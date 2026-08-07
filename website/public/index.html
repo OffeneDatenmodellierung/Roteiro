@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>Roteiro — a provenance-tagged knowledge graph for your codebase</title>
+<style>
+  :root { --ink:#1a2733; --accent:#0e6e8c; --paper:#f7f5f0; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: var(--ink);
+         background: var(--paper); max-width: 42rem; margin: 0 auto; padding: 3rem 1.5rem; line-height: 1.6; }
+  h1 { font-size: 2.2rem; margin-bottom: .25rem; }
+  .tagline { color: var(--accent); font-style: italic; margin-top: 0; }
+  code { font-family: ui-monospace, monospace; background: #ece8df; padding: .1em .35em; border-radius: 3px; }
+  table { border-collapse: collapse; margin: 1.5rem 0; width: 100%; }
+  th, td { text-align: left; border-bottom: 1px solid #d8d2c4; padding: .5rem .75rem; }
+  a { color: var(--accent); }
+  footer { margin-top: 3rem; font-size: .85rem; color: #6b7684; }
+</style>
+</head>
+<body>
+<h1><img src="logo.svg" alt="" width="56" height="56" style="vertical-align:-14px;margin-right:.4rem">Roteiro</h1>
+<p class="tagline">The pilot book for your codebase.</p>
+<p>The Portuguese <em>roteiros</em> were the guarded pilot books of the Age of
+Discovery — accumulated route knowledge that made navigation repeatable.
+Roteiro does the same for software: structure, intent, and context in one
+queryable, provenance-tagged knowledge graph, for humans and AI agents alike.</p>
+<table>
+<tr><th>Provenance</th><th>Source</th><th>Nature</th></tr>
+<tr><td><code>derived</code></td><td>tree-sitter AST extraction</td><td>Deterministic — symbols, calls, imports</td></tr>
+<tr><td><code>authored</code></td><td>ADRs, blueprints, <code>// @rto:</code> annotations</td><td>Curated intent, drift-checked in CI</td></tr>
+<tr><td><code>inferred</code></td><td>Docs, PDFs, embeddings</td><td>Fuzzy suggestions with confidence scores</td></tr>
+</table>
+<p>One SQLite store. One query surface. Three renderers — docs website,
+Obsidian vault, optional MCP server — all build outputs of the same graph,
+so what humans review is what agents query.</p>
+<p><a href="https://github.com/OffeneDatenmodellierung/Roteiro">GitHub</a> ·
+<a href="https://crates.io/crates/roteiro">crates.io</a> ·
+<a href="adr/">Architecture Decision Records</a></p>
+<footer>Dual-licensed MIT OR Apache-2.0 · The Roteiro Project Team</footer>
+</body>
+</html>

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Roteiro">
+  <!-- badge -->
+  <circle cx="64" cy="64" r="60" fill="#f7f5f0"/>
+  <circle cx="64" cy="64" r="60" fill="none" stroke="#1a2733" stroke-width="6"/>
+  <!-- compass north tick -->
+  <path d="M64 8 L69 22 L64 19 L59 22 Z" fill="#1a2733"/>
+  <!-- rhumb/route line: derived -> authored -> inferred -->
+  <path d="M34 92 L58 56 L94 40" fill="none" stroke="#0e6e8c" stroke-width="7"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- inferred continuation: dashed, a suggested course -->
+  <path d="M94 40 L106 34" fill="none" stroke="#0e6e8c" stroke-width="5"
+        stroke-linecap="round" stroke-dasharray="1 9" opacity="0.85"/>
+  <!-- nodes: derived (solid), authored (ring), inferred (small/faded) -->
+  <circle cx="34" cy="92" r="10" fill="#1a2733"/>
+  <circle cx="58" cy="56" r="9" fill="#f7f5f0" stroke="#1a2733" stroke-width="6"/>
+  <circle cx="94" cy="40" r="7" fill="#0e6e8c" opacity="0.85"/>
+</svg>

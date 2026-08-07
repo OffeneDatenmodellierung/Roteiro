@@ -1,0 +1,10 @@
+[workspace]
+# All four crates version together while the project is young; loosen later
+# if the crates' release cadences diverge.
+changelog_update = true
+git_release_enable = true
+semver_check = true
+dependencies_update = false
+
+[changelog]
+protect_breaking_commits = true
