@@ -12,7 +12,13 @@ authors.workspace = true
 [dependencies]
 rusqlite = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Also needed by the integration tests in `tests/`, which don't inherit the
+# crate's normal dependencies.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

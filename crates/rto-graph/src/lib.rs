@@ -4,9 +4,16 @@
 //! was produced: deterministically derived from source ASTs, authored by a
 //! human or agent in an ADR/blueprint, or inferred heuristically from docs and
 //! other artifacts. See ADR-0001.
+//!
+//! The graph is a set of [`Node`]s addressed by a deterministic natural
+//! [`Node::key`], connected by [`Edge`]s. Facts extracted from one source blob
+//! are grouped into a [`FactSet`] and applied atomically to a [`Store`].
 
+mod migrations;
+mod model;
 mod provenance;
 mod store;
 
+pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;
 pub use store::{Store, StoreError};
