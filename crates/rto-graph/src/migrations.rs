@@ -39,8 +39,11 @@ CREATE TABLE edges (
     provenance TEXT NOT NULL CHECK (provenance IN ('derived','authored','inferred')),
     confidence REAL,
     src_ref    TEXT,
-    -- A confidence score is present exactly when the edge is inferred.
-    CHECK ((provenance = 'inferred') = (confidence IS NOT NULL))
+    -- A confidence score is present exactly when the edge is inferred,
+    -- and when present it lies in [0.0, 1.0]. (Rust `Edge::is_valid` is the
+    -- primary guard and also rejects NaN/inf; this is defence in depth.)
+    CHECK ((provenance = 'inferred') = (confidence IS NOT NULL)),
+    CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0))
 );
 CREATE INDEX idx_nodes_kind ON nodes(kind);
 CREATE INDEX idx_edges_src ON edges(src);

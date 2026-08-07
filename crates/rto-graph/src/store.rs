@@ -215,10 +215,14 @@ impl Store {
             "SELECT {NODE_COLS} FROM nodes n JOIN edges e ON n.id = e.src \
              JOIN nodes d ON d.id = e.dst WHERE d.key = ?1"
         );
+        // Order by output column 1 (the node key) so results are deterministic
+        // across SQLite versions/plans. Positional ordering avoids both the
+        // ambiguity of a bare `key` (present in every joined table) and the fact
+        // that a table-qualified name cannot be used after the `Both` UNION.
         let sql = match dir {
-            Direction::Outgoing => out,
-            Direction::Incoming => inc,
-            Direction::Both => format!("{out} UNION {inc}"),
+            Direction::Outgoing => format!("{out} ORDER BY 1"),
+            Direction::Incoming => format!("{inc} ORDER BY 1"),
+            Direction::Both => format!("{out} UNION {inc} ORDER BY 1"),
         };
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([key])?;

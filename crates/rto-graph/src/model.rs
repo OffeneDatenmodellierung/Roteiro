@@ -295,11 +295,16 @@ impl Edge {
         }
     }
 
-    /// Whether this edge satisfies the provenance/confidence invariant:
-    /// a confidence score is present exactly when the edge is inferred.
+    /// Whether this edge is valid for storage: a confidence score is present
+    /// exactly when the edge is inferred, and any present score is a finite
+    /// value in `0.0..=1.0` (rejecting NaN, infinities, and out-of-range).
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        matches!(self.provenance, Provenance::Inferred) == self.confidence.is_some()
+        let inferred = matches!(self.provenance, Provenance::Inferred);
+        match self.confidence {
+            Some(c) => inferred && (0.0..=1.0).contains(&c),
+            None => !inferred,
+        }
     }
 }
 
@@ -415,13 +420,37 @@ mod tests {
         assert!(Edge::derived("a", "b", EdgeKind::Calls).is_valid());
         assert!(Edge::authored("a", "b", EdgeKind::AuthoredBy).is_valid());
         assert!(Edge::inferred("a", "b", EdgeKind::References, 0.5).is_valid());
+        // Boundary values are valid.
+        assert!(Edge::inferred("a", "b", EdgeKind::References, 0.0).is_valid());
+        assert!(Edge::inferred("a", "b", EdgeKind::References, 1.0).is_valid());
 
+        let inferred = Edge::inferred("a", "b", EdgeKind::References, 0.5);
+        // Non-inferred edge carrying confidence is invalid.
         let bad = Edge {
             provenance: Provenance::Derived,
             confidence: Some(0.9),
             ..Edge::derived("a", "b", EdgeKind::Calls)
         };
         assert!(!bad.is_valid());
+        // Inferred edge without confidence is invalid.
+        assert!(
+            !Edge {
+                confidence: None,
+                ..inferred.clone()
+            }
+            .is_valid()
+        );
+        // Out-of-range and non-finite confidences are invalid.
+        for c in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                !Edge {
+                    confidence: Some(c),
+                    ..inferred.clone()
+                }
+                .is_valid(),
+                "confidence {c} should be rejected"
+            );
+        }
     }
 
     #[test]
