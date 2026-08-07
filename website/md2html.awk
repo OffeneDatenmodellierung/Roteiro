@@ -104,10 +104,14 @@ END {
 
     if (line ~ /^[[:space:]]*$/) { i++; continue }
 
-    if (line ~ /^#{1,6}[[:space:]]/) {
-      n = 0
-      while (substr(line, n + 1, 1) == "#") n++
-      print "<h" n ">" inl(trim(substr(line, n + 1))) "</h" n ">"
+    # ATX heading. Uses #+ rather than #{1,6}: mawk (Cloudflare's build awk)
+    # does not support regex interval expressions, so #{1,6} never matched
+    # there and headings leaked as literal paragraphs.
+    if (line ~ /^#+[[:space:]]/) {
+      hn = 0
+      while (substr(line, hn + 1, 1) == "#") hn++
+      lvl = hn; if (lvl > 6) lvl = 6
+      print "<h" lvl ">" inl(trim(substr(line, hn + 1))) "</h" lvl ">"
       i++
       continue
     }
@@ -143,7 +147,7 @@ END {
     # Paragraph: join wrapped lines until a blank line or a new block starts.
     para = inl(line)
     i++
-    while (i <= NR && L[i] !~ /^[[:space:]]*$/ && L[i] !~ /^#{1,6}[[:space:]]/ &&
+    while (i <= NR && L[i] !~ /^[[:space:]]*$/ && L[i] !~ /^#+[[:space:]]/ &&
            L[i] !~ /^[[:space:]]*[-*][[:space:]]/ && L[i] !~ /^```/ &&
            L[i] !~ /^[[:space:]]*\|.*\|[[:space:]]*$/) {
       para = para " " inl(L[i])
