@@ -12,7 +12,7 @@ head_html() { # $1 root, $2 title
   printf '%s' '<meta name="viewport" content="width=device-width, initial-scale=1">'
   printf '<link rel="icon" href="%sfavicon.svg" type="image/svg+xml">' "$1"
   printf '<link rel="stylesheet" href="%sstyle.css">' "$1"
-  printf '<title>%s</title></head><body>' "$2"
+  printf '<title>%s</title></head><body>' "$(printf '%s' "$2" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
 }
 foot_html() { # $1 root
   printf '<p class="backlink"><a href="%s">← Back to roteiro.dev</a></p>' "$1"
