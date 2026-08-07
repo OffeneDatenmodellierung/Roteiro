@@ -8,7 +8,14 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "roteiro",
     version,
-    about = "Provenance-tagged codebase knowledge graph"
+    about = "Provenance-tagged codebase knowledge graph",
+    long_about = "Roteiro — the pilot book for your codebase.\n\n\
+        One SQLite store holding structure, intent, and context as a single \
+        provenance-tagged knowledge graph, queryable by humans and AI agents \
+        alike. Subcommands are scaffolds while the graph core lands; see \
+        ADR-0001 and docs/BUILD_PLAN.md for the roadmap.",
+    arg_required_else_help = true,
+    propagate_version = true
 )]
 struct Cli {
     #[command(subcommand)]
