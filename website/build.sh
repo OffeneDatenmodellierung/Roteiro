@@ -29,13 +29,14 @@ for f in ../docs/adr/*.md; do
   # First H1 after any YAML frontmatter is the page title; fall back to slug.
   title=$(awk 'NR==1&&$0=="---"{fm=1;next} fm&&$0=="---"{fm=0;next} fm{next} /^# /{sub(/^# /,"");print;exit}' "$f")
   [ -z "$title" ] && title=$slug
+  title_html=$(printf '%s' "$title" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
   {
     head_html "../" "$title — Roteiro"
     printf '<p class="nav"><a href="../">← Roteiro home</a> · <a href="./">All ADRs</a></p>'
     awk -f md2html.awk "$f"
     foot_html "../"
   } > "dist/adr/$slug.html"
-  index_items="$index_items<li><a href=\"$slug.html\">$title</a></li>"
+  index_items="$index_items<li><a href=\"$slug.html\">$title_html</a></li>"
 done
 
 # Themed ADR index page.
