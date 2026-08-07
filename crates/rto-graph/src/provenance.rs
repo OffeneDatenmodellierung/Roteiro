@@ -15,7 +15,7 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    /// Stable string form used in the SQLite store.
+    /// Stable string form used in the `SQLite` store.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
