@@ -1,27 +1,32 @@
 name: Website
 
+# The live site is built and deployed by the Cloudflare Pages Git
+# integration (build command ./website/build.sh, output website/dist).
+# This workflow only guards that the site still assembles, so a broken
+# build fails CI here rather than silently on Cloudflare.
 on:
-  # Deploy as part of every release of the umbrella crate…
+  pull_request:
+    paths:
+      - "website/**"
+      - "docs/adr/**"
+      - ".github/workflows/website.yml"
   push:
-    tags: ["roteiro-v*"]
-  # …and on demand.
+    branches: [main]
+    paths:
+      - "website/**"
+      - "docs/adr/**"
+      - ".github/workflows/website.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
-    name: Build and deploy roteiro.dev
+  build:
+    name: Build roteiro.dev
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build site
         run: ./website/build.sh
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy website/dist --project-name=roteiro
