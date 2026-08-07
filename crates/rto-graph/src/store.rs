@@ -7,12 +7,12 @@ use rusqlite::Connection;
 /// Errors raised by the store.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// Underlying SQLite failure.
+    /// Underlying `SQLite` failure.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
 
-/// A Roteiro graph store backed by a single SQLite database.
+/// A Roteiro graph store backed by a single `SQLite` database.
 pub struct Store {
     conn: Connection,
 }
@@ -64,10 +64,13 @@ impl Store {
     /// # Errors
     /// Returns [`StoreError::Sqlite`] on query failure.
     pub fn node_count(&self) -> Result<u64, StoreError> {
-        let n: u64 = self
+        // SQLite's native integer type is signed 64-bit, and rusqlite's
+        // `FromSql` is implemented for `i64` rather than `u64` accordingly.
+        // `COUNT(*)` is always non-negative, so the conversion never falls back.
+        let n: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
-        Ok(n)
+        Ok(u64::try_from(n).unwrap_or(0))
     }
 }
 
