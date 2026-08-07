@@ -22,7 +22,12 @@ rto-spec = { path = "crates/rto-spec", version = "0.0.1" }
 rto-render = { path = "crates/rto-render", version = "0.0.1" }
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+# Pinned to 0.39 (not the latest 0.40.x): libsqlite3-sys's build script from
+# 0.38.0 onward uses the std `cfg_select!` macro, stabilized in Rust 1.95 —
+# newer than our 1.94 MSRV, which breaks the `bundled` feature's build.rs on
+# our MSRV toolchain. Revisit this pin if/when the project MSRV moves to
+# 1.95+ (see ADR-0001 for MSRV policy).
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 
