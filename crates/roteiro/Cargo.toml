@@ -15,6 +15,7 @@ clap = { workspace = true }
 rto-graph = { workspace = true }
 rto-render = { workspace = true }
 rto-spec = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 mcp = ["rto-render/mcp"]

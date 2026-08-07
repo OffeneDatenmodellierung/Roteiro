@@ -27,7 +27,11 @@ enum Command {
     /// Scaffold Roteiro in the current repository (store, hooks, agent skill).
     Init,
     /// Incrementally update the graph for the current tree (content-addressed).
-    Sync,
+    Sync {
+        /// Emit the sync report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify authored links against code and ADR states; non-zero on drift.
     Check,
     /// One-shot import from lat.md, Graphify, or codegraph.
@@ -51,8 +55,8 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let name = match cli.command {
+        Command::Sync { json } => return run_sync(json),
         Command::Init => "init",
-        Command::Sync => "sync",
         Command::Check => "check",
         Command::Import { .. } => "import",
         Command::Render { .. } => "render",
@@ -60,5 +64,44 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "mcp")]
         Command::Serve => "serve",
     };
-    anyhow::bail!("`roteiro {name}` is not implemented yet (v0.0.1 scaffold; see ADR-0001)")
+    anyhow::bail!("`roteiro {name}` is not implemented yet (scaffold; see docs/BUILD_PLAN.md)")
+}
+
+/// Sync the graph for the current repository's `HEAD` tree.
+fn run_sync(json: bool) -> anyhow::Result<()> {
+    use rto_graph::{FileNodeExtractor, ObjectCache, Repo, Store, sync};
+
+    let cwd = std::env::current_dir()?;
+    let repo = Repo::discover(&cwd)?;
+
+    // Graph DB is per-worktree (under the worktree git dir); the extraction
+    // cache is shared across worktrees (under the common git dir).
+    let store_dir = repo.git_dir().join("roteiro");
+    std::fs::create_dir_all(&store_dir)?;
+    let mut store = Store::open(&store_dir.join("graph.db"))?;
+    let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
+
+    let report = sync(&mut store, &repo, &cache, &FileNodeExtractor)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let tree = &report.tree[..report.tree.len().min(12)];
+        if report.no_op {
+            println!(
+                "up to date (tree {tree}) — {} nodes, {} edges",
+                report.nodes, report.edges
+            );
+        } else {
+            println!(
+                "synced tree {tree} — {} blobs ({} extracted, {} cached) → {} nodes, {} edges",
+                report.blobs_total,
+                report.blobs_extracted,
+                report.blobs_cached,
+                report.nodes,
+                report.edges
+            );
+        }
+    }
+    Ok(())
 }

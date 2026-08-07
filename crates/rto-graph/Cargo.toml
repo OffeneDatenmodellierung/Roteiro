@@ -10,6 +10,15 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Pure-Rust git access for content-addressed extraction (blob/tree ids, tree
+# walking, worktree status). `sha1` selects the pure-Rust hashing backend; we
+# stay off default features to avoid pulling any network transports (offline).
+gix = { version = "0.86.0", default-features = false, features = [
+    "sha1",
+    "status",
+    "dirwalk",
+    "revision",
+] }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
