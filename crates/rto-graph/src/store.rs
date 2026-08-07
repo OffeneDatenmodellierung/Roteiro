@@ -64,10 +64,13 @@ impl Store {
     /// # Errors
     /// Returns [`StoreError::Sqlite`] on query failure.
     pub fn node_count(&self) -> Result<u64, StoreError> {
-        let n: u64 = self
+        // SQLite's native integer type is signed 64-bit, and rusqlite's
+        // `FromSql` is implemented for `i64` rather than `u64` accordingly.
+        // `COUNT(*)` is always non-negative, so the cast is safe.
+        let n: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
-        Ok(n)
+        Ok(n as u64)
     }
 }
 
