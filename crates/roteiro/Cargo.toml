@@ -1,0 +1,23 @@
+[package]
+name = "roteiro"
+description = "Roteiro: a provenance-tagged knowledge graph for your codebase — structure, intent, and context in one queryable store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+rto-graph = { workspace = true }
+rto-render = { workspace = true }
+rto-spec = { workspace = true }
+
+[features]
+mcp = ["rto-render/mcp"]
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "rto-render"
+description = "Renderers for Roteiro: docs site, Obsidian vault, and optional MCP server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+rto-graph = { workspace = true }
+
+[features]
+# MCP server support (`roteiro serve`); off by default — CLI-first.
+mcp = []
+
+[lints]
+workspace = true

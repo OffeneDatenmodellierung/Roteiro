@@ -1,0 +1,18 @@
+[package]
+name = "rto-spec"
+description = "House-style ADR/blueprint parsing, intent interview, and drift checking for Roteiro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+rto-graph = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
