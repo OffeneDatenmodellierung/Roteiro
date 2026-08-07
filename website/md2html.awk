@@ -32,9 +32,9 @@ function inl(s,   m, inner, i, p, ph, n, code, cb, text, url) {
     cb = index(m, "]")
     text = substr(m, 2, cb - 2)
     url = substr(m, cb + 2, length(m) - cb - 2)
+    if (tolower(trim(url)) ~ /^(javascript:|data:)/) url = "#"
     gsub(/"/, "\\&quot;", url)
     gsub(/'/, "\\&#39;", url)
-    s = substr(s, 1, RSTART - 1) "<a href=\"" url "\">" text "</a>" substr(s, RSTART + RLENGTH)
   }
   while (match(s, /\*\*[^*]+\*\*/)) {
     m = substr(s, RSTART, RLENGTH)
