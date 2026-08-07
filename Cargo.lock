@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "roteiro"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "rto-graph"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -288,14 +288,14 @@ dependencies = [
 
 [[package]]
 name = "rto-render"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "rto-graph",
 ]
 
 [[package]]
 name = "rto-spec"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "rto-graph",
  "serde",

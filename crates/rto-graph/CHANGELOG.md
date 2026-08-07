@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.1...rto-graph-v0.0.2) - 2026-08-07
+
+### Added
+
+- *(rto-graph)* implement graph core (Stage 1)
+
+### Fixed
+
+- *(rto-graph)* address PR review — confidence range + deterministic neighbors
+
 ## [0.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/releases/tag/rto-graph-v0.0.1) - 2026-08-07
 
 ### Added
