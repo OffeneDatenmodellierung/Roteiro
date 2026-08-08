@@ -907,15 +907,32 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
             title: rendered.title,
         });
     }
+
+    // Render lifetime docs (the Build Plan) as first-class root-level pages,
+    // and list them above the ADRs on the index.
+    let mut lifetime = Vec::new();
+    let build_plan = root.join("docs/BUILD_PLAN.md");
+    if build_plan.is_file() {
+        let md = std::fs::read_to_string(&build_plan)?;
+        let rendered = rto_render::render_doc(&md, "Build Plan");
+        std::fs::write(out.join("build-plan.html"), &rendered.html)?;
+        lifetime.push(rto_render::IndexEntry {
+            // The index lives under adr/, so link up one level.
+            href: "../build-plan.html".to_owned(),
+            title: rendered.title,
+        });
+    }
+
     std::fs::write(
         out.join("adr").join("index.html"),
-        rto_render::render_adr_index(&entries),
+        rto_render::render_adr_index(&lifetime, &entries),
     )?;
 
     println!(
-        "rendered docs → {} ({} ADR page(s))",
+        "rendered docs → {} ({} ADR page(s), {} lifetime doc(s))",
         out.display(),
-        entries.len()
+        entries.len(),
+        lifetime.len(),
     );
     Ok(())
 }

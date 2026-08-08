@@ -22,7 +22,7 @@ pub struct RenderedAdr {
     pub html: String,
 }
 
-/// An entry in the ADR index page.
+/// An entry in the ADR/docs index page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
     /// Relative href (e.g. `0001-….html`).
@@ -31,14 +31,22 @@ pub struct IndexEntry {
     pub title: String,
 }
 
-/// Convert `CommonMark` `md` to an HTML fragment, with GitHub-style tables and
-/// strikethrough enabled (the house ADR style uses pipe tables).
+/// Convert `CommonMark` `md` to an HTML fragment (GitHub tables + strikethrough,
+/// and Roteiro `[[wiki-links]]` resolved). Resolves ADR links relative to the
+/// ADR directory; use [`render_doc`] for root-level pages.
 #[must_use]
 pub fn markdown_to_html(md: &str) -> String {
+    render_markdown(md, "")
+}
+
+/// Render `md` to HTML: resolve `[[wiki-links]]` (ADR links use `adr_prefix` as
+/// their href prefix), then run `CommonMark` with GitHub tables/strikethrough.
+fn render_markdown(md: &str, adr_prefix: &str) -> String {
+    let pre = rewrite_wiki_links(md, adr_prefix);
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(md, opts);
+    let parser = Parser::new_ext(&pre, opts);
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
@@ -46,22 +54,48 @@ pub fn markdown_to_html(md: &str) -> String {
 
 /// Render one ADR markdown document to a themed HTML page. Leading YAML
 /// frontmatter is stripped; the title is the first `# ` heading, or `fallback`
-/// if there is none.
+/// if there is none. ADR `[[…]]` links resolve to sibling ADR pages.
 #[must_use]
 pub fn render_adr(markdown: &str, fallback_title: &str) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = markdown_to_html(body);
+    let content = render_markdown(body, "");
     let nav = "<p class=\"nav\"><a href=\"../\">← Roteiro home</a> · \
-               <a href=\"./\">All ADRs</a></p>";
+               <a href=\"./\">All ADRs</a> · <a href=\"../build-plan.html\">Build Plan</a></p>";
     let html = page(&format!("{title} — Roteiro"), "../", nav, &content);
     RenderedAdr { title, html }
 }
 
-/// Render the ADR index page listing `entries` in the given order.
+/// Render a root-level "lifetime doc" (e.g. the Build Plan) to a themed page.
+/// Its `[[docs/adr/…]]` links resolve into the `adr/` subdirectory.
 #[must_use]
-pub fn render_adr_index(entries: &[IndexEntry]) -> String {
-    let mut list = String::from("<h1>Architecture Decision Records</h1><ul>");
+pub fn render_doc(markdown: &str, fallback_title: &str) -> RenderedAdr {
+    let body = strip_frontmatter(markdown);
+    let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
+    let content = render_markdown(body, "adr/");
+    let nav = "<p class=\"nav\"><a href=\"./\">← Roteiro home</a> · \
+               <a href=\"adr/\">ADRs</a></p>";
+    let html = page(&format!("{title} — Roteiro"), "./", nav, &content);
+    RenderedAdr { title, html }
+}
+
+/// Render the docs index: any `lifetime` docs (Build Plan, …) then the ADRs.
+#[must_use]
+pub fn render_adr_index(lifetime: &[IndexEntry], entries: &[IndexEntry]) -> String {
+    let mut list = String::new();
+    if !lifetime.is_empty() {
+        list.push_str("<h1>Documentation</h1><ul>");
+        for e in lifetime {
+            let _ = write!(
+                list,
+                "<li><a href=\"{}\">{}</a></li>",
+                escape_attr(&e.href),
+                escape_html(&e.title)
+            );
+        }
+        list.push_str("</ul>");
+    }
+    list.push_str("<h1>Architecture Decision Records</h1><ul>");
     for e in entries {
         let _ = write!(
             list,
@@ -72,7 +106,84 @@ pub fn render_adr_index(entries: &[IndexEntry]) -> String {
     }
     list.push_str("</ul>");
     let nav = "<p class=\"nav\"><a href=\"../\">← Roteiro home</a></p>";
-    page("Architecture Decision Records — Roteiro", "../", nav, &list)
+    page("Documentation — Roteiro", "../", nav, &list)
+}
+
+/// Rewrite Roteiro `[[wiki-links]]` into Markdown, honouring code spans/fences:
+/// `[[docs/adr/<slug>.md]]` (optionally `#section`) becomes a link to that ADR
+/// page (`<adr_prefix><slug>.html`); any other `[[…]]` (code/file references,
+/// for which the site has no page) becomes inline code so it renders cleanly
+/// instead of leaking literal brackets.
+fn rewrite_wiki_links(md: &str, adr_prefix: &str) -> String {
+    let mut out = String::new();
+    let mut in_fence = false;
+    for line in md.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        // Only rewrite outside inline code spans (odd `-delimited segments).
+        for (i, seg) in line.split('`').enumerate() {
+            if i > 0 {
+                out.push('`');
+            }
+            if i % 2 == 1 {
+                out.push_str(seg);
+            } else {
+                rewrite_wiki_in(seg, adr_prefix, &mut out);
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Rewrite every `[[…]]` in one non-code text segment.
+fn rewrite_wiki_in(seg: &str, adr_prefix: &str, out: &mut String) {
+    let mut rest = seg;
+    while let Some(open) = rest.find("[[") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        if let Some(close) = after.find("]]") {
+            out.push_str(&wiki_target(&after[..close], adr_prefix));
+            rest = &after[close + 2..];
+        } else {
+            out.push_str("[[");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+}
+
+/// Resolve one wiki-link's inner text to Markdown.
+fn wiki_target(inner: &str, adr_prefix: &str) -> String {
+    let inner = inner.trim();
+    let path = inner.split_once('#').map_or(inner, |(p, _)| p.trim());
+    if let Some(rest) = path.strip_prefix("docs/adr/")
+        && let Some(stem) = rest.strip_suffix(".md")
+    {
+        return format!("[{}]({adr_prefix}{stem}.html)", adr_label(stem));
+    }
+    // Code/file reference — the site has no page for it; show it as code.
+    format!("`{inner}`")
+}
+
+/// A display label for an ADR filename stem: `0001-build-…` → `ADR-0001`.
+fn adr_label(stem: &str) -> String {
+    let digits: String = stem.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        stem.to_owned()
+    } else {
+        format!("ADR-{digits}")
+    }
 }
 
 /// Wrap body HTML in the themed page chrome. `root` is the relative path to the
@@ -121,7 +232,7 @@ fn escape_attr(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{IndexEntry, markdown_to_html, render_adr, render_adr_index};
+    use super::{IndexEntry, markdown_to_html, render_adr, render_adr_index, render_doc};
 
     #[test]
     fn markdown_renders_headings_and_tables() {
@@ -129,6 +240,48 @@ mod tests {
         assert!(html.contains("<h1>Title</h1>"));
         assert!(html.contains("<table>"));
         assert!(html.contains("<td>1</td>"));
+    }
+
+    #[test]
+    fn adr_wiki_links_become_sibling_page_links() {
+        // An ADR-to-ADR wiki link resolves to the sibling .html; a code/file
+        // reference becomes inline code; both stop leaking literal `[[ ]]`.
+        let md = "See [[docs/adr/0001-build-roteiro.md]] and \
+                  [[crates/rto-graph/src/store.rs#Store]] here.\n";
+        let html = markdown_to_html(md);
+        assert!(
+            html.contains("<a href=\"0001-build-roteiro.html\">ADR-0001</a>"),
+            "ADR wiki-link → sibling page: {html}"
+        );
+        assert!(
+            html.contains("<code>crates/rto-graph/src/store.rs#Store</code>"),
+            "code reference → inline code: {html}"
+        );
+        assert!(!html.contains("[["), "no literal wiki brackets leak: {html}");
+    }
+
+    #[test]
+    fn wiki_links_inside_code_are_left_literal() {
+        // A documented example of the syntax, in backticks or a fence, must not
+        // be rewritten.
+        let inline = markdown_to_html("use `[[docs/adr/0001-x.md]]` in prose\n");
+        assert!(inline.contains("<code>[[docs/adr/0001-x.md]]</code>"), "{inline}");
+        let fenced = markdown_to_html("```\n[[docs/adr/0001-x.md]]\n```\n");
+        assert!(fenced.contains("[[docs/adr/0001-x.md]]"), "fence literal: {fenced}");
+    }
+
+    #[test]
+    fn render_doc_links_adrs_into_subdir() {
+        // A root-level lifetime doc (Build Plan) resolves ADR links into `adr/`.
+        let r = render_doc("# Build Plan\n\nGoverned by [[docs/adr/0001-x.md]].\n", "Build Plan");
+        assert_eq!(r.title, "Build Plan");
+        assert!(
+            r.html.contains("<a href=\"adr/0001-x.html\">ADR-0001</a>"),
+            "root doc → adr/ prefix: {}",
+            r.html
+        );
+        // Root-level chrome: assets/back-link relative to site root.
+        assert!(r.html.contains("href=\"./style.css\""));
     }
 
     const ADR: &str = "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n\n## Context\n\nSome `code` and a [link](https://x).\n";
@@ -170,11 +323,18 @@ mod tests {
                 title: "Second".into(),
             },
         ];
-        let html = render_adr_index(&entries);
+        let lifetime = [IndexEntry {
+            href: "../build-plan.html".into(),
+            title: "Build Plan".into(),
+        }];
+        let html = render_adr_index(&lifetime, &entries);
+        assert!(html.contains("<a href=\"../build-plan.html\">Build Plan</a>"));
         assert!(html.contains("<a href=\"0001-x.html\">First &amp; &lt;best&gt;</a>"));
         assert!(html.contains("<a href=\"0002-y.html\">Second</a>"));
         // First entry precedes second (order preserved).
         assert!(html.find("0001-x").unwrap() < html.find("0002-y").unwrap());
+        // Lifetime docs listed before the ADRs.
+        assert!(html.find("build-plan").unwrap() < html.find("0001-x").unwrap());
     }
 
     #[test]
