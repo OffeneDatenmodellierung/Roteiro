@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.3...rto-graph-v0.0.4) - 2026-08-08
+
+### Added
+
+- *(rto-graph)* derived tree-sitter Rust extraction (Stage 3)
+
 ## [0.0.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.2...rto-graph-v0.0.3) - 2026-08-08
 
 ### Added
