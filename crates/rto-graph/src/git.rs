@@ -99,4 +99,5 @@ impl Repo {
         let id = gix::ObjectId::from_hex(oid.as_bytes()).map_err(ge)?;
         let object = self.inner.find_object(id).map_err(ge)?;
         Ok(object.data)
+    }
 }
