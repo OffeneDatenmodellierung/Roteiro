@@ -195,14 +195,6 @@ pub fn verify_sha256(bytes: &[u8], expected: &str) -> bool {
     expected.is_empty() || sha256_hex(bytes).eq_ignore_ascii_case(expected)
 }
 
-/// The directory to hand [`LocalEmbedder::load`] for `name`, if the model looks
-/// installed (its directory exists).
-#[must_use]
-pub fn installed_dir(name: &str) -> Option<PathBuf> {
-    let dir = model_dir(name);
-    dir.is_dir().then_some(dir)
-}
-
 /// Path helper: ensure the model directory exists, returning it.
 ///
 /// # Errors

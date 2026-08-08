@@ -434,7 +434,7 @@ fn infer_with_embedder(
     config: rto_graph::InferenceConfig,
     model: Option<&str>,
 ) -> anyhow::Result<(Vec<rto_graph::Edge>, String)> {
-    use rto_graph::{HashEmbedder, LocalEmbedder, infer_edges_with};
+    use rto_graph::{HashEmbedder, LocalEmbedder, Platform, infer_edges_with};
 
     let Some(name) = model else {
         return Ok((
@@ -442,12 +442,20 @@ fn infer_with_embedder(
             "hashing embedder (offline default)".to_owned(),
         ));
     };
-    let Some(dir) = rto_graph::installed_dir(name) else {
+    // Only accept a known registry model whose host-variant files are all
+    // present — never an arbitrary directory under the store root.
+    let spec = rto_graph::find_model(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown model `{name}` (see `roteiro model list`)"))?;
+    let variant = spec
+        .variant_for(Platform::host())
+        .ok_or_else(|| anyhow::anyhow!("no variant of `{name}` for this platform"))?;
+    if !rto_graph::is_installed(name, variant) {
         anyhow::bail!(
             "model `{name}` is not installed — run `roteiro model pull {name}` \
              (or omit --model to use the offline default)"
         );
-    };
+    }
+    let dir = rto_graph::model_dir(name);
     let embedder =
         LocalEmbedder::load(&dir).map_err(|e| anyhow::anyhow!("loading model `{name}`: {e}"))?;
     let edges = infer_edges_with(store, config, &EmbedderAdapter(&embedder))?;
@@ -458,8 +466,10 @@ fn infer_with_embedder(
 }
 
 /// Adapts a fallible [`LocalEmbedder`] to the infallible [`rto_graph::Embedder`]
-/// trait: an embedding failure yields a zero vector (that node simply gets no
-/// suggestions) rather than aborting the whole run.
+/// trait: on an embedding failure it returns an **empty** vector rather than
+/// aborting the whole run. An empty vector has a length no real embedding
+/// shares, so [`rto_graph::similarity`] scores it `0.0` against every other
+/// node — i.e. that node simply receives no suggestions.
 #[cfg(feature = "inference-local-models")]
 struct EmbedderAdapter<'a>(&'a rto_graph::LocalEmbedder);
 
@@ -558,7 +568,14 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
         let dest = dir.join(f.name);
         eprintln!("fetching {} …", f.name);
         let bytes = http_get(f.url)?;
-        if !verify_sha256(&bytes, f.sha256) {
+        if f.sha256.is_empty() {
+            // Make the absence of a pinned hash explicit rather than silently
+            // "passing" verification (verify_sha256 treats "" as unpinned).
+            eprintln!(
+                "  warning: no checksum pinned for {} — integrity NOT verified",
+                f.name
+            );
+        } else if !verify_sha256(&bytes, f.sha256) {
             anyhow::bail!(
                 "checksum mismatch for {} (expected {}, got {})",
                 f.name,
@@ -567,8 +584,13 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
             );
         }
         // Write atomically (temp + rename) so a partial download is never used.
+        // Remove any existing file first so re-pulling is idempotent across
+        // platforms (Windows `rename` fails if the destination exists).
         let tmp = dir.join(format!("{}.partial", f.name));
         std::fs::write(&tmp, &bytes)?;
+        if dest.exists() {
+            std::fs::remove_file(&dest)?;
+        }
         std::fs::rename(&tmp, &dest)?;
     }
     println!(

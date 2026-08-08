@@ -109,3 +109,51 @@ impl LocalEmbedder {
         Ok(normalized.squeeze(0)?.to_vec1::<f32>()?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LocalEmbedder, LocalModelError};
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("roteiro-embed-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    #[test]
+    fn load_missing_dir_is_io_error() {
+        // No config.json to read → an IO error, not a panic.
+        let dir = tmp("missing");
+        assert!(matches!(
+            LocalEmbedder::load(&dir),
+            Err(LocalModelError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn load_invalid_config_is_config_error() {
+        let dir = tmp("badcfg");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("config.json"), b"this is not json").expect("write");
+        assert!(matches!(
+            LocalEmbedder::load(&dir),
+            Err(LocalModelError::Config(_))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_missing_tokenizer_after_valid_config_errors() {
+        // A syntactically valid, minimal BERT config, but no tokenizer.json →
+        // the load fails at the tokenizer step rather than succeeding.
+        let dir = tmp("notokenizer");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("config.json"),
+            br#"{"hidden_size":16,"num_hidden_layers":1,"num_attention_heads":1,"intermediate_size":16,"vocab_size":8,"max_position_embeddings":8,"type_vocab_size":2}"#,
+        )
+        .expect("write");
+        assert!(LocalEmbedder::load(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

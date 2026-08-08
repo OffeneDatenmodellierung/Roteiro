@@ -37,8 +37,8 @@ pub use infer::{
 #[cfg(feature = "inference-local-models")]
 pub use localmodel::{
     LocalEmbedder, LocalModelError, ModelFile, ModelSpec, ModelVariant, Platform, REGISTRY,
-    ensure_model_dir, find as find_model, installed_dir, is_installed, model_dir, sha256_hex,
-    store_root, verify_sha256,
+    ensure_model_dir, find as find_model, is_installed, model_dir, sha256_hex, store_root,
+    verify_sha256,
 };
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;
