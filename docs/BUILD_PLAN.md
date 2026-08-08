@@ -356,7 +356,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - **DoD:** importing a sample of each source produces a graph + report;
   re-derivation supersedes imported structural edges without duplication.
 
-### Stage 10 — CI-canonical artifacts & v1.0 hardening  → **v1.0.0**
+### Stage 10 — CI-canonical artifacts & v1.0 hardening  → **v1.0.0** 🚧 *artifact format delivered*
 **Goal:** the merged graph is the source of truth; ship stable.
 - CI on PR merge: extract → `check` → assemble → publish content-addressed
   artifact → render docs + vault. Hooks fetch the artifact (offline fallback:
@@ -366,6 +366,21 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   itself.
 - **DoD:** clean clone → `init` → hook fetches CI artifact → `check` green,
   offline; docs/vault reproducible byte-for-byte in CI.
+- **Status: artifact format delivered (part 1).** `GraphArtifact` (`rto-graph`)
+  is a portable, **versioned** (`roteiro.graph/v1`) JSON snapshot of the whole
+  graph plus its `HEAD` tree id. `Store::export_factset` dumps nodes/edges in a
+  deterministic order, so the same graph always serialises byte-identically
+  (verified). `roteiro export [--out FILE|-]` writes it; `roteiro load <FILE|->`
+  rebuilds a store from it, **skipping extraction** and recording the tree id so
+  a `sync` at the matching commit short-circuits — the clone fast-path. An
+  unknown schema tag is rejected. Unit tests (round-trip / determinism /
+  schema-reject) + an end-to-end test that exports from one repo and loads into a
+  *different* one, asserting (via a direct store read) the loaded graph is the
+  artifact's, not re-extracted. ~97% coverage on `artifact.rs`.
+  - **Remaining (next PRs):** CI job to publish the artifact on merge + hooks
+    that fetch it (offline fallback: rebuild); language breadth (TS/JS, Python);
+    perf targets; `--json` schema freeze; the render-in-CI-then-serve deploy that
+    removes the Rust-in-Cloudflare build cost.
 
 ---
 

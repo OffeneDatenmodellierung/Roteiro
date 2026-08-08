@@ -207,6 +207,28 @@ impl Store {
         Ok(out)
     }
 
+    /// Dump the entire graph as a single [`FactSet`], with nodes and edges in a
+    /// deterministic order — suitable for a portable, content-stable artifact.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`], [`StoreError::Json`], or
+    /// [`StoreError::Corrupt`] on decode failure.
+    pub fn export_factset(&self) -> Result<FactSet, StoreError> {
+        let node_sql = format!("SELECT {NODE_COLS} FROM nodes n ORDER BY n.key");
+        let mut node_stmt = self.conn.prepare(&node_sql)?;
+        let mut node_rows = node_stmt.query([])?;
+        let nodes = collect_nodes(&mut node_rows)?;
+
+        // Order edges by their resolved endpoint keys (not row id) so the dump is
+        // stable regardless of insertion order.
+        let edge_sql = format!("{EDGE_SELECT} ORDER BY ns.key, nd.key, e.kind, e.provenance");
+        let mut edge_stmt = self.conn.prepare(&edge_sql)?;
+        let mut edge_rows = edge_stmt.query([])?;
+        let edges = collect_edges(&mut edge_rows)?;
+
+        Ok(FactSet { nodes, edges })
+    }
+
     /// All nodes of a given kind.
     ///
     /// # Errors
