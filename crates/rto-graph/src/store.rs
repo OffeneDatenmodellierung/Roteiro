@@ -282,6 +282,20 @@ impl Store {
         collect_edges(&mut rows)
     }
 
+    /// Delete all edges with the given provenance, returning how many were
+    /// removed. Used to re-derive a whole provenance class authoritatively (e.g.
+    /// `inferred` edges when re-running inference with different parameters).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn delete_edges_by_provenance(&self, provenance: Provenance) -> Result<u64, StoreError> {
+        let n = self.conn.execute(
+            "DELETE FROM edges WHERE provenance = ?1",
+            [provenance.as_str()],
+        )?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     /// Neighbouring nodes reachable from `key` in the given direction. Returns
     /// an empty vector if the node does not exist.
     ///

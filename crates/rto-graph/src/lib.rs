@@ -15,6 +15,8 @@ mod artifact;
 mod cache;
 mod extract;
 mod git;
+#[cfg(feature = "inference")]
+mod infer;
 mod migrations;
 mod model;
 mod provenance;
@@ -26,6 +28,8 @@ pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
 pub use cache::{CacheError, ObjectCache};
 pub use extract::{Extractor, FileNodeExtractor, Registry, RustExtractor};
 pub use git::{BlobRef, GitError, Repo};
+#[cfg(feature = "inference")]
+pub use infer::{InferenceConfig, embed, infer_edges, similarity};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;
 pub use query::{

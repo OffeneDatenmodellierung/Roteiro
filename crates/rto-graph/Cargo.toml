@@ -31,5 +31,12 @@ tree-sitter-rust = "0.24.2"
 # crate's normal dependencies.
 serde_json = { workspace = true }
 
+[features]
+# Offline similarity inference (the `inferred` provenance class). Adds no
+# dependencies — the default embedding is a pure-Rust hashing embedding
+# (ADR-0003). Larger learned models are the separate `inference-local-models`
+# tier and are not part of this crate.
+inference = []
+
 [lints]
 workspace = true
