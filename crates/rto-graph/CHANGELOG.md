@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.6...rto-graph-v0.0.7) - 2026-08-08
+
+### Added
+
+- *(rto-render)* real docs-site + Obsidian renderers (Stage 6)
+
 ## [0.0.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.5...rto-graph-v0.0.6) - 2026-08-08
 
 ### Added
