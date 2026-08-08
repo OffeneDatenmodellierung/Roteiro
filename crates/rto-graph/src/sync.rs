@@ -28,6 +28,9 @@ pub enum SyncError {
     /// A git operation failed.
     #[error(transparent)]
     Git(#[from] GitError),
+    /// Reading a working-tree file failed (dirty overlay).
+    #[error("worktree io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// A summary of the work a [`sync`] performed.
@@ -43,6 +46,9 @@ pub struct SyncReport {
     pub blobs_extracted: usize,
     /// Blobs served from the cache (cache hits).
     pub blobs_cached: usize,
+    /// Working-tree files whose uncommitted content overrode the committed blob
+    /// (the dirty overlay); always zero for a committed-only [`sync`].
+    pub blobs_dirty: usize,
     /// Nodes in the store after syncing.
     pub nodes: u64,
     /// Edges in the store after syncing.
@@ -73,8 +79,135 @@ pub fn sync(
         });
     }
 
+    let committed = extract_committed(repo, cache, extractor)?;
+    let total = committed.by_path.len();
+    let mut assembled = flatten(committed.by_path);
+    resolve_calls(&mut assembled);
+    store.rebuild(&assembled, &tree)?;
+
+    Ok(SyncReport {
+        no_op: false,
+        blobs_total: total,
+        blobs_extracted: committed.extracted,
+        blobs_cached: committed.cached,
+        blobs_dirty: 0,
+        nodes: store.node_count()?,
+        edges: store.edge_count()?,
+        tree,
+    })
+}
+
+/// Sync `store` to the working tree: the committed `HEAD` state with uncommitted
+/// edits to **tracked** files overlaid on top (a pre-commit preview).
+///
+/// Committed blobs come from the content-addressed cache as in [`sync`]; then
+/// each tracked file whose working copy differs from its committed blob is
+/// re-extracted in memory (never cached, since dirty content is not a git
+/// object), and deleted files are dropped. New *untracked* files are not yet
+/// included. The recorded sync state encodes the dirty set, so a later
+/// committed [`sync`] correctly supersedes the overlay.
+///
+/// # Errors
+/// Returns a [`SyncError`] if git access, extraction caching, working-tree I/O,
+/// or the store rebuild fails.
+pub fn sync_worktree(
+    store: &mut Store,
+    repo: &Repo,
+    cache: &ObjectCache,
+    extractor: &dyn Extractor,
+) -> Result<SyncReport, SyncError> {
+    let tree = repo.head_tree_id()?;
+    let committed = extract_committed(repo, cache, extractor)?;
+    let total = committed.by_path.len();
+    let mut by_path = committed.by_path;
+
+    // Overlay uncommitted edits to tracked files. A file is dirty when its
+    // working-copy content hashes to a different git blob id than the committed
+    // one; identical content hashes identically, so clean files are skipped.
+    let mut dirty: BTreeSet<(String, String)> = BTreeSet::new();
+    if let Some(workdir) = repo.workdir() {
+        for blob in &committed.blobs {
+            match std::fs::read(workdir.join(&blob.path)) {
+                Ok(bytes) => {
+                    let woid = repo.blob_oid(&bytes)?;
+                    if woid != blob.oid {
+                        by_path.insert(
+                            blob.path.clone(),
+                            extractor.extract(&blob.path, &woid, &bytes),
+                        );
+                        dirty.insert((blob.path.clone(), woid));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    by_path.remove(&blob.path);
+                    dirty.insert((blob.path.clone(), "\0deleted".to_owned()));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    // Encode the dirty set into the sync state so repeated identical previews
+    // no-op, but any committed change (which alters the plain tree id) does not.
+    let state = if dirty.is_empty() {
+        tree.clone()
+    } else {
+        let mut buf = String::new();
+        for (path, marker) in &dirty {
+            buf.push_str(path);
+            buf.push('\0');
+            buf.push_str(marker);
+            buf.push('\n');
+        }
+        format!("{tree}:dirty:{:016x}", fnv1a64(buf.as_bytes()))
+    };
+    let dirty_count = dirty.len();
+
+    if store.sync_state()?.as_deref() == Some(state.as_str()) {
+        return Ok(SyncReport {
+            no_op: true,
+            blobs_total: total,
+            blobs_dirty: dirty_count,
+            nodes: store.node_count()?,
+            edges: store.edge_count()?,
+            tree,
+            ..SyncReport::default()
+        });
+    }
+
+    let mut assembled = flatten(by_path);
+    resolve_calls(&mut assembled);
+    store.rebuild(&assembled, &state)?;
+
+    Ok(SyncReport {
+        no_op: false,
+        blobs_total: total,
+        blobs_extracted: committed.extracted,
+        blobs_cached: committed.cached,
+        blobs_dirty: dirty_count,
+        nodes: store.node_count()?,
+        edges: store.edge_count()?,
+        tree,
+    })
+}
+
+/// The committed fact sets for the `HEAD` tree, one per path, plus the blob list
+/// (for overlay comparison) and cache-hit/miss counts.
+struct Committed {
+    blobs: Vec<crate::BlobRef>,
+    by_path: BTreeMap<String, FactSet>,
+    extracted: usize,
+    cached: usize,
+}
+
+/// Extract (or load from cache) the fact set for every blob in the `HEAD` tree.
+fn extract_committed(
+    repo: &Repo,
+    cache: &ObjectCache,
+    extractor: &dyn Extractor,
+) -> Result<Committed, SyncError> {
     let blobs = repo.walk_blobs()?;
-    let mut assembled = FactSet::new();
+    let mut by_path = BTreeMap::new();
     let mut extracted = 0usize;
     let mut cached = 0usize;
 
@@ -96,23 +229,25 @@ pub fn sync(
             extracted += 1;
             facts
         };
-        let FactSet { nodes, edges } = facts;
-        assembled.nodes.extend(nodes);
-        assembled.edges.extend(edges);
+        by_path.insert(blob.path.clone(), facts);
     }
 
-    resolve_calls(&mut assembled);
-    store.rebuild(&assembled, &tree)?;
-
-    Ok(SyncReport {
-        no_op: false,
-        blobs_total: blobs.len(),
-        blobs_extracted: extracted,
-        blobs_cached: cached,
-        nodes: store.node_count()?,
-        edges: store.edge_count()?,
-        tree,
+    Ok(Committed {
+        blobs,
+        by_path,
+        extracted,
+        cached,
     })
+}
+
+/// Concatenate per-path fact sets into one assembled fact set.
+fn flatten(by_path: BTreeMap<String, FactSet>) -> FactSet {
+    let mut assembled = FactSet::new();
+    for facts in by_path.into_values() {
+        assembled.nodes.extend(facts.nodes);
+        assembled.edges.extend(facts.edges);
+    }
+    assembled
 }
 
 /// Resolve the per-function call records (`meta.calls`) accumulated during
