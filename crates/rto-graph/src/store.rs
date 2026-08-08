@@ -193,6 +193,20 @@ impl Store {
         }
     }
 
+    /// Every node key in the store, ordered. Useful for whole-graph exports.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn all_keys(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT key FROM nodes ORDER BY key")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// All nodes of a given kind.
     ///
     /// # Errors

@@ -266,7 +266,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     query mode; respecting `core.hooksPath`; hooks fetching a CI artifact
     (Stage 10) instead of always rebuilding.
 
-### Stage 6 — Renderers replace the shell stopgap (rto-render)  → **v0.6.0**
+### Stage 6 — Renderers replace the shell stopgap (rto-render)  → **v0.6.0** ✅ *delivered*
 **Goal:** docs site + Obsidian vault as true graph build-outputs.
 - `rto-render`: `roteiro render docs` produces the site (ADRs, blueprints,
   overview, per-subsystem AI-context pages) from the graph; `render obsidian`
@@ -278,6 +278,23 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - **DoD:** rendered site reaches parity with the current stopgap (headings,
   tables, links, theme, back-links — the bugs we already hit), snapshot-tested;
   Cloudflare build command switches to `roteiro render docs`.
+- **Status: delivered.** `rto-render` now renders with **`pulldown-cmark`**
+  (MIT, MSRV-clean, deny-clean), retiring `md2html.awk` entirely — which also
+  fixes the whole class of hand-rolled-parser bugs (backtick runs, tables,
+  headings) for free. `render docs` produces the themed ADR pages + index +
+  copied assets (byte-for-byte parity with the stopgap, verified: 1 h1, 8 h2,
+  3 tables, no frontmatter/code-span leaks); `render obsidian` emits a linked
+  vault (one note per node, edges as provenance-labelled `[[wikilinks]]` — 415
+  notes on this repo). Page chrome is hand-rolled (no templating dep). CLI:
+  `roteiro render <docs|obsidian> [--out DIR]`. `website/build.sh` now calls
+  `roteiro render docs` and the `Website` CI job builds it with a Rust
+  toolchain. Unit tests snapshot the HTML/markdown; an end-to-end test drives
+  the binary. Coverage ~98% on `rto-render`.
+  - **Deploy note:** the Cloudflare Pages build now needs the Rust toolchain
+    (Pages provides it) since `build.sh` runs `cargo run … render docs`. If the
+    Pages image can't build Rust, the fallback is to render in CI and serve the
+    artifact (Stage 10). Blueprints / overview / per-subsystem AI-context pages
+    are future render targets.
 
 ### Stage 7 — MCP server (feature-gated `serve`)  → **v0.7.0**
 **Goal:** agent access over MCP as a thin wrapper on the query API.
