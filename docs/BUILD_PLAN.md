@@ -262,9 +262,13 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     machine without the tool, and live under the common git dir (shared across
     worktrees). An end-to-end test drives the real binary: `init` installs
     working hooks, and a `git checkout` rebuilds the graph via the hook.
-  - **Follow-ups:** `roteiro path <a> <b>` (shortest path) and a working-tree
-    query mode; respecting `core.hooksPath`; hooks fetching a CI artifact
-    (Stage 10) instead of always rebuilding.
+  - **`roteiro path <from> <to>` — delivered** (v0.0.8 follow-up). Shortest path
+    between two nodes via deterministic BFS, following edges in either direction;
+    each hop is provenance- and direction-labelled, under the same
+    `roteiro.query/v1` schema. Exits non-zero when the nodes are unconnected, so
+    it doubles as a reachability assertion. Exposed as a third MCP tool (`path`).
+  - **Follow-ups:** a working-tree query mode; respecting `core.hooksPath`; hooks
+    fetching a CI artifact (Stage 10) instead of always rebuilding.
 
 ### Stage 6 — Renderers replace the shell stopgap (rto-render)  → **v0.6.0** ✅ *delivered*
 **Goal:** docs site + Obsidian vault as true graph build-outputs.
@@ -320,9 +324,10 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   Dogfooded both transports (stdio session returns the graph JSON; HTTP `/mcp`
   answers `initialize` with 200). Tool methods unit-tested + `get_info`; an
   end-to-end test drives the real binary over a stdio MCP session.
-  - **Follow-ups:** a `path` tool once `roteiro path` lands; in-app TLS (rustls)
-    as an alternative to proxy termination; richer capabilities (resources/
-    prompts) if agents want them.
+  - **`path` tool — delivered** (v0.0.8 follow-up): the MCP surface now exposes
+    `explain`, `list_kind`, **and `path`**.
+  - **Follow-ups:** in-app TLS (rustls) as an alternative to proxy termination;
+    richer capabilities (resources/prompts) if agents want them.
 
 ### Stage 8 — Inference layer (`inferred`)  → **v0.8.0**
 **Goal:** fuzzy doc/PDF/image → suggestions with confidence.
