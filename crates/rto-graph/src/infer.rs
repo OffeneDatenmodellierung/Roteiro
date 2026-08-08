@@ -116,12 +116,15 @@ pub fn similarity(a: &Embedding, b: &Embedding) -> f64 {
     f64::from(dot).clamp(0.0, 1.0)
 }
 
-/// The text embedded for a node: its name plus the file stem for a little path
-/// context.
+/// The text embedded for a node: its name plus the file stem (basename without
+/// extension) for a little path context.
 fn node_text(node: &Node) -> String {
     let mut text = node.name.clone();
-    if let Some(path) = &node.path {
-        let stem = path.rsplit('/').next().unwrap_or(path);
+    if let Some(path) = &node.path
+        && let Some(stem) = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+    {
         text.push(' ');
         text.push_str(stem);
     }
@@ -149,17 +152,20 @@ pub fn infer_edges(store: &Store, config: InferenceConfig) -> Result<Vec<Edge>, 
         }
     }
 
-    // Existing directed pairs, so we never suggest what is already a fact.
-    let mut existing: HashSet<(String, String)> = HashSet::new();
+    // Existing directed pairs, so we never suggest what is already a fact. Keep
+    // the owned strings in a Vec and borrow them into the lookup set, so the
+    // per-pair `connected` check inside the O(n^2) loop below allocates nothing.
+    let mut existing_owned: Vec<(String, String)> = Vec::new();
     for (key, _) in &nodes {
         for edge in store.edges_from(key)? {
-            existing.insert((edge.src, edge.dst));
+            existing_owned.push((edge.src, edge.dst));
         }
     }
-    let connected = |a: &str, b: &str| {
-        existing.contains(&(a.to_owned(), b.to_owned()))
-            || existing.contains(&(b.to_owned(), a.to_owned()))
-    };
+    let existing: HashSet<(&str, &str)> = existing_owned
+        .iter()
+        .map(|(s, d)| (s.as_str(), d.as_str()))
+        .collect();
+    let connected = |a: &str, b: &str| existing.contains(&(a, b)) || existing.contains(&(b, a));
 
     let mut edges = Vec::new();
     for (i, (src, src_vec)) in nodes.iter().enumerate() {
@@ -294,6 +300,81 @@ mod tests {
             !s2.edges_by_provenance(Provenance::Inferred)
                 .expect("q")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn re_inferring_is_authoritative_after_clearing() {
+        // Mirrors `roteiro infer`: applying suggestions, then clearing the
+        // inferred class and re-inferring at a higher threshold, leaves only the
+        // stricter set — no stale low-confidence edges accumulate.
+        let mut store = Store::open_in_memory().expect("store");
+        let facts = FactSet::new()
+            .with_node(Node::new(
+                "sym:rust:a.rs#handle_read",
+                NodeKind::Fn,
+                "handle_read",
+            ))
+            .with_node(Node::new(
+                "sym:rust:a.rs#handle_write",
+                NodeKind::Fn,
+                "handle_write",
+            ))
+            .with_node(Node::new(
+                "sym:rust:a.rs#handler_pool",
+                NodeKind::Fn,
+                "handler_pool",
+            ));
+        store.apply_factset(&facts).expect("apply");
+
+        let apply = |store: &mut Store, min: f64| {
+            let edges = infer_edges(
+                store,
+                InferenceConfig {
+                    min_confidence: min,
+                    top_k: 5,
+                },
+            )
+            .expect("infer");
+            store
+                .apply_factset(&FactSet {
+                    nodes: vec![],
+                    edges,
+                })
+                .expect("apply inferred");
+        };
+
+        apply(&mut store, 0.3);
+        let loose = store
+            .edges_by_provenance(Provenance::Inferred)
+            .expect("q")
+            .len();
+        assert!(loose > 0);
+
+        // Clear + re-infer stricter: count must not exceed the loose run.
+        let removed = store
+            .delete_edges_by_provenance(Provenance::Inferred)
+            .expect("delete");
+        assert_eq!(
+            usize::try_from(removed).unwrap(),
+            loose,
+            "delete removes exactly the inferred edges"
+        );
+        assert!(
+            store
+                .edges_by_provenance(Provenance::Inferred)
+                .expect("q")
+                .is_empty()
+        );
+
+        apply(&mut store, 0.9);
+        let strict = store
+            .edges_by_provenance(Provenance::Inferred)
+            .expect("q")
+            .len();
+        assert!(
+            strict <= loose,
+            "stricter re-run must not accumulate: {strict} vs {loose}"
         );
     }
 

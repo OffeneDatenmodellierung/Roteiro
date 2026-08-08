@@ -322,7 +322,7 @@ fn run_init() -> anyhow::Result<()> {
 /// full derived + authored graph first, then adds the fuzzy suggestion layer.
 #[cfg(feature = "inference")]
 fn run_infer(min_confidence: f64, top_k: usize, json: bool) -> anyhow::Result<()> {
-    use rto_graph::{FactSet, InferenceConfig, infer_edges};
+    use rto_graph::{FactSet, InferenceConfig, Provenance, infer_edges};
 
     if !(0.0..=1.0).contains(&min_confidence) {
         anyhow::bail!("--min-confidence must be in 0.0..=1.0 (got {min_confidence})");
@@ -330,6 +330,11 @@ fn run_infer(min_confidence: f64, top_k: usize, json: bool) -> anyhow::Result<()
 
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache)?;
+
+    // Inference is authoritative: clear any prior inferred edges first so the
+    // result reflects exactly the current flags (build_graph may no-op when the
+    // tree is unchanged, which would otherwise leave stale suggestions behind).
+    store.delete_edges_by_provenance(Provenance::Inferred)?;
 
     let config = InferenceConfig {
         min_confidence,

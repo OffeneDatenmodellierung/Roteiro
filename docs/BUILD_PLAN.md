@@ -360,11 +360,13 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   `inference`, **zero new deps**) implements ADR-0003's lean tier: a pure-Rust
   hashing embedding (`embed`/`similarity`), and `infer_edges` which suggests
   `EdgeKind::Related` edges tagged `provenance = inferred` with `confidence =`
-  cosine similarity and an `embedding:hash/v1` `src_ref`. It skips pairs already
-  joined by a derived/authored fact (never re-states a known relationship) and is
+  cosine similarity and an `embedding:hash/v1` `src_ref`. `infer_edges` skips any
+  pair already joined by an existing edge (either direction) and is
   deterministic. `roteiro infer [--min-confidence --top-k --json]` builds the
-  derived+authored graph then applies the suggestions; they surface in
-  `query`/`explain` with their confidence. Dogfooded on this repo (e.g. `run_sync`
+  derived+authored graph, **clears prior inferred edges** (so re-running with
+  different flags is authoritative and never accumulates stale suggestions), then
+  applies the new suggestions; they surface in `query`/`explain` with their
+  confidence. Dogfooded on this repo (e.g. `run_sync`
   ↔ its sibling `run_*` handlers ≈ 0.7). ~97% coverage on `infer.rs`; both the
   default (no inference) and `--all-features` builds are clippy/deny/msrv clean,
   and the default build pulls none of it — **DoD met**.
