@@ -130,20 +130,63 @@ fn rewrite_wiki_links(md: &str, adr_prefix: &str) -> String {
             out.push('\n');
             continue;
         }
-        // Only rewrite outside inline code spans (odd `-delimited segments).
-        for (i, seg) in line.split('`').enumerate() {
-            if i > 0 {
-                out.push('`');
-            }
-            if i % 2 == 1 {
-                out.push_str(seg);
-            } else {
-                rewrite_wiki_in(seg, adr_prefix, &mut out);
-            }
-        }
+        rewrite_line_outside_code(line, adr_prefix, &mut out);
         out.push('\n');
     }
     out
+}
+
+/// Rewrite wiki-links in one line, leaving `CommonMark` inline code spans
+/// untouched. A code span opens with a run of *n* backticks and closes with the
+/// next run of *exactly* *n* backticks; anything between (including `[[…]]`
+/// examples) is emitted verbatim. Backtick runs with no matching close are
+/// literal text and do not shield what follows.
+fn rewrite_line_outside_code(line: &str, adr_prefix: &str, out: &mut String) {
+    let bytes = line.as_bytes();
+    let mut text_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < bytes.len() && bytes[i] == b'`' {
+            i += 1;
+        }
+        let run = i - run_start;
+        if let Some(rel) = find_closing_run(&bytes[i..], run) {
+            // Text before the opening delimiter is ordinary prose.
+            rewrite_wiki_in(&line[text_start..run_start], adr_prefix, out);
+            let code_end = i + rel + run;
+            out.push_str(&line[run_start..code_end]); // span, delimiters included
+            i = code_end;
+            text_start = i;
+        }
+        // No close → treat the run as literal text; keep it in the pending
+        // buffer (rewrite_wiki_in leaves backticks alone) and keep scanning.
+    }
+    rewrite_wiki_in(&line[text_start..], adr_prefix, out);
+}
+
+/// Byte offset (within `bytes`) of the next backtick run of *exactly* `run`
+/// backticks, or `None`. Longer or shorter runs are skipped, per `CommonMark`.
+fn find_closing_run(bytes: &[u8], run: usize) -> Option<usize> {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] == b'`' {
+            i += 1;
+        }
+        if i - start == run {
+            return Some(start);
+        }
+    }
+    None
 }
 
 /// Rewrite every `[[…]]` in one non-code text segment.
@@ -257,7 +300,10 @@ mod tests {
             html.contains("<code>crates/rto-graph/src/store.rs#Store</code>"),
             "code reference → inline code: {html}"
         );
-        assert!(!html.contains("[["), "no literal wiki brackets leak: {html}");
+        assert!(
+            !html.contains("[["),
+            "no literal wiki brackets leak: {html}"
+        );
     }
 
     #[test]
@@ -265,15 +311,54 @@ mod tests {
         // A documented example of the syntax, in backticks or a fence, must not
         // be rewritten.
         let inline = markdown_to_html("use `[[docs/adr/0001-x.md]]` in prose\n");
-        assert!(inline.contains("<code>[[docs/adr/0001-x.md]]</code>"), "{inline}");
+        assert!(
+            inline.contains("<code>[[docs/adr/0001-x.md]]</code>"),
+            "{inline}"
+        );
         let fenced = markdown_to_html("```\n[[docs/adr/0001-x.md]]\n```\n");
-        assert!(fenced.contains("[[docs/adr/0001-x.md]]"), "fence literal: {fenced}");
+        assert!(
+            fenced.contains("[[docs/adr/0001-x.md]]"),
+            "fence literal: {fenced}"
+        );
+    }
+
+    #[test]
+    fn multi_backtick_code_spans_are_honoured() {
+        // A tight double-backtick span (`` ``…`` ``) and the Build Plan's
+        // nested-backtick example must both survive verbatim — the previous
+        // single-backtick split rewrote the wiki-link inside them.
+        let tight = markdown_to_html("say ``[[docs/adr/0001-x.md]]`` please\n");
+        assert!(
+            tight.contains("<code>[[docs/adr/0001-x.md]]</code>"),
+            "{tight}"
+        );
+        assert!(!tight.contains("<a "), "no link inside code span: {tight}");
+
+        let nested = markdown_to_html("its `` `[[path#Symbol]]` `` example\n");
+        assert!(
+            nested.contains("<code>`[[path#Symbol]]`</code>"),
+            "{nested}"
+        );
+        assert!(
+            !nested.contains("<a "),
+            "no link inside nested span: {nested}"
+        );
+
+        // An unterminated run is literal and does not shield a later real link.
+        let stray = markdown_to_html("a ` stray tick then [[docs/adr/0001-x.md]]\n");
+        assert!(
+            stray.contains("<a href=\"0001-x.html\">ADR-0001</a>"),
+            "unterminated backtick must not shield: {stray}"
+        );
     }
 
     #[test]
     fn render_doc_links_adrs_into_subdir() {
         // A root-level lifetime doc (Build Plan) resolves ADR links into `adr/`.
-        let r = render_doc("# Build Plan\n\nGoverned by [[docs/adr/0001-x.md]].\n", "Build Plan");
+        let r = render_doc(
+            "# Build Plan\n\nGoverned by [[docs/adr/0001-x.md]].\n",
+            "Build Plan",
+        );
         assert_eq!(r.title, "Build Plan");
         assert!(
             r.html.contains("<a href=\"adr/0001-x.html\">ADR-0001</a>"),
