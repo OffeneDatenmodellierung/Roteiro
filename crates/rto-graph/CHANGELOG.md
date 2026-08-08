@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.10...rto-graph-v0.0.11) - 2026-08-08
+
+### Added
+
+- *(rto-graph)* offline inference layer — `roteiro infer` (Stage 8 core)
+
+### Fixed
+
+- *(infer)* address PR #31 review — authoritative re-infer, stem, perf, docs
+
 ## [0.0.10](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.9...rto-graph-v0.0.10) - 2026-08-08
 
 ### Added

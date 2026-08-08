@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.10"
+version = "0.0.11"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
@@ -17,9 +17,9 @@ homepage = "https://roteiro.dev"
 authors = ["The Roteiro Project Team"]
 
 [workspace.dependencies]
-rto-graph = { path = "crates/rto-graph", version = "0.0.10" }
-rto-spec = { path = "crates/rto-spec", version = "0.0.10" }
-rto-render = { path = "crates/rto-render", version = "0.0.10" }
+rto-graph = { path = "crates/rto-graph", version = "0.0.11" }
+rto-spec = { path = "crates/rto-spec", version = "0.0.11" }
+rto-render = { path = "crates/rto-render", version = "0.0.11" }
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 # Pinned to 0.39 (not the latest 0.40.x): libsqlite3-sys's build script from
