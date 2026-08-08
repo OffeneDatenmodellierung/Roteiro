@@ -57,6 +57,25 @@ impl Repo {
         self.inner.git_dir()
     }
 
+    /// The working directory, if this is not a bare repository. The dirty
+    /// overlay reads uncommitted file contents from here.
+    #[must_use]
+    pub fn workdir(&self) -> Option<&Path> {
+        self.inner.workdir()
+    }
+
+    /// The hex git blob object id that `bytes` would have, without writing
+    /// anything. Used to detect whether a working-copy file differs from the
+    /// committed blob (same content ⇒ same id).
+    ///
+    /// # Errors
+    /// Returns [`GitError::Git`] if hashing fails.
+    pub fn blob_oid(&self, bytes: &[u8]) -> Result<String, GitError> {
+        let id = gix::objs::compute_hash(self.inner.object_hash(), gix::objs::Kind::Blob, bytes)
+            .map_err(ge)?;
+        Ok(id.to_hex().to_string())
+    }
+
     /// Hex object id of the tree at `HEAD`.
     ///
     /// # Errors

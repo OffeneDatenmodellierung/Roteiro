@@ -10,7 +10,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rto_graph::{EdgeKind, FileNodeExtractor, ObjectCache, Registry, Repo, Store, sync};
+use rto_graph::{
+    EdgeKind, FileNodeExtractor, ObjectCache, Registry, Repo, Store, sync, sync_worktree,
+};
 
 /// Run `git` in `dir` with hermetic identity/signing settings, asserting success.
 fn git(dir: &Path, args: &[&str]) {
@@ -225,6 +227,90 @@ fn rust_extraction_produces_derived_graph_with_cross_file_calls() {
     assert!(r2.no_op);
     assert_eq!(r2.nodes, r.nodes);
     assert_eq!(r2.edges, r.edges);
+
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn dirty_overlay_previews_uncommitted_edits() {
+    // The working-tree sync overlays uncommitted edits to tracked files on top
+    // of the committed graph, so a symbol added but not yet committed is visible.
+    let dir = fresh_dir("dirty-overlay");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "main.rs", "fn main() {}\n");
+    write(&dir, "util.rs", "pub fn helper() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "committed"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+
+    // A clean working tree: no overlay, committed symbols present.
+    let r0 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("clean");
+    assert_eq!(r0.blobs_dirty, 0);
+    assert!(
+        store
+            .get_node("sym:rust:util.rs#helper")
+            .expect("h")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_node("sym:rust:util.rs#added")
+            .expect("a")
+            .is_none()
+    );
+
+    // Edit a tracked file WITHOUT committing: the new symbol is previewed.
+    write(&dir, "util.rs", "pub fn helper() {}\npub fn added() {}\n");
+    let r1 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("dirty");
+    assert!(!r1.no_op);
+    assert_eq!(r1.blobs_dirty, 1);
+    assert_eq!(
+        r1.blobs_extracted, 0,
+        "committed blobs still come from cache"
+    );
+    assert!(
+        store
+            .get_node("sym:rust:util.rs#added")
+            .expect("added")
+            .is_some(),
+        "uncommitted symbol should be previewed",
+    );
+
+    // Re-running with the same dirty state is a no-op.
+    let r2 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("resync");
+    assert!(r2.no_op);
+    assert_eq!(r2.blobs_dirty, 1);
+
+    // Deleting a tracked file in the working tree drops its symbols.
+    std::fs::remove_file(dir.join("util.rs")).expect("rm");
+    let r3 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("deleted");
+    assert!(!r3.no_op);
+    assert!(
+        store
+            .get_node("sym:rust:util.rs#helper")
+            .expect("h2")
+            .is_none()
+    );
+
+    // A committed-only sync supersedes the overlay, restoring the HEAD view.
+    let r4 = sync(&mut store, &repo, &cache, &Registry).expect("committed");
+    assert!(!r4.no_op);
+    assert_eq!(r4.blobs_dirty, 0);
+    assert!(
+        store
+            .get_node("sym:rust:util.rs#helper")
+            .expect("h3")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_node("sym:rust:util.rs#added")
+            .expect("a3")
+            .is_none()
+    );
 
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }

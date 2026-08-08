@@ -26,4 +26,4 @@ pub use git::{BlobRef, GitError, Repo};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;
 pub use store::{Store, StoreError};
-pub use sync::{SyncError, SyncReport, sync};
+pub use sync::{SyncError, SyncReport, sync, sync_worktree};
