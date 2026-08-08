@@ -46,6 +46,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Query the graph: explain a node, or list all nodes of a kind.
+    Query {
+        /// Node key to explain (e.g. `sym:rust:…#Store`, `adr:0001`, `file:…`).
+        key: Option<String>,
+        /// List all nodes of this kind instead of explaining a key.
+        #[arg(long, conflicts_with = "key")]
+        kind: Option<String>,
+        /// Emit the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot import from lat.md, Graphify, or codegraph.
     Import {
         /// Source tool: lat | graphify | codegraph
@@ -69,6 +80,7 @@ fn main() -> anyhow::Result<()> {
     let name = match cli.command {
         Command::Sync { json, committed } => return run_sync(json, committed),
         Command::Check { json } => return run_check(json),
+        Command::Query { key, kind, json } => return run_query(key, kind, json),
         Command::Init => "init",
         Command::Import { .. } => "import",
         Command::Render { .. } => "render",
@@ -128,21 +140,28 @@ fn run_sync(json: bool, committed_only: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validate the authored layer (ADR `[[…]]` links and `@rto:` annotations)
-/// against the derived graph; exit non-zero on drift.
-fn run_check(json: bool) -> anyhow::Result<()> {
-    use rto_graph::{ObjectCache, Registry, Repo, Store, sync};
-
+/// Open the repository and its per-worktree store and shared object cache.
+fn open_graph() -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph::ObjectCache)> {
+    use rto_graph::{ObjectCache, Repo, Store};
     let cwd = std::env::current_dir()?;
     let repo = Repo::discover(&cwd)?;
     let store_dir = repo.git_dir().join("roteiro");
     std::fs::create_dir_all(&store_dir)?;
-    let mut store = Store::open(&store_dir.join("graph.db"))?;
+    let store = Store::open(&store_dir.join("graph.db"))?;
     let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
+    Ok((repo, store, cache))
+}
 
-    // Build the derived graph, then read the authored inputs straight from the
-    // HEAD tree (ADRs under docs/adr, `@rto:` annotations everywhere else).
-    sync(&mut store, &repo, &cache, &Registry)?;
+/// Build the full graph into `store`: the derived code graph (via `sync`) plus
+/// the authored ADR layer read from the `HEAD` tree. Returns the authored-layer
+/// check report (used by `check`; ignored by `query`).
+fn build_graph(
+    repo: &rto_graph::Repo,
+    store: &mut rto_graph::Store,
+    cache: &rto_graph::ObjectCache,
+) -> anyhow::Result<rto_spec::CheckReport> {
+    use rto_graph::{Registry, sync};
+    sync(store, repo, cache, &Registry)?;
 
     let mut docs = Vec::new();
     let mut annotations = Vec::new();
@@ -175,8 +194,16 @@ fn run_check(json: bool) -> anyhow::Result<()> {
         }
     }
 
-    let mut report = rto_spec::run(&mut store, &docs, &annotations)?;
+    let mut report = rto_spec::run(store, &docs, &annotations)?;
     report.violations.extend(malformed);
+    Ok(report)
+}
+
+/// Validate the authored layer (ADR `[[…]]` links and `@rto:` annotations)
+/// against the derived graph; exit non-zero on drift.
+fn run_check(json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    let report = build_graph(&repo, &mut store, &cache)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -195,6 +222,61 @@ fn run_check(json: bool) -> anyhow::Result<()> {
 
     if report.has_violations() {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Query the graph: explain a node's provenance-labelled neighbourhood, or list
+/// all nodes of a kind. Builds the full (derived + authored) graph first so
+/// results reflect the current source and ADRs.
+fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::Result<()> {
+    use rto_graph::{NodeKind, explain, list_kind};
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    match (key, kind) {
+        (Some(key), _) => {
+            let Some(ex) = explain(&store, &key)? else {
+                anyhow::bail!(
+                    "no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)"
+                );
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&ex)?);
+            } else {
+                println!("{}  ({})  {}", ex.node.key, ex.node.kind, ex.node.name);
+                if let Some(path) = &ex.node.path {
+                    println!("  path: {path}");
+                }
+                if !ex.outgoing.is_empty() {
+                    println!("  outgoing:");
+                    for e in &ex.outgoing {
+                        println!("    -[{}/{}]-> {}", e.kind, e.provenance, e.node);
+                    }
+                }
+                if !ex.incoming.is_empty() {
+                    println!("  incoming:");
+                    for e in &ex.incoming {
+                        println!("    <-[{}/{}]- {}", e.kind, e.provenance, e.node);
+                    }
+                }
+            }
+        }
+        (None, Some(kind)) => {
+            let listing = list_kind(&store, &NodeKind::from_token(&kind))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&listing)?);
+            } else {
+                println!("{} ({}):", listing.kind, listing.nodes.len());
+                for n in &listing.nodes {
+                    println!("  {}  {}", n.key, n.name);
+                }
+            }
+        }
+        (None, None) => {
+            anyhow::bail!("provide a node key to explain, or `--kind <kind>` to list nodes");
+        }
     }
     Ok(())
 }

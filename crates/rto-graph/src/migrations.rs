@@ -60,6 +60,17 @@ CREATE TABLE sync_state (
 );
 ";
 
+/// Migration 3: make edges a set — unique by `(src, dst, kind, provenance)`.
+/// The graph is a set of relationships, not a multiset, and this makes
+/// re-applying a fact set (e.g. the authored layer on top of an unchanged
+/// derived graph) idempotent instead of duplicating edges.
+const M0003_EDGE_UNIQUE: &str = "
+DELETE FROM edges WHERE id NOT IN (
+    SELECT MIN(id) FROM edges GROUP BY src, dst, kind, provenance
+);
+CREATE UNIQUE INDEX idx_edges_unique ON edges(src, dst, kind, provenance);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -69,6 +80,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 2,
         sql: M0002_SYNC_STATE,
+    },
+    Migration {
+        version: 3,
+        sql: M0003_EDGE_UNIQUE,
     },
 ];
 

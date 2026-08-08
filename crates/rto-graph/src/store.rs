@@ -315,9 +315,14 @@ fn insert_edge(conn: &Connection, edge: &Edge) -> Result<(), StoreError> {
         node_row_id(conn, &edge.src)?.ok_or_else(|| StoreError::UnknownNode(edge.src.clone()))?;
     let dst_id =
         node_row_id(conn, &edge.dst)?.ok_or_else(|| StoreError::UnknownNode(edge.dst.clone()))?;
+    // Edges are a set: a duplicate `(src, dst, kind, provenance)` is a no-op, so
+    // re-applying a fact set does not accumulate duplicate edges. `ON CONFLICT …
+    // DO NOTHING` targets only that unique index — other constraint violations
+    // (already guarded in Rust above) still surface.
     conn.execute(
         "INSERT INTO edges (src, dst, kind, provenance, confidence, src_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(src, dst, kind, provenance) DO NOTHING",
         params![
             src_id,
             dst_id,
@@ -409,7 +414,7 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        assert_eq!(store.schema_version().expect("version"), 2);
+        assert_eq!(store.schema_version().expect("version"), 3);
     }
 
     #[test]
@@ -580,7 +585,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 2);
+            assert_eq!(store.schema_version().expect("version"), 3);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

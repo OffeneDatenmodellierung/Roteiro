@@ -9,6 +9,7 @@
 mod adr;
 mod annotate;
 mod check;
+mod text;
 
 pub use adr::{AdrDoc, AdrMeta, AdrStatus, ParseError, Section, WikiLink, parse_adr};
 pub use annotate::{Annotation, scan_annotations};

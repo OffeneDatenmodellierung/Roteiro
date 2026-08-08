@@ -51,7 +51,11 @@ pub fn scan_annotations(rel_path: &str, text: &str) -> Vec<Annotation> {
         if !is_comment_line(line) {
             continue;
         }
-        let mut rest = line;
+        // Strip inline code spans (any backtick run) so a documented example
+        // such as `@rto:0001` in a doc comment is not counted as a real
+        // annotation.
+        let stripped = crate::text::strip_code_spans(line);
+        let mut rest: &str = &stripped;
         while let Some(pos) = rest.find(MARKER) {
             let after = &rest[pos + MARKER.len()..];
             let id: String = after
@@ -98,6 +102,16 @@ mod tests {
     fn ignores_annotations_outside_comments() {
         // An `@rto:` inside a string literal on a code line is not an annotation.
         let src = "let s = \"@rto:9999\";\n// @rto:0001\n";
+        let anns = scan_annotations("src/x.rs", src);
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns[0].adr_id, "0001");
+    }
+
+    #[test]
+    fn ignores_examples_inside_code_spans() {
+        // `@rto:9999` written as a documentation example in backticks is not an
+        // annotation; a bare one on the same comment line still is.
+        let src = "//! see the `@rto:9999` example — real: @rto:0001\n";
         let anns = scan_annotations("src/x.rs", src);
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].adr_id, "0001");

@@ -231,7 +231,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     Blueprint parsing and the structural duplication check are deferred within
     Stage 4 / to Stage 8 as planned.
 
-### Stage 5 — Query surface, `--json`, `init` & git hooks  → **v0.5.0**
+### Stage 5 — Query surface, `--json`, `init` & git hooks  → **v0.5.0** 🚧 *query delivered; init/hooks pending*
 **Goal:** the agent-facing interface and zero-touch freshness.
 - `rto-graph::query`: mixed-provenance query API returning labelled results
   (path, explain, neighbours, by-symbol, by-ADR). Stable `--json` schema
@@ -244,6 +244,19 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - **DoD:** `--json` output snapshot-tested and documented; `init` on a clean
   clone installs working hooks; a checkout that changes files auto-updates the
   graph via the hook.
+- **Status: query surface delivered.** `rto-graph::query` exposes `explain`
+  (a node + its provenance-labelled incoming/outgoing edges) and `list_kind`,
+  serialised under the versioned schema tag **`roteiro.query/v1`**. `roteiro
+  query <key>` explains a node; `roteiro query --kind <k>` lists — both with
+  `--json`. `check` and `query` share a `build_graph` helper that assembles the
+  full derived + authored graph. **Fixed** a latent bug surfaced here: edges are
+  now a *set* (migration 3: unique `(src, dst, kind, provenance)` + `ON CONFLICT
+  DO NOTHING`), so re-applying the authored layer over an unchanged derived
+  graph is idempotent instead of duplicating edges. Query JSON schema asserted
+  in a test; ~93% region / ~96% line.
+  - **Remaining (next PR):** `roteiro init` + `post-checkout`/`post-merge` hooks
+    + `AGENTS.md` snippet. `roteiro path <a> <b>` (shortest path) and a
+    working-tree-aware query mode are natural follow-ups.
 
 ### Stage 6 — Renderers replace the shell stopgap (rto-render)  → **v0.6.0**
 **Goal:** docs site + Obsidian vault as true graph build-outputs.
