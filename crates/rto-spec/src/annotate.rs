@@ -1,9 +1,13 @@
 //! Scanning source files for `@rto:<id>` annotations, which link code back to
 //! the ADR that authored or governs it.
 //!
-//! An annotation is any `@rto:<id>` token in a file (typically in a `//` or
-//! `//!` comment); the scan is comment-agnostic and simply finds the token so
-//! it works across languages.
+//! An annotation is an `@rto:<id>` token on a *comment* line. Recognition is
+//! restricted to comment lines (a small set of prefixes covering the languages
+//! Roteiro ingests — see [`is_comment_line`]) so that example tokens inside
+//! string literals, such as test fixtures, are not mistaken for real
+//! annotations. The trade-off is that a trailing `code; // @rto:0001` after
+//! code on the same line is not recognised — annotations are expected on their
+//! own comment or doc-comment line.
 
 /// A `@rto:<id>` annotation found in a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]

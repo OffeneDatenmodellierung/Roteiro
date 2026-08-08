@@ -17,6 +17,8 @@ use crate::annotate::Annotation;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ViolationKind {
+    /// An ADR under `docs/adr` could not be parsed.
+    MalformedAdr,
     /// An ADR `[[…]]` link points at a symbol or file not in the graph.
     BrokenLink,
     /// A `@rto:` annotation references an ADR that does not exist.
@@ -30,6 +32,7 @@ impl ViolationKind {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::MalformedAdr => "malformed-adr",
             Self::BrokenLink => "broken-link",
             Self::UnknownAdr => "unknown-adr",
             Self::InactiveAdr => "inactive-adr",

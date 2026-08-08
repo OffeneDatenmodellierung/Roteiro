@@ -146,6 +146,7 @@ fn run_check(json: bool) -> anyhow::Result<()> {
 
     let mut docs = Vec::new();
     let mut annotations = Vec::new();
+    let mut malformed = Vec::new();
     for blob in repo.walk_blobs()? {
         let bytes = repo.read_blob(&blob.oid)?;
         let text = String::from_utf8_lossy(&bytes);
@@ -162,14 +163,20 @@ fn run_check(json: bool) -> anyhow::Result<()> {
         if is_adr {
             match rto_spec::parse_adr(&blob.path, &text) {
                 Ok(doc) => docs.push(doc),
-                Err(e) => eprintln!("warning: skipping {}: {e}", blob.path),
+                // A malformed ADR is drift, not a skippable warning: it would let
+                // the gate pass while silently dropping authored intent.
+                Err(e) => malformed.push(rto_spec::Violation {
+                    kind: rto_spec::ViolationKind::MalformedAdr,
+                    message: format!("{}: cannot parse ADR: {e}", blob.path),
+                }),
             }
         } else {
             annotations.extend(rto_spec::scan_annotations(&blob.path, &text));
         }
     }
 
-    let report = rto_spec::run(&mut store, &docs, &annotations)?;
+    let mut report = rto_spec::run(&mut store, &docs, &annotations)?;
+    report.violations.extend(malformed);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
