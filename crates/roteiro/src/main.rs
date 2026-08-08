@@ -80,11 +80,16 @@ enum Command {
         /// Artifact file to load (`-` reads from stdin).
         file: String,
     },
-    /// One-shot import from lat.md, Graphify, or codegraph.
+    /// One-shot import from an external knowledge graph (currently: graphify).
     Import {
-        /// Source tool: lat | graphify | codegraph
+        /// Source tool: graphify (lat | codegraph planned).
         #[arg(long)]
         from: String,
+        /// Path to the export: a Graphify output directory or a `graph.json`.
+        path: String,
+        /// Emit the migration report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Render the graph: docs site or Obsidian vault.
     Render {
@@ -157,7 +162,7 @@ fn main() -> anyhow::Result<()> {
         Command::Load { file } => return run_load(&file),
         Command::Init => return run_init(),
         Command::Render { target, out } => return run_render(&target, out),
-        Command::Import { .. } => "import",
+        Command::Import { from, path, json } => return run_import(&from, &path, json),
         Command::Spec => "spec",
         #[cfg(feature = "inference")]
         Command::Infer {
@@ -357,7 +362,7 @@ fn run_infer(
     model: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    use rto_graph::{FactSet, InferenceConfig, Provenance};
+    use rto_graph::{FactSet, InferenceConfig};
 
     if !(0.0..=1.0).contains(&min_confidence) {
         anyhow::bail!("--min-confidence must be in 0.0..=1.0 (got {min_confidence})");
@@ -366,10 +371,12 @@ fn run_infer(
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache)?;
 
-    // Inference is authoritative: clear any prior inferred edges first so the
-    // result reflects exactly the current flags (build_graph may no-op when the
-    // tree is unchanged, which would otherwise leave stale suggestions behind).
-    store.delete_edges_by_provenance(Provenance::Inferred)?;
+    // Inference is authoritative over *its own* suggestions: clear prior
+    // embedding-produced edges first so the result reflects exactly the current
+    // flags (build_graph may no-op on an unchanged tree, which would otherwise
+    // leave stale suggestions). Edges from other producers (e.g. a Graphify
+    // import) carry a different src_ref and are left untouched.
+    store.delete_edges_by_src_ref(rto_graph::EMBED_REF)?;
 
     let config = InferenceConfig {
         min_confidence,
@@ -611,6 +618,83 @@ fn http_get(url: &str) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut reader, &mut bytes)?;
     Ok(bytes)
+}
+
+/// Import an external knowledge graph into the store as `inferred` facts.
+fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
+    match from {
+        "graphify" => run_import_graphify(path, json),
+        "lat" | "codegraph" => anyhow::bail!(
+            "importer `{from}` is not implemented yet (graphify is available; \
+             see docs/BUILD_PLAN.md Stage 9)"
+        ),
+        other => anyhow::bail!("unknown import source `{other}` (expected: graphify)"),
+    }
+}
+
+/// Import a Graphify export: keep doc/concept/inferred knowledge, drop its code
+/// structure (Roteiro re-derives that), and ground imported docs to real files.
+fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
+    use rto_graph::{Edge, EdgeKind, FactSet};
+
+    // Accept either the Graphify output directory or a graph.json directly.
+    let p = std::path::Path::new(path);
+    let graph_json = if p.is_dir() {
+        p.join("graph.json")
+    } else {
+        p.to_path_buf()
+    };
+    let text = std::fs::read_to_string(&graph_json)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", graph_json.display()))?;
+    let imported = rto_spec::import_graphify(&text)?;
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    // Re-import is authoritative over Graphify's own edges only.
+    store.delete_edges_by_src_ref(rto_spec::GRAPHIFY_REF)?;
+    store.apply_factset(&imported.facts)?;
+
+    // Ground imported doc nodes to real files: when an imported node's
+    // `source_file` matches a `file:<path>` node already in the graph, add an
+    // inferred edge linking the imported knowledge to the derived file.
+    let mut links = Vec::new();
+    for node in &imported.facts.nodes {
+        if let Some(path) = &node.path {
+            let file_key = format!("file:{path}");
+            if store.get_node(&file_key)?.is_some() {
+                let mut edge =
+                    Edge::inferred(node.key.clone(), file_key, EdgeKind::References, 0.9);
+                edge.src_ref = Some(rto_spec::GRAPHIFY_REF.to_owned());
+                links.push(edge);
+            }
+        }
+    }
+    let linked = links.len();
+    store.apply_factset(&FactSet {
+        nodes: vec![],
+        edges: links,
+    })?;
+
+    let r = &imported.report;
+    if json {
+        let mut report = serde_json::to_value(r)?;
+        report["docs_linked_to_files"] = serde_json::json!(linked);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "imported graphify: {} node(s) ({} dropped as code), {} inferred edge(s) \
+             ({} ast dropped, {} dangling skipped), {} hyperedge group(s); \
+             {linked} doc(s) linked to files",
+            r.nodes_imported,
+            r.nodes_dropped_code,
+            r.edges_imported,
+            r.edges_dropped_ast,
+            r.edges_skipped_dangling,
+            r.hyperedges_imported,
+        );
+    }
+    Ok(())
 }
 
 /// Query the graph: explain a node's provenance-labelled neighbourhood, or list

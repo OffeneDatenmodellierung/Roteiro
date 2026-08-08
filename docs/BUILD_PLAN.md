@@ -393,7 +393,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     prose, not just node names) and the semantic duplication check; real
     per-model SHA-256 pins + Apple MLX variants filled into the registry.
 
-### Stage 9 — Importers  → **v0.9.0** ⛔ *blocked — needs sample lat.md / Graphify / codegraph data*
+### Stage 9 — Importers  → **v0.9.0** 🚧 *Graphify delivered; lat.md / codegraph pending samples*
 **Goal:** migration path off the three incumbents.
 - `roteiro import --from lat|graphify|codegraph`: lat.md → `authored`, Graphify
   doc/media nodes → `inferred` (drop its code-structure edges in favour of
@@ -403,6 +403,24 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - CLI: `roteiro import --from <src>` (stub already exists).
 - **DoD:** importing a sample of each source produces a graph + report;
   re-derivation supersedes imported structural edges without duplication.
+- **Status: Graphify importer delivered.** `rto-spec::import_graphify` parses
+  Graphify's `NetworkX` node-link `graph.json`, importing doc/concept/rationale/
+  image nodes (keyed `graphify:<id>`) and its **semantic/`INFERRED`** links as
+  `inferred` edges (stamped `src_ref = import:graphify`), while **dropping** the
+  code/AST nodes and edges (Roteiro re-derives those, more precisely). Hyperedges
+  become grouping nodes with `related` edges to imported members. `roteiro import
+  --from graphify <dir|graph.json> [--json]` applies the facts, then **grounds**
+  each imported doc to a real `file:<path>` node where present, and prints a
+  migration report (imported / dropped-code / dropped-ast / dangling / hyperedge
+  / docs-linked). The two `inferred` producers (this import + the embedding
+  layer) **coexist**: each clears only its own `src_ref`, so `roteiro infer`
+  never wipes imported edges (and vice versa) — added `Store::delete_edges_by_src_ref`
+  and switched `infer`'s clear to be `src_ref`-scoped. Dogfooded on the real
+  Thalweg export: 572 knowledge nodes + 346 inferred edges + 25 groups imported,
+  2121 code nodes dropped, 17 docs linked to files. Unit tests (mapping rules,
+  hyperedge membership, bad JSON) + an end-to-end CLI test.
+  - **Remaining Stage 9:** lat.md → `authored` and codegraph → validation-oracle
+    importers (need sample exports — will generate if required).
 
 ### Stage 10 — CI-canonical artifacts & v1.0 hardening  → **v1.0.0** 🚧 *artifact format delivered*
 **Goal:** the merged graph is the source of truth; ship stable.
@@ -480,7 +498,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.7.0 | 7 | MCP `serve` (rmcp; stdio + HTTP, [ADR-0002](adr/0002-adopt-rmcp-for-networked-mcp-serving.md)) | ✅ v0.0.8 |
 | — | 7+ | `roteiro path` + MCP `path` tool (follow-up) | ✅ v0.0.9 |
 | v0.8.0 | 8 | Inference layer (`inferred` + confidence) | ✅ offline core + candle local-models (`roteiro infer`/`model`); doc-ingestion later |
-| v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ⛔ needs sample data |
+| v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | 🚧 Graphify shipped (`import --from graphify`); lat.md/codegraph pending samples |
 | v1.0.0 | 10 | CI-canonical artifacts, multi-language, frozen `--json`, stable | 🚧 artifact `export`/`load` shipped (v0.0.10); CI publish/fetch, breadth, freeze remain |
 
 ---

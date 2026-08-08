@@ -296,6 +296,20 @@ impl Store {
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
+    /// Delete all edges carrying the given `src_ref`, returning how many were
+    /// removed. Lets one producer of `inferred` edges (e.g. the embedding layer,
+    /// or a Graphify import) re-derive its own edges authoritatively without
+    /// touching edges another producer contributed.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn delete_edges_by_src_ref(&self, src_ref: &str) -> Result<u64, StoreError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM edges WHERE src_ref = ?1", [src_ref])?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     /// Neighbouring nodes reachable from `key` in the given direction. Returns
     /// an empty vector if the node does not exist.
     ///
