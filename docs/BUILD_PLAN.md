@@ -296,7 +296,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     artifact (Stage 10). Blueprints / overview / per-subsystem AI-context pages
     are future render targets.
 
-### Stage 7 — MCP server (feature-gated `serve`)  → **v0.7.0**
+### Stage 7 — MCP server (feature-gated `serve`)  → **v0.7.0** ✅ *delivered*
 **Goal:** agent access over MCP as a thin wrapper on the query API.
 - `rto-render` (or a dedicated module) behind `--features mcp`: expose query,
   path, explain as MCP tools over stdio. No new query logic — wrapper only.
@@ -305,6 +305,24 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - CLI: `roteiro serve` (already stubbed under `#[cfg(feature = "mcp")]`).
 - **DoD:** `serve` answers a real MCP `tools/call` for a query against the
   dogfood graph; default build unchanged (no MCP deps).
+- **Status: delivered (on `rmcp`).** `rto-render::mcp` (behind `--features mcp`)
+  exposes `explain` and `list_kind` as MCP tools — thin wrappers over the query
+  surface, no new query logic. **Q6 decided ([[docs/adr/0002-adopt-rmcp-for-networked-mcp-serving.md]]):**
+  the first cut was a lean hand-rolled JSON-RPC/stdio server, but once
+  **networked serving** became a near-term goal we adopted the official **`rmcp`
+  SDK** — hand-rolling HTTP/SSE/sessions is the wrong bet. `roteiro serve` now
+  serves over **stdio** (default, local agents) or **streamable-HTTP**
+  (`--http <addr>`, networked/multi-client; TLS terminated at a reverse proxy).
+  The `Store` is `!Sync`, so it's shared behind `Arc<Mutex<…>>`; the tokio
+  runtime lives inside `rto-render` so `roteiro` stays runtime-free. Everything
+  is strictly feature-gated: the **default build pulls none of rmcp/tokio/axum**
+  (verified). rmcp's tree builds on the 1.94 MSRV and passes `cargo deny`.
+  Dogfooded both transports (stdio session returns the graph JSON; HTTP `/mcp`
+  answers `initialize` with 200). Tool methods unit-tested + `get_info`; an
+  end-to-end test drives the real binary over a stdio MCP session.
+  - **Follow-ups:** a `path` tool once `roteiro path` lands; in-app TLS (rustls)
+    as an alternative to proxy termination; richer capabilities (resources/
+    prompts) if agents want them.
 
 ### Stage 8 — Inference layer (`inferred`)  → **v0.8.0**
 **Goal:** fuzzy doc/PDF/image → suggestions with confidence.

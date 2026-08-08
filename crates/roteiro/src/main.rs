@@ -77,7 +77,12 @@ enum Command {
     Spec,
     /// Start the MCP server (built with `--features mcp`).
     #[cfg(feature = "mcp")]
-    Serve,
+    Serve {
+        /// Serve networked over streamable HTTP at ADDR (e.g. `127.0.0.1:8080`)
+        /// instead of stdio. Terminate TLS at a reverse proxy.
+        #[arg(long, value_name = "ADDR")]
+        http: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -91,7 +96,7 @@ fn main() -> anyhow::Result<()> {
         Command::Import { .. } => "import",
         Command::Spec => "spec",
         #[cfg(feature = "mcp")]
-        Command::Serve => "serve",
+        Command::Serve { http } => return run_serve(http),
     };
     anyhow::bail!("`roteiro {name}` is not implemented yet (scaffold; see docs/BUILD_PLAN.md)")
 }
@@ -323,6 +328,25 @@ fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::R
         }
     }
     Ok(())
+}
+
+/// Serve the graph over the Model Context Protocol. Builds the full graph, then
+/// serves over stdio (default) or streamable HTTP (`--http <addr>`).
+#[cfg(feature = "mcp")]
+fn run_serve(http: Option<String>) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    match http {
+        Some(addr) => {
+            let addr: std::net::SocketAddr = addr
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid --http address `{addr}`: {e}"))?;
+            eprintln!("roteiro MCP server listening on http://{addr}/mcp");
+            rto_render::mcp::serve_http(store, addr).map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        None => rto_render::mcp::serve_stdio(store).map_err(|e| anyhow::anyhow!("{e}")),
+    }
 }
 
 /// Render a build-output of the graph: the docs site or an Obsidian vault.
