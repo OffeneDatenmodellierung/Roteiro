@@ -6,6 +6,8 @@
 
 use clap::{Parser, Subcommand};
 
+mod init;
+
 #[derive(Parser)]
 #[command(
     name = "roteiro",
@@ -81,7 +83,7 @@ fn main() -> anyhow::Result<()> {
         Command::Sync { json, committed } => return run_sync(json, committed),
         Command::Check { json } => return run_check(json),
         Command::Query { key, kind, json } => return run_query(key, kind, json),
-        Command::Init => "init",
+        Command::Init => return run_init(),
         Command::Import { .. } => "import",
         Command::Render { .. } => "render",
         Command::Spec => "spec",
@@ -222,6 +224,45 @@ fn run_check(json: bool) -> anyhow::Result<()> {
 
     if report.has_violations() {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Scaffold Roteiro in the current repository: build the initial graph, install
+/// the `post-checkout`/`post-merge` hooks, and add the `AGENTS.md` snippet.
+fn run_init() -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+
+    let report = build_graph(&repo, &mut store, &cache)?;
+    let nodes = store.node_count()?;
+    let edges = store.edge_count()?;
+
+    // Hooks live under the common git dir so they are shared across worktrees.
+    let hooks_dir = repo.common_dir().join("hooks");
+    for name in init::MANAGED_HOOKS {
+        match init::install_hook(&hooks_dir, name)? {
+            init::HookOutcome::Installed => println!("installed hook: {name}"),
+            init::HookOutcome::Updated => println!("refreshed hook: {name}"),
+            init::HookOutcome::SkippedForeign => eprintln!(
+                "warning: existing non-Roteiro `{name}` hook left untouched; \
+                 add `roteiro sync --committed` to it to keep the graph fresh"
+            ),
+        }
+    }
+
+    if let Some(workdir) = repo.workdir() {
+        let path = workdir.join("AGENTS.md");
+        if init::ensure_agents(&path)? {
+            println!("wrote Roteiro section to {}", path.display());
+        }
+    }
+
+    println!("roteiro initialised — graph has {nodes} nodes, {edges} edges");
+    if report.has_violations() {
+        eprintln!(
+            "note: {} authored-layer violation(s); run `roteiro check` for details",
+            report.violations.len()
+        );
     }
     Ok(())
 }
