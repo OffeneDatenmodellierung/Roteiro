@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.11...rto-render-v0.0.12) - 2026-08-08
+
+### Fixed
+
+- *(render)* honour multi-backtick code spans in wiki-link rewrite
+- *(render)* resolve [[wiki-links]] and publish the Build Plan page
+
 ## [0.0.9](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.8...rto-render-v0.0.9) - 2026-08-08
 
 ### Added
