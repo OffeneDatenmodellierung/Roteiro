@@ -277,18 +277,15 @@ pub fn path(store: &Store, from: &str, to: &str) -> Result<Path, StoreError> {
         }
     }
 
-    if !came_from.contains_key(to) {
-        return Ok(not_found(false, Vec::new()));
-    }
-
     // Walk predecessors back from `to` to `from`, then reverse. Every node in
-    // `came_from` other than `from` has a real predecessor, so the loop always
-    // terminates at `from` without needing to unwrap.
+    // `came_from` other than `from` has a real predecessor, so this terminates
+    // at `from`. If the chain is ever broken (an invariant violation), treat it
+    // as no path rather than silently returning a partial one.
     let mut hops = Vec::new();
     let mut cursor = to.to_owned();
     while cursor != from {
         let Some((prev, hop)) = came_from.get(&cursor) else {
-            break;
+            return Ok(not_found(false, Vec::new()));
         };
         hops.push(hop.clone());
         cursor = prev.clone();

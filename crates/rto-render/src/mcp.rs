@@ -125,7 +125,8 @@ impl GraphServer {
     /// Find a shortest path between two nodes.
     #[tool(
         description = "Find a shortest path between two graph nodes, following \
-                          edges in either direction. Each hop is provenance-labelled. \
+                          edges in either direction. Each hop records the edge kind, \
+                          provenance, and traversal direction (outgoing/incoming). \
                           Args: from, to (node keys)."
     )]
     async fn path(&self, Parameters(args): Parameters<PathArgs>) -> CallToolResult {

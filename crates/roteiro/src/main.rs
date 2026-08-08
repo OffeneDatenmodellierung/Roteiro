@@ -362,7 +362,8 @@ fn run_path(from: &str, to: &str, json: bool) -> anyhow::Result<()> {
         }
         println!("({} hop(s))", result.length);
     } else {
-        println!("no path from `{from}` to `{to}`");
+        // Keep stdout machine-readable/empty on failure; report to stderr.
+        eprintln!("no path from `{from}` to `{to}`");
     }
 
     if !result.found {
