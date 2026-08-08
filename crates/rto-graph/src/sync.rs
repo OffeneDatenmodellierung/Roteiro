@@ -87,8 +87,9 @@ pub fn sync(
             extracted += 1;
             facts
         };
-        assembled.nodes.extend(facts.nodes);
-        assembled.edges.extend(facts.edges);
+        let FactSet { nodes, edges } = facts;
+        assembled.nodes.extend(nodes);
+        assembled.edges.extend(edges);
     }
 
     store.rebuild(&assembled, &tree)?;
