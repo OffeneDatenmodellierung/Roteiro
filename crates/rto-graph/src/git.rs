@@ -98,6 +98,5 @@ impl Repo {
     pub fn read_blob(&self, oid: &str) -> Result<Vec<u8>, GitError> {
         let id = gix::ObjectId::from_hex(oid.as_bytes()).map_err(ge)?;
         let object = self.inner.find_object(id).map_err(ge)?;
-        Ok(object.data.clone())
-    }
+        Ok(object.data)
 }
