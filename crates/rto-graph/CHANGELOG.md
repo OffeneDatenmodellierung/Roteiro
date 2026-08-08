@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.11...rto-graph-v0.0.12) - 2026-08-08
+
+### Added
+
+- inference-local-models tier — candle embedder + model registry (Stage 8)
+
+### Fixed
+
+- address PR #33 review — model validation, checksum warning, tests
+
 ## [0.0.11](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.10...rto-graph-v0.0.11) - 2026-08-08
 
 ### Added
