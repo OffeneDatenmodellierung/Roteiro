@@ -472,9 +472,17 @@ the [Stage 9](#stage-9--importers--v090--graphify-delivered-latmd--codegraph-pen
   re-derives them).
 - **Sample data:** download and run lat.md and codegraph **against this repo**
   and use the outputs as import fixtures/dogfood — no external samples needed.
+- **Durable imports (fix carried from the Graphify importer):** today an import
+  is a re-appliable layer — `sync`'s full rebuild drops imported facts on the
+  next code-changing sync (same as `infer`, but with no auto-regeneration since
+  the source is external). Make imports **durable**: persist the imported
+  `FactSet` in the store (a new `imports` table) and re-apply it in `build_graph`
+  after sync+authored, tolerating endpoints whose derived nodes vanished (e.g. a
+  deleted file). This makes `import` a first-class, persistent layer.
 - **DoD:** importing each produces a graph + report; lat.md content lands as
-  `authored`; codegraph is oracle-only (no duplicate structural edges); an
-  end-to-end CLI test per source.
+  `authored`; codegraph is oracle-only (no duplicate structural edges); imported
+  facts **survive a subsequent code-changing sync**; an end-to-end CLI test per
+  source.
 
 ### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** *(completes Stage 8)*
 **Goal:** make `inferred` edges meaningful by embedding **real content**, not

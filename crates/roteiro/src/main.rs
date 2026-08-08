@@ -634,6 +634,11 @@ fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
 
 /// Import a Graphify export: keep doc/concept/inferred knowledge, drop its code
 /// structure (Roteiro re-derives that), and ground imported docs to real files.
+/// Note: like `roteiro infer`, an import is a **re-appliable layer** over the
+/// derived graph — a later code-changing `sync` rebuilds the derived graph and
+/// drops these facts, so re-run `import` to refresh. (Durable, auto-reapplied
+/// imports — persisting the facts and re-applying them in `build_graph` — are a
+/// tracked follow-up; see docs/BUILD_PLAN.md Stage 11.)
 fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
     use rto_graph::{Edge, EdgeKind, FactSet};
 
@@ -692,6 +697,10 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
             r.edges_dropped_ast,
             r.edges_skipped_dangling,
             r.hyperedges_imported,
+        );
+        eprintln!(
+            "note: this import is a re-appliable layer — a later code-changing `sync` \
+             rebuilds the derived graph and drops it; re-run `import` to refresh."
         );
     }
     Ok(())
