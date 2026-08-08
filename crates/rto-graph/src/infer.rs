@@ -109,11 +109,34 @@ pub fn embed(text: &str) -> Embedding {
 }
 
 /// Cosine similarity of two unit vectors (their dot product), clamped to
-/// `0.0..=1.0` so it is a valid inferred-edge confidence.
+/// `0.0..=1.0` so it is a valid inferred-edge confidence. Returns `0.0` if the
+/// vectors differ in length (never happens within one inference run).
 #[must_use]
-pub fn similarity(a: &Embedding, b: &Embedding) -> f64 {
+pub fn similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     f64::from(dot).clamp(0.0, 1.0)
+}
+
+/// A source of unit embedding vectors for text. The default [`HashEmbedder`] is
+/// the offline hashing embedding; the `inference-local-models` tier provides a
+/// candle-backed learned embedder implementing the same trait.
+pub trait Embedder {
+    /// Embed `text` into a unit vector. All vectors from one embedder must share
+    /// a dimensionality so they are comparable by [`similarity`].
+    fn embed(&self, text: &str) -> Vec<f32>;
+}
+
+/// The dependency-free hashing embedder (the offline default).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HashEmbedder;
+
+impl Embedder for HashEmbedder {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        embed(text).to_vec()
+    }
 }
 
 /// The text embedded for a node: its name plus the file stem (basename without
@@ -143,12 +166,25 @@ fn node_text(node: &Node) -> String {
 /// # Errors
 /// Returns [`StoreError`] if the store cannot be read.
 pub fn infer_edges(store: &Store, config: InferenceConfig) -> Result<Vec<Edge>, StoreError> {
+    infer_edges_with(store, config, &HashEmbedder)
+}
+
+/// Like [`infer_edges`], but using a caller-supplied [`Embedder`] (e.g. a
+/// candle-backed local model) instead of the default hashing embedding.
+///
+/// # Errors
+/// Returns [`StoreError`] if the store cannot be read.
+pub fn infer_edges_with(
+    store: &Store,
+    config: InferenceConfig,
+    embedder: &dyn Embedder,
+) -> Result<Vec<Edge>, StoreError> {
     // Embed every node once.
     let keys = store.all_keys()?;
-    let mut nodes: Vec<(String, Embedding)> = Vec::with_capacity(keys.len());
+    let mut nodes: Vec<(String, Vec<f32>)> = Vec::with_capacity(keys.len());
     for key in &keys {
         if let Some(node) = store.get_node(key)? {
-            nodes.push((node.key.clone(), embed(&node_text(&node))));
+            nodes.push((node.key.clone(), embedder.embed(&node_text(&node))));
         }
     }
 

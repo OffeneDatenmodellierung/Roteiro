@@ -16,12 +16,22 @@ rto-graph = { workspace = true }
 rto-render = { workspace = true }
 rto-spec = { workspace = true }
 serde_json = { workspace = true }
+# `inference-local-models` only: consent-gated model download (rustls, no
+# platform TLS). Blocking + pure-Rust.
+ureq = { version = "3", optional = true }
 
 [features]
 mcp = ["rto-render/mcp"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]
+# Pluggable local embedding models (`roteiro model`, `roteiro infer --model`):
+# candle backend + consent-gated download. ADR-0003.
+inference-local-models = [
+    "inference",
+    "rto-graph/inference-local-models",
+    "dep:ureq",
+]
 
 [lints]
 workspace = true

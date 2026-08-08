@@ -6,3 +6,10 @@ multiple-versions = "warn"
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # `paste` (build-time-only proc-macro) is unmaintained but has no known
+    # vulnerability. It enters the tree only via candle → gemm under the
+    # optional `inference-local-models` feature; the default/`inference` builds
+    # never pull it. Revisit if gemm/candle drop the dependency.
+    "RUSTSEC-2024-0436",
+]

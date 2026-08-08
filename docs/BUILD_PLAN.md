@@ -338,7 +338,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   - **Follow-ups:** in-app TLS (rustls) as an alternative to proxy termination;
     richer capabilities (resources/prompts) if agents want them.
 
-### Stage 8 — Inference layer (`inferred`)  → **v0.8.0** ✅ *core delivered (offline default)*
+### Stage 8 — Inference layer (`inferred`)  → **v0.8.0** ✅ *delivered (offline default + local models)*
 **Goal:** fuzzy doc/PDF/image → suggestions with confidence.
 - Separate, **optional** pipeline (never gates offline local rebuilds): ingest
   docs/PDFs/images, embed, emit `inferred` edges with confidence + `inferred_
@@ -370,12 +370,28 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   ↔ its sibling `run_*` handlers ≈ 0.7). ~97% coverage on `infer.rs`; both the
   default (no inference) and `--all-features` builds are clippy/deny/msrv clean,
   and the default build pulls none of it — **DoD met**.
-  - **Remaining Stage 8 (next PRs, per ADR-0003):** the `inference-local-models`
-    tier — `candle` backend + **GGUF** local models, the in-binary registry
-    (`roteiro model list|pull`), platform-aware (Metal/Apple vs standard) variant
-    selection, and consent-gated fetch; plus doc/PDF/image **ingestion** (so
-    inference spans authored text, not just node names) and the semantic
-    duplication check. Each new crate faces the `cargo deny` licence gate.
+  - **`inference-local-models` tier — delivered.** Behind that feature,
+    `rto-graph::localmodel` adds a **candle**-backed BERT sentence embedder
+    (`LocalEmbedder`, CPU, safe `from_buffered_safetensors` — no `unsafe`), an
+    in-binary **model registry** with per-platform variants + host-aware
+    selection (`Platform::host` → Metal/Apple vs standard), the model store
+    (`~/.roteiro/models`), and SHA-256 verification. `roteiro model list` shows
+    the registry; `roteiro model pull <name>` is **consent-gated** — it prints
+    source/licence/size and asks `[y/N]` on a TTY, and in a **non-interactive**
+    session refuses and prints the manual command (offline-by-default is never
+    broken). `roteiro infer --model <name>` uses the pulled model, falling back
+    to the hashing embedder if absent. candle enters the tree **only** under this
+    feature; the default and `inference` builds pull none of it (verified). One
+    scoped `cargo deny` exception was added: `RUSTSEC-2024-0436` (`paste`, an
+    unmaintained build-time proc-macro reached via candle→gemm; no CVE).
+    - **Verification note:** everything except *running a real downloaded model*
+      is unit/integration-tested and gate-clean (registry, platform selection,
+      checksum, consent-decline, feature errors; the candle embedder compiles
+      against the real API via a de-risked reference). Live model inference is
+      verified locally by the operator — CI has no network to fetch weights.
+  - **Remaining Stage 8 (later):** doc/PDF/image **ingestion** (embed authored
+    prose, not just node names) and the semantic duplication check; real
+    per-model SHA-256 pins + Apple MLX variants filled into the registry.
 
 ### Stage 9 — Importers  → **v0.9.0** ⛔ *blocked — needs sample lat.md / Graphify / codegraph data*
 **Goal:** migration path off the three incumbents.
@@ -463,7 +479,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.6.0 | 6 | Real docs-site + Obsidian renderers (retire shell stopgap) | ✅ v0.0.7 |
 | v0.7.0 | 7 | MCP `serve` (rmcp; stdio + HTTP, [ADR-0002](adr/0002-adopt-rmcp-for-networked-mcp-serving.md)) | ✅ v0.0.8 |
 | — | 7+ | `roteiro path` + MCP `path` tool (follow-up) | ✅ v0.0.9 |
-| v0.8.0 | 8 | Inference layer (`inferred` + confidence) | 🚧 offline core shipped (`roteiro infer`); local-models/ingestion remain |
+| v0.8.0 | 8 | Inference layer (`inferred` + confidence) | ✅ offline core + candle local-models (`roteiro infer`/`model`); doc-ingestion later |
 | v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ⛔ needs sample data |
 | v1.0.0 | 10 | CI-canonical artifacts, multi-language, frozen `--json`, stable | 🚧 artifact `export`/`load` shipped (v0.0.10); CI publish/fetch, breadth, freeze remain |
 
