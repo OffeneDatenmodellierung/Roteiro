@@ -147,12 +147,10 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   All four DoD criteria pass via a fixture-repo integration test (cold /
   no-op / single-file / cache-reuse-across-stores). Coverage ~93% region /
   ~97% line; clippy pedantic + deny + msrv clean.
-  - **Deferred to a Stage 2 follow-up:** the *uncommitted* working-tree dirty
-    overlay (preview edits before commit). The committed-tree sync fully
-    satisfies the DoD; the overlay needs working-tree/status handling and its
-    own tests, so it is tracked separately rather than bloating this change.
+  - ~~**Deferred to a Stage 2 follow-up:**~~ the uncommitted working-tree dirty
+    overlay — **delivered in Stage 3** (see below).
 
-### Stage 3 — Derived extraction (tree-sitter)  → **v0.3.0** ✅ *delivered (Rust; overlay pending)*
+### Stage 3 — Derived extraction (tree-sitter)  → **v0.3.0** ✅ *delivered (Rust + dirty overlay)*
 **Goal:** the `derived` provenance class for real code.
 - `rto-graph::extract`: language registry; per-language tree-sitter grammar +
   `.scm` query patterns → symbols (`defines`), calls (`calls`), imports
@@ -185,13 +183,20 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     (clap) call, which the unambiguous-resolver deliberately leaves unlinked; the
     test instead asserts an intra-tree cross-file call (`main → helper`), which
     is the honest, resolvable analogue.
-  - **Remaining Stage 3 item (next PR):** the **uncommitted working-tree dirty
-    overlay** (deferred from Stage 2). Now that real extraction exists, a
-    pre-commit preview is observable and testable; it needs gix working-tree
-    `status` integration and dirty-aware no-op state, tracked as its own change.
-  - **Follow-up (also next):** cross-file `calls` currently resolve by
-    unambiguous simple name; a scope-aware resolver (using import paths + `Self`
-    types) is a later refinement. TypeScript/JS and Python extractors follow.
+  - **Dirty overlay — delivered.** `sync_worktree` overlays uncommitted edits to
+    *tracked* files on top of the committed graph: a file is dirty when its
+    working copy hashes (via `gix::objs::compute_hash`, no status enum) to a
+    different blob id than `HEAD`; dirty files are re-extracted in memory (never
+    cached), deleted files are dropped. The sync state encodes the dirty set so
+    repeated previews no-op while a committed `sync` supersedes the overlay.
+    `roteiro sync` uses it by default; `--committed` selects committed-only
+    (for hooks/CI). New *untracked* files are not yet included (needs a
+    gitignore-aware dirwalk) — a small follow-up. Dogfooded (+N uncommitted) and
+    covered by a fixture test (edit → preview, delete → drop, committed
+    supersede).
+  - **Follow-up:** cross-file `calls` resolve by unambiguous simple name today; a
+    scope-aware resolver (import paths + `Self` types) and untracked-file overlay
+    are later refinements. TypeScript/JS and Python extractors follow.
 
 ### Stage 4 — Authored layer & `roteiro check` (rto-spec)  → **v0.4.0**
 **Goal:** house ADR/blueprint intent linked into code; drift gating.

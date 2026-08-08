@@ -27,10 +27,16 @@ enum Command {
     /// Scaffold Roteiro in the current repository (store, hooks, agent skill).
     Init,
     /// Incrementally update the graph for the current tree (content-addressed).
+    ///
+    /// By default this includes uncommitted edits to tracked files (a
+    /// pre-commit preview); pass `--committed` to sync only the `HEAD` tree.
     Sync {
         /// Emit the sync report as JSON.
         #[arg(long)]
         json: bool,
+        /// Sync only the committed `HEAD` tree, ignoring uncommitted edits.
+        #[arg(long)]
+        committed: bool,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     Check,
@@ -55,7 +61,7 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let name = match cli.command {
-        Command::Sync { json } => return run_sync(json),
+        Command::Sync { json, committed } => return run_sync(json, committed),
         Command::Init => "init",
         Command::Check => "check",
         Command::Import { .. } => "import",
@@ -67,9 +73,10 @@ fn main() -> anyhow::Result<()> {
     anyhow::bail!("`roteiro {name}` is not implemented yet (scaffold; see docs/BUILD_PLAN.md)")
 }
 
-/// Sync the graph for the current repository's `HEAD` tree.
-fn run_sync(json: bool) -> anyhow::Result<()> {
-    use rto_graph::{ObjectCache, Registry, Repo, Store, sync};
+/// Sync the graph for the current repository, optionally including uncommitted
+/// edits to tracked files.
+fn run_sync(json: bool, committed_only: bool) -> anyhow::Result<()> {
+    use rto_graph::{ObjectCache, Registry, Repo, Store, sync, sync_worktree};
 
     let cwd = std::env::current_dir()?;
     let repo = Repo::discover(&cwd)?;
@@ -81,20 +88,29 @@ fn run_sync(json: bool) -> anyhow::Result<()> {
     let mut store = Store::open(&store_dir.join("graph.db"))?;
     let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
 
-    let report = sync(&mut store, &repo, &cache, &Registry)?;
+    let report = if committed_only {
+        sync(&mut store, &repo, &cache, &Registry)?
+    } else {
+        sync_worktree(&mut store, &repo, &cache, &Registry)?
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         let tree = &report.tree[..report.tree.len().min(12)];
+        let dirty = if report.blobs_dirty > 0 {
+            format!(" +{} uncommitted", report.blobs_dirty)
+        } else {
+            String::new()
+        };
         if report.no_op {
             println!(
-                "up to date (tree {tree}) — {} nodes, {} edges",
+                "up to date (tree {tree}{dirty}) — {} nodes, {} edges",
                 report.nodes, report.edges
             );
         } else {
             println!(
-                "synced tree {tree} — {} blobs ({} extracted, {} cached) → {} nodes, {} edges",
+                "synced tree {tree}{dirty} — {} blobs ({} extracted, {} cached) → {} nodes, {} edges",
                 report.blobs_total,
                 report.blobs_extracted,
                 report.blobs_cached,
