@@ -489,11 +489,15 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
    The store treats keys as opaque strings, so the scheme can evolve. (Stage 1)
 2. ~~**On-disk FactSet codec**~~ — **decided: JSON** (debuggable; revisit a
    compact binary only if size/speed demands it). (Stage 2)
-3. **First language breadth** — Rust-only for v0.3, or Rust+TS together? (Stage 3)
-4. **YAML/Markdown parsing** — maintained crate vs. hand-parser for house-style
-   frontmatter/sections. (Stage 4)
-5. **Templating** — hand-rolled vs. `askama`/`minijinja` for the docs site. (Stage 6)
-6. **MCP SDK** — `rmcp` vs. minimal hand-rolled JSON-RPC. (Stage 7)
+3. ~~**First language breadth**~~ — **decided: Rust-only** for the first
+   extractor; TS/JS and Python are tracked Stage 3 follow-ups. (Stage 3)
+4. ~~**YAML/Markdown parsing**~~ — **decided: hand-parser** for house-style
+   frontmatter/sections (no `serde_yaml`); `pulldown-cmark` is used only for
+   rendering, not parsing intent. (Stage 4)
+5. ~~**Templating**~~ — **decided: hand-rolled** page chrome for the docs site
+   (no `askama`/`minijinja` — no templating dependency). (Stage 6)
+6. ~~**MCP SDK**~~ — **decided: `rmcp`** (the official SDK), for stdio +
+   networked HTTP serving — see [[docs/adr/0002-adopt-rmcp-for-networked-mcp-serving.md]]. (Stage 7)
 7. ~~**Embedding model**~~ — **decided ([[docs/adr/0003-pluggable-embedding-models.md]]):**
    a tiny static int8 (`model2vec`-style) embedding compiled in as the offline
    default (single-digit MB budget), plus **GGUF** pluggable local models via an
