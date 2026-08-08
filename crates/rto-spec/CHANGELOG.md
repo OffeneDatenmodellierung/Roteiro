@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.5...rto-spec-v0.0.6) - 2026-08-08
+
+### Added
+
+- query surface with stable --json schema (Stage 5, part 1)
+- *(rto-spec)* authored ADR layer and `roteiro check` (Stage 4)
+
+### Fixed
+
+- address PR #17 review — code-span runs and deterministic edge order
+- *(rto-spec)* address PR #14 review — fail on malformed ADRs, fix stale doc
+
 ## [0.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/releases/tag/rto-spec-v0.0.1) - 2026-08-07
 
 ### Added
