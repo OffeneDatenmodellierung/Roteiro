@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.11...roteiro-v0.0.12) - 2026-08-08
+
+### Added
+
+- *(rto-spec)* Graphify importer — `roteiro import --from graphify` (Stage 9)
+- inference-local-models tier — candle embedder + model registry (Stage 8)
+
+### Fixed
+
+- *(clippy)* backtick BUILD_PLAN path in import doc comment
+- address PR #33 review — model validation, checksum warning, tests
+
+### Other
+
+- make Graphify import durability explicit (PR #35 review)
+
 ## [0.0.11](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.10...roteiro-v0.0.11) - 2026-08-08
 
 ### Added

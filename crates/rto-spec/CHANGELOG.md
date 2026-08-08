@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.11...rto-spec-v0.0.12) - 2026-08-08
+
+### Added
+
+- *(rto-spec)* Graphify importer — `roteiro import --from graphify` (Stage 9)
+
+### Fixed
+
+- *(rto-spec)* namespace Graphify hyperedge groups (PR #35 review)
+- *(rto-spec)* address PR #35 review — import doc + node-kind token
+
 ## [0.0.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.5...rto-spec-v0.0.6) - 2026-08-08
 
 ### Added
