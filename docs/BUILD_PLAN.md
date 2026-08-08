@@ -335,11 +335,14 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   docs/PDFs/images, embed, emit `inferred` edges with confidence + `inferred_
   from` provenance ref. Runs as its own CI stage.
 - Semantic duplication check joins the structural one from Stage 4.
-- New deps (biggest risk): a **bundled, offline** embedding model. Options to
-  evaluate — `candle` + a small static/int8 model, `model2vec`-style static
-  embeddings, vs. binary-size/licence trade-offs. Decision required before
-  starting (see Open Questions). PDF/image extraction crates each need a licence
-  check.
+- **Model decision made — [[docs/adr/0003-pluggable-embedding-models.md]]:** a
+  tiny static int8 (`model2vec`-style) embedding **compiled in** as the offline
+  default (single-digit MB), plus **GGUF** pluggable local models via an
+  in-binary registry (`roteiro model list|pull`), platform-aware variant
+  selection (Metal/Apple vs standard), and consent-gated fetch. The `candle`
+  backend and GGUF loading sit behind a second `inference-local-models` feature,
+  so the default and `inference` builds pull none of them. PDF/image extraction
+  crates each need a `cargo deny` licence check.
 - CLI: `roteiro infer` (or `sync --with-inference`); confidence surfaced in
   `--json` and renderers (clearly marked as suggestions).
 - **DoD:** an inferred edge appears labelled with confidence; disabling the
@@ -461,7 +464,12 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
    frontmatter/sections. (Stage 4)
 5. **Templating** — hand-rolled vs. `askama`/`minijinja` for the docs site. (Stage 6)
 6. **MCP SDK** — `rmcp` vs. minimal hand-rolled JSON-RPC. (Stage 7)
-7. **Embedding model** — which offline model, and the binary-size budget. (Stage 8)
+7. ~~**Embedding model**~~ — **decided ([[docs/adr/0003-pluggable-embedding-models.md]]):**
+   a tiny static int8 (`model2vec`-style) embedding compiled in as the offline
+   default (single-digit MB budget), plus **GGUF** pluggable local models via an
+   in-binary registry with platform-aware (Metal/Apple vs standard) variant
+   selection and consent-gated fetch; the `candle` backend sits behind a second
+   `inference-local-models` feature. (Stage 8)
 
 ---
 
