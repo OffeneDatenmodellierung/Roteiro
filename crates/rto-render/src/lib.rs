@@ -8,7 +8,9 @@ mod obsidian;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
-pub use docs::{IndexEntry, RenderedAdr, markdown_to_html, render_adr, render_adr_index};
+pub use docs::{
+    IndexEntry, RenderedAdr, markdown_to_html, render_adr, render_adr_index, render_doc,
+};
 pub use obsidian::{VaultNote, note_name, render_note};
 
 /// A render target for the graph.
