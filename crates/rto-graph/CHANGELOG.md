@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.9...rto-graph-v0.0.10) - 2026-08-08
+
+### Added
+
+- *(rto-graph)* portable graph artifacts — `export`/`load` (Stage 10 part 1)
+
+### Fixed
+
+- *(rto-graph)* address PR #27 review — tree-less artifacts + determinism test
+
 ## [0.0.9](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.8...rto-graph-v0.0.9) - 2026-08-08
 
 ### Added
