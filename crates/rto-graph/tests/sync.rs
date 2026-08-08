@@ -134,6 +134,37 @@ fn removed_file_drops_its_node() {
 }
 
 #[test]
+fn duplicate_content_at_distinct_paths_stays_distinct() {
+    // Two files with identical content share a single git blob oid (git dedupes
+    // by content). Keying the cache by oid alone would collapse them into one
+    // node; keying by (path, oid) keeps them separate.
+    let dir = fresh_dir("dup-content");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "a.txt", "same\n");
+    write(&dir, "b.txt", "same\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "duplicate content"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+    let ex = FileNodeExtractor;
+
+    let r = sync(&mut store, &repo, &cache, &ex).expect("sync");
+    // Both blobs are extracted despite sharing an oid, and both nodes exist.
+    assert_eq!(r.blobs_total, 2);
+    assert_eq!(
+        r.blobs_extracted, 2,
+        "identical-content files must not share a cache entry"
+    );
+    assert_eq!(r.nodes, 2);
+    assert!(store.get_node("file:a.txt").expect("get a").is_some());
+    assert!(store.get_node("file:b.txt").expect("get b").is_some());
+
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
 fn cache_is_reused_across_independent_stores() {
     let dir = fresh_dir("cache-reuse");
     git(&dir, &["init", "-q"]);

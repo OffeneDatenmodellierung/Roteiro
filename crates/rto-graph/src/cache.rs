@@ -1,10 +1,12 @@
 //! Content-addressed on-disk cache of per-blob [`FactSet`]s.
 //!
-//! Extraction is a pure function of a git blob, so its result is keyed purely by
-//! the blob's git object id. The cache lives under the repository's *common* git
-//! directory (e.g. `<common>/roteiro/objects/`), so all worktrees and branches
-//! that share a blob share its extracted facts. Entries are JSON, sharded by the
-//! first two hex characters of the id (git-style) to keep directories small.
+//! The cache is a simple content-addressed key→[`FactSet`] store; the caller
+//! derives the key (see [`crate::sync`], which keys by blob oid **and** path,
+//! because extraction is a pure function of both). The cache lives under the
+//! repository's *common* git directory (e.g. `<common>/roteiro/objects/`), so
+//! all worktrees and branches that share a key share its extracted facts.
+//! Entries are JSON, sharded by the first two characters of the key (git-style)
+//! to keep directories small.
 
 use std::fs;
 use std::path::{Path, PathBuf};

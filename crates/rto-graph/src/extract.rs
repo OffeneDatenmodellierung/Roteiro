@@ -1,8 +1,9 @@
 //! Extraction: turning the bytes of a source blob into a [`FactSet`].
 //!
 //! Extraction must be a deterministic pure function of `(path, blob_id, bytes)`
-//! so its output can be content-addressed and cached by blob id (see
-//! [`crate::cache`]). Language-aware extraction (tree-sitter) arrives in a later
+//! so its output can be cached; because the facts are path-dependent (node keys
+//! are path-scoped), the cache is keyed by both path and blob id (see
+//! [`crate::sync`]). Language-aware extraction (tree-sitter) arrives in a later
 //! stage; [`FileNodeExtractor`] is the minimal placeholder that lets the sync
 //! pipeline run end-to-end today.
 

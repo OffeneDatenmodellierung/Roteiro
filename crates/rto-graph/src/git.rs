@@ -97,7 +97,8 @@ impl Repo {
     /// Returns [`GitError::Git`] if the id is malformed or the object is absent.
     pub fn read_blob(&self, oid: &str) -> Result<Vec<u8>, GitError> {
         let id = gix::ObjectId::from_hex(oid.as_bytes()).map_err(ge)?;
-        let object = self.inner.find_object(id).map_err(ge)?;
-        Ok(object.data)
+        // `detach()` moves the owned data out without cloning; `Object` itself
+        // implements `Drop`, so the bare field cannot be moved out directly.
+        Ok(self.inner.find_object(id).map_err(ge)?.detach().data)
     }
 }
