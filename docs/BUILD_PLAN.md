@@ -565,7 +565,7 @@ so generated plans reference *real* symbols/ADRs/deps and are `check`-gated.
   offline; docs/vault reproducible byte-for-byte in CI; `--json` schema declared
   stable.
 
-### Stage 15 — Intent-debt tracking (TODOs, stubs, deferred work)  → **v0.x** *(independent; low-risk, can slot early)*
+### Stage 15 — Intent-debt tracking (TODOs, stubs, deferred work)  → **delivered** *(independent; low-risk)*
 **Goal:** deterministically detect, log, and track **intent debt** — the markers
 in code and docs that signal *missed intent* or *intent left for the future* —
 so end users and AI can find what's incomplete instead of it hiding in comments
@@ -589,6 +589,19 @@ and footnotes.
   location + category; surfaces in `query`/`explain` + MCP; dogfooded on Roteiro
   itself (finds the lat/codegraph import stubs, the `spec` stub, and the
   "deferred/remaining" notes).
+- **Delivered:** `crates/rto-graph/src/markers.rs` scans every blob during
+  extraction (cached alongside the language facts) and emits `marker` nodes
+  (`NodeKind::Marker`) with a `contains` edge from the innermost enclosing
+  symbol (else the file), resolved by byte span. `rto_graph::debt` is a new
+  query primitive under the versioned schema; `roteiro debt [--json] [--kind …]`
+  groups by category, `roteiro check` prints a debt summary line, and MCP gains
+  a `debt` tool. Markers are also reachable via the existing `query --kind
+  marker` / `explain` surface and flow into the Obsidian vault as nodes.
+- **Scoped out (precision):** the noisy bare words `later` and `stub` from the
+  original phrase list are omitted — they flood documentation prose with false
+  positives without comment-awareness. Per-language *comment vs code* scoping
+  (so soft deferral phrases only fire inside comments) is a natural follow-up
+  once more language extractors land in Stage 14; tracked here.
 
 ---
 
@@ -646,7 +659,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ⛔ the "spec-store" front door from ADR-0001 |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
-| v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ⛔ independent; low-risk, can slot early |
+| v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 
 ---
 

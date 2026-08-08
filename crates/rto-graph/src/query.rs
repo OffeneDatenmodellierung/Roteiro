@@ -2,11 +2,12 @@
 //!
 //! Everything here is a read-only view built from the store's typed queries,
 //! serialised under a **stable, versioned** JSON schema ([`SCHEMA`]) so agents
-//! can depend on the shape. Three primitives are provided: [`explain`] (a node
+//! can depend on the shape. Four primitives are provided: [`explain`] (a node
 //! and its provenance-labelled neighbourhood), [`list_kind`] (all nodes of a
-//! kind), and [`path`] (a shortest path between two nodes). All return
-//! mixed-provenance results — the "one query surface" from ADR-0001 — with every
-//! edge carrying its `provenance`.
+//! kind), [`path`] (a shortest path between two nodes), and [`debt`] (the
+//! intent-debt marker inventory). All return mixed-provenance results — the
+//! "one query surface" from ADR-0001 — with every edge carrying its
+//! `provenance`.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -85,6 +86,84 @@ pub struct Listing {
     pub kind: String,
     /// Matching nodes, ordered by key.
     pub nodes: Vec<NodeSummary>,
+}
+
+/// One intent-debt finding in a [`DebtReport`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DebtItem {
+    /// Natural key of the marker node (`marker:<path>#<line>`).
+    pub key: String,
+    /// Category token (`todo` | `fixme` | `hack` | `stub` | `deferred`).
+    pub category: String,
+    /// The marker text (the trimmed source line).
+    pub text: String,
+    /// Repository-relative path of the source file, if any.
+    pub path: Option<String>,
+    /// 1-based line number, if recorded.
+    pub line: Option<u32>,
+}
+
+/// The intent-debt inventory: every `marker` node, grouped and listed. A
+/// deterministic, provenance-`derived` view of what is incomplete or deferred.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DebtReport {
+    /// Stable schema tag ([`SCHEMA`]).
+    pub schema: &'static str,
+    /// Total markers in the report (after any category filter).
+    pub total: usize,
+    /// Count per category, ordered by category token.
+    pub by_category: BTreeMap<String, usize>,
+    /// The markers, ordered by `(path, line, key)`.
+    pub items: Vec<DebtItem>,
+}
+
+/// Inventory intent-debt markers in the graph, optionally restricted to the
+/// given `categories` (empty means all). Ordered by `(path, line)` so output is
+/// stable and reads top-to-bottom per file.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure.
+pub fn debt(store: &Store, categories: &[String]) -> Result<DebtReport, StoreError> {
+    let filter: std::collections::BTreeSet<&str> = categories.iter().map(String::as_str).collect();
+    let mut items = Vec::new();
+    let mut by_category: BTreeMap<String, usize> = BTreeMap::new();
+    for node in store.nodes_by_kind(&NodeKind::Marker)? {
+        let category = node
+            .meta
+            .get("category")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("other")
+            .to_owned();
+        if !filter.is_empty() && !filter.contains(category.as_str()) {
+            continue;
+        }
+        let text = node
+            .meta
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(node.name.as_str())
+            .to_owned();
+        let line = node
+            .meta
+            .get("line")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|l| u32::try_from(l).ok());
+        *by_category.entry(category.clone()).or_default() += 1;
+        items.push(DebtItem {
+            key: node.key.clone(),
+            category,
+            text,
+            path: node.path.clone(),
+            line,
+        });
+    }
+    items.sort_by(|a, b| (&a.path, a.line, &a.key).cmp(&(&b.path, b.line, &b.key)));
+    Ok(DebtReport {
+        schema: SCHEMA,
+        total: items.len(),
+        by_category,
+        items,
+    })
 }
 
 /// One step along a [`Path`]: the edge traversed and the node it leads to.

@@ -4,10 +4,9 @@
 //! Two transports are offered (see [`serve_stdio`] / [`serve_http`]): stdio for
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
-//! same tools — `explain`, `list_kind`, and `path` — as thin wrappers over
-//! [`rto_graph::explain`] / [`rto_graph::list_kind`] / [`rto_graph::path`], so
-//! agents and the CLI see the same graph. See ADR-0002 for the decision to
-//! adopt `rmcp`.
+//! same tools — `explain`, `list_kind`, `path`, and `debt` — as thin wrappers
+//! over the matching [`rto_graph`] query primitives, so agents and the CLI see
+//! the same graph. See ADR-0002 for the decision to adopt `rmcp`.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -27,7 +26,7 @@ use rmcp::{
         },
     },
 };
-use rto_graph::{NodeKind, Store, explain, list_kind, path};
+use rto_graph::{NodeKind, Store, debt, explain, list_kind, path};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -60,6 +59,15 @@ struct PathArgs {
     from: String,
     /// Goal node key.
     to: String,
+}
+
+/// Arguments for the `debt` tool.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct DebtArgs {
+    /// Restrict to these categories (empty = all): todo, fixme, hack, stub,
+    /// deferred.
+    #[serde(default)]
+    kind: Vec<String>,
 }
 
 /// The MCP server handler wrapping the graph store.
@@ -142,6 +150,28 @@ impl GraphServer {
             Err(e) => tool_error(&format!("query error: {e}")),
         }
     }
+
+    /// List intent-debt markers (TODOs, stubs, deferred work).
+    #[tool(
+        description = "List intent-debt markers found in the codebase — TODO/FIXME/HACK \
+                          comments, todo!()/unimplemented!() stubs, and deferred-work notes — \
+                          grouped by category (todo, fixme, hack, stub, deferred). Optional \
+                          `kind` restricts to given categories. Each marker links to its \
+                          enclosing symbol or file via a `contains` edge."
+    )]
+    async fn debt(&self, Parameters(args): Parameters<DebtArgs>) -> CallToolResult {
+        let result = {
+            let store = self.store.lock().expect("store mutex poisoned");
+            debt(&store, &args.kind)
+        };
+        match result {
+            Ok(report) => match serde_json::to_string_pretty(&report) {
+                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                Err(e) => tool_error(&format!("serialize error: {e}")),
+            },
+            Err(e) => tool_error(&format!("query error: {e}")),
+        }
+    }
 }
 
 #[tool_handler]
@@ -155,7 +185,8 @@ impl ServerHandler for GraphServer {
         info.instructions = Some(
             "Roteiro codebase knowledge graph. Use `explain` for a node's \
              provenance-labelled neighbourhood, `list_kind` to enumerate a kind, \
-             and `path` to find how two nodes are connected."
+             `path` to find how two nodes are connected, and `debt` to list \
+             intent-debt markers (TODOs, stubs, deferred work)."
                 .into(),
         );
         info
@@ -212,7 +243,7 @@ pub fn serve_http(store: Store, addr: SocketAddr) -> Result<(), McpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExplainArgs, GraphServer, ListKindArgs, PathArgs};
+    use super::{DebtArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs};
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
     use std::sync::{Arc, Mutex};
@@ -221,13 +252,23 @@ mod tests {
 
     fn seeded() -> GraphServer {
         let mut store = Store::open_in_memory().expect("store");
+        let mut marker = Node::new("marker:a.rs#7", NodeKind::Marker, "TODO wire this up");
+        marker.meta =
+            serde_json::json!({ "category": "todo", "text": "TODO wire this up", "line": 7 });
+        marker.path = Some("a.rs".into());
         let facts = FactSet::new()
             .with_node(Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"))
             .with_node(Node::new("sym:rust:a.rs#helper", NodeKind::Fn, "helper"))
+            .with_node(marker)
             .with_edge(Edge::derived(
                 "sym:rust:a.rs#main",
                 "sym:rust:a.rs#helper",
                 EdgeKind::Calls,
+            ))
+            .with_edge(Edge::derived(
+                "sym:rust:a.rs#main",
+                "marker:a.rs#7",
+                EdgeKind::Contains,
             ));
         store.apply_factset(&facts).expect("apply");
         GraphServer::new(Arc::new(Mutex::new(store)))
@@ -292,6 +333,29 @@ mod tests {
         assert_eq!(json["length"], 1);
         assert_eq!(json["hops"][0]["node"], "sym:rust:a.rs#helper");
         assert_eq!(json["hops"][0]["provenance"], "derived");
+    }
+
+    #[tokio::test]
+    async fn debt_tool_lists_and_filters_markers() {
+        let server = seeded();
+        // No filter: the seeded marker is reported and counted.
+        let all = text_of(&server.debt(Parameters(DebtArgs::default())).await);
+        let json: serde_json::Value = serde_json::from_str(&all).expect("json");
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["by_category"]["todo"], 1);
+        assert_eq!(json["items"][0]["key"], "marker:a.rs#7");
+        assert_eq!(json["items"][0]["line"], 7);
+
+        // A non-matching category filter yields nothing.
+        let none = text_of(
+            &server
+                .debt(Parameters(DebtArgs {
+                    kind: vec!["stub".into()],
+                }))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&none).expect("json");
+        assert_eq!(json["total"], 0);
     }
 
     #[test]
