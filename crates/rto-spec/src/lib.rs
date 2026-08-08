@@ -9,8 +9,10 @@
 mod adr;
 mod annotate;
 mod check;
+mod import;
 mod text;
 
 pub use adr::{AdrDoc, AdrMeta, AdrStatus, ParseError, Section, WikiLink, parse_adr};
 pub use annotate::{Annotation, scan_annotations};
 pub use check::{CheckReport, Violation, ViolationKind, run};
+pub use import::{GRAPHIFY_REF, GraphifyImport, ImportError, ImportReport, import_graphify};

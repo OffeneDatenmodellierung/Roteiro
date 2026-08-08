@@ -32,7 +32,8 @@ pub use extract::{Extractor, FileNodeExtractor, Registry, RustExtractor};
 pub use git::{BlobRef, GitError, Repo};
 #[cfg(feature = "inference")]
 pub use infer::{
-    Embedder, HashEmbedder, InferenceConfig, embed, infer_edges, infer_edges_with, similarity,
+    EMBED_REF, Embedder, HashEmbedder, InferenceConfig, embed, infer_edges, infer_edges_with,
+    similarity,
 };
 #[cfg(feature = "inference-local-models")]
 pub use localmodel::{

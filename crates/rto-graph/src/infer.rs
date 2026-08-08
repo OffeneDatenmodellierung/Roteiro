@@ -28,7 +28,10 @@ const DIM: usize = 256;
 
 /// Provenance ref recorded on every inferred edge, identifying the embedding
 /// that produced it (so a future model swap is distinguishable in the data).
-const EMBED_REF: &str = "embedding:hash/v1";
+/// `src_ref` stamped on every edge the hashing embedder produces, so the CLI
+/// can clear exactly its own suggestions without touching other `inferred`
+/// edges (e.g. Graphify-imported ones).
+pub const EMBED_REF: &str = "embedding:hash/v1";
 
 /// Tuning for [`infer_edges`].
 #[derive(Debug, Clone, Copy)]
