@@ -11,6 +11,7 @@
 //!
 //! @rto:0001
 
+mod artifact;
 mod cache;
 mod extract;
 mod git;
@@ -21,6 +22,7 @@ mod query;
 mod store;
 mod sync;
 
+pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
 pub use cache::{CacheError, ObjectCache};
 pub use extract::{Extractor, FileNodeExtractor, Registry, RustExtractor};
 pub use git::{BlobRef, GitError, Repo};

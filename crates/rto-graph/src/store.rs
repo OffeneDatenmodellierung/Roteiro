@@ -152,14 +152,19 @@ impl Store {
             .optional()?)
     }
 
-    /// Atomically replace the entire graph with `facts` and record `tree` as the
-    /// synced state. All existing nodes and edges are deleted first, so the
-    /// store reflects exactly the given fact set.
+    /// Atomically replace the entire graph with `facts`, recording `tree` as the
+    /// synced state (or clearing it when `tree` is `None`). All existing nodes
+    /// and edges are deleted first, so the store reflects exactly the given fact
+    /// set.
+    ///
+    /// Passing `None` records *no* synced tree — distinct from an empty string —
+    /// so [`Store::sync_state`] returns `None` and a later `sync` will not
+    /// spuriously short-circuit.
     ///
     /// # Errors
     /// Returns the first error encountered (see [`Store::apply_factset`]); on any
     /// error nothing is committed.
-    pub fn rebuild(&mut self, facts: &FactSet, tree: &str) -> Result<(), StoreError> {
+    pub fn rebuild(&mut self, facts: &FactSet, tree: Option<&str>) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM edges", [])?;
         tx.execute("DELETE FROM nodes", [])?;
@@ -169,11 +174,14 @@ impl Store {
         for edge in &facts.edges {
             insert_edge(&tx, edge)?;
         }
-        tx.execute(
-            "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
-             ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
-            [tree],
-        )?;
+        match tree {
+            Some(tree) => tx.execute(
+                "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
+                 ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
+                [tree],
+            )?,
+            None => tx.execute("DELETE FROM sync_state WHERE id = 0", [])?,
+        };
         tx.commit()?;
         Ok(())
     }
@@ -205,6 +213,28 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Dump the entire graph as a single [`FactSet`], with nodes and edges in a
+    /// deterministic order — suitable for a portable, content-stable artifact.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`], [`StoreError::Json`], or
+    /// [`StoreError::Corrupt`] on decode failure.
+    pub fn export_factset(&self) -> Result<FactSet, StoreError> {
+        let node_sql = format!("SELECT {NODE_COLS} FROM nodes n ORDER BY n.key");
+        let mut node_stmt = self.conn.prepare(&node_sql)?;
+        let mut node_rows = node_stmt.query([])?;
+        let nodes = collect_nodes(&mut node_rows)?;
+
+        // Order edges by their resolved endpoint keys (not row id) so the dump is
+        // stable regardless of insertion order.
+        let edge_sql = format!("{EDGE_SELECT} ORDER BY ns.key, nd.key, e.kind, e.provenance");
+        let mut edge_stmt = self.conn.prepare(&edge_sql)?;
+        let mut edge_rows = edge_stmt.query([])?;
+        let edges = collect_edges(&mut edge_rows)?;
+
+        Ok(FactSet { nodes, edges })
     }
 
     /// All nodes of a given kind.

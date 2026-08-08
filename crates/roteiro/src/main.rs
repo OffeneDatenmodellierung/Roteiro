@@ -69,6 +69,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Export the assembled graph to a portable JSON artifact.
+    Export {
+        /// Output file (default: `roteiro-graph.json`); `-` writes to stdout.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Load a graph artifact into the local store, skipping extraction.
+    Load {
+        /// Artifact file to load (`-` reads from stdin).
+        file: String,
+    },
     /// One-shot import from lat.md, Graphify, or codegraph.
     Import {
         /// Source tool: lat | graphify | codegraph
@@ -102,6 +113,8 @@ fn main() -> anyhow::Result<()> {
         Command::Check { json } => return run_check(json),
         Command::Query { key, kind, json } => return run_query(key, kind, json),
         Command::Path { from, to, json } => return run_path(&from, &to, json),
+        Command::Export { out } => return run_export(out),
+        Command::Load { file } => return run_load(&file),
         Command::Init => return run_init(),
         Command::Render { target, out } => return run_render(&target, out),
         Command::Import { .. } => "import",
@@ -369,6 +382,56 @@ fn run_path(from: &str, to: &str, json: bool) -> anyhow::Result<()> {
     if !result.found {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Assemble the full graph and write it as a portable JSON artifact.
+fn run_export(out: Option<String>) -> anyhow::Result<()> {
+    use rto_graph::GraphArtifact;
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+    let artifact = GraphArtifact::from_store(&store)?;
+    let json = artifact.to_json()?;
+
+    let out = out.unwrap_or_else(|| "roteiro-graph.json".to_owned());
+    if out == "-" {
+        println!("{json}");
+    } else {
+        std::fs::write(&out, format!("{json}\n"))?;
+        eprintln!(
+            "exported {} nodes, {} edges → {out}",
+            artifact.facts.nodes.len(),
+            artifact.facts.edges.len()
+        );
+    }
+    Ok(())
+}
+
+/// Load a graph artifact into the local store, replacing its contents. Lets a
+/// fresh clone obtain a ready-made graph without re-extraction.
+fn run_load(file: &str) -> anyhow::Result<()> {
+    use rto_graph::{GraphArtifact, Repo, Store};
+
+    let json = if file == "-" {
+        std::io::read_to_string(std::io::stdin())?
+    } else {
+        std::fs::read_to_string(file)?
+    };
+    let artifact = GraphArtifact::from_json(&json)?;
+
+    let cwd = std::env::current_dir()?;
+    let repo = Repo::discover(&cwd)?;
+    let store_dir = repo.git_dir().join("roteiro");
+    std::fs::create_dir_all(&store_dir)?;
+    let mut store = Store::open(&store_dir.join("graph.db"))?;
+    artifact.load_into(&mut store)?;
+
+    println!(
+        "loaded {} nodes, {} edges from {file}",
+        store.node_count()?,
+        store.edge_count()?
+    );
     Ok(())
 }
 
