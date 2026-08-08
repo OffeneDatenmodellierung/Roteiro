@@ -551,6 +551,11 @@ so generated plans reference *real* symbols/ADRs/deps and are `check`-gated.
   Rust-in-Pages build cost; or keep the Git-integration build.
 - **Freeze & polish:** `--json` schema frozen and versioned; performance targets
   met; full docs; `roteiro check` authored-and-checks ADR-0001 itself.
+- **Per-crate crates.io READMEs:** every published crate (`rto-graph`,
+  `rto-spec`, `rto-render`, `roteiro`) ships a `README.md` wired via
+  `readme = "README.md"` in its `Cargo.toml`, stating the crate's role in the
+  workspace and linking back to <https://roteiro.dev> and the repo. So the
+  crates.io landing page is not empty and points to the canonical docs.
 - **Perf — subtree pruning (from the codegraph comparison):** `sync` walks the
   whole `HEAD` tree today; instead **diff the last-synced tree oid against HEAD
   and prune subtrees whose oid is unchanged** — the git-native, content-hash
