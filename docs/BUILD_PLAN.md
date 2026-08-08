@@ -501,6 +501,12 @@ just node names, and extend ingestion to docs/PDFs/images.
   feature. **This is the one genuinely uncertain item in the backlog.**
 - **Semantic duplication check:** join the structural dedup from Stage 4 using
   the embedding similarity already built.
+- **Dependency-aware invalidation (from the codegraph comparison):** once
+  per-node embeddings/AI-context are *cached*, a changed symbol must invalidate
+  the cached context of its **dependents** (callers, referencing docs) — the
+  graph edges we already have make this codegraph-style "dirty propagation"
+  natural. The derived graph itself needs no propagation (it re-resolves at
+  assembly); this applies only to cached inferred context.
 - **DoD:** a doc's *content* produces an inferred edge to semantically-related
   code; PDF/image ingestion each add labelled `inferred` facts behind their
   features; the default/`inference` builds stay unchanged.
@@ -545,9 +551,39 @@ so generated plans reference *real* symbols/ADRs/deps and are `check`-gated.
   Rust-in-Pages build cost; or keep the Git-integration build.
 - **Freeze & polish:** `--json` schema frozen and versioned; performance targets
   met; full docs; `roteiro check` authored-and-checks ADR-0001 itself.
+- **Perf — subtree pruning (from the codegraph comparison):** `sync` walks the
+  whole `HEAD` tree today; instead **diff the last-synced tree oid against HEAD
+  and prune subtrees whose oid is unchanged** — the git-native, content-hash
+  (not mtime) version of codegraph's "skip unchanged subtrees," for large-repo
+  sync latency.
 - **DoD:** clean clone → `init` → hook fetches the CI artifact → `check` green,
   offline; docs/vault reproducible byte-for-byte in CI; `--json` schema declared
   stable.
+
+### Stage 15 — Intent-debt tracking (TODOs, stubs, deferred work)  → **v0.x** *(independent; low-risk, can slot early)*
+**Goal:** deterministically detect, log, and track **intent debt** — the markers
+in code and docs that signal *missed intent* or *intent left for the future* —
+so end users and AI can find what's incomplete instead of it hiding in comments
+and footnotes.
+- **Detect during sync (derived provenance, no new deps):**
+  - comment markers — `TODO`, `FIXME`, `HACK`, `XXX`, `BUG`;
+  - not-implemented / stub — `todo!()`, `unimplemented!()`, `bail!("not
+    implemented")`, "stub", "placeholder", "not yet implemented";
+  - deferred / future intent — "for now", "later", "deferred", "follow-up",
+    "TBD", and unchecked `- [ ]` items in docs/ADRs.
+- **Schema (graph-native — on the one query surface):** a **`marker`** node per
+  finding (key `marker:<path>#<line>`) with a **category** (`todo` | `fixme` |
+  `hack` | `stub` | `deferred`), the text, and location; a `contains` edge from
+  the enclosing file/symbol → marker. `derived` provenance (pure function of the
+  source). Queryable via CLI `--json`, MCP, and renderers.
+- **Interface:** `roteiro debt [--json] [--kind …]` lists/groups findings; a
+  **summary line in `roteiro check`** (report, not a gate by default — optional
+  threshold later). Ties to authored intent: a deferred item may `[[link]]` the
+  ADR that owns it; a `@rto:` annotation can mark intentional debt.
+- **DoD:** markers extracted deterministically; `roteiro debt` lists them with
+  location + category; surfaces in `query`/`explain` + MCP; dogfooded on Roteiro
+  itself (finds the lat/codegraph import stubs, the `spec` stub, and the
+  "deferred/remaining" notes).
 
 ---
 
@@ -605,6 +641,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ⛔ the "spec-store" front door from ADR-0001 |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
+| v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ⛔ independent; low-risk, can slot early |
 
 ---
 
