@@ -81,11 +81,34 @@ impl ObjectCache {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
+
+        // Use a unique temp file name to avoid cross-process clobbering.
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let tmp = path.with_extension(format!("json.tmp.{unique}"));
+
         let bytes = serde_json::to_vec(facts)?;
         fs::write(&tmp, &bytes)?;
-        fs::rename(&tmp, &path)?;
-        Ok(())
+
+        match fs::rename(&tmp, &path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+                fs::rename(&tmp, &path)?;
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
