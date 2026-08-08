@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.7...roteiro-v0.0.8) - 2026-08-08
+
+### Added
+
+- *(mcp)* adopt rmcp for stdio + networked HTTP serving (ADR-0002)
+- *(rto-render)* MCP server over stdio, feature-gated (Stage 7)
+
 ## [0.0.7](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.6...roteiro-v0.0.7) - 2026-08-08
 
 ### Added
