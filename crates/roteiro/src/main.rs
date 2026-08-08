@@ -638,7 +638,7 @@ fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
 /// derived graph — a later code-changing `sync` rebuilds the derived graph and
 /// drops these facts, so re-run `import` to refresh. (Durable, auto-reapplied
 /// imports — persisting the facts and re-applying them in `build_graph` — are a
-/// tracked follow-up; see docs/BUILD_PLAN.md Stage 11.)
+/// tracked follow-up; see `docs/BUILD_PLAN.md` Stage 11.)
 fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
     use rto_graph::{Edge, EdgeKind, FactSet};
 
