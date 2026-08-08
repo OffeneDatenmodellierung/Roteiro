@@ -19,7 +19,7 @@ mod store;
 mod sync;
 
 pub use cache::{CacheError, ObjectCache};
-pub use extract::{Extractor, FileNodeExtractor};
+pub use extract::{Extractor, FileNodeExtractor, Registry, RustExtractor};
 pub use git::{BlobRef, GitError, Repo};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;

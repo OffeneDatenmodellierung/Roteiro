@@ -144,6 +144,22 @@ mod tests {
     }
 
     #[test]
+    fn put_overwrites_existing_entry() {
+        let dir =
+            std::env::temp_dir().join(format!("roteiro-cache-overwrite-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let cache = ObjectCache::open(&dir).expect("open");
+
+        cache.put("beef", &sample()).expect("first put");
+        // A second put for the same key must atomically replace the entry.
+        let replacement = FactSet::new().with_node(Node::new("only", NodeKind::File, "only"));
+        cache.put("beef", &replacement).expect("overwrite");
+        assert_eq!(cache.get("beef").expect("get"), Some(replacement));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn short_ids_do_not_panic_on_shard() {
         let dir = std::env::temp_dir().join(format!("roteiro-cache-short-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();

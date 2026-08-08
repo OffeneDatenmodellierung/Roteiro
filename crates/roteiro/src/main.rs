@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Sync the graph for the current repository's `HEAD` tree.
 fn run_sync(json: bool) -> anyhow::Result<()> {
-    use rto_graph::{FileNodeExtractor, ObjectCache, Repo, Store, sync};
+    use rto_graph::{ObjectCache, Registry, Repo, Store, sync};
 
     let cwd = std::env::current_dir()?;
     let repo = Repo::discover(&cwd)?;
@@ -81,7 +81,7 @@ fn run_sync(json: bool) -> anyhow::Result<()> {
     let mut store = Store::open(&store_dir.join("graph.db"))?;
     let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
 
-    let report = sync(&mut store, &repo, &cache, &FileNodeExtractor)?;
+    let report = sync(&mut store, &repo, &cache, &Registry)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

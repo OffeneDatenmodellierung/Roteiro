@@ -152,7 +152,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     satisfies the DoD; the overlay needs working-tree/status handling and its
     own tests, so it is tracked separately rather than bloating this change.
 
-### Stage 3 — Derived extraction (tree-sitter)  → **v0.3.0**
+### Stage 3 — Derived extraction (tree-sitter)  → **v0.3.0** ✅ *delivered (Rust; overlay pending)*
 **Goal:** the `derived` provenance class for real code.
 - `rto-graph::extract`: language registry; per-language tree-sitter grammar +
   `.scm` query patterns → symbols (`defines`), calls (`calls`), imports
@@ -168,6 +168,30 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - **DoD:** extract Roteiro's own crates; assert known symbols/edges exist
   (e.g. `Store::open` `defines` node, `main` `calls` `Cli::parse`); snapshot
   test on a fixture file; extraction is idempotent and cache-stable.
+- **Status: delivered (Rust extractor).** `RustExtractor` (tree-sitter) emits a
+  `file` node, symbol nodes (`fn`/`struct`/`enum`/`trait`/`mod` + `type`/`macro`)
+  with lexical `defines`/`contains` edges and path-scoped keys
+  (`sym:rust:<path>#<qualified>`), `imports` edges for `use` declarations, and
+  records each function's callee names in `meta.calls`. A `Registry` dispatches
+  by extension (`.rs` → Rust, else the `FileNodeExtractor` fallback). Emitted
+  facts are sorted for a byte-stable cache. **Cross-file `calls`** are resolved
+  at assembly time in `sync` (unambiguous simple-name match only — ambiguous and
+  external names are left unlinked rather than guessed). Deps `tree-sitter` +
+  `tree-sitter-rust` (both MIT) pass `cargo deny`. Dogfooded on this repo:
+  248 nodes / 356 edges (150 `calls`, 128 `defines`, 48 `imports`, 30
+  `contains`), with `main → run_sync` resolved. Fixture integration test proves
+  cross-file call resolution + cache-stable re-sync; ~92% region / ~97% line.
+  - **A note on the DoD example:** `main calls Cli::parse` is an *external*
+    (clap) call, which the unambiguous-resolver deliberately leaves unlinked; the
+    test instead asserts an intra-tree cross-file call (`main → helper`), which
+    is the honest, resolvable analogue.
+  - **Remaining Stage 3 item (next PR):** the **uncommitted working-tree dirty
+    overlay** (deferred from Stage 2). Now that real extraction exists, a
+    pre-commit preview is observable and testable; it needs gix working-tree
+    `status` integration and dirty-aware no-op state, tracked as its own change.
+  - **Follow-up (also next):** cross-file `calls` currently resolve by
+    unambiguous simple name; a scope-aware resolver (using import paths + `Self`
+    types) is a later refinement. TypeScript/JS and Python extractors follow.
 
 ### Stage 4 — Authored layer & `roteiro check` (rto-spec)  → **v0.4.0**
 **Goal:** house ADR/blueprint intent linked into code; drift gating.

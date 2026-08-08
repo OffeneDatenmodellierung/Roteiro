@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rto_graph::{FileNodeExtractor, ObjectCache, Repo, Store, sync};
+use rto_graph::{EdgeKind, FileNodeExtractor, ObjectCache, Registry, Repo, Store, sync};
 
 /// Run `git` in `dir` with hermetic identity/signing settings, asserting success.
 fn git(dir: &Path, args: &[&str]) {
@@ -160,6 +160,71 @@ fn duplicate_content_at_distinct_paths_stays_distinct() {
     assert_eq!(r.nodes, 2);
     assert!(store.get_node("file:a.txt").expect("get a").is_some());
     assert!(store.get_node("file:b.txt").expect("get b").is_some());
+
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn rust_extraction_produces_derived_graph_with_cross_file_calls() {
+    // A two-file Rust project: `main` in one file calls `helper` defined in the
+    // other. Extraction is per-file, so this call can only be linked at assembly
+    // time — exactly what the sync engine's call resolution does.
+    let dir = fresh_dir("rust-derive");
+    git(&dir, &["init", "-q"]);
+    write(
+        &dir,
+        "src/main.rs",
+        "mod util;\nfn main() {\n    util::helper();\n}\n",
+    );
+    write(&dir, "src/util.rs", "pub fn helper() -> u32 {\n    42\n}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "two rust files"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+
+    let r = sync(&mut store, &repo, &cache, &Registry).expect("sync");
+    assert!(!r.no_op);
+
+    // Symbol nodes are derived from both files.
+    assert!(
+        store
+            .get_node("sym:rust:src/main.rs#main")
+            .expect("m")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_node("sym:rust:src/util.rs#helper")
+            .expect("h")
+            .is_some()
+    );
+
+    // The file `defines` its top-level function.
+    let defines = store.edges_from("file:src/main.rs").expect("defines");
+    assert!(
+        defines
+            .iter()
+            .any(|e| e.kind == EdgeKind::Defines && e.dst == "sym:rust:src/main.rs#main"),
+    );
+
+    // The cross-file call `main -> helper` is resolved to a derived `calls` edge.
+    let calls = store
+        .edges_from("sym:rust:src/main.rs#main")
+        .expect("calls");
+    assert!(
+        calls
+            .iter()
+            .any(|e| e.kind == EdgeKind::Calls && e.dst == "sym:rust:src/util.rs#helper"),
+        "cross-file call main -> helper should resolve",
+    );
+
+    // A second sync over the unchanged tree is a cache-stable no-op.
+    let r2 = sync(&mut store, &repo, &cache, &Registry).expect("resync");
+    assert!(r2.no_op);
+    assert_eq!(r2.nodes, r.nodes);
+    assert_eq!(r2.edges, r.edges);
 
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
