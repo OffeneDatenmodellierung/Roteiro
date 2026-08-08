@@ -115,17 +115,20 @@ fn is_code_node(n: &GNode) -> bool {
     n.file_type == "code"
 }
 
-/// A link is a *semantic/inferred* relationship (imported) rather than
-/// code-structure (dropped) when it did not come from the AST.
+/// A link is a *semantic/inferred* relationship (imported) rather than plain
+/// code-structure (dropped) when it did **not** come from the AST, **or** it is
+/// explicitly marked `INFERRED` confidence (a fuzzy suggestion is worth keeping
+/// even if Graphify tagged its origin as `ast`).
 fn is_semantic_link(l: &GLink) -> bool {
     l.origin != "ast" || l.confidence.eq_ignore_ascii_case("inferred")
 }
 
-/// Map a Graphify `file_type` to a Roteiro node kind.
+/// Map a Graphify `file_type` to a Roteiro node kind. An unset type is treated
+/// as a plain document (mapping to the real [`NodeKind::Doc`], not an `Other`
+/// token that would collide with `Doc`'s stable token on round-trip).
 fn node_kind(file_type: &str) -> NodeKind {
     match file_type {
-        "document" => NodeKind::Doc,
-        "" => NodeKind::Other("doc".to_owned()),
+        "document" | "" => NodeKind::Doc,
         other => NodeKind::Other(other.to_owned()),
     }
 }
