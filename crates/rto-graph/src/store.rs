@@ -140,6 +140,44 @@ impl Store {
         Ok(())
     }
 
+    /// The `HEAD` tree id recorded at the last successful [`Store::rebuild`], if
+    /// any. Used by the sync engine to detect an unchanged tree.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn sync_state(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT tree FROM sync_state WHERE id = 0", [], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Atomically replace the entire graph with `facts` and record `tree` as the
+    /// synced state. All existing nodes and edges are deleted first, so the
+    /// store reflects exactly the given fact set.
+    ///
+    /// # Errors
+    /// Returns the first error encountered (see [`Store::apply_factset`]); on any
+    /// error nothing is committed.
+    pub fn rebuild(&mut self, facts: &FactSet, tree: &str) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM edges", [])?;
+        tx.execute("DELETE FROM nodes", [])?;
+        for node in &facts.nodes {
+            upsert_node(&tx, node)?;
+        }
+        for edge in &facts.edges {
+            insert_edge(&tx, edge)?;
+        }
+        tx.execute(
+            "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
+             ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
+            [tree],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Fetch a node by its natural key.
     ///
     /// # Errors
@@ -371,7 +409,7 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        assert_eq!(store.schema_version().expect("version"), 1);
+        assert_eq!(store.schema_version().expect("version"), 2);
     }
 
     #[test]
@@ -542,7 +580,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 1);
+            assert_eq!(store.schema_version().expect("version"), 2);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

@@ -121,7 +121,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   (keeping the stage's "only `serde_json`" dep budget). Coverage: ~94% regions /
   ~98% lines; clippy (pedantic, `-D warnings`) and fmt clean on the 1.94 MSRV.
 
-### Stage 2 — Content-addressed cache & `roteiro sync`  → **v0.2.0**
+### Stage 2 — Content-addressed cache & `roteiro sync`  → **v0.2.0** ✅ *delivered (core)*
 **Goal:** git-native incremental graph updates.
 - `rto-graph::cache`: compute git blob/tree ids, store per-blob FactSets under
   `.git/roteiro/objects/<blob-id>`, key the assembled snapshot by tree id.
@@ -136,6 +136,21 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - **DoD:** fixture-repo integration test proving (a) cold sync populates store,
   (b) no-op sync after unchanged tree touches zero blobs, (c) single-file change
   re-extracts exactly one blob; cache is branch/worktree-correct.
+- **Status: delivered (core).** `gix` (pure-Rust, `sha1`/`status`/`dirwalk`/
+  `revision`, no default features → no network transports) added and passing
+  `cargo deny`. New modules in `rto-graph`: `cache` (git-style sharded, atomic
+  JSON object store under the *common* git dir → shared across worktrees),
+  `extract` (`Extractor` trait + `FileNodeExtractor` placeholder until Stage 3),
+  `git` (thin gix wrapper), `sync` (tree-id short-circuit + per-blob
+  content-addressed extract/cache + transactional `Store::rebuild`). Migration 2
+  adds `sync_state`. `roteiro sync [--json]` wired and dogfooded on this repo.
+  All four DoD criteria pass via a fixture-repo integration test (cold /
+  no-op / single-file / cache-reuse-across-stores). Coverage ~93% region /
+  ~97% line; clippy pedantic + deny + msrv clean.
+  - **Deferred to a Stage 2 follow-up:** the *uncommitted* working-tree dirty
+    overlay (preview edits before commit). The committed-tree sync fully
+    satisfies the DoD; the overlay needs working-tree/status handling and its
+    own tests, so it is tracked separately rather than bloating this change.
 
 ### Stage 3 — Derived extraction (tree-sitter)  → **v0.3.0**
 **Goal:** the `derived` provenance class for real code.
@@ -287,7 +302,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | Release | Stage | Headline capability |
 |---|---|---|
 | v0.1.0 ✅ | 1 | Typed transactional graph store + migrations |
-| v0.2.0 | 2 | Content-addressed cache; `roteiro sync` (incremental) |
+| v0.2.0 ✅ | 2 | Content-addressed cache; `roteiro sync` (incremental) |
 | v0.3.0 | 3 | Derived tree-sitter extraction (Rust first) |
 | v0.4.0 | 4 | Authored ADR/blueprint layer; `roteiro check` gates CI |
 | v0.5.0 | 5 | Query API + `--json`; `init` + git hooks |

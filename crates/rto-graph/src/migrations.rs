@@ -51,11 +51,26 @@ CREATE INDEX idx_edges_dst ON edges(dst);
 CREATE INDEX idx_edges_provenance ON edges(provenance);
 ";
 
+/// Migration 2: single-row table recording the last synced `HEAD` tree id, so
+/// an unchanged tree can be detected as a no-op.
+const M0002_SYNC_STATE: &str = "
+CREATE TABLE sync_state (
+    id   INTEGER PRIMARY KEY CHECK (id = 0),
+    tree TEXT NOT NULL
+);
+";
+
 /// The ordered list of all migrations. Append only.
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: M0001_INITIAL,
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: M0001_INITIAL,
+    },
+    Migration {
+        version: 2,
+        sql: M0002_SYNC_STATE,
+    },
+];
 
 /// The highest migration version known to this build.
 #[cfg(test)]
