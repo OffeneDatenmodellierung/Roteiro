@@ -69,6 +69,9 @@ enum Command {
     Render {
         /// Target: docs | obsidian
         target: String,
+        /// Output directory (default: `website/dist` for docs, `vault` for obsidian).
+        #[arg(long)]
+        out: Option<String>,
     },
     /// Spec authoring (intent interview, house-style ADR scaffolding).
     Spec,
@@ -84,8 +87,8 @@ fn main() -> anyhow::Result<()> {
         Command::Check { json } => return run_check(json),
         Command::Query { key, kind, json } => return run_query(key, kind, json),
         Command::Init => return run_init(),
+        Command::Render { target, out } => return run_render(&target, out),
         Command::Import { .. } => "import",
-        Command::Render { .. } => "render",
         Command::Spec => "spec",
         #[cfg(feature = "mcp")]
         Command::Serve => "serve",
@@ -317,6 +320,110 @@ fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::R
         }
         (None, None) => {
             anyhow::bail!("provide a node key to explain, or `--kind <kind>` to list nodes");
+        }
+    }
+    Ok(())
+}
+
+/// Render a build-output of the graph: the docs site or an Obsidian vault.
+fn run_render(target: &str, out: Option<String>) -> anyhow::Result<()> {
+    match rto_render::Target::parse(target) {
+        Some(rto_render::Target::DocsSite) => render_docs(out),
+        Some(rto_render::Target::ObsidianVault) => render_obsidian(out),
+        None => anyhow::bail!("unknown render target `{target}` (expected: docs | obsidian)"),
+    }
+}
+
+/// Render the documentation site: copy static assets, then render each ADR and
+/// the ADR index into `<out>` (default `website/dist`).
+fn render_docs(out: Option<String>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let repo = rto_graph::Repo::discover(&cwd)?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("cannot render docs in a bare repository"))?;
+    let out = out.map_or_else(|| root.join("website/dist"), std::path::PathBuf::from);
+
+    if out.exists() {
+        std::fs::remove_dir_all(&out)?;
+    }
+    std::fs::create_dir_all(out.join("adr"))?;
+    copy_dir(&root.join("website/public"), &out)?;
+
+    // Render each ADR (skip the directory README), in a deterministic order.
+    let adr_dir = root.join("docs/adr");
+    let mut files: Vec<_> = std::fs::read_dir(&adr_dir)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("README.md"))
+        .collect();
+    files.sort();
+
+    let mut entries = Vec::new();
+    for path in &files {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("adr");
+        let md = std::fs::read_to_string(path)?;
+        let rendered = rto_render::render_adr(&md, stem);
+        std::fs::write(out.join("adr").join(format!("{stem}.html")), &rendered.html)?;
+        entries.push(rto_render::IndexEntry {
+            href: format!("{stem}.html"),
+            title: rendered.title,
+        });
+    }
+    std::fs::write(
+        out.join("adr").join("index.html"),
+        rto_render::render_adr_index(&entries),
+    )?;
+
+    println!(
+        "rendered docs → {} ({} ADR page(s))",
+        out.display(),
+        entries.len()
+    );
+    Ok(())
+}
+
+/// Render an Obsidian vault: one linked markdown note per graph node in `<out>`
+/// (default `vault`).
+fn render_obsidian(out: Option<String>) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+    let out = out.map_or_else(
+        || std::path::PathBuf::from("vault"),
+        std::path::PathBuf::from,
+    );
+    if out.exists() {
+        std::fs::remove_dir_all(&out)?;
+    }
+    std::fs::create_dir_all(&out)?;
+
+    let mut count = 0usize;
+    for key in store.all_keys()? {
+        if let Some(ex) = rto_graph::explain(&store, &key)? {
+            let note = rto_render::render_note(&ex);
+            std::fs::write(out.join(&note.filename), &note.content)?;
+            count += 1;
+        }
+    }
+    println!(
+        "rendered obsidian vault → {} ({count} note(s))",
+        out.display()
+    );
+    Ok(())
+}
+
+/// Recursively copy the contents of `src` into `dst`.
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
         }
     }
     Ok(())

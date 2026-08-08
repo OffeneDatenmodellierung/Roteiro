@@ -10,7 +10,11 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 rto-graph = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [features]
 # MCP server support (`roteiro serve`); off by default — CLI-first.
