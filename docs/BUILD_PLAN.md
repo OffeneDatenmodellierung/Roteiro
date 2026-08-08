@@ -338,7 +338,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   - **Follow-ups:** in-app TLS (rustls) as an alternative to proxy termination;
     richer capabilities (resources/prompts) if agents want them.
 
-### Stage 8 — Inference layer (`inferred`)  → **v0.8.0** ⛔ *next — model decided ([ADR-0003](adr/0003-pluggable-embedding-models.md))*
+### Stage 8 — Inference layer (`inferred`)  → **v0.8.0** ✅ *core delivered (offline default)*
 **Goal:** fuzzy doc/PDF/image → suggestions with confidence.
 - Separate, **optional** pipeline (never gates offline local rebuilds): ingest
   docs/PDFs/images, embed, emit `inferred` edges with confidence + `inferred_
@@ -356,6 +356,24 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   `--json` and renderers (clearly marked as suggestions).
 - **DoD:** an inferred edge appears labelled with confidence; disabling the
   layer leaves derived+authored builds fully offline and unchanged.
+- **Status: core delivered (the offline default).** `rto-graph::infer` (feature
+  `inference`, **zero new deps**) implements ADR-0003's lean tier: a pure-Rust
+  hashing embedding (`embed`/`similarity`), and `infer_edges` which suggests
+  `EdgeKind::Related` edges tagged `provenance = inferred` with `confidence =`
+  cosine similarity and an `embedding:hash/v1` `src_ref`. It skips pairs already
+  joined by a derived/authored fact (never re-states a known relationship) and is
+  deterministic. `roteiro infer [--min-confidence --top-k --json]` builds the
+  derived+authored graph then applies the suggestions; they surface in
+  `query`/`explain` with their confidence. Dogfooded on this repo (e.g. `run_sync`
+  ↔ its sibling `run_*` handlers ≈ 0.7). ~97% coverage on `infer.rs`; both the
+  default (no inference) and `--all-features` builds are clippy/deny/msrv clean,
+  and the default build pulls none of it — **DoD met**.
+  - **Remaining Stage 8 (next PRs, per ADR-0003):** the `inference-local-models`
+    tier — `candle` backend + **GGUF** local models, the in-binary registry
+    (`roteiro model list|pull`), platform-aware (Metal/Apple vs standard) variant
+    selection, and consent-gated fetch; plus doc/PDF/image **ingestion** (so
+    inference spans authored text, not just node names) and the semantic
+    duplication check. Each new crate faces the `cargo deny` licence gate.
 
 ### Stage 9 — Importers  → **v0.9.0** ⛔ *blocked — needs sample lat.md / Graphify / codegraph data*
 **Goal:** migration path off the three incumbents.
@@ -443,7 +461,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.6.0 | 6 | Real docs-site + Obsidian renderers (retire shell stopgap) | ✅ v0.0.7 |
 | v0.7.0 | 7 | MCP `serve` (rmcp; stdio + HTTP, [ADR-0002](adr/0002-adopt-rmcp-for-networked-mcp-serving.md)) | ✅ v0.0.8 |
 | — | 7+ | `roteiro path` + MCP `path` tool (follow-up) | ✅ v0.0.9 |
-| v0.8.0 | 8 | Inference layer (`inferred` + confidence) | ⛔ next (model decided — [ADR-0003](adr/0003-pluggable-embedding-models.md)) |
+| v0.8.0 | 8 | Inference layer (`inferred` + confidence) | 🚧 offline core shipped (`roteiro infer`); local-models/ingestion remain |
 | v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ⛔ needs sample data |
 | v1.0.0 | 10 | CI-canonical artifacts, multi-language, frozen `--json`, stable | 🚧 artifact `export`/`load` shipped (v0.0.10); CI publish/fetch, breadth, freeze remain |
 

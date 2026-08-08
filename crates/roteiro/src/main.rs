@@ -96,6 +96,19 @@ enum Command {
     },
     /// Spec authoring (intent interview, house-style ADR scaffolding).
     Spec,
+    /// Suggest `inferred` similarity edges (built with `--features inference`).
+    #[cfg(feature = "inference")]
+    Infer {
+        /// Minimum confidence (cosine similarity) for a suggestion, `0.0..=1.0`.
+        #[arg(long, default_value_t = 0.4)]
+        min_confidence: f64,
+        /// Maximum suggestions per node.
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Start the MCP server (built with `--features mcp`).
     #[cfg(feature = "mcp")]
     Serve {
@@ -119,6 +132,12 @@ fn main() -> anyhow::Result<()> {
         Command::Render { target, out } => return run_render(&target, out),
         Command::Import { .. } => "import",
         Command::Spec => "spec",
+        #[cfg(feature = "inference")]
+        Command::Infer {
+            min_confidence,
+            top_k,
+            json,
+        } => return run_infer(min_confidence, top_k, json),
         #[cfg(feature = "mcp")]
         Command::Serve { http } => return run_serve(http),
     };
@@ -294,6 +313,48 @@ fn run_init() -> anyhow::Result<()> {
         eprintln!(
             "note: {} authored-layer violation(s); run `roteiro check` for details",
             report.violations.len()
+        );
+    }
+    Ok(())
+}
+
+/// Suggest `inferred` similarity edges over the graph and apply them. Builds the
+/// full derived + authored graph first, then adds the fuzzy suggestion layer.
+#[cfg(feature = "inference")]
+fn run_infer(min_confidence: f64, top_k: usize, json: bool) -> anyhow::Result<()> {
+    use rto_graph::{FactSet, InferenceConfig, infer_edges};
+
+    if !(0.0..=1.0).contains(&min_confidence) {
+        anyhow::bail!("--min-confidence must be in 0.0..=1.0 (got {min_confidence})");
+    }
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    let config = InferenceConfig {
+        min_confidence,
+        top_k,
+    };
+    let edges = infer_edges(&store, config)?;
+    let count = edges.len();
+    // Inferred edges are additive suggestions; applying them never alters the
+    // derived/authored facts already in the store.
+    store.apply_factset(&FactSet {
+        nodes: vec![],
+        edges,
+    })?;
+
+    if json {
+        let report = serde_json::json!({
+            "min_confidence": min_confidence,
+            "top_k": top_k,
+            "inferred_edges": count,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "inferred {count} similarity edge(s) (min-confidence {min_confidence}, top-k {top_k}); \
+             query them with `roteiro query <key>`",
         );
     }
     Ok(())

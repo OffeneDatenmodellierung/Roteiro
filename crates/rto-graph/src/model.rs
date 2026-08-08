@@ -103,6 +103,8 @@ pub enum EdgeKind {
     AuthoredBy,
     /// Target is inferred from source.
     InferredFrom,
+    /// Source and target are semantically related (inferred by similarity).
+    Related,
     /// Any kind not covered above, kept verbatim.
     Other(String),
 }
@@ -120,6 +122,7 @@ impl EdgeKind {
             Self::Supersedes => "supersedes",
             Self::AuthoredBy => "authored_by",
             Self::InferredFrom => "inferred_from",
+            Self::Related => "related",
             Self::Other(s) => s,
         }
     }
@@ -137,6 +140,7 @@ impl EdgeKind {
             "supersedes" => Self::Supersedes,
             "authored_by" => Self::AuthoredBy,
             "inferred_from" => Self::InferredFrom,
+            "related" => Self::Related,
             other => Self::Other(other.to_owned()),
         }
     }

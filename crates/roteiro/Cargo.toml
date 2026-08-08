@@ -19,6 +19,9 @@ serde_json = { workspace = true }
 
 [features]
 mcp = ["rto-render/mcp"]
+# Offline similarity inference (`roteiro infer`) — the `inferred` provenance
+# class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
+inference = ["rto-graph/inference"]
 
 [lints]
 workspace = true
