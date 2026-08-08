@@ -1,13 +1,22 @@
 # Roteiro — Build Plan
 
-Status: Draft · Owner: The Roteiro Project Team · Last-modified: 2026-08-07
+Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-08
 Governing decision: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
 
-This plan takes Roteiro from the current v0.0.1 scaffold to a dogfooded v1.0. It
+This plan takes Roteiro from the initial v0.0.1 scaffold to a dogfooded v1.0. It
 is organised as sequenced **stages**, each ending in a shippable release cut by
 release-plz. Every stage names its deliverables, the concrete Rust surface it
 adds, new dependencies (with licence notes for the `cargo deny` gate), the CLI
 it wires up, and an explicit **Definition of Done (DoD)**.
+
+**Current position (2026-08-08): Stages 1–7 complete and released; Stage 10's
+portable graph-artifact format (`export`/`load`) landed; latest release
+**v0.0.10**.** Stage 8 is unblocked (model decided — [ADR-0003](adr/0003-pluggable-embedding-models.md));
+Stage 9 awaits sample importer data. **A note on version labels:** the per-stage
+`v0.x.0` headings below are *nominal targets*; because the workspace is pre-1.0,
+release-plz bumps `feat` commits as patches, so the real published tags are
+`0.0.n` (Stage 1 → v0.0.2, Stage 2 → v0.0.3, …, Stage 7 → v0.0.8, `path` →
+v0.0.9, artifacts → v0.0.10). §7 maps them.
 
 ---
 
@@ -329,7 +338,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   - **Follow-ups:** in-app TLS (rustls) as an alternative to proxy termination;
     richer capabilities (resources/prompts) if agents want them.
 
-### Stage 8 — Inference layer (`inferred`)  → **v0.8.0**
+### Stage 8 — Inference layer (`inferred`)  → **v0.8.0** ⛔ *next — model decided ([ADR-0003](adr/0003-pluggable-embedding-models.md))*
 **Goal:** fuzzy doc/PDF/image → suggestions with confidence.
 - Separate, **optional** pipeline (never gates offline local rebuilds): ingest
   docs/PDFs/images, embed, emit `inferred` edges with confidence + `inferred_
@@ -348,7 +357,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - **DoD:** an inferred edge appears labelled with confidence; disabling the
   layer leaves derived+authored builds fully offline and unchanged.
 
-### Stage 9 — Importers  → **v0.9.0**
+### Stage 9 — Importers  → **v0.9.0** ⛔ *blocked — needs sample lat.md / Graphify / codegraph data*
 **Goal:** migration path off the three incumbents.
 - `roteiro import --from lat|graphify|codegraph`: lat.md → `authored`, Graphify
   doc/media nodes → `inferred` (drop its code-structure edges in favour of
@@ -424,18 +433,19 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 
 ## 7. Milestones → releases
 
-| Release | Stage | Headline capability |
-|---|---|---|
-| v0.1.0 ✅ | 1 | Typed transactional graph store + migrations |
-| v0.2.0 ✅ | 2 | Content-addressed cache; `roteiro sync` (incremental) |
-| v0.3.0 | 3 | Derived tree-sitter extraction (Rust first) |
-| v0.4.0 | 4 | Authored ADR/blueprint layer; `roteiro check` gates CI |
-| v0.5.0 | 5 | Query API + `--json`; `init` + git hooks |
-| v0.6.0 | 6 | Real docs-site + Obsidian renderers (retire shell stopgap) |
-| v0.7.0 | 7 | MCP `serve` (feature-gated) |
-| v0.8.0 | 8 | Inference layer (`inferred` + confidence) |
-| v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports |
-| v1.0.0 | 10 | CI-canonical artifacts, multi-language, frozen `--json`, stable |
+| Nominal | Stage | Headline capability | Actual tag / status |
+|---|---|---|---|
+| v0.1.0 | 1 | Typed transactional graph store + migrations | ✅ v0.0.2 |
+| v0.2.0 | 2 | Content-addressed cache; `roteiro sync` (incremental) | ✅ v0.0.3 |
+| v0.3.0 | 3 | Derived tree-sitter extraction (Rust) + dirty overlay | ✅ v0.0.4 |
+| v0.4.0 | 4 | Authored ADR/blueprint layer; `roteiro check` gates CI | ✅ v0.0.5 |
+| v0.5.0 | 5 | Query API + `--json`; `init` + git hooks | ✅ v0.0.6 |
+| v0.6.0 | 6 | Real docs-site + Obsidian renderers (retire shell stopgap) | ✅ v0.0.7 |
+| v0.7.0 | 7 | MCP `serve` (rmcp; stdio + HTTP, [ADR-0002](adr/0002-adopt-rmcp-for-networked-mcp-serving.md)) | ✅ v0.0.8 |
+| — | 7+ | `roteiro path` + MCP `path` tool (follow-up) | ✅ v0.0.9 |
+| v0.8.0 | 8 | Inference layer (`inferred` + confidence) | ⛔ next (model decided — [ADR-0003](adr/0003-pluggable-embedding-models.md)) |
+| v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ⛔ needs sample data |
+| v1.0.0 | 10 | CI-canonical artifacts, multi-language, frozen `--json`, stable | 🚧 artifact `export`/`load` shipped (v0.0.10); CI publish/fetch, breadth, freeze remain |
 
 ---
 
@@ -444,11 +454,11 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Tree-sitter grammar licence incompatibility | Blocks a language | Verify licence before vendoring; `cargo deny` gate; drop/replace grammar if needed |
-| Offline embedding model size/licence (Stage 8) | Binary bloat or licence conflict | Decide model early; keep inference feature-gated & optional; static/int8 models |
-| Unmaintained YAML crate flagged by audit | `check` gate can't ship | Choose a maintained reader (`saphyr`/`yaml-rust2`) or hand-parse simple frontmatter |
+| Offline embedding model size/licence (Stage 8) | Binary bloat or licence conflict | **Resolved by [ADR-0003](adr/0003-pluggable-embedding-models.md):** tiny static int8 default compiled in; GGUF local models opt-in behind `inference-local-models`; consent-gated fetch |
+| Unmaintained YAML crate flagged by audit | `check` gate can't ship | **Resolved:** hand-parsed frontmatter in `rto-spec` (no `serde_yaml`) |
 | Non-deterministic extraction → cache churn | Cache/CI-diff noise | Sort all emitted facts; snapshot + idempotency tests from Stage 3 |
 | MSRV drift from a new dep | CI `msrv` job breaks | Pin (as with rusqlite); gate new deps on 1.94; ADR any bump |
-| Scope creep in `check`/dedup | Slips v0.4 | Structural checks first; semantic dedup deferred to Stage 8 |
+| Scope creep in `check`/dedup | Slips v0.4 | **Handled:** structural `check` shipped (v0.0.5); semantic dedup deferred to Stage 8 |
 
 ---
 
