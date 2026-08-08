@@ -8,11 +8,13 @@
 //! and rebuilt in a single transaction — a deliberately simple DB-write model
 //! for this stage; incremental DB updates can come later.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::cache::{CacheError, ObjectCache};
 use crate::extract::Extractor;
 use crate::git::{GitError, Repo};
 use crate::store::StoreError;
-use crate::{FactSet, Store};
+use crate::{Edge, EdgeKind, FactSet, NodeKind, Store};
 
 /// Errors raised while syncing.
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +101,7 @@ pub fn sync(
         assembled.edges.extend(edges);
     }
 
+    resolve_calls(&mut assembled);
     store.rebuild(&assembled, &tree)?;
 
     Ok(SyncReport {
@@ -110,6 +113,49 @@ pub fn sync(
         edges: store.edge_count()?,
         tree,
     })
+}
+
+/// Resolve the per-function call records (`meta.calls`) accumulated during
+/// extraction into `calls` edges, now that every file's symbols are present.
+///
+/// A callee simple-name is linked only when it resolves to **exactly one**
+/// function in the whole tree; ambiguous names (multiple `fn foo`) and unknown
+/// names (external/std calls) are left unresolved rather than guessed. This runs
+/// at assembly time — not per blob — because a single blob cannot see the
+/// definitions in other files.
+fn resolve_calls(facts: &mut FactSet) {
+    // Simple function name → the keys of functions with that name.
+    let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for n in &facts.nodes {
+        if n.kind == NodeKind::Fn {
+            by_name
+                .entry(n.name.as_str())
+                .or_default()
+                .push(n.key.as_str());
+        }
+    }
+
+    // Collect (caller, callee) pairs; BTreeSet dedupes and orders them.
+    let mut resolved: BTreeSet<(String, String)> = BTreeSet::new();
+    for n in &facts.nodes {
+        if n.kind != NodeKind::Fn {
+            continue;
+        }
+        let Some(calls) = n.meta.get("calls").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for callee in calls.iter().filter_map(|v| v.as_str()) {
+            if let Some(targets) = by_name.get(callee)
+                && targets.len() == 1
+            {
+                resolved.insert((n.key.clone(), targets[0].to_owned()));
+            }
+        }
+    }
+
+    for (src, dst) in resolved {
+        facts.edges.push(Edge::derived(src, dst, EdgeKind::Calls));
+    }
 }
 
 /// Content-addressed cache key for a blob at a given path: the blob oid (kept
@@ -133,7 +179,45 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_key;
+    use super::{cache_key, resolve_calls};
+    use crate::{EdgeKind, FactSet, Node, NodeKind};
+
+    fn fn_node(key: &str, name: &str, calls: &[&str]) -> Node {
+        let mut n = Node::new(key, NodeKind::Fn, name);
+        if !calls.is_empty() {
+            n.meta = serde_json::json!({ "calls": calls });
+        }
+        n
+    }
+
+    #[test]
+    fn resolve_calls_links_unique_names_only() {
+        let mut fs = FactSet::new()
+            .with_node(fn_node(
+                "sym:rust:a.rs#caller",
+                "caller",
+                &["target", "dup", "missing"],
+            ))
+            .with_node(fn_node("sym:rust:a.rs#target", "target", &[]))
+            // Two functions named `dup` → ambiguous, must not be linked.
+            .with_node(fn_node("sym:rust:a.rs#dup", "dup", &[]))
+            .with_node(fn_node("sym:rust:b.rs#dup", "dup", &[]));
+
+        resolve_calls(&mut fs);
+
+        let calls: Vec<_> = fs
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "only the unambiguous, known callee is linked"
+        );
+        assert_eq!(calls[0].src, "sym:rust:a.rs#caller");
+        assert_eq!(calls[0].dst, "sym:rust:a.rs#target");
+    }
 
     #[test]
     fn cache_key_separates_paths_but_is_stable() {
