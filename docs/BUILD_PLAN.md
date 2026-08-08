@@ -231,7 +231,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     Blueprint parsing and the structural duplication check are deferred within
     Stage 4 / to Stage 8 as planned.
 
-### Stage 5 — Query surface, `--json`, `init` & git hooks  → **v0.5.0** 🚧 *query delivered; init/hooks pending*
+### Stage 5 — Query surface, `--json`, `init` & git hooks  → **v0.5.0** ✅ *delivered*
 **Goal:** the agent-facing interface and zero-touch freshness.
 - `rto-graph::query`: mixed-provenance query API returning labelled results
   (path, explain, neighbours, by-symbol, by-ADR). Stable `--json` schema
@@ -254,9 +254,17 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
   DO NOTHING`), so re-applying the authored layer over an unchanged derived
   graph is idempotent instead of duplicating edges. Query JSON schema asserted
   in a test; ~93% region / ~96% line.
-  - **Remaining (next PR):** `roteiro init` + `post-checkout`/`post-merge` hooks
-    + `AGENTS.md` snippet. `roteiro path <a> <b>` (shortest path) and a
-    working-tree-aware query mode are natural follow-ups.
+  - **`init` + hooks — delivered.** `roteiro init` builds the initial graph and
+    installs *managed* `post-checkout`/`post-merge` hooks (marker-tagged, so
+    re-runs refresh in place and a foreign hook is never clobbered) plus a
+    managed `AGENTS.md` section pointing agents at `roteiro query`. Hooks are
+    self-guarding (`command -v roteiro … || true`) so they never break git on a
+    machine without the tool, and live under the common git dir (shared across
+    worktrees). An end-to-end test drives the real binary: `init` installs
+    working hooks, and a `git checkout` rebuilds the graph via the hook.
+  - **Follow-ups:** `roteiro path <a> <b>` (shortest path) and a working-tree
+    query mode; respecting `core.hooksPath`; hooks fetching a CI artifact
+    (Stage 10) instead of always rebuilding.
 
 ### Stage 6 — Renderers replace the shell stopgap (rto-render)  → **v0.6.0**
 **Goal:** docs site + Obsidian vault as true graph build-outputs.
