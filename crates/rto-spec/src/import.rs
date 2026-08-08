@@ -147,6 +147,13 @@ fn key(id: &str) -> String {
     format!("graphify:{id}")
 }
 
+/// The Roteiro node key for a Graphify **hyperedge** group id, in a distinct
+/// namespace so a hyperedge can never collide with (and clobber) a regular node
+/// that happens to share its id.
+fn group_key(id: &str) -> String {
+    format!("graphify:group:{id}")
+}
+
 /// Confidence in `0.0..=1.0` for an imported edge (defaulting mid-scale).
 fn confidence(score: Option<f64>) -> f64 {
     score.unwrap_or(0.5).clamp(0.0, 1.0)
@@ -239,18 +246,18 @@ pub fn import_graphify(json: &str) -> Result<GraphifyImport, ImportError> {
         if members.is_empty() {
             continue;
         }
-        let group_key = key(&h.id);
+        let gkey = group_key(&h.id);
         let name = if h.label.is_empty() {
             h.id.clone()
         } else {
             h.label.clone()
         };
-        let mut group = Node::new(group_key.clone(), NodeKind::Other("group".to_owned()), name);
+        let mut group = Node::new(gkey.clone(), NodeKind::Other("group".to_owned()), name);
         group.meta = serde_json::json!({ "graphify_id": h.id, "kind": "hyperedge" });
         facts.nodes.push(group);
         for member in members {
             let mut edge = Edge::inferred(
-                group_key.clone(),
+                gkey.clone(),
                 member,
                 EdgeKind::Related,
                 confidence(h.confidence_score),
@@ -350,11 +357,12 @@ mod tests {
     #[test]
     fn hyperedge_group_links_only_imported_members() {
         let out = import_graphify(SAMPLE).expect("import");
+        // The group lives in a distinct `graphify:group:` namespace.
         let group = out
             .facts
             .nodes
             .iter()
-            .find(|n| n.key == "graphify:grp1")
+            .find(|n| n.key == "graphify:group:grp1")
             .expect("group node");
         assert_eq!(group.kind, NodeKind::Other("group".to_owned()));
         // Group → adr59 and doc1 (imported), not codeA (dropped).
@@ -362,13 +370,44 @@ mod tests {
             .facts
             .edges
             .iter()
-            .filter(|e| e.src == "graphify:grp1")
+            .filter(|e| e.src == "graphify:group:grp1")
             .map(|e| e.dst.as_str())
             .collect();
         assert_eq!(group_edges.len(), 2);
         assert!(group_edges.contains(&"graphify:adr59"));
         assert!(group_edges.contains(&"graphify:doc1"));
         assert!(!group_edges.contains(&"graphify:codeA"));
+    }
+
+    #[test]
+    fn group_id_colliding_with_a_node_id_does_not_clobber() {
+        // A node and a hyperedge share the id "x": the group must land under
+        // `graphify:group:x`, leaving the real node `graphify:x` intact.
+        let json = r#"{
+          "nodes": [
+            {"id": "x", "label": "real node", "file_type": "document", "_origin": "semantic"},
+            {"id": "y", "label": "other", "file_type": "concept", "_origin": "semantic"}
+          ],
+          "links": [],
+          "hyperedges": [
+            {"id": "x", "label": "group named x", "nodes": ["y"], "confidence_score": 0.9}
+          ]
+        }"#;
+        let out = import_graphify(json).expect("import");
+        let real = out
+            .facts
+            .nodes
+            .iter()
+            .find(|n| n.key == "graphify:x")
+            .expect("real node survives");
+        assert_eq!(real.name, "real node");
+        let group = out
+            .facts
+            .nodes
+            .iter()
+            .find(|n| n.key == "graphify:group:x")
+            .expect("group in its own namespace");
+        assert_eq!(group.name, "group named x");
     }
 
     #[test]
