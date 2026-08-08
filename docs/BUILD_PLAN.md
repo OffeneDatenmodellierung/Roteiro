@@ -296,7 +296,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     artifact (Stage 10). Blueprints / overview / per-subsystem AI-context pages
     are future render targets.
 
-### Stage 7 — MCP server (feature-gated `serve`)  → **v0.7.0**
+### Stage 7 — MCP server (feature-gated `serve`)  → **v0.7.0** ✅ *delivered*
 **Goal:** agent access over MCP as a thin wrapper on the query API.
 - `rto-render` (or a dedicated module) behind `--features mcp`: expose query,
   path, explain as MCP tools over stdio. No new query logic — wrapper only.
@@ -305,6 +305,18 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - CLI: `roteiro serve` (already stubbed under `#[cfg(feature = "mcp")]`).
 - **DoD:** `serve` answers a real MCP `tools/call` for a query against the
   dogfood graph; default build unchanged (no MCP deps).
+- **Status: delivered.** `rto-render::mcp` (behind `--features mcp`) is a minimal
+  **hand-rolled JSON-RPC 2.0 over stdio** server — **decided (Q6)** against
+  `rmcp`/async, which would drag in tokio; the only dep is `serde_json`, already
+  in-tree via `rto-graph`, so the `mcp` feature adds **zero new crates** and the
+  default build is untouched. Tools `explain` and `list_kind` are thin wrappers
+  over the query surface (no new query logic). `roteiro serve` (feature-gated)
+  builds the full graph then serves. Dogfooded: a real `initialize` →
+  `tools/list` → `tools/call explain` session returns the graph JSON with mixed
+  provenance. `dispatch` unit-tested (initialize / tools/list / tools/call /
+  errors) plus an end-to-end test driving the binary over a stdio session.
+  - **Follow-ups:** a `path` tool once `roteiro path` lands; richer capabilities
+    (resources/prompts) if agents want them.
 
 ### Stage 8 — Inference layer (`inferred`)  → **v0.8.0**
 **Goal:** fuzzy doc/PDF/image → suggestions with confidence.

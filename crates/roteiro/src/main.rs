@@ -91,7 +91,7 @@ fn main() -> anyhow::Result<()> {
         Command::Import { .. } => "import",
         Command::Spec => "spec",
         #[cfg(feature = "mcp")]
-        Command::Serve => "serve",
+        Command::Serve => return run_serve(),
     };
     anyhow::bail!("`roteiro {name}` is not implemented yet (scaffold; see docs/BUILD_PLAN.md)")
 }
@@ -322,6 +322,16 @@ fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::R
             anyhow::bail!("provide a node key to explain, or `--kind <kind>` to list nodes");
         }
     }
+    Ok(())
+}
+
+/// Serve the graph over the Model Context Protocol (stdio). Builds the full
+/// graph, then answers MCP requests until stdin closes.
+#[cfg(feature = "mcp")]
+fn run_serve() -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+    rto_render::mcp::serve(&store)?;
     Ok(())
 }
 
