@@ -1598,6 +1598,7 @@ version = "0.0.4"
 dependencies = [
  "rto-graph",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

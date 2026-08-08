@@ -1,7 +1,15 @@
-//! House-style ADR/blueprint parsing, the intent-confirmation interview, and
-//! `roteiro check` drift detection. Sections of ADRs become graph nodes;
-//! `[[path#Symbol]]` links and `// @rto:` annotations become `authored` edges.
+//! House-style ADR/blueprint parsing and `roteiro check` drift detection.
+//!
+//! An ADR becomes an `adr` node with `adr_section` children; its
+//! `[[path#Symbol]]` wiki-links and `@rto:<id>` source annotations become
+//! `authored` edges into the derived code graph. [`check::run`] validates those
+//! links against the graph and fails on drift (a link to a missing symbol, or a
+//! `@rto:` annotation to an unknown or superseded ADR).
 
 mod adr;
+mod annotate;
+mod check;
 
-pub use adr::{AdrMeta, AdrStatus, ParseError};
+pub use adr::{AdrDoc, AdrMeta, AdrStatus, ParseError, Section, WikiLink, parse_adr};
+pub use annotate::{Annotation, scan_annotations};
+pub use check::{CheckReport, Violation, ViolationKind, run};

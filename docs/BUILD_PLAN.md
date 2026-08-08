@@ -193,7 +193,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     unambiguous simple name; a scope-aware resolver (using import paths + `Self`
     types) is a later refinement. TypeScript/JS and Python extractors follow.
 
-### Stage 4 — Authored layer & `roteiro check` (rto-spec)  → **v0.4.0**
+### Stage 4 — Authored layer & `roteiro check` (rto-spec)  → **v0.4.0** ✅ *delivered*
 **Goal:** house ADR/blueprint intent linked into code; drift gating.
 - `rto-spec`: full ADR/blueprint parser — YAML frontmatter → `AdrMeta`, sections
   → `adr_section` nodes; `[[path#Symbol]]` wiki links and `// @rto:<key>` source
@@ -208,6 +208,23 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - CLI: `roteiro check` wired and added to Roteiro's own CI (dogfood gate).
 - **DoD:** ADR-0001 parses; a deliberately-broken `[[path#Symbol]]` makes
   `check` exit non-zero; `check` passes on the real repo and runs in CI.
+- **Status: delivered.** `rto-spec` now parses ADRs (`parse_adr`): frontmatter →
+  `AdrMeta`, `## ` sections → `adr_section` nodes with `contains` edges, and
+  `[[path#Symbol]]`/`[[path]]` wiki-links resolved to graph keys. `scan_annotations`
+  finds `@rto:<id>` on comment lines. `check::run` applies ADR nodes, validates
+  wiki-links against the derived graph and `@rto:` targets against ADR state,
+  weaving valid links in as `authored` edges and reporting `BrokenLink` /
+  `UnknownAdr` / `InactiveAdr` drift. `roteiro check [--json]` self-syncs the
+  derived graph and reads authored inputs from the HEAD tree; it exits non-zero
+  on drift and is wired into CI as a dogfood gate. **No new dependencies** —
+  frontmatter is hand-parsed (Q4 decided: no `serde_yaml`), and the scanner
+  respects code spans/fences and comment lines to avoid false positives from
+  documented examples. Robustness note: it handles the real ADR-0001's inline
+  `#` frontmatter comments and its `` `[[path#Symbol]]` `` example.
+  - **Scope/follow-ups:** `check` validates the *committed* HEAD tree (ideal for
+    a CI gate); making it working-tree-aware pairs with `sync_worktree`.
+    Blueprint parsing and the structural duplication check are deferred within
+    Stage 4 / to Stage 8 as planned.
 
 ### Stage 5 — Query surface, `--json`, `init` & git hooks  → **v0.5.0**
 **Goal:** the agent-facing interface and zero-touch freshness.
