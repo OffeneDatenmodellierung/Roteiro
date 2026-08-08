@@ -12,15 +12,27 @@ authors.workspace = true
 [dependencies]
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 rto-graph = { workspace = true }
+# MCP-only (feature `mcp`): the official Rust MCP SDK + async runtime + HTTP.
+rmcp = { version = "3.1.2", default-features = false, features = [
+    "server",
+    "macros",
+    "transport-io",
+    "transport-streamable-http-server",
+], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net"], optional = true }
+axum = { version = "0.8", optional = true }
+schemars = { version = "1", optional = true }
+serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 
 [features]
-# MCP server support (`roteiro serve`); off by default — CLI-first. Pulls in
-# serde_json (a small, already-in-tree dep) and no async runtime.
-mcp = ["dep:serde_json"]
+# MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
+# (ADR-0002) for stdio + streamable-HTTP transports; entirely feature-gated so
+# the default build pulls none of it.
+mcp = ["dep:rmcp", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:serde_json"]
 
 [lints]
 workspace = true

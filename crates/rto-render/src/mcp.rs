@@ -1,187 +1,193 @@
-//! A minimal Model Context Protocol server exposing the query surface to agents
-//! over stdio, behind the `mcp` feature.
+//! Model Context Protocol server exposing the query surface to agents, behind
+//! the `mcp` feature, built on the official [`rmcp`] SDK.
 //!
-//! MCP's stdio transport is newline-delimited JSON-RPC 2.0, so this is a small
-//! synchronous loop over stdin/stdout — no async runtime, no `rmcp` (keeping the
-//! default build lean and offline). It adds *no query logic*: the `explain` and
-//! `list_kind` tools are thin wrappers over [`rto_graph::explain`] /
-//! [`rto_graph::list_kind`], so agents and the CLI see the same graph.
+//! Two transports are offered (see [`serve_stdio`] / [`serve_http`]): stdio for
+//! a local agent-spawned subprocess, and streamable-HTTP for networked,
+//! multi-client serving (terminate TLS at a reverse proxy). Both expose the
+//! same tools — `explain` and `list_kind` — as thin wrappers over
+//! [`rto_graph::explain`] / [`rto_graph::list_kind`], so agents and the CLI see
+//! the same graph. See ADR-0002 for the decision to adopt `rmcp`.
 
-use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
+use rmcp::{
+    ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{
+        CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities,
+        ServerInfo,
+    },
+    tool, tool_handler, tool_router,
+    transport::{
+        stdio,
+        streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        },
+    },
+};
 use rto_graph::{NodeKind, Store, explain, list_kind};
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
-/// The MCP protocol revision this server implements.
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// Errors from running the MCP server.
+type McpError = Box<dyn std::error::Error + Send + Sync>;
 
-/// A JSON-RPC error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpcError {
-    /// JSON-RPC error code.
-    pub code: i64,
-    /// Human-readable message.
-    pub message: String,
+/// The store shared across sessions. `Store` is `Send` but not `Sync` (it holds
+/// a `rusqlite` connection), so a `Mutex` provides the `Sync` the async server
+/// requires; queries are brief and never hold the lock across an `.await`.
+type SharedStore = Arc<Mutex<Store>>;
+
+/// Arguments for the `explain` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExplainArgs {
+    /// Node key, e.g. `sym:rust:<path>#<Name>`, `file:<path>`, or `adr:<id>`.
+    key: String,
 }
 
-impl RpcError {
-    fn method_not_found(method: &str) -> Self {
+/// Arguments for the `list_kind` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListKindArgs {
+    /// Node kind token, e.g. `fn`, `struct`, `adr`, `file`.
+    kind: String,
+}
+
+/// The MCP server handler wrapping the graph store.
+#[derive(Clone)]
+struct GraphServer {
+    store: SharedStore,
+    // Populated by the `#[tool_router]` macro and consumed by the
+    // `#[tool_handler]`-generated routing; not read by hand.
+    #[allow(dead_code)]
+    tool_router: ToolRouter<Self>,
+}
+
+impl GraphServer {
+    fn new(store: SharedStore) -> Self {
         Self {
-            code: -32601,
-            message: format!("method not found: {method}"),
-        }
-    }
-    fn invalid_params(msg: &str) -> Self {
-        Self {
-            code: -32602,
-            message: msg.to_owned(),
-        }
-    }
-    fn internal(msg: &str) -> Self {
-        Self {
-            code: -32603,
-            message: msg.to_owned(),
+            store,
+            tool_router: Self::tool_router(),
         }
     }
 }
 
-/// Run the MCP server loop against `store`, reading requests from stdin and
-/// writing responses to stdout until EOF.
+#[tool_router]
+impl GraphServer {
+    /// Explain a node: its record and provenance-labelled incoming/outgoing edges.
+    #[tool(description = "Explain a graph node: its record and its \
+                          provenance-labelled incoming/outgoing edges. \
+                          Keys: sym:<lang>:<path>#<Name>, file:<path>, adr:<id>.")]
+    async fn explain(&self, Parameters(args): Parameters<ExplainArgs>) -> CallToolResult {
+        let result = {
+            let store = self.store.lock().expect("store mutex poisoned");
+            explain(&store, &args.key)
+        };
+        match result {
+            Ok(Some(ex)) => match serde_json::to_string_pretty(&ex) {
+                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                Err(e) => tool_error(&format!("serialize error: {e}")),
+            },
+            Ok(None) => CallToolResult::success(vec![ContentBlock::text(format!(
+                "no node with key `{}`",
+                args.key
+            ))]),
+            Err(e) => tool_error(&format!("query error: {e}")),
+        }
+    }
+
+    /// List all nodes of a given kind.
+    #[tool(description = "List all nodes of a given kind (fn, struct, enum, \
+                          trait, module, file, adr, …).")]
+    async fn list_kind(&self, Parameters(args): Parameters<ListKindArgs>) -> CallToolResult {
+        let result = {
+            let store = self.store.lock().expect("store mutex poisoned");
+            list_kind(&store, &NodeKind::from_token(&args.kind))
+        };
+        match result {
+            Ok(listing) => match serde_json::to_string_pretty(&listing) {
+                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                Err(e) => tool_error(&format!("serialize error: {e}")),
+            },
+            Err(e) => tool_error(&format!("query error: {e}")),
+        }
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for GraphServer {
+    fn get_info(&self) -> ServerInfo {
+        // `ServerInfo` is `#[non_exhaustive]`; build from default then set fields.
+        let mut info = ServerInfo::default();
+        info.protocol_version = ProtocolVersion::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = Implementation::new("roteiro", env!("CARGO_PKG_VERSION"));
+        info.instructions = Some(
+            "Roteiro codebase knowledge graph. Use `explain` for a node's \
+             provenance-labelled neighbourhood, `list_kind` to enumerate a kind."
+                .into(),
+        );
+        info
+    }
+}
+
+/// An error `tools/call` result carrying `message`.
+fn tool_error(message: &str) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message.to_owned())])
+}
+
+/// Build a current-thread-safe multi-thread tokio runtime.
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+}
+
+/// Serve the graph over stdio (for a local, agent-spawned server), blocking
+/// until stdin closes. Takes ownership of `store`.
 ///
 /// # Errors
-/// Returns [`io::Error`] if reading stdin or writing stdout fails.
-pub fn serve(store: &Store) -> io::Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        // Notifications carry no `id` and get no response.
-        let Some(id) = msg.get("id").cloned() else {
-            continue;
-        };
-        let method = msg
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let params = msg.get("params").cloned().unwrap_or(Value::Null);
-        let response = match dispatch(store, method, &params) {
-            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err(e) => json!({
-                "jsonrpc": "2.0", "id": id,
-                "error": {"code": e.code, "message": e.message}
-            }),
-        };
-        writeln!(stdout, "{response}")?;
-        stdout.flush()?;
-    }
-    Ok(())
+/// Returns an error if the runtime cannot start or the transport fails.
+pub fn serve_stdio(store: Store) -> Result<(), McpError> {
+    let shared: SharedStore = Arc::new(Mutex::new(store));
+    runtime()?.block_on(async move {
+        let service = GraphServer::new(shared).serve(stdio()).await?;
+        service.waiting().await?;
+        Ok(())
+    })
 }
 
-/// Handle one JSON-RPC method, returning its `result` value or an error.
+/// Serve the graph over the streamable-HTTP transport at `addr`, on the `/mcp`
+/// path (for networked, multi-client access; terminate TLS at a reverse proxy).
+/// Takes ownership of `store`.
 ///
 /// # Errors
-/// Returns [`RpcError`] for an unknown method, invalid parameters, or an
-/// underlying store failure.
-pub fn dispatch(store: &Store, method: &str, params: &Value) -> Result<Value, RpcError> {
-    match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "roteiro", "version": env!("CARGO_PKG_VERSION")},
-        })),
-        "tools/list" => Ok(json!({ "tools": tool_defs() })),
-        "tools/call" => tools_call(store, params),
-        "ping" => Ok(json!({})),
-        other => Err(RpcError::method_not_found(other)),
-    }
-}
-
-/// The tool definitions advertised to clients.
-fn tool_defs() -> Value {
-    json!([
-        {
-            "name": "explain",
-            "description": "Explain a graph node: its record and its \
-                            provenance-labelled incoming/outgoing edges.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": "Node key, e.g. sym:rust:<path>#<Name>, file:<path>, adr:<id>."
-                    }
-                },
-                "required": ["key"],
-            },
-        },
-        {
-            "name": "list_kind",
-            "description": "List all nodes of a given kind (fn, struct, adr, file, …).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "description": "Node kind token."}
-                },
-                "required": ["kind"],
-            },
-        },
-    ])
-}
-
-/// Dispatch a `tools/call` request to the named tool.
-fn tools_call(store: &Store, params: &Value) -> Result<Value, RpcError> {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RpcError::invalid_params("missing tool name"))?;
-    let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-
-    match name {
-        "explain" => {
-            let key = args
-                .get("key")
-                .and_then(Value::as_str)
-                .ok_or_else(|| RpcError::invalid_params("`explain` requires a string `key`"))?;
-            let text = match explain(store, key).map_err(|e| RpcError::internal(&e.to_string()))? {
-                Some(ex) => serde_json::to_string_pretty(&ex)
-                    .map_err(|e| RpcError::internal(&e.to_string()))?,
-                None => format!("no node with key `{key}`"),
-            };
-            Ok(text_content(&text))
-        }
-        "list_kind" => {
-            let kind = args
-                .get("kind")
-                .and_then(Value::as_str)
-                .ok_or_else(|| RpcError::invalid_params("`list_kind` requires a string `kind`"))?;
-            let listing = list_kind(store, &NodeKind::from_token(kind))
-                .map_err(|e| RpcError::internal(&e.to_string()))?;
-            let text = serde_json::to_string_pretty(&listing)
-                .map_err(|e| RpcError::internal(&e.to_string()))?;
-            Ok(text_content(&text))
-        }
-        other => Err(RpcError::invalid_params(&format!("unknown tool: {other}"))),
-    }
-}
-
-/// Wrap `text` in an MCP `tools/call` text-content result.
-fn text_content(text: &str) -> Value {
-    json!({ "content": [{ "type": "text", "text": text }], "isError": false })
+/// Returns an error if the runtime cannot start, the address cannot be bound, or
+/// the server fails.
+pub fn serve_http(store: Store, addr: SocketAddr) -> Result<(), McpError> {
+    let shared: SharedStore = Arc::new(Mutex::new(store));
+    runtime()?.block_on(async move {
+        let service = StreamableHttpService::new(
+            move || Ok(GraphServer::new(shared.clone())),
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig::default(),
+        );
+        let router = axum::Router::new().nest_service("/mcp", service);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, router).await?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch;
-    use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
-    use serde_json::json;
+    use super::{ExplainArgs, GraphServer, ListKindArgs};
+    use rmcp::ServerHandler;
+    use rmcp::handler::server::wrapper::Parameters;
+    use std::sync::{Arc, Mutex};
 
-    fn seeded() -> Store {
+    use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
+
+    fn seeded() -> GraphServer {
         let mut store = Store::open_in_memory().expect("store");
         let facts = FactSet::new()
             .with_node(Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"))
@@ -192,80 +198,59 @@ mod tests {
                 EdgeKind::Calls,
             ));
         store.apply_factset(&facts).expect("apply");
-        store
+        GraphServer::new(Arc::new(Mutex::new(store)))
     }
 
-    #[test]
-    fn initialize_advertises_tools_capability() {
-        let store = seeded();
-        let r = dispatch(&store, "initialize", &json!(null)).expect("init");
-        assert_eq!(r["protocolVersion"], super::PROTOCOL_VERSION);
-        assert!(r["capabilities"]["tools"].is_object());
-        assert_eq!(r["serverInfo"]["name"], "roteiro");
-    }
-
-    #[test]
-    fn tools_list_includes_explain_and_list_kind() {
-        let store = seeded();
-        let r = dispatch(&store, "tools/list", &json!(null)).expect("list");
-        let names: Vec<_> = r["tools"]
-            .as_array()
-            .unwrap()
+    fn text_of(result: &rmcp::model::CallToolResult) -> String {
+        result
+            .content
             .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"explain"));
-        assert!(names.contains(&"list_kind"));
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect()
     }
 
-    #[test]
-    fn tools_call_explain_returns_graph_json() {
-        let store = seeded();
-        let params = json!({"name": "explain", "arguments": {"key": "sym:rust:a.rs#main"}});
-        let r = dispatch(&store, "tools/call", &params).expect("call");
-        assert_eq!(r["isError"], false);
-        let text = r["content"][0]["text"].as_str().unwrap();
-        // The tool returns the query surface's JSON verbatim.
-        let inner: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(inner["node"]["key"], "sym:rust:a.rs#main");
-        assert_eq!(inner["outgoing"][0]["node"], "sym:rust:a.rs#helper");
-        assert_eq!(inner["outgoing"][0]["provenance"], "derived");
+    #[tokio::test]
+    async fn explain_tool_returns_graph_json() {
+        let server = seeded();
+        let out = server
+            .explain(Parameters(ExplainArgs {
+                key: "sym:rust:a.rs#main".into(),
+            }))
+            .await;
+        let text = text_of(&out);
+        let json: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(json["node"]["key"], "sym:rust:a.rs#main");
+        assert_eq!(json["outgoing"][0]["node"], "sym:rust:a.rs#helper");
+        assert_eq!(json["outgoing"][0]["provenance"], "derived");
     }
 
-    #[test]
-    fn tools_call_list_kind_lists_nodes() {
-        let store = seeded();
-        let params = json!({"name": "list_kind", "arguments": {"kind": "fn"}});
-        let r = dispatch(&store, "tools/call", &params).expect("call");
-        let text = r["content"][0]["text"].as_str().unwrap();
+    #[tokio::test]
+    async fn list_kind_tool_lists_nodes() {
+        let server = seeded();
+        let out = server
+            .list_kind(Parameters(ListKindArgs { kind: "fn".into() }))
+            .await;
+        let text = text_of(&out);
         assert!(text.contains("sym:rust:a.rs#helper"));
         assert!(text.contains("sym:rust:a.rs#main"));
     }
 
-    #[test]
-    fn unknown_method_and_tool_error() {
-        let store = seeded();
-        assert_eq!(
-            dispatch(&store, "bogus", &json!(null)).unwrap_err().code,
-            -32601
-        );
-        let params = json!({"name": "nope", "arguments": {}});
-        assert_eq!(
-            dispatch(&store, "tools/call", &params).unwrap_err().code,
-            -32602
-        );
+    #[tokio::test]
+    async fn explain_missing_node_is_not_an_error() {
+        let server = seeded();
+        let out = server
+            .explain(Parameters(ExplainArgs {
+                key: "sym:rust:a.rs#ghost".into(),
+            }))
+            .await;
+        assert!(text_of(&out).contains("no node with key"));
     }
 
     #[test]
-    fn explain_missing_node_is_not_an_error() {
-        let store = seeded();
-        let params = json!({"name": "explain", "arguments": {"key": "sym:rust:a.rs#ghost"}});
-        let r = dispatch(&store, "tools/call", &params).expect("call");
-        assert!(
-            r["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("no node with key")
-        );
+    fn get_info_advertises_tools() {
+        let server = seeded();
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "roteiro");
+        assert!(info.capabilities.tools.is_some());
     }
 }

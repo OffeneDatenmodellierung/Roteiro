@@ -52,7 +52,9 @@ fn serve_answers_initialize_and_tools_call() {
         .expect("spawn serve");
 
     let session = concat!(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":\
+         {\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\
+         \"clientInfo\":{\"name\":\"test\",\"version\":\"0\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":\
          {\"name\":\"explain\",\"arguments\":{\"key\":\"sym:rust:src/main.rs#main\"}}}\n",
