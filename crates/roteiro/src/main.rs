@@ -1,6 +1,8 @@
-//! Roteiro umbrella CLI. Subcommands are stubs in v0.0.1; each returns a
-//! clear "not yet implemented" message so agents and hooks fail loudly, not
-//! silently. See ADR-0001 for the roadmap.
+//! Roteiro umbrella CLI. Wires the graph, spec, and render crates behind
+//! subcommands; owns argument parsing, process I/O, and exit codes. See
+//! ADR-0001 for the roadmap.
+//!
+//! @rto:0001
 
 use clap::{Parser, Subcommand};
 
@@ -39,7 +41,11 @@ enum Command {
         committed: bool,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
-    Check,
+    Check {
+        /// Emit the check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot import from lat.md, Graphify, or codegraph.
     Import {
         /// Source tool: lat | graphify | codegraph
@@ -62,8 +68,8 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let name = match cli.command {
         Command::Sync { json, committed } => return run_sync(json, committed),
+        Command::Check { json } => return run_check(json),
         Command::Init => "init",
-        Command::Check => "check",
         Command::Import { .. } => "import",
         Command::Render { .. } => "render",
         Command::Spec => "spec",
@@ -118,6 +124,77 @@ fn run_sync(json: bool, committed_only: bool) -> anyhow::Result<()> {
                 report.edges
             );
         }
+    }
+    Ok(())
+}
+
+/// Validate the authored layer (ADR `[[…]]` links and `@rto:` annotations)
+/// against the derived graph; exit non-zero on drift.
+fn run_check(json: bool) -> anyhow::Result<()> {
+    use rto_graph::{ObjectCache, Registry, Repo, Store, sync};
+
+    let cwd = std::env::current_dir()?;
+    let repo = Repo::discover(&cwd)?;
+    let store_dir = repo.git_dir().join("roteiro");
+    std::fs::create_dir_all(&store_dir)?;
+    let mut store = Store::open(&store_dir.join("graph.db"))?;
+    let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
+
+    // Build the derived graph, then read the authored inputs straight from the
+    // HEAD tree (ADRs under docs/adr, `@rto:` annotations everywhere else).
+    sync(&mut store, &repo, &cache, &Registry)?;
+
+    let mut docs = Vec::new();
+    let mut annotations = Vec::new();
+    let mut malformed = Vec::new();
+    for blob in repo.walk_blobs()? {
+        let bytes = repo.read_blob(&blob.oid)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let file = std::path::Path::new(&blob.path);
+        let is_md = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let is_adr = blob.path.starts_with("docs/adr/") && is_md && name != "README.md";
+        if is_adr {
+            match rto_spec::parse_adr(&blob.path, &text) {
+                Ok(doc) => docs.push(doc),
+                // A malformed ADR is drift, not a skippable warning: it would let
+                // the gate pass while silently dropping authored intent.
+                Err(e) => malformed.push(rto_spec::Violation {
+                    kind: rto_spec::ViolationKind::MalformedAdr,
+                    message: format!("{}: cannot parse ADR: {e}", blob.path),
+                }),
+            }
+        } else {
+            annotations.extend(rto_spec::scan_annotations(&blob.path, &text));
+        }
+    }
+
+    let mut report = rto_spec::run(&mut store, &docs, &annotations)?;
+    report.violations.extend(malformed);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for v in &report.violations {
+            eprintln!("drift [{}]: {}", v.kind.label(), v.message);
+        }
+        println!(
+            "checked {} ADR(s): {} link(s) ok, {} annotation(s) ok, {} violation(s)",
+            report.adrs,
+            report.links_ok,
+            report.annotations_ok,
+            report.violations.len(),
+        );
+    }
+
+    if report.has_violations() {
+        std::process::exit(1);
     }
     Ok(())
 }

@@ -8,6 +8,8 @@
 //! The graph is a set of [`Node`]s addressed by a deterministic natural
 //! [`Node::key`], connected by [`Edge`]s. Facts extracted from one source blob
 //! are grouped into a [`FactSet`] and applied atomically to a [`Store`].
+//!
+//! @rto:0001
 
 mod cache;
 mod extract;

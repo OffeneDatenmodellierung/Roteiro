@@ -23,6 +23,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: Dogfood (roteiro check)
+        run: cargo run -p roteiro -- check
       - name: Audit
         run: |
           cargo install cargo-audit --locked
