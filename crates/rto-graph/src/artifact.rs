@@ -61,13 +61,15 @@ impl GraphArtifact {
         Ok(artifact)
     }
 
-    /// Load this artifact into `store`, replacing its entire contents and
-    /// recording the tree id so a later `sync` sees it as already applied.
+    /// Load this artifact into `store`, replacing its entire contents. If the
+    /// artifact carries a tree id it is recorded, so a `sync` at the matching
+    /// commit sees the graph as already applied; a tree-less artifact records no
+    /// synced state.
     ///
     /// # Errors
     /// Returns [`StoreError`] if the rebuild fails.
     pub fn load_into(&self, store: &mut Store) -> Result<(), StoreError> {
-        store.rebuild(&self.facts, self.tree.as_deref().unwrap_or(""))
+        store.rebuild(&self.facts, self.tree.as_deref())
     }
 }
 
@@ -76,24 +78,46 @@ mod tests {
     use super::{ARTIFACT_SCHEMA, GraphArtifact};
     use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
-    fn seeded() -> Store {
-        let mut store = Store::open_in_memory().expect("store");
-        let facts = FactSet::new()
-            .with_node(Node::new("adr:0001", NodeKind::Adr, "Build Roteiro"))
-            .with_node(Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"))
-            .with_node(Node::new("sym:rust:a.rs#helper", NodeKind::Fn, "helper"))
-            .with_edge(Edge::authored(
-                "adr:0001",
-                "sym:rust:a.rs#main",
-                EdgeKind::References,
-            ))
-            .with_edge(Edge::derived(
+    /// The three nodes and two edges of the sample graph, as builder closures so
+    /// tests can apply them in any order.
+    fn sample_nodes() -> Vec<Node> {
+        vec![
+            Node::new("adr:0001", NodeKind::Adr, "Build Roteiro"),
+            Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"),
+            Node::new("sym:rust:a.rs#helper", NodeKind::Fn, "helper"),
+        ]
+    }
+
+    fn sample_edges() -> Vec<Edge> {
+        vec![
+            Edge::authored("adr:0001", "sym:rust:a.rs#main", EdgeKind::References),
+            Edge::derived(
                 "sym:rust:a.rs#main",
                 "sym:rust:a.rs#helper",
                 EdgeKind::Calls,
-            ));
-        store.rebuild(&facts, "treeabc").expect("rebuild");
+            ),
+        ]
+    }
+
+    /// Build a store from the sample graph, applying nodes/edges in the given
+    /// order (to exercise insertion-order independence) and recording `tree`.
+    fn seeded_ordered(reversed: bool, tree: Option<&str>) -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        let mut nodes = sample_nodes();
+        let mut edges = sample_edges();
+        if reversed {
+            nodes.reverse();
+            edges.reverse();
+        }
+        let mut facts = FactSet::new();
+        facts.nodes = nodes;
+        facts.edges = edges;
+        store.rebuild(&facts, tree).expect("rebuild");
         store
+    }
+
+    fn seeded() -> Store {
+        seeded_ordered(false, Some("treeabc"))
     }
 
     #[test]
@@ -129,18 +153,33 @@ mod tests {
     }
 
     #[test]
-    fn export_is_deterministic() {
-        // Two independent stores with the same facts applied in different orders
-        // export byte-identical JSON.
-        let a = GraphArtifact::from_store(&seeded())
+    fn export_is_deterministic_regardless_of_insertion_order() {
+        // The same graph, inserted forwards vs. reversed, must export to
+        // byte-identical JSON — proving the ordering comes from the export, not
+        // from insertion order.
+        let a = GraphArtifact::from_store(&seeded_ordered(false, Some("treeabc")))
             .expect("a")
             .to_json()
             .expect("ja");
-        let b = GraphArtifact::from_store(&seeded())
+        let b = GraphArtifact::from_store(&seeded_ordered(true, Some("treeabc")))
             .expect("b")
             .to_json()
             .expect("jb");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn artifact_without_tree_records_no_sync_state() {
+        // An artifact carrying no tree id must load as `sync_state == None`, not
+        // an empty string, so a later `sync` does not spuriously short-circuit.
+        let store = seeded_ordered(false, None);
+        let artifact = GraphArtifact::from_store(&store).expect("capture");
+        assert_eq!(artifact.tree, None);
+
+        let mut fresh = Store::open_in_memory().expect("fresh");
+        artifact.load_into(&mut fresh).expect("load");
+        assert_eq!(fresh.node_count().expect("nc"), 3);
+        assert_eq!(fresh.sync_state().expect("state"), None);
     }
 
     #[test]

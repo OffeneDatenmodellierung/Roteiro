@@ -152,14 +152,19 @@ impl Store {
             .optional()?)
     }
 
-    /// Atomically replace the entire graph with `facts` and record `tree` as the
-    /// synced state. All existing nodes and edges are deleted first, so the
-    /// store reflects exactly the given fact set.
+    /// Atomically replace the entire graph with `facts`, recording `tree` as the
+    /// synced state (or clearing it when `tree` is `None`). All existing nodes
+    /// and edges are deleted first, so the store reflects exactly the given fact
+    /// set.
+    ///
+    /// Passing `None` records *no* synced tree — distinct from an empty string —
+    /// so [`Store::sync_state`] returns `None` and a later `sync` will not
+    /// spuriously short-circuit.
     ///
     /// # Errors
     /// Returns the first error encountered (see [`Store::apply_factset`]); on any
     /// error nothing is committed.
-    pub fn rebuild(&mut self, facts: &FactSet, tree: &str) -> Result<(), StoreError> {
+    pub fn rebuild(&mut self, facts: &FactSet, tree: Option<&str>) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM edges", [])?;
         tx.execute("DELETE FROM nodes", [])?;
@@ -169,11 +174,14 @@ impl Store {
         for edge in &facts.edges {
             insert_edge(&tx, edge)?;
         }
-        tx.execute(
-            "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
-             ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
-            [tree],
-        )?;
+        match tree {
+            Some(tree) => tx.execute(
+                "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
+                 ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
+                [tree],
+            )?,
+            None => tx.execute("DELETE FROM sync_state WHERE id = 0", [])?,
+        };
         tx.commit()?;
         Ok(())
     }
