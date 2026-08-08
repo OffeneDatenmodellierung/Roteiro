@@ -1510,7 +1510,7 @@ checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
 
 [[package]]
 name = "roteiro"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "rto-graph"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "gix",
  "rusqlite",
@@ -1543,14 +1543,14 @@ dependencies = [
 
 [[package]]
 name = "rto-render"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "rto-graph",
 ]
 
 [[package]]
 name = "rto-spec"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "rto-graph",
  "serde",
