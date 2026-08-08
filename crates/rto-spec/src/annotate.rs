@@ -51,22 +51,29 @@ pub fn scan_annotations(rel_path: &str, text: &str) -> Vec<Annotation> {
         if !is_comment_line(line) {
             continue;
         }
-        let mut rest = line;
-        while let Some(pos) = rest.find(MARKER) {
-            let after = &rest[pos + MARKER.len()..];
-            let id: String = after
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .collect();
-            if !id.is_empty() {
-                out.push(Annotation {
-                    path: rel_path.to_owned(),
-                    adr_id: id.clone(),
-                    line: i + 1,
-                });
+        // Skip inline code spans (backticks) so a documented example such as
+        // `@rto:0001` inside a doc comment is not counted as a real annotation.
+        for (seg_idx, segment) in line.split('`').enumerate() {
+            if seg_idx % 2 == 1 {
+                continue;
             }
-            // Advance past this marker (plus the id) to find more on one line.
-            rest = &after[id.len()..];
+            let mut rest = segment;
+            while let Some(pos) = rest.find(MARKER) {
+                let after = &rest[pos + MARKER.len()..];
+                let id: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if !id.is_empty() {
+                    out.push(Annotation {
+                        path: rel_path.to_owned(),
+                        adr_id: id.clone(),
+                        line: i + 1,
+                    });
+                }
+                // Advance past this marker (plus the id) to find more on one line.
+                rest = &after[id.len()..];
+            }
         }
     }
     out
@@ -98,6 +105,16 @@ mod tests {
     fn ignores_annotations_outside_comments() {
         // An `@rto:` inside a string literal on a code line is not an annotation.
         let src = "let s = \"@rto:9999\";\n// @rto:0001\n";
+        let anns = scan_annotations("src/x.rs", src);
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns[0].adr_id, "0001");
+    }
+
+    #[test]
+    fn ignores_examples_inside_code_spans() {
+        // `@rto:9999` written as a documentation example in backticks is not an
+        // annotation; a bare one on the same comment line still is.
+        let src = "//! see the `@rto:9999` example — real: @rto:0001\n";
         let anns = scan_annotations("src/x.rs", src);
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].adr_id, "0001");
