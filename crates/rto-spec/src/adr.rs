@@ -293,27 +293,22 @@ fn slugify(s: &str) -> String {
 }
 
 /// Extract the inner text of every `[[…]]` on a line, ignoring any that fall
-/// inside an inline code span (backticks), so ``[[path#Symbol]]`` written as a
+/// inside an inline code span, so `` `[[path#Symbol]]` `` written as a
 /// documentation example is not treated as a real link.
 fn scan_wiki_links(line: &str) -> Vec<String> {
     let mut out = Vec::new();
-    // Segments alternate outside/inside code spans on each backtick.
-    for (i, segment) in line.split('`').enumerate() {
-        if i % 2 == 1 {
-            continue;
-        }
-        let mut rest = segment;
-        while let Some(open) = rest.find("[[") {
-            let after = &rest[open + 2..];
-            if let Some(close) = after.find("]]") {
-                let inner = after[..close].trim();
-                if !inner.is_empty() {
-                    out.push(inner.to_owned());
-                }
-                rest = &after[close + 2..];
-            } else {
-                break;
+    let stripped = crate::text::strip_code_spans(line);
+    let mut rest = stripped.as_str();
+    while let Some(open) = rest.find("[[") {
+        let after = &rest[open + 2..];
+        if let Some(close) = after.find("]]") {
+            let inner = after[..close].trim();
+            if !inner.is_empty() {
+                out.push(inner.to_owned());
             }
+            rest = &after[close + 2..];
+        } else {
+            break;
         }
     }
     out

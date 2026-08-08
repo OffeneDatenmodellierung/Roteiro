@@ -103,7 +103,9 @@ fn in_ref(edge: &Edge) -> EdgeRef {
 }
 
 fn sort_refs(refs: &mut [EdgeRef]) {
-    refs.sort_by(|a, b| (&a.kind, &a.node).cmp(&(&b.kind, &b.node)));
+    // Include provenance so edges differing only in provenance have a total,
+    // stable order; with the edge-uniqueness constraint this key is unique.
+    refs.sort_by(|a, b| (&a.kind, &a.node, a.provenance).cmp(&(&b.kind, &b.node, b.provenance)));
 }
 
 /// Explain a node: its record plus every incoming and outgoing edge, each
@@ -195,6 +197,23 @@ mod tests {
     fn explain_missing_node_is_none() {
         let store = seeded();
         assert!(explain(&store, "sym:rust:a.rs#ghost").expect("q").is_none());
+    }
+
+    #[test]
+    fn edges_differing_only_in_provenance_are_ordered() {
+        // Two edges A->B with the same kind but different provenance must sort
+        // into a stable, deterministic order (authored before derived).
+        let mut store = Store::open_in_memory().expect("store");
+        let facts = FactSet::new()
+            .with_node(Node::new("a", NodeKind::Fn, "a"))
+            .with_node(Node::new("b", NodeKind::Fn, "b"))
+            .with_edge(Edge::derived("a", "b", EdgeKind::References))
+            .with_edge(Edge::authored("a", "b", EdgeKind::References));
+        store.apply_factset(&facts).expect("apply");
+
+        let ex = explain(&store, "a").expect("q").expect("present");
+        let provs: Vec<_> = ex.outgoing.iter().map(|e| e.provenance).collect();
+        assert_eq!(provs, ["authored", "derived"]);
     }
 
     #[test]

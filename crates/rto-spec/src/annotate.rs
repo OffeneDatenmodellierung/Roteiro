@@ -51,29 +51,26 @@ pub fn scan_annotations(rel_path: &str, text: &str) -> Vec<Annotation> {
         if !is_comment_line(line) {
             continue;
         }
-        // Skip inline code spans (backticks) so a documented example such as
-        // `@rto:0001` inside a doc comment is not counted as a real annotation.
-        for (seg_idx, segment) in line.split('`').enumerate() {
-            if seg_idx % 2 == 1 {
-                continue;
+        // Strip inline code spans (any backtick run) so a documented example
+        // such as `@rto:0001` in a doc comment is not counted as a real
+        // annotation.
+        let stripped = crate::text::strip_code_spans(line);
+        let mut rest: &str = &stripped;
+        while let Some(pos) = rest.find(MARKER) {
+            let after = &rest[pos + MARKER.len()..];
+            let id: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if !id.is_empty() {
+                out.push(Annotation {
+                    path: rel_path.to_owned(),
+                    adr_id: id.clone(),
+                    line: i + 1,
+                });
             }
-            let mut rest = segment;
-            while let Some(pos) = rest.find(MARKER) {
-                let after = &rest[pos + MARKER.len()..];
-                let id: String = after
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                    .collect();
-                if !id.is_empty() {
-                    out.push(Annotation {
-                        path: rel_path.to_owned(),
-                        adr_id: id.clone(),
-                        line: i + 1,
-                    });
-                }
-                // Advance past this marker (plus the id) to find more on one line.
-                rest = &after[id.len()..];
-            }
+            // Advance past this marker (plus the id) to find more on one line.
+            rest = &after[id.len()..];
         }
     }
     out
