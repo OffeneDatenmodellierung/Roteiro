@@ -26,6 +26,14 @@ thiserror = { workspace = true }
 tree-sitter = "0.26.11"
 tree-sitter-rust = "0.24.2"
 
+# `inference-local-models` only (candle BERT embedder + checksum). CPU-only —
+# no cuda/metal/mkl features, so it builds on any CI box. See ADR-0003.
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"], optional = true }
+sha2 = { version = "0.10", optional = true }
+
 [dev-dependencies]
 # Also needed by the integration tests in `tests/`, which don't inherit the
 # crate's normal dependencies.
@@ -34,9 +42,19 @@ serde_json = { workspace = true }
 [features]
 # Offline similarity inference (the `inferred` provenance class). Adds no
 # dependencies — the default embedding is a pure-Rust hashing embedding
-# (ADR-0003). Larger learned models are the separate `inference-local-models`
-# tier and are not part of this crate.
+# (ADR-0003).
 inference = []
+# The opt-in pluggable-model tier (ADR-0003): a candle-backed BERT embedder,
+# model registry, and checksum verification. Pulls candle/tokenizers/sha2 — none
+# of which the default or plain `inference` builds contain.
+inference-local-models = [
+    "inference",
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:sha2",
+]
 
 [lints]
 workspace = true

@@ -105,9 +105,20 @@ enum Command {
         /// Maximum suggestions per node.
         #[arg(long, default_value_t = 5)]
         top_k: usize,
+        /// Use a pulled local model by name instead of the offline default
+        /// (requires `--features inference-local-models`; falls back to the
+        /// hashing embedder if the model is not installed).
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Manage pluggable local embedding models (`--features inference-local-models`).
+    #[cfg(feature = "inference-local-models")]
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
     },
     /// Start the MCP server (built with `--features mcp`).
     #[cfg(feature = "mcp")]
@@ -116,6 +127,22 @@ enum Command {
         /// instead of stdio. Terminate TLS at a reverse proxy.
         #[arg(long, value_name = "ADDR")]
         http: Option<String>,
+    },
+}
+
+/// `roteiro model` actions.
+#[cfg(feature = "inference-local-models")]
+#[derive(Subcommand)]
+enum ModelAction {
+    /// List registry models and which are installed for this platform.
+    List,
+    /// Download a model into `~/.roteiro/models` (asks before fetching).
+    Pull {
+        /// Registry model name (see `roteiro model list`).
+        name: String,
+        /// Skip the confirmation prompt and download immediately.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -136,8 +163,11 @@ fn main() -> anyhow::Result<()> {
         Command::Infer {
             min_confidence,
             top_k,
+            model,
             json,
-        } => return run_infer(min_confidence, top_k, json),
+        } => return run_infer(min_confidence, top_k, model.as_deref(), json),
+        #[cfg(feature = "inference-local-models")]
+        Command::Model { action } => return run_model(action),
         #[cfg(feature = "mcp")]
         Command::Serve { http } => return run_serve(http),
     };
@@ -321,8 +351,13 @@ fn run_init() -> anyhow::Result<()> {
 /// Suggest `inferred` similarity edges over the graph and apply them. Builds the
 /// full derived + authored graph first, then adds the fuzzy suggestion layer.
 #[cfg(feature = "inference")]
-fn run_infer(min_confidence: f64, top_k: usize, json: bool) -> anyhow::Result<()> {
-    use rto_graph::{FactSet, InferenceConfig, Provenance, infer_edges};
+fn run_infer(
+    min_confidence: f64,
+    top_k: usize,
+    model: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use rto_graph::{FactSet, InferenceConfig, Provenance};
 
     if !(0.0..=1.0).contains(&min_confidence) {
         anyhow::bail!("--min-confidence must be in 0.0..=1.0 (got {min_confidence})");
@@ -340,7 +375,10 @@ fn run_infer(min_confidence: f64, top_k: usize, json: bool) -> anyhow::Result<()
         min_confidence,
         top_k,
     };
-    let edges = infer_edges(&store, config)?;
+
+    // Choose the embedder: a pulled local model if requested and installed,
+    // otherwise the offline hashing default.
+    let (edges, embedder_label) = infer_with_embedder(&store, config, model)?;
     let count = edges.len();
     // Inferred edges are additive suggestions; applying them never alters the
     // derived/authored facts already in the store.
@@ -353,16 +391,204 @@ fn run_infer(min_confidence: f64, top_k: usize, json: bool) -> anyhow::Result<()
         let report = serde_json::json!({
             "min_confidence": min_confidence,
             "top_k": top_k,
+            "embedder": embedder_label,
             "inferred_edges": count,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "inferred {count} similarity edge(s) (min-confidence {min_confidence}, top-k {top_k}); \
+            "inferred {count} similarity edge(s) via {embedder_label} \
+             (min-confidence {min_confidence}, top-k {top_k}); \
              query them with `roteiro query <key>`",
         );
     }
     Ok(())
+}
+
+/// Run inference with the requested embedder, returning the edges and a label
+/// describing which embedder was used. Without the `inference-local-models`
+/// feature, only the hashing embedder exists.
+#[cfg(all(feature = "inference", not(feature = "inference-local-models")))]
+fn infer_with_embedder(
+    store: &rto_graph::Store,
+    config: rto_graph::InferenceConfig,
+    model: Option<&str>,
+) -> anyhow::Result<(Vec<rto_graph::Edge>, String)> {
+    use rto_graph::infer_edges_with;
+    if model.is_some() {
+        anyhow::bail!(
+            "--model requires the `inference-local-models` feature; \
+             rebuild with `--features inference-local-models`"
+        );
+    }
+    Ok((
+        infer_edges_with(store, config, &rto_graph::HashEmbedder)?,
+        "hashing embedder (offline default)".to_owned(),
+    ))
+}
+
+/// Feature-rich variant: honour `--model` by loading a local candle model.
+#[cfg(feature = "inference-local-models")]
+fn infer_with_embedder(
+    store: &rto_graph::Store,
+    config: rto_graph::InferenceConfig,
+    model: Option<&str>,
+) -> anyhow::Result<(Vec<rto_graph::Edge>, String)> {
+    use rto_graph::{HashEmbedder, LocalEmbedder, infer_edges_with};
+
+    let Some(name) = model else {
+        return Ok((
+            infer_edges_with(store, config, &HashEmbedder)?,
+            "hashing embedder (offline default)".to_owned(),
+        ));
+    };
+    let Some(dir) = rto_graph::installed_dir(name) else {
+        anyhow::bail!(
+            "model `{name}` is not installed — run `roteiro model pull {name}` \
+             (or omit --model to use the offline default)"
+        );
+    };
+    let embedder =
+        LocalEmbedder::load(&dir).map_err(|e| anyhow::anyhow!("loading model `{name}`: {e}"))?;
+    let edges = infer_edges_with(store, config, &EmbedderAdapter(&embedder))?;
+    Ok((
+        edges,
+        format!("local model `{name}` (dim {})", embedder.dim()),
+    ))
+}
+
+/// Adapts a fallible [`LocalEmbedder`] to the infallible [`rto_graph::Embedder`]
+/// trait: an embedding failure yields a zero vector (that node simply gets no
+/// suggestions) rather than aborting the whole run.
+#[cfg(feature = "inference-local-models")]
+struct EmbedderAdapter<'a>(&'a rto_graph::LocalEmbedder);
+
+#[cfg(feature = "inference-local-models")]
+impl rto_graph::Embedder for EmbedderAdapter<'_> {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.0.embed(text).unwrap_or_default()
+    }
+}
+
+/// Manage pluggable local embedding models: list the registry or pull a model.
+#[cfg(feature = "inference-local-models")]
+fn run_model(action: ModelAction) -> anyhow::Result<()> {
+    match action {
+        ModelAction::List => {
+            run_model_list();
+            Ok(())
+        }
+        ModelAction::Pull { name, yes } => run_model_pull(&name, yes),
+    }
+}
+
+/// Print the registry, marking which models are installed for this host.
+#[cfg(feature = "inference-local-models")]
+fn run_model_list() {
+    use rto_graph::{Platform, REGISTRY};
+
+    let host = Platform::host();
+    println!(
+        "platform: {}   model store: {}",
+        host.as_str(),
+        rto_graph::store_root().display()
+    );
+    println!("(the built-in hashing embedder is always available with no model)\n");
+    for spec in REGISTRY {
+        let variant = spec.variant_for(host);
+        let installed = variant.is_some_and(|v| rto_graph::is_installed(spec.name, v));
+        let mark = if installed {
+            "✓ installed"
+        } else {
+            "  available"
+        };
+        println!(
+            "{mark}  {name}  (dim {dim}, {licence}, ~{size} MiB)\n            {desc}",
+            name = spec.name,
+            dim = spec.dim,
+            licence = spec.licence,
+            size = spec.size_mib,
+            desc = spec.description,
+        );
+    }
+}
+
+/// Download a model into the store, asking for consent first (unless `--yes` or
+/// non-interactive, in which case the manual command is printed instead).
+#[cfg(feature = "inference-local-models")]
+fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
+    use rto_graph::{Platform, ensure_model_dir, find_model, verify_sha256};
+    use std::io::Write as _;
+
+    let spec = find_model(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown model `{name}` (see `roteiro model list`)"))?;
+    let variant = spec
+        .variant_for(Platform::host())
+        .ok_or_else(|| anyhow::anyhow!("no variant of `{name}` for this platform"))?;
+
+    let stdin_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    if !yes {
+        // Print exactly what would be fetched — source + licence + size.
+        eprintln!(
+            "roteiro would download model `{name}` (~{} MiB, {}) from:",
+            spec.size_mib, spec.licence
+        );
+        for f in variant.files {
+            eprintln!("  {}", f.url);
+        }
+        if !stdin_is_tty {
+            // Never fetch without an explicit human yes; print the manual route.
+            eprintln!(
+                "\nnon-interactive: not downloading. Re-run with `--yes`, or fetch manually into {}",
+                rto_graph::model_dir(name).display()
+            );
+            anyhow::bail!("download declined (non-interactive)");
+        }
+        eprint!("Download now? [y/N] ");
+        std::io::stderr().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+            anyhow::bail!("download declined");
+        }
+    }
+
+    let dir = ensure_model_dir(name)?;
+    for f in variant.files {
+        let dest = dir.join(f.name);
+        eprintln!("fetching {} …", f.name);
+        let bytes = http_get(f.url)?;
+        if !verify_sha256(&bytes, f.sha256) {
+            anyhow::bail!(
+                "checksum mismatch for {} (expected {}, got {})",
+                f.name,
+                f.sha256,
+                rto_graph::sha256_hex(&bytes),
+            );
+        }
+        // Write atomically (temp + rename) so a partial download is never used.
+        let tmp = dir.join(format!("{}.partial", f.name));
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &dest)?;
+    }
+    println!(
+        "installed `{name}` → {}  (use it with `roteiro infer --model {name}`)",
+        dir.display()
+    );
+    Ok(())
+}
+
+/// Download `url` into memory over HTTPS.
+#[cfg(feature = "inference-local-models")]
+fn http_get(url: &str) -> anyhow::Result<Vec<u8>> {
+    let mut reader = ureq::get(url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?
+        .into_body()
+        .into_reader();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+    Ok(bytes)
 }
 
 /// Query the graph: explain a node's provenance-labelled neighbourhood, or list

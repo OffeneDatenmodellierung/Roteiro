@@ -17,6 +17,8 @@ mod extract;
 mod git;
 #[cfg(feature = "inference")]
 mod infer;
+#[cfg(feature = "inference-local-models")]
+mod localmodel;
 mod migrations;
 mod model;
 mod provenance;
@@ -29,7 +31,15 @@ pub use cache::{CacheError, ObjectCache};
 pub use extract::{Extractor, FileNodeExtractor, Registry, RustExtractor};
 pub use git::{BlobRef, GitError, Repo};
 #[cfg(feature = "inference")]
-pub use infer::{InferenceConfig, embed, infer_edges, similarity};
+pub use infer::{
+    Embedder, HashEmbedder, InferenceConfig, embed, infer_edges, infer_edges_with, similarity,
+};
+#[cfg(feature = "inference-local-models")]
+pub use localmodel::{
+    LocalEmbedder, LocalModelError, ModelFile, ModelSpec, ModelVariant, Platform, REGISTRY,
+    ensure_model_dir, find as find_model, installed_dir, is_installed, model_dir, sha256_hex,
+    store_root, verify_sha256,
+};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;
 pub use query::{
