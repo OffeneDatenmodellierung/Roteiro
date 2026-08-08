@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.5...rto-graph-v0.0.6) - 2026-08-08
+
+### Added
+
+- *(rto-spec)* authored ADR layer and `roteiro check` (Stage 4)
+
+### Other
+
+- Merge pull request #15 from OffeneDatenmodellierung/release-plz-2026-08-08T09-17-25Z
+- Merge remote-tracking branch 'origin/main' into feat/authored-layer
+
 ## [0.0.5](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.4...rto-graph-v0.0.5) - 2026-08-08
 
 ### Added
