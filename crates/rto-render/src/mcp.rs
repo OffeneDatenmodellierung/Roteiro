@@ -4,9 +4,10 @@
 //! Two transports are offered (see [`serve_stdio`] / [`serve_http`]): stdio for
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
-//! same tools — `explain` and `list_kind` — as thin wrappers over
-//! [`rto_graph::explain`] / [`rto_graph::list_kind`], so agents and the CLI see
-//! the same graph. See ADR-0002 for the decision to adopt `rmcp`.
+//! same tools — `explain`, `list_kind`, and `path` — as thin wrappers over
+//! [`rto_graph::explain`] / [`rto_graph::list_kind`] / [`rto_graph::path`], so
+//! agents and the CLI see the same graph. See ADR-0002 for the decision to
+//! adopt `rmcp`.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -26,7 +27,7 @@ use rmcp::{
         },
     },
 };
-use rto_graph::{NodeKind, Store, explain, list_kind};
+use rto_graph::{NodeKind, Store, explain, list_kind, path};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -50,6 +51,15 @@ struct ExplainArgs {
 struct ListKindArgs {
     /// Node kind token, e.g. `fn`, `struct`, `adr`, `file`.
     kind: String,
+}
+
+/// Arguments for the `path` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PathArgs {
+    /// Start node key.
+    from: String,
+    /// Goal node key.
+    to: String,
 }
 
 /// The MCP server handler wrapping the graph store.
@@ -111,6 +121,26 @@ impl GraphServer {
             Err(e) => tool_error(&format!("query error: {e}")),
         }
     }
+
+    /// Find a shortest path between two nodes.
+    #[tool(
+        description = "Find a shortest path between two graph nodes, following \
+                          edges in either direction. Each hop is provenance-labelled. \
+                          Args: from, to (node keys)."
+    )]
+    async fn path(&self, Parameters(args): Parameters<PathArgs>) -> CallToolResult {
+        let result = {
+            let store = self.store.lock().expect("store mutex poisoned");
+            path(&store, &args.from, &args.to)
+        };
+        match result {
+            Ok(p) => match serde_json::to_string_pretty(&p) {
+                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                Err(e) => tool_error(&format!("serialize error: {e}")),
+            },
+            Err(e) => tool_error(&format!("query error: {e}")),
+        }
+    }
 }
 
 #[tool_handler]
@@ -123,7 +153,8 @@ impl ServerHandler for GraphServer {
         info.server_info = Implementation::new("roteiro", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Roteiro codebase knowledge graph. Use `explain` for a node's \
-             provenance-labelled neighbourhood, `list_kind` to enumerate a kind."
+             provenance-labelled neighbourhood, `list_kind` to enumerate a kind, \
+             and `path` to find how two nodes are connected."
                 .into(),
         );
         info
@@ -180,7 +211,7 @@ pub fn serve_http(store: Store, addr: SocketAddr) -> Result<(), McpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExplainArgs, GraphServer, ListKindArgs};
+    use super::{ExplainArgs, GraphServer, ListKindArgs, PathArgs};
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
     use std::sync::{Arc, Mutex};
@@ -244,6 +275,22 @@ mod tests {
             }))
             .await;
         assert!(text_of(&out).contains("no node with key"));
+    }
+
+    #[tokio::test]
+    async fn path_tool_returns_connecting_path() {
+        let server = seeded();
+        let out = server
+            .path(Parameters(PathArgs {
+                from: "sym:rust:a.rs#main".into(),
+                to: "sym:rust:a.rs#helper".into(),
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&text_of(&out)).expect("json");
+        assert_eq!(json["found"], true);
+        assert_eq!(json["length"], 1);
+        assert_eq!(json["hops"][0]["node"], "sym:rust:a.rs#helper");
+        assert_eq!(json["hops"][0]["provenance"], "derived");
     }
 
     #[test]

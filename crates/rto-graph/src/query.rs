@@ -2,10 +2,13 @@
 //!
 //! Everything here is a read-only view built from the store's typed queries,
 //! serialised under a **stable, versioned** JSON schema ([`SCHEMA`]) so agents
-//! can depend on the shape. Two primitives are provided: [`explain`] (a node
-//! and its provenance-labelled neighbourhood) and [`list_kind`] (all nodes of a
-//! kind). Both return mixed-provenance results — the "one query surface" from
-//! ADR-0001 — with every edge carrying its `provenance`.
+//! can depend on the shape. Three primitives are provided: [`explain`] (a node
+//! and its provenance-labelled neighbourhood), [`list_kind`] (all nodes of a
+//! kind), and [`path`] (a shortest path between two nodes). All return
+//! mixed-provenance results — the "one query surface" from ADR-0001 — with every
+//! edge carrying its `provenance`.
+
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::Serialize;
 
@@ -84,6 +87,41 @@ pub struct Listing {
     pub nodes: Vec<NodeSummary>,
 }
 
+/// One step along a [`Path`]: the edge traversed and the node it leads to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PathHop {
+    /// Edge kind token (e.g. `calls`, `contains`).
+    pub kind: String,
+    /// How the edge was produced.
+    pub provenance: &'static str,
+    /// Confidence score, present only for inferred edges.
+    pub confidence: Option<f64>,
+    /// The direction the edge was traversed relative to the previous node
+    /// (`outgoing` = along the edge, `incoming` = against it).
+    pub direction: &'static str,
+    /// The natural key of the node this hop arrives at.
+    pub node: String,
+}
+
+/// A shortest path between two nodes. Edges are followed in either direction
+/// (the graph is treated as undirected for reachability), and each hop records
+/// the actual direction and provenance of the edge used.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Path {
+    /// Stable schema tag ([`SCHEMA`]).
+    pub schema: &'static str,
+    /// Natural key of the start node.
+    pub from: String,
+    /// Natural key of the goal node.
+    pub to: String,
+    /// Whether a path (including the trivial empty one) was found.
+    pub found: bool,
+    /// Number of hops (edges) in the path; `0` when `from == to`.
+    pub length: usize,
+    /// The hops from `from` to `to`, in order.
+    pub hops: Vec<PathHop>,
+}
+
 fn out_ref(edge: &Edge) -> EdgeRef {
     EdgeRef {
         kind: edge.kind.as_str().to_owned(),
@@ -147,9 +185,132 @@ pub fn list_kind(store: &Store, kind: &NodeKind) -> Result<Listing, StoreError> 
     })
 }
 
+/// A candidate step out of a node during traversal: the edge used and the node
+/// on the other end. Ordered so BFS expansion is deterministic.
+struct Step {
+    node: String,
+    hop: PathHop,
+}
+
+/// All one-hop steps out of `key`, following edges in either direction, sorted
+/// for deterministic traversal.
+fn steps_from(store: &Store, key: &str) -> Result<Vec<Step>, StoreError> {
+    let mut steps = Vec::new();
+    for edge in store.edges_from(key)? {
+        steps.push(Step {
+            node: edge.dst.clone(),
+            hop: hop(&edge, "outgoing", edge.dst.clone()),
+        });
+    }
+    for edge in store.edges_to(key)? {
+        steps.push(Step {
+            node: edge.src.clone(),
+            hop: hop(&edge, "incoming", edge.src.clone()),
+        });
+    }
+    steps.sort_by(|a, b| {
+        (&a.node, &a.hop.kind, a.hop.provenance, a.hop.direction).cmp(&(
+            &b.node,
+            &b.hop.kind,
+            b.hop.provenance,
+            b.hop.direction,
+        ))
+    });
+    Ok(steps)
+}
+
+fn hop(edge: &Edge, direction: &'static str, node: String) -> PathHop {
+    PathHop {
+        kind: edge.kind.as_str().to_owned(),
+        provenance: edge.provenance.as_str(),
+        confidence: edge.confidence,
+        direction,
+        node,
+    }
+}
+
+/// Find a shortest path from `from` to `to`, following edges in either
+/// direction. Returns a [`Path`] with `found = false` (and no hops) if either
+/// endpoint is absent or `to` is unreachable; `from == to` yields the trivial
+/// zero-length path.
+///
+/// The search is breadth-first with deterministic neighbour ordering, so the
+/// returned path is stable for a given graph.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure.
+pub fn path(store: &Store, from: &str, to: &str) -> Result<Path, StoreError> {
+    let not_found = |found: bool, hops: Vec<PathHop>| Path {
+        schema: SCHEMA,
+        from: from.to_owned(),
+        to: to.to_owned(),
+        found,
+        length: hops.len(),
+        hops,
+    };
+
+    // Both endpoints must exist in the graph.
+    if store.get_node(from)?.is_none() || store.get_node(to)?.is_none() {
+        return Ok(not_found(false, Vec::new()));
+    }
+    if from == to {
+        return Ok(not_found(true, Vec::new()));
+    }
+
+    // BFS, recording for each visited node the (predecessor, hop) that reached
+    // it so the path can be reconstructed.
+    let mut came_from: BTreeMap<String, (String, PathHop)> = BTreeMap::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(from.to_owned());
+    came_from.insert(from.to_owned(), (String::new(), placeholder_hop()));
+
+    while let Some(current) = queue.pop_front() {
+        if current == to {
+            break;
+        }
+        for step in steps_from(store, &current)? {
+            if came_from.contains_key(&step.node) {
+                continue;
+            }
+            came_from.insert(step.node.clone(), (current.clone(), step.hop));
+            queue.push_back(step.node);
+        }
+    }
+
+    if !came_from.contains_key(to) {
+        return Ok(not_found(false, Vec::new()));
+    }
+
+    // Walk predecessors back from `to` to `from`, then reverse. Every node in
+    // `came_from` other than `from` has a real predecessor, so the loop always
+    // terminates at `from` without needing to unwrap.
+    let mut hops = Vec::new();
+    let mut cursor = to.to_owned();
+    while cursor != from {
+        let Some((prev, hop)) = came_from.get(&cursor) else {
+            break;
+        };
+        hops.push(hop.clone());
+        cursor = prev.clone();
+    }
+    hops.reverse();
+    Ok(not_found(true, hops))
+}
+
+/// A sentinel hop for the BFS start node (never emitted in a result).
+fn placeholder_hop() -> PathHop {
+    PathHop {
+        kind: String::new(),
+        provenance: "derived",
+        confidence: None,
+        direction: "outgoing",
+        node: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SCHEMA, explain, list_kind};
+    use super::{SCHEMA, explain, list_kind, path};
     use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
     fn seeded() -> Store {
@@ -237,5 +398,89 @@ mod tests {
         assert_eq!(json["outgoing"][0]["provenance"], "authored");
         assert_eq!(json["outgoing"][0]["node"], "sym:rust:a.rs#main");
         assert!(json["outgoing"][0]["confidence"].is_null());
+    }
+
+    #[test]
+    fn path_crosses_provenance_and_direction() {
+        // adr:0001 --authored/references--> main --derived/calls--> helper.
+        // A path from the ADR to helper must traverse both, each hop labelled.
+        let store = seeded();
+        let p = path(&store, "adr:0001", "sym:rust:a.rs#helper").expect("path");
+        assert!(p.found);
+        assert_eq!(p.length, 2);
+        assert_eq!(p.schema, SCHEMA);
+
+        assert_eq!(p.hops[0].kind, "references");
+        assert_eq!(p.hops[0].provenance, "authored");
+        assert_eq!(p.hops[0].direction, "outgoing");
+        assert_eq!(p.hops[0].node, "sym:rust:a.rs#main");
+
+        assert_eq!(p.hops[1].kind, "calls");
+        assert_eq!(p.hops[1].provenance, "derived");
+        assert_eq!(p.hops[1].node, "sym:rust:a.rs#helper");
+    }
+
+    #[test]
+    fn path_follows_edges_against_direction() {
+        // From helper back to the ADR: both edges are traversed against their
+        // stored direction, so each hop is `incoming`.
+        let store = seeded();
+        let p = path(&store, "sym:rust:a.rs#helper", "adr:0001").expect("path");
+        assert!(p.found);
+        assert_eq!(p.length, 2);
+        assert!(p.hops.iter().all(|h| h.direction == "incoming"));
+        assert_eq!(p.hops.last().unwrap().node, "adr:0001");
+    }
+
+    #[test]
+    fn path_same_node_is_trivial() {
+        let store = seeded();
+        let p = path(&store, "adr:0001", "adr:0001").expect("path");
+        assert!(p.found);
+        assert_eq!(p.length, 0);
+        assert!(p.hops.is_empty());
+    }
+
+    #[test]
+    fn path_missing_endpoint_or_unreachable_is_not_found() {
+        let mut store = Store::open_in_memory().expect("store");
+        // Two disconnected components: a-b and an isolated island.
+        let facts = FactSet::new()
+            .with_node(Node::new("a", NodeKind::Fn, "a"))
+            .with_node(Node::new("b", NodeKind::Fn, "b"))
+            .with_node(Node::new("island", NodeKind::Fn, "island"))
+            .with_edge(Edge::derived("a", "b", EdgeKind::Calls));
+        store.apply_factset(&facts).expect("apply");
+
+        // Absent endpoint.
+        let missing = path(&store, "a", "ghost").expect("path");
+        assert!(!missing.found);
+        assert!(missing.hops.is_empty());
+
+        // Present but unreachable.
+        let unreachable = path(&store, "a", "island").expect("path");
+        assert!(!unreachable.found);
+        assert!(unreachable.hops.is_empty());
+    }
+
+    #[test]
+    fn path_is_shortest() {
+        // a-b-c-d chain plus a direct a-d edge: the path must take the shortcut.
+        let mut store = Store::open_in_memory().expect("store");
+        let facts = FactSet::new()
+            .with_node(Node::new("a", NodeKind::Fn, "a"))
+            .with_node(Node::new("b", NodeKind::Fn, "b"))
+            .with_node(Node::new("c", NodeKind::Fn, "c"))
+            .with_node(Node::new("d", NodeKind::Fn, "d"))
+            .with_edge(Edge::derived("a", "b", EdgeKind::Calls))
+            .with_edge(Edge::derived("b", "c", EdgeKind::Calls))
+            .with_edge(Edge::derived("c", "d", EdgeKind::Calls))
+            .with_edge(Edge::derived("a", "d", EdgeKind::Calls));
+        store.apply_factset(&facts).expect("apply");
+
+        let p = path(&store, "a", "d").expect("path");
+        assert!(p.found);
+        assert_eq!(p.length, 1, "the direct a->d edge is the shortest path");
+        assert_eq!(p.hops[0].node, "d");
     }
 }

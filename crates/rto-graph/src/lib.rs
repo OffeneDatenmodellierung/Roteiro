@@ -26,6 +26,8 @@ pub use extract::{Extractor, FileNodeExtractor, Registry, RustExtractor};
 pub use git::{BlobRef, GitError, Repo};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;
-pub use query::{EdgeRef, Explanation, Listing, NodeSummary, SCHEMA, explain, list_kind};
+pub use query::{
+    EdgeRef, Explanation, Listing, NodeSummary, Path, PathHop, SCHEMA, explain, list_kind, path,
+};
 pub use store::{Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_worktree};

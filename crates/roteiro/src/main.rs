@@ -59,6 +59,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Find a shortest path between two nodes (edges followed either direction).
+    Path {
+        /// Start node key.
+        from: String,
+        /// Goal node key.
+        to: String,
+        /// Emit the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot import from lat.md, Graphify, or codegraph.
     Import {
         /// Source tool: lat | graphify | codegraph
@@ -91,6 +101,7 @@ fn main() -> anyhow::Result<()> {
         Command::Sync { json, committed } => return run_sync(json, committed),
         Command::Check { json } => return run_check(json),
         Command::Query { key, kind, json } => return run_query(key, kind, json),
+        Command::Path { from, to, json } => return run_path(&from, &to, json),
         Command::Init => return run_init(),
         Command::Render { target, out } => return run_render(&target, out),
         Command::Import { .. } => "import",
@@ -326,6 +337,36 @@ fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::R
         (None, None) => {
             anyhow::bail!("provide a node key to explain, or `--kind <kind>` to list nodes");
         }
+    }
+    Ok(())
+}
+
+/// Find and print a shortest path between two nodes. Exits non-zero if the two
+/// nodes are not connected, so it is usable as a reachability assertion.
+fn run_path(from: &str, to: &str, json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    let result = rto_graph::path(&store, from, to)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.found {
+        println!("{from}");
+        for hop in &result.hops {
+            let arrow = if hop.direction == "outgoing" {
+                "->"
+            } else {
+                "<-"
+            };
+            println!("  {arrow}[{}/{}] {}", hop.kind, hop.provenance, hop.node);
+        }
+        println!("({} hop(s))", result.length);
+    } else {
+        println!("no path from `{from}` to `{to}`");
+    }
+
+    if !result.found {
+        std::process::exit(1);
     }
     Ok(())
 }
