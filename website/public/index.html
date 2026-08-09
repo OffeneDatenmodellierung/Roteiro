@@ -7,27 +7,219 @@
 <link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>Roteiro — a provenance-tagged knowledge graph for your codebase</title>
+<meta name="description" content="Roteiro builds one queryable, provenance-tagged knowledge graph of your codebase — structure, intent, and context — for humans and AI agents alike. Offline by default, with optional local models and an MCP server.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
 <h1><img src="logo.svg" alt="" width="56" height="56" style="vertical-align:-14px;margin-right:.4rem">Roteiro</h1>
 <p class="tagline">The pilot book for your codebase.</p>
-<p>The Portuguese <em>roteiros</em> were the guarded pilot books of the Age of
+
+<p class="lead">The Portuguese <em>roteiros</em> were the guarded pilot books of the Age of
 Discovery — accumulated route knowledge that made navigation repeatable.
-Roteiro does the same for software: structure, intent, and context in one
-queryable, provenance-tagged knowledge graph, for humans and AI agents alike.</p>
+Roteiro does the same for software: <strong>structure, intent, and context in one
+queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents alike.</p>
+
+<nav class="toc">
+  <a href="#what">What it is</a>
+  <a href="#how">How it works</a>
+  <a href="#build">Install &amp; build</a>
+  <a href="#modes">Modes</a>
+  <a href="#models">Models</a>
+  <a href="#languages">Languages</a>
+  <a href="#links">Links</a>
+</nav>
+
+<h2 id="what">What Roteiro is</h2>
+
+<p>Roteiro reads a git repository and assembles a single <strong>SQLite knowledge graph</strong>
+of everything worth knowing about the code: the symbols and how they call each
+other, the documents and decisions that govern them, and the fuzzy relationships
+between them. Every node and edge is <strong>provenance-tagged</strong> — it records
+<em>how it was produced</em> — so you always know whether a fact is a hard truth
+extracted from the source, a human decision, or a machine's suggestion.</p>
+
 <table>
 <tr><th>Provenance</th><th>Source</th><th>Nature</th></tr>
-<tr><td><code>derived</code></td><td>tree-sitter AST extraction</td><td>Deterministic — symbols, calls, imports</td></tr>
-<tr><td><code>authored</code></td><td>ADRs, blueprints, <code>// @rto:</code> annotations</td><td>Curated intent, drift-checked in CI</td></tr>
-<tr><td><code>inferred</code></td><td>Docs, PDFs, embeddings</td><td>Fuzzy suggestions with confidence scores</td></tr>
+<tr><td><span class="pill derived">derived</span></td><td>tree-sitter AST extraction</td><td>Deterministic — symbols, calls, imports</td></tr>
+<tr><td><span class="pill authored">authored</span></td><td>ADRs, blueprints, <code>// @rto:</code> annotations</td><td>Curated intent, drift-checked in CI</td></tr>
+<tr><td><span class="pill inferred">inferred</span></td><td>Docs, PDFs, images, embeddings</td><td>Fuzzy suggestions with confidence scores</td></tr>
 </table>
-<p>One SQLite store. One query surface. Three renderers — docs website,
-Obsidian vault, optional MCP server — all build outputs of the same graph,
-so what humans review is what agents query.</p>
-<p><a href="https://github.com/OffeneDatenmodellierung/Roteiro">GitHub</a> ·
-<a href="https://crates.io/crates/roteiro">crates.io</a> ·
-<a href="adr/">Architecture Decision Records</a></p>
+
+<p>One store. One query surface. Three renderers — a docs website, an Obsidian
+vault, and an optional MCP server — are all <em>build outputs of the same graph</em>,
+so <strong>what humans review is exactly what agents query</strong>.</p>
+
+<div class="note"><strong>Offline by default.</strong> The default build needs no network and
+no model download. It is a small, pure-Rust binary. Everything heavier — local
+models, PDF/image ingestion, the model server — is opt-in behind a feature flag,
+and nothing ever touches the network without an explicit <code>[y/N]</code> consent.</div>
+
+<h2 id="how">How it works</h2>
+
+<p>The graph is built by an incremental, content-addressed pipeline. Re-running
+<code>sync</code> only re-extracts blobs whose content changed, so it stays fast on
+a large repository.</p>
+
+<div class="grid">
+  <div class="card"><h3>1 · Extract</h3><p>tree-sitter parses each source blob into symbols, calls and imports. Prose, PDFs and images can be ingested too. Deterministic and cached per git blob.</p></div>
+  <div class="card"><h3>2 · Author</h3><p>ADRs, blueprints and inline <code>// @rto:</code> annotations add human intent. <code>roteiro check</code> verifies these links against the code and fails CI on drift.</p></div>
+  <div class="card"><h3>3 · Infer</h3><p>Optional embeddings suggest <span class="pill inferred">inferred</span> similarity edges and likely duplicates, each with a confidence score you can threshold.</p></div>
+  <div class="card"><h3>4 · Render / Serve</h3><p>Emit a docs site or an Obsidian vault, or serve the graph to AI agents over MCP — every output is regenerated from the one store.</p></div>
+</div>
+
+<p>Because provenance is a first-class attribute, a query can say not just
+<em>“what calls this function”</em> but <em>“which of these relationships are
+verified facts versus a model's guess.”</em> That is the difference between a graph
+you can build automation on and one you can only browse.</p>
+
+<h2 id="build">Install &amp; build</h2>
+
+<p>Roteiro is a Rust workspace (MSRV 1.94). Install the lean default build from
+crates.io, or build from source with the feature tiers you want.</p>
+
+<pre><code><span class="c"># Lean, fully-offline default build</span>
+cargo install roteiro
+
+<span class="c"># From source, with optional capabilities enabled</span>
+git clone https://github.com/OffeneDatenmodellierung/Roteiro
+cd Roteiro
+cargo build --release --features "inference,models"</code></pre>
+
+<h3>Feature tiers</h3>
+<table>
+<tr><th>Feature</th><th>Adds</th></tr>
+<tr><td><em>(default)</em></td><td>Graph build, query, check, render — offline, no models, smallest binary.</td></tr>
+<tr><td><code>inference</code></td><td><code>roteiro infer</code> / <code>duplicates</code> with a pure-Rust hashing embedder. Still fully offline; no download.</td></tr>
+<tr><td><code>models</code></td><td>The <code>roteiro model</code> registry: list and consent-gated <code>pull</code> of local models.</td></tr>
+<tr><td><code>inference-local-models</code></td><td>Run pulled GGUF embedding &amp; generative models via the shared llama.cpp engine.</td></tr>
+<tr><td><code>pdf-text</code> · <code>image-ocr</code> · <code>image-vision</code></td><td>Ingest text from PDFs, OCR text from images, and describe images with a local vision model.</td></tr>
+<tr><td><code>serve</code></td><td>An OpenAI-compatible <code>/v1</code> model endpoint over your installed models (llama.cpp).</td></tr>
+<tr><td><code>mcp</code></td><td>The MCP graph server, exposing the graph to AI agents (stdio or HTTP).</td></tr>
+</table>
+
+<h2 id="modes">The four ways to run it</h2>
+
+<h3>1 · Offline mode <span style="font-weight:normal;color:var(--sub)">— the default</span></h3>
+<p>No models, no network. Build the graph, query it, verify authored intent, and
+render docs. This alone is a complete tool.</p>
+<pre><code><span class="c"># Scaffold the store, hooks and agent skill in your repo</span>
+roteiro init
+
+<span class="c"># Build / incrementally update the graph for the working tree</span>
+roteiro sync
+
+<span class="c"># Explain a node — its provenance-labelled neighbourhood</span>
+roteiro query 'sym:rust:crates/rto-graph/src/store.rs#Store'
+roteiro query --kind fn                 <span class="c"># list every function node</span>
+
+<span class="c"># Verify authored links against the code; non-zero exit on drift (CI gate)</span>
+roteiro check
+
+<span class="c"># Shortest path between two nodes, and outstanding intent-debt markers</span>
+roteiro path 'file:src/main.rs' 'adr:0001'
+roteiro debt
+
+<span class="c"># Render the graph to a docs site or an Obsidian vault</span>
+roteiro render docs
+roteiro render obsidian</code></pre>
+
+<h3>2 · Online mode <span style="font-weight:normal;color:var(--sub)">— richer inference with local models</span></h3>
+<p>Pull a real embedding or generative model <em>once</em> (with consent), then run
+everything locally — the “online” is a one-time, explicit download, after which
+inference is offline again. Requires <code>--features inference-local-models</code>.</p>
+<pre><code><span class="c"># See models curated for THIS machine's resources, then pull one</span>
+roteiro model list
+roteiro model pull bge-small-en-v1.5-gguf
+<span class="c">#   Download bge-small-en-v1.5-gguf (~65 MB, MIT) from …? [y/N]</span>
+
+<span class="c"># Suggest inferred similarity edges using the pulled embedding model</span>
+roteiro infer --model bge-small-en-v1.5-gguf --min-confidence 0.5
+
+<span class="c"># Report likely-duplicate content (same blob, or near-identical embeddings)</span>
+roteiro duplicates --min-similarity 0.9
+
+<span class="c"># Draft a house-style, graph-grounded ADR/blueprint with a generative model</span>
+roteiro spec scaffold "rate limiting" --kind adr
+roteiro spec draft draft-adr.md         <span class="c"># fills placeholder sections</span></code></pre>
+
+<h3>3 · Serving mode <span style="font-weight:normal;color:var(--sub)">— a local OpenAI-compatible endpoint</span></h3>
+<p>Serve your installed generative/embedding models over an OpenAI-compatible
+<code>/v1</code> API on loopback — reuse the same GGUFs from your editor or scripts.
+Requires <code>--features serve</code>.</p>
+<pre><code><span class="c"># Loopback by default (127.0.0.1:8017); front a public bind with a proxy</span>
+roteiro serve --models
+
+<span class="c"># Then call it like any OpenAI endpoint</span>
+curl http://127.0.0.1:8017/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"hello"}]}'</code></pre>
+
+<h3>4 · MCP mode <span style="font-weight:normal;color:var(--sub)">— the graph, for AI agents</span></h3>
+<p>Expose the knowledge graph to an MCP-capable agent (Claude, editors, custom
+tooling). Agents get typed tools to query nodes, fetch a node's context bundle,
+find paths and list debt — grounded in the <em>same</em> graph humans review.
+Requires <code>--features mcp</code>.</p>
+<pre><code><span class="c"># Default: MCP over stdio (for a local agent to spawn)</span>
+roteiro serve
+
+<span class="c"># Or networked over streamable HTTP (terminate TLS at a reverse proxy)</span>
+roteiro serve --http 127.0.0.1:8080</code></pre>
+
+<h2 id="models">Recommended local models</h2>
+
+<p>Models are <strong>pluggable and platform-aware</strong>: <code>roteiro model list</code>
+recommends a pick per section tuned to your machine (Apple-silicon Metal builds
+on macOS, standard GGUF elsewhere) — treat it as the source of truth. All local
+models are GGUF, run through the shared llama.cpp engine. A rough guide:</p>
+
+<h3>Embedding <span style="font-weight:normal;color:var(--sub)">— for <code>infer</code> / <code>duplicates</code></span></h3>
+<table>
+<tr><th>Model</th><th>Size</th><th>Dim</th><th>Best for</th></tr>
+<tr><td><code>bge-small-en-v1.5-gguf</code></td><td>~65 MB</td><td>384</td><td>Any laptop — the recommended default.</td></tr>
+<tr><td><code>bge-base-en-v1.5</code></td><td>~200 MB</td><td>768</td><td>Stronger recall on a moderate machine.</td></tr>
+<tr><td><code>bge-large-en-v1.5</code></td><td>~640 MB</td><td>1024</td><td>Best quality, for a workstation.</td></tr>
+</table>
+
+<h3>Generative <span style="font-weight:normal;color:var(--sub)">— for <code>spec draft</code> / serving</span></h3>
+<table>
+<tr><th>Model</th><th>Size</th><th>Role</th><th>Best for</th></tr>
+<tr><td><code>qwen3-0.6b</code></td><td>~380 MB</td><td>instruct</td><td>Tiny, offline — the <code>spec draft</code> default.</td></tr>
+<tr><td><code>qwen3-8b</code></td><td>~4.8 GB</td><td>instruct</td><td>Stronger drafting on a ~16 GB machine.</td></tr>
+<tr><td><code>qwen3-32b</code></td><td>~18 GB</td><td>instruct</td><td>Best drafting, for a workstation.</td></tr>
+<tr><td><code>qwen2.5-coder-3b</code></td><td>~1.8 GB</td><td>coding</td><td>Code completion &amp; code Q&amp;A.</td></tr>
+<tr><td><code>deepseek-r1-distill-qwen-1.5b</code></td><td>~1.0 GB</td><td>reasoning</td><td>Small chain-of-thought reasoning.</td></tr>
+</table>
+
+<h3>Vision &amp; OCR <span style="font-weight:normal;color:var(--sub)">— for image ingestion</span></h3>
+<table>
+<tr><th>Model</th><th>Size</th><th>Best for</th></tr>
+<tr><td><code>ocrs-text</code></td><td>~12 MB</td><td>Pure-Rust OCR — literal text in screenshots (<code>image-ocr</code>).</td></tr>
+<tr><td><code>smolvlm-500m-gguf</code></td><td>~520 MB</td><td>Describing diagrams &amp; photos (<code>image-vision</code>).</td></tr>
+</table>
+
+<h2 id="languages">Languages</h2>
+
+<p>Roteiro extracts a <strong>full symbol graph for Rust</strong> today — functions,
+structs, enums, traits, modules, <code>impl</code> blocks, <code>use</code> imports, and
+per-function call lists resolved into call edges across files. Broader
+first-class language extraction (Python, JavaScript/TypeScript, Go, Java, C/C++,
+C#, Ruby, PHP and more) is rolling out via tree-sitter's <code>tags</code> queries,
+which surface definitions and references through one shared code path.</p>
+
+<p>Independent of source language, <strong>any file is ingested as a graph node</strong>
+with size and content metadata — and prose (Markdown/text), PDFs and images can
+contribute embeddable content — so a repository is never opaque to the graph,
+only richer where a language extractor exists.</p>
+
+<h2 id="links">Links</h2>
+
+<p class="hero-links">
+<a href="https://github.com/OffeneDatenmodellierung/Roteiro">GitHub</a>
+<a href="https://crates.io/crates/roteiro">crates.io</a>
+<a href="adr/">Architecture Decision Records</a>
+</p>
+
 <footer>Dual-licensed MIT OR Apache-2.0 · The Roteiro Project Team</footer>
 </body>
 </html>
