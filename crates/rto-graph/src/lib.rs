@@ -44,6 +44,8 @@ pub use infer::{
     DuplicateConfig, DuplicatePair, DuplicateReport, EMBED_REF, Embedder, HashEmbedder,
     InferenceConfig, duplicates, duplicates_with, embed, infer_edges, infer_edges_with, similarity,
 };
+#[cfg(feature = "image-vision")]
+pub use localmodel::LocalVlm;
 #[cfg(feature = "inference-local-models")]
 pub use localmodel::{GenConfig, LocalEmbedder, LocalGenerator, LocalModelError};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};

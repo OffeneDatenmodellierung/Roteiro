@@ -72,6 +72,8 @@ pub enum ModelKind {
     Generative,
     /// An OCR model set for image text extraction (ADR-0005 Tier A).
     Ocr,
+    /// A vision-language model for image *understanding* (ADR-0005 Tier B).
+    Vision,
 }
 
 impl ModelKind {
@@ -82,6 +84,7 @@ impl ModelKind {
             Self::Embedding => "embedding",
             Self::Generative => "generative",
             Self::Ocr => "ocr",
+            Self::Vision => "vision",
         }
     }
 }
@@ -351,6 +354,34 @@ pub const REGISTRY: &[ModelSpec] = &[
             ],
         }],
     },
+    // ADR-0005 Tier B: Moondream2, a small vision-language model (candle
+    // `quantized_moondream`) that *describes* an image — for diagrams/photos OCR
+    // can't capture. Q4_0 GGUF; weights Apache-2.0 (vikhyatk/moondream2). Loaded
+    // via `LocalVlm` (needs `image-vision`, which pulls candle).
+    ModelSpec {
+        name: "moondream2",
+        kind: ModelKind::Vision,
+        tier: ResourceTier::Low,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Moondream2 (Q4_0 GGUF) — tiny offline vision-language model for `image-vision`",
+        size_mib: 1445,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/santiagomed/candle-moondream/resolve/main/model-q4_0.gguf",
+                    sha256: "cdde43dcf5f4249111ad36cadd8810ea88bf3aabb33de2bab0146e50a31d78c0",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/santiagomed/candle-moondream/resolve/main/tokenizer.json",
+                    sha256: "337da36be7a71a6e88aa9148967a7bc8736f4b47c7de8e19ba92b89e80734cfc",
+                },
+            ],
+        }],
+    },
 ];
 
 /// Look up a model spec by name.
@@ -465,7 +496,12 @@ mod tests {
     fn every_section_has_a_low_tier_floor() {
         // The curated matrix must offer a runs-anywhere pick for each section, so
         // `roteiro model list` always has a low-resource recommendation.
-        for kind in [ModelKind::Embedding, ModelKind::Generative, ModelKind::Ocr] {
+        for kind in [
+            ModelKind::Embedding,
+            ModelKind::Generative,
+            ModelKind::Ocr,
+            ModelKind::Vision,
+        ] {
             assert!(
                 REGISTRY
                     .iter()
