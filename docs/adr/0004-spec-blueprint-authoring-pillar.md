@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0004"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
+version: "1.0"
 last-modified: 2026-08-09
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.1 |
+| **Document version** | 1.0 |
 
 ## Reference
 
@@ -122,3 +122,4 @@ Project direction incorporated above: light-mode generation must run **offline o
 | Version | Date | Notes |
 |---------|------|-------|
 | 0.1 | 2026-08-09 | For Review. Tiered (0: offline scaffold → 1: local GGUF instruct → 2: larger local → 3: agent), graph-grounded, house-style, `check`-gated authoring pillar; spec-kit phases mapped to house artifacts; generative tier extends ADR-0003's registry/consent/candle machinery; agent-vs-tool boundary defined. |
+| 1.0 | 2026-08-09 | Accepted. Tier 0 implementation began with `roteiro spec context` (graph-grounded context assembly, no model). |
