@@ -292,6 +292,44 @@ pub struct DuplicateReport {
     pub pairs: Vec<DuplicatePair>,
 }
 
+/// Order two pairs by report rank, putting the *better* one first: exact
+/// duplicates ahead of semantic, then higher similarity, then smaller keys.
+fn better_first(p: &DuplicatePair, q: &DuplicatePair) -> std::cmp::Ordering {
+    q.exact
+        .cmp(&p.exact)
+        .then_with(|| {
+            q.similarity
+                .partial_cmp(&p.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| (&p.a, &p.b).cmp(&(&q.a, &q.b)))
+}
+
+/// A [`DuplicatePair`] whose `Ord` makes the *worst*-ranked pair the maximum, so
+/// a [`std::collections::BinaryHeap`] (a max-heap) keeps the best `limit` pairs
+/// by popping the worst whenever it overflows — bounding memory to `O(limit)`
+/// instead of collecting every `O(n²)` candidate pair.
+struct ByRank(DuplicatePair);
+
+impl PartialEq for ByRank {
+    fn eq(&self, other: &Self) -> bool {
+        better_first(&self.0, &other.0) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for ByRank {}
+impl PartialOrd for ByRank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ByRank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Worst-first: if `self` is worse than `other`, it is the greater (heap
+        // max), so it is the one evicted when the heap exceeds `limit`.
+        better_first(&self.0, &other.0)
+    }
+}
+
 /// Report likely-duplicate content over the graph using the default hashing
 /// embedding: nodes with identical content (the same git blob hash — the
 /// *structural* dedup) and nodes whose embeddings are near-identical (the
@@ -362,39 +400,45 @@ pub fn duplicates_with(
     // broken deterministically.
     cands.sort_by(|x, y| x.key.cmp(&y.key));
 
-    let mut pairs = Vec::new();
+    // Keep only the best `limit` pairs in a bounded max-heap (worst on top), so
+    // memory stays `O(limit)` even if a low `min_similarity` qualifies `O(n²)`
+    // pairs. `total` counts every qualifying pair regardless of the bound.
+    let mut total = 0usize;
+    let mut heap: std::collections::BinaryHeap<ByRank> = std::collections::BinaryHeap::new();
     for (i, a) in cands.iter().enumerate() {
         for b in cands.iter().skip(i + 1) {
             // Exact: two files that are the same blob (whole-content identity).
             let exact = a.is_file
                 && b.is_file
                 && matches!((&a.blob, &b.blob), (Some(x), Some(y)) if x == y);
-            // Semantic: both carry real content and embed near-identically.
+            let both_content = a.has_content && b.has_content;
+            // A pair that is neither exact nor content-vs-content can never be a
+            // duplicate — skip it *before* the similarity computation.
+            if !exact && !both_content {
+                continue;
+            }
             let sim = similarity(&a.vec, &b.vec);
-            let semantic = a.has_content && b.has_content && sim >= config.min_similarity;
-            if exact || semantic {
-                pairs.push(DuplicatePair {
-                    a: a.key.clone(),
-                    b: b.key.clone(),
-                    similarity: sim,
-                    exact,
-                });
+            if !exact && sim < config.min_similarity {
+                continue;
+            }
+            total += 1;
+            if config.limit == 0 {
+                continue;
+            }
+            heap.push(ByRank(DuplicatePair {
+                a: a.key.clone(),
+                b: b.key.clone(),
+                similarity: sim,
+                exact,
+            }));
+            if heap.len() > config.limit {
+                heap.pop(); // drop the current worst-ranked pair
             }
         }
     }
-    let total = pairs.len();
-    // Exact duplicates first, then highest similarity, then key order.
-    pairs.sort_by(|p, q| {
-        q.exact
-            .cmp(&p.exact)
-            .then_with(|| {
-                q.similarity
-                    .partial_cmp(&p.similarity)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| (&p.a, &p.b).cmp(&(&q.a, &q.b)))
-    });
-    pairs.truncate(config.limit);
+    let mut pairs: Vec<DuplicatePair> = heap.into_iter().map(|r| r.0).collect();
+    // Best first: exact ahead of semantic, then highest similarity, then key.
+    pairs.sort_by(better_first);
     Ok(DuplicateReport {
         schema: crate::query::SCHEMA,
         total,
@@ -668,6 +712,42 @@ mod tests {
                 .all(|p| p.a != "file:docs/z.md" && p.b != "file:docs/z.md"),
             "unrelated node must not be a duplicate",
         );
+    }
+
+    #[test]
+    fn duplicates_bounds_memory_by_limit_and_counts_total() {
+        // Six content nodes with the same body → every one of the 15 pairs
+        // qualifies at similarity 1.0. A `limit` of 2 must keep exactly two of
+        // them while `total` still reports all fifteen.
+        let mut store = Store::open_in_memory().expect("store");
+        let mut facts = FactSet::new();
+        for i in 0..6 {
+            let mut n = Node::new(
+                format!("file:docs/d{i}.md"),
+                NodeKind::Doc,
+                format!("d{i}.md"),
+            );
+            n.path = Some(format!("docs/d{i}.md"));
+            n.meta = serde_json::json!({ "content": "identical shared documentation body text" });
+            facts = facts.with_node(n);
+        }
+        store.apply_factset(&facts).expect("apply");
+
+        let report = duplicates(
+            &store,
+            DuplicateConfig {
+                min_similarity: 0.0,
+                limit: 2,
+            },
+        )
+        .expect("dup");
+        assert_eq!(report.total, 15, "all C(6,2) pairs counted");
+        assert_eq!(report.pairs.len(), 2, "output bounded by limit");
+        // The kept pairs are genuine (canonical order, in range).
+        for p in &report.pairs {
+            assert!(p.a < p.b);
+            assert!((0.0..=1.0).contains(&p.similarity));
+        }
     }
 
     #[test]
