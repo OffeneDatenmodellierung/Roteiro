@@ -1,6 +1,6 @@
 # Roteiro — Build Plan
 
-Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-08
+Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-09
 Governing decision: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
 
 This plan takes Roteiro from the initial v0.0.1 scaffold to a dogfooded v1.0. It
@@ -9,21 +9,22 @@ release-plz. Every stage names its deliverables, the concrete Rust surface it
 adds, new dependencies (with licence notes for the `cargo deny` gate), the CLI
 it wires up, and an explicit **Definition of Done (DoD)**.
 
-**Current position (2026-08-08):** Stages 1–8 are delivered (Stage 8 = offline
-inference core + candle local-models), Stage 10's portable graph-artifact
-format shipped, and **Stage 9's Graphify importer** is done. What each stage
-*deferred* is now tracked honestly as first-class **Stages 11–14** in §5b — so
-nothing hides in a footnote. Agreed order: **Stage 11** (lat.md + codegraph
-importers) → **Stage 12** (inference content/PDF/image ingestion + semantic
-dedup) → **Stage 13** (spec/blueprint authoring pillar) → **Stage 16**
-(commit-time correctness gate) → **Stage 14** (v1.0 hardening). **A note on stage
-numbers:** they are labels, not execution order — Stage 15 (intent-debt) shipped
-early and independently, and Stage 16 (commit-time gate) is sequenced last before
-the Stage 14 freeze because it touches sync, check, and hooks together. **A note
-on version labels:** the per-stage `v0.x` headings are
-*nominal targets*; because the workspace is pre-1.0, release-plz bumps `feat`
-commits as patches, so real tags are `0.0.n` (Stage 1 → v0.0.2 … artifacts →
-v0.0.10, Graphify import → next). §7 maps them.
+**Current position (2026-08-09):** Stages 1–8 are delivered (Stage 8 = offline
+inference core + candle local-models), Stage 10's portable graph-artifact format
+shipped, **Stage 9's Graphify importer** is done, **Stage 15** (intent-debt
+tracking) shipped independently, and **Stage 11** is complete — durable +
+validated imports, the lat.md importer, and the codegraph validation oracle — so
+the migration path off all three incumbents is finished. What each stage
+*deferred* is tracked honestly as first-class stages in §5b. Remaining order:
+**Stage 13** (spec/blueprint authoring pillar — *next*) → **Stage 12** (inference
+content/PDF/image ingestion + semantic dedup) → **Stage 16** (commit-time
+correctness gate) → **Stage 14** (v1.0 hardening). **A note on stage numbers:**
+they are labels, not execution order — Stage 15 shipped early, Stage 13 is being
+taken before Stage 12, and Stage 16 is sequenced last before the Stage 14 freeze
+because it touches sync, check, and hooks together. **A note on version labels:**
+the per-stage `v0.x` headings are *nominal targets*; because the workspace is
+pre-1.0, release-plz bumps `feat` commits as patches, so real tags are `0.0.n`
+(Stage 1 → v0.0.2 … artifacts → v0.0.10 … Stage 11 → v0.0.12). §7 maps them.
 
 ---
 
@@ -401,7 +402,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     dedup. Also outstanding: real per-model SHA-256 pins + Apple MLX registry
     variants.
 
-### Stage 9 — Importers  → **v0.9.0** 🚧 *Graphify delivered; lat.md / codegraph pending samples*
+### Stage 9 — Importers  → **v0.9.0** ✅ *Graphify delivered; lat.md + codegraph completed in Stage 11*
 **Goal:** migration path off the three incumbents.
 - `roteiro import --from lat|graphify|codegraph`: lat.md → `authored`, Graphify
   doc/media nodes → `inferred` (drop its code-structure edges in favour of
@@ -713,11 +714,11 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.7.0 | 7 | MCP `serve` (rmcp; stdio + HTTP, [ADR-0002](adr/0002-adopt-rmcp-for-networked-mcp-serving.md)) | ✅ v0.0.8 |
 | — | 7+ | `roteiro path` + MCP `path` tool (follow-up) | ✅ v0.0.9 |
 | v0.8.0 | 8 | Inference layer (`inferred` + confidence) | ✅ offline core + candle local-models (`roteiro infer`/`model`); **ingestion → Stage 12** |
-| v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | 🚧 Graphify shipped; **lat.md/codegraph → Stage 11** |
+| v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ✅ Graphify shipped; lat.md + codegraph completed in Stage 11 |
 | v0.10.x | 10 | CI-canonical artifacts | 🚧 artifact `export`/`load` shipped (v0.0.10); **CI publish/fetch etc. → Stage 14** |
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ✅ durable+validated imports, lat.md importer, codegraph oracle (`compare_codegraph`) |
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
-| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ⛔ the "spec-store" front door from ADR-0001 |
+| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ⛔ **next** — the "spec-store" front door from ADR-0001 |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
