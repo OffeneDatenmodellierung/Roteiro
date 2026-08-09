@@ -794,14 +794,15 @@ fn infer_with_embedder(
     ))
 }
 
-/// Feature-rich variant: honour `--model` by loading a local candle model.
+/// Feature-rich variant: honour `--model` by loading a local **GGUF** embedding
+/// model through the shared llama.cpp engine (ADR-0003 v1.1) — no candle.
 #[cfg(feature = "inference-local-models")]
 fn infer_with_embedder(
     store: &rto_graph::Store,
     config: rto_graph::InferenceConfig,
     model: Option<&str>,
 ) -> anyhow::Result<(Vec<rto_graph::Edge>, String)> {
-    use rto_graph::{HashEmbedder, LocalEmbedder, Platform, infer_edges_with};
+    use rto_graph::{HashEmbedder, Platform, infer_edges_with};
 
     let Some(name) = model else {
         return Ok((
@@ -822,28 +823,50 @@ fn infer_with_embedder(
              (or omit --model to use the offline default)"
         );
     }
-    let dir = rto_graph::model_dir(name);
-    let embedder =
-        LocalEmbedder::load(&dir).map_err(|e| anyhow::anyhow!("loading model `{name}`: {e}"))?;
-    let edges = infer_edges_with(store, config, &EmbedderAdapter(&embedder))?;
-    Ok((
-        edges,
-        format!("local model `{name}` (dim {})", embedder.dim()),
-    ))
+    let embedder = LlamaEmbedder::new(name)?;
+    let edges = infer_edges_with(store, config, &embedder)?;
+    Ok((edges, format!("local model `{name}` (llama.cpp)")))
 }
 
-/// Adapts a fallible [`LocalEmbedder`] to the infallible [`rto_graph::Embedder`]
-/// trait: on an embedding failure it returns an **empty** vector rather than
-/// aborting the whole run. An empty vector has a length no real embedding
-/// shares, so [`rto_graph::similarity`] scores it `0.0` against every other
-/// node — i.e. that node simply receives no suggestions.
+/// A GGUF embedding model behind the [`rto_graph::Embedder`] trait, backed by the
+/// shared llama.cpp engine. On an embedding failure it returns an **empty**
+/// vector rather than aborting the run — an empty vector shares no length with a
+/// real embedding, so [`rto_graph::similarity`] scores it `0.0` against every
+/// node (that node simply receives no suggestions).
 #[cfg(feature = "inference-local-models")]
-struct EmbedderAdapter<'a>(&'a rto_graph::LocalEmbedder);
+struct LlamaEmbedder {
+    engine: rto_llama::llama::LlamaEngine,
+    model: String,
+}
 
 #[cfg(feature = "inference-local-models")]
-impl rto_graph::Embedder for EmbedderAdapter<'_> {
+impl LlamaEmbedder {
+    fn new(name: &str) -> anyhow::Result<Self> {
+        let engine = rto_llama::llama::LlamaEngine::new(
+            vec![rto_llama::llama::Served {
+                name: name.to_owned(),
+                path: rto_graph::model_dir(name).join("model.gguf"),
+                mmproj: None,
+            }],
+            0,
+        )
+        .map_err(|e| anyhow::anyhow!("loading model `{name}`: {e}"))?;
+        Ok(Self {
+            engine,
+            model: name.to_owned(),
+        })
+    }
+}
+
+#[cfg(feature = "inference-local-models")]
+impl rto_graph::Embedder for LlamaEmbedder {
     fn embed(&self, text: &str) -> Vec<f32> {
-        self.0.embed(text).unwrap_or_default()
+        use rto_llama::Engine as _;
+        self.engine
+            .embed(&self.model, &[text.to_owned()])
+            .ok()
+            .and_then(|mut v| v.pop())
+            .unwrap_or_default()
     }
 }
 
@@ -1410,39 +1433,43 @@ fn run_spec_draft(
     emit_artifact(&md, &format!("{label} draft"), out)
 }
 
-/// Draft each placeholder section of `scaffold` with the local generative model,
-/// via **llama.cpp** (`serve`) — the Stage-20 inference-core path.
-#[cfg(feature = "serve")]
+/// The generation backend label shown after drafting.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
 const GEN_BACKEND: &str = "llama.cpp";
 
 /// Max tokens generated per drafted section.
-#[cfg(feature = "serve")]
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
 const DRAFT_MAX_TOKENS: u32 = 800;
 
-#[cfg(feature = "serve")]
+/// Draft each placeholder section of `scaffold` with the local generative model
+/// through the shared **llama.cpp** engine (`rto-llama`, ADR-0003 v1.1) — no
+/// candle. Available under either `serve` or `inference-local-models`.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn draft_sections(
     model: &str,
     scaffold: &str,
     topic: &str,
     ctx: &rto_spec::SpecContext,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    use rto_serve::Engine as _; // brings `.chat` into scope
+    use rto_llama::Engine as _; // brings `.chat` into scope
 
-    let served = vec![rto_serve::llama::Served {
-        name: model.to_owned(),
-        path: rto_graph::model_dir(model).join("model.gguf"),
-        mmproj: None,
-    }];
-    let engine = rto_serve::llama::LlamaEngine::new(served, 0)
-        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    let engine = rto_llama::llama::LlamaEngine::new(
+        vec![rto_llama::llama::Served {
+            name: model.to_owned(),
+            path: rto_graph::model_dir(model).join("model.gguf"),
+            mmproj: None,
+        }],
+        0,
+    )
+    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
 
     let mut drafts = Vec::new();
     for (heading, hint) in rto_spec::draft_targets(scaffold) {
         let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
         let completion = engine
-            .chat(&rto_serve::ChatRequest {
+            .chat(&rto_llama::ChatRequest {
                 model: model.to_owned(),
-                messages: vec![rto_serve::Message {
+                messages: vec![rto_llama::Message {
                     role: "user".to_owned(),
                     content: prompt,
                 }],
@@ -1464,40 +1491,12 @@ fn draft_sections(
 
 /// Drop a leading `<think>…</think>` reasoning block, returning the answer that
 /// follows it. Text with no closing `</think>` is returned unchanged.
-#[cfg(feature = "serve")]
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn strip_thinking(text: &str) -> String {
     match text.find("</think>") {
         Some(end) => text[end + "</think>".len()..].trim_start().to_owned(),
         None => text.to_owned(),
     }
-}
-
-/// Transitional fallback: draft with the candle `LocalGenerator` on a build that
-/// has `inference-local-models` but not `serve`.
-#[cfg(all(not(feature = "serve"), feature = "inference-local-models"))]
-const GEN_BACKEND: &str = "candle";
-
-#[cfg(all(not(feature = "serve"), feature = "inference-local-models"))]
-fn draft_sections(
-    model: &str,
-    scaffold: &str,
-    topic: &str,
-    ctx: &rto_spec::SpecContext,
-) -> anyhow::Result<Vec<(String, String)>> {
-    let mut generator = rto_graph::LocalGenerator::load(&rto_graph::model_dir(model))
-        .map_err(|e| anyhow::anyhow!("loading {model}: {e}"))?;
-    let cfg = rto_graph::GenConfig::default();
-    let mut drafts = Vec::new();
-    for (heading, hint) in rto_spec::draft_targets(scaffold) {
-        let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
-        let prose = generator
-            .generate(None, &prompt, &cfg)
-            .map_err(|e| anyhow::anyhow!("drafting `{heading}`: {e}"))?;
-        if !prose.trim().is_empty() {
-            drafts.push((heading, prose));
-        }
-    }
-    Ok(drafts)
 }
 
 /// `spec draft` without a generation backend: guide the user to enable one.
