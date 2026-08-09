@@ -1,0 +1,27 @@
+[package]
+name = "rto-llama"
+description = "Roteiro's llama.cpp inference core: the Engine trait + a llama.cpp-backed engine (generation, embeddings, vision), shared by serving and internal uses (ADR-0003/0006)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# The llama.cpp engine. Opt-in: pulls a C/C++ toolchain (cmake, clang, libclang)
+# to build vendored llama.cpp. The pure-Rust `Engine` trait + request/result
+# types build and are usable without it (e.g. mock engines, wire mappers).
+llama-cpp-2 = { version = "0.1.154", optional = true }
+encoding_rs = { version = "0.8", optional = true }
+
+[features]
+# The real llama.cpp-backed engine. Off by default so downstream default builds
+# stay pure-Rust; callers turn it on when they need local inference.
+llama = ["dep:llama-cpp-2", "llama-cpp-2/mtmd", "dep:encoding_rs"]
+
+[lints]
+workspace = true

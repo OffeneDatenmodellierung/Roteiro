@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rto-graph",
+    "crates/rto-llama",
     "crates/rto-spec",
     "crates/rto-render",
     "crates/rto-serve",
@@ -19,6 +20,7 @@ authors = ["The Roteiro Project Team"]
 
 [workspace.dependencies]
 rto-graph = { path = "crates/rto-graph", version = "0.0.13" }
+rto-llama = { path = "crates/rto-llama", version = "0.0.13" }
 rto-spec = { path = "crates/rto-spec", version = "0.0.13" }
 rto-render = { path = "crates/rto-render", version = "0.0.13" }
 rto-serve = { path = "crates/rto-serve", version = "0.0.13" }

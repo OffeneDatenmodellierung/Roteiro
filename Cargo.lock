@@ -3391,6 +3391,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rto-llama"
+version = "0.0.13"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "llama-cpp-2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "rto-render"
 version = "0.0.13"
 dependencies = [
@@ -3411,9 +3421,8 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "encoding_rs",
  "http-body-util",
- "llama-cpp-2",
+ "rto-llama",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
