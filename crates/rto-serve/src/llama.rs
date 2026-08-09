@@ -344,8 +344,8 @@ impl Engine for LlamaEngine {
         match (req.images.is_empty(), mmproj.as_deref()) {
             (true, _) => self.chat_text(model, req, on_token),
             (false, Some(mmproj)) => self.chat_vision(model, mmproj, req, on_token),
-            (false, None) => Err(EngineError::Inference(format!(
-                "model `{}` has no vision projector and cannot accept images",
+            (false, None) => Err(EngineError::InvalidRequest(format!(
+                "model `{}` is text-only and cannot accept images",
                 req.model
             ))),
         }

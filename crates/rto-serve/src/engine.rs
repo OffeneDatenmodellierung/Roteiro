@@ -89,6 +89,10 @@ pub enum EngineError {
     /// The requested model is not one this engine serves.
     #[error("model `{0}` is not served (see GET /v1/models)")]
     UnknownModel(String),
+    /// The request is malformed for the chosen model (e.g. images sent to a
+    /// text-only model) — a client error (400), not an internal failure.
+    #[error("{0}")]
+    InvalidRequest(String),
     /// The operation is not implemented by the active engine (e.g. embeddings on
     /// a chat-only engine) — a 501, not an internal failure.
     #[error("not supported: {0}")]

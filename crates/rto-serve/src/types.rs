@@ -84,12 +84,18 @@ pub struct ChatMessageDto {
     pub content: String,
 }
 
+/// Max base64 payload length for an image (~20 MiB once decoded) — a guard
+/// against a request decoding an unbounded blob into memory.
+const MAX_IMAGE_B64_LEN: usize = 28 * 1024 * 1024;
+
 /// Decode an `image_url` into raw (still-encoded, e.g. PNG/JPEG) image bytes.
-/// Only `data:` URIs are supported — a local server does not fetch remote URLs
-/// (avoids SSRF); the decoder further down handles the actual image format.
+/// Only `data:image/*;base64,…` URIs are accepted — a local server does not fetch
+/// remote URLs (avoids SSRF), the payload must be a base64 image, and it is size-
+/// capped; the image decoder downstream handles the actual format.
 ///
 /// # Errors
-/// Returns a message if the URL is not a base64 `data:` URI or fails to decode.
+/// Returns a message if the URL is not a base64 `image/*` `data:` URI, is over
+/// the size cap, or fails to decode.
 fn decode_image_url(url: &str) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     let rest = url
@@ -98,11 +104,20 @@ fn decode_image_url(url: &str) -> Result<Vec<u8>, String> {
     let (meta, data) = rest
         .split_once(',')
         .ok_or("malformed data URI (no comma)")?;
-    if !meta.contains("base64") {
-        return Err("only base64 data URIs are supported".to_owned());
+    // MIME types are case-insensitive; normalise before matching.
+    let meta = meta.to_ascii_lowercase();
+    if !meta.starts_with("image/") {
+        return Err("`image_url` must be an `image/*` data URI".to_owned());
+    }
+    if !meta.ends_with(";base64") {
+        return Err("only base64-encoded image data URIs are supported".to_owned());
+    }
+    let data = data.trim();
+    if data.len() > MAX_IMAGE_B64_LEN {
+        return Err("image is too large".to_owned());
     }
     base64::engine::general_purpose::STANDARD
-        .decode(data.trim())
+        .decode(data)
         .map_err(|e| format!("base64 decode: {e}"))
 }
 
@@ -117,9 +132,14 @@ impl ChatCompletionRequest {
         if self.messages.is_empty() {
             return Err("`messages` must not be empty".to_owned());
         }
+        // Images are placed at the last `user` turn (where the vision path inserts
+        // the media markers), so images may only appear there — anywhere else the
+        // ordering relative to the text would be ambiguous.
+        let last_user = self.messages.iter().rposition(|m| m.role == "user");
         let mut messages = Vec::with_capacity(self.messages.len());
         let mut images: Vec<Vec<u8>> = Vec::new();
-        for m in self.messages {
+        for (i, m) in self.messages.into_iter().enumerate() {
+            let is_last_user = Some(i) == last_user;
             let text = match m.content.unwrap_or(MessageContent::Text(String::new())) {
                 MessageContent::Text(s) => s,
                 MessageContent::Parts(parts) => {
@@ -133,6 +153,12 @@ impl ChatCompletionRequest {
                                 text.push_str(&t);
                             }
                             ContentPart::ImageUrl { image_url } => {
+                                if !is_last_user {
+                                    return Err(
+                                        "images are only supported in the last user message"
+                                            .to_owned(),
+                                    );
+                                }
                                 images.push(decode_image_url(&image_url.url)?);
                             }
                         }
