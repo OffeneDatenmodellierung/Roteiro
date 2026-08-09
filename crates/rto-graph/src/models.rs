@@ -74,6 +74,42 @@ pub enum ModelKind {
     Ocr,
 }
 
+impl ModelKind {
+    /// Stable token naming the model's *section* in the registry.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedding => "embedding",
+            Self::Generative => "generative",
+            Self::Ocr => "ocr",
+        }
+    }
+}
+
+/// The rough hardware a model is aimed at — an opinionated curation so `roteiro
+/// model list` can recommend a pick per section for a machine's resources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceTier {
+    /// Runs comfortably on any laptop (low RAM/CPU).
+    Low,
+    /// Wants a moderate machine (~16 GB).
+    Mid,
+    /// Aimed at a workstation (e.g. a 64 GB Apple-silicon machine).
+    High,
+}
+
+impl ResourceTier {
+    /// Stable token for this tier.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Mid => "mid",
+            Self::High => "high",
+        }
+    }
+}
+
 /// A model the user can pull and use.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelSpec {
@@ -81,6 +117,8 @@ pub struct ModelSpec {
     pub name: &'static str,
     /// What the model is for.
     pub kind: ModelKind,
+    /// The hardware tier this pick is curated for within its section.
+    pub tier: ResourceTier,
     /// Embedding dimensionality (0 for generative models).
     pub dim: usize,
     /// SPDX licence of the model weights.
@@ -119,6 +157,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "all-minilm-l6-v2",
         kind: ModelKind::Embedding,
+        tier: ResourceTier::Low,
         dim: 384,
         licence: "Apache-2.0",
         description: "sentence-transformers/all-MiniLM-L6-v2 — small, fast general-purpose embeddings",
@@ -144,12 +183,76 @@ pub const REGISTRY: &[ModelSpec] = &[
             ],
         }],
     },
+    // Mid embedding tier: a stronger general-purpose BERT sentence-transformer,
+    // loadable by the same `LocalEmbedder` as MiniLM (standard BERT arch).
+    ModelSpec {
+        name: "bge-base-en-v1.5",
+        kind: ModelKind::Embedding,
+        tier: ResourceTier::Mid,
+        dim: 768,
+        licence: "MIT",
+        description: "BAAI/bge-base-en-v1.5 — stronger English embeddings (768-d)",
+        size_mib: 420,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "config.json",
+                    url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/config.json",
+                    sha256: "bc00af31a4a31b74040d73370aa83b62da34c90b75eb77bfa7db039d90abd591",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json",
+                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+                },
+                ModelFile {
+                    name: "model.safetensors",
+                    url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/model.safetensors",
+                    sha256: "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7",
+                },
+            ],
+        }],
+    },
+    // High embedding tier: the strongest BERT sentence-transformer our loader
+    // handles (bigger/better embeddings than this are decoder-based — e.g.
+    // gte-Qwen2-7B — and need a future decoder-embedding loader).
+    ModelSpec {
+        name: "bge-large-en-v1.5",
+        kind: ModelKind::Embedding,
+        tier: ResourceTier::High,
+        dim: 1024,
+        licence: "MIT",
+        description: "BAAI/bge-large-en-v1.5 — strongest BERT embeddings we load (1024-d)",
+        size_mib: 1340,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "config.json",
+                    url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/config.json",
+                    sha256: "446712fac367857b4b1302762fe1cd7bfa8b3c4b77b4dc5d77c4025407660896",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/tokenizer.json",
+                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+                },
+                ModelFile {
+                    name: "model.safetensors",
+                    url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/model.safetensors",
+                    sha256: "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
+                },
+            ],
+        }],
+    },
     // ADR-0004 Tier 1: a tiny Apache-2.0 instruct model for offline spec/blueprint
     // drafting (Qwen2 arch, ChatML). Stored locally as `model.gguf` + its
     // tokenizer (which lives in the base instruct repo, not the GGUF repo).
     ModelSpec {
         name: "qwen2.5-0.5b-instruct",
         kind: ModelKind::Generative,
+        tier: ResourceTier::Low,
         dim: 0,
         licence: "Apache-2.0",
         description: "Qwen2.5-0.5B-Instruct (Q4_K_M GGUF) — tiny offline instruct model for `spec draft`",
@@ -177,6 +280,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "ocrs-text",
         kind: ModelKind::Ocr,
+        tier: ResourceTier::Low,
         dim: 0,
         licence: "CC-BY-SA-4.0",
         description: "ocrs text detection + recognition (pure-Rust OCR for `image-ocr`)",
@@ -275,7 +379,9 @@ pub fn ensure_model_dir(name: &str) -> std::io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelKind, Platform, REGISTRY, find, sha256_hex, store_root, verify_sha256};
+    use super::{
+        ModelKind, Platform, REGISTRY, ResourceTier, find, sha256_hex, store_root, verify_sha256,
+    };
     use std::path::Path;
 
     #[test]
@@ -301,6 +407,22 @@ mod tests {
             );
             let v = spec.variant_for(Platform::host()).expect("host variant");
             assert!(!v.files.is_empty());
+            assert!(!spec.tier.as_str().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_section_has_a_low_tier_floor() {
+        // The curated matrix must offer a runs-anywhere pick for each section, so
+        // `roteiro model list` always has a low-resource recommendation.
+        for kind in [ModelKind::Embedding, ModelKind::Generative, ModelKind::Ocr] {
+            assert!(
+                REGISTRY
+                    .iter()
+                    .any(|s| s.kind == kind && s.tier == ResourceTier::Low),
+                "section {} needs a Low-tier entry",
+                kind.as_str(),
+            );
         }
     }
 
