@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.12...rto-render-v0.0.13) - 2026-08-09
+
+### Fixed
+
+- *(docs)* link .ico + apple-touch-icon favicons in rendered pages
+- *(render)* rewrite `[…](*.md)` links to their rendered `.html` targets
+
+### Other
+
+- Add favicon assertions to root-level render_doc test
+- Potential fix for pull request finding
+
 ## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.11...rto-render-v0.0.12) - 2026-08-09
 
 ### Added

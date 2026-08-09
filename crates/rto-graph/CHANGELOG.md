@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.12...rto-graph-v0.0.13) - 2026-08-09
+
+### Added
+
+- *(config)* wire [ingest] content toggles into sync (ADR-0007)
+- *(generator)* Qwen3 support + curated generative tiers (low/mid/high)
+- *(models)* opinionated model matrix — resource tiers per section
+- *(extract)* Tier A image OCR via ocrs/rten (Stage 12, ADR-0005)
+- *(context)* dependency-aware per-node context cache (Stage 12)
+- *(infer)* semantic + structural duplicate detection (Stage 12)
+- *(extract)* ingest PDF text into meta.content (Stage 12, feature-gated)
+- *(infer)* embed real content, not just names (Stage 12 content ingestion)
+- *(spec)* `roteiro spec draft` — Tier 1 offline local-model drafting (completes Stage 13)
+- *(spec)* `roteiro spec context` — graph-grounded authoring context (Stage 13, Tier 0)
+
+### Fixed
+
+- *(models)* PR #75 review — clean up the partial file on any download error
+- PR #72 review — clearer arch match, generic error doc, tier-consistent desc
+- *(models)* PR #71 review — pin SHA-256 for the bge embedding files
+- *(extract)* PR #69 review — host-variant env tag, borrow in OCR guard, docs
+- *(context)* PR #64 review — exact confidence in fingerprint; lighter refresh; doc link
+- *(extract)* PR #62 review — case-insensitive extension dispatch
+- *(extract)* PR #61 review — O(n) content cap; robust `/**/` doc comment
+- *(spec)* PR #60 review — require an EOS token; clear KV cache defensively
+- *(spec)* use a range loop for the decode counter (CI clippy 1.97)
+- *(spec)* PR #53 review — short-circuit limit==0; lock in clean scaffold output
+- *(query)* PR #52 review — `::`-only tokenizer, node-only search scan
+
+### Other
+
+- address PR #82 review — precise env_tag + missing-feature wording
+- Merge branch 'main' into feat/streaming-downloads
+- *(models)* stream model downloads to disk instead of buffering in memory
+- *(models)* decouple the model registry/pull from the candle feature
+- *(infer)* PR #63 review — bound dedup memory to O(limit); skip needless sims
+
 ## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.11...rto-graph-v0.0.12) - 2026-08-09
 
 ### Added
