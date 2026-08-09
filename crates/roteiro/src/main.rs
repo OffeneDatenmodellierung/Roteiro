@@ -59,6 +59,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List intent-debt markers (TODOs, stubs, deferred work) in the graph.
+    Debt {
+        /// Restrict to these categories (repeatable): todo | fixme | hack |
+        /// stub | deferred. Omit to list all.
+        #[arg(long, value_name = "CATEGORY")]
+        kind: Vec<String>,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Find a shortest path between two nodes (edges followed either direction).
     Path {
         /// Start node key.
@@ -157,6 +167,7 @@ fn main() -> anyhow::Result<()> {
         Command::Sync { json, committed } => return run_sync(json, committed),
         Command::Check { json } => return run_check(json),
         Command::Query { key, kind, json } => return run_query(key, kind, json),
+        Command::Debt { kind, json } => return run_debt(&kind, json),
         Command::Path { from, to, json } => return run_path(&from, &to, json),
         Command::Export { out } => return run_export(out),
         Command::Load { file } => return run_load(&file),
@@ -306,6 +317,8 @@ fn run_check(json: bool) -> anyhow::Result<()> {
             report.annotations_ok,
             report.violations.len(),
         );
+        // Report intent debt alongside drift (a summary, not a gate).
+        println!("{}", debt_summary(&rto_graph::debt(&store, &[])?));
     }
 
     if report.has_violations() {
@@ -759,6 +772,47 @@ fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::R
         }
     }
     Ok(())
+}
+
+/// List intent-debt markers (TODOs, stubs, deferred work) in the graph, grouped
+/// by category. A report, not a gate: it always exits zero.
+fn run_debt(kinds: &[String], json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    let report = rto_graph::debt(&store, kinds)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for item in &report.items {
+            let loc = match (&item.path, item.line) {
+                (Some(p), Some(l)) => format!("{p}:{l}"),
+                (Some(p), None) => p.clone(),
+                _ => item.key.clone(),
+            };
+            println!("  [{}] {loc}  {}", item.category, item.text);
+        }
+        println!("{}", debt_summary(&report));
+    }
+    Ok(())
+}
+
+/// A one-line summary of a [`rto_graph::DebtReport`], e.g.
+/// `intent debt: 12 marker(s) (deferred 5, stub 4, todo 3)`.
+fn debt_summary(report: &rto_graph::DebtReport) -> String {
+    if report.total == 0 {
+        return "intent debt: none".to_owned();
+    }
+    let breakdown: Vec<String> = report
+        .by_category
+        .iter()
+        .map(|(cat, n)| format!("{cat} {n}"))
+        .collect();
+    format!(
+        "intent debt: {} marker(s) ({})",
+        report.total,
+        breakdown.join(", ")
+    )
 }
 
 /// Find and print a shortest path between two nodes. Exits non-zero if the two

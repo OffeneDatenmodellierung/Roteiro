@@ -38,6 +38,8 @@ pub enum NodeKind {
     Blueprint,
     /// A free-form documentation artifact.
     Doc,
+    /// An intent-debt marker (a `TODO`/`FIXME`/stub/deferred-work finding).
+    Marker,
     /// Any kind not covered above, kept verbatim.
     Other(String),
 }
@@ -57,6 +59,7 @@ impl NodeKind {
             Self::AdrSection => "adr_section",
             Self::Blueprint => "blueprint",
             Self::Doc => "doc",
+            Self::Marker => "marker",
             Self::Other(s) => s,
         }
     }
@@ -76,6 +79,7 @@ impl NodeKind {
             "adr_section" => Self::AdrSection,
             "blueprint" => Self::Blueprint,
             "doc" => Self::Doc,
+            "marker" => Self::Marker,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -380,6 +384,7 @@ mod tests {
             NodeKind::AdrSection,
             NodeKind::Blueprint,
             NodeKind::Doc,
+            NodeKind::Marker,
             NodeKind::Other("weird".to_owned()),
         ];
         for k in kinds {

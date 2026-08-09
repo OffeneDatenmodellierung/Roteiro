@@ -24,16 +24,20 @@ pub trait Extractor {
 }
 
 /// Dispatches extraction to a language-aware extractor by file extension,
-/// falling back to [`FileNodeExtractor`] when no language is registered.
+/// falling back to [`FileNodeExtractor`] when no language is registered. After
+/// the language extractor runs, [`crate::markers`] appends any intent-debt
+/// markers (TODOs, stubs, deferred-work notes) found in the blob.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Registry;
 
 impl Extractor for Registry {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet {
-        match extension(path) {
+        let mut facts = match extension(path) {
             Some("rs") => RustExtractor.extract(path, blob_id, bytes),
             _ => FileNodeExtractor.extract(path, blob_id, bytes),
-        }
+        };
+        crate::markers::augment(&mut facts, path, blob_id, bytes);
+        facts
     }
 }
 
