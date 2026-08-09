@@ -36,6 +36,9 @@ inference-local-models = [
     "rto-graph/inference-local-models",
     "dep:ureq",
 ]
+# Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
+# large PDF/font-parsing tree). See [`rto_graph::extract`].
+pdf-text = ["rto-graph/pdf-text"]
 
 [lints]
 workspace = true

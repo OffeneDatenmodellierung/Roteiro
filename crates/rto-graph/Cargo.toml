@@ -34,6 +34,11 @@ candle-transformers = { version = "0.11", optional = true }
 tokenizers = { version = "0.23.1", default-features = false, features = ["onig"], optional = true }
 sha2 = { version = "0.10", optional = true }
 
+# `pdf-text` only: pure-Rust PDF text extraction (fonts/CMaps handled internally).
+# Opt-in — pulls a large tree (lopdf + font/crypto parsers) that the default and
+# `inference*` builds never contain. Extraction is panic-guarded (see extract.rs).
+pdf-extract = { version = "0.12", optional = true }
+
 [dev-dependencies]
 # Also needed by the integration tests in `tests/`, which don't inherit the
 # crate's normal dependencies.
@@ -55,6 +60,11 @@ inference-local-models = [
     "dep:tokenizers",
     "dep:sha2",
 ]
+# Ingest text from PDF documents into `meta.content` so inference embeds their
+# meaning, not just the filename. Opt-in (off by default): pulls `pdf-extract`
+# and its font/PDF-parsing tree. See ADR-0003-adjacent content-ingestion notes
+# and [`crate::extract`].
+pdf-text = ["dep:pdf-extract"]
 
 [lints]
 workspace = true
