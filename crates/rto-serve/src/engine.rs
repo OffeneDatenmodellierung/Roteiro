@@ -74,6 +74,9 @@ pub struct ChatRequest {
     pub model: String,
     /// The conversation so far.
     pub messages: Vec<Message>,
+    /// Images attached to the request (decoded, still-encoded PNG/JPEG bytes),
+    /// in order — non-empty only for multimodal requests to a vision model.
+    pub images: Vec<Vec<u8>>,
     /// Sampling temperature (`0.0` = greedy).
     pub temperature: f32,
     /// Maximum tokens to generate.

@@ -659,6 +659,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multimodal_content_parts_are_parsed() {
+        // A user turn with a text part + an image_url (tiny 1x1 PNG data URI):
+        // the text is extracted (mock echoes it) and the image decodes without error.
+        let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": png}},
+            ]}],
+        });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["choices"][0]["message"]["content"], "LOOK");
+    }
+
+    #[tokio::test]
+    async fn remote_image_url_is_rejected() {
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+            ]}],
+        });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn embeddings_empty_input_is_400() {
         let resp = test_app()
             .oneshot(

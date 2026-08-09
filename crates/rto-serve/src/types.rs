@@ -2,19 +2,9 @@
 //! reads or emits are modelled; unknown request fields are ignored so standard
 //! OpenAI clients work unchanged.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::engine::{ChatRequest, Message};
-
-/// Deserialize a string field that OpenAI clients may send as `null` (an
-/// assistant turn with a tool call carries `content: null`) — treat null and a
-/// missing field alike as the empty string.
-fn null_as_empty<'de, D>(de: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(de)?.unwrap_or_default())
-}
 
 /// Default token budget when a request omits `max_tokens`.
 const DEFAULT_MAX_TOKENS: u32 = 512;
@@ -25,7 +15,7 @@ pub struct ChatCompletionRequest {
     /// The model id to run (must be one of `/v1/models`).
     pub model: String,
     /// The conversation turns.
-    pub messages: Vec<ChatMessageDto>,
+    pub messages: Vec<RequestMessage>,
     /// Sampling temperature; `0` (or omitted) is greedy.
     #[serde(default)]
     pub temperature: Option<f32>,
@@ -38,37 +28,127 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
 }
 
-/// One chat turn on the wire.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ChatMessageDto {
+/// One incoming chat turn, whose content may be a plain string or an array of
+/// OpenAI content parts (text + `image_url`) for multimodal requests.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequestMessage {
     /// `system` | `user` | `assistant`.
     pub role: String,
-    /// The turn's text. A missing or `null` value (OpenAI allows both) is read
-    /// as the empty string.
-    #[serde(default, deserialize_with = "null_as_empty")]
+    /// The turn's content. A missing or `null` value is read as empty text.
+    #[serde(default)]
+    pub content: Option<MessageContent>,
+}
+
+/// A message's content: a string, or an array of parts (OpenAI multimodal).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text content.
+    Text(String),
+    /// Multimodal content parts (text and/or images).
+    Parts(Vec<ContentPart>),
+}
+
+/// One content part of a multimodal message.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// A text span.
+    #[serde(rename = "text")]
+    Text {
+        /// The text.
+        #[serde(default)]
+        text: String,
+    },
+    /// An image reference (only `data:` URIs are accepted — see [`decode_image_url`]).
+    #[serde(rename = "image_url")]
+    ImageUrl {
+        /// The image URL wrapper.
+        image_url: ImageUrlPart,
+    },
+}
+
+/// The `image_url` object of an image content part.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageUrlPart {
+    /// The image URL — a `data:<mime>;base64,<data>` URI.
+    pub url: String,
+}
+
+/// One chat turn on the response side (assistant messages): always plain text.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatMessageDto {
+    /// `assistant`.
+    pub role: String,
+    /// The generated text.
     pub content: String,
 }
 
+/// Decode an `image_url` into raw (still-encoded, e.g. PNG/JPEG) image bytes.
+/// Only `data:` URIs are supported — a local server does not fetch remote URLs
+/// (avoids SSRF); the decoder further down handles the actual image format.
+///
+/// # Errors
+/// Returns a message if the URL is not a base64 `data:` URI or fails to decode.
+fn decode_image_url(url: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let rest = url
+        .strip_prefix("data:")
+        .ok_or("only `data:` image URIs are supported (remote URLs are not fetched)")?;
+    let (meta, data) = rest
+        .split_once(',')
+        .ok_or("malformed data URI (no comma)")?;
+    if !meta.contains("base64") {
+        return Err("only base64 data URIs are supported".to_owned());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|e| format!("base64 decode: {e}"))
+}
+
 impl ChatCompletionRequest {
-    /// Validate and normalise into an [`ChatRequest`] for the engine.
+    /// Validate and normalise into an [`ChatRequest`] for the engine, extracting
+    /// text (per message) and any images (across the whole request).
     ///
     /// # Errors
-    /// Returns a human-readable message if the request has no messages or asks
-    /// for streaming (not yet supported).
+    /// Returns a human-readable message if there are no messages or an
+    /// `image_url` cannot be decoded.
     pub fn into_engine_request(self) -> Result<ChatRequest, String> {
         if self.messages.is_empty() {
             return Err("`messages` must not be empty".to_owned());
         }
+        let mut messages = Vec::with_capacity(self.messages.len());
+        let mut images: Vec<Vec<u8>> = Vec::new();
+        for m in self.messages {
+            let text = match m.content.unwrap_or(MessageContent::Text(String::new())) {
+                MessageContent::Text(s) => s,
+                MessageContent::Parts(parts) => {
+                    let mut text = String::new();
+                    for part in parts {
+                        match part {
+                            ContentPart::Text { text: t } => {
+                                if !text.is_empty() {
+                                    text.push('\n');
+                                }
+                                text.push_str(&t);
+                            }
+                            ContentPart::ImageUrl { image_url } => {
+                                images.push(decode_image_url(&image_url.url)?);
+                            }
+                        }
+                    }
+                    text
+                }
+            };
+            messages.push(Message {
+                role: m.role,
+                content: text,
+            });
+        }
         Ok(ChatRequest {
             model: self.model,
-            messages: self
-                .messages
-                .into_iter()
-                .map(|m| Message {
-                    role: m.role,
-                    content: m.content,
-                })
-                .collect(),
+            messages,
+            images,
             temperature: self.temperature.unwrap_or(0.0).max(0.0),
             max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).max(1),
         })

@@ -79,6 +79,7 @@ pub fn chat_with_tools(
         engine.chat(&ChatRequest {
             model: req.model.clone(),
             messages: messages.to_vec(),
+            images: req.images.clone(),
             temperature: req.temperature,
             max_tokens: req.max_tokens,
         })
@@ -271,6 +272,7 @@ mod tests {
                 role: "user".to_owned(),
                 content: "explain abc".to_owned(),
             }],
+            images: vec![],
             temperature: 0.0,
             max_tokens: 64,
         };
@@ -300,6 +302,7 @@ mod tests {
                 role: "user".to_owned(),
                 content: "hi".to_owned(),
             }],
+            images: vec![],
             temperature: 0.0,
             max_tokens: 64,
         };
