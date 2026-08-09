@@ -236,8 +236,10 @@ enum SpecAction {
         out: Option<String>,
     },
     /// Scaffold, then draft the placeholder sections offline with a small local
-    /// instruct model (ADR-0004 Tier 1). Needs `--features inference-local-models`
-    /// and a pulled generative model; falls back to the plain scaffold otherwise.
+    /// instruct model (ADR-0004 Tier 1). Needs a generation backend
+    /// (`--features serve` for llama.cpp, or `--features inference-local-models`
+    /// for candle) and a pulled generative model; falls back to the plain
+    /// scaffold otherwise.
     Draft {
         /// Topic the artifact is about (grounds the draft against the graph).
         topic: String,
@@ -1338,9 +1340,13 @@ fn run_spec_scaffold(
 }
 
 /// Draft the scaffold's placeholder sections with a small local instruct model
-/// (ADR-0004 Tier 1). Needs `--features inference-local-models` and a pulled
-/// generative model; without a model it emits the plain scaffold + a hint.
-#[cfg(feature = "inference-local-models")]
+/// (ADR-0004 Tier 1). Needs a generation backend (`serve` → llama.cpp, or
+/// `inference-local-models` → candle) and a pulled generative model; without a
+/// model it emits the plain scaffold + a hint.
+// Stage 20: `spec draft` generation runs on **llama.cpp** (the `serve` feature's
+// engine) — the inference-core unify direction (ADR-0006) — falling back to the
+// candle `LocalGenerator` only on a `inference-local-models`-without-`serve` build.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn run_spec_draft(
     cfg: &config::Config,
     ingest: rto_graph::IngestConfig,
@@ -1350,8 +1356,7 @@ fn run_spec_draft(
     out: Option<&str>,
 ) -> anyhow::Result<()> {
     use rto_graph::{
-        GenConfig, LocalGenerator, ModelKind, ModelRole, Platform, REGISTRY, ResourceTier,
-        find_model, is_installed, model_dir,
+        ModelKind, ModelRole, Platform, REGISTRY, ResourceTier, find_model, is_installed,
     };
 
     let (scaffold, label, ctx) = build_scaffold(ingest, topic, title, kind)?;
@@ -1395,12 +1400,96 @@ fn run_spec_draft(
              release build (`cargo build --release`) for usable speed."
         );
     }
-    let mut generator = LocalGenerator::load(&model_dir(spec.name))
-        .map_err(|e| anyhow::anyhow!("loading {}: {e}", spec.name))?;
-    let cfg = GenConfig::default();
+    let drafts = draft_sections(spec.name, &scaffold, topic, &ctx)?;
+    eprintln!(
+        "drafted {} section(s) with {} (via {GEN_BACKEND})",
+        drafts.len(),
+        spec.name
+    );
+    let md = rto_spec::apply_drafts(&scaffold, &drafts);
+    emit_artifact(&md, &format!("{label} draft"), out)
+}
+
+/// Draft each placeholder section of `scaffold` with the local generative model,
+/// via **llama.cpp** (`serve`) — the Stage-20 inference-core path.
+#[cfg(feature = "serve")]
+const GEN_BACKEND: &str = "llama.cpp";
+
+/// Max tokens generated per drafted section.
+#[cfg(feature = "serve")]
+const DRAFT_MAX_TOKENS: u32 = 800;
+
+#[cfg(feature = "serve")]
+fn draft_sections(
+    model: &str,
+    scaffold: &str,
+    topic: &str,
+    ctx: &rto_spec::SpecContext,
+) -> anyhow::Result<Vec<(String, String)>> {
+    use rto_serve::Engine as _; // brings `.chat` into scope
+
+    let served = vec![rto_serve::llama::Served {
+        name: model.to_owned(),
+        path: rto_graph::model_dir(model).join("model.gguf"),
+        mmproj: None,
+    }];
+    let engine = rto_serve::llama::LlamaEngine::new(served, 0)
+        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+
     let mut drafts = Vec::new();
-    for (heading, hint) in rto_spec::draft_targets(&scaffold) {
-        let prompt = rto_spec::draft_prompt(topic, &ctx, &heading, &hint);
+    for (heading, hint) in rto_spec::draft_targets(scaffold) {
+        let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
+        let completion = engine
+            .chat(&rto_serve::ChatRequest {
+                model: model.to_owned(),
+                messages: vec![rto_serve::Message {
+                    role: "user".to_owned(),
+                    content: prompt,
+                }],
+                images: vec![],
+                temperature: 0.0,
+                max_tokens: DRAFT_MAX_TOKENS,
+            })
+            .map_err(|e| anyhow::anyhow!("drafting `{heading}`: {e}"))?;
+        // A reasoning-capable GGUF (Qwen3, DeepSeek-R1, …) emits a
+        // `<think>…</think>` block before its answer; keep only the answer so the
+        // reasoning never lands in the drafted document.
+        let prose = strip_thinking(&completion.content);
+        if !prose.trim().is_empty() {
+            drafts.push((heading, prose));
+        }
+    }
+    Ok(drafts)
+}
+
+/// Drop a leading `<think>…</think>` reasoning block, returning the answer that
+/// follows it. Text with no closing `</think>` is returned unchanged.
+#[cfg(feature = "serve")]
+fn strip_thinking(text: &str) -> String {
+    match text.find("</think>") {
+        Some(end) => text[end + "</think>".len()..].trim_start().to_owned(),
+        None => text.to_owned(),
+    }
+}
+
+/// Transitional fallback: draft with the candle `LocalGenerator` on a build that
+/// has `inference-local-models` but not `serve`.
+#[cfg(all(not(feature = "serve"), feature = "inference-local-models"))]
+const GEN_BACKEND: &str = "candle";
+
+#[cfg(all(not(feature = "serve"), feature = "inference-local-models"))]
+fn draft_sections(
+    model: &str,
+    scaffold: &str,
+    topic: &str,
+    ctx: &rto_spec::SpecContext,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut generator = rto_graph::LocalGenerator::load(&rto_graph::model_dir(model))
+        .map_err(|e| anyhow::anyhow!("loading {model}: {e}"))?;
+    let cfg = rto_graph::GenConfig::default();
+    let mut drafts = Vec::new();
+    for (heading, hint) in rto_spec::draft_targets(scaffold) {
+        let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
         let prose = generator
             .generate(None, &prompt, &cfg)
             .map_err(|e| anyhow::anyhow!("drafting `{heading}`: {e}"))?;
@@ -1408,13 +1497,11 @@ fn run_spec_draft(
             drafts.push((heading, prose));
         }
     }
-    eprintln!("drafted {} section(s) with {}", drafts.len(), spec.name);
-    let md = rto_spec::apply_drafts(&scaffold, &drafts);
-    emit_artifact(&md, &format!("{label} draft"), out)
+    Ok(drafts)
 }
 
-/// `spec draft` without the local-models feature: guide the user to enable it.
-#[cfg(not(feature = "inference-local-models"))]
+/// `spec draft` without a generation backend: guide the user to enable one.
+#[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
 fn run_spec_draft(
     _cfg: &config::Config,
     _ingest: rto_graph::IngestConfig,
@@ -1424,9 +1511,9 @@ fn run_spec_draft(
     _out: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "`spec draft` needs a local instruct model: build with \
-         `--features inference-local-models`, then `roteiro model pull qwen3-0.6b`. \
-         (`spec scaffold` works with no model.)"
+        "`spec draft` needs a generation backend: build with `--features serve` \
+         (llama.cpp) or `--features inference-local-models` (candle), then \
+         `roteiro model pull qwen3-0.6b`. (`spec scaffold` works with no model.)"
     )
 }
 

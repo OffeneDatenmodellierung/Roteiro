@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
-last-modified: 2026-08-08
+version: "1.1"
+last-modified: 2026-08-09
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -88,6 +88,7 @@ A single bundled model can satisfy at most two of these. Decoupling *the default
 - New deps arrive only under `inference-local-models` (`candle`, GGUF, an HTTP client for `pull`), each subject to the `cargo deny` licence gate; PDF/image extraction crates (Stage 8 ingestion) are checked likewise. The default and `inference` builds pull none of them.
 - `~/.roteiro/models/` becomes a user-level cache; model licences are surfaced at `pull` time and recorded in the registry.
 - Inference remains a **separate, optional** pipeline that never gates offline local rebuilds (per ADR-0001) — derived+authored builds are unaffected whether or not any model is present.
+- **Inference-core unification on llama.cpp (Stage 20, amends this ADR).** [[docs/adr/0006-local-model-serving.md]] adopted **llama.cpp** (`llama-cpp-2`) as the serving engine — fastest, `cargo deny`-clean, GGUF tokenizer/template for free — and named it the target for the *whole* inference core. The migration is staged: **generation is moved** — `spec draft` now generates through llama.cpp (the `serve` feature's engine) over the same GGUFs, with the candle `LocalGenerator` kept only as a transitional fallback on an `inference-local-models`-without-`serve` build. **Embeddings** (`infer`) and **image vision** (`sync`) are **scheduled next** — embeddings move to GGUF embedding models (already served via llama.cpp, e.g. `bge-small-en-v1.5-gguf`), vision to `mmproj` (already served, e.g. `smolvlm-500m-gguf`); until those internal call-sites cut over, candle (`inference-local-models` / `image-vision`) remains their backend and the two coexist transitionally. End state: one llama.cpp inference core shared by serving and internal uses; candle is removed once embeddings + vision are migrated.
 
 ## Advice Received
 
@@ -98,3 +99,4 @@ Decision refined with the project team: (a) prefer models built/re-encoded for t
 | Version | Date | Notes |
 |---------|------|-------|
 | 1.0 | 2026-08-08 | Accepted. Tiny static int8 default compiled in; GGUF pluggable local models via an in-binary registry; platform-aware (Metal/Apple vs standard) variant selection; consent-gated fetch; candle behind `inference-local-models`. Answers ADR-0001 Q7. |
+| 1.1 | 2026-08-09 | Amended (Stage 20) for the **inference-core unification on llama.cpp** (direction set in ADR-0006). **Generation moved**: `spec draft` generates via llama.cpp (the `serve` engine) over the same GGUFs; candle `LocalGenerator` is a transitional fallback only. **Embeddings → GGUF** and **vision → `mmproj`** scheduled next (both already served via llama.cpp); candle stays their backend until they cut over, then is removed. Adds a `role` label (instruct/coding/reasoning) and opt-in coding (`qwen2.5-coder-3b`) + reasoning (`deepseek-r1-distill-qwen-1.5b`) registry entries. |
