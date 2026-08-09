@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.11...roteiro-v0.0.12) - 2026-08-09
+
+### Added
+
+- *(import)* lat.md importer — authored layer over the code graph (Stage 11, 2/3)
+- *(import)* durable import layers surviving code-changing syncs (Stage 11)
+- *(debt)* intent-debt tracking — marker nodes + `roteiro debt` (Stage 15)
+- *(rto-spec)* Graphify importer — `roteiro import --from graphify` (Stage 9)
+- inference-local-models tier — candle embedder + model registry (Stage 8)
+
+### Fixed
+
+- *(import)* PR #44 review round 2 — symlink-safe walk, docs, sort
+- *(import)* stamp lat edges with LAT_REF; reject lat files outside the repo
+- *(import)* validate import layers on import and on sync; PR review
+- *(render)* resolve [[wiki-links]] and publish the Build Plan page
+- *(clippy)* backtick BUILD_PLAN path in import doc comment
+- address PR #33 review — model validation, checksum warning, tests
+
+### Other
+
+- make Graphify import durability explicit (PR #35 review)
+
 ## [0.0.11](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.10...roteiro-v0.0.11) - 2026-08-08
 
 ### Added
