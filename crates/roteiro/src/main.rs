@@ -427,6 +427,11 @@ fn print_config_sections(loaded: &config::Loaded) {
         e.serve.models,
         source(p.serve.models.is_some(), u.serve.models.is_some())
     );
+    println!(
+        "  tools  = {:?}  ({})",
+        e.serve.tools,
+        source(p.serve.tools.is_some(), u.serve.tools.is_some())
+    );
 }
 
 /// Sync the graph for the current repository, optionally including uncommitted
@@ -1754,7 +1759,7 @@ fn run_serve(
     addr: Option<String>,
 ) -> anyhow::Result<()> {
     if models {
-        serve_models_endpoint(cfg, addr)
+        serve_models_endpoint(cfg, ingest, addr)
     } else {
         serve_mcp(ingest, http)
     }
@@ -1791,7 +1796,11 @@ fn serve_mcp(_ingest: rto_graph::IngestConfig, _http: Option<String>) -> anyhow:
 /// Serve installed generative models over the loopback, OpenAI-compatible `/v1`
 /// endpoint (ADR-0006). Serves only installed models; never downloads.
 #[cfg(feature = "serve")]
-fn serve_models_endpoint(cfg: &config::Config, addr: Option<String>) -> anyhow::Result<()> {
+fn serve_models_endpoint(
+    cfg: &config::Config,
+    ingest: rto_graph::IngestConfig,
+    addr: Option<String>,
+) -> anyhow::Result<()> {
     use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
 
     // Resolve which installed generative models to serve: the `[serve] models`
@@ -1829,19 +1838,161 @@ fn serve_models_endpoint(cfg: &config::Config, addr: Option<String>) -> anyhow::
         );
     }
 
-    let names: Vec<&str> = served.iter().map(|s| s.name.as_str()).collect();
-    eprintln!(
-        "roteiro model server listening on http://{socket}/v1 — serving: {}",
-        names.join(", ")
-    );
+    let names = served
+        .iter()
+        .map(|s| s.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
     let engine = rto_serve::llama::LlamaEngine::new(served, 0)
         .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-    rto_serve::serve_blocking(std::sync::Arc::new(engine), socket)
+    let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
+
+    // Auto-register the graph tools (ADR-0006) unless disabled: build the graph
+    // once so the served model can `explain`/`search`/`path`/`debt` this repo.
+    if cfg.serve.tools.unwrap_or(true) {
+        let (repo, mut store, cache) = open_graph()?;
+        build_graph(&repo, &mut store, &cache, ingest)?;
+        let tools = std::sync::Arc::new(GraphToolRegistry::new(store));
+        eprintln!(
+            "roteiro model server listening on http://{socket}/v1 (graph tools on) — serving: {names}"
+        );
+        rto_serve::serve_blocking_with_tools(engine, tools, socket)
+    } else {
+        eprintln!("roteiro model server listening on http://{socket}/v1 — serving: {names}");
+        rto_serve::serve_blocking(engine, socket)
+    }
+}
+
+/// A [`rto_serve::ToolRegistry`] backing the served model with Roteiro's graph
+/// query tools (ADR-0006). Wraps the store in a mutex (queries take `&Store` and
+/// the registry is shared across request threads).
+#[cfg(feature = "serve")]
+struct GraphToolRegistry {
+    store: std::sync::Mutex<rto_graph::Store>,
+}
+
+#[cfg(feature = "serve")]
+impl GraphToolRegistry {
+    fn new(store: rto_graph::Store) -> Self {
+        Self {
+            store: std::sync::Mutex::new(store),
+        }
+    }
+}
+
+#[cfg(feature = "serve")]
+impl rto_serve::ToolRegistry for GraphToolRegistry {
+    fn tools(&self) -> Vec<rto_serve::ToolDef> {
+        use serde_json::json;
+        vec![
+            rto_serve::ToolDef {
+                name: "explain".to_owned(),
+                description: "Explain a graph node by key (its record and immediate \
+                              neighbours), e.g. `fn:foo` or `file:src/main.rs`."
+                    .to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "key": { "type": "string" } },
+                    "required": ["key"],
+                }),
+            },
+            rto_serve::ToolDef {
+                name: "search".to_owned(),
+                description: "Search graph nodes by text; returns the top matches with keys."
+                    .to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
+                    },
+                    "required": ["query"],
+                }),
+            },
+            rto_serve::ToolDef {
+                name: "path".to_owned(),
+                description: "Find a shortest path between two node keys.".to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string" },
+                        "to": { "type": "string" },
+                    },
+                    "required": ["from", "to"],
+                }),
+            },
+            rto_serve::ToolDef {
+                name: "debt".to_owned(),
+                description: "List intent-debt markers (todo/fixme/hack/stub/deferred), \
+                              optionally filtered by category."
+                    .to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "categories": { "type": "array", "items": { "type": "string" } },
+                    },
+                }),
+            },
+        ]
+    }
+
+    fn call(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "store mutex poisoned".to_owned())?;
+        let str_arg = |k: &str| args.get(k).and_then(serde_json::Value::as_str);
+        match name {
+            "explain" => {
+                let key = str_arg("key").ok_or("`explain` needs a string `key`")?;
+                let r = rto_graph::explain(&store, key).map_err(|e| e.to_string())?;
+                serde_json::to_string(&r).map_err(|e| e.to_string())
+            }
+            "search" => {
+                let query = str_arg("query").ok_or("`search` needs a string `query`")?;
+                // `limit` is model-controlled: clamp to 1..=25 (results are
+                // truncated before feed-back anyway) so a huge value can't
+                // waste work; the schema advertises the same bound.
+                let limit = args
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(10)
+                    .clamp(1, 25);
+                let r = rto_graph::search(&store, query, limit).map_err(|e| e.to_string())?;
+                serde_json::to_string(&r).map_err(|e| e.to_string())
+            }
+            "path" => {
+                let from = str_arg("from").ok_or("`path` needs a string `from`")?;
+                let to = str_arg("to").ok_or("`path` needs a string `to`")?;
+                let r = rto_graph::path(&store, from, to).map_err(|e| e.to_string())?;
+                serde_json::to_string(&r).map_err(|e| e.to_string())
+            }
+            "debt" => {
+                let categories: Vec<String> = args
+                    .get("categories")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let r = rto_graph::debt(&store, &categories).map_err(|e| e.to_string())?;
+                serde_json::to_string(&r).map_err(|e| e.to_string())
+            }
+            other => Err(format!("unknown tool `{other}`")),
+        }
+    }
 }
 
 /// The model endpoint is unavailable without the `serve` feature.
 #[cfg(all(not(feature = "serve"), feature = "mcp"))]
-fn serve_models_endpoint(_cfg: &config::Config, _addr: Option<String>) -> anyhow::Result<()> {
+fn serve_models_endpoint(
+    _cfg: &config::Config,
+    _ingest: rto_graph::IngestConfig,
+    _addr: Option<String>,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "`serve --models` needs the `serve` feature (build with `--features serve`, \
          which pulls the llama.cpp engine)"

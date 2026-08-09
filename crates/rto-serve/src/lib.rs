@@ -10,6 +10,7 @@
 
 pub mod engine;
 pub mod server;
+pub mod tools;
 pub mod types;
 
 #[cfg(feature = "llama")]
@@ -18,4 +19,5 @@ pub mod llama;
 pub use engine::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
-pub use server::{app, serve_blocking};
+pub use server::{app, app_with_tools, serve_blocking, serve_blocking_with_tools};
+pub use tools::{ToolDef, ToolRegistry, chat_with_tools};

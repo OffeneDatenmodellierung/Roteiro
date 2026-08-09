@@ -797,10 +797,19 @@ and make the served model **code-aware** by handing it Roteiro's graph tools.
   [DONE]`). The `Engine` trait is now streaming-first (`chat_stream` with a token
   callback; `chat` accumulates); the server bridges the blocking decode loop to
   SSE over a channel. Verified live against `qwen3-0.6b`.
-- **Remaining sub-PRs:** **auto-register the graph tools** (function-calling →
-  MCP tools → graph) — the differentiator; then `/v1/embeddings`. llama-cpp-2 has
-  no tool scaffolding, so tools are hand-rolled (Qwen tool-schema injection +
-  `<tool_call>` parsing + a bounded server-side execute-and-loop).
+- **Delivered — graph tools (the differentiator):** the served model is handed
+  Roteiro's graph tools (`explain`/`search`/`path`/`debt`) and can query *this
+  repo* while answering (ADR-0006). Since llama-cpp-2 has no tool scaffolding, the
+  protocol is hand-rolled and model-agnostic: a system prompt advertises the
+  tools, the model emits `<tool_call>{…}</tool_call>`, and the server parses it,
+  executes it against the graph, feeds a `<tool_response>` back, and loops
+  (bounded rounds) — all server-side, so a plain OpenAI client just gets a
+  graph-grounded answer. Decoupled via a `ToolRegistry` trait (rto-serve stays
+  graph-free; roteiro backs it with the store). Toggle: `[serve] tools` (default
+  on). The loop is unit-tested end-to-end with a scripted engine; live tool
+  emission needs a capable model (the 0.6B tier reasons about the call but is too
+  small to reliably emit the syntax — qwen3-8b+ recommended for tool use).
+- **Remaining sub-PR:** `/v1/embeddings`.
 - **Engine: llama.cpp** (`llama-cpp-2`), behind an opt-in `serve` feature (pulls a
   C/C++ toolchain: cmake + clang + libclang). Chosen after a head-to-head de-risk
   (candle vs mistral.rs vs llama.cpp on MSRV 1.94 + strict `cargo deny`): it is the
