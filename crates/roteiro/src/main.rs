@@ -718,6 +718,8 @@ fn run_import_lat(path: &str, json: bool) -> anyhow::Result<()> {
 
 /// Recursively collect `*.md` files under `dir`, pushing `(repo-relative path,
 /// contents)` pairs. Paths use `/` separators for stable, portable node keys.
+/// Errors if a file is outside the repository `root`, since a non-repo-relative
+/// key would be unstable and would import content from outside the repo.
 fn collect_markdown(
     dir: &std::path::Path,
     root: &std::path::Path,
@@ -728,11 +730,15 @@ fn collect_markdown(
         if path.is_dir() {
             collect_markdown(&path, root, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = path.strip_prefix(root).map_err(|_| {
+                anyhow::anyhow!(
+                    "lat file {} is outside the repository ({}); the lat.md \
+                     directory must live inside the repo",
+                    path.display(),
+                    root.display()
+                )
+            })?;
+            let rel = rel.to_string_lossy().replace('\\', "/");
             out.push((rel, std::fs::read_to_string(&path)?));
         }
     }

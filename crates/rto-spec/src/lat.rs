@@ -127,6 +127,15 @@ impl LatIndex {
     }
 }
 
+/// Build an `authored` lat.md edge stamped with [`LAT_REF`] in `src_ref`, so a
+/// re-import can clear and replace the whole lat layer authoritatively (the
+/// store deletes prior edges by `src_ref` in `apply_import_layer`).
+fn lat_edge(src: String, dst: String, kind: EdgeKind) -> Edge {
+    let mut edge = Edge::authored(src, dst, kind);
+    edge.src_ref = Some(LAT_REF.to_owned());
+    edge
+}
+
 /// Split a reference into `(head, rest)` at the first `#`.
 fn split_head(raw: &str) -> (&str, Option<&str>) {
     match raw.split_once('#') {
@@ -181,7 +190,7 @@ fn import_file(
             let parent = stack.last().map_or(doc.clone(), |(_, k)| k.clone());
             facts
                 .edges
-                .push(Edge::authored(parent, key.clone(), EdgeKind::Contains));
+                .push(lat_edge(parent, key.clone(), EdgeKind::Contains));
             stack.push((level, key));
             continue;
         }
@@ -197,7 +206,7 @@ fn import_file(
                 }
                 facts
                     .edges
-                    .push(Edge::authored(from.clone(), target, EdgeKind::References));
+                    .push(lat_edge(from.clone(), target, EdgeKind::References));
             }
         }
     }
@@ -312,13 +321,11 @@ mod tests {
         );
         assert_eq!(imp.report.links_to_sections, 1);
         assert_eq!(imp.report.links_to_code, 2);
-        // Every imported edge is authored.
-        assert!(
-            imp.facts
-                .edges
-                .iter()
-                .all(|e| e.provenance.as_str() == "authored")
-        );
+        // Every imported edge is authored and stamped with LAT_REF, so a
+        // re-import can clear the whole layer authoritatively by src_ref.
+        assert!(imp.facts.edges.iter().all(|e| {
+            e.provenance.as_str() == "authored" && e.src_ref.as_deref() == Some(LAT_REF)
+        }));
     }
 
     #[test]

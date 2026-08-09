@@ -100,5 +100,26 @@ fn import_lat_authors_links_prunes_stale_and_is_durable() {
     let nodes = listing["nodes"].as_array().expect("nodes");
     assert_eq!(nodes.len(), 2, "lat sections survive a code-changing sync");
 
+    // Authoritative re-import: dropping the Widget link and re-importing must
+    // remove the old edge (proves lat edges are stamped with the import src_ref,
+    // which `apply_import_layer` deletes by).
+    std::fs::write(
+        dir.join("lat.md/design.md"),
+        "# Design\n\nNo links here now.\n\n## Details\n\nStill nothing.\n",
+    )
+    .expect("rewrite lat");
+    let reimport = roteiro(&dir, &["import", "--from", "lat", "lat.md", "--json"]);
+    assert!(reimport.status.success(), "reimport failed: {reimport:?}");
+    let after = roteiro(&dir, &["query", "lat:lat.md/design.md#design", "--json"]);
+    let reimported: serde_json::Value = serde_json::from_slice(&after.stdout).expect("json");
+    assert!(
+        !reimported["outgoing"]
+            .as_array()
+            .expect("outgoing")
+            .iter()
+            .any(|e| e["node"] == "sym:rust:src/lib.rs#Widget"),
+        "re-import must clear the old Widget reference edge: {reimported}",
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
