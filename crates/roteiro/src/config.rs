@@ -102,6 +102,11 @@ pub struct ServeConfig {
     /// Auto-register the graph tools so the served model can query the codebase
     /// (ADR-0006). Default `true`.
     pub tools: Option<bool>,
+    /// Approximate memory budget (MiB) for models kept resident at once. The
+    /// engine loads models on demand and unloads the least-recently-used once the
+    /// resident set (proxied by GGUF size) exceeds this. Unset/`0` keeps a single
+    /// model resident — set it higher to keep several warm and swap in real time.
+    pub memory_budget_mb: Option<u64>,
 }
 
 /// `[infer]` — defaults for the similarity-inference command.
@@ -162,6 +167,7 @@ impl Config {
                 addr: over.serve.addr.clone().or(self.serve.addr.clone()),
                 models: over.serve.models.clone().or(self.serve.models.clone()),
                 tools: over.serve.tools.or(self.serve.tools),
+                memory_budget_mb: over.serve.memory_budget_mb.or(self.serve.memory_budget_mb),
             },
         }
     }
