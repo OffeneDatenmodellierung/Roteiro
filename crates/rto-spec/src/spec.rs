@@ -341,6 +341,100 @@ fn symbol_link_target(key: &str) -> Option<&str> {
         .map(|(_lang, target)| target)
 }
 
+// --- Tier 1 drafting: turn a scaffold's `_TODO_` placeholders into grounded
+// generation prompts, and splice the generated prose back in. Pure and
+// model-agnostic — the caller runs the prompts through whatever generator
+// (a local model, or an agent) and passes the prose back to [`apply_drafts`].
+
+/// The placeholder sections of a scaffold a generator should fill: `(heading,
+/// hint)` for each `_TODO…_` line, in document order. `hint` is the guidance
+/// text after `_TODO:` (empty for a bare `_TODO._`).
+#[must_use]
+pub fn draft_targets(scaffold_md: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut heading = String::new();
+    for line in scaffold_md.lines() {
+        if let Some(h) = line.strip_prefix("## ") {
+            h.trim().clone_into(&mut heading);
+        } else if let Some(hint) = todo_hint(line) {
+            out.push((heading.clone(), hint));
+        }
+    }
+    out
+}
+
+/// The hint of a `_TODO: hint._` (or `_TODO._`) placeholder line, else `None`.
+fn todo_hint(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("_TODO")?.strip_suffix('_')?;
+    // `rest` is now `.` (bare) or `: <hint>.`; drop the leading `:`/`.`/space
+    // and the trailing `.`/space.
+    Some(
+        rest.trim_start_matches([':', '.', ' '])
+            .trim_end_matches(['.', ' '])
+            .to_owned(),
+    )
+}
+
+/// Build a grounded generation prompt (a plain-text user message) for the
+/// `heading` section of an artifact about `topic`, using `hint` as guidance and
+/// `ctx` as the real symbols/ADRs the model may reference. The prompt constrains
+/// the model to the grounded facts so drafts stay honest.
+#[must_use]
+pub fn draft_prompt(topic: &str, ctx: &SpecContext, heading: &str, hint: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut p = String::new();
+    let _ = write!(
+        p,
+        "You are drafting the \"{heading}\" section of a house-style technical \
+         document about \"{topic}\" for the Roteiro project (a provenance-tagged \
+         codebase knowledge graph). "
+    );
+    if !hint.is_empty() {
+        let _ = write!(p, "Focus: {hint}. ");
+    }
+    let symbols: Vec<&str> = ctx.symbols.iter().map(|s| s.node.name.as_str()).collect();
+    if !symbols.is_empty() {
+        let _ = write!(p, "Relevant code symbols: {}. ", symbols.join(", "));
+    }
+    if !ctx.related_adrs.is_empty() {
+        let _ = write!(p, "Related decisions: {}. ", ctx.related_adrs.join(", "));
+    }
+    p.push_str(
+        "Write 2–4 precise, technical sentences. Reference the real symbols above \
+         where relevant; do not invent symbols, files, or facts. Output only the \
+         prose, no heading.",
+    );
+    p
+}
+
+/// Splice generated prose back into a scaffold: each `_TODO…_` line under a
+/// heading present in `drafts` (as `(heading, prose)`) is replaced by that prose.
+/// Headings without a draft, and all other lines, are left unchanged.
+#[must_use]
+pub fn apply_drafts(scaffold_md: &str, drafts: &[(String, String)]) -> String {
+    let by_heading: std::collections::BTreeMap<&str, &str> = drafts
+        .iter()
+        .map(|(h, prose)| (h.as_str(), prose.as_str()))
+        .collect();
+    let mut out = String::new();
+    let mut heading = "";
+    for line in scaffold_md.lines() {
+        if let Some(h) = line.strip_prefix("## ") {
+            heading = h.trim();
+        } else if todo_hint(line).is_some()
+            && let Some(prose) = by_heading.get(heading)
+        {
+            out.push_str(prose);
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SPEC_SCHEMA, context};
@@ -487,6 +581,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn draft_round_trip_fills_todo_sections() {
+        use super::{apply_drafts, draft_prompt, draft_targets, scaffold_adr};
+        let store = seeded();
+        let ctx = context(&store, "validate_token", 10).expect("context");
+        let scaffold = scaffold_adr("validate_token", None, "0099", "2026-08-09", &ctx);
+
+        // Targets: every `## Heading` with a `_TODO…_` placeholder.
+        let targets = draft_targets(&scaffold);
+        assert!(targets.iter().any(|(h, _)| h == "Summary"));
+        assert!(targets.iter().any(|(h, _)| h == "Context"));
+
+        // A grounded prompt names the real symbol and forbids invention.
+        let prompt = draft_prompt("validate_token", &ctx, "Summary", "the decision");
+        assert!(prompt.contains("validate_token"), "{prompt}");
+        assert!(prompt.contains("do not invent"));
+
+        // A mock generator fills each target; apply_drafts splices the prose in
+        // and the `_TODO_` placeholders for drafted sections are gone.
+        let drafts: Vec<(String, String)> = targets
+            .iter()
+            .map(|(h, _)| (h.clone(), format!("Drafted prose for {h}.")))
+            .collect();
+        let filled = apply_drafts(&scaffold, &drafts);
+        assert!(filled.contains("Drafted prose for Summary."));
+        assert!(
+            !filled.contains("_TODO: the decision"),
+            "placeholder replaced: {filled}"
+        );
+        // Structure is preserved (headings still present).
+        assert!(filled.contains("## Summary") && filled.contains("## Context"));
     }
 
     #[test]

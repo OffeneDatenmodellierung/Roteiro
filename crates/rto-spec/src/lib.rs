@@ -20,5 +20,6 @@ pub use check::{CheckReport, Violation, ViolationKind, run};
 pub use import::{GRAPHIFY_REF, GraphifyImport, ImportError, ImportReport, import_graphify};
 pub use lat::{LAT_REF, LatImport, LatReport, import_lat, resolve_lat_ref};
 pub use spec::{
-    SPEC_SCHEMA, SpecContext, SymbolContext, context, scaffold_adr, scaffold_blueprint,
+    SPEC_SCHEMA, SpecContext, SymbolContext, apply_drafts, context, draft_prompt, draft_targets,
+    scaffold_adr, scaffold_blueprint,
 };

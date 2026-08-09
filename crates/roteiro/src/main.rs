@@ -167,16 +167,32 @@ enum SpecAction {
         #[arg(long)]
         json: bool,
     },
-    /// Emit a house-style, graph-grounded, `check`-clean ADR skeleton for a
-    /// topic — with an interview checklist and a build-plan outline.
+    /// Emit a house-style, graph-grounded, `check`-clean ADR/blueprint skeleton
+    /// for a topic — with an interview checklist and a build-plan outline.
     Scaffold {
-        /// Topic the ADR is about (grounds the skeleton against the graph).
+        /// Topic the artifact is about (grounds the skeleton against the graph).
         topic: String,
-        /// ADR title (defaults to the topic).
+        /// Title (defaults to the topic).
         #[arg(long)]
         title: Option<String>,
         /// Artifact kind: `adr` (numbered decision) or `blueprint` (technical
         /// implementation plan).
+        #[arg(long, default_value = "adr")]
+        kind: String,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Scaffold, then draft the placeholder sections offline with a small local
+    /// instruct model (ADR-0004 Tier 1). Needs `--features inference-local-models`
+    /// and a pulled generative model; falls back to the plain scaffold otherwise.
+    Draft {
+        /// Topic the artifact is about (grounds the draft against the graph).
+        topic: String,
+        /// Title (defaults to the topic).
+        #[arg(long)]
+        title: Option<String>,
+        /// Artifact kind: `adr` or `blueprint`.
         #[arg(long, default_value = "adr")]
         kind: String,
         /// Write to this file instead of stdout.
@@ -560,7 +576,7 @@ fn run_model(action: ModelAction) -> anyhow::Result<()> {
 /// Print the registry, marking which models are installed for this host.
 #[cfg(feature = "inference-local-models")]
 fn run_model_list() {
-    use rto_graph::{Platform, REGISTRY};
+    use rto_graph::{ModelKind, Platform, REGISTRY};
 
     let host = Platform::host();
     println!(
@@ -577,10 +593,14 @@ fn run_model_list() {
         } else {
             "  available"
         };
+        // Embedding models report a dimension; generative models report their role.
+        let detail = match spec.kind {
+            ModelKind::Embedding => format!("embedding, dim {}", spec.dim),
+            ModelKind::Generative => "generative (spec draft)".to_owned(),
+        };
         println!(
-            "{mark}  {name}  (dim {dim}, {licence}, ~{size} MiB)\n            {desc}",
+            "{mark}  {name}  ({detail}, {licence}, ~{size} MiB)\n            {desc}",
             name = spec.name,
-            dim = spec.dim,
             licence = spec.licence,
             size = spec.size_mib,
             desc = spec.description,
@@ -658,8 +678,12 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
         }
         std::fs::rename(&tmp, &dest)?;
     }
+    let use_hint = match spec.kind {
+        rto_graph::ModelKind::Embedding => format!("roteiro infer --model {name}"),
+        rto_graph::ModelKind::Generative => "roteiro spec draft <topic>".to_owned(),
+    };
     println!(
-        "installed `{name}` → {}  (use it with `roteiro infer --model {name}`)",
+        "installed `{name}` → {}  (use it with `{use_hint}`)",
         dir.display()
     );
     Ok(())
@@ -921,22 +945,27 @@ fn run_spec(action: SpecAction) -> anyhow::Result<()> {
             kind,
             out,
         } => run_spec_scaffold(&topic, title.as_deref(), &kind, out.as_deref()),
+        SpecAction::Draft {
+            topic,
+            title,
+            kind,
+            out,
+        } => run_spec_draft(&topic, title.as_deref(), &kind, out.as_deref()),
     }
 }
 
-/// Emit a graph-grounded, house-style ADR or blueprint skeleton for `topic`
-/// (ADR-0004 Tier 0).
-fn run_spec_scaffold(
+/// Build the derived+authored graph, then a house-style, grounded scaffold for
+/// `topic` of the given `kind` (`adr` | `blueprint`). Returns the scaffold
+/// markdown, its label (e.g. `ADR-0007`), and the grounded context — shared by
+/// `spec scaffold` (Tier 0) and `spec draft` (Tier 1).
+fn build_scaffold(
     topic: &str,
     title: Option<&str>,
     kind: &str,
-    out: Option<&str>,
-) -> anyhow::Result<()> {
-    // Validate the kind before any expensive graph work.
+) -> anyhow::Result<(String, String, rto_spec::SpecContext)> {
     if kind != "adr" && kind != "blueprint" {
         anyhow::bail!("unknown --kind `{kind}` (expected: adr | blueprint)");
     }
-
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache)?;
     let root = repo
@@ -944,7 +973,7 @@ fn run_spec_scaffold(
         .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
     let ctx = rto_spec::context(&store, topic, 10)?;
 
-    let (md, wrote) = if kind == "adr" {
+    let (md, label) = if kind == "adr" {
         let adr_id = next_adr_id(&root.join("docs/adr"));
         (
             rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx),
@@ -956,15 +985,94 @@ fn run_spec_scaffold(
             "blueprint".to_owned(),
         )
     };
+    Ok((md, label, ctx))
+}
 
+/// Write `md` to `out` (or stdout), announcing `label` on stderr when writing.
+fn emit_artifact(md: &str, label: &str, out: Option<&str>) -> anyhow::Result<()> {
     match out {
         Some(path) => {
-            std::fs::write(path, &md)?;
-            eprintln!("wrote {wrote} scaffold → {path}");
+            std::fs::write(path, md)?;
+            eprintln!("wrote {label} → {path}");
         }
         None => print!("{md}"),
     }
     Ok(())
+}
+
+/// Emit a graph-grounded, house-style ADR or blueprint skeleton (ADR-0004 Tier 0).
+fn run_spec_scaffold(
+    topic: &str,
+    title: Option<&str>,
+    kind: &str,
+    out: Option<&str>,
+) -> anyhow::Result<()> {
+    let (md, label, _ctx) = build_scaffold(topic, title, kind)?;
+    emit_artifact(&md, &format!("{label} scaffold"), out)
+}
+
+/// Draft the scaffold's placeholder sections with a small local instruct model
+/// (ADR-0004 Tier 1). Needs `--features inference-local-models` and a pulled
+/// generative model; without a model it emits the plain scaffold + a hint.
+#[cfg(feature = "inference-local-models")]
+fn run_spec_draft(
+    topic: &str,
+    title: Option<&str>,
+    kind: &str,
+    out: Option<&str>,
+) -> anyhow::Result<()> {
+    use rto_graph::{
+        GenConfig, LocalGenerator, ModelKind, Platform, REGISTRY, is_installed, model_dir,
+    };
+
+    let (scaffold, label, ctx) = build_scaffold(topic, title, kind)?;
+
+    let Some(spec) = REGISTRY.iter().find(|m| m.kind == ModelKind::Generative) else {
+        anyhow::bail!("no generative model in the registry");
+    };
+    let installed = spec
+        .variant_for(Platform::host())
+        .is_some_and(|v| is_installed(spec.name, v));
+    if !installed {
+        eprintln!(
+            "note: generative model `{0}` is not installed — emitting the scaffold. \
+             Draft prose with: roteiro model pull {0}",
+            spec.name
+        );
+        return emit_artifact(&scaffold, &format!("{label} scaffold"), out);
+    }
+
+    let mut generator = LocalGenerator::load(&model_dir(spec.name))
+        .map_err(|e| anyhow::anyhow!("loading {}: {e}", spec.name))?;
+    let cfg = GenConfig::default();
+    let mut drafts = Vec::new();
+    for (heading, hint) in rto_spec::draft_targets(&scaffold) {
+        let prompt = rto_spec::draft_prompt(topic, &ctx, &heading, &hint);
+        let prose = generator
+            .generate(None, &prompt, &cfg)
+            .map_err(|e| anyhow::anyhow!("drafting `{heading}`: {e}"))?;
+        if !prose.trim().is_empty() {
+            drafts.push((heading, prose));
+        }
+    }
+    eprintln!("drafted {} section(s) with {}", drafts.len(), spec.name);
+    let md = rto_spec::apply_drafts(&scaffold, &drafts);
+    emit_artifact(&md, &format!("{label} draft"), out)
+}
+
+/// `spec draft` without the local-models feature: guide the user to enable it.
+#[cfg(not(feature = "inference-local-models"))]
+fn run_spec_draft(
+    _topic: &str,
+    _title: Option<&str>,
+    _kind: &str,
+    _out: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`spec draft` needs a local instruct model: build with \
+         `--features inference-local-models`, then `roteiro model pull \
+         qwen2.5-0.5b-instruct`. (`spec scaffold` works with no model.)"
+    )
 }
 
 /// The next zero-padded ADR id: one past the highest `NNNN-*.md` under `adr_dir`
