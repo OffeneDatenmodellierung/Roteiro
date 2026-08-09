@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.11...rto-graph-v0.0.12) - 2026-08-09
+
+### Added
+
+- *(oracle)* codegraph validation oracle — `import --from codegraph` (Stage 11, 3/3)
+- *(import)* durable import layers surviving code-changing syncs (Stage 11)
+- *(debt)* inline `roteiro:ignore` / `roteiro:ignore-file` opt-out directives
+- *(debt)* intent-debt tracking — marker nodes + `roteiro debt` (Stage 15)
+- *(rto-spec)* Graphify importer — `roteiro import --from graphify` (Stage 9)
+- inference-local-models tier — candle embedder + model registry (Stage 8)
+
+### Fixed
+
+- *(oracle)* PR #46 review — propagate DB errors, count-based scope diff, both samples
+- *(import)* validate import layers on import and on sync; PR review
+- *(debt)* PR review — anchor to first non-ws byte, mixed-case tags, stronger test
+- address PR #33 review — model validation, checksum warning, tests
+
 ## [0.0.11](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.10...rto-graph-v0.0.11) - 2026-08-08
 
 ### Added
