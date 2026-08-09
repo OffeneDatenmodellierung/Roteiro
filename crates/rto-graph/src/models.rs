@@ -113,6 +113,36 @@ impl ResourceTier {
     }
 }
 
+/// The specialisation of a generative model — a sub-label within the generative
+/// section so `model list` can distinguish general drafting from coding and
+/// reasoning models (Stage 20). Non-generative models are [`ModelRole::None`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelRole {
+    /// Not a generative model (embedding / OCR / vision).
+    None,
+    /// General instruction-following (chat, spec/blueprint drafting). Qwen3's
+    /// thinking mode makes these reasoning-capable out of the box.
+    Instruct,
+    /// Code-specialised (completion, refactoring, code Q&A).
+    Coding,
+    /// Reasoning-specialised (long chain-of-thought before answering).
+    Reasoning,
+}
+
+impl ModelRole {
+    /// Stable token for this role (`instruct` | `coding` | `reasoning`), or `None`
+    /// for a non-generative model.
+    #[must_use]
+    pub fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Instruct => Some("instruct"),
+            Self::Coding => Some("coding"),
+            Self::Reasoning => Some("reasoning"),
+        }
+    }
+}
+
 /// A model the user can pull and use.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelSpec {
@@ -120,6 +150,9 @@ pub struct ModelSpec {
     pub name: &'static str,
     /// What the model is for.
     pub kind: ModelKind,
+    /// For generative models, the specialisation (instruct/coding/reasoning);
+    /// [`ModelRole::None`] for non-generative models.
+    pub role: ModelRole,
     /// The hardware tier this pick is curated for within its section.
     pub tier: ResourceTier,
     /// Embedding dimensionality (0 for generative models).
@@ -160,6 +193,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "all-minilm-l6-v2",
         kind: ModelKind::Embedding,
+        role: ModelRole::None,
         tier: ResourceTier::Low,
         dim: 384,
         licence: "Apache-2.0",
@@ -191,6 +225,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "bge-base-en-v1.5",
         kind: ModelKind::Embedding,
+        role: ModelRole::None,
         tier: ResourceTier::Mid,
         dim: 768,
         licence: "MIT",
@@ -223,6 +258,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "bge-large-en-v1.5",
         kind: ModelKind::Embedding,
+        role: ModelRole::None,
         tier: ResourceTier::High,
         dim: 1024,
         licence: "MIT",
@@ -256,6 +292,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "bge-small-en-v1.5-gguf",
         kind: ModelKind::Embedding,
+        role: ModelRole::None,
         tier: ResourceTier::Low,
         dim: 384,
         licence: "MIT",
@@ -278,6 +315,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "qwen3-0.6b",
         kind: ModelKind::Generative,
+        role: ModelRole::Instruct,
         tier: ResourceTier::Low,
         dim: 0,
         licence: "Apache-2.0",
@@ -302,6 +340,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "qwen3-8b",
         kind: ModelKind::Generative,
+        role: ModelRole::Instruct,
         tier: ResourceTier::Mid,
         dim: 0,
         licence: "Apache-2.0",
@@ -326,6 +365,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "qwen3-32b",
         kind: ModelKind::Generative,
+        role: ModelRole::Instruct,
         tier: ResourceTier::High,
         dim: 0,
         licence: "Apache-2.0",
@@ -347,6 +387,62 @@ pub const REGISTRY: &[ModelSpec] = &[
             ],
         }],
     },
+    // Stage 20: opt-in coding + reasoning generative models for local use and
+    // serving (ADR-0006). GGUF-only (the embedded tokenizer serves llama.cpp — no
+    // separate `tokenizer.json`); `role` distinguishes them from the general
+    // Qwen3 instruct picks in `model list`. Off by default.
+    ModelSpec {
+        name: "qwen2.5-coder-3b",
+        kind: ModelKind::Generative,
+        role: ModelRole::Coding,
+        tier: ResourceTier::Mid,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Qwen2.5-Coder-3B-Instruct (Q4_K_M GGUF) — code completion/Q&A, served via llama.cpp",
+        size_mib: 1841,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf",
+                    sha256: "3da3afe6cf5c674ac195803ea0dd6fee7e1c228c2105c1ce8c66890d1d4ab460",
+                },
+                // Also ships the tokenizer so the candle `LocalGenerator` fallback
+                // can load it too, not only the llama.cpp path.
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct/resolve/main/tokenizer.json",
+                    sha256: "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+                },
+            ],
+        }],
+    },
+    ModelSpec {
+        name: "deepseek-r1-distill-qwen-1.5b",
+        kind: ModelKind::Generative,
+        role: ModelRole::Reasoning,
+        tier: ResourceTier::Low,
+        dim: 0,
+        licence: "MIT",
+        description: "DeepSeek-R1-Distill-Qwen-1.5B (Q4_K_M GGUF) — small reasoning model, served via llama.cpp",
+        size_mib: 1066,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
+                    sha256: "1741e5b2d062b07acf048bf0d2c514dadf2a48f94e2b4aa0cfe069af3838ee2f",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/tokenizer.json",
+                    sha256: "88145e3c3249adc2546ede277e9819d6e405e19072456e4b521cbc724bd60773",
+                },
+            ],
+        }],
+    },
     // ADR-0005 Tier A: the `ocrs` pure-Rust OCR model set (detection +
     // recognition, `.rten` format). Weights trace to open datasets (HierText,
     // CC-BY-SA-4.0); the `ocrs` engine crate is MIT/Apache-2.0. Checksums are
@@ -354,6 +450,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "ocrs-text",
         kind: ModelKind::Ocr,
+        role: ModelRole::None,
         tier: ResourceTier::Low,
         dim: 0,
         licence: "CC-BY-SA-4.0",
@@ -382,6 +479,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "moondream2",
         kind: ModelKind::Vision,
+        role: ModelRole::None,
         tier: ResourceTier::Low,
         dim: 0,
         licence: "Apache-2.0",
@@ -411,6 +509,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         name: "smolvlm-500m-gguf",
         kind: ModelKind::Vision,
+        role: ModelRole::None,
         tier: ResourceTier::Low,
         dim: 0,
         licence: "Apache-2.0",
