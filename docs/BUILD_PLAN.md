@@ -9,21 +9,26 @@ release-plz. Every stage names its deliverables, the concrete Rust surface it
 adds, new dependencies (with licence notes for the `cargo deny` gate), the CLI
 it wires up, and an explicit **Definition of Done (DoD)**.
 
-**Current position (2026-08-09):** Stages 1–8 are delivered (Stage 8 = offline
-inference core + candle local-models), Stage 10's portable graph-artifact format
-shipped, **Stage 9's Graphify importer** is done, **Stage 15** (intent-debt
-tracking) shipped independently, and **Stage 11** is complete — durable +
-validated imports, the lat.md importer, and the codegraph validation oracle — so
-the migration path off all three incumbents is finished. What each stage
-*deferred* is tracked honestly as first-class stages in §5b. Remaining order:
-**Stage 13** (spec/blueprint authoring pillar — *in progress*, Tier 0 done) →
-**Stage 12** (inference content/PDF/image ingestion + semantic dedup) → **Stage
+**Current position (2026-08-09):** Stages 1–13 and 15 are delivered — the graph
+core, extraction/sync/cache, query surface, renderers; the offline inference core
++ candle local-models (Stage 8); the portable graph-artifact (Stage 10); all
+three importers + the codegraph validation oracle (Stages 9/11); intent-debt
+tracking (Stage 15); the spec/blueprint authoring pillar (Stage 13 — Tier 0
+`spec context`/`scaffold` + Tier 1 `spec draft`, now **Qwen3**-backed); and
+**Stage 12** — content/PDF/**image OCR + vision** ingestion, semantic dedup, and
+the dependency-aware context cache. Shipped alongside: a curated **low/mid/high
+model matrix** (ADR-0003), a GGUF-arch-dispatching generative loader (Qwen2/Qwen3),
+and **streaming, checksum-verified model downloads** (so the 20 GiB tier is safe
+to pull). What each stage *deferred* is tracked in §5b. **Remaining core:** **Stage
 16** (commit-time correctness gate) → **Stage 14** (v1.0 hardening) → **Stage 17**
-(tool-agnostic agent instructions & context-aware review, post-v1.0). **A note on
-stage numbers:** they are labels, not execution order — Stage 15 shipped early,
-Stage 13 is being taken before Stage 12, and Stages 16/17 are sequenced around the
-Stage 14 freeze (16 just before, 17 just after) because they depend on the final
-sync/check/standards surface. **A note on version labels:**
+(tool-agnostic agent instructions & review, post-v1.0). **Newly decided
+(post-Stage-12, via ADRs — §5c):** **Stage 18** configuration file
+([ADR-0007](adr/0007-configuration-file.md)) → **Stage 19** local model serving
+([ADR-0006](adr/0006-local-model-serving.md), llama.cpp-backed, code-aware) →
+**Stage 20** inference-core direction (unify on llama.cpp) + coding/reasoning
+models. **A note on stage numbers:**
+they are labels, not execution order — Stage 15 shipped early, Stage 13 before
+Stage 12, and 16/17 bracket the Stage 14 freeze. **A note on version labels:**
 the per-stage `v0.x` headings are *nominal targets*; because the workspace is
 pre-1.0, release-plz bumps `feat` commits as patches, so real tags are `0.0.n`
 (Stage 1 → v0.0.2 … artifacts → v0.0.10 … Stage 11 → v0.0.12). §7 maps them.
@@ -742,6 +747,75 @@ are final (v1.0-frozen), not a moving target.
 - **DoD:** a tool-agnostic instructions file measurably shapes an agent review
   (attribution shows it was read); the review checklist/skill exists; the
   MCP-for-review feasibility is recorded (done or explicitly deferred).
+
+---
+
+## 5c. New stages (decided post-Stage-12, via ADRs)
+
+Decisions taken after the original roadmap, each with its own ADR. Sequenced
+around the Stage 14 freeze: config is foundational (before 14), serving and
+acceleration are features (config first, since serving is configured through it).
+
+### Stage 18 — Configuration file ([ADR-0007](adr/0007-configuration-file.md))  → *(execution order: before Stage 14)*
+**Goal:** a persistent, optional **`roteiro.toml`** so per-project preferences are
+set once, not retyped as flags — reproducible and shareable when committed.
+- Optional project `roteiro.toml` (repo root) + user `~/.roteiro/config.toml`;
+  precedence **CLI flag > project > user > built-in default**.
+- **TOML only** (YAML rejected — `serde_yaml` is unmaintained). Adds the `toml`
+  crate (deny-clean). Fully defaulted (zero-config still works); unknown keys
+  ignored; malformed = hard error; a key for a feature the binary lacks warns.
+- Initial schema: `[models]` picks, `[ingest]` toggles/caps, `[infer]` +
+  `[duplicates]` thresholds, `[debt]` ignore paths, `[serve]` (Stage 19),
+  `[paths]`. A `roteiro config` command prints the effective merged config.
+- **DoD:** a committed `roteiro.toml` changes behaviour deterministically; flags
+  override it; no config is still a working default; `roteiro config` shows the
+  merged result and each value's provenance.
+
+### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → *(execution order: after Stage 18)*
+**Goal:** reuse the models a user already pulled by exposing them over an
+**opt-in, loopback OpenAI-compatible endpoint** — offline, no second download —
+and make the served model **code-aware** by handing it Roteiro's graph tools.
+- **Engine: llama.cpp** (`llama-cpp-2`), behind an opt-in `serve` feature (pulls a
+  C/C++ toolchain: cmake + clang + libclang). Chosen after a head-to-head de-risk
+  (candle vs mistral.rs vs llama.cpp on MSRV 1.94 + strict `cargo deny`): it is the
+  **fastest** (Metal ~129 tok/s, ~2.75× CPU), the **only** one passing `cargo deny`
+  **unchanged** (46 crates, no waivers — mistral.rs fails on MPL-2.0/CDLA/0BSD,
+  candle is slower), and it reads a GGUF's **embedded tokenizer + chat template for
+  free**. Performance is the priority (background use; developers shouldn't wait),
+  so the C++ trade is accepted for this opt-in feature; the default build stays
+  pure-Rust.
+- **Our own thin `/v1`** over `llama-cpp-2` primitives (not the stock
+  `llama-server`) — `POST /v1/chat/completions`, `GET /v1/models` (installed only),
+  then `/v1/embeddings`. We own the request loop so we can **auto-register
+  Roteiro's MCP graph tools** (`explain`/`debt`/`path`/`search`, ADR-0002) into the
+  model's function-calling → a locally-served, graph-grounded model. Binds
+  `127.0.0.1`; never downloads (consent gate preserved).
+- Warm model; serialised per model initially (llama.cpp Metal batching is a later
+  enhancement). Metal is llama.cpp's (default-on for the vendored macOS build), so
+  this is also where the *serving* acceleration lives.
+- **DoD:** an external OpenAI client gets a chat completion (and the served model
+  can call a Roteiro graph tool) from an installed model over loopback, fully
+  offline; only installed models are served; the default build is unchanged; the
+  `serve` feature is `deny`-clean.
+
+### Stage 20 — Inference-core direction + coding/reasoning models  → *(execution order: with/after Stage 19)*
+**Goal:** decide the accelerated inference path across *all* uses (not just
+serving), and broaden the opt-in model catalogue.
+- **Acceleration / unify direction:** performance matters for the internal uses
+  too (`spec draft`, `infer`), and llama.cpp is now proven fast + `deny`-clean, so
+  it is the target for the **whole inference core** — a **staged migration off
+  candle** (generation first; embeddings → GGUF models; vision → `mmproj`),
+  recorded as a follow-up amendment to ADR-0003. Until then candle stays the
+  internal backend; its own `metal` backend can be target-gated on macOS as an
+  interim speed-up (candle+Metal was de-risk-verified to run our Q4_K_M GGUFs,
+  4.5× prefill). **No MLX** — llama.cpp supersedes that consideration.
+- **Coding/reasoning models:** add opt-in registry entries — a coding model
+  (Qwen2.5-Coder) and a reasoning model (QwQ-32B / DeepSeek-R1-Distill), plus a
+  Qwen3 thinking-enabled option — for general local use and serving (Stage 19).
+  Off by default; a `role` label distinguishes instruct/coding/reasoning in
+  `model list`.
+- **DoD:** the inference-core migration path is recorded (ADR-0003 amendment) with
+  at least generation moved or scheduled; the coding/reasoning entries pull and run.
 
 ---
 
