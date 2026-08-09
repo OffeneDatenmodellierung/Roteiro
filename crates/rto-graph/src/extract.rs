@@ -53,7 +53,7 @@ pub struct Registry;
 
 impl Extractor for Registry {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet {
-        let mut facts = match extension(path) {
+        let mut facts = match extension(path).as_deref() {
             Some("rs") => RustExtractor.extract(path, blob_id, bytes),
             _ => FileNodeExtractor.extract(path, blob_id, bytes),
         };
@@ -62,10 +62,12 @@ impl Extractor for Registry {
     }
 }
 
-/// Lowercase file extension of `path`, if any.
-fn extension(path: &str) -> Option<&str> {
+/// Lowercase file extension of `path`, if any. Lowercasing makes extension
+/// dispatch case-insensitive, so `Guide.PDF` and `README.MD` are recognised.
+fn extension(path: &str) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or(path);
-    name.rsplit_once('.').map(|(_, ext)| ext)
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
 }
 
 /// The natural key of the `file` node for `path`.
@@ -139,7 +141,7 @@ fn doc_comment_body(raw: &str) -> Option<String> {
 /// node rather than aborting the whole sync.
 #[cfg(feature = "pdf-text")]
 fn pdf_content(path: &str, bytes: &[u8]) -> Option<String> {
-    if extension(path) != Some("pdf") || bytes.len() > MAX_PDF_BYTES {
+    if extension(path).as_deref() != Some("pdf") || bytes.len() > MAX_PDF_BYTES {
         return None;
     }
     let owned = bytes.to_vec();
@@ -158,7 +160,7 @@ fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
 /// Whether `path` is a prose file whose body is worth embedding.
 fn is_prose(path: &str) -> bool {
     matches!(
-        extension(path),
+        extension(path).as_deref(),
         Some("md" | "markdown" | "txt" | "rst" | "adoc")
     )
 }
@@ -647,6 +649,9 @@ mod inner {
         // A non-prose file gets no content.
         let rs = FileNodeExtractor.extract("notes.bin", "b", b"\x00\x01binary");
         assert!(rs.nodes[0].meta.get("content").is_none());
+        // Extension matching is case-insensitive: `README.MD` is prose too.
+        let upper = FileNodeExtractor.extract("README.MD", "b", b"# Hi\n");
+        assert_eq!(upper.nodes[0].meta["content"], "# Hi");
     }
 
     /// Build a one-page PDF with a single Helvetica text run, computing exact
@@ -692,6 +697,9 @@ mod inner {
         let facts = FileNodeExtractor.extract("docs/guide.pdf", "b", &pdf);
         let content = facts.nodes[0].meta["content"].as_str().unwrap();
         assert!(content.contains("Hello Roteiro"), "got: {content:?}");
+        // Extension matching is case-insensitive: `Guide.PDF` extracts too.
+        let upper = FileNodeExtractor.extract("docs/Guide.PDF", "b", &pdf);
+        assert!(upper.nodes[0].meta.get("content").is_some());
         // A malformed PDF degrades to a plain file node — no panic, no content.
         let bad = FileNodeExtractor.extract("docs/bad.pdf", "b", b"%PDF-1.4\ngarbage");
         assert!(bad.nodes[0].meta.get("content").is_none());

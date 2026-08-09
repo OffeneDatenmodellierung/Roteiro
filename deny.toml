@@ -15,6 +15,11 @@ ignore = [
     # `ttf-parser` is unmaintained (author-declared, no known vulnerability). It
     # enters the tree only via pdf-extract → lopdf under the optional `pdf-text`
     # feature; the default and `inference*` builds never pull it. It is a mature,
-    # widely-used font parser. Revisit if lopdf drops or replaces it.
+    # widely-used font parser. NOTE: cargo-deny cannot scope an advisory ignore to
+    # a feature, so this ignore is global — if `ttf-parser` (or a future, more
+    # serious advisory on it) ever enters via a non-`pdf-text` path, it would be
+    # silenced too. Acceptable while the only edge is the opt-in feature and the
+    # advisory is unmaintained-only; revisit if either changes, or if lopdf drops
+    # or replaces the dependency.
     "RUSTSEC-2026-0192",
 ]
