@@ -780,10 +780,21 @@ set once, not retyped as flags — reproducible and shareable when committed.
   deterministically; flags override it; no config is still a working default;
   `roteiro config` shows the merged result and each value's provenance.
 
-### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → *(execution order: after Stage 18)*
+### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → 🚧 *in progress (19a delivered)*
 **Goal:** reuse the models a user already pulled by exposing them over an
 **opt-in, loopback OpenAI-compatible endpoint** — offline, no second download —
 and make the served model **code-aware** by handing it Roteiro's graph tools.
+- **Delivered — 19a (foundation + chat):** new `rto-serve` crate — the `Engine`
+  trait, OpenAI wire types, and an axum `/v1` layer (`GET /v1/models`, `POST
+  /v1/chat/completions`) tested against a mock without a C++ build. The `llama`
+  feature adds the real `llama-cpp-2` engine (loads a GGUF, warm model, greedy/
+  temp sampling). `roteiro serve --models [--addr]` (feature `serve`) resolves
+  installed generative models from the registry, warns on a non-loopback bind,
+  and serves them — verified end-to-end against a local `qwen3-0.6b` on Metal.
+  CI installs the C/C++ toolchain so `--all-features` builds the feature.
+- **Remaining sub-PRs:** 19b streaming + **auto-register the graph tools**
+  (function-calling → MCP tools → graph); 19c `/v1/embeddings`. The tool
+  auto-registration is the differentiator (a graph-grounded served model).
 - **Engine: llama.cpp** (`llama-cpp-2`), behind an opt-in `serve` feature (pulls a
   C/C++ toolchain: cmake + clang + libclang). Chosen after a head-to-head de-risk
   (candle vs mistral.rs vs llama.cpp on MSRV 1.94 + strict `cargo deny`): it is the

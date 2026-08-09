@@ -3242,6 +3242,7 @@ dependencies = [
  "clap",
  "rto-graph",
  "rto-render",
+ "rto-serve",
  "rto-spec",
  "rusqlite",
  "serde",
