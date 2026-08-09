@@ -2,12 +2,12 @@
 //!
 //! Everything here is a read-only view built from the store's typed queries,
 //! serialised under a **stable, versioned** JSON schema ([`SCHEMA`]) so agents
-//! can depend on the shape. Four primitives are provided: [`explain`] (a node
-//! and its provenance-labelled neighbourhood), [`list_kind`] (all nodes of a
-//! kind), [`path`] (a shortest path between two nodes), and [`debt`] (the
-//! intent-debt marker inventory). All return mixed-provenance results — the
-//! "one query surface" from ADR-0001 — with every edge carrying its
-//! `provenance`.
+//! can depend on the shape. The primitives are [`explain`] (a node and its
+//! provenance-labelled neighbourhood), [`list_kind`] (all nodes of a kind),
+//! [`path`] (a shortest path between two nodes), [`debt`] (the intent-debt marker
+//! inventory), and [`search`] (relevance-ranked node search). All return
+//! mixed-provenance results — the "one query surface" from ADR-0001 — with every
+//! edge carrying its `provenance`.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -264,6 +264,75 @@ pub fn list_kind(store: &Store, kind: &NodeKind) -> Result<Listing, StoreError> 
     })
 }
 
+/// A relevance-ranked search hit: a node summary plus its score.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SearchHit {
+    /// Relevance score (higher is better); see [`search`] for how it is derived.
+    pub score: u32,
+    /// The matching node.
+    #[serde(flatten)]
+    pub node: NodeSummary,
+}
+
+/// Deterministically search node names/keys/paths for `query`, ranked by
+/// relevance, returning at most `limit` hits. Case-insensitive; every
+/// whitespace/`::`-separated token in `query` must appear somewhere in the node.
+/// Scoring favours an exact name match, then a name substring, then per-token
+/// hits across name/key/path. Ties break by key so results are stable.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure.
+pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>, StoreError> {
+    let q = query.trim().to_lowercase();
+    // Tokens are separated by whitespace or the `::` path separator; a lone `:`
+    // (as in a `sym:rust:…` key) does not split a token.
+    let tokens: Vec<&str> = q.split("::").flat_map(str::split_whitespace).collect();
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    for node in store.all_nodes()? {
+        let name = node.name.to_lowercase();
+        let key = node.key.to_lowercase();
+        let path = node.path.as_deref().unwrap_or("").to_lowercase();
+        // Require every token to appear somewhere, so a multi-word query narrows.
+        if !tokens
+            .iter()
+            .all(|t| name.contains(t) || key.contains(t) || path.contains(t))
+        {
+            continue;
+        }
+        let mut relevance = 0u32;
+        if name == q {
+            relevance += 100;
+        } else if name.contains(&q) {
+            relevance += 60;
+        }
+        for t in &tokens {
+            if name.contains(t) {
+                relevance += 12;
+            } else if key.contains(t) {
+                relevance += 6;
+            } else if path.contains(t) {
+                relevance += 3;
+            }
+        }
+        hits.push(SearchHit {
+            score: relevance,
+            node: NodeSummary::from_node(&node),
+        });
+    }
+    // Highest score first; ties by key for a stable, deterministic order.
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.node.key.cmp(&b.node.key))
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
 /// A candidate step out of a node during traversal: the edge used and the node
 /// on the other end. Ordered so BFS expansion is deterministic.
 struct Step {
@@ -386,7 +455,7 @@ fn placeholder_hop() -> PathHop {
 
 #[cfg(test)]
 mod tests {
-    use super::{SCHEMA, explain, list_kind, path};
+    use super::{SCHEMA, explain, list_kind, path, search};
     use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
     fn seeded() -> Store {
@@ -407,6 +476,36 @@ mod tests {
             ));
         store.apply_factset(&facts).expect("apply");
         store
+    }
+
+    #[test]
+    fn search_ranks_by_relevance_and_is_bounded() {
+        let store = seeded();
+        // An exact name match outranks a substring match.
+        let hits = search(&store, "helper", 10).expect("search");
+        assert_eq!(hits[0].node.key, "sym:rust:a.rs#helper");
+        assert!(hits[0].score >= 100, "exact name match scores high");
+
+        // Every token must appear: "main roteiro" matches nothing (no node has both).
+        assert!(
+            search(&store, "main roteiro", 10)
+                .expect("search")
+                .is_empty()
+        );
+
+        // A lone `:` does not split a token: `sym:rust` is one token matching the
+        // code-symbol keys but not `adr:0001`.
+        let by_prefix = search(&store, "sym:rust", 10).expect("search");
+        assert!(!by_prefix.is_empty());
+        assert!(
+            by_prefix
+                .iter()
+                .all(|h| h.node.key.starts_with("sym:rust:"))
+        );
+
+        // A blank query yields nothing; the limit is respected.
+        assert!(search(&store, "   ", 10).expect("search").is_empty());
+        assert!(search(&store, "a.rs", 1).expect("search").len() <= 1);
     }
 
     #[test]

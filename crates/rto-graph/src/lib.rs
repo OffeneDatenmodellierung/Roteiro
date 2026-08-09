@@ -47,8 +47,8 @@ pub use localmodel::{
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use provenance::Provenance;
 pub use query::{
-    DebtItem, DebtReport, EdgeRef, Explanation, Listing, NodeSummary, Path, PathHop, SCHEMA, debt,
-    explain, list_kind, path,
+    DebtItem, DebtReport, EdgeRef, Explanation, Listing, NodeSummary, Path, PathHop, SCHEMA,
+    SearchHit, debt, explain, list_kind, path, search,
 };
 pub use store::{ImportApplied, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_worktree};

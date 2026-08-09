@@ -111,8 +111,12 @@ enum Command {
         #[arg(long)]
         out: Option<String>,
     },
-    /// Spec authoring (intent interview, house-style ADR scaffolding).
-    Spec,
+    /// Graph-grounded spec/blueprint authoring (ADR-0004). Tier 0: offline,
+    /// deterministic — no model required.
+    Spec {
+        #[command(subcommand)]
+        action: SpecAction,
+    },
     /// Suggest `inferred` similarity edges (built with `--features inference`).
     #[cfg(feature = "inference")]
     Infer {
@@ -147,6 +151,24 @@ enum Command {
     },
 }
 
+/// `roteiro spec` actions (ADR-0004).
+#[derive(Subcommand)]
+enum SpecAction {
+    /// Assemble graph-grounded context for a topic: related symbols (with their
+    /// callers/callees and governing ADRs) and related docs. The grounding to
+    /// start authoring from.
+    Context {
+        /// Topic to search the graph for (e.g. a symbol, module, or concept).
+        topic: String,
+        /// Maximum symbols and docs to include.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Emit the context as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// `roteiro model` actions.
 #[cfg(feature = "inference-local-models")]
 #[derive(Subcommand)]
@@ -165,31 +187,30 @@ enum ModelAction {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let name = match cli.command {
-        Command::Sync { json, committed } => return run_sync(json, committed),
-        Command::Check { json } => return run_check(json),
-        Command::Query { key, kind, json } => return run_query(key, kind, json),
-        Command::Debt { kind, json } => return run_debt(&kind, json),
-        Command::Path { from, to, json } => return run_path(&from, &to, json),
-        Command::Export { out } => return run_export(out),
-        Command::Load { file } => return run_load(&file),
-        Command::Init => return run_init(),
-        Command::Render { target, out } => return run_render(&target, out),
-        Command::Import { from, path, json } => return run_import(&from, &path, json),
-        Command::Spec => "spec",
+    match cli.command {
+        Command::Sync { json, committed } => run_sync(json, committed),
+        Command::Check { json } => run_check(json),
+        Command::Query { key, kind, json } => run_query(key, kind, json),
+        Command::Debt { kind, json } => run_debt(&kind, json),
+        Command::Path { from, to, json } => run_path(&from, &to, json),
+        Command::Export { out } => run_export(out),
+        Command::Load { file } => run_load(&file),
+        Command::Init => run_init(),
+        Command::Render { target, out } => run_render(&target, out),
+        Command::Import { from, path, json } => run_import(&from, &path, json),
+        Command::Spec { action } => run_spec(action),
         #[cfg(feature = "inference")]
         Command::Infer {
             min_confidence,
             top_k,
             model,
             json,
-        } => return run_infer(min_confidence, top_k, model.as_deref(), json),
+        } => run_infer(min_confidence, top_k, model.as_deref(), json),
         #[cfg(feature = "inference-local-models")]
-        Command::Model { action } => return run_model(action),
+        Command::Model { action } => run_model(action),
         #[cfg(feature = "mcp")]
-        Command::Serve { http } => return run_serve(http),
-    };
-    anyhow::bail!("`roteiro {name}` is not implemented yet (scaffold; see docs/BUILD_PLAN.md)")
+        Command::Serve { http } => run_serve(http),
+    }
 }
 
 /// Sync the graph for the current repository, optionally including uncommitted
@@ -870,6 +891,59 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
             r.hyperedges_imported,
             applied.edges_pruned,
         );
+    }
+    Ok(())
+}
+
+/// Graph-grounded spec/blueprint authoring (ADR-0004).
+fn run_spec(action: SpecAction) -> anyhow::Result<()> {
+    match action {
+        SpecAction::Context { topic, limit, json } => run_spec_context(&topic, limit, json),
+    }
+}
+
+/// Assemble and print graph-grounded context for a topic (ADR-0004 Tier 0): the
+/// related symbols with their neighbourhood and governing ADRs, plus related
+/// docs. Builds the full derived + authored graph first so results are grounded.
+fn run_spec_context(topic: &str, limit: usize, json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    let ctx = rto_spec::context(&store, topic, limit)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ctx)?);
+    } else {
+        println!("context for \"{}\":", ctx.topic);
+        if ctx.symbols.is_empty() && ctx.docs.is_empty() {
+            println!("  (nothing in the graph matches — try `roteiro query --kind fn` to browse)");
+        }
+        if !ctx.symbols.is_empty() {
+            println!("  symbols:");
+            for s in &ctx.symbols {
+                println!("    {}  ({})", s.node.key, s.node.kind);
+                if let Some(c) = &s.container {
+                    println!("      in: {c}");
+                }
+                if !s.called_by.is_empty() {
+                    println!("      called by: {}", s.called_by.join(", "));
+                }
+                if !s.calls.is_empty() {
+                    println!("      calls: {}", s.calls.join(", "));
+                }
+                if !s.authored_by.is_empty() {
+                    println!("      governed by: {}", s.authored_by.join(", "));
+                }
+            }
+        }
+        if !ctx.docs.is_empty() {
+            println!("  docs:");
+            for d in &ctx.docs {
+                println!("    {}  {}", d.key, d.name);
+            }
+        }
+        if !ctx.related_adrs.is_empty() {
+            println!("  related ADRs: {}", ctx.related_adrs.join(", "));
+        }
     }
     Ok(())
 }

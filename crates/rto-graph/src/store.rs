@@ -266,6 +266,19 @@ impl Store {
         collect_nodes(&mut rows)
     }
 
+    /// Every node in the store, ordered by key. Unlike [`Store::export_factset`]
+    /// this decodes no edges, so it is cheap for node-only scans (e.g. search).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`], [`StoreError::Json`], or
+    /// [`StoreError::Corrupt`] on decode failure.
+    pub fn all_nodes(&self) -> Result<Vec<Node>, StoreError> {
+        let sql = format!("SELECT {NODE_COLS} FROM nodes n ORDER BY n.key");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        collect_nodes(&mut rows)
+    }
+
     /// Edges whose source is the node with the given key.
     ///
     /// # Errors
