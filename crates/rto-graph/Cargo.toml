@@ -82,6 +82,11 @@ pdf-text = ["dep:pdf-extract"]
 # (off by default): pulls the pure-Rust `ocrs`/`rten` OCR tree. Reuses the shared
 # `models` registry to fetch the OCR models with consent. See [`crate::extract`].
 image-ocr = ["models", "dep:ocrs", "dep:rten", "dep:image"]
+# Describe images via a local vision-language model (ADR-0005 Tier B). Opt-in
+# (off by default): pulls candle (via `inference-local-models`) + `image`. When
+# combined with `image-ocr`, OCR runs always and the VLM only on text-sparse
+# images. See [`crate::extract`] and [`crate::localmodel::vision`].
+image-vision = ["inference-local-models", "dep:image"]
 
 [lints]
 workspace = true

@@ -213,7 +213,7 @@ fn extract_committed(
 
     // OCR output depends on which models are installed (runtime state), so fold a
     // tag for it into the cache key. Computed once per sync.
-    let env = crate::extract::ocr_env_tag();
+    let env = crate::extract::image_env_tag();
 
     for blob in &blobs {
         // Extraction is a function of (path, blob bytes) and — with `image-ocr`
@@ -302,7 +302,7 @@ fn resolve_calls(facts: &mut FactSet) {
 /// as the leading, well-distributed shard) suffixed with a stable 64-bit hash of
 /// the path, the [`crate::extract::EXTRACT_VERSION`], and the extractor
 /// environment tag `env` (the installed-OCR-model identity; `0` when OCR is off
-/// or absent — see [`crate::extract::ocr_env_tag`]). Sharing across
+/// or absent — see [`crate::extract::image_env_tag`]). Sharing across
 /// branches/worktrees is preserved (same path+oid+version+env → same key) while
 /// duplicate content at distinct paths stays distinct; bumping the extractor
 /// version *or* changing the OCR model environment retires old entries so a

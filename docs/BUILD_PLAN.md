@@ -505,7 +505,7 @@ the [Stage 9](#stage-9--importers--v090--graphify-delivered-latmd--codegraph-pen
   facts **survive a subsequent code-changing sync**; an end-to-end CLI test per
   source.
 
-### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; text + PDF ingestion, semantic dedup, dependency-aware context cache delivered; image OCR/vision remains)*
+### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** ✅ *delivered (text + PDF + image OCR/vision ingestion, semantic dedup, dependency-aware context cache; completes Stage 8)*
 **Goal:** make `inferred` edges meaningful by embedding **real content**, not
 just node names, and extend ingestion to docs/PDFs/images.
 - **Text-content ingestion (first, zero new deps) — delivered.** Extraction now
@@ -523,23 +523,25 @@ just node names, and extend ingestion to docs/PDFs/images.
   `ttf-parser` carries a scoped `deny` exception (opt-in feature only), and
   `pdf-text` occupies a distinct `EXTRACT_VERSION` namespace so a `pdf-text` build
   and a default build never serve each other stale PDF facts from a shared cache.
-- **Image scanning ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) — Tier A
-  delivered; Tier B pending.** Two opt-in tiers, decided after a go/no-go de-risk
-  spike. **Tier A — `image-ocr` (delivered):** pure-Rust OCR via `ocrs`/`rten` (no
-  C++ FFI) OCRs `.png`/`.jpg`/`.jpeg` blobs into `meta.content` beside the prose/PDF paths
+- **Image scanning ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) —
+  delivered (both tiers).** Two opt-in tiers, decided after a go/no-go de-risk
+  spike. **Tier A — `image-ocr`:** pure-Rust OCR via `ocrs`/`rten` (no C++ FFI)
+  OCRs `.png`/`.jpg`/`.jpeg` blobs into `meta.content` beside the prose/PDF paths
   — panic-guarded, byte- and pixel-capped, models fetched with consent through the
-  shared `models` registry (`roteiro model pull ocrs-text`, checksum-pinned). OCR
-  output depends on which models are installed, so a runtime **env tag** (models
-  absent → 0, else a hash of the pinned model identities) is folded into the sync
-  cache key, keeping extraction deterministic (installing/upgrading models
-  re-extracts affected images instead of serving stale facts). `image` is pinned
-  to `png`/`jpeg` codecs (defaults pull an AVIF → `libfuzzer-sys` NCSA chain);
-  `deny` clean. Verified end-to-end: `roteiro sync` reads real text from an image.
-  **Tier B — `image-vision` (pending):** an optional `candle` document-VLM for
-  image *understanding*, reusing the ADR-0003 registry/consent machinery. The
-  three surveyed crates were rejected (`rusto-rs`/MNN and `oar-ocr`/ONNX-Runtime
-  need a C++ engine; `yingkitw/ocr` is immature/unvalidated), as was splicing
-  candle-TrOCR into the rten pipeline.
+  shared `models` registry (`roteiro model pull ocrs-text`, checksum-pinned).
+  `image` is pinned to `png`/`jpeg` codecs (defaults pull an AVIF → `libfuzzer-sys`
+  NCSA chain); `deny` clean. **Tier B — `image-vision`:** a small `candle`
+  vision-language model (**Moondream2**, `quantized_moondream`) *describes* an
+  image for cases OCR can't capture (diagrams/photos). **Smart composition:** when
+  both features are on, OCR runs always (cheap, accurate literal text) and the VLM
+  runs only on **text-sparse** images (< 8 OCR words), storing both when both fire
+  — literal text for screenshots, a description for diagrams. Both models fetched
+  with consent (checksum-pinned). A runtime **env tag** folding the installed
+  OCR *and* vision model identities is in the sync cache key, so installing/
+  upgrading either re-extracts affected images (extraction stays deterministic).
+  The three surveyed OCR crates were rejected (`rusto-rs`/MNN and
+  `oar-ocr`/ONNX-Runtime need a C++ engine; `yingkitw/ocr` is immature), as was
+  splicing candle-TrOCR into the rten pipeline. Verified end-to-end for both tiers.
 - **Semantic duplication check — delivered.** `roteiro duplicates` (alias `dup`)
   unifies two signals over content-bearing nodes: **exact** structural dupes (two
   `file` nodes sharing a git blob — byte-identical content at different paths) and
