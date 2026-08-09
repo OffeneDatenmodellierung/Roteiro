@@ -712,7 +712,7 @@ fn run_model_list() {
 /// non-interactive, in which case the manual command is printed instead).
 #[cfg(feature = "models")]
 fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
-    use rto_graph::{Platform, ensure_model_dir, find_model, verify_sha256};
+    use rto_graph::{Platform, ensure_model_dir, find_model};
     use std::io::Write as _;
 
     let spec = find_model(name)
@@ -752,31 +752,19 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
     for f in variant.files {
         let dest = dir.join(f.name);
         eprintln!("fetching {} …", f.name);
-        let bytes = http_get(f.url)?;
         if f.sha256.is_empty() {
             // Make the absence of a pinned hash explicit rather than silently
-            // "passing" verification (verify_sha256 treats "" as unpinned).
+            // "passing" verification (an empty hash is treated as unpinned).
             eprintln!(
                 "  warning: no checksum pinned for {} — integrity NOT verified",
                 f.name
             );
-        } else if !verify_sha256(&bytes, f.sha256) {
-            anyhow::bail!(
-                "checksum mismatch for {} (expected {}, got {})",
-                f.name,
-                f.sha256,
-                rto_graph::sha256_hex(&bytes),
-            );
         }
-        // Write atomically (temp + rename) so a partial download is never used.
-        // Remove any existing file first so re-pulling is idempotent across
-        // platforms (Windows `rename` fails if the destination exists).
-        let tmp = dir.join(format!("{}.partial", f.name));
-        std::fs::write(&tmp, &bytes)?;
-        if dest.exists() {
-            std::fs::remove_file(&dest)?;
-        }
-        std::fs::rename(&tmp, &dest)?;
+        // Stream the response straight to disk, hashing as it writes and
+        // installing atomically — so a 20 GiB model never buffers in memory.
+        let reader = http_reader(f.url)?;
+        rto_graph::download_verified(reader, &dest, f.sha256)
+            .map_err(|e| anyhow::anyhow!("downloading {}: {e}", f.name))?;
     }
     let use_hint = match spec.kind {
         rto_graph::ModelKind::Embedding => format!("roteiro infer --model {name}"),
@@ -792,17 +780,14 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Download `url` into memory over HTTPS.
+/// Open a streaming HTTPS reader for `url` (the body is not buffered whole).
 #[cfg(feature = "models")]
-fn http_get(url: &str) -> anyhow::Result<Vec<u8>> {
-    let mut reader = ureq::get(url)
+fn http_reader(url: &str) -> anyhow::Result<impl std::io::Read> {
+    Ok(ureq::get(url)
         .call()
         .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?
         .into_body()
-        .into_reader();
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut reader, &mut bytes)?;
-    Ok(bytes)
+        .into_reader())
 }
 
 /// Import an external knowledge graph into the store (or, for codegraph, compare

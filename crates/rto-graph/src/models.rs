@@ -11,7 +11,7 @@
 //! (feature `image-ocr`) can reuse the registry and `roteiro model pull` without
 //! pulling candle.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A host platform that a model may have a tuned variant for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,12 +427,117 @@ pub fn ensure_model_dir(name: &str) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Errors from [`download_verified`].
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadError {
+    /// A read/write failure while streaming the download.
+    #[error("download io error: {0}")]
+    Io(#[from] std::io::Error),
+    /// The streamed bytes did not match the pinned checksum.
+    #[error("checksum mismatch: expected {expected}, got {got}")]
+    Checksum {
+        /// The pinned SHA-256.
+        expected: String,
+        /// The SHA-256 actually computed over the downloaded bytes.
+        got: String,
+    },
+}
+
+/// Stream `reader` to `dest`, hashing the bytes **as they are written** (constant
+/// memory — the file is never buffered whole), verify the result against
+/// `expected_sha256` (empty ⇒ unpinned, verification skipped), and install
+/// atomically (temp file + rename). This lets multi-gigabyte models download
+/// without holding the whole file in memory.
+///
+/// On a checksum mismatch the partial file is removed and
+/// [`DownloadError::Checksum`] is returned.
+///
+/// # Errors
+/// Returns [`DownloadError::Io`] on a read/write failure, or
+/// [`DownloadError::Checksum`] if the pinned hash does not match.
+pub fn download_verified(
+    mut reader: impl std::io::Read,
+    dest: &Path,
+    expected_sha256: &str,
+) -> Result<(), DownloadError> {
+    use sha2::{Digest, Sha256};
+
+    let tmp = dest.with_extension("partial");
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16]; // 64 KiB chunks
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        std::io::Write::write_all(&mut writer, &buf[..n])?;
+    }
+    // `into_inner` flushes the buffer; fsync so the bytes are durable before the
+    // rename makes them the installed file.
+    writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?
+        .sync_all()?;
+
+    if !expected_sha256.is_empty() {
+        let mut got = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            use std::fmt::Write as _;
+            let _ = write!(got, "{byte:02x}");
+        }
+        if !got.eq_ignore_ascii_case(expected_sha256) {
+            std::fs::remove_file(&tmp).ok();
+            return Err(DownloadError::Checksum {
+                expected: expected_sha256.to_owned(),
+                got,
+            });
+        }
+    }
+    // Atomic install: remove any existing file first (Windows `rename` fails if
+    // the destination exists), then rename the verified temp into place.
+    if dest.exists() {
+        std::fs::remove_file(dest)?;
+    }
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelKind, Platform, REGISTRY, ResourceTier, find, sha256_hex, store_root, verify_sha256,
+        DownloadError, ModelKind, Platform, REGISTRY, ResourceTier, download_verified, find,
+        sha256_hex, store_root, verify_sha256,
     };
     use std::path::Path;
+
+    #[test]
+    fn download_verified_streams_and_checks() {
+        let dir = std::env::temp_dir().join(format!("roteiro-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let payload = b"the streamed model bytes";
+        let sha = sha256_hex(payload);
+
+        // Correct hash → file installed with exactly the streamed bytes.
+        let good = dir.join("good.bin");
+        download_verified(&payload[..], &good, &sha).expect("verified");
+        assert_eq!(std::fs::read(&good).expect("read"), payload);
+
+        // Wrong hash → error, and no partial file left behind.
+        let bad = dir.join("bad.bin");
+        let err = download_verified(&payload[..], &bad, &"0".repeat(64)).unwrap_err();
+        assert!(matches!(err, DownloadError::Checksum { .. }));
+        assert!(!bad.exists());
+        assert!(!bad.with_extension("partial").exists());
+
+        // Empty (unpinned) hash → installed without verification.
+        let unpinned = dir.join("unpinned.bin");
+        download_verified(&payload[..], &unpinned, "").expect("unpinned");
+        assert!(unpinned.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn registry_entries_are_well_formed() {
