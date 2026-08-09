@@ -49,16 +49,21 @@ serde_json = { workspace = true }
 # dependencies — the default embedding is a pure-Rust hashing embedding
 # (ADR-0003).
 inference = []
-# The opt-in pluggable-model tier (ADR-0003): a candle-backed BERT embedder,
-# model registry, and checksum verification. Pulls candle/tokenizers/sha2 — none
-# of which the default or plain `inference` builds contain.
+# The shared, candle-free model machinery (ADR-0003): the registry, per-platform
+# variants, the on-disk model store, and SHA-256 verification. Enabled by every
+# model tier (embedding, generative, OCR) so they share one registry and the
+# `roteiro model` commands without pulling candle. Adds only `sha2`.
+models = ["dep:sha2"]
+# The opt-in pluggable-model tier (ADR-0003): a candle-backed BERT embedder and
+# GGUF instruct generator. Pulls candle/tokenizers — none of which the default or
+# plain `inference` builds contain. Builds on the shared `models` registry.
 inference-local-models = [
     "inference",
+    "models",
     "dep:candle-core",
     "dep:candle-nn",
     "dep:candle-transformers",
     "dep:tokenizers",
-    "dep:sha2",
 ]
 # Ingest text from PDF documents into `meta.content` so inference embeds their
 # meaning, not just the filename. Opt-in (off by default): pulls `pdf-extract`

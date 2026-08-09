@@ -29,12 +29,16 @@ mcp = ["rto-render/mcp"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]
-# Pluggable local embedding models (`roteiro model`, `roteiro infer --model`):
-# candle backend + consent-gated download. ADR-0003.
+# The shared model machinery: the `roteiro model` list/pull commands and the
+# consent-gated downloader (`ureq`), over rto-graph's candle-free registry.
+# Enabled by every model tier so `roteiro model pull` works without candle.
+models = ["rto-graph/models", "dep:ureq"]
+# Pluggable local embedding/generative models (`roteiro infer --model`, `spec
+# draft`): candle backend on top of the shared `models` registry. ADR-0003.
 inference-local-models = [
     "inference",
+    "models",
     "rto-graph/inference-local-models",
-    "dep:ureq",
 ]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].

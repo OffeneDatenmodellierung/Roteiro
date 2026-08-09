@@ -164,8 +164,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Manage pluggable local embedding models (`--features inference-local-models`).
-    #[cfg(feature = "inference-local-models")]
+    /// Manage pluggable local models: list the registry, pull with consent
+    /// (`--features models`).
+    #[cfg(feature = "models")]
     Model {
         #[command(subcommand)]
         action: ModelAction,
@@ -231,7 +232,7 @@ enum SpecAction {
 }
 
 /// `roteiro model` actions.
-#[cfg(feature = "inference-local-models")]
+#[cfg(feature = "models")]
 #[derive(Subcommand)]
 enum ModelAction {
     /// List registry models and which are installed for this platform.
@@ -274,7 +275,7 @@ fn main() -> anyhow::Result<()> {
             limit,
             json,
         } => run_duplicates(min_similarity, limit, json),
-        #[cfg(feature = "inference-local-models")]
+        #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
         #[cfg(feature = "mcp")]
         Command::Serve { http } => run_serve(http),
@@ -639,7 +640,7 @@ impl rto_graph::Embedder for EmbedderAdapter<'_> {
 }
 
 /// Manage pluggable local embedding models: list the registry or pull a model.
-#[cfg(feature = "inference-local-models")]
+#[cfg(feature = "models")]
 fn run_model(action: ModelAction) -> anyhow::Result<()> {
     match action {
         ModelAction::List => {
@@ -651,7 +652,7 @@ fn run_model(action: ModelAction) -> anyhow::Result<()> {
 }
 
 /// Print the registry, marking which models are installed for this host.
-#[cfg(feature = "inference-local-models")]
+#[cfg(feature = "models")]
 fn run_model_list() {
     use rto_graph::{ModelKind, Platform, REGISTRY};
 
@@ -687,7 +688,7 @@ fn run_model_list() {
 
 /// Download a model into the store, asking for consent first (unless `--yes` or
 /// non-interactive, in which case the manual command is printed instead).
-#[cfg(feature = "inference-local-models")]
+#[cfg(feature = "models")]
 fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
     use rto_graph::{Platform, ensure_model_dir, find_model, verify_sha256};
     use std::io::Write as _;
@@ -767,7 +768,7 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
 }
 
 /// Download `url` into memory over HTTPS.
-#[cfg(feature = "inference-local-models")]
+#[cfg(feature = "models")]
 fn http_get(url: &str) -> anyhow::Result<Vec<u8>> {
     let mut reader = ureq::get(url)
         .call()
