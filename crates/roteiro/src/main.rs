@@ -92,10 +92,10 @@ enum Command {
     },
     /// One-shot import from an external knowledge graph (currently: graphify).
     Import {
-        /// Source tool: graphify (lat | codegraph planned).
+        /// Source tool: graphify | lat (codegraph planned).
         #[arg(long)]
         from: String,
-        /// Path to the export: a Graphify output directory or a `graph.json`.
+        /// Path to the export: a Graphify dir/`graph.json`, or a `lat.md/` dir.
         path: String,
         /// Emit the migration report as JSON.
         #[arg(long)]
@@ -639,16 +639,104 @@ fn http_get(url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Import an external knowledge graph into the store as `inferred` facts.
+/// Import an external knowledge graph into the store.
 fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
     match from {
         "graphify" => run_import_graphify(path, json),
-        "lat" | "codegraph" => anyhow::bail!(
-            "importer `{from}` is not implemented yet (graphify is available; \
-             see docs/BUILD_PLAN.md Stage 9)"
+        "lat" => run_import_lat(path, json),
+        "codegraph" => anyhow::bail!(
+            "importer `codegraph` is not implemented yet (graphify and lat are \
+             available; see docs/BUILD_PLAN.md Stage 11)"
         ),
-        other => anyhow::bail!("unknown import source `{other}` (expected: graphify)"),
+        other => anyhow::bail!("unknown import source `{other}` (expected: graphify | lat)"),
     }
+}
+
+/// Import a lat.md directory: its markdown sections and `[[…]]` links become an
+/// `authored` layer over the code graph (a doc node per file, a section node per
+/// heading, `contains`/`references` edges). Durable and validated: links into
+/// code that no longer exists are pruned by [`rto_graph::Store::apply_import_layer`].
+fn run_import_lat(path: &str, json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("cannot import into a bare repository"))?;
+
+    let cwd = std::env::current_dir()?;
+    let dir = {
+        let p = std::path::Path::new(path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        }
+    };
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "lat directory not found: {} (expected a lat.md/ dir)",
+            dir.display()
+        );
+    }
+
+    // Collect every markdown file under the directory, keyed by its repo-relative
+    // path so node keys (`lat:<path>`) are stable and links resolve consistently.
+    let mut files = Vec::new();
+    collect_markdown(&dir, root, &mut files)?;
+    files.sort();
+    if files.is_empty() {
+        anyhow::bail!("no .md files under {}", dir.display());
+    }
+
+    let imported = rto_spec::import_lat(&files);
+
+    // Build the derived + authored graph first so code links validate against it.
+    build_graph(&repo, &mut store, &cache)?;
+    let applied = store.apply_import_layer(rto_spec::LAT_REF, &imported.facts)?;
+
+    let r = &imported.report;
+    if json {
+        let mut report = serde_json::to_value(r)?;
+        report["edges_applied"] = serde_json::json!(applied.edges_applied);
+        report["edges_pruned_stale"] = serde_json::json!(applied.edges_pruned);
+        report["durable"] = serde_json::json!(true);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "imported lat.md: {} file(s), {} section(s), {} link(s) \
+             ({} to sections, {} to code); {} edge(s) applied, {} stale pruned — persisted (durable)",
+            r.files,
+            r.sections,
+            r.links_total,
+            r.links_to_sections,
+            r.links_to_code,
+            applied.edges_applied,
+            applied.edges_pruned,
+        );
+    }
+    Ok(())
+}
+
+/// Recursively collect `*.md` files under `dir`, pushing `(repo-relative path,
+/// contents)` pairs. Paths use `/` separators for stable, portable node keys.
+fn collect_markdown(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    out: &mut Vec<(String, String)>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_markdown(&path, root, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, std::fs::read_to_string(&path)?));
+        }
+    }
+    Ok(())
 }
 
 /// Import a Graphify export: keep doc/concept/inferred knowledge, drop its code

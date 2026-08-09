@@ -1,5 +1,46 @@
 //! Small Markdown text helpers shared by the ADR and annotation scanners.
 
+/// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`,
+/// trimmed of leading/trailing `-`. Shared by the ADR and lat.md section keys.
+#[must_use]
+pub(crate) fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_owned()
+}
+
+/// Extract the inner text of every `[[…]]` on `line`, ignoring any inside an
+/// inline code span (so `` `[[path#Symbol]]` `` written as a documentation
+/// example is not treated as a real link). Shared by the ADR and lat.md parsers.
+#[must_use]
+pub(crate) fn scan_wiki_links(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let stripped = strip_code_spans(line);
+    let mut rest = stripped.as_str();
+    while let Some(open) = rest.find("[[") {
+        let after = &rest[open + 2..];
+        if let Some(close) = after.find("]]") {
+            let inner = after[..close].trim();
+            if !inner.is_empty() {
+                out.push(inner.to_owned());
+            }
+            rest = &after[close + 2..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// Return `line` with inline code spans removed, so tokens documented as
 /// examples (e.g. `` `[[path#Symbol]]` `` or ``` ``@rto:0001`` ```) are not
 /// scanned as real links or annotations.
