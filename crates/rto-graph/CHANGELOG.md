@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.12...rto-graph-v0.0.13) - 2026-08-09
+
+### Added
+
+- *(spec)* `roteiro spec context` — graph-grounded authoring context (Stage 13, Tier 0)
+
+### Fixed
+
+- *(spec)* PR #53 review — short-circuit limit==0; lock in clean scaffold output
+- *(query)* PR #52 review — `::`-only tokenizer, node-only search scan
+
 ## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.11...rto-graph-v0.0.12) - 2026-08-09
 
 ### Added
