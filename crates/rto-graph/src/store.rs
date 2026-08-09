@@ -512,6 +512,23 @@ impl Store {
         Ok(row)
     }
 
+    /// Fetch just the cached fingerprint for `key`, without reading the (larger)
+    /// JSON payload — for a cheap freshness check.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn context_cache_fingerprint(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let fp = self
+            .conn
+            .query_row(
+                "SELECT fingerprint FROM node_context WHERE key = ?1",
+                [key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(fp)
+    }
+
     /// Store (or replace) the cached context bundle for `key`.
     ///
     /// # Errors

@@ -18,9 +18,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::query::SCHEMA;
 use crate::store::{Store, StoreError};
-use crate::{Edge, Node};
+use crate::{Edge, Node, SCHEMA};
 
 /// A compact node summary within a [`NodeContext`]. Owned and round-trippable so
 /// the whole bundle can be cached as JSON and read back.
@@ -124,11 +123,12 @@ fn node_signature(node: &Node) -> u64 {
 
 /// A canonical, sortable descriptor of one incident edge for the fingerprint:
 /// direction, kind, provenance, confidence, the neighbour's key, and the
-/// neighbour's content signature.
+/// neighbour's content signature. The confidence is captured by its exact bit
+/// pattern, so any change to it — however small — moves the fingerprint.
 fn edge_descriptor(edge: &Edge, direction: &str, neighbour: &str, neighbour_sig: u64) -> String {
     let confidence = edge
         .confidence
-        .map_or_else(String::new, |c| format!("{c:.6}"));
+        .map_or_else(String::new, |c| format!("{:016x}", c.to_bits()));
     format!(
         "{direction}|{}|{}|{confidence}|{neighbour}|{neighbour_sig:016x}",
         edge.kind.as_str(),
@@ -287,9 +287,11 @@ pub fn refresh_contexts(store: &Store) -> Result<ContextRefresh, StoreError> {
             continue;
         };
         let fingerprint = compute_fingerprint(store, &node)?;
+        // Only the fingerprint is needed to decide freshness — avoid reading the
+        // full cached JSON payload for entries that turn out to be fresh.
         let fresh = store
-            .context_cache_get(&key)?
-            .is_some_and(|(fp, _)| fp == fingerprint);
+            .context_cache_fingerprint(&key)?
+            .is_some_and(|fp| fp == fingerprint);
         if fresh {
             out.reused += 1;
         } else {
