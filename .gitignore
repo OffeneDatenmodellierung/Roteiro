@@ -2,3 +2,6 @@
 *.sqlite3
 .roteiro/
 website/dist/
+
+# macOS Finder metadata
+.DS_Store
