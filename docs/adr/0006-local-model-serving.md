@@ -1,5 +1,5 @@
 ---
-Title: Local model serving — reuse pulled models over an OpenAI-compatible endpoint
+Title: Local model serving — a llama.cpp-backed, code-aware OpenAI-compatible endpoint
 Space: ARCH
 Parent: ADRs
 
@@ -7,51 +7,48 @@ Parent: ADRs
 type: adr
 adr-id: "0006"
 status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
-architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
+architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-09
 confluence-url:
 ---
 
-# ADR-0006: Local model serving — reuse pulled models over an OpenAI-compatible endpoint
+# ADR-0006: Local model serving — a llama.cpp-backed, code-aware OpenAI-compatible endpoint
 
 | | |
 |---|---|
 | **State** | Accepted |
-| **Architectural Significance** | MEDIUM |
+| **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
-Adds an **opt-in local model server** so tools other than Roteiro (e.g. an Omnigent agent) can call the models a user has already pulled — offline, with no second download or second runtime. Reuses the model registry and consent-gated store from [[docs/adr/0003-pluggable-embedding-models.md]] and the candle loaders that grew across it and [[docs/adr/0004-spec-blueprint-authoring-pillar.md]] / [[docs/adr/0005-image-ocr-vision-ingestion.md]], and the networked-serving stack already chosen in [[docs/adr/0002-adopt-rmcp-for-networked-mcp-serving.md]]. Configured through [[docs/adr/0007-configuration-file.md]]'s `[serve]` table. See [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]] for the offline-first principle this rests on.
+Adds an **opt-in local model server** so tools other than Roteiro (e.g. an Omnigent agent, an editor) can call the models a user has already pulled — offline, with no second download. Reuses the model registry and consent-gated store from [[docs/adr/0003-pluggable-embedding-models.md]], and wires in the graph query tools from [[docs/adr/0002-adopt-rmcp-for-networked-mcp-serving.md]] so the served model is **code-aware**. Configured through [[docs/adr/0007-configuration-file.md]]'s `[serve]` table. Rests on the offline-first principle of [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]]. Introduces **llama.cpp** as the high-performance inference backend, evaluated against candle and mistral.rs below.
 
 ## Summary
 
-Expose the **installed registry models** — embeddings (`LocalEmbedder`), generative (`LocalGenerator`), and image description (`LocalVlm`) — over a **local, opt-in, OpenAI-compatible HTTP endpoint**, so any tool that speaks the OpenAI API can use them **offline** without pulling its own copies or bundling its own inference runtime.
+Serve local models over an **opt-in, loopback, OpenAI-compatible HTTP endpoint** (`roteiro serve --models`), backed by **llama.cpp** (via the Rust binding `llama-cpp-2`) for performance, with **Roteiro's own graph tools auto-registered** so the served model can query the codebase.
 
-Deliberately scoped to *reuse*, **not to compete with Ollama / llama.cpp**:
+Three decisions:
 
-- **Opt-in & local.** A feature-gated `roteiro serve --models` (bound to `127.0.0.1` by default), off by default; the default binary and the graph query surface are unchanged.
-- **OpenAI-compatible surface.** `POST /v1/embeddings` and `POST /v1/chat/completions` first (the two endpoints every tool already speaks), image-description next. Models are addressed by their **registry name** (`qwen3-8b`, `bge-large-en-v1.5`, …); only *installed* models are served.
-- **Warm & serialised.** The model is loaded once and kept resident; requests are **serialised through it** (candle generation is stateful — a per-model KV cache), a mutex/queue rather than true concurrency. Correctness over throughput.
-- **Reuses what exists.** The HTTP stack from ADR-0002 (rmcp / streamable HTTP) and the consent-gated model store from ADR-0003 — so this is a thin surface, not a new subsystem.
+1. **Engine: llama.cpp (`llama-cpp-2`), opt-in.** After a head-to-head de-risk (candle vs mistral.rs vs llama.cpp on this project's MSRV 1.94 + strict `cargo deny`), llama.cpp is the choice: it is the **fastest** (Metal ~129 tok/s on a 0.6B, ~2.75× CPU), the **only** candidate that passes our `cargo deny` **unchanged** (46 crates, all allow-listed), and it reads a plain GGUF's **embedded tokenizer + chat template for free** (no `tokenizer.json`, no quant plumbing). The price is a **C/C++ toolchain** (it compiles vendored llama.cpp via cmake) — accepted, deliberately, because performance is the priority (models run often in the background and developers should not wait) and the crate tree is ~10× smaller than the alternatives.
+2. **Serving layer: our own thin `/v1`**, not the stock `llama-server`. `llama-cpp-2` exposes inference primitives only; we hand-roll a small axum `/v1` (`/v1/chat/completions`, `/v1/embeddings`, `/v1/models`) over `load → apply_chat_template → tokenize → decode → sample`. We own the loop **so we can wire Roteiro's tools into it** (see #3). (A passthrough to the standalone `llama-server` was considered and deferred — it is a separate process and makes the tool integration external.)
+3. **Code-aware by default: auto-register Roteiro's MCP graph tools.** On `serve`, the model is handed Roteiro's [[docs/adr/0002-adopt-rmcp-for-networked-mcp-serving.md]] tools (`explain` / `debt` / `path` / `search`) via OpenAI function-calling — so a locally-served model can query *this codebase's* graph out of the box. This is Roteiro's differentiator: not just a model server, a **graph-grounded** one.
 
-**Honest positioning:** this is "reuse the models you already pulled," not a high-throughput inference server. candle CPU generation is slower than llama.cpp; on Apple Silicon the acceleration path (candle's `metal` backend, target-gated on macOS) makes it genuinely usable, especially for the larger tiers — but we do not promise Ollama-class performance.
+Scope remains **reuse + performance**, not a general model server. Loopback-bound by default; serves only *installed* models; never downloads. candle stays the backend for the internal uses (`infer`, `spec draft`, image vision) for now; **unifying the inference core on llama.cpp is the stated direction** (§Consequences) — a follow-up amendment to ADR-0003, not a big-bang.
 
 ## Context
 
-Roteiro already downloads, verifies, and stores real models for its own use (`infer --model`, `spec draft`, image OCR/vision). A user running Roteiro on a plane already has, say, `qwen3-8b` and `bge-large` on disk. A *separate* local tool (an Omnigent agent that only sometimes needs a foundation model) would otherwise **re-download its own copy and ship its own runtime** to do the same thing offline. That is wasteful and, for a fully-offline workflow, a real friction.
+Roteiro already downloads, verifies, and stores real GGUF/safetensors models for its own use. A separate local tool that only sometimes needs a model would otherwise re-download its own copy and ship its own runtime. Serving reuses the local store so nothing new is fetched and nothing leaves the machine. Two things sharpened the design after the first draft:
 
-Forces to reconcile:
+1. **Performance is a first-class requirement.** These models run frequently in the background; slow inference is a real developer-experience cost. That tilts the engine choice toward the fastest viable option, and makes candle's modest quantized-Metal decode a genuine liability rather than a footnote.
+2. **A local server is only interesting if it's *ours*.** Anyone can run Ollama or `llama-server`. Roteiro's reason to serve is to hand the model **the codebase graph** — the one query surface from ADR-0001/0002 — so the served model is code-aware. That argues for owning the request loop (to inject tools), not delegating to a black-box server.
 
-1. **Offline-first & self-contained (ADR-0001).** The value is precisely that nothing leaves the machine and nothing new is fetched — reuse the local store. The default build must not grow; serving is opt-in.
-2. **Don't become a worse Ollama.** A general model server is a large, ongoing surface (streaming, batching, concurrency, model management, format compatibility). We must scope tightly to *reuse* or this balloons past the project's mission.
-3. **candle models are stateful and CPU-slow.** `LocalGenerator`'s KV cache means requests cannot run concurrently on one model instance; and CPU decode is modest. The design must serialise and set expectations honestly (with the Mac `metal` path as the performance answer).
-4. **A universal interface.** The calling tools (Omnigent, editors, scripts) overwhelmingly speak the **OpenAI API**. That, not a bespoke protocol, is the interoperable choice. (MCP from ADR-0002 is the graph surface; it can expose these as tools later, but REST is the front door.)
+Forces to reconcile: offline-first & self-contained (ADR-0001); don't become a general model server; honest about the C++ trade (we have held a pure-Rust preference — this opt-in feature is where we consciously relax it for performance, while the default build stays pure-Rust); and a universal interface (OpenAI API, which every calling tool already speaks).
 
 ## Decision makers
 
@@ -59,45 +56,53 @@ Forces to reconcile:
 
 ## Recommended option
 
-**Option 3 — opt-in OpenAI-compatible local endpoint over the existing stack (recommended).**
+**llama.cpp engine + our own `/v1` layer + auto-registered graph tools (recommended).**
 
-- **CLI:** `roteiro serve --models [--addr 127.0.0.1:PORT]` (feature `serve-models`), or the equivalent `[serve]` config (ADR-0007). Off by default; loopback bind by default; a warning if bound to a non-loopback address.
-- **Endpoints (grow across PRs):**
-  - `POST /v1/embeddings` — `LocalEmbedder`; the fast, high-value, low-risk one (stateless, cheap). Ships first.
-  - `POST /v1/chat/completions` — `LocalGenerator` (Qwen2/Qwen3), ChatML mapped from the OpenAI messages; non-streaming first, then SSE streaming.
-  - `GET /v1/models` — lists the *installed* registry models.
-  - Image description (`LocalVlm`) — exposed as a vision `chat/completions` (OpenAI image-input shape) once the text endpoints are solid.
-- **Execution model:** each model is loaded lazily on first request and kept warm; a per-model mutex serialises requests (KV-cache safety); the offline/consent invariants are unchanged (it only serves already-pulled models — it never downloads on demand).
-- **Acceleration:** honours the ADR-0006-adjacent acceleration decision — candle's `metal` backend, target-gated on macOS — so a Mac serves the big tiers at usable speed. No MLX (candle+Metal was de-risk-verified to run our Q4_K_M models correctly; a second FFI engine is not justified).
+- **CLI:** `roteiro serve --models [--addr 127.0.0.1:PORT]` behind an opt-in `serve` feature (pulls `llama-cpp-2`). Off by default; loopback bind; warns on a non-loopback address (no auth — a localhost dev tool; TLS/authn terminate at a reverse proxy, as ADR-0002 frames for MCP).
+- **Endpoints (grow across PRs):** `/v1/chat/completions` (generation, over the same installed GGUFs), `/v1/models` (installed only), then `/v1/embeddings`. *(Embeddings note: llama.cpp embeds via GGUF embedding models; our current embedders are BERT safetensors, so embedding-serving either adds GGUF embedding entries to the registry or is served via the existing candle `LocalEmbedder` — resolved at implementation.)*
+- **Execution:** model loaded lazily on first request and kept warm; requests serialised per model initially (llama.cpp supports Metal batching — a later enhancement). Serves only installed models; never downloads.
+- **Graph tools:** Roteiro's MCP tools auto-registered into the served model's function-calling; the model calls a tool → Roteiro executes it against the graph → result is fed back.
+- **Acceleration:** llama.cpp's Metal backend (enabled by default on macOS in the vendored build) — this *is* the acceleration story for served models, and moots candle's quantized-Metal weakness on the serving path.
 
 ## Options considered + consequences
 
-### Option 1: Don't build it — tell users to run Ollama/llama.cpp
-- Pros: zero work; those tools are faster and battle-tested.
-- Cons: defeats the point — the user then maintains a *second* model store and runtime, re-downloads GGUFs, and loses the "one self-contained offline tool" property. Rejected as the whole answer (but we explicitly *don't* try to match their performance).
+### Engine — candle vs mistral.rs vs llama.cpp (de-risked on MSRV 1.94 + strict `cargo deny`)
 
-### Option 2: Expose models only through MCP (ADR-0002) tools
-- Pros: reuses the exact server we already run; no new protocol.
-- Cons: most external tools speak the OpenAI API, not MCP tool-calls, so adoption friction is high. Rejected as the *primary* surface — MCP can expose serving as tools later, but REST is the front door.
+| | **llama.cpp** (`llama-cpp-2`) — chosen | **mistral.rs** | **candle** (hand-roll) |
+|---|---|---|---|
+| Metal tok/s (0.6B) | **~129** (2.75× CPU) | ~125 | slower (quant-decode ties CPU) |
+| `cargo deny` | ✅ **passes unchanged** | ❌ fails (MPL-2.0/CDLA/0BSD core deps) | ✅ |
+| Crates | **46** (mostly build-only) | 465 | large candle tree |
+| OpenAI server | our `/v1` | embedded | our `/v1` |
+| GGUF tokenizer/template | **free (embedded)** | free | we hand-code it |
+| Cost | C++ (cmake/clang/libclang) | C/C++ + licence waivers | pure-Rust; slower; more of our code |
 
-### Option 3: Opt-in OpenAI-compatible local endpoint (recommended)
-- Pros: universally callable; reuses the registry, store, and HTTP stack; strictly offline (serves only local models); scoped to reuse, not a general server; default build unchanged.
-- Cons: candle CPU throughput is modest and generation is serialised (mitigated: warm model, honest positioning, Mac `metal` acceleration for the big tiers); maintaining even a small OpenAI-compat surface is ongoing work (mitigated: start with embeddings + non-streaming chat, grow deliberately).
+- **mistral.rs — rejected.** It embeds an OpenAI server (attractive) and builds on 1.94, but its **core** dependencies pull **MPL-2.0** (`option-ext` via hf-hub), **CDLA-Permissive-2.0** (`webpki-roots`), and **0BSD** (`interprocess`) — unavoidable, so it fails our `cargo deny` allow-list without waivers, and it drags 465 crates + candle 0.10 (a version split from our 0.11). Disqualified under current policy.
+- **candle hand-roll — viable, not chosen for serving.** Keeps everything pure-Rust and reuses our loaders, but it is the slowest, and we'd hand-write the tokenizer/quant/Metal work llama.cpp gives for free. Given performance is the priority, it loses here — though it remains the backend for internal uses (for now).
+- **llama.cpp — chosen.** Fastest, `deny`-clean unchanged, minimal Rust surface, GGUF tokenizer/template for free. Trade accepted: a C/C++ build for the opt-in `serve` feature.
+
+### Serving layer — our `/v1` vs the stock `llama-server`
+- **`llama-server` (stock) — deferred.** `llama-cpp-2` does not build it; using it means a separate process, and it makes wiring **our** graph tools external. A future optional passthrough is possible, but it is not where the Roteiro value (code-awareness) lives.
+- **Our thin `/v1` — chosen.** ~5 primitives; we own the loop, so tool-registration is natural.
+
+### Surface — OpenAI REST vs MCP-only (from v1.0 of this ADR)
+- OpenAI REST is the front door (every tool speaks it); MCP (ADR-0002) is reused *inside* it as the tool layer, not as the primary API.
 
 ## Consequences
 
-- A new opt-in `serve-models` feature and `roteiro serve --models`; the default binary, `infer`, `spec`, and the graph surface are untouched. Loopback-by-default; a non-loopback bind warns (there is no auth — it is a localhost dev tool, TLS/authn terminate at a reverse proxy, as ADR-0002 already frames for MCP).
-- Serving **only ever exposes installed models** and **never downloads** — the consent gate (ADR-0003) is preserved: you serve what you chose to pull.
-- Requests are serialised per model; a busy generative request blocks another. Documented; acceptable for a single-user local endpoint.
-- Performance is honestly "reuse-grade," not "Ollama-grade"; the Mac `metal` backend is the answer for the larger tiers, and the coding/reasoning models the registry may add are natural things to serve.
-- Composes with ADR-0007: `[serve]` in `roteiro.toml` sets defaults (enable, addr, which models to expose), overridable by CLI flags.
+- A new opt-in `serve` feature pulls **`llama-cpp-2`** — a **C/C++ toolchain** (cmake, clang, libclang) is required to build *that feature*; the default and other opt-in builds stay as they are. **No `cargo deny` change** is needed — `llama-cpp-2`'s 46-crate tree is fully allow-listed with no advisories. This is the point at which the project consciously accepts C++ FFI for an **opt-in** performance path, while holding pure-Rust for the default build.
+- Serving **only ever exposes installed models** and **never downloads** — the ADR-0003 consent gate is preserved.
+- The served model is **code-aware**: Roteiro's graph tools are auto-registered, so a local model can `explain`/`search`/`path`/`debt` over this repo — dogfooding the one query surface (ADR-0001) for external agents.
+- **Direction — inference-core unify.** Performance matters for the internal uses too (`spec draft`, `infer`), so llama.cpp — now proven fast and `deny`-clean — is the stated target for the *whole* inference core: a **staged migration off candle** (generation first; embeddings move to GGUF models; vision to `mmproj`), recorded as a follow-up amendment to ADR-0003, not a big-bang. Until then candle remains the internal backend and the two coexist only transitionally (serving reads the same GGUFs candle does, so generation stays consistent).
+- Composes with ADR-0007: `[serve]` sets defaults (enable, addr, which models, tool-registration on/off), overridable by CLI flags.
 
 ## Advice Received
 
-Project direction incorporated: build it, but keep it a **reuse** endpoint, not a general model server — scope to the OpenAI endpoints tools actually call, reuse the existing registry/store/HTTP stack, stay offline (serve only local models, never fetch), and be honest that performance is candle-grade with the Mac `metal` path as the accelerator rather than promising llama.cpp throughput.
+Project direction incorporated: **prioritise performance** (background use; developers shouldn't wait) — so use the fastest viable engine even at the cost of C++; since we're allowing C++ bindings, **llama.cpp** is the pick (and it passes `deny` cleanly, unlike mistral.rs); use **our own internal serving layer** (not the stock server) so we can **auto-register Roteiro's MCP/agent tools** and serve a code-aware model; keep it opt-in and offline; and treat unifying the inference core on llama.cpp as the direction.
 
 ## Document version history
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 1.0 | 2026-08-09 | Accepted. Opt-in, loopback OpenAI-compatible local endpoint (`roteiro serve --models`) reusing the installed registry models (embeddings → generative → vision), warm + serialised, over the ADR-0002 HTTP stack; scoped to *reuse* not a general server; honest candle-grade performance with the macOS `metal` acceleration path; configured via ADR-0007's `[serve]`. Rejects "just use Ollama" and MCP-only as the primary surface. |
+| 1.0 | 2026-08-09 | Accepted. Opt-in loopback OpenAI-compatible endpoint reusing installed models, warm + serialised over the ADR-0002 stack; scoped to reuse; candle-implied engine; rejected Ollama-replacement and MCP-only as the front door. |
+| 1.1 | 2026-08-09 | Revised after a head-to-head engine de-risk. **Engine → llama.cpp (`llama-cpp-2`)** — fastest, and the only candidate passing `cargo deny` unchanged (mistral.rs fails on MPL-2.0/CDLA/0BSD; candle is slower). **Serving via our own thin `/v1`** (not stock `llama-server`) so **Roteiro's graph tools auto-register** into the model (code-aware serving). Accepts a C/C++ toolchain for the opt-in `serve` feature; no `deny` change needed. States the candle→llama.cpp inference-core unify as the direction (follow-up ADR-0003 amendment). |

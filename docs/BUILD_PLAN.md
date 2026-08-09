@@ -24,8 +24,9 @@ to pull). What each stage *deferred* is tracked in §5b. **Remaining core:** **S
 (tool-agnostic agent instructions & review, post-v1.0). **Newly decided
 (post-Stage-12, via ADRs — §5c):** **Stage 18** configuration file
 ([ADR-0007](adr/0007-configuration-file.md)) → **Stage 19** local model serving
-([ADR-0006](adr/0006-local-model-serving.md)) → **Stage 20** model acceleration
-(macOS Metal) + coding/reasoning model additions. **A note on stage numbers:**
+([ADR-0006](adr/0006-local-model-serving.md), llama.cpp-backed, code-aware) →
+**Stage 20** inference-core direction (unify on llama.cpp) + coding/reasoning
+models. **A note on stage numbers:**
 they are labels, not execution order — Stage 15 shipped early, Stage 13 before
 Stage 12, and 16/17 bracket the Stage 14 freeze. **A note on version labels:**
 the per-stage `v0.x` headings are *nominal targets*; because the workspace is
@@ -772,37 +773,49 @@ set once, not retyped as flags — reproducible and shareable when committed.
 
 ### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → *(execution order: after Stage 18)*
 **Goal:** reuse the models a user already pulled by exposing them over an
-**opt-in, loopback OpenAI-compatible endpoint** — so other tools (e.g. an
-Omnigent agent) call them **offline** with no second download or runtime.
-- `roteiro serve --models` (feature `serve-models`, off by default; binds
-  `127.0.0.1`). `POST /v1/embeddings` first, then `/v1/chat/completions`
-  (Qwen2/Qwen3), then image description; `GET /v1/models` lists *installed*
-  models. Never downloads (consent gate preserved).
-- Warm model, **requests serialised** per model (candle KV cache is stateful).
-  Reuses the ADR-0002 HTTP stack and the ADR-0003 store. Scoped to *reuse*, not a
-  general server; honest candle-grade performance (Metal path, Stage 20, for the
-  big tiers).
-- **DoD:** an external OpenAI client gets embeddings and a chat completion from an
-  installed model over loopback, fully offline; only installed models are served;
-  the default build is unchanged.
+**opt-in, loopback OpenAI-compatible endpoint** — offline, no second download —
+and make the served model **code-aware** by handing it Roteiro's graph tools.
+- **Engine: llama.cpp** (`llama-cpp-2`), behind an opt-in `serve` feature (pulls a
+  C/C++ toolchain: cmake + clang + libclang). Chosen after a head-to-head de-risk
+  (candle vs mistral.rs vs llama.cpp on MSRV 1.94 + strict `cargo deny`): it is the
+  **fastest** (Metal ~129 tok/s, ~2.75× CPU), the **only** one passing `cargo deny`
+  **unchanged** (46 crates, no waivers — mistral.rs fails on MPL-2.0/CDLA/0BSD,
+  candle is slower), and it reads a GGUF's **embedded tokenizer + chat template for
+  free**. Performance is the priority (background use; developers shouldn't wait),
+  so the C++ trade is accepted for this opt-in feature; the default build stays
+  pure-Rust.
+- **Our own thin `/v1`** over `llama-cpp-2` primitives (not the stock
+  `llama-server`) — `POST /v1/chat/completions`, `GET /v1/models` (installed only),
+  then `/v1/embeddings`. We own the request loop so we can **auto-register
+  Roteiro's MCP graph tools** (`explain`/`debt`/`path`/`search`, ADR-0002) into the
+  model's function-calling → a locally-served, graph-grounded model. Binds
+  `127.0.0.1`; never downloads (consent gate preserved).
+- Warm model; serialised per model initially (llama.cpp Metal batching is a later
+  enhancement). Metal is llama.cpp's (default-on for the vendored macOS build), so
+  this is also where the *serving* acceleration lives.
+- **DoD:** an external OpenAI client gets a chat completion (and the served model
+  can call a Roteiro graph tool) from an installed model over loopback, fully
+  offline; only installed models are served; the default build is unchanged; the
+  `serve` feature is `deny`-clean.
 
-### Stage 20 — Model acceleration (macOS Metal) + coding/reasoning models  → *(execution order: with/after Stage 19)*
-**Goal:** make local inference fast on the target machine, and broaden the
-opt-in model catalogue.
-- **Acceleration:** target-gate candle's `metal` backend on macOS (via
-  `[target.'cfg(target_os = "macos")'.dependencies]`) so a Mac build is
-  GPU-accelerated; CPU stays the portable default; Linux/CI never build Metal.
-  De-risk-verified: candle+Metal runs our Q4_K_M GGUFs correctly (4.5× prefill).
-  **No MLX** — a second FFI engine is not justified. (CI's `--all-features` clippy
-  moves to an explicit feature set, or a macOS job, so it never builds Metal on
-  Linux.)
+### Stage 20 — Inference-core direction + coding/reasoning models  → *(execution order: with/after Stage 19)*
+**Goal:** decide the accelerated inference path across *all* uses (not just
+serving), and broaden the opt-in model catalogue.
+- **Acceleration / unify direction:** performance matters for the internal uses
+  too (`spec draft`, `infer`), and llama.cpp is now proven fast + `deny`-clean, so
+  it is the target for the **whole inference core** — a **staged migration off
+  candle** (generation first; embeddings → GGUF models; vision → `mmproj`),
+  recorded as a follow-up amendment to ADR-0003. Until then candle stays the
+  internal backend; its own `metal` backend can be target-gated on macOS as an
+  interim speed-up (candle+Metal was de-risk-verified to run our Q4_K_M GGUFs,
+  4.5× prefill). **No MLX** — llama.cpp supersedes that consideration.
 - **Coding/reasoning models:** add opt-in registry entries — a coding model
-  (Qwen2.5-Coder, loads on the existing `quantized_qwen2` branch) and a reasoning
-  model (QwQ-32B / DeepSeek-R1-Distill, also Qwen2-arch), plus a Qwen3
-  thinking-enabled option — for general local use and serving (Stage 19). Off by
-  default; a `role` label distinguishes instruct/coding/reasoning in `model list`.
-- **DoD:** a macOS build offloads generation to the GPU (measurably faster, still
-  CPU-correct on Linux); the coding/reasoning entries pull and run.
+  (Qwen2.5-Coder) and a reasoning model (QwQ-32B / DeepSeek-R1-Distill), plus a
+  Qwen3 thinking-enabled option — for general local use and serving (Stage 19).
+  Off by default; a `role` label distinguishes instruct/coding/reasoning in
+  `model list`.
+- **DoD:** the inference-core migration path is recorded (ADR-0003 amendment) with
+  at least generation moved or scheduled; the coding/reasoning entries pull and run.
 
 ---
 
