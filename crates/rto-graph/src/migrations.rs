@@ -71,6 +71,19 @@ DELETE FROM edges WHERE id NOT IN (
 CREATE UNIQUE INDEX idx_edges_unique ON edges(src, dst, kind, provenance);
 ";
 
+/// Migration 4: durable import layers. `sync`'s full rebuild wipes `nodes`/
+/// `edges`, so facts applied by an `import` (Graphify, lat.md, …) would be lost
+/// on the next code-changing sync. Persist each import's `FactSet` here, keyed by
+/// its `src_ref`, so `build_graph` can re-apply it after every rebuild. This
+/// table is never touched by `rebuild`, so imported knowledge is durable.
+const M0004_IMPORTS: &str = "
+CREATE TABLE imports (
+    src_ref     TEXT PRIMARY KEY,
+    facts       TEXT NOT NULL,
+    imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -84,6 +97,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         sql: M0003_EDGE_UNIQUE,
+    },
+    Migration {
+        version: 4,
+        sql: M0004_IMPORTS,
     },
 ];
 
@@ -155,7 +172,7 @@ mod tests {
     fn apply_creates_core_tables() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
-        for table in ["nodes", "edges", "schema_migrations"] {
+        for table in ["nodes", "edges", "imports", "schema_migrations"] {
             let count: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",

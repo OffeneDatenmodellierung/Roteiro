@@ -295,6 +295,12 @@ fn build_graph(
 
     let mut report = rto_spec::run(store, &docs, &annotations)?;
     report.violations.extend(malformed);
+
+    // Re-apply any persisted import layers (Graphify, lat.md, …) on top of the
+    // freshly-rebuilt derived + authored graph, so imported knowledge is durable
+    // across code-changing syncs. Dangling edges (endpoints removed by a sync)
+    // are tolerated.
+    store.reapply_imports()?;
     Ok(report)
 }
 
@@ -647,13 +653,11 @@ fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
 
 /// Import a Graphify export: keep doc/concept/inferred knowledge, drop its code
 /// structure (Roteiro re-derives that), and ground imported docs to real files.
-/// Note: like `roteiro infer`, an import is a **re-appliable layer** over the
-/// derived graph — a later code-changing `sync` rebuilds the derived graph and
-/// drops these facts, so re-run `import` to refresh. (Durable, auto-reapplied
-/// imports — persisting the facts and re-applying them in `build_graph` — are a
-/// tracked follow-up; see `docs/BUILD_PLAN.md` Stage 11.)
+/// The import is **durable**: its facts are persisted (keyed by
+/// [`rto_spec::GRAPHIFY_REF`]) and re-applied by `build_graph` after every sync,
+/// so they survive a later code-changing sync (dangling edges are tolerated).
 fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
-    use rto_graph::{Edge, EdgeKind, FactSet};
+    use rto_graph::{Edge, EdgeKind};
 
     // Accept either the Graphify output directory or a graph.json directly.
     let p = std::path::Path::new(path);
@@ -669,14 +673,12 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache)?;
 
-    // Re-import is authoritative over Graphify's own edges only.
-    store.delete_edges_by_src_ref(rto_spec::GRAPHIFY_REF)?;
-    store.apply_factset(&imported.facts)?;
-
-    // Ground imported doc nodes to real files: when an imported node's
-    // `source_file` matches a `file:<path>` node already in the graph, add an
-    // inferred edge linking the imported knowledge to the derived file.
-    let mut links = Vec::new();
+    // Assemble the full import layer: Graphify's own nodes/edges plus grounding
+    // links. When an imported node's `source_file` matches a `file:<path>` node
+    // already in the graph, add an inferred edge linking the imported knowledge
+    // to the derived file.
+    let mut facts = imported.facts.clone();
+    let mut linked = 0usize;
     for node in &imported.facts.nodes {
         if let Some(path) = &node.path {
             let file_key = format!("file:{path}");
@@ -684,36 +686,35 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
                 let mut edge =
                     Edge::inferred(node.key.clone(), file_key, EdgeKind::References, 0.9);
                 edge.src_ref = Some(rto_spec::GRAPHIFY_REF.to_owned());
-                links.push(edge);
+                facts.edges.push(edge);
+                linked += 1;
             }
         }
     }
-    let linked = links.len();
-    store.apply_factset(&FactSet {
-        nodes: vec![],
-        edges: links,
-    })?;
+
+    // Re-import is authoritative over Graphify's own edges only; apply the layer
+    // to the live graph and persist it so it is durable across future syncs.
+    store.delete_edges_by_src_ref(rto_spec::GRAPHIFY_REF)?;
+    store.apply_factset(&facts)?;
+    store.put_import(rto_spec::GRAPHIFY_REF, &facts)?;
 
     let r = &imported.report;
     if json {
         let mut report = serde_json::to_value(r)?;
         report["docs_linked_to_files"] = serde_json::json!(linked);
+        report["durable"] = serde_json::json!(true);
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
             "imported graphify: {} node(s) ({} dropped as code), {} inferred edge(s) \
              ({} ast dropped, {} dangling skipped), {} hyperedge group(s); \
-             {linked} doc(s) linked to files",
+             {linked} doc(s) linked to files — persisted (durable across syncs)",
             r.nodes_imported,
             r.nodes_dropped_code,
             r.edges_imported,
             r.edges_dropped_ast,
             r.edges_skipped_dangling,
             r.hyperedges_imported,
-        );
-        eprintln!(
-            "note: this import is a re-appliable layer — a later code-changing `sync` \
-             rebuilds the derived graph and drops it; re-run `import` to refresh."
         );
     }
     Ok(())

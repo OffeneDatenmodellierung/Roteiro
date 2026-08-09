@@ -28,6 +28,20 @@ pub enum StoreError {
     Corrupt(String),
 }
 
+/// A summary of re-applying the persisted import layers (see
+/// [`Store::reapply_imports`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ImportApplied {
+    /// Number of import layers re-applied.
+    pub layers: usize,
+    /// Import nodes upserted (across all layers).
+    pub nodes: usize,
+    /// Import edges inserted (both endpoints present).
+    pub edges_applied: usize,
+    /// Import edges skipped because an endpoint was absent from the graph.
+    pub edges_skipped: usize,
+}
+
 /// Qualified node columns for `SELECT`s that alias the `nodes` table as `n`.
 const NODE_COLS: &str =
     "n.key, n.kind, n.name, n.path, n.lang, n.blob_hash, n.span_start, n.span_end, n.meta";
@@ -310,6 +324,99 @@ impl Store {
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
+    /// Persist an import layer's `facts` under `src_ref`, replacing any previous
+    /// import with that ref. The `imports` table is the durable source of truth;
+    /// [`Store::reapply_imports`] replays it after every rebuild, so imported
+    /// knowledge survives a code-changing `sync`. Persisting does not itself
+    /// apply the facts to the live graph — callers apply and persist together.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Json`] if `facts` cannot be serialized, or
+    /// [`StoreError::Sqlite`] on write failure.
+    pub fn put_import(&self, src_ref: &str, facts: &FactSet) -> Result<(), StoreError> {
+        let json = serde_json::to_string(facts)?;
+        self.conn.execute(
+            "INSERT INTO imports (src_ref, facts) VALUES (?1, ?2)
+             ON CONFLICT(src_ref) DO UPDATE SET
+                 facts = excluded.facts, imported_at = datetime('now')",
+            params![src_ref, json],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the persisted import layer for `src_ref`, returning whether one
+    /// existed. Does not remove edges already in the live graph (use
+    /// [`Store::delete_edges_by_src_ref`] for that).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn delete_import(&self, src_ref: &str) -> Result<bool, StoreError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM imports WHERE src_ref = ?1", [src_ref])?;
+        Ok(n > 0)
+    }
+
+    /// The `src_ref`s of all persisted import layers, ordered.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn import_refs(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT src_ref FROM imports ORDER BY src_ref")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Re-apply every persisted import layer on top of the current graph, in
+    /// `src_ref` order, tolerating edges whose endpoints are absent (e.g. a
+    /// derived node whose file was deleted). Import nodes are upserted; a dangling
+    /// edge is counted and skipped rather than erroring. Idempotent — safe to run
+    /// after each rebuild in `build_graph`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Json`] if a stored layer cannot be decoded, or
+    /// [`StoreError::Sqlite`] on write failure.
+    pub fn reapply_imports(&mut self) -> Result<ImportApplied, StoreError> {
+        let layers = self.load_import_factsets()?;
+        let mut applied = ImportApplied::default();
+        let tx = self.conn.transaction()?;
+        for facts in &layers {
+            for node in &facts.nodes {
+                upsert_node(&tx, node)?;
+                applied.nodes += 1;
+            }
+            for edge in &facts.edges {
+                if insert_edge_if_present(&tx, edge)? {
+                    applied.edges_applied += 1;
+                } else {
+                    applied.edges_skipped += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        applied.layers = layers.len();
+        Ok(applied)
+    }
+
+    /// Load and decode every persisted import `FactSet`, in `src_ref` order.
+    fn load_import_factsets(&self) -> Result<Vec<FactSet>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT facts FROM imports ORDER BY src_ref")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str::<FactSet>(&row?)?);
+        }
+        Ok(out)
+    }
+
     /// Neighbouring nodes reachable from `key` in the given direction. Returns
     /// an empty vector if the node does not exist.
     ///
@@ -377,20 +484,53 @@ fn upsert_node(conn: &Connection, node: &Node) -> Result<(), StoreError> {
 }
 
 fn insert_edge(conn: &Connection, edge: &Edge) -> Result<(), StoreError> {
-    if !edge.is_valid() {
-        return Err(StoreError::InvalidEdge(format!(
-            "confidence must be present iff provenance is inferred (src={}, dst={})",
-            edge.src, edge.dst
-        )));
-    }
+    validate_edge(edge)?;
     let src_id =
         node_row_id(conn, &edge.src)?.ok_or_else(|| StoreError::UnknownNode(edge.src.clone()))?;
     let dst_id =
         node_row_id(conn, &edge.dst)?.ok_or_else(|| StoreError::UnknownNode(edge.dst.clone()))?;
-    // Edges are a set: a duplicate `(src, dst, kind, provenance)` is a no-op, so
-    // re-applying a fact set does not accumulate duplicate edges. `ON CONFLICT …
-    // DO NOTHING` targets only that unique index — other constraint violations
-    // (already guarded in Rust above) still surface.
+    insert_edge_row(conn, edge, src_id, dst_id)
+}
+
+/// Insert `edge` only if both endpoints already resolve to nodes, returning
+/// whether it was inserted. Unlike [`insert_edge`], a missing endpoint is *not*
+/// an error — it is skipped. Used when re-applying a persisted import layer,
+/// whose edges may point at derived nodes that a later sync removed (e.g. a
+/// deleted file).
+fn insert_edge_if_present(conn: &Connection, edge: &Edge) -> Result<bool, StoreError> {
+    validate_edge(edge)?;
+    let (Some(src_id), Some(dst_id)) =
+        (node_row_id(conn, &edge.src)?, node_row_id(conn, &edge.dst)?)
+    else {
+        return Ok(false);
+    };
+    insert_edge_row(conn, edge, src_id, dst_id)?;
+    Ok(true)
+}
+
+/// The provenance/confidence invariant guard shared by the strict and tolerant
+/// edge inserts.
+fn validate_edge(edge: &Edge) -> Result<(), StoreError> {
+    if edge.is_valid() {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidEdge(format!(
+            "confidence must be present iff provenance is inferred (src={}, dst={})",
+            edge.src, edge.dst
+        )))
+    }
+}
+
+/// Insert an edge row given already-resolved endpoint ids. Edges are a set: a
+/// duplicate `(src, dst, kind, provenance)` is a no-op via `ON CONFLICT … DO
+/// NOTHING`, so re-applying a fact set never accumulates duplicates. Other
+/// constraint violations (guarded in Rust above) still surface.
+fn insert_edge_row(
+    conn: &Connection,
+    edge: &Edge,
+    src_id: i64,
+    dst_id: i64,
+) -> Result<(), StoreError> {
     conn.execute(
         "INSERT INTO edges (src, dst, kind, provenance, confidence, src_ref)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -486,7 +626,7 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        assert_eq!(store.schema_version().expect("version"), 3);
+        assert_eq!(store.schema_version().expect("version"), 4);
     }
 
     #[test]
@@ -657,9 +797,93 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 3);
+            assert_eq!(store.schema_version().expect("version"), 4);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    /// A persisted import layer is re-applied after a `rebuild` wipes the graph,
+    /// so imported facts survive a code-changing sync.
+    #[test]
+    fn imports_survive_rebuild() {
+        let mut store = Store::open_in_memory().expect("open");
+        // A derived file node the import will link to, plus the import layer.
+        let derived = FactSet::new().with_node(Node::new("file:a.rs", NodeKind::File, "a.rs"));
+        store.rebuild(&derived, Some("tree1")).expect("rebuild");
+
+        let import = FactSet::new()
+            .with_node(Node::new("graphify:doc1", NodeKind::Doc, "Doc 1"))
+            .with_edge({
+                let mut e = Edge::inferred("graphify:doc1", "file:a.rs", EdgeKind::References, 0.9);
+                e.src_ref = Some("import:graphify".to_owned());
+                e
+            });
+        store.apply_factset(&import).expect("apply");
+        store
+            .put_import("import:graphify", &import)
+            .expect("persist");
+        assert_eq!(store.import_refs().expect("refs"), vec!["import:graphify"]);
+
+        // Simulate a code-changing sync: the derived graph is rebuilt from scratch
+        // (still contains file:a.rs), which drops the imported doc + edge.
+        store.rebuild(&derived, Some("tree2")).expect("rebuild2");
+        assert!(store.get_node("graphify:doc1").expect("get").is_none());
+
+        // Re-applying imports restores them.
+        let applied = store.reapply_imports().expect("reapply");
+        assert_eq!(applied.layers, 1);
+        assert_eq!(applied.nodes, 1);
+        assert_eq!(applied.edges_applied, 1);
+        assert_eq!(applied.edges_skipped, 0);
+        assert!(store.get_node("graphify:doc1").expect("get").is_some());
+        assert_eq!(store.edges_from("graphify:doc1").expect("edges").len(), 1);
+    }
+
+    /// Re-applying tolerates an import edge whose endpoint the sync removed
+    /// (e.g. a deleted file): the node is upserted, the dangling edge skipped.
+    #[test]
+    fn reapply_skips_dangling_edges() {
+        let mut store = Store::open_in_memory().expect("open");
+        let import = FactSet::new()
+            .with_node(Node::new("graphify:doc1", NodeKind::Doc, "Doc 1"))
+            .with_edge({
+                let mut e =
+                    Edge::inferred("graphify:doc1", "file:gone.rs", EdgeKind::References, 0.9);
+                e.src_ref = Some("import:graphify".to_owned());
+                e
+            });
+        store
+            .put_import("import:graphify", &import)
+            .expect("persist");
+        // Rebuild to an empty derived graph — the file the edge points at is gone.
+        store.rebuild(&FactSet::new(), Some("t")).expect("rebuild");
+
+        let applied = store.reapply_imports().expect("reapply");
+        assert_eq!(applied.nodes, 1);
+        assert_eq!(applied.edges_applied, 0);
+        assert_eq!(
+            applied.edges_skipped, 1,
+            "the edge to a deleted file is skipped"
+        );
+        assert!(store.get_node("graphify:doc1").expect("get").is_some());
+    }
+
+    /// `put_import` replaces the layer for a ref; `delete_import` removes it.
+    #[test]
+    fn put_import_replaces_and_delete_removes() {
+        let store = Store::open_in_memory().expect("open");
+        let a = FactSet::new().with_node(Node::new("graphify:x", NodeKind::Doc, "x"));
+        let b = FactSet::new().with_node(Node::new("graphify:y", NodeKind::Doc, "y"));
+        store.put_import("import:graphify", &a).expect("put a");
+        store.put_import("import:graphify", &b).expect("put b");
+        assert_eq!(
+            store.import_refs().expect("refs").len(),
+            1,
+            "same ref replaced"
+        );
+        assert!(store.delete_import("import:graphify").expect("del"));
+        assert!(store.import_refs().expect("refs").is_empty());
+        assert!(!store.delete_import("import:graphify").expect("del again"));
     }
 }

@@ -48,5 +48,5 @@ pub use query::{
     DebtItem, DebtReport, EdgeRef, Explanation, Listing, NodeSummary, Path, PathHop, SCHEMA, debt,
     explain, list_kind, path,
 };
-pub use store::{Store, StoreError};
+pub use store::{ImportApplied, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_worktree};
