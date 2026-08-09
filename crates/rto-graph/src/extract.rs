@@ -25,7 +25,7 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 /// vs content-free) facts from a shared cache. (Image output also depends on
 /// *which* models are installed; that runtime state is folded into the cache key
 /// separately — see [`image_env_tag`] and [`crate::sync`].)
-pub(crate) const EXTRACT_VERSION: u32 = 3
+pub(crate) const EXTRACT_VERSION: u32 = 4
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "image-vision") {
@@ -174,9 +174,17 @@ impl Extractor for Registry {
 /// extractors: pick the language extractor by extension, applying `ingest` to
 /// content extraction.
 fn extract_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
-    match extension(path).as_deref() {
+    let ext = extension(path);
+    match ext.as_deref() {
+        // Rust keeps its dedicated AST walker (imports, impl scoping, richer calls).
         Some("rs") => rust_facts(path, blob_id, bytes, ingest),
-        _ => FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest)),
+        // Every other supported language goes through the generic tags extractor;
+        // an unhandled extension (or a query that fails to compile) falls back to
+        // a plain file node.
+        Some(ext) => tag_facts(path, blob_id, bytes, ext, ingest).unwrap_or_else(|| {
+            FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest))
+        }),
+        None => FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest)),
     }
 }
 
@@ -875,6 +883,374 @@ impl RustWalk<'_> {
     }
 }
 
+// ======================= Generic tags-query extraction =======================
+//
+// One extractor drives every non-Rust language through its tree-sitter `tags.scm`
+// query (the `@definition.*` / `@reference.*` capture convention). It emits the
+// same fact shape as the Rust walker — a `file` node, one symbol node per
+// definition with `defines`/`contains` edges reflecting byte-range nesting, and
+// each function's callee simple-names in `meta.calls` — so cross-file (and
+// cross-language) call resolution in `crate::sync` works uniformly. A new
+// language is a row in `tag_lang_for`, not new code.
+
+/// A language dispatched to the generic tags extractor: its label, grammar, and
+/// `tags.scm` source (from the grammar crate, or vendored under `src/queries/`).
+struct TagLang {
+    /// Canonical label — the node `lang` and the `sym:<lang>:` key namespace.
+    lang: &'static str,
+    /// The tree-sitter grammar.
+    language: tree_sitter::Language,
+    /// The `tags.scm` query source. Usually borrowed from the grammar crate's
+    /// const; owned when it is assembled (TypeScript's query `inherits` the
+    /// JavaScript one, which the crate's `TAGS_QUERY` const does not concatenate).
+    query: std::borrow::Cow<'static, str>,
+}
+
+/// Resolve a lowercase file extension to its tags-extractor language, or `None`
+/// when no generic extractor handles it (the caller then falls back to a plain
+/// file node). Rust is intentionally absent — it keeps its richer AST walker.
+fn tag_lang_for(ext: &str) -> Option<TagLang> {
+    use std::borrow::Cow;
+    // TypeScript's tags query `inherits` JavaScript's; the crate const ships only
+    // the TS-specific supplement, so concatenate the two. The JavaScript patterns
+    // match against the TypeScript superset grammar.
+    let ts_query = || -> Cow<'static, str> {
+        Cow::Owned(format!(
+            "{}\n{}",
+            tree_sitter_javascript::TAGS_QUERY,
+            tree_sitter_typescript::TAGS_QUERY
+        ))
+    };
+    let borrowed = |q: &'static str| -> Cow<'static, str> { Cow::Borrowed(q) };
+
+    let (lang, language, query): (&str, tree_sitter::Language, Cow<'static, str>) = match ext {
+        "py" | "pyi" => (
+            "python",
+            tree_sitter_python::LANGUAGE.into(),
+            borrowed(tree_sitter_python::TAGS_QUERY),
+        ),
+        "js" | "jsx" | "mjs" | "cjs" => (
+            "javascript",
+            tree_sitter_javascript::LANGUAGE.into(),
+            borrowed(tree_sitter_javascript::TAGS_QUERY),
+        ),
+        "ts" | "mts" | "cts" => (
+            "typescript",
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            ts_query(),
+        ),
+        "tsx" => (
+            "tsx",
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            ts_query(),
+        ),
+        "go" => (
+            "go",
+            tree_sitter_go::LANGUAGE.into(),
+            borrowed(tree_sitter_go::TAGS_QUERY),
+        ),
+        "rb" => (
+            "ruby",
+            tree_sitter_ruby::LANGUAGE.into(),
+            borrowed(tree_sitter_ruby::TAGS_QUERY),
+        ),
+        "java" => (
+            "java",
+            tree_sitter_java::LANGUAGE.into(),
+            borrowed(tree_sitter_java::TAGS_QUERY),
+        ),
+        "c" | "h" => (
+            "c",
+            tree_sitter_c::LANGUAGE.into(),
+            borrowed(tree_sitter_c::TAGS_QUERY),
+        ),
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => (
+            "cpp",
+            tree_sitter_cpp::LANGUAGE.into(),
+            borrowed(tree_sitter_cpp::TAGS_QUERY),
+        ),
+        // The crate's TAGS_QUERY has a stray `@module` capture that
+        // `tree-sitter-tags` rejects, so a corrected copy is vendored.
+        "cs" => (
+            "csharp",
+            tree_sitter_c_sharp::LANGUAGE.into(),
+            borrowed(include_str!("queries/csharp/tags.scm")),
+        ),
+        "php" => (
+            "php",
+            tree_sitter_php::LANGUAGE_PHP.into(),
+            borrowed(tree_sitter_php::TAGS_QUERY),
+        ),
+        // Scala's crate bundles a tags.scm but exposes no const, so it is vendored.
+        "scala" | "sc" => (
+            "scala",
+            tree_sitter_scala::LANGUAGE.into(),
+            borrowed(include_str!("queries/scala/tags.scm")),
+        ),
+        "ml" => (
+            "ocaml",
+            tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+            borrowed(tree_sitter_ocaml::TAGS_QUERY),
+        ),
+        "mli" => (
+            "ocaml",
+            tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into(),
+            borrowed(tree_sitter_ocaml::TAGS_QUERY),
+        ),
+        "ex" | "exs" => (
+            "elixir",
+            tree_sitter_elixir::LANGUAGE.into(),
+            borrowed(tree_sitter_elixir::TAGS_QUERY),
+        ),
+        // Bash ships no tags query at all, so one is vendored.
+        "sh" | "bash" => (
+            "bash",
+            tree_sitter_bash::LANGUAGE.into(),
+            borrowed(include_str!("queries/bash/tags.scm")),
+        ),
+        _ => return None,
+    };
+    Some(TagLang {
+        lang,
+        language,
+        query,
+    })
+}
+
+/// A compiled tags configuration, shared across the blobs of one language.
+type TagConfig = std::sync::Arc<tree_sitter_tags::TagsConfiguration>;
+
+/// Cache of compiled tags configurations, keyed by language label. Compiling a
+/// `tags.scm` query is not free, and `sync` extracts many blobs, so each
+/// language's configuration is built once. A language whose query fails to
+/// compile (a grammar/query mismatch — a build-time invariant, not a runtime
+/// input) caches `None` so it is not retried per file.
+static TAG_CONFIGS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<&'static str, Option<TagConfig>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// The compiled tags configuration for a language, building and caching it on
+/// first use. `None` if the query does not compile against the grammar.
+fn tag_config(def: &TagLang) -> Option<TagConfig> {
+    let mut cache = TAG_CONFIGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(def.lang)
+        .or_insert_with(|| {
+            tree_sitter_tags::TagsConfiguration::new(def.language.clone(), &def.query, "")
+                .ok()
+                .map(std::sync::Arc::new)
+        })
+        .clone()
+}
+
+/// Map a `tags.scm` syntax type (the tail of a `@definition.X` capture) to a
+/// graph node kind. Unrecognised kinds are kept verbatim under `Other`.
+fn tag_node_kind(syntax_type: &str) -> NodeKind {
+    match syntax_type {
+        "function" | "method" | "constructor" => NodeKind::Fn,
+        "class" | "struct" => NodeKind::Struct,
+        "interface" | "trait" | "protocol" => NodeKind::Trait,
+        "enum" => NodeKind::Enum,
+        // A Scala/Kotlin `object` is a singleton namespace; group it with modules.
+        "module" | "namespace" | "object" => NodeKind::Module,
+        other => NodeKind::Other(other.to_owned()),
+    }
+}
+
+/// A definition captured from a `tags.scm` run, before nesting is resolved.
+struct TagDef {
+    name: String,
+    kind: NodeKind,
+    range: std::ops::Range<usize>,
+    docs: Option<String>,
+}
+
+/// Extract facts from a source blob via its language's tags query. Returns `None`
+/// when the extension has no generic extractor or the query cannot compile, so
+/// the caller falls back to a plain file node.
+fn tag_facts(
+    path: &str,
+    blob_id: &str,
+    bytes: &[u8],
+    ext: &str,
+    ingest: IngestConfig,
+) -> Option<FactSet> {
+    let def = tag_lang_for(ext)?;
+    let lang = def.lang;
+    let config = tag_config(&def)?;
+
+    let mut ctx = tree_sitter_tags::TagsContext::new();
+    let (tags, _had_error) = ctx.generate_tags(&config, bytes, None).ok()?;
+
+    let mut defs: Vec<TagDef> = Vec::new();
+    // Call references, as (byte offset of the call, callee simple-name), attached
+    // later to whichever function definition encloses them.
+    let mut calls: Vec<(usize, String)> = Vec::new();
+    for tag in tags {
+        let Ok(tag) = tag else { continue };
+        let Some(name) = bytes
+            .get(tag.name_range.clone())
+            .and_then(|b| std::str::from_utf8(b).ok())
+        else {
+            continue;
+        };
+        let syntax = config.syntax_type_name(tag.syntax_type_id);
+        if tag.is_definition {
+            defs.push(TagDef {
+                name: name.to_owned(),
+                kind: tag_node_kind(syntax),
+                range: tag.range.clone(),
+                // The tags machinery already resolves a definition's doc comment.
+                docs: tag.docs.clone(),
+            });
+        } else if syntax == "call" || syntax == "send" {
+            // `send` is Ruby's message-send; both mean "invokes a name".
+            calls.push((tag.range.start, name.to_owned()));
+        }
+    }
+
+    // Resolve nesting purely by byte-range containment: a definition's parent is
+    // the smallest other definition whose range strictly encloses it. This yields
+    // `contains` edges (parent→child) and qualified, collision-resistant keys
+    // without any language-specific scope rules.
+    let parents: Vec<Option<usize>> = (0..defs.len())
+        .map(|i| smallest_enclosing(&defs, defs[i].range.clone(), Some(i)))
+        .collect();
+
+    let keys: Vec<String> = (0..defs.len())
+        .map(|i| {
+            let qualified = qualified_name(&defs, &parents, i);
+            format!("sym:{lang}:{path}#{qualified}")
+        })
+        .collect();
+
+    let mut nodes = vec![file_node(path, blob_id, bytes, Some(lang), ingest)];
+    let mut edges: Vec<Edge> = Vec::new();
+
+    for (i, d) in defs.iter().enumerate() {
+        let mut meta = serde_json::Map::new();
+        if let Some(doc) = &d.docs {
+            let content = cap_content(doc);
+            if !content.is_empty() {
+                meta.insert("content".into(), serde_json::Value::from(content));
+            }
+        }
+        // Attach the calls this definition encloses — but only for functions, the
+        // only kind `crate::sync::resolve_calls` links.
+        if d.kind == NodeKind::Fn {
+            let mut names: Vec<String> = calls
+                .iter()
+                .filter(|(off, _)| d.range.contains(off))
+                .filter(|(off, _)| smallest_enclosing_off(&defs, *off) == Some(i))
+                .map(|(_, name)| name.clone())
+                .collect();
+            names.sort();
+            names.dedup();
+            if !names.is_empty() {
+                meta.insert("calls".into(), serde_json::Value::from(names));
+            }
+        }
+
+        let start = u32::try_from(d.range.start).unwrap_or(u32::MAX);
+        let end = u32::try_from(d.range.end).unwrap_or(u32::MAX);
+        nodes.push(Node {
+            key: keys[i].clone(),
+            kind: d.kind.clone(),
+            name: d.name.clone(),
+            path: Some(path.to_owned()),
+            lang: Some(lang.to_owned()),
+            blob_hash: Some(blob_id.to_owned()),
+            span: Some(Span::new(start, end)),
+            meta: serde_json::Value::Object(meta),
+        });
+
+        match parents[i] {
+            Some(p) => edges.push(Edge::derived(
+                keys[p].clone(),
+                keys[i].clone(),
+                EdgeKind::Contains,
+            )),
+            None => edges.push(Edge::derived(
+                file_key(path),
+                keys[i].clone(),
+                EdgeKind::Defines,
+            )),
+        }
+    }
+
+    // Deterministic, duplicate-free output (two query patterns can capture the
+    // same definition, and distinct symbols can share a qualified name).
+    nodes.sort_by(|a, b| a.key.cmp(&b.key));
+    nodes.dedup_by(|a, b| a.key == b.key);
+    edges.sort_by(|a, b| (a.kind.as_str(), &a.src, &a.dst).cmp(&(b.kind.as_str(), &b.src, &b.dst)));
+    edges.dedup();
+    Some(FactSet { nodes, edges })
+}
+
+/// Index of the smallest definition (other than `skip`) whose range strictly
+/// encloses `range`, or `None` if `range` is top-level.
+fn smallest_enclosing(
+    defs: &[TagDef],
+    range: std::ops::Range<usize>,
+    skip: Option<usize>,
+) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (j, c) in defs.iter().enumerate() {
+        if Some(j) == skip {
+            continue;
+        }
+        // Strictly encloses: contains both ends and is a larger span.
+        let encloses = c.range.start <= range.start
+            && c.range.end >= range.end
+            && (c.range.end - c.range.start) > (range.end - range.start);
+        if encloses
+            && best.is_none_or(|b| {
+                defs[b].range.end - defs[b].range.start > c.range.end - c.range.start
+            })
+        {
+            best = Some(j);
+        }
+    }
+    best
+}
+
+/// Index of the smallest definition enclosing byte offset `off`.
+fn smallest_enclosing_off(defs: &[TagDef], off: usize) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (j, c) in defs.iter().enumerate() {
+        if c.range.contains(&off)
+            && best.is_none_or(|b| {
+                defs[b].range.end - defs[b].range.start > c.range.end - c.range.start
+            })
+        {
+            best = Some(j);
+        }
+    }
+    best
+}
+
+/// A definition's qualified name: its ancestors' names (root→leaf) joined to its
+/// own by `::`, so nested symbols get distinct, stable keys.
+fn qualified_name(defs: &[TagDef], parents: &[Option<usize>], i: usize) -> String {
+    let mut chain: Vec<&str> = vec![defs[i].name.as_str()];
+    let mut cur = parents[i];
+    // Bound the walk by the number of definitions — parents form a DAG toward
+    // smaller-or-equal spans, but guard against any pathological cycle.
+    let mut guard = defs.len();
+    while let Some(p) = cur {
+        if guard == 0 {
+            break;
+        }
+        guard -= 1;
+        chain.push(defs[p].name.as_str());
+        cur = parents[p];
+    }
+    chain.reverse();
+    chain.join("::")
+}
+
 /// Byte span of an AST node, clamped to `u32`.
 fn span(node: tree_sitter::Node) -> Span {
     let start = u32::try_from(node.start_byte()).unwrap_or(u32::MAX);
@@ -1136,6 +1512,106 @@ mod inner {
             "non-code file falls back to a file node"
         );
         assert_eq!(txt.nodes[0].kind, NodeKind::File);
+    }
+
+    #[test]
+    fn tags_extracts_python_symbols_calls_and_nesting() {
+        let src = "def helper():\n    pass\n\nclass Thing:\n    def run(self):\n        helper()\n";
+        let fs = Registry::default().extract("app.py", "b", src.as_bytes());
+
+        let names: Vec<&str> = fs.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"helper"), "top-level function");
+        assert!(names.contains(&"Thing"), "class");
+        assert!(names.contains(&"run"), "method");
+
+        // Every symbol is language-tagged.
+        assert_eq!(
+            fs.nodes
+                .iter()
+                .find(|n| n.name == "helper")
+                .and_then(|n| n.lang.as_deref()),
+            Some("python")
+        );
+
+        // The method is nested in the class: a `contains` edge to `Thing::run`.
+        assert!(
+            fs.edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::Contains && e.dst.ends_with("#Thing::run")),
+            "method nested under class via containment"
+        );
+
+        // The method's body calls `helper`, recorded for later resolution.
+        let run = fs.nodes.iter().find(|n| n.name == "run").unwrap();
+        let calls = run.meta.get("calls").and_then(|v| v.as_array()).unwrap();
+        assert!(
+            calls.iter().any(|c| c.as_str() == Some("helper")),
+            "enclosed call captured in meta.calls"
+        );
+    }
+
+    #[test]
+    fn tags_extraction_is_deterministic() {
+        let src = b"package main\nfunc Add(a int) int { return a }\n";
+        let a = Registry::default().extract("m.go", "b", src);
+        let b = Registry::default().extract("m.go", "b", src);
+        assert_eq!(a, b, "tags extraction must be deterministic");
+        assert!(
+            a.nodes
+                .iter()
+                .any(|n| n.name == "Add" && n.kind == NodeKind::Fn)
+        );
+    }
+
+    #[test]
+    fn tags_extracts_typescript() {
+        let ts = Registry::default().extract("svc.ts", "b", b"export class Svc {\n  run() {}\n}\n");
+        assert!(ts.nodes.iter().any(|n| n.name == "Svc"), "class");
+        assert!(ts.nodes.iter().any(|n| n.name == "run"), "method");
+        assert_eq!(
+            ts.nodes
+                .iter()
+                .find(|n| n.name == "Svc")
+                .and_then(|n| n.lang.as_deref()),
+            Some("typescript")
+        );
+    }
+
+    #[test]
+    fn every_registered_language_query_compiles() {
+        // A grammar/query mismatch (e.g. a future grammar bump) would make a
+        // language silently fall back to a plain file node; assert each query
+        // compiles against its grammar so that regression surfaces here instead.
+        for ext in [
+            "py", "js", "ts", "tsx", "go", "rb", "java", "c", "cpp", "cs", "php", "scala", "ml",
+            "mli", "ex", "sh",
+        ] {
+            let def = super::tag_lang_for(ext).unwrap_or_else(|| panic!("no language for .{ext}"));
+            let lang = def.lang;
+            assert!(
+                super::tag_config(&def).is_some(),
+                "tags query for .{ext} ({lang}) must compile against its grammar"
+            );
+        }
+    }
+
+    #[test]
+    fn tags_extracts_vendored_bash_query() {
+        let src = "greet() {\n  echo hi\n}\nmain() {\n  greet\n}\n";
+        let fs = Registry::default().extract("run.sh", "b", src.as_bytes());
+        let names: Vec<&str> = fs.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"greet"), "shell function greet");
+        assert!(names.contains(&"main"), "shell function main");
+
+        // `main` invokes `greet` — a command reference captured as a call.
+        let main = fs.nodes.iter().find(|n| n.name == "main").unwrap();
+        assert!(
+            main.meta
+                .get("calls")
+                .and_then(|v| v.as_array())
+                .is_some_and(|c| c.iter().any(|x| x.as_str() == Some("greet"))),
+            "internal command invocation captured"
+        );
     }
 
     #[test]
