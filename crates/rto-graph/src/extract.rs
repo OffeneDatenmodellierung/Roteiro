@@ -19,15 +19,20 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
 /// blob — the version is folded into the cache key. See [`crate::sync`].
 ///
-/// The `pdf-text` and `image-ocr` features change what PDFs/images extract to, so
-/// each occupies a distinct version namespace: a feature build and a default
-/// build never serve each other stale (content-bearing vs content-free) facts
-/// from a shared cache. (OCR output also depends on *which* models are installed;
-/// that runtime state is folded into the cache key separately — see
-/// [`ocr_env_tag`] and [`crate::sync`].)
+/// The `pdf-text`, `image-ocr`, and `image-vision` features change what
+/// PDFs/images extract to, so each occupies a distinct version namespace: a
+/// feature build and a default build never serve each other stale (content-bearing
+/// vs content-free) facts from a shared cache. (Image output also depends on
+/// *which* models are installed; that runtime state is folded into the cache key
+/// separately — see [`image_env_tag`] and [`crate::sync`].)
 pub(crate) const EXTRACT_VERSION: u32 = 3
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
-    + if cfg!(feature = "image-ocr") { 200 } else { 0 };
+    + if cfg!(feature = "image-ocr") { 200 } else { 0 }
+    + if cfg!(feature = "image-vision") {
+        400
+    } else {
+        0
+    };
 
 /// Max characters of embeddable content (markdown body / doc-comment / PDF text)
 /// captured into a node's `meta.content`, to keep the store small while giving
@@ -39,15 +44,21 @@ const MAX_CONTENT: usize = 1500;
 #[cfg(feature = "pdf-text")]
 const MAX_PDF_BYTES: usize = 20 * 1024 * 1024;
 
-/// Images larger than this (compressed bytes) are not OCR'd.
-#[cfg(feature = "image-ocr")]
+/// Images larger than this (compressed bytes) are not processed (OCR/VLM).
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
-/// Images with more pixels than this are not OCR'd — OCR time scales with pixel
-/// count, and this also guards against decompression bombs (the dimension is read
-/// from the header before the pixels are decoded).
-#[cfg(feature = "image-ocr")]
+/// Images with more pixels than this are not processed — OCR/VLM time scales with
+/// pixel count, and this also guards against decompression bombs (the dimension is
+/// read from the header before the pixels are decoded).
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
 const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
+
+/// When OCR yields fewer than this many words, the image is treated as
+/// text-sparse (a diagram/photo rather than a text screenshot), so the vision
+/// model is run to describe it (only when `image-vision` is also enabled).
+#[cfg(feature = "image-vision")]
+const MIN_OCR_WORDS: usize = 8;
 
 /// Turns one source blob into the nodes and edges derived from it.
 pub trait Extractor {
@@ -173,24 +184,88 @@ fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// OCR the text of an image blob for embedding, or `None` when `path` is not an
-/// image, the `image-ocr` feature is off, the image is too large, the OCR models
-/// are not installed, or OCR yields no text.
+/// Embeddable content for an image blob, composing OCR text and an optional
+/// vision-model description (see [`ocr_content`]/[`vlm_content`]), or `None` when
+/// `path` is not an image, the image is too large, no image model is installed,
+/// or nothing is produced.
 ///
-/// The `ocrs` engine can panic on some inputs; the call is panic-guarded so a
-/// bad image degrades to a plain file node rather than aborting the whole sync.
-/// OCR reads the installed OCR models — that runtime dependency is reflected in
-/// the cache key via [`ocr_env_tag`], so installing/upgrading the models
-/// re-extracts affected images instead of serving stale (content-free) facts.
-#[cfg(feature = "image-ocr")]
+/// Both extractors read the *installed* image models — that runtime dependency is
+/// reflected in the cache key via [`image_env_tag`], so installing/upgrading a
+/// model re-extracts affected images instead of serving stale (content-free)
+/// facts.
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
 fn image_content(path: &str, bytes: &[u8]) -> Option<String> {
     if !is_image(path) || bytes.len() > MAX_IMAGE_BYTES {
         return None;
     }
+    // OCR reads literal text (cheap, accurate); the vision model *describes* the
+    // image (slow). Smart composition (ADR-0005): always OCR; run the VLM only
+    // when OCR text is sparse — a diagram/photo rather than a text screenshot —
+    // and store both when both fire.
+    let ocr = ocr_content(bytes);
+    let sparse = ocr
+        .as_deref()
+        .is_none_or(|t| t.split_whitespace().count() < min_ocr_words());
+    let vision = if sparse { vlm_content(bytes) } else { None };
+    match (ocr, vision) {
+        (Some(o), Some(v)) => Some(format!("{o}\n\n{v}")),
+        (Some(o), None) => Some(o),
+        (None, Some(v)) => Some(v),
+        (None, None) => None,
+    }
+}
+
+/// No-op when neither image feature is on: images become plain file nodes.
+#[cfg(not(any(feature = "image-ocr", feature = "image-vision")))]
+fn image_content(_path: &str, _bytes: &[u8]) -> Option<String> {
+    None
+}
+
+/// The word count below which OCR output is "sparse" enough to invoke the VLM.
+/// `usize::MAX` when `image-vision` is off, so the VLM is never triggered.
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
+fn min_ocr_words() -> usize {
+    #[cfg(feature = "image-vision")]
+    {
+        MIN_OCR_WORDS
+    }
+    #[cfg(not(feature = "image-vision"))]
+    {
+        usize::MAX
+    }
+}
+
+/// Whether `path` is an image OCR/vision can read.
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
+fn is_image(path: &str) -> bool {
+    matches!(extension(path).as_deref(), Some("png" | "jpg" | "jpeg"))
+}
+
+/// Whether the image's pixel dimensions (read from its header, without decoding
+/// the pixels — so a decompression bomb is rejected cheaply) are within
+/// [`MAX_IMAGE_PIXELS`]. `false` if the header cannot be parsed or the limit is
+/// exceeded.
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
+fn image_dimensions_ok(bytes: &[u8]) -> bool {
+    let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    else {
+        return false;
+    };
+    match reader.into_dimensions() {
+        Ok((w, h)) => u64::from(w) * u64::from(h) <= MAX_IMAGE_PIXELS,
+        Err(_) => false,
+    }
+}
+
+/// OCR an image's text (or `None` when `image-ocr` is off, the models are not
+/// installed, the image is too large, or extraction yields nothing). The `ocrs`
+/// engine can panic on some inputs, so the call is panic-guarded.
+#[cfg(feature = "image-ocr")]
+fn ocr_content(bytes: &[u8]) -> Option<String> {
     let dir = crate::models::model_dir("ocrs-text");
     let detection = dir.join("text-detection.rten");
     let recognition = dir.join("text-recognition.rten");
-    if !detection.exists() || !recognition.exists() {
+    if !detection.exists() || !recognition.exists() || !image_dimensions_ok(bytes) {
         // Models not installed → OCR is inert (run `roteiro model pull ocrs-text`).
         return None;
     }
@@ -202,10 +277,9 @@ fn image_content(path: &str, bytes: &[u8]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-/// Whether `path` is an image OCR can read.
-#[cfg(feature = "image-ocr")]
-fn is_image(path: &str) -> bool {
-    matches!(extension(path).as_deref(), Some("png" | "jpg" | "jpeg"))
+#[cfg(not(feature = "image-ocr"))]
+fn ocr_content(_bytes: &[u8]) -> Option<String> {
+    None
 }
 
 /// Run detection + recognition over an image's bytes, returning its text.
@@ -217,16 +291,6 @@ fn run_ocr(
     bytes: &[u8],
 ) -> Option<String> {
     use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
-
-    // Read the dimensions from the header first, before decoding pixels, so a
-    // decompression bomb is rejected cheaply.
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    let (w, h) = reader.into_dimensions().ok()?;
-    if u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS {
-        return None;
-    }
 
     let detection_model = rten::Model::load_file(detection).ok()?;
     let recognition_model = rten::Model::load_file(recognition).ok()?;
@@ -243,43 +307,81 @@ fn run_ocr(
     engine.get_text(&input).ok()
 }
 
-/// No-op when the `image-ocr` feature is off: images become plain file nodes.
-#[cfg(not(feature = "image-ocr"))]
-fn image_content(_path: &str, _bytes: &[u8]) -> Option<String> {
+/// Describe an image with the local vision model (or `None` when `image-vision`
+/// is off, the model is not installed, the image is too large, or generation
+/// yields nothing).
+///
+/// The model is loaded fresh per image so its KV cache never carries over between
+/// images. It is a large (~1.4 GiB) model and generation is slow, so this is the
+/// opt-in, slow path (images in a repo are typically few); loading once across a
+/// sync is a future optimisation.
+#[cfg(feature = "image-vision")]
+fn vlm_content(bytes: &[u8]) -> Option<String> {
+    let dir = crate::models::model_dir("moondream2");
+    if !dir.join("model.gguf").exists()
+        || !dir.join("tokenizer.json").exists()
+        || !image_dimensions_ok(bytes)
+    {
+        // Not installed → vision is inert (run `roteiro model pull moondream2`).
+        return None;
+    }
+    let mut vlm = crate::localmodel::LocalVlm::load(&dir).ok()?;
+    let text = vlm.describe(bytes).ok()?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+#[cfg(not(feature = "image-vision"))]
+fn vlm_content(_bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// A cache-key component reflecting the OCR extractor's runtime environment: `0`
-/// when the `image-ocr` feature is off or the models are not installed, else a
-/// hash of the pinned model identities. Folded into the sync cache key so that
-/// installing or upgrading the OCR models invalidates cached image facts (OCR
-/// output is not a pure function of the blob alone). See [`crate::sync`].
-#[cfg(feature = "image-ocr")]
-pub(crate) fn ocr_env_tag() -> u64 {
-    let dir = crate::models::model_dir("ocrs-text");
-    if !dir.join("text-detection.rten").exists() || !dir.join("text-recognition.rten").exists() {
-        return 0;
-    }
-    // Fold the pinned checksums of the *host-selected* variant so a model change
-    // (new registry sha) re-extracts — but adding an unrelated platform variant
-    // does not perturb this host's tag.
+/// A cache-key component reflecting the image extractors' runtime environment:
+/// `0` when neither image feature is on or no models are installed, else a hash
+/// of the installed OCR/vision model identities. Folded into the sync cache key
+/// so installing/upgrading a model re-extracts affected images instead of serving
+/// stale facts (image output is not a pure function of the blob alone). See
+/// [`crate::sync`].
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
+pub(crate) fn image_env_tag() -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    if let Some(variant) = crate::models::find("ocrs-text")
-        .and_then(|spec| spec.variant_for(crate::models::Platform::host()))
+    let mut any = false;
+    #[cfg(feature = "image-ocr")]
     {
-        for file in variant.files {
-            for b in file.sha256.bytes() {
-                hash ^= u64::from(b);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
+        any |= fold_installed_model(&mut hash, "ocrs-text");
     }
-    hash | 1 // never 0 (which means "no OCR")
+    #[cfg(feature = "image-vision")]
+    {
+        any |= fold_installed_model(&mut hash, "moondream2");
+    }
+    if any { hash | 1 } else { 0 }
 }
 
-/// `0` whenever OCR is not compiled in.
-#[cfg(not(feature = "image-ocr"))]
-pub(crate) fn ocr_env_tag() -> u64 {
+/// If model `name` is fully installed, fold its host-variant checksums into
+/// `hash` and return `true`. Only the host-selected variant is hashed, so an
+/// unrelated platform variant does not perturb this host's tag.
+#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
+fn fold_installed_model(hash: &mut u64, name: &str) -> bool {
+    let Some(variant) = crate::models::find(name)
+        .and_then(|spec| spec.variant_for(crate::models::Platform::host()))
+    else {
+        return false;
+    };
+    let dir = crate::models::model_dir(name);
+    if !variant.files.iter().all(|f| dir.join(f.name).exists()) {
+        return false;
+    }
+    for file in variant.files {
+        for b in file.sha256.bytes() {
+            *hash ^= u64::from(b);
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    true
+}
+
+/// `0` whenever neither image feature is compiled in.
+#[cfg(not(any(feature = "image-ocr", feature = "image-vision")))]
+pub(crate) fn image_env_tag() -> u64 {
     0
 }
 
@@ -831,7 +933,7 @@ mod inner {
         assert!(bad.nodes[0].meta.get("content").is_none());
     }
 
-    #[cfg(feature = "image-ocr")]
+    #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
     #[test]
     fn image_content_guards_before_touching_models() {
         // Case-insensitive image detection.
@@ -839,7 +941,7 @@ mod inner {
         assert!(super::is_image("b.jpeg"));
         assert!(super::is_image("c.jpg"));
         assert!(!super::is_image("d.gif"));
-        // A non-image path returns None without ever looking for OCR models.
+        // A non-image path returns None without ever looking for models.
         assert!(super::image_content("notes.txt", b"hello").is_none());
         // An oversized image is rejected by the size guard, before model lookup.
         let big = vec![0u8; super::MAX_IMAGE_BYTES + 1];

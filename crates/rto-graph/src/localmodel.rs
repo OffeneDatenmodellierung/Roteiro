@@ -11,5 +11,9 @@
 
 mod embedder;
 mod generator;
+#[cfg(feature = "image-vision")]
+mod vision;
 pub use embedder::{LocalEmbedder, LocalModelError};
 pub use generator::{GenConfig, LocalGenerator};
+#[cfg(feature = "image-vision")]
+pub use vision::LocalVlm;

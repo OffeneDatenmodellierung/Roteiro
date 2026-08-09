@@ -673,6 +673,10 @@ fn run_model_list() {
             ModelKind::Ocr,
             "OCR — image text (`roteiro sync` with --features image-ocr)",
         ),
+        (
+            ModelKind::Vision,
+            "Vision — image description (`roteiro sync` with --features image-vision)",
+        ),
     ];
     let tiers = [
         (ResourceTier::Low, "low  (any laptop)"),
@@ -771,6 +775,9 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
         rto_graph::ModelKind::Generative => "roteiro spec draft <topic>".to_owned(),
         rto_graph::ModelKind::Ocr => {
             "roteiro sync (a build with --features image-ocr OCRs images)".to_owned()
+        }
+        rto_graph::ModelKind::Vision => {
+            "roteiro sync (a build with --features image-vision describes images)".to_owned()
         }
     };
     println!(

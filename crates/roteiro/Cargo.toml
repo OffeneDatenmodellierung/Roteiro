@@ -47,6 +47,9 @@ pdf-text = ["rto-graph/pdf-text"]
 # pulls the pure-Rust ocrs/rten tree). Implies `models` so `roteiro model pull
 # ocrs-text` can fetch the OCR models with consent.
 image-ocr = ["models", "rto-graph/image-ocr"]
+# Describe images with a local vision-language model during `roteiro sync`
+# (ADR-0005 Tier B; off by default; pulls candle + the moondream model).
+image-vision = ["inference-local-models", "rto-graph/image-vision"]
 
 [lints]
 workspace = true
