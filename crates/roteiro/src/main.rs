@@ -73,9 +73,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show the effective, merged configuration and each value's provenance.
+    /// Show the effective, merged configuration. The default human-readable
+    /// output labels each value's provenance (which layer set it); `--json`
+    /// emits only the effective config, without provenance.
     Config {
-        /// Emit the effective config as JSON.
+        /// Emit the effective config as JSON (no provenance; use the default
+        /// text output to see which layer set each value).
         #[arg(long)]
         json: bool,
     },
@@ -554,6 +557,31 @@ fn run_init() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve a config-sourced embedding model name against this binary's feature
+/// set. When built with `inference-local-models`, the name is honoured; when
+/// built without it, a config-set model can't be loaded, so — per ADR-0007's
+/// "missing-feature keys warn" rule — emit a warning and fall back to the
+/// offline default (returning `None`) rather than hard-failing. An explicit
+/// `--model` flag bypasses this and is validated directly by the embedder.
+#[cfg(feature = "inference-local-models")]
+fn config_embedding_model(name: Option<&str>) -> Option<String> {
+    name.map(str::to_owned)
+}
+
+/// See the `inference-local-models` variant: without local models a
+/// config-sourced embedding model is warned about and ignored.
+#[cfg(all(feature = "inference", not(feature = "inference-local-models")))]
+fn config_embedding_model(name: Option<&str>) -> Option<String> {
+    if let Some(name) = name {
+        eprintln!(
+            "warning: config `[models] embedding = {name:?}` needs the \
+             `inference-local-models` feature; this build ignores it and uses \
+             the offline default (pass `--model` to force an error instead)"
+        );
+    }
+    None
+}
+
 /// Suggest `inferred` similarity edges over the graph and apply them. Builds the
 /// full derived + authored graph first, then adds the fuzzy suggestion layer.
 #[cfg(feature = "inference")]
@@ -569,7 +597,11 @@ fn run_infer(
     // Precedence: CLI flag > config > built-in default.
     let min_confidence = min_confidence.or(cfg.infer.min_confidence).unwrap_or(0.4);
     let top_k = top_k.or(cfg.infer.top_k).unwrap_or(5);
-    let model = model.or_else(|| cfg.models.embedding.clone());
+    // An explicit `--model` flag is always honoured (and errors below if this
+    // binary lacks local-model support). A model coming *only* from config must
+    // degrade gracefully per ADR-0007: warn and fall back to the offline default
+    // rather than hard-failing a build that can't use it.
+    let model = model.or_else(|| config_embedding_model(cfg.models.embedding.as_deref()));
 
     if !(0.0..=1.0).contains(&min_confidence) {
         anyhow::bail!("--min-confidence must be in 0.0..=1.0 (got {min_confidence})");

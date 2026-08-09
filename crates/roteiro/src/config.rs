@@ -1,7 +1,8 @@
 //! Layered project/user configuration (ADR-0007).
 //!
-//! Reads an optional **project** `roteiro.toml` (found by walking up from the
-//! working directory) and an optional **user** `~/.roteiro/config.toml`, then
+//! Reads an optional **project** `roteiro.toml` (at the repository root — the
+//! nearest ancestor holding a `.git` entry) and an optional **user**
+//! `~/.roteiro/config.toml`, then
 //! merges them so that, per value, the precedence is
 //! **CLI flag > project > user > built-in default**. This module resolves the
 //! *config* layers (project over user); the CLI-vs-config precedence is applied
@@ -152,14 +153,21 @@ fn user_config_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".roteiro").join("config.toml"))
 }
 
-/// Find the nearest `roteiro.toml` walking up from `start` to the filesystem
-/// root — the project config for whatever repo/subdir you run in.
+/// Find the project `roteiro.toml` at the **repository root** — the nearest
+/// ancestor of `start` that contains a `.git` entry (per ADR-0007, the project
+/// config lives alongside the git dir). Bounding discovery to the repo root
+/// keeps it from ascending into parent directories *outside* the repo and stops
+/// a `roteiro.toml` in a nested subdirectory from shadowing the repo-level one.
+/// Returns `None` when `start` is not inside a git repository, or the root has
+/// no `roteiro.toml`.
 fn find_project_config(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
-        let candidate = d.join("roteiro.toml");
-        if candidate.is_file() {
-            return Some(candidate);
+        // `.git` is a directory in a normal clone but a file in worktrees and
+        // submodules, so test existence rather than `is_dir`.
+        if d.join(".git").exists() {
+            let candidate = d.join("roteiro.toml");
+            return candidate.is_file().then_some(candidate);
         }
         dir = d.parent();
     }
@@ -168,7 +176,36 @@ fn find_project_config(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, load_from};
+    use super::{Config, find_project_config, load_from};
+
+    #[test]
+    fn project_config_is_repo_root_bounded() {
+        let root = std::env::temp_dir().join(format!("roteiro-disc-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let repo = root.join("repo");
+        let sub = repo.join("crate").join("src");
+        std::fs::create_dir_all(&sub).expect("mkdir");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+
+        // A `roteiro.toml` above the repo (in `root`) must NOT be picked up when
+        // running from inside the repo — discovery stops at the repo root.
+        std::fs::write(root.join("roteiro.toml"), "[infer]\ntop_k = 1\n").expect("write outside");
+        assert_eq!(
+            find_project_config(&sub),
+            None,
+            "no repo-root config → None, never the parent-dir one"
+        );
+
+        // With a config at the repo root, running from a nested subdir finds it.
+        let at_root = repo.join("roteiro.toml");
+        std::fs::write(&at_root, "[infer]\ntop_k = 2\n").expect("write root");
+        assert_eq!(find_project_config(&sub), Some(at_root));
+
+        // Not inside a git repo at all → None (the outside config is ignored).
+        assert_eq!(find_project_config(&root), None);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn config_layering_precedence_and_errors() {

@@ -22,6 +22,9 @@ fn config_reflects_project_toml_and_rejects_malformed() {
     let dir = std::env::temp_dir().join(format!("roteiro-config-cli-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).expect("mkdir");
+    // Project config is discovered at the repo root (alongside `.git`, per
+    // ADR-0007), so mark this temp dir as a repository root.
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
     std::fs::write(
         dir.join("roteiro.toml"),
         "[infer]\nmin_confidence = 0.66\n[duplicates]\nlimit = 7\n",
