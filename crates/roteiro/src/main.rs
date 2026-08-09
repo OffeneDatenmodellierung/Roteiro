@@ -184,13 +184,22 @@ enum Command {
         #[command(subcommand)]
         action: ModelAction,
     },
-    /// Start the MCP server (built with `--features mcp`).
-    #[cfg(feature = "mcp")]
+    /// Start a server: the MCP graph server (`--features mcp`) or the local
+    /// OpenAI-compatible model endpoint (`--models`, `--features serve`).
+    #[cfg(any(feature = "mcp", feature = "serve"))]
     Serve {
-        /// Serve networked over streamable HTTP at ADDR (e.g. `127.0.0.1:8080`)
-        /// instead of stdio. Terminate TLS at a reverse proxy.
+        /// Serve the OpenAI-compatible `/v1` endpoint over installed models
+        /// (ADR-0006), instead of the MCP graph server. Needs `--features serve`.
+        #[arg(long)]
+        models: bool,
+        /// MCP server: serve networked over streamable HTTP at ADDR (e.g.
+        /// `127.0.0.1:8080`) instead of stdio. Terminate TLS at a reverse proxy.
         #[arg(long, value_name = "ADDR")]
         http: Option<String>,
+        /// Model server (`--models`): bind ADDR (default `127.0.0.1:8017`). A
+        /// non-loopback address is warned about (no auth — front with a proxy).
+        #[arg(long, value_name = "ADDR")]
+        addr: Option<String>,
     },
 }
 
@@ -298,8 +307,21 @@ fn main() -> anyhow::Result<()> {
         } => run_duplicates(&cfg.effective, ingest, min_similarity, limit, json),
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
-        #[cfg(feature = "mcp")]
-        Command::Serve { http } => run_serve(ingest, http),
+        #[cfg(any(feature = "mcp", feature = "serve"))]
+        Command::Serve { models, http, addr } => {
+            run_serve(ingest, &cfg.effective, models, http, addr)
+        }
+    }
+}
+
+/// Which layer set a value, given whether the project/user layers carry it.
+fn provenance(proj: bool, usr: bool) -> &'static str {
+    if proj {
+        "project"
+    } else if usr {
+        "user"
+    } else {
+        "default"
     }
 }
 
@@ -310,15 +332,6 @@ fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&loaded.effective)?);
         return Ok(());
     }
-    let source = |proj: bool, usr: bool| {
-        if proj {
-            "project"
-        } else if usr {
-            "user"
-        } else {
-            "default"
-        }
-    };
     println!(
         "project config: {}",
         loaded
@@ -333,6 +346,14 @@ fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
             .as_deref()
             .map_or_else(|| "(none)".to_owned(), |p| p.display().to_string())
     );
+    print_config_sections(loaded);
+    println!("\n(unset values fall back to built-in defaults; a CLI flag overrides config)");
+    Ok(())
+}
+
+/// Print each config section's values with provenance labels.
+fn print_config_sections(loaded: &config::Loaded) {
+    let source = provenance;
     let e = &loaded.effective;
     let (p, u) = (&loaded.project, &loaded.user);
     println!("\n[models]");
@@ -395,8 +416,17 @@ fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
         e.ingest.vision,
         source(p.ingest.vision.is_some(), u.ingest.vision.is_some())
     );
-    println!("\n(unset values fall back to built-in defaults; a CLI flag overrides config)");
-    Ok(())
+    println!("[serve]");
+    println!(
+        "  addr   = {:?}  ({})",
+        e.serve.addr,
+        source(p.serve.addr.is_some(), u.serve.addr.is_some())
+    );
+    println!(
+        "  models = {:?}  ({})",
+        e.serve.models,
+        source(p.serve.models.is_some(), u.serve.models.is_some())
+    );
 }
 
 /// Sync the graph for the current repository, optionally including uncommitted
@@ -1712,10 +1742,28 @@ fn run_load(file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Dispatch `roteiro serve`: the OpenAI-compatible model endpoint (`--models`,
+/// ADR-0006) or the MCP graph server. Each backend is feature-gated; a build
+/// lacking the relevant feature reports how to enable it.
+#[cfg(any(feature = "mcp", feature = "serve"))]
+fn run_serve(
+    ingest: rto_graph::IngestConfig,
+    cfg: &config::Config,
+    models: bool,
+    http: Option<String>,
+    addr: Option<String>,
+) -> anyhow::Result<()> {
+    if models {
+        serve_models_endpoint(cfg, addr)
+    } else {
+        serve_mcp(ingest, http)
+    }
+}
+
 /// Serve the graph over the Model Context Protocol. Builds the full graph, then
 /// serves over stdio (default) or streamable HTTP (`--http <addr>`).
 #[cfg(feature = "mcp")]
-fn run_serve(ingest: rto_graph::IngestConfig, http: Option<String>) -> anyhow::Result<()> {
+fn serve_mcp(ingest: rto_graph::IngestConfig, http: Option<String>) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest)?;
 
@@ -1729,6 +1777,75 @@ fn run_serve(ingest: rto_graph::IngestConfig, http: Option<String>) -> anyhow::R
         }
         None => rto_render::mcp::serve_stdio(store).map_err(|e| anyhow::anyhow!("{e}")),
     }
+}
+
+/// MCP serving is unavailable without the `mcp` feature.
+#[cfg(all(not(feature = "mcp"), feature = "serve"))]
+fn serve_mcp(_ingest: rto_graph::IngestConfig, _http: Option<String>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "MCP serving needs the `mcp` feature (build with `--features mcp`); \
+         use `--models` for the OpenAI-compatible model endpoint"
+    )
+}
+
+/// Serve installed generative models over the loopback, OpenAI-compatible `/v1`
+/// endpoint (ADR-0006). Serves only installed models; never downloads.
+#[cfg(feature = "serve")]
+fn serve_models_endpoint(cfg: &config::Config, addr: Option<String>) -> anyhow::Result<()> {
+    use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
+
+    // Resolve which installed generative models to serve: the `[serve] models`
+    // allow-list if set, otherwise every installed generative model.
+    let host = Platform::host();
+    let wanted = cfg.serve.models.as_deref();
+    let served: Vec<rto_serve::llama::Served> = REGISTRY
+        .iter()
+        .filter(|m| m.kind == ModelKind::Generative)
+        .filter(|m| wanted.is_none_or(|w| w.iter().any(|n| n == m.name)))
+        .filter(|m| m.variant_for(host).is_some_and(|v| is_installed(m.name, v)))
+        .map(|m| rto_serve::llama::Served {
+            name: m.name.to_owned(),
+            path: model_dir(m.name).join("model.gguf"),
+        })
+        .collect();
+    if served.is_empty() {
+        anyhow::bail!(
+            "no installed generative models to serve — pull one first \
+             (`roteiro model pull qwen3-0.6b`; see `roteiro model list`)"
+        );
+    }
+
+    // Address precedence: CLI flag > `[serve] addr` > default loopback.
+    let addr = addr
+        .or_else(|| cfg.serve.addr.clone())
+        .unwrap_or_else(|| "127.0.0.1:8017".to_owned());
+    let socket: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid serve address `{addr}`: {e}"))?;
+    if !socket.ip().is_loopback() {
+        eprintln!(
+            "warning: binding a non-loopback address ({socket}) — the endpoint \
+             has no auth; front it with a reverse proxy (ADR-0006)"
+        );
+    }
+
+    let names: Vec<&str> = served.iter().map(|s| s.name.as_str()).collect();
+    eprintln!(
+        "roteiro model server listening on http://{socket}/v1 — serving: {}",
+        names.join(", ")
+    );
+    let engine = rto_serve::llama::LlamaEngine::new(served, 0)
+        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    rto_serve::serve_blocking(std::sync::Arc::new(engine), socket)
+}
+
+/// The model endpoint is unavailable without the `serve` feature.
+#[cfg(all(not(feature = "serve"), feature = "mcp"))]
+fn serve_models_endpoint(_cfg: &config::Config, _addr: Option<String>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`serve --models` needs the `serve` feature (build with `--features serve`, \
+         which pulls the llama.cpp engine)"
+    )
 }
 
 /// Render a build-output of the graph: the docs site or an Obsidian vault.

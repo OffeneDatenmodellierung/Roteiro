@@ -17,6 +17,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The opt-in `serve` feature builds vendored llama.cpp (ADR-0006), which
+      # `--all-features` below pulls in. cmake + libclang (bindgen) are required;
+      # the compiled artefacts are cached by rust-cache across runs.
+      - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -42,6 +47,8 @@ jobs:
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
       - name: Build on MSRV
         run: cargo check --workspace --all-features
       - name: Audit on MSRV lockfile

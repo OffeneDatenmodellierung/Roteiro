@@ -44,6 +44,8 @@ pub struct Config {
     pub duplicates: DuplicatesConfig,
     /// `roteiro sync` content-ingestion toggles.
     pub ingest: IngestConfig,
+    /// `roteiro serve --models` local endpoint settings.
+    pub serve: ServeConfig,
 }
 
 /// `[models]` — override the registry tier defaults for this project.
@@ -86,6 +88,17 @@ impl IngestConfig {
             vision: self.vision.unwrap_or(default.vision),
         }
     }
+}
+
+/// `[serve]` — the opt-in local OpenAI-compatible model endpoint (ADR-0006).
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ServeConfig {
+    /// Bind address for `roteiro serve --models` (default `127.0.0.1:8017`).
+    pub addr: Option<String>,
+    /// Restrict which installed generative models to serve (default: all
+    /// installed generative models).
+    pub models: Option<Vec<String>>,
 }
 
 /// `[infer]` — defaults for the similarity-inference command.
@@ -141,6 +154,10 @@ impl Config {
                 pdf: over.ingest.pdf.or(self.ingest.pdf),
                 ocr: over.ingest.ocr.or(self.ingest.ocr),
                 vision: over.ingest.vision.or(self.ingest.vision),
+            },
+            serve: ServeConfig {
+                addr: over.serve.addr.clone().or(self.serve.addr.clone()),
+                models: over.serve.models.clone().or(self.serve.models.clone()),
             },
         }
     }
