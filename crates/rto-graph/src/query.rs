@@ -284,16 +284,15 @@ pub struct SearchHit {
 /// Returns [`StoreError`] on query failure.
 pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>, StoreError> {
     let q = query.trim().to_lowercase();
-    let tokens: Vec<&str> = q
-        .split(|c: char| c.is_whitespace() || c == ':')
-        .filter(|t| !t.is_empty())
-        .collect();
+    // Tokens are separated by whitespace or the `::` path separator; a lone `:`
+    // (as in a `sym:rust:…` key) does not split a token.
+    let tokens: Vec<&str> = q.split("::").flat_map(str::split_whitespace).collect();
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut hits: Vec<SearchHit> = Vec::new();
-    for node in store.export_factset()?.nodes {
+    for node in store.all_nodes()? {
         let name = node.name.to_lowercase();
         let key = node.key.to_lowercase();
         let path = node.path.as_deref().unwrap_or("").to_lowercase();
@@ -492,6 +491,16 @@ mod tests {
             search(&store, "main roteiro", 10)
                 .expect("search")
                 .is_empty()
+        );
+
+        // A lone `:` does not split a token: `sym:rust` is one token matching the
+        // code-symbol keys but not `adr:0001`.
+        let by_prefix = search(&store, "sym:rust", 10).expect("search");
+        assert!(!by_prefix.is_empty());
+        assert!(
+            by_prefix
+                .iter()
+                .all(|h| h.node.key.starts_with("sym:rust:"))
         );
 
         // A blank query yields nothing; the limit is respected.
