@@ -15,5 +15,7 @@ pub mod types;
 #[cfg(feature = "llama")]
 pub mod llama;
 
-pub use engine::{ChatRequest, Completion, Engine, EngineError, FinishReason, Message, ModelInfo};
+pub use engine::{
+    ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
+};
 pub use server::{app, serve_blocking};

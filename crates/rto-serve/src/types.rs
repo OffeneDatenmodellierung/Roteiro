@@ -32,8 +32,8 @@ pub struct ChatCompletionRequest {
     /// Maximum tokens to generate.
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Server-sent-events streaming. Not yet supported; a `true` value is
-    /// rejected with a clear error (added in a later PR).
+    /// Server-sent-events streaming: when `true`, the response is a stream of
+    /// `chat.completion.chunk` events terminated by `data: [DONE]`.
     #[serde(default)]
     pub stream: Option<bool>,
 }
@@ -58,9 +58,6 @@ impl ChatCompletionRequest {
     pub fn into_engine_request(self) -> Result<ChatRequest, String> {
         if self.messages.is_empty() {
             return Err("`messages` must not be empty".to_owned());
-        }
-        if self.stream == Some(true) {
-            return Err("streaming (`stream: true`) is not yet supported".to_owned());
         }
         Ok(ChatRequest {
             model: self.model,
@@ -135,6 +132,44 @@ pub struct Usage {
     pub completion_tokens: u32,
     /// Their sum.
     pub total_tokens: u32,
+}
+
+/// One `chat.completion.chunk` streamed over SSE when `stream: true`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatCompletionChunk {
+    /// The completion id (stable across the stream).
+    pub id: String,
+    /// Always `"chat.completion.chunk"`.
+    pub object: &'static str,
+    /// Unix seconds when the completion started.
+    pub created: u64,
+    /// The model producing the stream.
+    pub model: String,
+    /// The incremental choices (always exactly one for Roteiro).
+    pub choices: Vec<ChunkChoice>,
+}
+
+/// One choice in a streamed [`ChatCompletionChunk`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkChoice {
+    /// Choice index (always `0`).
+    pub index: u32,
+    /// The incremental delta for this chunk.
+    pub delta: Delta,
+    /// Set only on the final chunk: `stop` | `length`.
+    pub finish_reason: Option<&'static str>,
+}
+
+/// The incremental payload of a streamed chunk: a role on the first chunk, then
+/// content pieces, then empty on the terminating chunk.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Delta {
+    /// Present only on the first chunk (`"assistant"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<&'static str>,
+    /// A piece of generated text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// An OpenAI-shaped error body: `{ "error": { "message", "type" } }`.
