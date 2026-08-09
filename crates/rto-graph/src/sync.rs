@@ -211,9 +211,11 @@ fn extract_committed(
     let mut extracted = 0usize;
     let mut cached = 0usize;
 
-    // OCR output depends on which models are installed (runtime state), so fold a
-    // tag for it into the cache key. Computed once per sync.
-    let env = crate::extract::image_env_tag();
+    // Extraction output depends on runtime state beyond (path, bytes): which
+    // image models are installed, and the extractor's ingestion toggles. The
+    // extractor folds both into a single tag for the cache key. Computed once
+    // per sync.
+    let env = extractor.env_tag();
 
     for blob in &blobs {
         // Extraction is a function of (path, blob bytes) and — with `image-ocr`

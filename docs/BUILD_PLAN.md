@@ -759,18 +759,20 @@ acceleration are features (config first, since serving is configured through it)
 ### Stage 18 — Configuration file ([ADR-0007](adr/0007-configuration-file.md))  → ✅ *core delivered (more sections as their consumers land)*
 **Goal:** a persistent, optional **`roteiro.toml`** so per-project preferences are
 set once, not retyped as flags — reproducible and shareable when committed.
-- **Delivered:** project `roteiro.toml` (found by walking up from the cwd) + user
+- **Delivered:** project `roteiro.toml` (at the repo root, alongside `.git`) + user
   `~/.roteiro/config.toml`; precedence **CLI flag > project > user > built-in
   default** (CLI args made `Option`, resolved `cli.or(config).unwrap_or(default)`).
   **TOML only** (`toml` crate, deny-clean; YAML rejected — `serde_yaml`
   unmaintained). Fully defaulted (zero-config works); unknown keys ignored;
-  malformed = hard error for any command. Sections wired: `[models]`
-  (embedding → `infer --model`, generative → `spec draft`), `[infer]`
-  (min_confidence/top_k), `[duplicates]` (min_similarity/limit). New `roteiro
-  config [--json]` prints the effective merged config with each value's
-  **provenance** (project/user/default).
-- **Follow-ups:** `[ingest]` toggles, `[debt]` ignore paths, `[serve]` (Stage 19),
-  `[paths]`; a warning when a config key targets a feature the binary lacks.
+  malformed = hard error for any command; a config key targeting a feature the
+  binary lacks **warns and falls back** rather than hard-failing. Sections wired:
+  `[models]` (embedding → `infer --model`, generative → `spec draft`), `[infer]`
+  (min_confidence/top_k), `[duplicates]` (min_similarity/limit), `[ingest]`
+  (prose/pdf/ocr/vision content toggles, applied to `sync` and folded into the
+  extraction cache key so toggling re-extracts). New `roteiro config [--json]`
+  prints the effective merged config with each value's **provenance**
+  (project/user/default).
+- **Follow-ups:** `[debt]` ignore paths, `[serve]` (Stage 19), `[paths]`.
 - **DoD (met for the core):** a committed `roteiro.toml` changes behaviour
   deterministically; flags override it; no config is still a working default;
   `roteiro config` shows the merged result and each value's provenance.
@@ -880,7 +882,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
-| v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`, CLI>project>user>default |
+| v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`/`[ingest]`, CLI>project>user>default |
 | v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ⛔ opt-in `serve`; our `/v1` + auto-registered graph tools |
 | v0.x | 20 | Inference-core direction (unify on llama.cpp) + coding/reasoning models | ⛔ staged candle→llama.cpp migration (ADR-0003 amendment); opt-in coding/reasoning registry entries |
 | — | — | Shipped alongside Stage 12: curated low/mid/high **model matrix** ([ADR-0003](adr/0003-pluggable-embedding-models.md)) + streaming, checksum-verified model downloads | ✅ `roteiro model list` by section→tier; `download_verified` (constant memory) |

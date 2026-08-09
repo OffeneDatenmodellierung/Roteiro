@@ -266,19 +266,22 @@ fn main() -> anyhow::Result<()> {
     // config.toml`); a malformed file is a hard error for any command (ADR-0007).
     let cwd = std::env::current_dir()?;
     let cfg = config::load(&cwd)?;
+    // Resolve the ingestion toggles once; every command that (re)builds the graph
+    // extracts with the same set so they share one cache, never thrashing it.
+    let ingest = cfg.effective.ingest.resolve();
     match cli.command {
-        Command::Sync { json, committed } => run_sync(json, committed),
-        Command::Check { json } => run_check(json),
-        Command::Query { key, kind, json } => run_query(key, kind, json),
-        Command::Context { key, refresh, json } => run_context(key, refresh, json),
-        Command::Debt { kind, json } => run_debt(&kind, json),
-        Command::Path { from, to, json } => run_path(&from, &to, json),
-        Command::Export { out } => run_export(out),
+        Command::Sync { json, committed } => run_sync(ingest, json, committed),
+        Command::Check { json } => run_check(ingest, json),
+        Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
+        Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
+        Command::Debt { kind, json } => run_debt(ingest, &kind, json),
+        Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
+        Command::Export { out } => run_export(ingest, out),
         Command::Load { file } => run_load(&file),
-        Command::Init => run_init(),
-        Command::Render { target, out } => run_render(&target, out),
-        Command::Import { from, path, json } => run_import(&from, &path, json),
-        Command::Spec { action } => run_spec(&cfg.effective, action),
+        Command::Init => run_init(ingest),
+        Command::Render { target, out } => run_render(ingest, &target, out),
+        Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
+        Command::Spec { action } => run_spec(&cfg.effective, ingest, action),
         Command::Config { json } => run_config(&cfg, json),
         #[cfg(feature = "inference")]
         Command::Infer {
@@ -286,17 +289,17 @@ fn main() -> anyhow::Result<()> {
             top_k,
             model,
             json,
-        } => run_infer(&cfg.effective, min_confidence, top_k, model, json),
+        } => run_infer(&cfg.effective, ingest, min_confidence, top_k, model, json),
         #[cfg(feature = "inference")]
         Command::Duplicates {
             min_similarity,
             limit,
             json,
-        } => run_duplicates(&cfg.effective, min_similarity, limit, json),
+        } => run_duplicates(&cfg.effective, ingest, min_similarity, limit, json),
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
         #[cfg(feature = "mcp")]
-        Command::Serve { http } => run_serve(http),
+        Command::Serve { http } => run_serve(ingest, http),
     }
 }
 
@@ -371,13 +374,38 @@ fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
         e.duplicates.limit,
         source(p.duplicates.limit.is_some(), u.duplicates.limit.is_some())
     );
+    println!("[ingest]");
+    println!(
+        "  prose  = {:?}  ({})",
+        e.ingest.prose,
+        source(p.ingest.prose.is_some(), u.ingest.prose.is_some())
+    );
+    println!(
+        "  pdf    = {:?}  ({})",
+        e.ingest.pdf,
+        source(p.ingest.pdf.is_some(), u.ingest.pdf.is_some())
+    );
+    println!(
+        "  ocr    = {:?}  ({})",
+        e.ingest.ocr,
+        source(p.ingest.ocr.is_some(), u.ingest.ocr.is_some())
+    );
+    println!(
+        "  vision = {:?}  ({})",
+        e.ingest.vision,
+        source(p.ingest.vision.is_some(), u.ingest.vision.is_some())
+    );
     println!("\n(unset values fall back to built-in defaults; a CLI flag overrides config)");
     Ok(())
 }
 
 /// Sync the graph for the current repository, optionally including uncommitted
 /// edits to tracked files.
-fn run_sync(json: bool, committed_only: bool) -> anyhow::Result<()> {
+fn run_sync(
+    ingest: rto_graph::IngestConfig,
+    json: bool,
+    committed_only: bool,
+) -> anyhow::Result<()> {
     use rto_graph::{ObjectCache, Registry, Repo, Store, sync, sync_worktree};
 
     let cwd = std::env::current_dir()?;
@@ -390,10 +418,11 @@ fn run_sync(json: bool, committed_only: bool) -> anyhow::Result<()> {
     let mut store = Store::open(&store_dir.join("graph.db"))?;
     let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
 
+    let registry = Registry::new(ingest);
     let report = if committed_only {
-        sync(&mut store, &repo, &cache, &Registry)?
+        sync(&mut store, &repo, &cache, &registry)?
     } else {
-        sync_worktree(&mut store, &repo, &cache, &Registry)?
+        sync_worktree(&mut store, &repo, &cache, &registry)?
     };
 
     if json {
@@ -443,9 +472,10 @@ fn build_graph(
     repo: &rto_graph::Repo,
     store: &mut rto_graph::Store,
     cache: &rto_graph::ObjectCache,
+    ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<rto_spec::CheckReport> {
     use rto_graph::{Registry, sync};
-    sync(store, repo, cache, &Registry)?;
+    sync(store, repo, cache, &Registry::new(ingest))?;
 
     let mut docs = Vec::new();
     let mut annotations = Vec::new();
@@ -491,9 +521,9 @@ fn build_graph(
 
 /// Validate the authored layer (ADR `[[…]]` links and `@rto:` annotations)
 /// against the derived graph; exit non-zero on drift.
-fn run_check(json: bool) -> anyhow::Result<()> {
+fn run_check(ingest: rto_graph::IngestConfig, json: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    let report = build_graph(&repo, &mut store, &cache)?;
+    let report = build_graph(&repo, &mut store, &cache, ingest)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -520,10 +550,10 @@ fn run_check(json: bool) -> anyhow::Result<()> {
 
 /// Scaffold Roteiro in the current repository: build the initial graph, install
 /// the `post-checkout`/`post-merge` hooks, and add the `AGENTS.md` snippet.
-fn run_init() -> anyhow::Result<()> {
+fn run_init(ingest: rto_graph::IngestConfig) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
 
-    let report = build_graph(&repo, &mut store, &cache)?;
+    let report = build_graph(&repo, &mut store, &cache, ingest)?;
     let nodes = store.node_count()?;
     let edges = store.edge_count()?;
 
@@ -587,6 +617,7 @@ fn config_embedding_model(name: Option<&str>) -> Option<String> {
 #[cfg(feature = "inference")]
 fn run_infer(
     cfg: &config::Config,
+    ingest: rto_graph::IngestConfig,
     min_confidence: Option<f64>,
     top_k: Option<usize>,
     model: Option<String>,
@@ -608,7 +639,7 @@ fn run_infer(
     }
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     // Inference is authoritative over *its own* suggestions: clear prior
     // embedding-produced edges first so the result reflects exactly the current
@@ -657,6 +688,7 @@ fn run_infer(
 #[cfg(feature = "inference")]
 fn run_duplicates(
     cfg: &config::Config,
+    ingest: rto_graph::IngestConfig,
     min_similarity: Option<f64>,
     limit: Option<usize>,
     json: bool,
@@ -674,7 +706,7 @@ fn run_duplicates(
     }
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     let report = rto_graph::duplicates(
         &store,
@@ -938,11 +970,16 @@ fn http_reader(url: &str) -> anyhow::Result<impl std::io::Read> {
 
 /// Import an external knowledge graph into the store (or, for codegraph, compare
 /// against it as a validation oracle).
-fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
+fn run_import(
+    ingest: rto_graph::IngestConfig,
+    from: &str,
+    path: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     match from {
-        "graphify" => run_import_graphify(path, json),
-        "lat" => run_import_lat(path, json),
-        "codegraph" => run_compare_codegraph(path, json),
+        "graphify" => run_import_graphify(ingest, path, json),
+        "lat" => run_import_lat(ingest, path, json),
+        "codegraph" => run_compare_codegraph(ingest, path, json),
         other => {
             anyhow::bail!("unknown import source `{other}` (expected: graphify | lat | codegraph)")
         }
@@ -953,10 +990,14 @@ fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
 /// agreement/divergence. codegraph is a **validation oracle only** — its
 /// structural edges are not imported (Roteiro re-derives them). Exits zero; the
 /// report is informational.
-fn run_compare_codegraph(path: &str, json: bool) -> anyhow::Result<()> {
+fn run_compare_codegraph(
+    ingest: rto_graph::IngestConfig,
+    path: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     // Build the derived graph so there is something to compare against.
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     let report = rto_graph::compare_codegraph(std::path::Path::new(path), &store)?;
 
@@ -998,7 +1039,7 @@ fn run_compare_codegraph(path: &str, json: bool) -> anyhow::Result<()> {
 /// `authored` layer over the code graph (a doc node per file, a section node per
 /// heading, `contains`/`references` edges). Durable and validated: links into
 /// code that no longer exists are pruned by [`rto_graph::Store::apply_import_layer`].
-fn run_import_lat(path: &str, json: bool) -> anyhow::Result<()> {
+fn run_import_lat(ingest: rto_graph::IngestConfig, path: &str, json: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     let root = repo
         .workdir()
@@ -1033,7 +1074,7 @@ fn run_import_lat(path: &str, json: bool) -> anyhow::Result<()> {
     let imported = rto_spec::import_lat(&files);
 
     // Build the derived + authored graph first so code links validate against it.
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
     let applied = store.apply_import_layer(rto_spec::LAT_REF, &imported.facts)?;
 
     let r = &imported.report;
@@ -1102,7 +1143,11 @@ fn collect_markdown(
 /// The import is **durable**: its facts are persisted (keyed by
 /// [`rto_spec::GRAPHIFY_REF`]) and re-applied by `build_graph` after every sync,
 /// so they survive a later code-changing sync (dangling edges are tolerated).
-fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
+fn run_import_graphify(
+    ingest: rto_graph::IngestConfig,
+    path: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     use rto_graph::{Edge, EdgeKind};
 
     // Accept either the Graphify output directory or a graph.json directly.
@@ -1117,7 +1162,7 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
     let imported = rto_spec::import_graphify(&text)?;
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     // Assemble the full import layer: Graphify's own nodes/edges plus grounding
     // links. When an imported node's `source_file` matches a `file:<path>` node
@@ -1170,21 +1215,25 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Graph-grounded spec/blueprint authoring (ADR-0004).
-fn run_spec(cfg: &config::Config, action: SpecAction) -> anyhow::Result<()> {
+fn run_spec(
+    cfg: &config::Config,
+    ingest: rto_graph::IngestConfig,
+    action: SpecAction,
+) -> anyhow::Result<()> {
     match action {
-        SpecAction::Context { topic, limit, json } => run_spec_context(&topic, limit, json),
+        SpecAction::Context { topic, limit, json } => run_spec_context(ingest, &topic, limit, json),
         SpecAction::Scaffold {
             topic,
             title,
             kind,
             out,
-        } => run_spec_scaffold(&topic, title.as_deref(), &kind, out.as_deref()),
+        } => run_spec_scaffold(ingest, &topic, title.as_deref(), &kind, out.as_deref()),
         SpecAction::Draft {
             topic,
             title,
             kind,
             out,
-        } => run_spec_draft(cfg, &topic, title.as_deref(), &kind, out.as_deref()),
+        } => run_spec_draft(cfg, ingest, &topic, title.as_deref(), &kind, out.as_deref()),
     }
 }
 
@@ -1193,6 +1242,7 @@ fn run_spec(cfg: &config::Config, action: SpecAction) -> anyhow::Result<()> {
 /// markdown, its label (e.g. `ADR-0007`), and the grounded context — shared by
 /// `spec scaffold` (Tier 0) and `spec draft` (Tier 1).
 fn build_scaffold(
+    ingest: rto_graph::IngestConfig,
     topic: &str,
     title: Option<&str>,
     kind: &str,
@@ -1201,7 +1251,7 @@ fn build_scaffold(
         anyhow::bail!("unknown --kind `{kind}` (expected: adr | blueprint)");
     }
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
     let root = repo
         .workdir()
         .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
@@ -1236,12 +1286,13 @@ fn emit_artifact(md: &str, label: &str, out: Option<&str>) -> anyhow::Result<()>
 
 /// Emit a graph-grounded, house-style ADR or blueprint skeleton (ADR-0004 Tier 0).
 fn run_spec_scaffold(
+    ingest: rto_graph::IngestConfig,
     topic: &str,
     title: Option<&str>,
     kind: &str,
     out: Option<&str>,
 ) -> anyhow::Result<()> {
-    let (md, label, _ctx) = build_scaffold(topic, title, kind)?;
+    let (md, label, _ctx) = build_scaffold(ingest, topic, title, kind)?;
     emit_artifact(&md, &format!("{label} scaffold"), out)
 }
 
@@ -1251,6 +1302,7 @@ fn run_spec_scaffold(
 #[cfg(feature = "inference-local-models")]
 fn run_spec_draft(
     cfg: &config::Config,
+    ingest: rto_graph::IngestConfig,
     topic: &str,
     title: Option<&str>,
     kind: &str,
@@ -1261,7 +1313,7 @@ fn run_spec_draft(
         is_installed, model_dir,
     };
 
-    let (scaffold, label, ctx) = build_scaffold(topic, title, kind)?;
+    let (scaffold, label, ctx) = build_scaffold(ingest, topic, title, kind)?;
 
     // Model pick: `[models] generative` from config if set (and a real generative
     // entry), otherwise the low-tier default (runs anywhere).
@@ -1319,6 +1371,7 @@ fn run_spec_draft(
 #[cfg(not(feature = "inference-local-models"))]
 fn run_spec_draft(
     _cfg: &config::Config,
+    _ingest: rto_graph::IngestConfig,
     _topic: &str,
     _title: Option<&str>,
     _kind: &str,
@@ -1369,9 +1422,14 @@ fn today_utc() -> String {
 /// Assemble and print graph-grounded context for a topic (ADR-0004 Tier 0): the
 /// related symbols with their neighbourhood and governing ADRs, plus related
 /// docs. Builds the full derived + authored graph first so results are grounded.
-fn run_spec_context(topic: &str, limit: usize, json: bool) -> anyhow::Result<()> {
+fn run_spec_context(
+    ingest: rto_graph::IngestConfig,
+    topic: &str,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     let ctx = rto_spec::context(&store, topic, limit)?;
     if json {
@@ -1415,11 +1473,16 @@ fn run_spec_context(topic: &str, limit: usize, json: bool) -> anyhow::Result<()>
 /// Query the graph: explain a node's provenance-labelled neighbourhood, or list
 /// all nodes of a kind. Builds the full (derived + authored) graph first so
 /// results reflect the current source and ADRs.
-fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::Result<()> {
+fn run_query(
+    ingest: rto_graph::IngestConfig,
+    key: Option<String>,
+    kind: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
     use rto_graph::{NodeKind, explain, list_kind};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     match (key, kind) {
         (Some(key), _) => {
@@ -1471,11 +1534,16 @@ fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::R
 /// contexts with the current graph — rebuilding stale ones and pruning entries
 /// for deleted nodes. The cache is dependency-aware: a change to a node or any of
 /// its neighbours invalidates its cached context (see `rto_graph::context`).
-fn run_context(key: Option<String>, refresh: bool, json: bool) -> anyhow::Result<()> {
+fn run_context(
+    ingest: rto_graph::IngestConfig,
+    key: Option<String>,
+    refresh: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     use rto_graph::{context, refresh_contexts};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     if refresh {
         let report = refresh_contexts(&store)?;
@@ -1519,9 +1587,9 @@ fn run_context(key: Option<String>, refresh: bool, json: bool) -> anyhow::Result
 
 /// List intent-debt markers (TODOs, stubs, deferred work) in the graph, grouped
 /// by category. A report, not a gate: it always exits zero.
-fn run_debt(kinds: &[String], json: bool) -> anyhow::Result<()> {
+fn run_debt(ingest: rto_graph::IngestConfig, kinds: &[String], json: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     let report = rto_graph::debt(&store, kinds)?;
     if json {
@@ -1560,9 +1628,14 @@ fn debt_summary(report: &rto_graph::DebtReport) -> String {
 
 /// Find and print a shortest path between two nodes. Exits non-zero if the two
 /// nodes are not connected, so it is usable as a reachability assertion.
-fn run_path(from: &str, to: &str, json: bool) -> anyhow::Result<()> {
+fn run_path(
+    ingest: rto_graph::IngestConfig,
+    from: &str,
+    to: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     let result = rto_graph::path(&store, from, to)?;
     if json {
@@ -1590,11 +1663,11 @@ fn run_path(from: &str, to: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Assemble the full graph and write it as a portable JSON artifact.
-fn run_export(out: Option<String>) -> anyhow::Result<()> {
+fn run_export(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::Result<()> {
     use rto_graph::GraphArtifact;
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
     let artifact = GraphArtifact::from_store(&store)?;
     let json = artifact.to_json()?;
 
@@ -1642,9 +1715,9 @@ fn run_load(file: &str) -> anyhow::Result<()> {
 /// Serve the graph over the Model Context Protocol. Builds the full graph, then
 /// serves over stdio (default) or streamable HTTP (`--http <addr>`).
 #[cfg(feature = "mcp")]
-fn run_serve(http: Option<String>) -> anyhow::Result<()> {
+fn run_serve(ingest: rto_graph::IngestConfig, http: Option<String>) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
 
     match http {
         Some(addr) => {
@@ -1659,10 +1732,14 @@ fn run_serve(http: Option<String>) -> anyhow::Result<()> {
 }
 
 /// Render a build-output of the graph: the docs site or an Obsidian vault.
-fn run_render(target: &str, out: Option<String>) -> anyhow::Result<()> {
+fn run_render(
+    ingest: rto_graph::IngestConfig,
+    target: &str,
+    out: Option<String>,
+) -> anyhow::Result<()> {
     match rto_render::Target::parse(target) {
         Some(rto_render::Target::DocsSite) => render_docs(out),
-        Some(rto_render::Target::ObsidianVault) => render_obsidian(out),
+        Some(rto_render::Target::ObsidianVault) => render_obsidian(ingest, out),
         None => anyhow::bail!("unknown render target `{target}` (expected: docs | obsidian)"),
     }
 }
@@ -1736,9 +1813,9 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
 
 /// Render an Obsidian vault: one linked markdown note per graph node in `<out>`
 /// (default `vault`).
-fn render_obsidian(out: Option<String>) -> anyhow::Result<()> {
+fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache)?;
+    build_graph(&repo, &mut store, &cache, ingest)?;
     let out = out.map_or_else(
         || std::path::PathBuf::from("vault"),
         std::path::PathBuf::from,
