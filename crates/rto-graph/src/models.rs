@@ -199,17 +199,17 @@ pub const REGISTRY: &[ModelSpec] = &[
                 ModelFile {
                     name: "config.json",
                     url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/config.json",
-                    sha256: "",
+                    sha256: "bc00af31a4a31b74040d73370aa83b62da34c90b75eb77bfa7db039d90abd591",
                 },
                 ModelFile {
                     name: "tokenizer.json",
                     url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json",
-                    sha256: "",
+                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
                 },
                 ModelFile {
                     name: "model.safetensors",
                     url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/model.safetensors",
-                    sha256: "",
+                    sha256: "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7",
                 },
             ],
         }],
@@ -231,17 +231,17 @@ pub const REGISTRY: &[ModelSpec] = &[
                 ModelFile {
                     name: "config.json",
                     url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/config.json",
-                    sha256: "",
+                    sha256: "446712fac367857b4b1302762fe1cd7bfa8b3c4b77b4dc5d77c4025407660896",
                 },
                 ModelFile {
                     name: "tokenizer.json",
                     url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/tokenizer.json",
-                    sha256: "",
+                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
                 },
                 ModelFile {
                     name: "model.safetensors",
                     url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/model.safetensors",
-                    sha256: "",
+                    sha256: "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
                 },
             ],
         }],
