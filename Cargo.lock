@@ -3083,7 +3083,7 @@ dependencies = [
 
 [[package]]
 name = "roteiro"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "rto-graph"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "rto-render"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "axum",
  "pulldown-cmark",
@@ -3250,7 +3250,7 @@ dependencies = [
 
 [[package]]
 name = "rto-spec"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "rto-graph",
  "serde",
