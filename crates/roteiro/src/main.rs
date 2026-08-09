@@ -90,7 +90,7 @@ enum Command {
         /// Artifact file to load (`-` reads from stdin).
         file: String,
     },
-    /// One-shot import from an external knowledge graph (currently: graphify).
+    /// One-shot import from an external knowledge graph (graphify, lat).
     Import {
         /// Source tool: graphify | lat (codegraph planned).
         #[arg(long)]
@@ -682,7 +682,8 @@ fn run_import_lat(path: &str, json: bool) -> anyhow::Result<()> {
     // path so node keys (`lat:<path>`) are stable and links resolve consistently.
     let mut files = Vec::new();
     collect_markdown(&dir, root, &mut files)?;
-    files.sort();
+    // Sort by path only; the content is never a tie-breaker (paths are unique).
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     if files.is_empty() {
         anyhow::bail!("no .md files under {}", dir.display());
     }
@@ -720,16 +721,25 @@ fn run_import_lat(path: &str, json: bool) -> anyhow::Result<()> {
 /// contents)` pairs. Paths use `/` separators for stable, portable node keys.
 /// Errors if a file is outside the repository `root`, since a non-repo-relative
 /// key would be unstable and would import content from outside the repo.
+///
+/// Symlinks are **not** followed (checked via [`std::fs::DirEntry::file_type`],
+/// which does not traverse the link): a symlinked directory or file could
+/// otherwise pull in out-of-repo content behind a repo-relative-looking key.
 fn collect_markdown(
     dir: &std::path::Path,
     root: &std::path::Path,
     out: &mut Vec<(String, String)>,
 ) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
             collect_markdown(&path, root, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
             let rel = path.strip_prefix(root).map_err(|_| {
                 anyhow::anyhow!(
                     "lat file {} is outside the repository ({}); the lat.md \

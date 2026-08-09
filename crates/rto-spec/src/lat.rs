@@ -3,12 +3,16 @@
 //!
 //! lat.md (<https://github.com/1st1/lat.md>) stores knowledge as markdown files
 //! in a `lat.md/` directory: headings are sections, `[[file#Section]]` links join
-//! sections, `[[src/x.rs#Symbol]]` links reach into code, and `// @lat:
-//! [[section]]` comments in source link back. That model mirrors Roteiro's own
-//! ADR `[[path#Symbol]]` + `@rto:` layer, so lat content imports as **`authored`**
-//! facts — a `doc` node per file, a `lat_section` node per heading, `contains`
-//! edges for structure, and `references` edges for links. Links into code are
-//! validated by the durable-import layer, which prunes any that dangle.
+//! sections, and `[[src/x.rs#Symbol]]` links reach into code. That model mirrors
+//! Roteiro's own ADR `[[path#Symbol]]` + `@rto:` layer, so lat content imports as
+//! **`authored`** facts — a `doc` node per file, a `lat_section` node per
+//! heading, `contains` edges for structure, and `references` edges for links.
+//! Links into code are validated by the durable-import layer, which prunes any
+//! that dangle.
+//!
+//! lat also supports `// @lat: [[section]]` backlinks *from* source code (like
+//! `@rto:`); importing those as `authored` edges is a planned fast-follow —
+//! [`resolve_lat_ref`] already resolves such references to node keys.
 
 use std::collections::BTreeMap;
 
@@ -42,8 +46,6 @@ pub struct LatReport {
     pub links_to_sections: usize,
     /// Links resolved to a code symbol or file.
     pub links_to_code: usize,
-    /// `@lat:` source annotations linked back to lat sections.
-    pub annotations: usize,
 }
 
 /// Import a lat.md directory. `files` are `(repo-relative path, content)` pairs
