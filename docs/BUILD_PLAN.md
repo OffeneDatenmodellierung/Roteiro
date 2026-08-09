@@ -857,12 +857,18 @@ serving), and broaden the opt-in model catalogue.
   inference-core unification. **Generation moved** — `spec draft` generates via
   llama.cpp (the `serve` engine) over the same GGUFs; candle `LocalGenerator` is a
   transitional fallback only (`inference-local-models` without `serve`). Verified
-  live: *"drafted 5 section(s) with qwen3-0.6b (via llama.cpp)"*. **Embeddings →
-  GGUF** and **vision → `mmproj`** are scheduled (both already served via
-  llama.cpp — `bge-small-en-v1.5-gguf`, `smolvlm-500m-gguf`); candle stays their
-  backend until they cut over, then is removed. Added a `role` label
-  (instruct/coding/reasoning) + opt-in `qwen2.5-coder-3b` (coding) and
+  live: *"drafted 5 section(s) with qwen3-0.6b (via llama.cpp)"*. Added a `role`
+  label (instruct/coding/reasoning) + opt-in `qwen2.5-coder-3b` (coding) and
   `deepseek-r1-distill-qwen-1.5b` (reasoning) entries — both pull and run.
+- **Unification complete — candle removed (ADR-0003 v1.2).** The engine was
+  extracted into a shared **`rto-llama`** crate (no HTTP/async deps), and all
+  three internal uses cut over: `infer --model` embeds via GGUF (`bge-*` re-listed
+  as F16 GGUF; safetensors `all-MiniLM` dropped), `sync` image understanding uses
+  `smolvlm-500m-gguf` + `mmproj` (candle moondream removed), and `spec draft`
+  generates via the shared engine. candle-core/nn/transformers + tokenizers are
+  gone from the tree; `inference-local-models`/`image-vision` now mean local
+  **llama.cpp** models. One inference core for serving and internal uses. (Perf
+  follow-up: `infer` embeds a fresh context per node — warm-context/batching.)
 - **Acceleration / unify direction:** performance matters for the internal uses
   too (`spec draft`, `infer`), and llama.cpp is now proven fast + `deny`-clean, so
   it is the target for the **whole inference core** — a **staged migration off
@@ -940,7 +946,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
 | v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`/`[ingest]`, CLI>project>user>default |
 | v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ✅ opt-in `serve` — `/v1/models`+`chat`+streaming+`embeddings`+vision (`mtmd`), auto-registered graph tools |
-| v0.x | 20 | Inference-core direction (unify on llama.cpp) + coding/reasoning models | ✅ generation → llama.cpp (`spec draft`); embeddings/vision scheduled (ADR-0003 v1.1); coding/reasoning `role` entries pull+run |
+| v0.x | 20 | Inference-core direction (unify on llama.cpp) + coding/reasoning models | ✅ **candle removed** — one `rto-llama` core for gen/embed/vision + serving (ADR-0003 v1.2); coding/reasoning `role` entries pull+run |
 | — | — | Shipped alongside Stage 12: curated low/mid/high **model matrix** ([ADR-0003](adr/0003-pluggable-embedding-models.md)) + streaming, checksum-verified model downloads | ✅ `roteiro model list` by section→tier; `download_verified` (constant memory) |
 
 ---

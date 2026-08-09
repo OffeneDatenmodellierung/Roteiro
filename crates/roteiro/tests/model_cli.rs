@@ -37,7 +37,7 @@ fn model_list_shows_registry() {
     assert!(out.status.success(), "model list failed: {out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("all-minilm-l6-v2"),
+        text.contains("bge-base-en-v1.5"),
         "registry model listed: {text}"
     );
     assert!(
@@ -54,14 +54,14 @@ fn model_list_shows_registry() {
 #[test]
 fn pull_is_declined_non_interactively_and_downloads_nothing() {
     let home = fresh_home("pull");
-    let out = roteiro(&home, &["model", "pull", "all-minilm-l6-v2"]);
+    let out = roteiro(&home, &["model", "pull", "bge-base-en-v1.5"]);
     // Non-interactive with no `--yes`: must refuse and exit non-zero.
     assert!(!out.status.success(), "pull must decline non-interactively");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("non-interactive"), "explains why: {err}");
     assert!(err.contains("--yes"), "points at the override: {err}");
     // Nothing was written to the store.
-    let model_dir = home.join("models/all-minilm-l6-v2");
+    let model_dir = home.join("models/bge-base-en-v1.5");
     assert!(
         !model_dir.join("model.safetensors").exists(),
         "no weights should be downloaded",
@@ -109,7 +109,7 @@ fn infer_with_uninstalled_model_errors() {
         );
     }
     let out = Command::new(BIN)
-        .args(["infer", "--model", "all-minilm-l6-v2"])
+        .args(["infer", "--model", "bge-base-en-v1.5"])
         .current_dir(&dir)
         .env("ROTEIRO_HOME", &dir)
         .output()

@@ -13,6 +13,7 @@ authors.workspace = true
 anyhow = { workspace = true }
 clap = { workspace = true }
 rto-graph = { workspace = true }
+rto-llama = { workspace = true, optional = true }
 rto-render = { workspace = true }
 rto-serve = { workspace = true, optional = true }
 rto-spec = { workspace = true }
@@ -39,11 +40,13 @@ inference = ["rto-graph/inference"]
 # Enabled by every model tier so `roteiro model pull` works without candle.
 models = ["rto-graph/models", "dep:ureq"]
 # Pluggable local embedding/generative models (`roteiro infer --model`, `spec
-# draft`): candle backend on top of the shared `models` registry. ADR-0003.
+# draft`) via the shared **llama.cpp** engine — GGUF embedding + generative
+# models, no candle (ADR-0003 v1.1). Pulls `rto-llama` (a C/C++ toolchain).
 inference-local-models = [
     "inference",
     "models",
-    "rto-graph/inference-local-models",
+    "dep:rto-llama",
+    "rto-llama/llama",
 ]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
@@ -52,14 +55,15 @@ pdf-text = ["rto-graph/pdf-text"]
 # pulls the pure-Rust ocrs/rten tree). Implies `models` so `roteiro model pull
 # ocrs-text` can fetch the OCR models with consent.
 image-ocr = ["models", "rto-graph/image-ocr"]
-# Describe images with a local vision-language model during `roteiro sync`
-# (ADR-0005 Tier B; off by default; pulls candle + the moondream model).
-image-vision = ["inference-local-models", "rto-graph/image-vision"]
+# Describe images with a local GGUF vision-language model during `roteiro sync`
+# (ADR-0005 Tier B; off by default). Uses the shared llama.cpp engine via
+# `rto-graph/image-vision` (smolvlm + mmproj) — no candle.
+image-vision = ["models", "rto-graph/image-vision"]
 # Local model serving (`roteiro serve --models`): the opt-in, loopback,
 # OpenAI-compatible `/v1` endpoint over installed models (ADR-0006). Pulls
-# `rto-serve` with its llama.cpp engine (a C/C++ toolchain) and the `models`
-# registry to resolve installed generative models.
-serve = ["dep:rto-serve", "rto-serve/llama", "models"]
+# `rto-serve` with its llama.cpp engine; also enables the internal llama.cpp uses
+# (`infer --model`, `spec draft`) via `inference-local-models`.
+serve = ["dep:rto-serve", "rto-serve/llama", "inference-local-models"]
 
 [lints]
 workspace = true
