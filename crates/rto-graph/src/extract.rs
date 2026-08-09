@@ -14,6 +14,17 @@
 
 use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 
+/// Version of the extraction *output* (node/edge shape and captured `meta`).
+/// Bump whenever extraction changes what it produces, so the content-addressed
+/// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
+/// blob — the version is folded into the cache key. See [`crate::sync`].
+pub(crate) const EXTRACT_VERSION: u32 = 2;
+
+/// Max characters of embeddable content (markdown body / doc-comment) captured
+/// into a node's `meta.content`, to keep the store small while giving inference
+/// real text to embed.
+const MAX_CONTENT: usize = 1500;
+
 /// Turns one source blob into the nodes and edges derived from it.
 pub trait Extractor {
     /// Extract a [`FactSet`] from a blob's `path`, git `blob_id`, and `bytes`.
@@ -59,6 +70,15 @@ fn file_node(path: &str, blob_id: &str, bytes: &[u8], lang: Option<&str>) -> Nod
         .iter()
         .fold(0usize, |n, &b| n + usize::from(b == b'\n'));
     let end = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    let mut meta = serde_json::json!({ "bytes": bytes.len(), "lines": lines });
+    // For prose files, capture the (capped) body so inference embeds *meaning*,
+    // not just the filename.
+    if is_prose(path) {
+        let content = cap_content(&String::from_utf8_lossy(bytes));
+        if !content.is_empty() {
+            meta["content"] = serde_json::Value::from(content);
+        }
+    }
     Node {
         key: file_key(path),
         kind: NodeKind::File,
@@ -67,8 +87,58 @@ fn file_node(path: &str, blob_id: &str, bytes: &[u8], lang: Option<&str>) -> Nod
         lang: lang.map(ToOwned::to_owned),
         blob_hash: Some(blob_id.to_owned()),
         span: Some(Span::new(0, end)),
-        meta: serde_json::json!({ "bytes": bytes.len(), "lines": lines }),
+        meta,
     }
+}
+
+/// Strip doc-comment markers from a comment, returning its body — or `None` if
+/// it is not a doc comment. Recognises `///` (but not `////`), `//!`, `/** */`,
+/// and `/*! */`; a plain `//` or `/* */` comment returns `None`.
+fn doc_comment_body(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.starts_with("//!") || (t.starts_with("///") && !t.starts_with("////")) {
+        return Some(t[3..].trim().to_owned());
+    }
+    if t.starts_with("/**") || t.starts_with("/*!") {
+        let body = t[3..].strip_suffix("*/").unwrap_or(&t[3..]);
+        let cleaned: Vec<&str> = body
+            .lines()
+            .map(|l| l.trim().trim_start_matches('*').trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+        return Some(cleaned.join(" "));
+    }
+    None
+}
+
+/// Whether `path` is a prose file whose body is worth embedding.
+fn is_prose(path: &str) -> bool {
+    matches!(
+        extension(path),
+        Some("md" | "markdown" | "txt" | "rst" | "adoc")
+    )
+}
+
+/// Trim and cap `text` to [`MAX_CONTENT`] characters (whitespace-collapsed), so
+/// stored content stays small and deterministic.
+fn cap_content(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().min(MAX_CONTENT));
+    let mut last_was_space = true;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            out.push(c);
+            last_was_space = false;
+        }
+        if out.chars().count() >= MAX_CONTENT {
+            break;
+        }
+    }
+    out.trim().to_owned()
 }
 
 /// Fallback extractor: emits a single `file` node per blob, tagged with its blob
@@ -205,6 +275,10 @@ impl RustWalk<'_> {
                 meta.insert("calls".into(), serde_json::Value::from(calls));
             }
         }
+        // Capture the item's doc-comment so inference embeds what it *means*.
+        if let Some(doc) = self.doc_comment(node) {
+            meta.insert("content".into(), serde_json::Value::from(doc));
+        }
 
         self.nodes.push(Node {
             key: key.clone(),
@@ -222,6 +296,33 @@ impl RustWalk<'_> {
         // pushing this symbol onto the scope stack.
         let child_scope = extend(scope, &self.simple(node, "name"), Some(key));
         self.recurse_body(node, &child_scope);
+    }
+
+    /// The doc-comment (`///` / `//!` / `/** … */`) immediately preceding `node`,
+    /// concatenated, or `None`. Attributes between the comment and the item are
+    /// skipped; a non-doc comment (or any other node) ends the block.
+    fn doc_comment(&self, node: tree_sitter::Node) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        let mut prev = node.prev_sibling();
+        while let Some(n) = prev {
+            match n.kind() {
+                "line_comment" | "block_comment" => match doc_comment_body(self.text(n)) {
+                    Some(body) => {
+                        parts.push(body);
+                        prev = n.prev_sibling();
+                    }
+                    None => break,
+                },
+                "attribute_item" => prev = n.prev_sibling(),
+                _ => break,
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        parts.reverse();
+        let joined = cap_content(&parts.join(" "));
+        (!joined.is_empty()).then_some(joined)
     }
 
     /// An `impl` block emits no node but contributes its type name as a scope
@@ -458,6 +559,61 @@ mod inner {
         let a = RustExtractor.extract("src/lib.rs", "blob1", SAMPLE.as_bytes());
         let b = RustExtractor.extract("src/lib.rs", "blob1", SAMPLE.as_bytes());
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rust_extractor_captures_doc_comments() {
+        let src = "/// The central store.\n\
+                   pub struct Store;\n\n\
+                   /// Opens it.\n\
+                   /// Reads the config.\n\
+                   pub fn open() {}\n\n\
+                   // not a doc comment\n\
+                   pub fn plain() {}\n";
+        let fs = RustExtractor.extract("src/lib.rs", "b", src.as_bytes());
+        let content = |key: &str| {
+            fs.nodes
+                .iter()
+                .find(|n| n.key == key)
+                .and_then(|n| n.meta.get("content"))
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+        };
+        assert_eq!(
+            content("sym:rust:src/lib.rs#Store").as_deref(),
+            Some("The central store.")
+        );
+        assert_eq!(
+            content("sym:rust:src/lib.rs#open").as_deref(),
+            Some("Opens it. Reads the config.")
+        );
+        // A plain `//` comment is not captured.
+        assert_eq!(content("sym:rust:src/lib.rs#plain"), None);
+    }
+
+    #[test]
+    fn prose_file_captures_capped_body() {
+        let md = FileNodeExtractor.extract("docs/x.md", "b", b"# Title\n\nSome prose   here.\n");
+        assert_eq!(md.nodes[0].meta["content"], "# Title Some prose here.");
+        // A non-prose file gets no content.
+        let rs = FileNodeExtractor.extract("notes.bin", "b", b"\x00\x01binary");
+        assert!(rs.nodes[0].meta.get("content").is_none());
+    }
+
+    #[test]
+    fn doc_comment_body_recognises_doc_markers() {
+        assert_eq!(super::doc_comment_body("/// hi").as_deref(), Some("hi"));
+        assert_eq!(
+            super::doc_comment_body("//! mod doc").as_deref(),
+            Some("mod doc")
+        );
+        assert_eq!(
+            super::doc_comment_body("/** block */").as_deref(),
+            Some("block")
+        );
+        // Plain and `////` comments are not docs.
+        assert_eq!(super::doc_comment_body("// plain"), None);
+        assert_eq!(super::doc_comment_body("//// header"), None);
     }
 
     #[test]
