@@ -3,11 +3,12 @@
 //! model — these are `derived`, a pure function of the blob bytes).
 //!
 //! "Intent debt" is the class of signals that say *something is missing* or
-//! *left for later*: `TODO`/`FIXME`/`HACK` comments, `todo!()`/`unimplemented!()`
-//! stubs, "not implemented" panics, and deferral phrases (`for now`, `deferred`,
-//! unchecked `- [ ]` items). The scan is line-based and language-agnostic so it
-//! works uniformly over code, docs, and ADRs; [`augment`] attaches each finding
-//! to its innermost enclosing symbol (or the file) via a `contains` edge.
+//! *left for later*: `TODO`/`FIXME`/`HACK` comments (in any case for the
+//! unambiguous tags), `todo!()`/`unimplemented!()` stubs, "not implemented"
+//! panics, and deferral phrases (`for now`, `deferred`, unchecked `- [ ]`
+//! items). The scan is line-based and language-agnostic so it works uniformly
+//! over code, docs, and ADRs; [`augment`] attaches each finding to its innermost
+//! enclosing symbol (or the file) via a `contains` edge.
 
 use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 
@@ -53,29 +54,49 @@ pub struct Marker {
     pub line: u32,
     /// Byte span of the line within the blob.
     pub span: Span,
+    /// Byte offset of the first non-whitespace byte on the line. Used to resolve
+    /// the enclosing symbol: an indented declaration's tree-sitter span starts
+    /// after its leading whitespace, so the line's *start* offset would fall
+    /// before it and misattach a same-line marker to an outer container.
+    pub anchor: u32,
 }
 
 /// How a rule's needle is matched against a line.
 enum Mode {
     /// Case-sensitive substring (for the macro/call syntax `todo!(`).
     Substr,
-    /// Case-sensitive whole word (for the uppercase `TODO`-style tags).
+    /// Case-sensitive whole word (for the uppercase `TODO`-style tags, matched
+    /// anywhere on the line).
     Word,
-    /// Case-insensitive whole word/phrase (for prose deferral notes).
+    /// Case-insensitive whole word/phrase (for `todo`/`fixme`/`tbd` in any case
+    /// and prose deferral notes). `needle` must be lowercase.
     Phrase,
+    /// Case-insensitive whole word in *annotation form* — immediately followed
+    /// by `:` or `(` (e.g. `Bug:`, `hack(x):`). Lets the noisier tags match in
+    /// any case without flagging the bare English words `bug`/`hack`/`xxx` in
+    /// prose. `needle` must be lowercase.
+    Annotation,
 }
 
 /// The detection table, checked top to bottom; the first hit on a line wins, so
 /// more specific rules precede more general ones. Kept intentionally small and
 /// high-signal — this is a report, not a gate, but noise still erodes trust.
+///
+/// Case handling: `todo`/`fixme`/`tbd` match in any case anywhere (the words are
+/// unambiguous). `BUG`/`HACK`/`XXX` match uppercase anywhere, but in other cases
+/// only as an annotation (`Bug:`, `hack(`), since bare lowercase `bug`/`hack` are
+/// ordinary English. The prose phrases were already case-insensitive.
 const RULES: &[(&str, MarkerCategory, Mode)] = &[
     ("todo!(", MarkerCategory::Stub, Mode::Substr),
     ("unimplemented!(", MarkerCategory::Stub, Mode::Substr),
-    ("TODO", MarkerCategory::Todo, Mode::Word),
-    ("FIXME", MarkerCategory::Fixme, Mode::Word),
+    ("todo", MarkerCategory::Todo, Mode::Phrase),
+    ("fixme", MarkerCategory::Fixme, Mode::Phrase),
     ("BUG", MarkerCategory::Fixme, Mode::Word),
     ("HACK", MarkerCategory::Hack, Mode::Word),
     ("XXX", MarkerCategory::Hack, Mode::Word),
+    ("bug", MarkerCategory::Fixme, Mode::Annotation),
+    ("hack", MarkerCategory::Hack, Mode::Annotation),
+    ("xxx", MarkerCategory::Hack, Mode::Annotation),
     ("not yet implemented", MarkerCategory::Stub, Mode::Phrase),
     ("not implemented", MarkerCategory::Stub, Mode::Phrase),
     ("placeholder", MarkerCategory::Stub, Mode::Phrase),
@@ -83,7 +104,7 @@ const RULES: &[(&str, MarkerCategory, Mode)] = &[
     ("deferred", MarkerCategory::Deferred, Mode::Phrase),
     ("follow-up", MarkerCategory::Deferred, Mode::Phrase),
     ("followup", MarkerCategory::Deferred, Mode::Phrase),
-    ("TBD", MarkerCategory::Deferred, Mode::Word),
+    ("tbd", MarkerCategory::Deferred, Mode::Phrase),
 ];
 
 /// Maximum stored marker text length (in characters), to keep nodes small.
@@ -101,11 +122,14 @@ pub fn scan_markers(bytes: &[u8]) -> Vec<Marker> {
         let decoded = String::from_utf8_lossy(raw);
         let line = decoded.trim_end_matches('\r');
         if let Some(category) = classify(line) {
+            let lead = u32::try_from(raw.iter().take_while(|b| b.is_ascii_whitespace()).count())
+                .unwrap_or(0);
             out.push(Marker {
                 category,
                 text: cap_text(line),
                 line: u32::try_from(idx + 1).unwrap_or(u32::MAX),
                 span: Span::new(offset, offset.saturating_add(raw_len)),
+                anchor: offset.saturating_add(lead),
             });
         }
         // +1 for the '\n' that `split` consumed; the trailing empty element for a
@@ -122,6 +146,7 @@ fn classify(line: &str) -> Option<MarkerCategory> {
             Mode::Substr => line.contains(needle),
             Mode::Word => find_bounded(line, needle, false).is_some(),
             Mode::Phrase => find_bounded(line, needle, true).is_some(),
+            Mode::Annotation => find_annotation(line, needle).is_some(),
         };
         if hit {
             return Some(*category);
@@ -162,6 +187,27 @@ fn find_bounded(hay: &str, needle: &str, ci: bool) -> Option<usize> {
     None
 }
 
+/// Find `needle` (given lowercase) as an ASCII-case-insensitive whole word in
+/// *annotation form*: preceded by a non-word boundary and immediately followed
+/// by `:` or `(`. Used for the noisier tags so `Bug:` matches but bare `bug`
+/// does not.
+fn find_annotation(hay: &str, needle: &str) -> Option<usize> {
+    let lowered = hay.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lowered[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+        let after_ok = end < bytes.len() && matches!(bytes[end], b':' | b'(');
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        from = start + 1;
+    }
+    None
+}
+
 /// Whether `b` continues an identifier word (so a match touching it is not a
 /// standalone token).
 fn is_word_byte(b: u8) -> bool {
@@ -190,8 +236,11 @@ fn cap_text(line: &str) -> String {
 pub fn augment(facts: &mut FactSet, path: &str, blob_id: &str, bytes: &[u8]) {
     for m in scan_markers(bytes) {
         let key = format!("marker:{path}#{}", m.line);
-        let container = innermost_container(&facts.nodes, m.span.start)
-            .unwrap_or_else(|| format!("file:{path}"));
+        // Resolve against the first non-whitespace byte, not the line start: an
+        // indented symbol's tree-sitter span begins after its leading
+        // whitespace, so the line start would fall before it.
+        let container =
+            innermost_container(&facts.nodes, m.anchor).unwrap_or_else(|| format!("file:{path}"));
         facts.nodes.push(Node {
             key: key.clone(),
             kind: NodeKind::Marker,
@@ -270,10 +319,29 @@ plain line, nothing here
 
     #[test]
     fn word_boundaries_avoid_false_positives() {
-        // Substrings inside larger identifiers/words must not match.
-        assert!(categories("let bugfix = 1; // mastodon todos").is_empty());
+        // Tags embedded in larger words must not match — using uppercase forms
+        // that WOULD match if `find_bounded` regressed to substring search.
+        assert!(categories("mastodon Todos BUGFIX fixmelike").is_empty());
         // But a real standalone tag does.
         assert_eq!(categories("x // BUG here")[0].1, MarkerCategory::Fixme);
+    }
+
+    #[test]
+    fn tags_match_mixed_case() {
+        // todo / fixme / tbd match in any case, anywhere on the line.
+        assert_eq!(categories("// Todo: wire it")[0].1, MarkerCategory::Todo);
+        assert_eq!(categories("// fixme this path")[0].1, MarkerCategory::Fixme);
+        assert_eq!(categories("decision TBD")[0].1, MarkerCategory::Deferred);
+        // BUG / HACK / XXX match uppercase anywhere...
+        assert_eq!(categories("// HACK ordering")[0].1, MarkerCategory::Hack);
+        // ...or in any case only as an annotation (`Bug:`, `hack(...)`).
+        assert_eq!(categories("note a Bug: crash")[0].1, MarkerCategory::Fixme);
+        assert_eq!(
+            categories("// hack(perf): fast path")[0].1,
+            MarkerCategory::Hack
+        );
+        // But bare lowercase bug/hack in prose is not a marker.
+        assert!(categories("we fixed a bug in the hack layer").is_empty());
     }
 
     #[test]
@@ -311,6 +379,37 @@ plain line, nothing here
             .iter()
             .find(|e| e.kind == EdgeKind::Contains && e.dst == marker.key)
             .expect("a contains edge");
+        assert_eq!(edge.src, "sym:rust:a.rs#f");
+    }
+
+    #[test]
+    fn augment_attaches_to_symbol_on_its_own_indented_line() {
+        // A symbol whose span starts after leading indentation (as tree-sitter
+        // reports), with the marker as a trailing comment on that same line.
+        let mut facts = FactSet::new()
+            .with_node(Node {
+                span: Some(Span::new(0, 80)),
+                ..Node::new("file:a.rs", NodeKind::File, "a.rs")
+            })
+            .with_node(Node {
+                // `fn f` begins at byte 4, after four spaces of indentation.
+                span: Some(Span::new(4, 40)),
+                ..Node::new("sym:rust:a.rs#f", NodeKind::Fn, "f")
+            });
+        augment(&mut facts, "a.rs", "blob", b"    fn f() { // TODO soon }\n");
+
+        let marker = facts
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Marker)
+            .unwrap();
+        let edge = facts
+            .edges
+            .iter()
+            .find(|e| e.kind == EdgeKind::Contains && e.dst == marker.key)
+            .unwrap();
+        // The anchor (byte 4) is inside the symbol; the line start (byte 0) is
+        // not — resolving from the line start would misattach to the file.
         assert_eq!(edge.src, "sym:rust:a.rs#f");
     }
 
