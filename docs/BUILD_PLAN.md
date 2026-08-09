@@ -15,8 +15,12 @@ format shipped, and **Stage 9's Graphify importer** is done. What each stage
 *deferred* is now tracked honestly as first-class **Stages 11–14** in §5b — so
 nothing hides in a footnote. Agreed order: **Stage 11** (lat.md + codegraph
 importers) → **Stage 12** (inference content/PDF/image ingestion + semantic
-dedup) → **Stage 13** (spec/blueprint authoring pillar) → **Stage 14** (v1.0
-hardening). **A note on version labels:** the per-stage `v0.x` headings are
+dedup) → **Stage 13** (spec/blueprint authoring pillar) → **Stage 16**
+(commit-time correctness gate) → **Stage 14** (v1.0 hardening). **A note on stage
+numbers:** they are labels, not execution order — Stage 15 (intent-debt) shipped
+early and independently, and Stage 16 (commit-time gate) is sequenced last before
+the Stage 14 freeze because it touches sync, check, and hooks together. **A note
+on version labels:** the per-stage `v0.x` headings are
 *nominal targets*; because the workspace is pre-1.0, release-plz bumps `feat`
 commits as patches, so real tags are `0.0.n` (Stage 1 → v0.0.2 … artifacts →
 v0.0.10, Graphify import → next). §7 maps them.
@@ -538,6 +542,38 @@ so generated plans reference *real* symbols/ADRs/deps and are `check`-gated.
   in real graph facts with **no** model; tier-1 drafts prose from a small local
   model offline; both artifacts are `check`-gated.
 
+### Stage 16 — Commit-time correctness gate  → **v0.x** *(execution order: after Stage 13, immediately before Stage 14)*
+**Goal:** guarantee the knowledge base is not just *fresh* (what `sync` gives)
+but *correct* (no authored-vs-code drift) **at the point of a commit** — and
+checkable mid-work during a large change — instead of relying on a manual
+`check` or only Roteiro's own CI. Today the managed hooks run `sync --committed`
+only (freshness on checkout/merge); nothing runs `check`, and `check` validates
+the committed `HEAD` tree, so as a pre-commit hook it would inspect the *parent*
+commit, not the staged change. This stage closes that gap. Resolves the
+follow-ups noted under Stages 2/4 ("making `check` working-tree-aware pairs with
+`sync_worktree`"; "a working-tree query mode").
+- **Working-tree-aware `check`:** a mode that validates the *staged/uncommitted*
+  state about to be committed, built on the delivered `sync_worktree` overlay
+  (hash working-copy bytes over the committed tree). The committed-`HEAD` form
+  stays for the CI merge gate.
+- **`pre-commit` hook (managed by `roteiro init`):** runs the worktree-aware
+  `check` and blocks a commit that introduces drift (ADR `[[link]]` to a missing
+  symbol, `@rto:` to an unknown/superseded ADR, malformed ADR). Guarded and
+  skippable like the other managed hooks; git-native `--no-verify` is the escape
+  hatch. Added to `MANAGED_HOOKS`.
+- **`post-commit` freshness (optional):** a `post-commit` hook running `roteiro
+  sync --committed` so a same-branch commit refreshes the graph — today only
+  `post-checkout`/`post-merge` do.
+- **Mid-work usage:** the same worktree-aware `check` is what an agent or human
+  runs before finishing a large change (mirrors lat.md's `lat check`; the
+  `AGENTS.md` snippet already points agents at `roteiro check`).
+- **Why here:** it touches `sync` (worktree overlay), `check` (validation), and
+  `init` (hooks) at once, so it lands as the last correctness guarantee before
+  the Stage 14 freeze.
+- **DoD:** worktree-aware `check` validates uncommitted state; a managed
+  `pre-commit` hook blocks a drift-introducing commit and passes a clean one;
+  `post-commit` refresh works; dogfooded on Roteiro; `--no-verify` documented.
+
 ### Stage 14 — v1.0 hardening  → **v1.0.0**
 **Goal:** the merged graph is the canonical source; ship stable (completes the
 [Stage 10](#stage-10--ci-canonical-artifacts--v010x-artifact-format-delivered) deferral).
@@ -668,6 +704,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ⛔ **next** — generate samples by running the tools on this repo |
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ⛔ the "spec-store" front door from ADR-0001 |
+| v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 
