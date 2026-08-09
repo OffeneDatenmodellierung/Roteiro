@@ -795,7 +795,7 @@ fn infer_with_embedder(
 }
 
 /// Feature-rich variant: honour `--model` by loading a local **GGUF** embedding
-/// model through the shared llama.cpp engine (ADR-0003 v1.1) — no candle.
+/// model through the shared llama.cpp engine (ADR-0003 v1.2) — no candle.
 #[cfg(feature = "inference-local-models")]
 fn infer_with_embedder(
     store: &rto_graph::Store,
@@ -814,6 +814,17 @@ fn infer_with_embedder(
     // present — never an arbitrary directory under the store root.
     let spec = rto_graph::find_model(name)
         .ok_or_else(|| anyhow::anyhow!("unknown model `{name}` (see `roteiro model list`)"))?;
+    // Reject non-embedding models upfront: a generative/OCR/vision model would
+    // otherwise be "accepted", then fail every embed call — and because embed
+    // errors degrade to empty vectors (see `LlamaEmbedder`), that would surface
+    // silently as "no suggestions" rather than a clear error.
+    if spec.kind != rto_graph::ModelKind::Embedding {
+        anyhow::bail!(
+            "model `{name}` is a {} model, not an embedding model — \
+             `infer --model` needs an embedding model (see `roteiro model list`)",
+            spec.kind.as_str()
+        );
+    }
     let variant = spec
         .variant_for(Platform::host())
         .ok_or_else(|| anyhow::anyhow!("no variant of `{name}` for this platform"))?;
@@ -1442,7 +1453,7 @@ const GEN_BACKEND: &str = "llama.cpp";
 const DRAFT_MAX_TOKENS: u32 = 800;
 
 /// Draft each placeholder section of `scaffold` with the local generative model
-/// through the shared **llama.cpp** engine (`rto-llama`, ADR-0003 v1.1) — no
+/// through the shared **llama.cpp** engine (`rto-llama`, ADR-0003 v1.2) — no
 /// candle. Available under either `serve` or `inference-local-models`.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn draft_sections(

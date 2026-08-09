@@ -414,14 +414,12 @@ fn run_ocr(
     engine.get_text(&input).ok()
 }
 
-/// Describe an image with the local vision model (or `None` when `image-vision`
-/// is off, the model is not installed, the image is too large, or generation
-/// yields nothing).
-///
 /// Describe an image with the GGUF vision-language model (`smolvlm-500m-gguf`)
-/// through the shared llama.cpp engine (`rto-llama`, ADR-0003 v1.1) — no candle.
-/// The engine (model + `mmproj`) is loaded once per process and reused across
-/// images (a fresh context per call keeps KV cache from carrying over).
+/// through the shared llama.cpp engine (`rto-llama`, ADR-0003 v1.2) — no candle.
+/// Returns `None` when `image-vision` is off, the model is not installed, the
+/// image is too large, or generation yields nothing. The engine (model +
+/// `mmproj`) is loaded once per process and reused across images (a fresh
+/// context per call keeps KV cache from carrying over).
 #[cfg(feature = "image-vision")]
 fn vlm_content(bytes: &[u8]) -> Option<String> {
     use rto_llama::Engine as _;
