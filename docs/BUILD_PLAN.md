@@ -222,7 +222,7 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     single **generic tags extractor** drives every other language through its
     tree-sitter `tags.scm` query (the `@definition.*` / `@reference.*` capture
     convention): **Python, JavaScript, TypeScript/TSX, Go, Ruby, Java, C, C++,
-    C#, PHP, Scala, OCaml, Elixir, and Bash**. It emits the same fact shape as
+    C#, PHP, Scala, OCaml, Elixir, Bash, and SQL**. It emits the same fact shape as
     the Rust extractor — a `file` node, one symbol node per definition with
     nesting-derived `contains`/`defines` edges and byte-range-qualified keys
     (`sym:<lang>:<path>#<A::b>`), plus each function's callee names in
@@ -230,11 +230,11 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     works unchanged. A new language is a row in `tag_lang_for`, not new code.
     Queries come from the grammar crate's `TAGS_QUERY` const where exposed and
     correct; **vendored** under `src/queries/` where not (Scala ships a
-    `tags.scm` but no const; Bash ships none; C#'s const has a stray `@module`
-    capture `tree-sitter-tags` rejects). TypeScript's query concatenates the
+    `tags.scm` but no const; Bash and SQL ship none; C#'s const has a stray
+    `@module` capture `tree-sitter-tags` rejects). TypeScript's query concatenates the
     JavaScript one it `inherits`. A guard test asserts every registered
     language's query compiles, so a grammar bump that breaks one fails CI rather
-    than silently degrading to the file-node fallback. All 14 grammar crates are
+    than silently degrading to the file-node fallback. All 15 grammar crates are
     MIT/Apache-2.0 and pass `cargo deny`.
   - **Follow-up:** cross-file `calls` resolve by unambiguous simple name today; a
     scope-aware resolver (import paths + `Self` types) and untracked-file overlay

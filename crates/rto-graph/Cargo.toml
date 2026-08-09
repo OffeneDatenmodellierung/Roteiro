@@ -45,6 +45,7 @@ tree-sitter-scala = "0.26.2"
 tree-sitter-ocaml = "0.25.0"
 tree-sitter-elixir = "0.3.5"
 tree-sitter-bash = "0.25.1"
+tree-sitter-sequel = "0.3.11"
 
 # `models` only: SHA-256 verification for the registry/store.
 sha2 = { version = "0.10", optional = true }

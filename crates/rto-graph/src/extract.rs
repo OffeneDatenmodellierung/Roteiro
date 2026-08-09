@@ -898,6 +898,11 @@ impl RustWalk<'_> {
 struct TagLang {
     /// Canonical label — the node `lang` and the `sym:<lang>:` key namespace.
     lang: &'static str,
+    /// Cache key identifying the *grammar* (not just the label): one `lang` can
+    /// map to more than one grammar — OCaml `.ml` and `.mli` are both `"ocaml"`
+    /// but use distinct grammars — so the config cache must key on this, not
+    /// `lang`, to avoid parsing one grammar's blobs with another's parser.
+    grammar_key: &'static str,
     /// The tree-sitter grammar.
     language: tree_sitter::Language,
     /// The `tags.scm` query source. Usually borrowed from the grammar crate's
@@ -909,6 +914,8 @@ struct TagLang {
 /// Resolve a lowercase file extension to its tags-extractor language, or `None`
 /// when no generic extractor handles it (the caller then falls back to a plain
 /// file node). Rust is intentionally absent — it keeps its richer AST walker.
+// A flat extension→grammar dispatch table; length is inherent to the breadth.
+#[allow(clippy::too_many_lines)]
 fn tag_lang_for(ext: &str) -> Option<TagLang> {
     use std::borrow::Cow;
     // TypeScript's tags query `inherits` JavaScript's; the crate const ships only
@@ -1008,10 +1015,23 @@ fn tag_lang_for(ext: &str) -> Option<TagLang> {
             tree_sitter_bash::LANGUAGE.into(),
             borrowed(include_str!("queries/bash/tags.scm")),
         ),
+        // SQL (tree-sitter-sequel) ships no tags query, so one is vendored.
+        "sql" => (
+            "sql",
+            tree_sitter_sequel::LANGUAGE.into(),
+            borrowed(include_str!("queries/sql/tags.scm")),
+        ),
         _ => return None,
+    };
+    // Distinguish grammars that share a `lang` label: `.ml` and `.mli` are both
+    // "ocaml" but parse with different grammars, so they must cache separately.
+    let grammar_key = match ext {
+        "mli" => "ocaml-interface",
+        _ => lang,
     };
     Some(TagLang {
         lang,
+        grammar_key,
         language,
         query,
     })
@@ -1020,11 +1040,12 @@ fn tag_lang_for(ext: &str) -> Option<TagLang> {
 /// A compiled tags configuration, shared across the blobs of one language.
 type TagConfig = std::sync::Arc<tree_sitter_tags::TagsConfiguration>;
 
-/// Cache of compiled tags configurations, keyed by language label. Compiling a
+/// Cache of compiled tags configurations, keyed by [`TagLang::grammar_key`] (not
+/// the `lang` label, since one label can back multiple grammars). Compiling a
 /// `tags.scm` query is not free, and `sync` extracts many blobs, so each
-/// language's configuration is built once. A language whose query fails to
-/// compile (a grammar/query mismatch — a build-time invariant, not a runtime
-/// input) caches `None` so it is not retried per file.
+/// grammar's configuration is built once. A grammar whose query fails to compile
+/// (a grammar/query mismatch — a build-time invariant, not a runtime input)
+/// caches `None` so it is not retried per file.
 static TAG_CONFIGS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<&'static str, Option<TagConfig>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1036,7 +1057,7 @@ fn tag_config(def: &TagLang) -> Option<TagConfig> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cache
-        .entry(def.lang)
+        .entry(def.grammar_key)
         .or_insert_with(|| {
             tree_sitter_tags::TagsConfiguration::new(def.language.clone(), &def.query, "")
                 .ok()
@@ -1584,7 +1605,7 @@ mod inner {
         // compiles against its grammar so that regression surfaces here instead.
         for ext in [
             "py", "js", "ts", "tsx", "go", "rb", "java", "c", "cpp", "cs", "php", "scala", "ml",
-            "mli", "ex", "sh",
+            "mli", "ex", "sh", "sql",
         ] {
             let def = super::tag_lang_for(ext).unwrap_or_else(|| panic!("no language for .{ext}"));
             let lang = def.lang;
@@ -1593,6 +1614,21 @@ mod inner {
                 "tags query for .{ext} ({lang}) must compile against its grammar"
             );
         }
+    }
+
+    #[test]
+    fn ocaml_impl_and_interface_cache_under_distinct_grammars() {
+        // `.ml` and `.mli` share the `ocaml` label but use different grammars, so
+        // their config-cache keys must differ or one would parse with the other's
+        // grammar (see the config cache keyed on `grammar_key`, not `lang`).
+        let ml = super::tag_lang_for("ml").unwrap();
+        let mli = super::tag_lang_for("mli").unwrap();
+        assert_eq!(ml.lang, "ocaml");
+        assert_eq!(mli.lang, "ocaml");
+        assert_ne!(
+            ml.grammar_key, mli.grammar_key,
+            "distinct grammars must cache separately"
+        );
     }
 
     #[test]
@@ -1611,6 +1647,38 @@ mod inner {
                 .and_then(|v| v.as_array())
                 .is_some_and(|c| c.iter().any(|x| x.as_str() == Some("greet"))),
             "internal command invocation captured"
+        );
+    }
+
+    #[test]
+    fn tags_extracts_vendored_sql_query() {
+        let src = "CREATE TABLE users (id int);\n\
+                   CREATE FUNCTION recent() RETURNS int AS $$ SELECT total(id) FROM users $$ LANGUAGE sql;\n";
+        let fs = Registry::default().extract("schema.sql", "b", src.as_bytes());
+        let names: Vec<&str> = fs.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"users"), "table definition");
+        assert!(names.contains(&"recent"), "function definition");
+
+        // The table maps to a non-function kind; the function to `Fn`.
+        assert_eq!(
+            fs.nodes.iter().find(|n| n.name == "users").map(|n| &n.kind),
+            Some(&NodeKind::Other("table".to_owned()))
+        );
+        // The function body invokes `total`, captured for resolution.
+        let f = fs.nodes.iter().find(|n| n.name == "recent").unwrap();
+        assert!(
+            f.meta
+                .get("calls")
+                .and_then(|v| v.as_array())
+                .is_some_and(|c| c.iter().any(|x| x.as_str() == Some("total"))),
+            "invocation inside function captured in meta.calls"
+        );
+        assert_eq!(
+            fs.nodes
+                .iter()
+                .find(|n| n.name == "users")
+                .and_then(|n| n.lang.as_deref()),
+            Some("sql")
         );
     }
 
