@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.13...rto-graph-v0.0.14) - 2026-08-09
+
+### Added
+
+- *(extract)* broad multi-language symbol extraction via tree-sitter tags
+- *(models)* coding/reasoning generative models + role label (Stage 20)
+
+### Fixed
+
+- *(extract)* per-grammar config cache key + add SQL
+- address PR #99 review — v1.2 refs, dedup vlm doc, reject non-embedding model
+- *(models)* address PR #93 review — tokenizer.json + deterministic default
+
+### Other
+
+- remove candle — unify the whole inference core on llama.cpp (ADR-0003 v1.2)
+- Merge branch 'main' into feat/stage20-models
+
 ## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.12...rto-graph-v0.0.13) - 2026-08-09
 
 ### Added
