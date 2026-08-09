@@ -167,6 +167,21 @@ enum SpecAction {
         #[arg(long)]
         json: bool,
     },
+    /// Emit a house-style, graph-grounded, `check`-clean ADR skeleton for a
+    /// topic — with an interview checklist and a build-plan outline.
+    Scaffold {
+        /// Topic the ADR is about (grounds the skeleton against the graph).
+        topic: String,
+        /// ADR title (defaults to the topic).
+        #[arg(long)]
+        title: Option<String>,
+        /// Artifact kind (only `adr` is implemented; `blueprint` is planned).
+        #[arg(long, default_value = "adr")]
+        kind: String,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 /// `roteiro model` actions.
@@ -899,7 +914,81 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
 fn run_spec(action: SpecAction) -> anyhow::Result<()> {
     match action {
         SpecAction::Context { topic, limit, json } => run_spec_context(&topic, limit, json),
+        SpecAction::Scaffold {
+            topic,
+            title,
+            kind,
+            out,
+        } => run_spec_scaffold(&topic, title.as_deref(), &kind, out.as_deref()),
     }
+}
+
+/// Emit a graph-grounded, house-style ADR skeleton for `topic` (ADR-0004 Tier 0).
+fn run_spec_scaffold(
+    topic: &str,
+    title: Option<&str>,
+    kind: &str,
+    out: Option<&str>,
+) -> anyhow::Result<()> {
+    if kind != "adr" {
+        anyhow::bail!(
+            "spec scaffold --kind `{kind}` is not implemented yet (only `adr`; \
+             `blueprint` is planned — see ADR-0004)"
+        );
+    }
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
+
+    let ctx = rto_spec::context(&store, topic, 10)?;
+    let adr_id = next_adr_id(&root.join("docs/adr"));
+    let md = rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx);
+
+    match out {
+        Some(path) => {
+            std::fs::write(path, &md)?;
+            eprintln!("wrote ADR-{adr_id} scaffold → {path}");
+        }
+        None => print!("{md}"),
+    }
+    Ok(())
+}
+
+/// The next zero-padded ADR id: one past the highest `NNNN-*.md` under `adr_dir`
+/// (or `0001` if none/absent).
+fn next_adr_id(adr_dir: &std::path::Path) -> String {
+    let mut max = 0u32;
+    if let Ok(entries) = std::fs::read_dir(adr_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+                if let Ok(n) = digits.parse::<u32>() {
+                    max = max.max(n);
+                }
+            }
+        }
+    }
+    format!("{:04}", max + 1)
+}
+
+/// Today's UTC date as `YYYY-MM-DD`, dependency-free (Hinnant's civil-from-days).
+fn today_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let days = i64::try_from(secs / 86_400).unwrap_or(0) + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = year + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// Assemble and print graph-grounded context for a topic (ADR-0004 Tier 0): the
