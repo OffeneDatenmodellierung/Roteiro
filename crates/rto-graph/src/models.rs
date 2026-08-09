@@ -305,7 +305,7 @@ pub const REGISTRY: &[ModelSpec] = &[
         tier: ResourceTier::High,
         dim: 0,
         licence: "Apache-2.0",
-        description: "Qwen3-32B (Q4_K_M GGUF) — best offline drafting on a workstation (~20 GB)",
+        description: "Qwen3-32B (Q4_K_M GGUF) — best offline drafting, for a workstation",
         size_mib: 18845,
         variants: &[ModelVariant {
             platform: Platform::Standard,

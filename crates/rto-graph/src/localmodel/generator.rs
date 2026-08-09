@@ -97,13 +97,17 @@ impl LocalGenerator {
 
         let mut file = std::fs::File::open(model_dir.join(GGUF_FILE))?;
         let content = gguf_file::Content::read(&mut file)?;
-        // Read the architecture before `content` is moved into `from_gguf`;
+        // Read the architecture before `content` is moved into `from_gguf` below
+        // (the owned copy is needed because that move ends the metadata borrow);
         // default to qwen2 for older GGUFs that omit the key.
-        let arch = content
+        let arch = match content
             .metadata
             .get("general.architecture")
             .and_then(|v| v.to_string().ok())
-            .map_or_else(|| "qwen2".to_owned(), Clone::clone);
+        {
+            Some(a) => a.clone(),
+            None => "qwen2".to_owned(),
+        };
         // `Content::read` left the cursor past the header; `from_gguf` seeks to
         // absolute tensor offsets, so rewind to the file start.
         file.rewind()?;
