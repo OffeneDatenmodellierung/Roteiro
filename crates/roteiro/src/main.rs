@@ -175,7 +175,8 @@ enum SpecAction {
         /// ADR title (defaults to the topic).
         #[arg(long)]
         title: Option<String>,
-        /// Artifact kind (only `adr` is implemented; `blueprint` is planned).
+        /// Artifact kind: `adr` (numbered decision) or `blueprint` (technical
+        /// implementation plan).
         #[arg(long, default_value = "adr")]
         kind: String,
         /// Write to this file instead of stdout.
@@ -923,33 +924,40 @@ fn run_spec(action: SpecAction) -> anyhow::Result<()> {
     }
 }
 
-/// Emit a graph-grounded, house-style ADR skeleton for `topic` (ADR-0004 Tier 0).
+/// Emit a graph-grounded, house-style ADR or blueprint skeleton for `topic`
+/// (ADR-0004 Tier 0).
 fn run_spec_scaffold(
     topic: &str,
     title: Option<&str>,
     kind: &str,
     out: Option<&str>,
 ) -> anyhow::Result<()> {
-    if kind != "adr" {
-        anyhow::bail!(
-            "spec scaffold --kind `{kind}` is not implemented yet (only `adr`; \
-             `blueprint` is planned — see ADR-0004)"
-        );
-    }
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache)?;
     let root = repo
         .workdir()
         .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
-
     let ctx = rto_spec::context(&store, topic, 10)?;
-    let adr_id = next_adr_id(&root.join("docs/adr"));
-    let md = rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx);
+
+    let (md, wrote) = match kind {
+        "adr" => {
+            let adr_id = next_adr_id(&root.join("docs/adr"));
+            (
+                rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx),
+                format!("ADR-{adr_id}"),
+            )
+        }
+        "blueprint" => (
+            rto_spec::scaffold_blueprint(topic, title, &ctx),
+            "blueprint".to_owned(),
+        ),
+        other => anyhow::bail!("unknown --kind `{other}` (expected: adr | blueprint)"),
+    };
 
     match out {
         Some(path) => {
             std::fs::write(path, &md)?;
-            eprintln!("wrote ADR-{adr_id} scaffold → {path}");
+            eprintln!("wrote {wrote} scaffold → {path}");
         }
         None => print!("{md}"),
     }
