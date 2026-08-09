@@ -156,8 +156,10 @@ impl Extractor for Registry {
             // All-on default: preserve existing cache keys exactly.
             img
         } else {
-            // FNV-1a fold of both components — deterministic and stable, and
-            // non-zero so it never aliases the all-on key.
+            // FNV-1a fold of both components — deterministic and stable. As with
+            // any 64-bit hash a collision with the all-on key is possible but
+            // vanishingly unlikely, and a collision only costs a spurious cache
+            // hit/miss, never incorrect facts.
             let mut h = 0xcbf2_9ce4_8422_2325u64;
             for b in img.to_le_bytes().into_iter().chain(disabled.to_le_bytes()) {
                 h ^= u64::from(b);

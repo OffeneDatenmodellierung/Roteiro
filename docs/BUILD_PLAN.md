@@ -764,9 +764,12 @@ set once, not retyped as flags — reproducible and shareable when committed.
   default** (CLI args made `Option`, resolved `cli.or(config).unwrap_or(default)`).
   **TOML only** (`toml` crate, deny-clean; YAML rejected — `serde_yaml`
   unmaintained). Fully defaulted (zero-config works); unknown keys ignored;
-  malformed = hard error for any command; a config key targeting a feature the
-  binary lacks **warns and falls back** rather than hard-failing. Sections wired:
-  `[models]` (embedding → `infer --model`, generative → `spec draft`), `[infer]`
+  malformed = hard error for any command. Where a config key selects a model
+  that needs an absent feature (e.g. `[models] embedding` without
+  `inference-local-models`) it **warns and falls back** rather than hard-failing;
+  `[ingest]` toggles for an absent content feature are simply inert (they can
+  only turn *supported* content off). Sections wired: `[models]`
+  (embedding → `infer --model`, generative → `spec draft`), `[infer]`
   (min_confidence/top_k), `[duplicates]` (min_similarity/limit), `[ingest]`
   (prose/pdf/ocr/vision content toggles, applied to `sync` and folded into the
   extraction cache key so toggling re-extracts). New `roteiro config [--json]`
