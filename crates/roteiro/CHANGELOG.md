@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.13...roteiro-v0.0.14) - 2026-08-09
+
+### Added
+
+- *(spec)* draft generation via llama.cpp + ADR-0003 amendment (Stage 20)
+- *(models)* coding/reasoning generative models + role label (Stage 20)
+
+### Fixed
+
+- *(spec)* address PR #94 review — strip <think>, correct backend docs
+- *(models)* address PR #93 review — tokenizer.json + deterministic default
+
+### Other
+
+- Merge branch 'main' into feat/stage20-models
+
 ## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.12...roteiro-v0.0.13) - 2026-08-09
 
 ### Added
