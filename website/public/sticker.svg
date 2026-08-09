@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="60mm" viewBox="0 0 600 600" role="img" aria-label="Roteiro — roteiro.dev">
+  <title>Roteiro sticker — roteiro.dev</title>
+  <defs><clipPath id="disc"><circle cx="300" cy="300" r="300"/></clipPath></defs>
+  <g clip-path="url(#disc)">
+    <circle cx="300" cy="300" r="300" fill="#1a2733"/>
+    <circle cx="300" cy="300" r="286" fill="none" stroke="#f7f5f0" stroke-width="4" stroke-opacity="0.35"/>
+    <g stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 205 372 L 288 300 L 345 336 L 408 226" fill="none" stroke="#f7f5f0" stroke-width="20"/>
+      <circle cx="205" cy="372" r="26" fill="#0e6e8c" stroke="#f7f5f0" stroke-width="8"/>
+      <circle cx="345" cy="336" r="13" fill="#0e6e8c" stroke="#f7f5f0" stroke-width="6"/>
+      <circle cx="408" cy="226" r="22" fill="#0e6e8c" stroke="#f7f5f0" stroke-width="8"/>
+    </g>
+    <text x="300" y="470" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="76" font-weight="800" letter-spacing="1" fill="#f7f5f0">roteiro</text>
+    <text x="114.4" y="120.8" transform="rotate(-46.0 114.4 120.8)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">r</text>
+    <text x="145.5" y="93.4" transform="rotate(-36.8 145.5 93.4)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">o</text>
+    <text x="180.5" y="71.4" transform="rotate(-27.6 180.5 71.4)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">t</text>
+    <text x="218.6" y="55.2" transform="rotate(-18.4 218.6 55.2)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">e</text>
+    <text x="258.8" y="45.3" transform="rotate(-9.2 258.8 45.3)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">i</text>
+    <text x="300.0" y="42.0" transform="rotate(0.0 300.0 42.0)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">r</text>
+    <text x="341.2" y="45.3" transform="rotate(9.2 341.2 45.3)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">o</text>
+    <text x="381.4" y="55.2" transform="rotate(18.4 381.4 55.2)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">.</text>
+    <text x="419.5" y="71.4" transform="rotate(27.6 419.5 71.4)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">d</text>
+    <text x="454.5" y="93.4" transform="rotate(36.8 454.5 93.4)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">e</text>
+    <text x="485.6" y="120.8" transform="rotate(46.0 485.6 120.8)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#f7f5f0">v</text>
+    <text x="46.9" y="367.8" transform="rotate(75.0 46.9 367.8)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">C</text>
+    <text x="55.4" y="393.9" transform="rotate(69.0 55.4 393.9)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">O</text>
+    <text x="66.6" y="418.9" transform="rotate(63.0 66.6 418.9)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">D</text>
+    <text x="80.3" y="442.7" transform="rotate(57.0 80.3 442.7)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">E</text>
+    <text x="96.4" y="464.9" transform="rotate(51.0 96.4 464.9)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">B</text>
+    <text x="114.7" y="485.3" transform="rotate(45.0 114.7 485.3)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">A</text>
+    <text x="135.1" y="503.6" transform="rotate(39.0 135.1 503.6)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">S</text>
+    <text x="157.3" y="519.7" transform="rotate(33.0 157.3 519.7)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">E</text>
+    <text x="181.1" y="533.4" transform="rotate(27.0 181.1 533.4)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8"> </text>
+    <text x="206.1" y="544.6" transform="rotate(21.0 206.1 544.6)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">·</text>
+    <text x="232.2" y="553.1" transform="rotate(15.0 232.2 553.1)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8"> </text>
+    <text x="259.0" y="558.8" transform="rotate(9.0 259.0 558.8)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">K</text>
+    <text x="286.3" y="561.6" transform="rotate(3.0 286.3 561.6)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">N</text>
+    <text x="313.7" y="561.6" transform="rotate(-3.0 313.7 561.6)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">O</text>
+    <text x="341.0" y="558.8" transform="rotate(-9.0 341.0 558.8)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">W</text>
+    <text x="367.8" y="553.1" transform="rotate(-15.0 367.8 553.1)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">L</text>
+    <text x="393.9" y="544.6" transform="rotate(-21.0 393.9 544.6)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">E</text>
+    <text x="418.9" y="533.4" transform="rotate(-27.0 418.9 533.4)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">D</text>
+    <text x="442.7" y="519.7" transform="rotate(-33.0 442.7 519.7)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">G</text>
+    <text x="464.9" y="503.6" transform="rotate(-39.0 464.9 503.6)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">E</text>
+    <text x="485.3" y="485.3" transform="rotate(-45.0 485.3 485.3)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8"> </text>
+    <text x="503.6" y="464.9" transform="rotate(-51.0 503.6 464.9)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">G</text>
+    <text x="519.7" y="442.7" transform="rotate(-57.0 519.7 442.7)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">R</text>
+    <text x="533.4" y="418.9" transform="rotate(-63.0 533.4 418.9)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">A</text>
+    <text x="544.6" y="393.9" transform="rotate(-69.0 544.6 393.9)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">P</text>
+    <text x="553.1" y="367.8" transform="rotate(-75.0 553.1 367.8)" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="600" fill="#0fb6c8">H</text>
+  </g>
+</svg>
