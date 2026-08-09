@@ -426,6 +426,13 @@ mod tests {
         );
         // Root-level chrome: assets/back-link relative to site root.
         assert!(r.html.contains("href=\"./style.css\""));
+        // Full favicon set — root-relative from the site root.
+        assert!(r.html.contains("href=\"./favicon.svg\""));
+        assert!(r.html.contains("href=\"./favicon.ico\""));
+        assert!(
+            r.html
+                .contains("rel=\"apple-touch-icon\" href=\"./apple-touch-icon.png\"")
+        );
     }
 
     const ADR: &str = "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n\n## Context\n\nSome `code` and a [link](https://x).\n";
