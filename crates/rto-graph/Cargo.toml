@@ -39,6 +39,14 @@ sha2 = { version = "0.10", optional = true }
 # `inference*` builds never contain. Extraction is panic-guarded (see extract.rs).
 pdf-extract = { version = "0.12", optional = true }
 
+# `image-ocr` only (ADR-0005 Tier A): pure-Rust OCR. `ocrs` runs detection +
+# recognition on `rten`, a pure-Rust model runtime (no ONNX Runtime / tesseract /
+# C++ FFI). `image` is pinned to minimal codecs — its default features pull an
+# AVIF → libfuzzer-sys (NCSA) chain that is not on the `cargo deny` allow-list.
+ocrs = { version = "0.12", optional = true }
+rten = { version = "0.24", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+
 [dev-dependencies]
 # Also needed by the integration tests in `tests/`, which don't inherit the
 # crate's normal dependencies.
@@ -70,6 +78,10 @@ inference-local-models = [
 # and its font/PDF-parsing tree. See ADR-0003-adjacent content-ingestion notes
 # and [`crate::extract`].
 pdf-text = ["dep:pdf-extract"]
+# Ingest text from images via OCR into `meta.content` (ADR-0005 Tier A). Opt-in
+# (off by default): pulls the pure-Rust `ocrs`/`rten` OCR tree. Reuses the shared
+# `models` registry to fetch the OCR models with consent. See [`crate::extract`].
+image-ocr = ["models", "dep:ocrs", "dep:rten", "dep:image"]
 
 [lints]
 workspace = true

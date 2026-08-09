@@ -19,11 +19,15 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
 /// blob — the version is folded into the cache key. See [`crate::sync`].
 ///
-/// The `pdf-text` feature changes what PDFs extract to, so it occupies a
-/// distinct version namespace: a `pdf-text` build and a default build never
-/// serve each other stale (content-bearing vs content-free) PDF facts from a
-/// shared cache.
-pub(crate) const EXTRACT_VERSION: u32 = if cfg!(feature = "pdf-text") { 103 } else { 3 };
+/// The `pdf-text` and `image-ocr` features change what PDFs/images extract to, so
+/// each occupies a distinct version namespace: a feature build and a default
+/// build never serve each other stale (content-bearing vs content-free) facts
+/// from a shared cache. (OCR output also depends on *which* models are installed;
+/// that runtime state is folded into the cache key separately — see
+/// [`ocr_env_tag`] and [`crate::sync`].)
+pub(crate) const EXTRACT_VERSION: u32 = 3
+    + if cfg!(feature = "pdf-text") { 100 } else { 0 }
+    + if cfg!(feature = "image-ocr") { 200 } else { 0 };
 
 /// Max characters of embeddable content (markdown body / doc-comment / PDF text)
 /// captured into a node's `meta.content`, to keep the store small while giving
@@ -34,6 +38,16 @@ const MAX_CONTENT: usize = 1500;
 /// document text in memory, so cap the work a pathological file can impose.
 #[cfg(feature = "pdf-text")]
 const MAX_PDF_BYTES: usize = 20 * 1024 * 1024;
+
+/// Images larger than this (compressed bytes) are not OCR'd.
+#[cfg(feature = "image-ocr")]
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+/// Images with more pixels than this are not OCR'd — OCR time scales with pixel
+/// count, and this also guards against decompression bombs (the dimension is read
+/// from the header before the pixels are decoded).
+#[cfg(feature = "image-ocr")]
+const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
 
 /// Turns one source blob into the nodes and edges derived from it.
 pub trait Extractor {
@@ -89,6 +103,8 @@ fn file_node(path: &str, blob_id: &str, bytes: &[u8], lang: Option<&str>) -> Nod
     let content = if is_prose(path) {
         cap_content(&String::from_utf8_lossy(bytes))
     } else if let Some(text) = pdf_content(path, bytes) {
+        cap_content(&text)
+    } else if let Some(text) = image_content(path, bytes) {
         cap_content(&text)
     } else {
         String::new()
@@ -155,6 +171,113 @@ fn pdf_content(path: &str, bytes: &[u8]) -> Option<String> {
 #[cfg(not(feature = "pdf-text"))]
 fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
     None
+}
+
+/// OCR the text of an image blob for embedding, or `None` when `path` is not an
+/// image, the `image-ocr` feature is off, the image is too large, the OCR models
+/// are not installed, or OCR yields no text.
+///
+/// The `ocrs` engine can panic on some inputs; the call is panic-guarded so a
+/// bad image degrades to a plain file node rather than aborting the whole sync.
+/// OCR reads the installed OCR models — that runtime dependency is reflected in
+/// the cache key via [`ocr_env_tag`], so installing/upgrading the models
+/// re-extracts affected images instead of serving stale (content-free) facts.
+#[cfg(feature = "image-ocr")]
+fn image_content(path: &str, bytes: &[u8]) -> Option<String> {
+    if !is_image(path) || bytes.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let dir = crate::models::model_dir("ocrs-text");
+    let detection = dir.join("text-detection.rten");
+    let recognition = dir.join("text-recognition.rten");
+    if !detection.exists() || !recognition.exists() {
+        // Models not installed → OCR is inert (run `roteiro model pull ocrs-text`).
+        return None;
+    }
+    let owned = bytes.to_vec();
+    let text = std::panic::catch_unwind(move || run_ocr(&detection, &recognition, &owned))
+        .ok()
+        .flatten()?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Whether `path` is an image OCR can read.
+#[cfg(feature = "image-ocr")]
+fn is_image(path: &str) -> bool {
+    matches!(extension(path).as_deref(), Some("png" | "jpg" | "jpeg"))
+}
+
+/// Run detection + recognition over an image's bytes, returning its text.
+/// Fallible steps collapse to `None` (a bad image yields no content).
+#[cfg(feature = "image-ocr")]
+fn run_ocr(
+    detection: &std::path::Path,
+    recognition: &std::path::Path,
+    bytes: &[u8],
+) -> Option<String> {
+    use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
+
+    // Read the dimensions from the header first, before decoding pixels, so a
+    // decompression bomb is rejected cheaply.
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (w, h) = reader.into_dimensions().ok()?;
+    if u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS {
+        return None;
+    }
+
+    let detection_model = rten::Model::load_file(detection).ok()?;
+    let recognition_model = rten::Model::load_file(recognition).ok()?;
+    let engine = OcrEngine::new(OcrEngineParams {
+        detection_model: Some(detection_model),
+        recognition_model: Some(recognition_model),
+        ..Default::default()
+    })
+    .ok()?;
+
+    let img = image::load_from_memory(bytes).ok()?.into_rgb8();
+    let source = ImageSource::from_bytes(img.as_raw(), img.dimensions()).ok()?;
+    let input = engine.prepare_input(source).ok()?;
+    engine.get_text(&input).ok()
+}
+
+/// No-op when the `image-ocr` feature is off: images become plain file nodes.
+#[cfg(not(feature = "image-ocr"))]
+fn image_content(_path: &str, _bytes: &[u8]) -> Option<String> {
+    None
+}
+
+/// A cache-key component reflecting the OCR extractor's runtime environment: `0`
+/// when the `image-ocr` feature is off or the models are not installed, else a
+/// hash of the pinned model identities. Folded into the sync cache key so that
+/// installing or upgrading the OCR models invalidates cached image facts (OCR
+/// output is not a pure function of the blob alone). See [`crate::sync`].
+#[cfg(feature = "image-ocr")]
+pub(crate) fn ocr_env_tag() -> u64 {
+    let dir = crate::models::model_dir("ocrs-text");
+    if !dir.join("text-detection.rten").exists() || !dir.join("text-recognition.rten").exists() {
+        return 0;
+    }
+    // Fold the pinned checksums so a model change (new registry sha) re-extracts.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    if let Some(spec) = crate::models::find("ocrs-text") {
+        for variant in spec.variants {
+            for file in variant.files {
+                for b in file.sha256.bytes() {
+                    hash ^= u64::from(b);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+    }
+    hash | 1 // never 0 (which means "no OCR")
+}
+
+/// `0` whenever OCR is not compiled in.
+#[cfg(not(feature = "image-ocr"))]
+pub(crate) fn ocr_env_tag() -> u64 {
+    0
 }
 
 /// Whether `path` is a prose file whose body is worth embedding.
@@ -703,6 +826,21 @@ mod inner {
         // A malformed PDF degrades to a plain file node — no panic, no content.
         let bad = FileNodeExtractor.extract("docs/bad.pdf", "b", b"%PDF-1.4\ngarbage");
         assert!(bad.nodes[0].meta.get("content").is_none());
+    }
+
+    #[cfg(feature = "image-ocr")]
+    #[test]
+    fn image_content_guards_before_touching_models() {
+        // Case-insensitive image detection.
+        assert!(super::is_image("shot.PNG"));
+        assert!(super::is_image("b.jpeg"));
+        assert!(super::is_image("c.jpg"));
+        assert!(!super::is_image("d.gif"));
+        // A non-image path returns None without ever looking for OCR models.
+        assert!(super::image_content("notes.txt", b"hello").is_none());
+        // An oversized image is rejected by the size guard, before model lookup.
+        let big = vec![0u8; super::MAX_IMAGE_BYTES + 1];
+        assert!(super::image_content("shot.png", &big).is_none());
     }
 
     #[test]

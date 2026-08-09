@@ -43,6 +43,10 @@ inference-local-models = [
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
 pdf-text = ["rto-graph/pdf-text"]
+# OCR text from images during `roteiro sync` (ADR-0005 Tier A; off by default;
+# pulls the pure-Rust ocrs/rten tree). Implies `models` so `roteiro model pull
+# ocrs-text` can fetch the OCR models with consent.
+image-ocr = ["models", "rto-graph/image-ocr"]
 
 [lints]
 workspace = true

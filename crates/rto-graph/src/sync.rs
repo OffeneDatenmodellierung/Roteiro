@@ -211,6 +211,10 @@ fn extract_committed(
     let mut extracted = 0usize;
     let mut cached = 0usize;
 
+    // OCR output depends on which models are installed (runtime state), so fold a
+    // tag for it into the cache key. Computed once per sync.
+    let env = crate::extract::ocr_env_tag();
+
     for blob in &blobs {
         // Extraction is a pure function of (path, blob bytes), not blob id
         // alone: node keys are path-scoped (e.g. `file:<path>`), so the same
@@ -218,7 +222,7 @@ fn extract_committed(
         // cache by (path, oid) so duplicate-content files (e.g. empty files,
         // which git dedupes to one oid) never collide, while the same path+oid
         // in another branch/worktree still hits.
-        let key = cache_key(&blob.path, &blob.oid);
+        let key = cache_key(&blob.path, &blob.oid, env);
         let facts = if let Some(facts) = cache.get(&key)? {
             cached += 1;
             facts
@@ -299,9 +303,9 @@ fn resolve_calls(facts: &mut FactSet) {
 /// branches/worktrees is preserved (same path+oid+version → same key) while
 /// duplicate content at distinct paths stays distinct; bumping the extractor
 /// version retires every old entry so a re-extraction is forced.
-fn cache_key(path: &str, oid: &str) -> String {
+fn cache_key(path: &str, oid: &str, env: u64) -> String {
     format!(
-        "{oid}-{:016x}-v{}",
+        "{oid}-{:016x}-v{}-e{env:016x}",
         fnv1a64(path.as_bytes()),
         crate::extract::EXTRACT_VERSION,
     )
@@ -363,17 +367,27 @@ mod tests {
     #[test]
     fn cache_key_separates_paths_but_is_stable() {
         let oid = "abc123";
-        // Same path + oid is stable across calls.
-        assert_eq!(cache_key("src/a.rs", oid), cache_key("src/a.rs", oid));
+        // Same path + oid + env is stable across calls.
+        assert_eq!(cache_key("src/a.rs", oid, 0), cache_key("src/a.rs", oid, 0));
         // Same blob content (oid) at two different paths must not collide.
-        assert_ne!(cache_key("src/a.rs", oid), cache_key("src/b.rs", oid));
+        assert_ne!(cache_key("src/a.rs", oid, 0), cache_key("src/b.rs", oid, 0));
         // Different content at the same path differs too.
-        assert_ne!(cache_key("src/a.rs", "aaa"), cache_key("src/a.rs", "bbb"));
+        assert_ne!(
+            cache_key("src/a.rs", "aaa", 0),
+            cache_key("src/a.rs", "bbb", 0)
+        );
+        // A different extractor environment (e.g. OCR models installed) differs,
+        // so image facts are re-extracted when the models change.
+        assert_ne!(
+            cache_key("src/a.rs", oid, 0),
+            cache_key("src/a.rs", oid, 42)
+        );
         // Key stays sharded on the oid so the cache's 2-char shard is well spread.
-        assert!(cache_key("src/a.rs", oid).starts_with("abc123-"));
+        assert!(cache_key("src/a.rs", oid, 0).starts_with("abc123-"));
         // The extractor version is folded in, so a bump retires old entries.
         assert!(
-            cache_key("src/a.rs", oid).ends_with(&format!("-v{}", crate::extract::EXTRACT_VERSION))
+            cache_key("src/a.rs", oid, 0)
+                .contains(&format!("-v{}", crate::extract::EXTRACT_VERSION))
         );
     }
 }
