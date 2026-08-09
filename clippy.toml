@@ -1,0 +1,3 @@
+# Product/protocol names that read as identifiers to clippy's `doc_markdown`
+# lint but are plain prose in our docs. `".."` keeps clippy's built-in defaults.
+doc-valid-idents = ["OpenAI", ".."]

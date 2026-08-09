@@ -4,6 +4,7 @@ members = [
     "crates/rto-graph",
     "crates/rto-spec",
     "crates/rto-render",
+    "crates/rto-serve",
     "crates/roteiro",
 ]
 
@@ -20,6 +21,7 @@ authors = ["The Roteiro Project Team"]
 rto-graph = { path = "crates/rto-graph", version = "0.0.12" }
 rto-spec = { path = "crates/rto-spec", version = "0.0.12" }
 rto-render = { path = "crates/rto-render", version = "0.0.12" }
+rto-serve = { path = "crates/rto-serve", version = "0.0.12" }
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 # Pinned to 0.39 (not the latest 0.40.x): libsqlite3-sys's build script from
