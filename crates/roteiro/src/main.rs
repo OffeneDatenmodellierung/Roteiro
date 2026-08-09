@@ -135,6 +135,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Report likely-duplicate content: nodes with identical content (same git
+    /// blob) or near-identical embeddings (built with `--features inference`).
+    #[cfg(feature = "inference")]
+    #[command(visible_alias = "dup")]
+    Duplicates {
+        /// Minimum cosine similarity for a near-duplicate pair, `0.0..=1.0`.
+        /// Exact (same-blob) duplicates are always reported.
+        #[arg(long, default_value_t = 0.9)]
+        min_similarity: f64,
+        /// Maximum pairs to report.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage pluggable local embedding models (`--features inference-local-models`).
     #[cfg(feature = "inference-local-models")]
     Model {
@@ -238,6 +254,12 @@ fn main() -> anyhow::Result<()> {
             model,
             json,
         } => run_infer(min_confidence, top_k, model.as_deref(), json),
+        #[cfg(feature = "inference")]
+        Command::Duplicates {
+            min_similarity,
+            limit,
+            json,
+        } => run_duplicates(min_similarity, limit, json),
         #[cfg(feature = "inference-local-models")]
         Command::Model { action } => run_model(action),
         #[cfg(feature = "mcp")]
@@ -482,6 +504,47 @@ fn run_infer(
              (min-confidence {min_confidence}, top-k {top_k}); \
              query them with `roteiro query <key>`",
         );
+    }
+    Ok(())
+}
+
+/// Report likely-duplicate content (identical blobs + near-identical
+/// embeddings) over the current graph. Read-only: builds the graph but applies
+/// nothing. Uses the offline hashing embedder.
+#[cfg(feature = "inference")]
+fn run_duplicates(min_similarity: f64, limit: usize, json: bool) -> anyhow::Result<()> {
+    use rto_graph::DuplicateConfig;
+
+    if !(0.0..=1.0).contains(&min_similarity) {
+        anyhow::bail!("--min-similarity must be in 0.0..=1.0 (got {min_similarity})");
+    }
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    let report = rto_graph::duplicates(
+        &store,
+        DuplicateConfig {
+            min_similarity,
+            limit,
+        },
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if report.pairs.is_empty() {
+        println!("no duplicate content found (min-similarity {min_similarity})");
+    } else {
+        let shown = if report.total > report.pairs.len() {
+            format!(" (showing top {})", report.pairs.len())
+        } else {
+            String::new()
+        };
+        println!("{} duplicate pair(s){shown}:", report.total);
+        for p in &report.pairs {
+            let tag = if p.exact { "exact" } else { "~sim " };
+            println!("  [{tag} {:.2}] {}  <->  {}", p.similarity, p.a, p.b);
+        }
     }
     Ok(())
 }
