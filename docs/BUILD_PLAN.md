@@ -9,21 +9,25 @@ release-plz. Every stage names its deliverables, the concrete Rust surface it
 adds, new dependencies (with licence notes for the `cargo deny` gate), the CLI
 it wires up, and an explicit **Definition of Done (DoD)**.
 
-**Current position (2026-08-09):** Stages 1–8 are delivered (Stage 8 = offline
-inference core + candle local-models), Stage 10's portable graph-artifact format
-shipped, **Stage 9's Graphify importer** is done, **Stage 15** (intent-debt
-tracking) shipped independently, and **Stage 11** is complete — durable +
-validated imports, the lat.md importer, and the codegraph validation oracle — so
-the migration path off all three incumbents is finished. What each stage
-*deferred* is tracked honestly as first-class stages in §5b. Remaining order:
-**Stage 13** (spec/blueprint authoring pillar — *in progress*, Tier 0 done) →
-**Stage 12** (inference content/PDF/image ingestion + semantic dedup) → **Stage
+**Current position (2026-08-09):** Stages 1–13 and 15 are delivered — the graph
+core, extraction/sync/cache, query surface, renderers; the offline inference core
++ candle local-models (Stage 8); the portable graph-artifact (Stage 10); all
+three importers + the codegraph validation oracle (Stages 9/11); intent-debt
+tracking (Stage 15); the spec/blueprint authoring pillar (Stage 13 — Tier 0
+`spec context`/`scaffold` + Tier 1 `spec draft`, now **Qwen3**-backed); and
+**Stage 12** — content/PDF/**image OCR + vision** ingestion, semantic dedup, and
+the dependency-aware context cache. Shipped alongside: a curated **low/mid/high
+model matrix** (ADR-0003), a GGUF-arch-dispatching generative loader (Qwen2/Qwen3),
+and **streaming, checksum-verified model downloads** (so the 20 GiB tier is safe
+to pull). What each stage *deferred* is tracked in §5b. **Remaining core:** **Stage
 16** (commit-time correctness gate) → **Stage 14** (v1.0 hardening) → **Stage 17**
-(tool-agnostic agent instructions & context-aware review, post-v1.0). **A note on
-stage numbers:** they are labels, not execution order — Stage 15 shipped early,
-Stage 13 is being taken before Stage 12, and Stages 16/17 are sequenced around the
-Stage 14 freeze (16 just before, 17 just after) because they depend on the final
-sync/check/standards surface. **A note on version labels:**
+(tool-agnostic agent instructions & review, post-v1.0). **Newly decided
+(post-Stage-12, via ADRs — §5c):** **Stage 18** configuration file
+([ADR-0007](adr/0007-configuration-file.md)) → **Stage 19** local model serving
+([ADR-0006](adr/0006-local-model-serving.md)) → **Stage 20** model acceleration
+(macOS Metal) + coding/reasoning model additions. **A note on stage numbers:**
+they are labels, not execution order — Stage 15 shipped early, Stage 13 before
+Stage 12, and 16/17 bracket the Stage 14 freeze. **A note on version labels:**
 the per-stage `v0.x` headings are *nominal targets*; because the workspace is
 pre-1.0, release-plz bumps `feat` commits as patches, so real tags are `0.0.n`
 (Stage 1 → v0.0.2 … artifacts → v0.0.10 … Stage 11 → v0.0.12). §7 maps them.
@@ -742,6 +746,63 @@ are final (v1.0-frozen), not a moving target.
 - **DoD:** a tool-agnostic instructions file measurably shapes an agent review
   (attribution shows it was read); the review checklist/skill exists; the
   MCP-for-review feasibility is recorded (done or explicitly deferred).
+
+---
+
+## 5c. New stages (decided post-Stage-12, via ADRs)
+
+Decisions taken after the original roadmap, each with its own ADR. Sequenced
+around the Stage 14 freeze: config is foundational (before 14), serving and
+acceleration are features (config first, since serving is configured through it).
+
+### Stage 18 — Configuration file ([ADR-0007](adr/0007-configuration-file.md))  → *(execution order: before Stage 14)*
+**Goal:** a persistent, optional **`roteiro.toml`** so per-project preferences are
+set once, not retyped as flags — reproducible and shareable when committed.
+- Optional project `roteiro.toml` (repo root) + user `~/.roteiro/config.toml`;
+  precedence **CLI flag > project > user > built-in default**.
+- **TOML only** (YAML rejected — `serde_yaml` is unmaintained). Adds the `toml`
+  crate (deny-clean). Fully defaulted (zero-config still works); unknown keys
+  ignored; malformed = hard error; a key for a feature the binary lacks warns.
+- Initial schema: `[models]` picks, `[ingest]` toggles/caps, `[infer]` +
+  `[duplicates]` thresholds, `[debt]` ignore paths, `[serve]` (Stage 19),
+  `[paths]`. A `roteiro config` command prints the effective merged config.
+- **DoD:** a committed `roteiro.toml` changes behaviour deterministically; flags
+  override it; no config is still a working default; `roteiro config` shows the
+  merged result and each value's provenance.
+
+### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → *(execution order: after Stage 18)*
+**Goal:** reuse the models a user already pulled by exposing them over an
+**opt-in, loopback OpenAI-compatible endpoint** — so other tools (e.g. an
+Omnigent agent) call them **offline** with no second download or runtime.
+- `roteiro serve --models` (feature `serve-models`, off by default; binds
+  `127.0.0.1`). `POST /v1/embeddings` first, then `/v1/chat/completions`
+  (Qwen2/Qwen3), then image description; `GET /v1/models` lists *installed*
+  models. Never downloads (consent gate preserved).
+- Warm model, **requests serialised** per model (candle KV cache is stateful).
+  Reuses the ADR-0002 HTTP stack and the ADR-0003 store. Scoped to *reuse*, not a
+  general server; honest candle-grade performance (Metal path, Stage 20, for the
+  big tiers).
+- **DoD:** an external OpenAI client gets embeddings and a chat completion from an
+  installed model over loopback, fully offline; only installed models are served;
+  the default build is unchanged.
+
+### Stage 20 — Model acceleration (macOS Metal) + coding/reasoning models  → *(execution order: with/after Stage 19)*
+**Goal:** make local inference fast on the target machine, and broaden the
+opt-in model catalogue.
+- **Acceleration:** target-gate candle's `metal` backend on macOS (via
+  `[target.'cfg(target_os = "macos")'.dependencies]`) so a Mac build is
+  GPU-accelerated; CPU stays the portable default; Linux/CI never build Metal.
+  De-risk-verified: candle+Metal runs our Q4_K_M GGUFs correctly (4.5× prefill).
+  **No MLX** — a second FFI engine is not justified. (CI's `--all-features` clippy
+  moves to an explicit feature set, or a macOS job, so it never builds Metal on
+  Linux.)
+- **Coding/reasoning models:** add opt-in registry entries — a coding model
+  (Qwen2.5-Coder, loads on the existing `quantized_qwen2` branch) and a reasoning
+  model (QwQ-32B / DeepSeek-R1-Distill, also Qwen2-arch), plus a Qwen3
+  thinking-enabled option — for general local use and serving (Stage 19). Off by
+  default; a `role` label distinguishes instruct/coding/reasoning in `model list`.
+- **DoD:** a macOS build offloads generation to the GPU (measurably faster, still
+  CPU-correct on Linux); the coding/reasoning entries pull and run.
 
 ---
 
