@@ -23,8 +23,29 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tree-sitter = "0.26.11"
+tree-sitter = "0.26.12"
+tree-sitter-tags = "0.26.12"
+# Language grammars for the generic tags-query extractor. Each ships a `tags.scm`
+# (surfacing `@definition.*` / `@reference.*`) that one shared extractor drives,
+# so a new language is a table row, not new code. Grammars runtime-depend only on
+# `tree-sitter-language`, so they never conflict with the core version. Rust keeps
+# its dedicated AST walker (richer: imports, impl scoping); the rest go via tags.
 tree-sitter-rust = "0.24.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-go = "0.25.0"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-java = "0.23.5"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-php = "0.24.2"
+tree-sitter-scala = "0.26.2"
+tree-sitter-ocaml = "0.25.0"
+tree-sitter-elixir = "0.3.5"
+tree-sitter-bash = "0.25.1"
+tree-sitter-sequel = "0.3.11"
 
 # `models` only: SHA-256 verification for the registry/store.
 sha2 = { version = "0.10", optional = true }
