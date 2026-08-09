@@ -28,6 +28,9 @@ pub enum LocalModelError {
     /// A candle tensor/model operation failed.
     #[error("candle error: {0}")]
     Candle(#[from] candle_core::Error),
+    /// The GGUF model's `general.architecture` is not one the generator supports.
+    #[error("unsupported model architecture: {0}")]
+    UnsupportedArch(String),
 }
 
 /// A loaded local embedding model. Reusable across many `embed` calls.

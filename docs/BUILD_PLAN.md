@@ -597,12 +597,15 @@ so generated plans reference *real* symbols/ADRs/deps and are `check`-gated.
 - **Delivered.** `roteiro spec context` (graph search + neighbourhood grounding),
   `roteiro spec scaffold --kind adr|blueprint` (house-style, grounded,
   `check`-clean skeletons + interview checklist + build-plan outline), and
-  `roteiro spec draft` — Tier 1: a tiny **Qwen2.5-0.5B-Instruct** GGUF (Apache-2.0)
-  run offline via **candle** `quantized_qwen2` (behind `inference-local-models`,
-  pulled with consent through the ADR-0003 registry) fills the scaffold's `_TODO_`
-  sections from grounded prompts; falls back to the plain scaffold with no model.
-  Tiers 2/3 (larger local model, agent review) and a bundled skill are natural
-  follow-ups. Blueprint scaffold modelled on Thalweg's `docs/blueprints`.
+  `roteiro spec draft` — Tier 1: a tiny **Qwen3-0.6B** GGUF (Apache-2.0), the
+  default of a curated **low/mid/high** generative matrix (Qwen3 0.6B / 8B / 32B),
+  run offline via **candle** — `LocalGenerator` dispatches `quantized_qwen2` vs
+  `quantized_qwen3` on the GGUF's `general.architecture`, so Qwen2.5 GGUFs still
+  load — behind `inference-local-models`, pulled with consent through the ADR-0003
+  registry. It fills the scaffold's `_TODO_` sections from grounded prompts (Qwen3
+  thinking-mode suppressed for clean drafts); falls back to the plain scaffold with
+  no model. Tiers 2/3 (agent review) and a bundled skill are natural follow-ups.
+  Blueprint scaffold modelled on Thalweg's `docs/blueprints`.
 
 ### Stage 16 — Commit-time correctness gate  → **v0.x** *(execution order: after Stage 13, immediately before Stage 14)*
 **Goal:** guarantee the knowledge base is not just *fresh* (what `sync` gives)

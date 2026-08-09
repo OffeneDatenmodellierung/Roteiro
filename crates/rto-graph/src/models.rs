@@ -246,29 +246,79 @@ pub const REGISTRY: &[ModelSpec] = &[
             ],
         }],
     },
-    // ADR-0004 Tier 1: a tiny Apache-2.0 instruct model for offline spec/blueprint
-    // drafting (Qwen2 arch, ChatML). Stored locally as `model.gguf` + its
-    // tokenizer (which lives in the base instruct repo, not the GGUF repo).
+    // ADR-0004 Tier 1: Apache-2.0 Qwen3 instruct GGUFs for offline spec/blueprint
+    // drafting, curated low/mid/high. Stored as `model.gguf` + its `tokenizer.json`
+    // (which lives in the base instruct repo, not the GGUF repo — all Qwen3 sizes
+    // share one tokenizer). Loaded via the GGUF-arch-dispatching `LocalGenerator`
+    // (Qwen2 GGUFs still load too). The low pick is the `spec draft` default.
     ModelSpec {
-        name: "qwen2.5-0.5b-instruct",
+        name: "qwen3-0.6b",
         kind: ModelKind::Generative,
         tier: ResourceTier::Low,
         dim: 0,
         licence: "Apache-2.0",
-        description: "Qwen2.5-0.5B-Instruct (Q4_K_M GGUF) — tiny offline instruct model for `spec draft`",
-        size_mib: 410,
+        description: "Qwen3-0.6B (Q4_K_M GGUF) — tiny offline instruct model, the `spec draft` default",
+        size_mib: 380,
         variants: &[ModelVariant {
             platform: Platform::Standard,
             files: &[
                 ModelFile {
                     name: "model.gguf",
-                    url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-                    sha256: "",
+                    url: "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
+                    sha256: "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a",
                 },
                 ModelFile {
                     name: "tokenizer.json",
-                    url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json",
-                    sha256: "",
+                    url: "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer.json",
+                    sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+                },
+            ],
+        }],
+    },
+    ModelSpec {
+        name: "qwen3-8b",
+        kind: ModelKind::Generative,
+        tier: ResourceTier::Mid,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Qwen3-8B (Q4_K_M GGUF) — stronger offline drafting on a ~16 GB machine",
+        size_mib: 4795,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+                    sha256: "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json",
+                    sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+                },
+            ],
+        }],
+    },
+    ModelSpec {
+        name: "qwen3-32b",
+        kind: ModelKind::Generative,
+        tier: ResourceTier::High,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Qwen3-32B (Q4_K_M GGUF) — best offline drafting on a workstation (~20 GB)",
+        size_mib: 18845,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/Qwen/Qwen3-32B-GGUF/resolve/main/Qwen3-32B-Q4_K_M.gguf",
+                    sha256: "efd971561896866f0e910cce52761ca77b1b138090c7f15fe284676d57d1f689",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/Qwen/Qwen3-32B/resolve/main/tokenizer.json",
+                    sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
                 },
             ],
         }],
