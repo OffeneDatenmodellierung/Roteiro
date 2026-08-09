@@ -6,6 +6,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod config;
 mod init;
 
 #[derive(Parser)]
@@ -72,6 +73,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the effective, merged configuration and each value's provenance.
+    Config {
+        /// Emit the effective config as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List intent-debt markers (TODOs, stubs, deferred work) in the graph.
     Debt {
         /// Restrict to these categories (repeatable): todo | fixme | hack |
@@ -134,14 +141,16 @@ enum Command {
     #[cfg(feature = "inference")]
     Infer {
         /// Minimum confidence (cosine similarity) for a suggestion, `0.0..=1.0`.
-        #[arg(long, default_value_t = 0.4)]
-        min_confidence: f64,
-        /// Maximum suggestions per node.
-        #[arg(long, default_value_t = 5)]
-        top_k: usize,
+        /// Overrides `[infer] min_confidence` in config; default 0.4.
+        #[arg(long)]
+        min_confidence: Option<f64>,
+        /// Maximum suggestions per node. Overrides `[infer] top_k`; default 5.
+        #[arg(long)]
+        top_k: Option<usize>,
         /// Use a pulled local model by name instead of the offline default
         /// (requires `--features inference-local-models`; falls back to the
-        /// hashing embedder if the model is not installed).
+        /// hashing embedder if the model is not installed). Overrides
+        /// `[models] embedding`.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
         /// Emit the report as JSON.
@@ -154,12 +163,13 @@ enum Command {
     #[command(visible_alias = "dup")]
     Duplicates {
         /// Minimum cosine similarity for a near-duplicate pair, `0.0..=1.0`.
-        /// Exact (same-blob) duplicates are always reported.
-        #[arg(long, default_value_t = 0.9)]
-        min_similarity: f64,
-        /// Maximum pairs to report.
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
+        /// Exact (same-blob) duplicates are always reported. Overrides
+        /// `[duplicates] min_similarity`; default 0.9.
+        #[arg(long)]
+        min_similarity: Option<f64>,
+        /// Maximum pairs to report. Overrides `[duplicates] limit`; default 50.
+        #[arg(long)]
+        limit: Option<usize>,
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
@@ -249,6 +259,10 @@ enum ModelAction {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Load layered config once (project `roteiro.toml` + user `~/.roteiro/
+    // config.toml`); a malformed file is a hard error for any command (ADR-0007).
+    let cwd = std::env::current_dir()?;
+    let cfg = config::load(&cwd)?;
     match cli.command {
         Command::Sync { json, committed } => run_sync(json, committed),
         Command::Check { json } => run_check(json),
@@ -261,25 +275,101 @@ fn main() -> anyhow::Result<()> {
         Command::Init => run_init(),
         Command::Render { target, out } => run_render(&target, out),
         Command::Import { from, path, json } => run_import(&from, &path, json),
-        Command::Spec { action } => run_spec(action),
+        Command::Spec { action } => run_spec(&cfg.effective, action),
+        Command::Config { json } => run_config(&cfg, json),
         #[cfg(feature = "inference")]
         Command::Infer {
             min_confidence,
             top_k,
             model,
             json,
-        } => run_infer(min_confidence, top_k, model.as_deref(), json),
+        } => run_infer(&cfg.effective, min_confidence, top_k, model, json),
         #[cfg(feature = "inference")]
         Command::Duplicates {
             min_similarity,
             limit,
             json,
-        } => run_duplicates(min_similarity, limit, json),
+        } => run_duplicates(&cfg.effective, min_similarity, limit, json),
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
         #[cfg(feature = "mcp")]
         Command::Serve { http } => run_serve(http),
     }
+}
+
+/// Print the effective, merged configuration and each value's provenance
+/// (`project` / `user` / `default`) — the answer to "why did it use that?".
+fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&loaded.effective)?);
+        return Ok(());
+    }
+    let source = |proj: bool, usr: bool| {
+        if proj {
+            "project"
+        } else if usr {
+            "user"
+        } else {
+            "default"
+        }
+    };
+    println!(
+        "project config: {}",
+        loaded
+            .project_path
+            .as_deref()
+            .map_or_else(|| "(none)".to_owned(), |p| p.display().to_string())
+    );
+    println!(
+        "user config:    {}",
+        loaded
+            .user_path
+            .as_deref()
+            .map_or_else(|| "(none)".to_owned(), |p| p.display().to_string())
+    );
+    let e = &loaded.effective;
+    let (p, u) = (&loaded.project, &loaded.user);
+    println!("\n[models]");
+    println!(
+        "  embedding  = {:?}  ({})",
+        e.models.embedding,
+        source(p.models.embedding.is_some(), u.models.embedding.is_some())
+    );
+    println!(
+        "  generative = {:?}  ({})",
+        e.models.generative,
+        source(p.models.generative.is_some(), u.models.generative.is_some())
+    );
+    println!("[infer]");
+    println!(
+        "  min_confidence = {:?}  ({})",
+        e.infer.min_confidence,
+        source(
+            p.infer.min_confidence.is_some(),
+            u.infer.min_confidence.is_some()
+        )
+    );
+    println!(
+        "  top_k          = {:?}  ({})",
+        e.infer.top_k,
+        source(p.infer.top_k.is_some(), u.infer.top_k.is_some())
+    );
+    println!("[duplicates]");
+    println!(
+        "  min_similarity = {:?}  ({})",
+        e.duplicates.min_similarity,
+        source(
+            p.duplicates.min_similarity.is_some(),
+            u.duplicates.min_similarity.is_some()
+        )
+    );
+    println!(
+        "  limit          = {:?}  ({})",
+        e.duplicates.limit,
+        source(p.duplicates.limit.is_some(), u.duplicates.limit.is_some())
+    );
+    println!("\n(unset values fall back to built-in defaults; a CLI flag overrides config)");
+    Ok(())
 }
 
 /// Sync the graph for the current repository, optionally including uncommitted
@@ -468,12 +558,18 @@ fn run_init() -> anyhow::Result<()> {
 /// full derived + authored graph first, then adds the fuzzy suggestion layer.
 #[cfg(feature = "inference")]
 fn run_infer(
-    min_confidence: f64,
-    top_k: usize,
-    model: Option<&str>,
+    cfg: &config::Config,
+    min_confidence: Option<f64>,
+    top_k: Option<usize>,
+    model: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
     use rto_graph::{FactSet, InferenceConfig};
+
+    // Precedence: CLI flag > config > built-in default.
+    let min_confidence = min_confidence.or(cfg.infer.min_confidence).unwrap_or(0.4);
+    let top_k = top_k.or(cfg.infer.top_k).unwrap_or(5);
+    let model = model.or_else(|| cfg.models.embedding.clone());
 
     if !(0.0..=1.0).contains(&min_confidence) {
         anyhow::bail!("--min-confidence must be in 0.0..=1.0 (got {min_confidence})");
@@ -496,7 +592,7 @@ fn run_infer(
 
     // Choose the embedder: a pulled local model if requested and installed,
     // otherwise the offline hashing default.
-    let (edges, embedder_label) = infer_with_embedder(&store, config, model)?;
+    let (edges, embedder_label) = infer_with_embedder(&store, config, model.as_deref())?;
     let count = edges.len();
     // Inferred edges are additive suggestions; applying them never alters the
     // derived/authored facts already in the store.
@@ -527,8 +623,19 @@ fn run_infer(
 /// embeddings) over the current graph. Read-only: builds the graph but applies
 /// nothing. Uses the offline hashing embedder.
 #[cfg(feature = "inference")]
-fn run_duplicates(min_similarity: f64, limit: usize, json: bool) -> anyhow::Result<()> {
+fn run_duplicates(
+    cfg: &config::Config,
+    min_similarity: Option<f64>,
+    limit: Option<usize>,
+    json: bool,
+) -> anyhow::Result<()> {
     use rto_graph::DuplicateConfig;
+
+    // Precedence: CLI flag > config > built-in default.
+    let min_similarity = min_similarity
+        .or(cfg.duplicates.min_similarity)
+        .unwrap_or(0.9);
+    let limit = limit.or(cfg.duplicates.limit).unwrap_or(50);
 
     if !(0.0..=1.0).contains(&min_similarity) {
         anyhow::bail!("--min-similarity must be in 0.0..=1.0 (got {min_similarity})");
@@ -1031,7 +1138,7 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Graph-grounded spec/blueprint authoring (ADR-0004).
-fn run_spec(action: SpecAction) -> anyhow::Result<()> {
+fn run_spec(cfg: &config::Config, action: SpecAction) -> anyhow::Result<()> {
     match action {
         SpecAction::Context { topic, limit, json } => run_spec_context(&topic, limit, json),
         SpecAction::Scaffold {
@@ -1045,7 +1152,7 @@ fn run_spec(action: SpecAction) -> anyhow::Result<()> {
             title,
             kind,
             out,
-        } => run_spec_draft(&topic, title.as_deref(), &kind, out.as_deref()),
+        } => run_spec_draft(cfg, &topic, title.as_deref(), &kind, out.as_deref()),
     }
 }
 
@@ -1111,23 +1218,32 @@ fn run_spec_scaffold(
 /// generative model; without a model it emits the plain scaffold + a hint.
 #[cfg(feature = "inference-local-models")]
 fn run_spec_draft(
+    cfg: &config::Config,
     topic: &str,
     title: Option<&str>,
     kind: &str,
     out: Option<&str>,
 ) -> anyhow::Result<()> {
     use rto_graph::{
-        GenConfig, LocalGenerator, ModelKind, Platform, REGISTRY, ResourceTier, is_installed,
-        model_dir,
+        GenConfig, LocalGenerator, ModelKind, Platform, REGISTRY, ResourceTier, find_model,
+        is_installed, model_dir,
     };
 
     let (scaffold, label, ctx) = build_scaffold(topic, title, kind)?;
 
-    // Default to the low-tier generative pick (runs anywhere); a bigger tier is
-    // opt-in via `roteiro model pull`.
-    let Some(spec) = REGISTRY
-        .iter()
-        .find(|m| m.kind == ModelKind::Generative && m.tier == ResourceTier::Low)
+    // Model pick: `[models] generative` from config if set (and a real generative
+    // entry), otherwise the low-tier default (runs anywhere).
+    let Some(spec) = cfg
+        .models
+        .generative
+        .as_deref()
+        .and_then(find_model)
+        .filter(|m| m.kind == ModelKind::Generative)
+        .or_else(|| {
+            REGISTRY
+                .iter()
+                .find(|m| m.kind == ModelKind::Generative && m.tier == ResourceTier::Low)
+        })
     else {
         anyhow::bail!("no generative model in the registry");
     };
@@ -1170,6 +1286,7 @@ fn run_spec_draft(
 /// `spec draft` without the local-models feature: guide the user to enable it.
 #[cfg(not(feature = "inference-local-models"))]
 fn run_spec_draft(
+    _cfg: &config::Config,
     _topic: &str,
     _title: Option<&str>,
     _kind: &str,

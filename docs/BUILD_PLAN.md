@@ -756,20 +756,24 @@ Decisions taken after the original roadmap, each with its own ADR. Sequenced
 around the Stage 14 freeze: config is foundational (before 14), serving and
 acceleration are features (config first, since serving is configured through it).
 
-### Stage 18 — Configuration file ([ADR-0007](adr/0007-configuration-file.md))  → *(execution order: before Stage 14)*
+### Stage 18 — Configuration file ([ADR-0007](adr/0007-configuration-file.md))  → ✅ *core delivered (more sections as their consumers land)*
 **Goal:** a persistent, optional **`roteiro.toml`** so per-project preferences are
 set once, not retyped as flags — reproducible and shareable when committed.
-- Optional project `roteiro.toml` (repo root) + user `~/.roteiro/config.toml`;
-  precedence **CLI flag > project > user > built-in default**.
-- **TOML only** (YAML rejected — `serde_yaml` is unmaintained). Adds the `toml`
-  crate (deny-clean). Fully defaulted (zero-config still works); unknown keys
-  ignored; malformed = hard error; a key for a feature the binary lacks warns.
-- Initial schema: `[models]` picks, `[ingest]` toggles/caps, `[infer]` +
-  `[duplicates]` thresholds, `[debt]` ignore paths, `[serve]` (Stage 19),
-  `[paths]`. A `roteiro config` command prints the effective merged config.
-- **DoD:** a committed `roteiro.toml` changes behaviour deterministically; flags
-  override it; no config is still a working default; `roteiro config` shows the
-  merged result and each value's provenance.
+- **Delivered:** project `roteiro.toml` (found by walking up from the cwd) + user
+  `~/.roteiro/config.toml`; precedence **CLI flag > project > user > built-in
+  default** (CLI args made `Option`, resolved `cli.or(config).unwrap_or(default)`).
+  **TOML only** (`toml` crate, deny-clean; YAML rejected — `serde_yaml`
+  unmaintained). Fully defaulted (zero-config works); unknown keys ignored;
+  malformed = hard error for any command. Sections wired: `[models]`
+  (embedding → `infer --model`, generative → `spec draft`), `[infer]`
+  (min_confidence/top_k), `[duplicates]` (min_similarity/limit). New `roteiro
+  config [--json]` prints the effective merged config with each value's
+  **provenance** (project/user/default).
+- **Follow-ups:** `[ingest]` toggles, `[debt]` ignore paths, `[serve]` (Stage 19),
+  `[paths]`; a warning when a config key targets a feature the binary lacks.
+- **DoD (met for the core):** a committed `roteiro.toml` changes behaviour
+  deterministically; flags override it; no config is still a working default;
+  `roteiro config` shows the merged result and each value's provenance.
 
 ### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → *(execution order: after Stage 18)*
 **Goal:** reuse the models a user already pulled by exposing them over an
