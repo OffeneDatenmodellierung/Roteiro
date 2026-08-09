@@ -22,7 +22,9 @@ queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents 
 
 <nav class="toc">
   <a href="#what">What it is</a>
+  <a href="#replaces">What it replaces</a>
   <a href="#how">How it works</a>
+  <a href="#gitnative">Git-native</a>
   <a href="#build">Install &amp; build</a>
   <a href="#modes">Modes</a>
   <a href="#models">Models</a>
@@ -56,6 +58,27 @@ no model download. It is a small, pure-Rust binary. Everything heavier — local
 models, PDF/image ingestion, the model server — is opt-in behind a feature flag,
 and nothing ever touches the network without an explicit <code>[y/N]</code> consent.</div>
 
+<h2 id="replaces">One graph, not a stack of tools</h2>
+
+<p>Teams end up gluing together a code-graph tool, a docs/spec system, a
+knowledge-graph builder, and a spec-driven-development kit — each with its own
+store, its own truth, and no shared notion of <em>where a fact came from</em>.
+Roteiro does all of it in <strong>one provenance-tagged store</strong>, and imports the
+tools you already use so you don't start from scratch.</p>
+
+<table>
+<tr><th>Instead of…</th><th>Roteiro gives you…</th></tr>
+<tr><td><strong>codegraph</strong> — an AST code-symbol graph</td><td>The <span class="pill derived">derived</span> layer: tree-sitter symbols, calls, imports and containment across 15+ languages — but git-native and provenance-tagged. <code>roteiro import codegraph</code> uses a codegraph snapshot as a <em>validation oracle</em>.</td></tr>
+<tr><td><strong>lat.md</strong> — markdown specs with <code>lat check</code></td><td>The <span class="pill authored">authored</span> layer: ADRs/blueprints linked into code symbols, with <code>roteiro check</code> failing CI on drift. <code>roteiro import lat</code> maps existing lat.md docs to authored nodes.</td></tr>
+<tr><td><strong>Graphify</strong> — a doc/media knowledge graph</td><td>The <span class="pill inferred">inferred</span> layer: doc/PDF/image nodes with embedding-based similarity edges. <code>roteiro import graphify</code> brings its doc &amp; media nodes in as inferred facts.</td></tr>
+<tr><td><strong>SpecKit</strong> — spec-driven development</td><td><code>roteiro spec</code>: graph-<em>grounded</em> ADR/blueprint authoring — assemble context from the graph, scaffold a house-style, <code>check</code>-clean skeleton, and optionally draft it with a local model.</td></tr>
+</table>
+
+<p>Because they share one store, an <code>authored</code> ADR can link to a
+<code>derived</code> symbol and be verified against it, while an <code>inferred</code>
+edge stays clearly labelled as a suggestion. That cross-layer, provenance-aware
+query is exactly what a pile of separate tools cannot give you.</p>
+
 <h2 id="how">How it works</h2>
 
 <p>The graph is built by an incremental, content-addressed pipeline. Re-running
@@ -73,6 +96,23 @@ a large repository.</p>
 <em>“what calls this function”</em> but <em>“which of these relationships are
 verified facts versus a model's guess.”</em> That is the difference between a graph
 you can build automation on and one you can only browse.</p>
+
+<h2 id="gitnative">Git-native &amp; shareable</h2>
+
+<p>Roteiro's cache is <strong>content-addressed the same way git is</strong>. Extraction
+is a pure function of <code>(path, git blob id, bytes)</code>, so every fact is
+keyed by the blob and tree hashes git already computes — a Merkle model layered
+directly on the object graph. Three consequences fall out of that:</p>
+
+<div class="grid">
+  <div class="card"><h3>Incremental by hash</h3><p>A re-sync diffs the last-synced tree oid against <code>HEAD</code> and re-extracts only blobs whose content hash changed — never mtimes, so it's correct across checkouts, merges and rebases.</p></div>
+  <div class="card"><h3>Shared across a team</h3><p>The same commit yields the same graph for everyone. CI assembles the graph on merge and publishes a content-addressed artifact; a teammate's hooks <em>fetch</em> it instead of rebuilding — and fall back to a local rebuild offline.</p></div>
+  <div class="card"><h3>Branch- &amp; worktree-safe</h3><p>Because keys are content hashes, branches and worktrees share extraction work and never serve each other stale facts. Uncommitted edits overlay the committed graph as a preview.</p></div>
+</div>
+
+<p>The upshot: the <strong>merged graph is the single source of truth</strong>, reproducible
+byte-for-byte from git alone, with no external database to keep in sync. It works
+with your repository, not beside it.</p>
 
 <h2 id="build">Install &amp; build</h2>
 
