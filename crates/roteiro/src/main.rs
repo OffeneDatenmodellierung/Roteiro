@@ -654,7 +654,7 @@ fn run_model(action: ModelAction) -> anyhow::Result<()> {
 /// Print the registry, marking which models are installed for this host.
 #[cfg(feature = "models")]
 fn run_model_list() {
-    use rto_graph::{ModelKind, Platform, REGISTRY};
+    use rto_graph::{ModelKind, Platform, REGISTRY, ResourceTier};
 
     let host = Platform::host();
     println!(
@@ -662,28 +662,49 @@ fn run_model_list() {
         host.as_str(),
         rto_graph::store_root().display()
     );
-    println!("(the built-in hashing embedder is always available with no model)\n");
-    for spec in REGISTRY {
-        let variant = spec.variant_for(host);
-        let installed = variant.is_some_and(|v| rto_graph::is_installed(spec.name, v));
-        let mark = if installed {
-            "✓ installed"
-        } else {
-            "  available"
-        };
-        // Embedding models report a dimension; generative models report their role.
-        let detail = match spec.kind {
-            ModelKind::Embedding => format!("embedding, dim {}", spec.dim),
-            ModelKind::Generative => "generative (spec draft)".to_owned(),
-            ModelKind::Ocr => "ocr (image text)".to_owned(),
-        };
-        println!(
-            "{mark}  {name}  ({detail}, {licence}, ~{size} MiB)\n            {desc}",
-            name = spec.name,
-            licence = spec.licence,
-            size = spec.size_mib,
-            desc = spec.description,
-        );
+    println!("(the built-in hashing embedder is always available with no model)");
+
+    // Group the opinionated picks by section, then by resource tier, so the
+    // "which should I pull?" answer reads off a machine's resources.
+    let sections = [
+        (ModelKind::Embedding, "Embedding (`roteiro infer --model`)"),
+        (ModelKind::Generative, "Generative (`roteiro spec draft`)"),
+        (
+            ModelKind::Ocr,
+            "OCR — image text (`roteiro sync` with --features image-ocr)",
+        ),
+    ];
+    let tiers = [
+        (ResourceTier::Low, "low  (any laptop)"),
+        (ResourceTier::Mid, "mid  (~16 GB)"),
+        (ResourceTier::High, "high (workstation / 64 GB)"),
+    ];
+
+    for (kind, heading) in sections {
+        println!("\n{heading}:");
+        for (tier, tier_label) in tiers {
+            for spec in REGISTRY.iter().filter(|s| s.kind == kind && s.tier == tier) {
+                let variant = spec.variant_for(host);
+                let installed = variant.is_some_and(|v| rto_graph::is_installed(spec.name, v));
+                let mark = if installed {
+                    "✓ installed"
+                } else {
+                    "  available"
+                };
+                let dim = if spec.dim > 0 {
+                    format!(", dim {}", spec.dim)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  [{tier_label}] {mark}  {name}  ({licence}{dim}, ~{size} MiB)\n      {desc}",
+                    name = spec.name,
+                    licence = spec.licence,
+                    size = spec.size_mib,
+                    desc = spec.description,
+                );
+            }
+        }
     }
 }
 
