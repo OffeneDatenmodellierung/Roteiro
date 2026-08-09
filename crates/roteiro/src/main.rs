@@ -1042,6 +1042,12 @@ fn run_spec_draft(
         return emit_artifact(&scaffold, &format!("{label} scaffold"), out);
     }
 
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "note: unoptimized build — local generation is very slow; use a \
+             release build (`cargo build --release`) for usable speed."
+        );
+    }
     let mut generator = LocalGenerator::load(&model_dir(spec.name))
         .map_err(|e| anyhow::anyhow!("loading {}: {e}", spec.name))?;
     let cfg = GenConfig::default();
