@@ -523,17 +523,23 @@ just node names, and extend ingestion to docs/PDFs/images.
   `ttf-parser` carries a scoped `deny` exception (opt-in feature only), and
   `pdf-text` occupies a distinct `EXTRACT_VERSION` namespace so a `pdf-text` build
   and a default build never serve each other stale PDF facts from a shared cache.
-- **Image scanning — decided ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)), implementation pending.**
-  Two opt-in tiers, decided after a go/no-go de-risk spike: **Tier A** `image-ocr`
-  — pure-Rust OCR via `ocrs`/`rten` (no C++ FFI) extracting image text into
-  `meta.content`, the default/common case; **Tier B** `image-vision` — an optional
-  `candle` document-VLM for image *understanding*, reusing the ADR-0003 registry/
-  consent machinery. The three surveyed crates were rejected (`rusto-rs`/MNN and
-  `oar-ocr`/ONNX-Runtime need a C++ engine; `yingkitw/ocr` is immature/unvalidated),
-  as was splicing candle-TrOCR into the rten pipeline. Spike verdict: MSRV 1.94 ✓,
-  no FFI ✓, `cargo deny` ✓ at ~73 crates — **provided `image` is pinned to minimal
-  codecs** (`default-features = false, features = ["png","jpeg"]`; defaults pull an
-  AVIF → `libfuzzer-sys` NCSA chain). Tier A ships first, behind its feature.
+- **Image scanning ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) — Tier A
+  delivered; Tier B pending.** Two opt-in tiers, decided after a go/no-go de-risk
+  spike. **Tier A — `image-ocr` (delivered):** pure-Rust OCR via `ocrs`/`rten` (no
+  C++ FFI) OCRs `.png`/`.jpg`/`.jpeg` blobs into `meta.content` beside the prose/PDF paths
+  — panic-guarded, byte- and pixel-capped, models fetched with consent through the
+  shared `models` registry (`roteiro model pull ocrs-text`, checksum-pinned). OCR
+  output depends on which models are installed, so a runtime **env tag** (models
+  absent → 0, else a hash of the pinned model identities) is folded into the sync
+  cache key, keeping extraction deterministic (installing/upgrading models
+  re-extracts affected images instead of serving stale facts). `image` is pinned
+  to `png`/`jpeg` codecs (defaults pull an AVIF → `libfuzzer-sys` NCSA chain);
+  `deny` clean. Verified end-to-end: `roteiro sync` reads real text from an image.
+  **Tier B — `image-vision` (pending):** an optional `candle` document-VLM for
+  image *understanding*, reusing the ADR-0003 registry/consent machinery. The
+  three surveyed crates were rejected (`rusto-rs`/MNN and `oar-ocr`/ONNX-Runtime
+  need a C++ engine; `yingkitw/ocr` is immature/unvalidated), as was splicing
+  candle-TrOCR into the rten pipeline.
 - **Semantic duplication check — delivered.** `roteiro duplicates` (alias `dup`)
   unifies two signals over content-bearing nodes: **exact** structural dupes (two
   `file` nodes sharing a git blob — byte-identical content at different paths) and

@@ -70,6 +70,8 @@ pub enum ModelKind {
     Embedding,
     /// A generative instruct model (spec/blueprint drafting, ADR-0004 Tier 1).
     Generative,
+    /// An OCR model set for image text extraction (ADR-0005 Tier A).
+    Ocr,
 }
 
 /// A model the user can pull and use.
@@ -164,6 +166,33 @@ pub const REGISTRY: &[ModelSpec] = &[
                     name: "tokenizer.json",
                     url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json",
                     sha256: "",
+                },
+            ],
+        }],
+    },
+    // ADR-0005 Tier A: the `ocrs` pure-Rust OCR model set (detection +
+    // recognition, `.rten` format). Weights trace to open datasets (HierText,
+    // CC-BY-SA-4.0); the `ocrs` engine crate is MIT/Apache-2.0. Checksums are
+    // pinned so a model change invalidates cached image facts (see extract.rs).
+    ModelSpec {
+        name: "ocrs-text",
+        kind: ModelKind::Ocr,
+        dim: 0,
+        licence: "CC-BY-SA-4.0",
+        description: "ocrs text detection + recognition (pure-Rust OCR for `image-ocr`)",
+        size_mib: 12,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "text-detection.rten",
+                    url: "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
+                    sha256: "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
+                },
+                ModelFile {
+                    name: "text-recognition.rten",
+                    url: "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
+                    sha256: "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
                 },
             ],
         }],

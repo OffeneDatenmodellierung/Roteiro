@@ -675,6 +675,7 @@ fn run_model_list() {
         let detail = match spec.kind {
             ModelKind::Embedding => format!("embedding, dim {}", spec.dim),
             ModelKind::Generative => "generative (spec draft)".to_owned(),
+            ModelKind::Ocr => "ocr (image text)".to_owned(),
         };
         println!(
             "{mark}  {name}  ({detail}, {licence}, ~{size} MiB)\n            {desc}",
@@ -759,6 +760,9 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
     let use_hint = match spec.kind {
         rto_graph::ModelKind::Embedding => format!("roteiro infer --model {name}"),
         rto_graph::ModelKind::Generative => "roteiro spec draft <topic>".to_owned(),
+        rto_graph::ModelKind::Ocr => {
+            "roteiro sync (a build with --features image-ocr OCRs images)".to_owned()
+        }
     };
     println!(
         "installed `{name}` → {}  (use it with `{use_hint}`)",
