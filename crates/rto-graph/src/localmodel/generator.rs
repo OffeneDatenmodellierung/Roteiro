@@ -121,17 +121,16 @@ impl LocalGenerator {
         let mut next = sampler.sample(&self.model.forward(&input, 0)?.squeeze(0)?)?;
 
         let mut generated: Vec<u32> = Vec::new();
-        let mut index_pos = prompt_tokens.len();
-        for _ in 0..cfg.max_new_tokens {
+        // Decode one token at a time; `index_pos` is the KV-cache offset, starting
+        // just past the prompt.
+        for index_pos in (prompt_tokens.len()..).take(cfg.max_new_tokens) {
             if self.eos.contains(&next) {
                 break;
             }
             generated.push(next);
-            // Decode one token at a time, advancing the KV-cache position.
             let input = Tensor::new(&[next], &self.device)?.unsqueeze(0)?;
             let logits = self.model.forward(&input, index_pos)?.squeeze(0)?;
             next = sampler.sample(&logits)?;
-            index_pos += 1;
         }
         // Reset the attention cache so the instance is reusable.
         self.model.clear_kv_cache();
