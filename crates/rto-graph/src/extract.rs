@@ -99,9 +99,13 @@ fn doc_comment_body(raw: &str) -> Option<String> {
     if t.starts_with("//!") || (t.starts_with("///") && !t.starts_with("////")) {
         return Some(t[3..].trim().to_owned());
     }
-    if t.starts_with("/**") || t.starts_with("/*!") {
-        let body = t[3..].strip_suffix("*/").unwrap_or(&t[3..]);
-        let cleaned: Vec<&str> = body
+    if (t.starts_with("/**") || t.starts_with("/*!")) && t.ends_with("*/") {
+        // Content lies between the 3-char opener (`/**`/`/*!`) and the 2-char
+        // closer (`*/`). Guard the overlap on tiny comments like `/**/`, where
+        // the opener and closer share a `*` — those have no body.
+        let end = t.len() - 2;
+        let inner = if end >= 3 { &t[3..end] } else { "" };
+        let cleaned: Vec<&str> = inner
             .lines()
             .map(|l| l.trim().trim_start_matches('*').trim())
             .filter(|l| !l.is_empty())
@@ -123,19 +127,24 @@ fn is_prose(path: &str) -> bool {
 /// stored content stays small and deterministic.
 fn cap_content(text: &str) -> String {
     let mut out = String::with_capacity(text.len().min(MAX_CONTENT));
+    // Track the character count incrementally — `out.chars().count()` per
+    // iteration would make this O(n²) on long inputs.
+    let mut chars = 0usize;
     let mut last_was_space = true;
     for c in text.chars() {
+        if chars >= MAX_CONTENT {
+            break;
+        }
         if c.is_whitespace() {
             if !last_was_space {
                 out.push(' ');
+                chars += 1;
                 last_was_space = true;
             }
         } else {
             out.push(c);
+            chars += 1;
             last_was_space = false;
-        }
-        if out.chars().count() >= MAX_CONTENT {
-            break;
         }
     }
     out.trim().to_owned()
@@ -614,6 +623,9 @@ mod inner {
         // Plain and `////` comments are not docs.
         assert_eq!(super::doc_comment_body("// plain"), None);
         assert_eq!(super::doc_comment_body("//// header"), None);
+        // Degenerate block comments have an empty body, never garbage like "/".
+        assert_eq!(super::doc_comment_body("/**/").as_deref(), Some(""));
+        assert_eq!(super::doc_comment_body("/*!*/").as_deref(), Some(""));
     }
 
     #[test]
