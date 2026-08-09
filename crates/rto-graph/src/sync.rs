@@ -301,12 +301,12 @@ fn resolve_calls(facts: &mut FactSet) {
 /// Content-addressed cache key for a blob at a given path: the blob oid (kept
 /// as the leading, well-distributed shard) suffixed with a stable 64-bit hash of
 /// the path, the [`crate::extract::EXTRACT_VERSION`], and the extractor
-/// environment tag `env` (the installed-OCR-model identity; `0` when OCR is off
-/// or absent — see [`crate::extract::image_env_tag`]). Sharing across
-/// branches/worktrees is preserved (same path+oid+version+env → same key) while
-/// duplicate content at distinct paths stays distinct; bumping the extractor
-/// version *or* changing the OCR model environment retires old entries so a
-/// re-extraction is forced.
+/// environment tag `env` (the installed image-model — OCR + vision — identity;
+/// `0` when no image model is active — see [`crate::extract::image_env_tag`]).
+/// Sharing across branches/worktrees is preserved (same path+oid+version+env →
+/// same key) while duplicate content at distinct paths stays distinct; bumping
+/// the extractor version *or* changing the installed image models retires old
+/// entries so a re-extraction is forced.
 fn cache_key(path: &str, oid: &str, env: u64) -> String {
     format!(
         "{oid}-{:016x}-v{}-e{env:016x}",

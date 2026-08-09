@@ -184,15 +184,15 @@ fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// OCR the text of an image blob for embedding, or `None` when `path` is not an
-/// image, the `image-ocr` feature is off, the image is too large, the OCR models
-/// are not installed, or OCR yields no text.
+/// Embeddable content for an image blob, composing OCR text and an optional
+/// vision-model description (see [`ocr_content`]/[`vlm_content`]), or `None` when
+/// `path` is not an image, the image is too large, no image model is installed,
+/// or nothing is produced.
 ///
-/// The `ocrs` engine can panic on some inputs; the call is panic-guarded so a
-/// bad image degrades to a plain file node rather than aborting the whole sync.
-/// OCR reads the installed OCR models — that runtime dependency is reflected in
-/// the cache key via [`ocr_env_tag`], so installing/upgrading the models
-/// re-extracts affected images instead of serving stale (content-free) facts.
+/// Both extractors read the *installed* image models — that runtime dependency is
+/// reflected in the cache key via [`image_env_tag`], so installing/upgrading a
+/// model re-extracts affected images instead of serving stale (content-free)
+/// facts.
 #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
 fn image_content(path: &str, bytes: &[u8]) -> Option<String> {
     if !is_image(path) || bytes.len() > MAX_IMAGE_BYTES {
@@ -241,9 +241,10 @@ fn is_image(path: &str) -> bool {
     matches!(extension(path).as_deref(), Some("png" | "jpg" | "jpeg"))
 }
 
-/// Read an image's pixel dimensions from its header without decoding the pixels
-/// (so a decompression bomb is rejected cheaply). `None` if it fails to parse or
-/// exceeds [`MAX_IMAGE_PIXELS`].
+/// Whether the image's pixel dimensions (read from its header, without decoding
+/// the pixels — so a decompression bomb is rejected cheaply) are within
+/// [`MAX_IMAGE_PIXELS`]. `false` if the header cannot be parsed or the limit is
+/// exceeded.
 #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
 fn image_dimensions_ok(bytes: &[u8]) -> bool {
     let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()

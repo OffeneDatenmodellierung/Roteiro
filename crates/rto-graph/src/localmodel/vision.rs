@@ -99,8 +99,15 @@ impl LocalVlm {
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
             let next = sampler.sample(&logits)?;
             tokens.push(next);
-            // Stop on EOS or Moondream's `<END>` marker (`[27, 10619, 29]`).
-            if next == self.eos || tokens.ends_with(&[27, 10619, 29]) {
+            if next == self.eos {
+                break;
+            }
+            // Moondream's `<END>` marker is the 3-token sequence `[27, 10619, 29]`.
+            // Its first two tokens were pushed to `generated` on the previous two
+            // iterations before we could know they formed the marker, so drop them
+            // (the final `29` was never pushed) to avoid leaking `<END` artifacts.
+            if tokens.ends_with(&[27, 10619, 29]) {
+                generated.truncate(generated.len().saturating_sub(2));
                 break;
             }
             generated.push(next);
