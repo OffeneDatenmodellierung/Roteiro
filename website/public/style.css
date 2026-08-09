@@ -1,7 +1,9 @@
-:root { --ink:#1a2733; --accent:#0e6e8c; --paper:#f7f5f0; --line:#d8d2c4; --sub:#6b7684; --tint:#ece8df; --card:#fbfaf6; }
+:root { --ink:#1a2733; --accent:#0e6e8c; --paper:#f7f5f0; --line:#d8d2c4; --sub:#6b7684; --tint:#ece8df; --card:#fbfaf6; --muted:#3d4b57; }
 * { box-sizing: border-box; }
 body { font-family: Georgia, 'Times New Roman', serif; color: var(--ink);
        background: var(--paper); max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem; line-height: 1.6; }
+/* Offset in-page anchor jumps so the sticky nav (below) never hides a heading. */
+h2, h3 { scroll-margin-top: 3.5rem; }
 h1 { font-size: 2.4rem; margin-bottom: .25rem; line-height: 1.15; }
 h2 { font-size: 1.5rem; margin-top: 3rem; border-bottom: 1px solid var(--line); padding-bottom: .25rem; }
 h3 { font-size: 1.18rem; margin-top: 1.8rem; margin-bottom: .3rem; }
@@ -39,7 +41,7 @@ nav.toc a:hover { color: var(--accent); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .9rem; margin: 1.2rem 0; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .9rem 1rem; }
 .card h3 { margin-top: 0; font-size: 1.05rem; }
-.card p { margin: .3rem 0 0; font-size: .92rem; color: #3d4b57; }
+.card p { margin: .3rem 0 0; font-size: .92rem; color: var(--muted); }
 
 .note { background: #eef4f6; border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0;
         padding: .7rem 1rem; margin: 1.2rem 0; font-size: .93rem; }
@@ -47,7 +49,7 @@ nav.toc a:hover { color: var(--accent); }
 .hero-links a { display: inline-block; margin-right: 1.1rem; }
 
 @media (prefers-color-scheme: dark) {
-  :root { --ink:#e7e3d8; --accent:#4bb8d1; --paper:#141c24; --line:#2c3843; --sub:#93a1ad; --tint:#1e2831; --card:#1a232c; }
+  :root { --ink:#e7e3d8; --accent:#4bb8d1; --paper:#141c24; --line:#2c3843; --sub:#93a1ad; --tint:#1e2831; --card:#1a232c; --muted:#b7c2cc; }
   th { background: #1e2831; }
   pre { background: #0c1319; }
   .pill.derived  { background:#14323b; color:#4bb8d1; border-color:#245a68; }
