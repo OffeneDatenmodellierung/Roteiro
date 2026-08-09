@@ -155,6 +155,11 @@ async fn chat_json(state: Shared, req: ChatRequest) -> Response {
             EngineError::UnknownModel(m).to_string(),
             "invalid_request_error",
         ),
+        Ok(Err(e @ EngineError::InvalidRequest(_))) => error(
+            StatusCode::BAD_REQUEST,
+            e.to_string(),
+            "invalid_request_error",
+        ),
         Ok(Err(e @ EngineError::Unsupported(_))) => error(
             StatusCode::NOT_IMPLEMENTED,
             e.to_string(),
@@ -212,6 +217,11 @@ async fn embeddings(State(state): State<Shared>, Json(body): Json<EmbeddingReque
         Ok(Err(EngineError::UnknownModel(m))) => error(
             StatusCode::NOT_FOUND,
             EngineError::UnknownModel(m).to_string(),
+            "invalid_request_error",
+        ),
+        Ok(Err(e @ EngineError::InvalidRequest(_))) => error(
+            StatusCode::BAD_REQUEST,
+            e.to_string(),
             "invalid_request_error",
         ),
         Ok(Err(e @ EngineError::Unsupported(_))) => error(
@@ -656,6 +666,158 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn multimodal_content_parts_are_parsed() {
+        // A user turn with a text part + an image_url (tiny 1x1 PNG data URI):
+        // the text is extracted (mock echoes it) and the image decodes without error.
+        let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": png}},
+            ]}],
+        });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["choices"][0]["message"]["content"], "LOOK");
+    }
+
+    async fn post_chat(body: serde_json::Value) -> axum::http::StatusCode {
+        test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn image_in_a_non_user_message_is_400() {
+        let img = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [
+                {"role": "system", "content": [{"type": "image_url", "image_url": {"url": img}}]},
+                {"role": "user", "content": "hi"},
+            ],
+        });
+        assert_eq!(post_chat(body).await, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn too_many_images_is_400() {
+        let img = serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="},
+        });
+        let parts: Vec<serde_json::Value> = (0..9).map(|_| img.clone()).collect();
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": parts}],
+        });
+        assert_eq!(post_chat(body).await, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn non_image_data_uri_is_400() {
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:text/plain;base64,aGk="}},
+            ]}],
+        });
+        assert_eq!(post_chat(body).await, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn images_to_a_text_only_model_are_400() {
+        use crate::engine::{ChatRequest, CompletionStats};
+
+        struct TextOnly;
+        impl Engine for TextOnly {
+            fn models(&self) -> Vec<ModelInfo> {
+                vec![ModelInfo {
+                    id: "echo".to_owned(),
+                }]
+            }
+            fn chat_stream(
+                &self,
+                req: &ChatRequest,
+                _on_token: &mut dyn FnMut(&str),
+            ) -> Result<CompletionStats, EngineError> {
+                if req.images.is_empty() {
+                    Ok(CompletionStats {
+                        prompt_tokens: 1,
+                        completion_tokens: 0,
+                        finish_reason: FinishReason::Stop,
+                    })
+                } else {
+                    Err(EngineError::InvalidRequest("text-only model".to_owned()))
+                }
+            }
+        }
+
+        let img = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": img}},
+            ]}],
+        });
+        let resp = app(std::sync::Arc::new(TextOnly))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn remote_image_url_is_rejected() {
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+            ]}],
+        });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

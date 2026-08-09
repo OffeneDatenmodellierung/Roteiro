@@ -17,6 +17,8 @@ thiserror = { workspace = true }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 tokio-stream = "0.1"
+# Decode `image_url` data-URIs (base64) in multimodal chat requests.
+base64 = "0.22"
 # The llama.cpp inference engine (ADR-0006). Opt-in: pulls a C/C++ toolchain
 # (cmake, clang, libclang) to build vendored llama.cpp. The crate's pure-Rust
 # core (types, `Engine` trait, the `/v1` server) builds and tests without it.
@@ -33,7 +35,7 @@ http-body-util = "0.1"
 [features]
 # The real llama.cpp-backed engine. Off by default so the default build stays
 # pure-Rust; `roteiro`'s `serve` feature turns it on.
-llama = ["dep:llama-cpp-2", "dep:encoding_rs"]
+llama = ["dep:llama-cpp-2", "llama-cpp-2/mtmd", "dep:encoding_rs"]
 
 [lints]
 workspace = true

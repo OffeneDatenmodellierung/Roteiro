@@ -403,6 +403,35 @@ pub const REGISTRY: &[ModelSpec] = &[
             ],
         }],
     },
+    // Vision-language GGUF for the llama.cpp serving path (ADR-0006 multimodal
+    // `/v1/chat/completions`). Ships a base `model.gguf` plus its multimodal
+    // projector `mmproj.gguf`; served via llama.cpp `mtmd`. SmolVLM-500M is
+    // llama.cpp's small reference multimodal model — image description *and*
+    // reading text in an image (the OCR use case is just a prompt).
+    ModelSpec {
+        name: "smolvlm-500m-gguf",
+        kind: ModelKind::Vision,
+        tier: ResourceTier::Low,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "SmolVLM-500M-Instruct (Q8_0 GGUF + mmproj) — small vision-language model served via llama.cpp",
+        size_mib: 520,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/SmolVLM-500M-Instruct-Q8_0.gguf",
+                    sha256: "9d4612de6a42214499e301494a3ecc2be0abdd9de44e663bda63f1152fad1bf4",
+                },
+                ModelFile {
+                    name: "mmproj.gguf",
+                    url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/mmproj-SmolVLM-500M-Instruct-Q8_0.gguf",
+                    sha256: "d1eb8b6b23979205fdf63703ed10f788131a3f812c7b1f72e0119d5d81295150",
+                },
+            ],
+        }],
+    },
 ];
 
 /// Look up a model spec by name.

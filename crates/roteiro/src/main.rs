@@ -1803,33 +1803,41 @@ fn serve_models_endpoint(
 ) -> anyhow::Result<()> {
     use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
 
-    // Serve every installed **GGUF** generative/embedding model (llama.cpp path):
-    // generative GGUFs answer `/v1/chat/completions`, embedding GGUFs answer
-    // `/v1/embeddings`. A GGUF model is one whose variant ships a `model.gguf`
-    // file — this excludes the candle safetensors embedders; the kind filter
-    // excludes vision/OCR models, which the text `/v1` cannot serve. The
+    // Serve every installed **GGUF** model over the llama.cpp path: generative →
+    // `/v1/chat/completions`, embedding → `/v1/embeddings`, vision → multimodal
+    // `/v1/chat/completions`. Servable = the variant ships a `model.gguf` (this
+    // excludes the candle safetensors/`model-q4_0` entries), and — for vision —
+    // also an `mmproj.gguf` projector. OCR is not a served model. The
     // `[serve] models` allow-list narrows it further if set.
     let host = Platform::host();
     let wanted = cfg.serve.models.as_deref();
+    let has_file = |m: &rto_graph::ModelSpec, name: &str| {
+        m.variant_for(host)
+            .is_some_and(|v| v.files.iter().any(|f| f.name == name))
+    };
     let served: Vec<rto_serve::llama::Served> = REGISTRY
         .iter()
-        .filter(|m| matches!(m.kind, ModelKind::Generative | ModelKind::Embedding))
         .filter(|m| wanted.is_none_or(|w| w.iter().any(|n| n == m.name)))
-        .filter(|m| {
-            m.variant_for(host).is_some_and(|v| {
-                v.files.iter().any(|f| f.name == "model.gguf") && is_installed(m.name, v)
-            })
+        .filter(|m| has_file(m, "model.gguf"))
+        .filter(|m| match m.kind {
+            ModelKind::Generative | ModelKind::Embedding => true,
+            // A vision model is only servable with its multimodal projector.
+            ModelKind::Vision => has_file(m, "mmproj.gguf"),
+            ModelKind::Ocr => false,
         })
+        .filter(|m| m.variant_for(host).is_some_and(|v| is_installed(m.name, v)))
         .map(|m| rto_serve::llama::Served {
             name: m.name.to_owned(),
             path: model_dir(m.name).join("model.gguf"),
+            mmproj: has_file(m, "mmproj.gguf").then(|| model_dir(m.name).join("mmproj.gguf")),
         })
         .collect();
     if served.is_empty() {
         anyhow::bail!(
             "no installed GGUF models to serve — pull one first \
-             (`roteiro model pull qwen3-0.6b` for chat, or \
-             `roteiro model pull bge-small-en-v1.5-gguf` for embeddings; \
+             (`roteiro model pull qwen3-0.6b` for chat, \
+             `roteiro model pull bge-small-en-v1.5-gguf` for embeddings, or \
+             `roteiro model pull smolvlm-500m-gguf` for vision; \
              see `roteiro model list`)"
         );
     }

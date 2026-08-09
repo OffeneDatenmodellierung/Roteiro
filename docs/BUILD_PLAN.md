@@ -780,7 +780,7 @@ set once, not retyped as flags — reproducible and shareable when committed.
   deterministically; flags override it; no config is still a working default;
   `roteiro config` shows the merged result and each value's provenance.
 
-### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → ✅ *delivered (models + chat + streaming + graph tools + embeddings)*
+### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → ✅ *delivered (models + chat + streaming + graph tools + embeddings + vision)*
 **Goal:** reuse the models a user already pulled by exposing them over an
 **opt-in, loopback OpenAI-compatible endpoint** — offline, no second download —
 and make the served model **code-aware** by handing it Roteiro's graph tools.
@@ -817,6 +817,16 @@ and make the served model **code-aware** by handing it Roteiro's graph tools.
   --models` now serves any installed GGUF generative/embedding model (vision/OCR
   excluded). Verified live: 384-d unit-norm vectors, cosine 0.75 between
   paraphrases. `input` accepts a string or array; unit-tested via a mock.
+- **Delivered — vision (multimodal `/v1/chat/completions`):** an image is sent as
+  an OpenAI `image_url` content part (base64 `data:` URI; remote URLs are not
+  fetched — no SSRF) and projected through the model's **mmproj** via llama.cpp
+  **`mtmd`** (image decode → `eval_chunks` → generate). Adds a `smolvlm-500m-gguf`
+  entry (base GGUF + `mmproj.gguf`); `serve --models` auto-serves any installed
+  vision GGUF that ships an mmproj. **OCR is served through the VLM** (the chosen
+  option): reading text in an image is just a prompt — verified live, SmolVLM read
+  "ROTEIRO" off a rendered image. (The pure-Rust `ocrs` pipeline stays an internal
+  `sync`-ingestion step, not a served model.) Follow-on multimodal/perf work
+  (audio, batching, candle→llama.cpp internal unification) is Stage 20.
 - **Engine: llama.cpp** (`llama-cpp-2`), behind an opt-in `serve` feature (pulls a
   C/C++ toolchain: cmake + clang + libclang). Chosen after a head-to-head de-risk
   (candle vs mistral.rs vs llama.cpp on MSRV 1.94 + strict `cargo deny`): it is the
@@ -919,7 +929,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
 | v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`/`[ingest]`, CLI>project>user>default |
-| v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ✅ opt-in `serve` — `/v1/models`+`chat`+streaming+`embeddings`, auto-registered graph tools |
+| v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ✅ opt-in `serve` — `/v1/models`+`chat`+streaming+`embeddings`+vision (`mtmd`), auto-registered graph tools |
 | v0.x | 20 | Inference-core direction (unify on llama.cpp) + coding/reasoning models | ⛔ staged candle→llama.cpp migration (ADR-0003 amendment); opt-in coding/reasoning registry entries |
 | — | — | Shipped alongside Stage 12: curated low/mid/high **model matrix** ([ADR-0003](adr/0003-pluggable-embedding-models.md)) + streaming, checksum-verified model downloads | ✅ `roteiro model list` by section→tier; `download_verified` (constant memory) |
 
