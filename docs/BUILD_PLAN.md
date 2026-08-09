@@ -596,12 +596,22 @@ and footnotes.
   query primitive under the versioned schema; `roteiro debt [--json] [--kind …]`
   groups by category, `roteiro check` prints a debt summary line, and MCP gains
   a `debt` tool. Markers are also reachable via the existing `query --kind
-  marker` / `explain` surface and flow into the Obsidian vault as nodes.
+  marker` / `explain` surface and flow into the Obsidian vault as nodes. Tags
+  match mixed case (`todo`/`fixme`/`tbd` anywhere; `BUG`/`HACK`/`XXX` uppercase
+  anywhere or in annotation form `Bug:` / `hack(…)`).
+- **Opt-out directives:** an inline `ignore` directive skips one line and an
+  `ignore-file` directive (both prefixed `roteiro:`, spelled out in
+  `markers.rs`) skips a whole blob — a git-tracked escape hatch for false
+  positives. Applied to `markers.rs` itself, which only enumerates the detection
+  vocabulary. (This page deliberately avoids the literal directive tokens so it
+  is not self-silenced.)
 - **Scoped out (precision):** the noisy bare words `later` and `stub` from the
   original phrase list are omitted — they flood documentation prose with false
   positives without comment-awareness. Per-language *comment vs code* scoping
   (so soft deferral phrases only fire inside comments) is a natural follow-up
-  once more language extractors land in Stage 14; tracked here.
+  once more language extractors land in Stage 14; tracked here. The debt
+  feature's own API docs still self-report a handful of markers (they name the
+  categories); the ignore directives are the intended remedy where it matters.
 
 ---
 
