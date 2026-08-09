@@ -84,6 +84,21 @@ CREATE TABLE imports (
 );
 ";
 
+/// Migration 5: the per-node context cache. Each row holds a node's assembled
+/// context bundle (`json`) and a `fingerprint` derived from the node's own
+/// content **and** its one-hop neighbourhood, so a change to the node or any
+/// neighbour invalidates the entry (a cache miss on next read). Like `imports`,
+/// this table is *not* touched by `rebuild`, so cached context survives a
+/// code-changing sync and is invalidated only by fingerprint — a stale entry for
+/// a deleted node is pruned on refresh.
+const M0005_NODE_CONTEXT: &str = "
+CREATE TABLE node_context (
+    key         TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    json        TEXT NOT NULL
+);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -101,6 +116,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 4,
         sql: M0004_IMPORTS,
+    },
+    Migration {
+        version: 5,
+        sql: M0005_NODE_CONTEXT,
     },
 ];
 

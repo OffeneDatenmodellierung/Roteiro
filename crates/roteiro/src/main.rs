@@ -59,6 +59,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Fetch a node's cached context bundle (its provenance-labelled
+    /// neighbourhood), or refresh all cached contexts that have gone stale.
+    Context {
+        /// Node key to fetch context for. Omit together with `--refresh`.
+        key: Option<String>,
+        /// Rebuild every cached context whose node or a neighbour changed, prune
+        /// entries for deleted nodes, and report the counts.
+        #[arg(long, conflicts_with = "key")]
+        refresh: bool,
+        /// Emit the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List intent-debt markers (TODOs, stubs, deferred work) in the graph.
     Debt {
         /// Restrict to these categories (repeatable): todo | fixme | hack |
@@ -239,6 +252,7 @@ fn main() -> anyhow::Result<()> {
         Command::Sync { json, committed } => run_sync(json, committed),
         Command::Check { json } => run_check(json),
         Command::Query { key, kind, json } => run_query(key, kind, json),
+        Command::Context { key, refresh, json } => run_context(key, refresh, json),
         Command::Debt { kind, json } => run_debt(&kind, json),
         Command::Path { from, to, json } => run_path(&from, &to, json),
         Command::Export { out } => run_export(out),
@@ -1275,6 +1289,56 @@ fn run_query(key: Option<String>, kind: Option<String>, json: bool) -> anyhow::R
         }
         (None, None) => {
             anyhow::bail!("provide a node key to explain, or `--kind <kind>` to list nodes");
+        }
+    }
+    Ok(())
+}
+
+/// Fetch a node's cached context bundle, or (`--refresh`) reconcile all cached
+/// contexts with the current graph — rebuilding stale ones and pruning entries
+/// for deleted nodes. The cache is dependency-aware: a change to a node or any of
+/// its neighbours invalidates its cached context (see `rto_graph::context`).
+fn run_context(key: Option<String>, refresh: bool, json: bool) -> anyhow::Result<()> {
+    use rto_graph::{context, refresh_contexts};
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache)?;
+
+    if refresh {
+        let report = refresh_contexts(&store)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!(
+                "context cache refreshed: {} rebuilt, {} reused, {} pruned",
+                report.rebuilt, report.reused, report.pruned
+            );
+        }
+        return Ok(());
+    }
+
+    let Some(key) = key else {
+        anyhow::bail!("provide a node key, or `--refresh` to refresh all cached contexts");
+    };
+    let Some(ctx) = context(&store, &key)? else {
+        anyhow::bail!("no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)");
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ctx)?);
+    } else {
+        println!("{}  ({})  {}", ctx.node.key, ctx.node.kind, ctx.node.name);
+        println!("  fingerprint: {}", ctx.fingerprint);
+        if !ctx.outgoing.is_empty() {
+            println!("  outgoing:");
+            for e in &ctx.outgoing {
+                println!("    -[{}/{}]-> {}", e.kind, e.provenance, e.node);
+            }
+        }
+        if !ctx.incoming.is_empty() {
+            println!("  incoming:");
+            for e in &ctx.incoming {
+                println!("    <-[{}/{}]- {}", e.kind, e.provenance, e.node);
+            }
         }
     }
     Ok(())

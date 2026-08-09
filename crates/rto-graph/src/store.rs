@@ -493,6 +493,71 @@ impl Store {
         let mut rows = stmt.query([key])?;
         collect_nodes(&mut rows)
     }
+
+    /// Fetch the cached context bundle for `key` as `(fingerprint, json)`, if
+    /// present. The caller compares the fingerprint to the node's current one to
+    /// decide whether the entry is fresh (see [`crate::context`]).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn context_cache_get(&self, key: &str) -> Result<Option<(String, String)>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT fingerprint, json FROM node_context WHERE key = ?1",
+                [key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Store (or replace) the cached context bundle for `key`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn context_cache_put(
+        &self,
+        key: &str,
+        fingerprint: &str,
+        json: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO node_context (key, fingerprint, json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                 fingerprint = excluded.fingerprint, json = excluded.json",
+            [key, fingerprint, json],
+        )?;
+        Ok(())
+    }
+
+    /// Delete the cached context entry for `key`, returning whether one existed.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn context_cache_delete(&self, key: &str) -> Result<bool, StoreError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM node_context WHERE key = ?1", [key])?;
+        Ok(n > 0)
+    }
+
+    /// Every key with a cached context entry, ordered. Used to prune entries for
+    /// nodes that no longer exist.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn context_cache_keys(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key FROM node_context ORDER BY key")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 // --- Free helpers operating on a `Connection` (a `Transaction` derefs to one) ---
@@ -706,7 +771,7 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        assert_eq!(store.schema_version().expect("version"), 4);
+        assert_eq!(store.schema_version().expect("version"), 5);
     }
 
     #[test]
@@ -877,7 +942,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 4);
+            assert_eq!(store.schema_version().expect("version"), 5);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");
