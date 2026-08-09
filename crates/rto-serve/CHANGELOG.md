@@ -1,0 +1,25 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.12...rto-serve-v0.0.13) - 2026-08-09
+
+### Added
+
+- *(serve)* vision serving — multimodal /v1/chat/completions via llama.cpp mtmd (ADR-0006)
+- *(serve)* /v1/embeddings from GGUF via llama.cpp (ADR-0006, completes Stage 19)
+- *(serve)* auto-register graph tools — code-aware serving (ADR-0006, Stage 19b)
+- *(serve)* SSE streaming for /v1/chat/completions (ADR-0006, Stage 19b)
+
+### Fixed
+
+- *(serve)* cap images per request (PR #91 follow-up)
+- *(serve)* address PR #91 review — image data-URI hardening, 400s
+- *(serve)* address PR #89 review — 501 for unsupported, empty-input test
+- *(serve)* address PR #86 review — tool loop robustness
+- *(serve)* address PR #85 review — streaming 404, finish_reason doc
