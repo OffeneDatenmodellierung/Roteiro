@@ -24,6 +24,8 @@ mod localmodel;
 mod markers;
 mod migrations;
 mod model;
+#[cfg(feature = "models")]
+mod models;
 mod provenance;
 mod query;
 mod store;
@@ -43,12 +45,13 @@ pub use infer::{
     InferenceConfig, duplicates, duplicates_with, embed, infer_edges, infer_edges_with, similarity,
 };
 #[cfg(feature = "inference-local-models")]
-pub use localmodel::{
-    GenConfig, LocalEmbedder, LocalGenerator, LocalModelError, ModelFile, ModelKind, ModelSpec,
-    ModelVariant, Platform, REGISTRY, ensure_model_dir, find as find_model, is_installed,
-    model_dir, sha256_hex, store_root, verify_sha256,
-};
+pub use localmodel::{GenConfig, LocalEmbedder, LocalGenerator, LocalModelError};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
+#[cfg(feature = "models")]
+pub use models::{
+    ModelFile, ModelKind, ModelSpec, ModelVariant, Platform, REGISTRY, ensure_model_dir,
+    find as find_model, is_installed, model_dir, sha256_hex, store_root, verify_sha256,
+};
 pub use provenance::Provenance;
 pub use query::{
     DebtItem, DebtReport, EdgeRef, Explanation, Listing, NodeSummary, Path, PathHop, SCHEMA,
