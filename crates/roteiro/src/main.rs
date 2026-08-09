@@ -932,6 +932,11 @@ fn run_spec_scaffold(
     kind: &str,
     out: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Validate the kind before any expensive graph work.
+    if kind != "adr" && kind != "blueprint" {
+        anyhow::bail!("unknown --kind `{kind}` (expected: adr | blueprint)");
+    }
+
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache)?;
     let root = repo
@@ -939,19 +944,17 @@ fn run_spec_scaffold(
         .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
     let ctx = rto_spec::context(&store, topic, 10)?;
 
-    let (md, wrote) = match kind {
-        "adr" => {
-            let adr_id = next_adr_id(&root.join("docs/adr"));
-            (
-                rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx),
-                format!("ADR-{adr_id}"),
-            )
-        }
-        "blueprint" => (
+    let (md, wrote) = if kind == "adr" {
+        let adr_id = next_adr_id(&root.join("docs/adr"));
+        (
+            rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx),
+            format!("ADR-{adr_id}"),
+        )
+    } else {
+        (
             rto_spec::scaffold_blueprint(topic, title, &ctx),
             "blueprint".to_owned(),
-        ),
-        other => anyhow::bail!("unknown --kind `{other}` (expected: adr | blueprint)"),
+        )
     };
 
     match out {
