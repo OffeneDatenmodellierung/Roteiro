@@ -20,6 +20,10 @@ serde_json = { workspace = true }
 # platform TLS). Blocking + pure-Rust.
 ureq = { version = "3", optional = true }
 
+[dev-dependencies]
+# Write a codegraph-schema SQLite fixture in the `import --from codegraph` test.
+rusqlite = { workspace = true }
+
 [features]
 mcp = ["rto-render/mcp"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance

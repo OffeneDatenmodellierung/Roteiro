@@ -90,12 +90,14 @@ enum Command {
         /// Artifact file to load (`-` reads from stdin).
         file: String,
     },
-    /// One-shot import from an external knowledge graph (graphify, lat).
+    /// Import from an external knowledge graph (graphify, lat), or compare
+    /// against a codegraph snapshot as a validation oracle.
     Import {
-        /// Source tool: graphify | lat (codegraph planned).
+        /// Source: graphify | lat (imported), or codegraph (compared, oracle-only).
         #[arg(long)]
         from: String,
-        /// Path to the export: a Graphify dir/`graph.json`, or a `lat.md/` dir.
+        /// Path to the source: a Graphify dir/`graph.json`, a `lat.md/` dir, or a
+        /// codegraph `.db` snapshot.
         path: String,
         /// Emit the migration report as JSON.
         #[arg(long)]
@@ -639,17 +641,62 @@ fn http_get(url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Import an external knowledge graph into the store.
+/// Import an external knowledge graph into the store (or, for codegraph, compare
+/// against it as a validation oracle).
 fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
     match from {
         "graphify" => run_import_graphify(path, json),
         "lat" => run_import_lat(path, json),
-        "codegraph" => anyhow::bail!(
-            "importer `codegraph` is not implemented yet (graphify and lat are \
-             available; see docs/BUILD_PLAN.md Stage 11)"
-        ),
-        other => anyhow::bail!("unknown import source `{other}` (expected: graphify | lat)"),
+        "codegraph" => run_compare_codegraph(path, json),
+        other => {
+            anyhow::bail!("unknown import source `{other}` (expected: graphify | lat | codegraph)")
+        }
     }
+}
+
+/// Compare Roteiro's derived graph against a codegraph `SQLite` snapshot and report
+/// agreement/divergence. codegraph is a **validation oracle only** — its
+/// structural edges are not imported (Roteiro re-derives them). Exits zero; the
+/// report is informational.
+fn run_compare_codegraph(path: &str, json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    // Build the derived graph so there is something to compare against.
+    build_graph(&repo, &mut store, &cache)?;
+
+    let report = rto_graph::compare_codegraph(std::path::Path::new(path), &store)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        if let Some(commit) = &report.source_commit {
+            let short = &commit[..commit.len().min(12)];
+            println!("codegraph oracle — snapshot indexed at {short}");
+        }
+        println!(
+            "symbols: {} matched, {} scope-only diffs (same symbol, different \
+             module scope), {} codegraph-only, {} roteiro-only \
+             (codegraph {}, roteiro {}; {} constants are a known Roteiro gap)",
+            report.symbols_matched,
+            report.symbols_scope_diff,
+            report.codegraph_only,
+            report.roteiro_only,
+            report.symbols_codegraph,
+            report.symbols_roteiro,
+            report.constants_codegraph,
+        );
+        println!(
+            "calls: {}/{} codegraph internal calls agree ({} not re-derived — \
+             Roteiro links only unambiguous calls)",
+            report.calls_agree, report.calls_codegraph, report.calls_codegraph_only,
+        );
+        for key in report.codegraph_only_sample.iter().take(10) {
+            println!("  codegraph-only: {key}");
+        }
+        for key in report.roteiro_only_sample.iter().take(10) {
+            println!("  roteiro-only:   {key}");
+        }
+    }
+    Ok(())
 }
 
 /// Import a lat.md directory: its markdown sections and `[[…]]` links become an

@@ -2841,6 +2841,7 @@ dependencies = [
  "rto-graph",
  "rto-render",
  "rto-spec",
+ "rusqlite",
  "serde_json",
  "ureq",
 ]
