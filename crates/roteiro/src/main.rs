@@ -236,8 +236,10 @@ enum SpecAction {
         out: Option<String>,
     },
     /// Scaffold, then draft the placeholder sections offline with a small local
-    /// instruct model (ADR-0004 Tier 1). Needs `--features inference-local-models`
-    /// and a pulled generative model; falls back to the plain scaffold otherwise.
+    /// instruct model (ADR-0004 Tier 1). Needs a generation backend
+    /// (`--features serve` for llama.cpp, or `--features inference-local-models`
+    /// for candle) and a pulled generative model; falls back to the plain
+    /// scaffold otherwise.
     Draft {
         /// Topic the artifact is about (grounds the draft against the graph).
         topic: String,
@@ -1338,8 +1340,9 @@ fn run_spec_scaffold(
 }
 
 /// Draft the scaffold's placeholder sections with a small local instruct model
-/// (ADR-0004 Tier 1). Needs `--features inference-local-models` and a pulled
-/// generative model; without a model it emits the plain scaffold + a hint.
+/// (ADR-0004 Tier 1). Needs a generation backend (`serve` → llama.cpp, or
+/// `inference-local-models` → candle) and a pulled generative model; without a
+/// model it emits the plain scaffold + a hint.
 // Stage 20: `spec draft` generation runs on **llama.cpp** (the `serve` feature's
 // engine) — the inference-core unify direction (ADR-0006) — falling back to the
 // candle `LocalGenerator` only on a `inference-local-models`-without-`serve` build.
@@ -1448,11 +1451,25 @@ fn draft_sections(
                 max_tokens: DRAFT_MAX_TOKENS,
             })
             .map_err(|e| anyhow::anyhow!("drafting `{heading}`: {e}"))?;
-        if !completion.content.trim().is_empty() {
-            drafts.push((heading, completion.content));
+        // A reasoning-capable GGUF (Qwen3, DeepSeek-R1, …) emits a
+        // `<think>…</think>` block before its answer; keep only the answer so the
+        // reasoning never lands in the drafted document.
+        let prose = strip_thinking(&completion.content);
+        if !prose.trim().is_empty() {
+            drafts.push((heading, prose));
         }
     }
     Ok(drafts)
+}
+
+/// Drop a leading `<think>…</think>` reasoning block, returning the answer that
+/// follows it. Text with no closing `</think>` is returned unchanged.
+#[cfg(feature = "serve")]
+fn strip_thinking(text: &str) -> String {
+    match text.find("</think>") {
+        Some(end) => text[end + "</think>".len()..].trim_start().to_owned(),
+        None => text.to_owned(),
+    }
 }
 
 /// Transitional fallback: draft with the candle `LocalGenerator` on a build that
