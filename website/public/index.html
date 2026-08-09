@@ -26,6 +26,7 @@ queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents 
   <a href="#build">Install &amp; build</a>
   <a href="#modes">Modes</a>
   <a href="#models">Models</a>
+  <a href="#config">Config</a>
   <a href="#languages">Languages</a>
   <a href="#links">Links</a>
 </nav>
@@ -197,6 +198,43 @@ models are GGUF, run through the shared llama.cpp engine. A rough guide:</p>
 <tr><td><code>ocrs-text</code></td><td>~12 MB</td><td>Pure-Rust OCR — literal text in screenshots (<code>image-ocr</code>).</td></tr>
 <tr><td><code>smolvlm-500m-gguf</code></td><td>~520 MB</td><td>Describing diagrams &amp; photos (<code>image-vision</code>).</td></tr>
 </table>
+
+<h2 id="config">Configuration</h2>
+
+<p>Defaults are sensible, so a config file is optional. When you want to pin
+choices, Roteiro merges two layers: a per-user <code>~/.roteiro/config.toml</code>
+and a per-project <code>roteiro.toml</code> at the repository root (project wins).
+<code>roteiro config</code> prints the effective, merged values and labels which
+layer set each one.</p>
+
+<pre><code><span class="c"># roteiro.toml — every key is optional; shown with its default</span>
+
+[models]                                <span class="c"># unset ⇒ offline defaults (hashing embedder / qwen3-0.6b)</span>
+embedding  = "bge-small-en-v1.5-gguf"   <span class="c"># embedding model for `infer`</span>
+generative = "qwen3-0.6b"               <span class="c"># model for `spec draft` / serving</span>
+
+[ingest]                                <span class="c"># which blob content `sync` embeds</span>
+prose  = true                           <span class="c"># Markdown / plain text bodies</span>
+pdf    = true                           <span class="c"># PDF text   (needs the pdf-text feature)</span>
+ocr    = true                           <span class="c"># image OCR  (needs the image-ocr feature)</span>
+vision = true                           <span class="c"># image description (needs image-vision)</span>
+
+[infer]
+min_confidence = 0.4                     <span class="c"># cosine-similarity floor for a suggestion</span>
+top_k          = 5                       <span class="c"># max suggestions per node</span>
+
+[duplicates]
+min_similarity = 0.9                     <span class="c"># floor for a near-duplicate pair</span>
+limit          = 50                      <span class="c"># max pairs reported</span>
+
+[serve]                                  <span class="c"># the local OpenAI-compatible endpoint</span>
+addr   = "127.0.0.1:8017"               <span class="c"># bind address (loopback by default)</span>
+models = ["qwen3-0.6b"]                 <span class="c"># which installed models to expose</span>
+tools  = true                            <span class="c"># expose graph tools to the model</span></code></pre>
+
+<div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
+extracts, so affected blobs are re-processed on the next run — the content-addressed
+cache folds the ingestion config into its key.</div>
 
 <h2 id="languages">Languages</h2>
 
