@@ -9,6 +9,14 @@
 //! items). The scan is line-based and language-agnostic so it works uniformly
 //! over code, docs, and ADRs; [`augment`] attaches each finding to its innermost
 //! enclosing symbol (or the file) via a `contains` edge.
+//!
+//! Opt-out: a source can suppress false positives with an inline directive —
+//! `roteiro:ignore` on a line skips that line, and `roteiro:ignore-file`
+//! anywhere in a blob skips the whole file. This module carries the file
+//! directive below, because a file that only enumerates marker vocabulary would
+//! otherwise catalogue itself.
+//
+// roteiro:ignore-file — this file defines the detection vocabulary.
 
 use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 
@@ -110,17 +118,34 @@ const RULES: &[(&str, MarkerCategory, Mode)] = &[
 /// Maximum stored marker text length (in characters), to keep nodes small.
 const MAX_TEXT: usize = 200;
 
+/// Inline opt-out placed on a line to skip *that line* during detection.
+const IGNORE_LINE: &str = "roteiro:ignore";
+/// Inline opt-out placed anywhere in a blob to skip the *whole file* — for
+/// sources that only enumerate marker vocabulary (like this one) and would
+/// otherwise report themselves. `IGNORE_LINE` is a prefix of this, so a file
+/// directive also satisfies the per-line check.
+const IGNORE_FILE: &str = "roteiro:ignore-file";
+
 /// Scan `bytes` for intent-debt markers, one (highest-priority) per line, in
 /// ascending line order. Deterministic: identical bytes always yield identical
 /// markers.
 #[must_use]
 pub fn scan_markers(bytes: &[u8]) -> Vec<Marker> {
+    // Whole-file opt-out: a blob carrying the file directive is skipped entirely.
+    if contains_bytes(bytes, IGNORE_FILE.as_bytes()) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let mut offset: u32 = 0;
     for (idx, raw) in bytes.split(|&b| b == b'\n').enumerate() {
         let raw_len = u32::try_from(raw.len()).unwrap_or(u32::MAX);
         let decoded = String::from_utf8_lossy(raw);
         let line = decoded.trim_end_matches('\r');
+        // Per-line opt-out.
+        if line.contains(IGNORE_LINE) {
+            offset = offset.saturating_add(raw_len).saturating_add(1);
+            continue;
+        }
         if let Some(category) = classify(line) {
             let lead = u32::try_from(raw.iter().take_while(|b| b.is_ascii_whitespace()).count())
                 .unwrap_or(0);
@@ -212,6 +237,11 @@ fn find_annotation(hay: &str, needle: &str) -> Option<usize> {
 /// standalone token).
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Whether `hay` contains the byte sequence `needle` (a small ASCII directive).
+fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Trim surrounding whitespace and cap to [`MAX_TEXT`] characters (appending an
@@ -348,6 +378,18 @@ plain line, nothing here
     fn scanning_is_deterministic() {
         let src = b"// TODO one\ncode\n// FIXME two\n";
         assert_eq!(scan_markers(src), scan_markers(src));
+    }
+
+    #[test]
+    fn ignore_directives_suppress_line_and_file() {
+        // A per-line directive skips only that line.
+        let got = categories("// TODO real\n// TODO shush  roteiro:ignore\n// FIXME real\n");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, 1);
+        assert_eq!(got[1].0, 3); // line 2 suppressed
+
+        // A file directive suppresses everything in the blob.
+        assert!(scan_markers(b"// TODO x\n// note: roteiro:ignore-file\n// FIXME y\n").is_empty());
     }
 
     #[test]
