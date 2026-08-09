@@ -70,11 +70,18 @@ impl LocalGenerator {
         let model = ModelWeights::from_gguf(content, &mut file, &device)?;
 
         // ChatML end-of-turn `<|im_end|>` and the base `<|endoftext|>`; resolved
-        // from the tokenizer so a differing vocab still stops correctly.
-        let eos = ["<|im_end|>", "<|endoftext|>"]
+        // from the tokenizer so a differing vocab still stops correctly. A model
+        // with neither would only ever stop on `max_new_tokens`, so treat that as
+        // a load error rather than generating run-on text.
+        let eos: Vec<u32> = ["<|im_end|>", "<|endoftext|>"]
             .iter()
             .filter_map(|t| tokenizer.token_to_id(t))
             .collect();
+        if eos.is_empty() {
+            return Err(LocalModelError::Tokenizer(
+                "tokenizer has no end-of-turn token (`<|im_end|>`/`<|endoftext|>`)".to_owned(),
+            ));
+        }
 
         Ok(Self {
             model,
@@ -97,6 +104,10 @@ impl LocalGenerator {
         user: &str,
         cfg: &GenConfig,
     ) -> Result<String, LocalModelError> {
+        // Clear the KV cache up front so the instance is reliably reusable even
+        // if a previous `generate` call errored out mid-decode.
+        self.model.clear_kv_cache();
+
         let prompt = chatml(system, user);
         let encoding = self
             .tokenizer
@@ -132,8 +143,6 @@ impl LocalGenerator {
             let logits = self.model.forward(&input, index_pos)?.squeeze(0)?;
             next = sampler.sample(&logits)?;
         }
-        // Reset the attention cache so the instance is reusable.
-        self.model.clear_kv_cache();
 
         self.tokenizer
             .decode(&generated, true)
