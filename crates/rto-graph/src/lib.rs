@@ -51,9 +51,9 @@ pub use localmodel::{GenConfig, LocalEmbedder, LocalGenerator, LocalModelError};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
 pub use models::{
-    ModelFile, ModelKind, ModelSpec, ModelVariant, Platform, REGISTRY, ResourceTier,
-    ensure_model_dir, find as find_model, is_installed, model_dir, sha256_hex, store_root,
-    verify_sha256,
+    DownloadError, ModelFile, ModelKind, ModelSpec, ModelVariant, Platform, REGISTRY, ResourceTier,
+    download_verified, ensure_model_dir, find as find_model, is_installed, model_dir, sha256_hex,
+    store_root, verify_sha256,
 };
 pub use provenance::Provenance;
 pub use query::{
