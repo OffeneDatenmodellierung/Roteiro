@@ -874,12 +874,16 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ✅ Graphify shipped; lat.md + codegraph completed in Stage 11 |
 | v0.10.x | 10 | CI-canonical artifacts | 🚧 artifact `export`/`load` shipped (v0.0.10); **CI publish/fetch etc. → Stage 14** |
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ✅ durable+validated imports, lat.md importer, codegraph oracle (`compare_codegraph`) |
-| v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | 🚧 content ingestion ✅ (+ cache versioning); PDF/image/dedup/invalidation remaining (image OCR needs a decision) |
-| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ✅ ADR-0004; Tier 0 (`spec context`/`scaffold`) + Tier 1 (`spec draft`, Qwen2.5-0.5B GGUF via candle) |
+| v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ✅ prose + PDF + **image OCR/vision** ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) ingestion, semantic dedup (`roteiro duplicates`), dependency-aware context cache (`roteiro context`) |
+| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ✅ ADR-0004; Tier 0 (`spec context`/`scaffold`) + Tier 1 (`spec draft`) — now **Qwen3** via a GGUF-arch-dispatching candle loader |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
+| v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`, CLI>project>user>default |
+| v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ⛔ opt-in `serve`; our `/v1` + auto-registered graph tools |
+| v0.x | 20 | Inference-core direction (unify on llama.cpp) + coding/reasoning models | ⛔ staged candle→llama.cpp migration (ADR-0003 amendment); opt-in coding/reasoning registry entries |
+| — | — | Shipped alongside Stage 12: curated low/mid/high **model matrix** ([ADR-0003](adr/0003-pluggable-embedding-models.md)) + streaming, checksum-verified model downloads | ✅ `roteiro model list` by section→tier; `download_verified` (constant memory) |
 
 ---
 
