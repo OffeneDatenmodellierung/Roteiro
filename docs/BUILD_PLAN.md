@@ -465,12 +465,20 @@ first-class, sequenced stages. Order reflects the agreed priority:
 **complete Stage 9 → complete Stage 8 → the spec/blueprint authoring pillar →
 Stage 10 overflow (v1.0 hardening).**
 
-### Stage 11 — Importers: lat.md + codegraph  → **v0.11.x** ⛔ *next*
+### Stage 11 — Importers: lat.md + codegraph  → **v0.11.x** 🚧 *in progress*
 **Goal:** finish the migration path off the remaining two incumbents (completes
 the [Stage 9](#stage-9--importers--v090--graphify-delivered-latmd--codegraph-pending-samples) deferral).
-- `roteiro import --from lat` — lat.md authored markdown → **`authored`** nodes/
-  edges (wiki-links → `authored` references, like ADRs); a migration report.
-- `roteiro import --from codegraph` — codegraph is a bootstrap/**validation
+- **Durable + validated imports — delivered.** An `imports` table persists each
+  layer; `build_graph` re-applies it after every sync, validating both on import
+  and on sync so stale cross-references (to code that no longer exists) are
+  pruned, not retried. `Store::apply_import_layer` / `reapply_imports`.
+- **`roteiro import --from lat` — delivered.** lat.md `lat.md/` markdown →
+  **`authored`** nodes/edges: a `doc` node per file, a `lat_section` per heading
+  with `contains` structure, and `references` edges for `[[…]]` links (to lat
+  sections via a file-stem index, or to code symbols/files like ADR links). A
+  real `lat.md/` authored for this repo ships as the dogfood/sample. *Fast-follow:
+  `@lat:` reverse-annotations scanned from source (mirrors `@rto:`).*
+- `roteiro import --from codegraph` — **remaining.** codegraph is a bootstrap/**validation
   oracle** only: compare its symbols/edges against Roteiro's derived graph and
   report agreement/divergence; do **not** import its structural edges (Roteiro
   re-derives them).
@@ -701,7 +709,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.8.0 | 8 | Inference layer (`inferred` + confidence) | ✅ offline core + candle local-models (`roteiro infer`/`model`); **ingestion → Stage 12** |
 | v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | 🚧 Graphify shipped; **lat.md/codegraph → Stage 11** |
 | v0.10.x | 10 | CI-canonical artifacts | 🚧 artifact `export`/`load` shipped (v0.0.10); **CI publish/fetch etc. → Stage 14** |
-| v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ⛔ **next** — generate samples by running the tools on this repo |
+| v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | 🚧 durable+validated imports ✅, lat.md importer ✅; **codegraph oracle remaining** |
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ⛔ the "spec-store" front door from ADR-0001 |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
