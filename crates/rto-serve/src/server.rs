@@ -267,6 +267,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn null_content_is_accepted_as_empty() {
+        // OpenAI clients may send `content: null`; it must deserialize (as "")
+        // rather than 400 before normalisation.
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [
+                {"role": "system", "content": null},
+                {"role": "user", "content": "hey"},
+            ],
+        });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["choices"][0]["message"]["content"], "HEY");
+    }
+
+    #[tokio::test]
     async fn empty_messages_is_400() {
         let body = serde_json::json!({ "model": "echo", "messages": [] });
         let resp = test_app()

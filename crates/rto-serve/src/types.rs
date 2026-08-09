@@ -2,9 +2,19 @@
 //! reads or emits are modelled; unknown request fields are ignored so standard
 //! OpenAI clients work unchanged.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::engine::{ChatRequest, Message};
+
+/// Deserialize a string field that OpenAI clients may send as `null` (an
+/// assistant turn with a tool call carries `content: null`) — treat null and a
+/// missing field alike as the empty string.
+fn null_as_empty<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(de)?.unwrap_or_default())
+}
 
 /// Default token budget when a request omits `max_tokens`.
 const DEFAULT_MAX_TOKENS: u32 = 512;
@@ -33,8 +43,9 @@ pub struct ChatCompletionRequest {
 pub struct ChatMessageDto {
     /// `system` | `user` | `assistant`.
     pub role: String,
-    /// The turn's text. Defaults to empty (OpenAI allows null content).
-    #[serde(default)]
+    /// The turn's text. A missing or `null` value (OpenAI allows both) is read
+    /// as the empty string.
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub content: String,
 }
 

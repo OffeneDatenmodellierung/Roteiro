@@ -19,8 +19,6 @@ use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason, 
 
 /// Default context window when the caller does not set one.
 const DEFAULT_N_CTX: u32 = 4096;
-/// Batch capacity for the prompt/decoding steps.
-const BATCH_CAPACITY: usize = 512;
 
 /// One installed model this engine may serve: its public name and GGUF path.
 #[derive(Debug, Clone)]
@@ -125,8 +123,11 @@ impl Engine for LlamaEngine {
             .new_context(&self.backend, ctx_params)
             .map_err(|e| EngineError::Inference(format!("context: {e}")))?;
 
-        // Prime the batch with the prompt; only the last token needs logits.
-        let mut batch = LlamaBatch::new(BATCH_CAPACITY, 1);
+        // Prime the batch with the prompt; only the last token needs logits. The
+        // batch must hold the whole prompt at once, so size it to the prompt (the
+        // single-token decode steps below reuse the same batch). Whether the
+        // prompt fits the context window is enforced by the decode call.
+        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
         let last = tokens.len().saturating_sub(1);
         for (i, token) in tokens.iter().enumerate() {
             let pos = i32::try_from(i).unwrap_or(i32::MAX);
@@ -177,8 +178,10 @@ impl Engine for LlamaEngine {
                 .map_err(|e| EngineError::Inference(format!("decode: {e}")))?;
         }
 
+        // Return the exact detokenized text: trimming would desync `content`
+        // from `completion_tokens` and diverge from OpenAI behaviour.
         Ok(Completion {
-            content: content.trim().to_owned(),
+            content,
             prompt_tokens,
             completion_tokens,
             finish_reason,
