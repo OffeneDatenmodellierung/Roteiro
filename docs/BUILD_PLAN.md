@@ -526,7 +526,7 @@ just node names, and extend ingestion to docs/PDFs/images.
 - **Image scanning ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) — Tier A
   delivered; Tier B pending.** Two opt-in tiers, decided after a go/no-go de-risk
   spike. **Tier A — `image-ocr` (delivered):** pure-Rust OCR via `ocrs`/`rten` (no
-  C++ FFI) OCRs `.png`/`.jpg` blobs into `meta.content` beside the prose/PDF paths
+  C++ FFI) OCRs `.png`/`.jpg`/`.jpeg` blobs into `meta.content` beside the prose/PDF paths
   — panic-guarded, byte- and pixel-capped, models fetched with consent through the
   shared `models` registry (`roteiro model pull ocrs-text`, checksum-pinned). OCR
   output depends on which models are installed, so a runtime **env tag** (models

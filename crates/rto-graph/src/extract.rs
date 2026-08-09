@@ -194,8 +194,9 @@ fn image_content(path: &str, bytes: &[u8]) -> Option<String> {
         // Models not installed → OCR is inert (run `roteiro model pull ocrs-text`).
         return None;
     }
-    let owned = bytes.to_vec();
-    let text = std::panic::catch_unwind(move || run_ocr(&detection, &recognition, &owned))
+    // Borrow `bytes` into the guarded closure — no need to clone the (up to
+    // 20 MiB) image. `&[u8]`/`&Path` are unwind-safe, so no `AssertUnwindSafe`.
+    let text = std::panic::catch_unwind(|| run_ocr(&detection, &recognition, bytes))
         .ok()
         .flatten()?;
     (!text.trim().is_empty()).then_some(text)
@@ -259,15 +260,17 @@ pub(crate) fn ocr_env_tag() -> u64 {
     if !dir.join("text-detection.rten").exists() || !dir.join("text-recognition.rten").exists() {
         return 0;
     }
-    // Fold the pinned checksums so a model change (new registry sha) re-extracts.
+    // Fold the pinned checksums of the *host-selected* variant so a model change
+    // (new registry sha) re-extracts — but adding an unrelated platform variant
+    // does not perturb this host's tag.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    if let Some(spec) = crate::models::find("ocrs-text") {
-        for variant in spec.variants {
-            for file in variant.files {
-                for b in file.sha256.bytes() {
-                    hash ^= u64::from(b);
-                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-                }
+    if let Some(variant) = crate::models::find("ocrs-text")
+        .and_then(|spec| spec.variant_for(crate::models::Platform::host()))
+    {
+        for file in variant.files {
+            for b in file.sha256.bytes() {
+                hash ^= u64::from(b);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
     }

@@ -216,12 +216,13 @@ fn extract_committed(
     let env = crate::extract::ocr_env_tag();
 
     for blob in &blobs {
-        // Extraction is a pure function of (path, blob bytes), not blob id
-        // alone: node keys are path-scoped (e.g. `file:<path>`), so the same
-        // blob content at two different paths yields different facts. Key the
-        // cache by (path, oid) so duplicate-content files (e.g. empty files,
-        // which git dedupes to one oid) never collide, while the same path+oid
-        // in another branch/worktree still hits.
+        // Extraction is a function of (path, blob bytes) and — with `image-ocr`
+        // — the OCR model environment (`env`), never blob id alone: node keys are
+        // path-scoped (e.g. `file:<path>`), so the same blob content at two
+        // different paths yields different facts. Key the cache by (path, oid,
+        // env) so duplicate-content files (e.g. empty files, which git dedupes to
+        // one oid) never collide, the same path+oid in another branch/worktree
+        // still hits, and installing/upgrading OCR models re-extracts images.
         let key = cache_key(&blob.path, &blob.oid, env);
         let facts = if let Some(facts) = cache.get(&key)? {
             cached += 1;
@@ -298,11 +299,14 @@ fn resolve_calls(facts: &mut FactSet) {
 }
 
 /// Content-addressed cache key for a blob at a given path: the blob oid (kept
-/// as the leading, well-distributed shard) suffixed with a stable 64-bit hash
-/// of the path and the [`crate::extract::EXTRACT_VERSION`]. Sharing across
-/// branches/worktrees is preserved (same path+oid+version → same key) while
+/// as the leading, well-distributed shard) suffixed with a stable 64-bit hash of
+/// the path, the [`crate::extract::EXTRACT_VERSION`], and the extractor
+/// environment tag `env` (the installed-OCR-model identity; `0` when OCR is off
+/// or absent — see [`crate::extract::ocr_env_tag`]). Sharing across
+/// branches/worktrees is preserved (same path+oid+version+env → same key) while
 /// duplicate content at distinct paths stays distinct; bumping the extractor
-/// version retires every old entry so a re-extraction is forced.
+/// version *or* changing the OCR model environment retires old entries so a
+/// re-extraction is forced.
 fn cache_key(path: &str, oid: &str, env: u64) -> String {
     format!(
         "{oid}-{:016x}-v{}-e{env:016x}",
