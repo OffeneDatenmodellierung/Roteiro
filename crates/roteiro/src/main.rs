@@ -90,12 +90,12 @@ enum Command {
         /// Artifact file to load (`-` reads from stdin).
         file: String,
     },
-    /// One-shot import from an external knowledge graph (currently: graphify).
+    /// One-shot import from an external knowledge graph (graphify, lat).
     Import {
-        /// Source tool: graphify (lat | codegraph planned).
+        /// Source tool: graphify | lat (codegraph planned).
         #[arg(long)]
         from: String,
-        /// Path to the export: a Graphify output directory or a `graph.json`.
+        /// Path to the export: a Graphify dir/`graph.json`, or a `lat.md/` dir.
         path: String,
         /// Emit the migration report as JSON.
         #[arg(long)]
@@ -639,16 +639,120 @@ fn http_get(url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Import an external knowledge graph into the store as `inferred` facts.
+/// Import an external knowledge graph into the store.
 fn run_import(from: &str, path: &str, json: bool) -> anyhow::Result<()> {
     match from {
         "graphify" => run_import_graphify(path, json),
-        "lat" | "codegraph" => anyhow::bail!(
-            "importer `{from}` is not implemented yet (graphify is available; \
-             see docs/BUILD_PLAN.md Stage 9)"
+        "lat" => run_import_lat(path, json),
+        "codegraph" => anyhow::bail!(
+            "importer `codegraph` is not implemented yet (graphify and lat are \
+             available; see docs/BUILD_PLAN.md Stage 11)"
         ),
-        other => anyhow::bail!("unknown import source `{other}` (expected: graphify)"),
+        other => anyhow::bail!("unknown import source `{other}` (expected: graphify | lat)"),
     }
+}
+
+/// Import a lat.md directory: its markdown sections and `[[…]]` links become an
+/// `authored` layer over the code graph (a doc node per file, a section node per
+/// heading, `contains`/`references` edges). Durable and validated: links into
+/// code that no longer exists are pruned by [`rto_graph::Store::apply_import_layer`].
+fn run_import_lat(path: &str, json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("cannot import into a bare repository"))?;
+
+    let cwd = std::env::current_dir()?;
+    let dir = {
+        let p = std::path::Path::new(path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        }
+    };
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "lat directory not found: {} (expected a lat.md/ dir)",
+            dir.display()
+        );
+    }
+
+    // Collect every markdown file under the directory, keyed by its repo-relative
+    // path so node keys (`lat:<path>`) are stable and links resolve consistently.
+    let mut files = Vec::new();
+    collect_markdown(&dir, root, &mut files)?;
+    // Sort by path only; the content is never a tie-breaker (paths are unique).
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    if files.is_empty() {
+        anyhow::bail!("no .md files under {}", dir.display());
+    }
+
+    let imported = rto_spec::import_lat(&files);
+
+    // Build the derived + authored graph first so code links validate against it.
+    build_graph(&repo, &mut store, &cache)?;
+    let applied = store.apply_import_layer(rto_spec::LAT_REF, &imported.facts)?;
+
+    let r = &imported.report;
+    if json {
+        let mut report = serde_json::to_value(r)?;
+        report["edges_applied"] = serde_json::json!(applied.edges_applied);
+        report["edges_pruned_stale"] = serde_json::json!(applied.edges_pruned);
+        report["durable"] = serde_json::json!(true);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "imported lat.md: {} file(s), {} section(s), {} link(s) \
+             ({} to sections, {} to code); {} edge(s) applied, {} stale pruned — persisted (durable)",
+            r.files,
+            r.sections,
+            r.links_total,
+            r.links_to_sections,
+            r.links_to_code,
+            applied.edges_applied,
+            applied.edges_pruned,
+        );
+    }
+    Ok(())
+}
+
+/// Recursively collect `*.md` files under `dir`, pushing `(repo-relative path,
+/// contents)` pairs. Paths use `/` separators for stable, portable node keys.
+/// Errors if a file is outside the repository `root`, since a non-repo-relative
+/// key would be unstable and would import content from outside the repo.
+///
+/// Symlinks are **not** followed (checked via [`std::fs::DirEntry::file_type`],
+/// which does not traverse the link): a symlinked directory or file could
+/// otherwise pull in out-of-repo content behind a repo-relative-looking key.
+fn collect_markdown(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    out: &mut Vec<(String, String)>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_markdown(&path, root, out)?;
+        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+            let rel = path.strip_prefix(root).map_err(|_| {
+                anyhow::anyhow!(
+                    "lat file {} is outside the repository ({}); the lat.md \
+                     directory must live inside the repo",
+                    path.display(),
+                    root.display()
+                )
+            })?;
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            out.push((rel, std::fs::read_to_string(&path)?));
+        }
+    }
+    Ok(())
 }
 
 /// Import a Graphify export: keep doc/concept/inferred knowledge, drop its code

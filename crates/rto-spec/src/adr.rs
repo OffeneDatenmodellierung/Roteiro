@@ -203,11 +203,11 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
         }
         if let Some(heading) = line.strip_prefix("## ") {
             let title = heading.trim().to_owned();
-            let slug = slugify(&title);
+            let slug = crate::text::slugify(&title);
             current = Some(slug.clone());
             sections.push(Section { slug, title });
         }
-        for raw in scan_wiki_links(line) {
+        for raw in crate::text::scan_wiki_links(line) {
             let from = match &current {
                 Some(slug) => format!("adr:{id}#{slug}"),
                 None => format!("adr:{id}"),
@@ -276,44 +276,6 @@ fn strip_quotes(s: &str) -> &str {
     s
 }
 
-/// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`.
-fn slugify(s: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    out.trim_matches('-').to_owned()
-}
-
-/// Extract the inner text of every `[[…]]` on a line, ignoring any that fall
-/// inside an inline code span, so `` `[[path#Symbol]]` `` written as a
-/// documentation example is not treated as a real link.
-fn scan_wiki_links(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let stripped = crate::text::strip_code_spans(line);
-    let mut rest = stripped.as_str();
-    while let Some(open) = rest.find("[[") {
-        let after = &rest[open + 2..];
-        if let Some(close) = after.find("]]") {
-            let inner = after[..close].trim();
-            if !inner.is_empty() {
-                out.push(inner.to_owned());
-            }
-            rest = &after[close + 2..];
-        } else {
-            break;
-        }
-    }
-    out
-}
-
 /// Resolve a wiki-link's inner text to a graph node key: `path#Symbol` →
 /// `sym:<lang>:<path>#<Symbol>`, or `path` → `file:<path>`.
 fn resolve_target(raw: &str) -> Option<String> {
@@ -344,7 +306,8 @@ fn lang_for(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdrStatus, parse_adr, slugify};
+    use super::{AdrStatus, parse_adr};
+    use crate::text::slugify;
 
     #[test]
     fn parses_all_house_statuses() {
