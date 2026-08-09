@@ -275,6 +275,8 @@ fn page(title: &str, root: &str, nav: &str, body: &str) -> String {
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <link rel=\"icon\" href=\"{root}favicon.svg\" type=\"image/svg+xml\">\
+         <link rel=\"icon\" href=\"{root}favicon.ico\" sizes=\"16x16 32x32 48x48\">\
+         <link rel=\"apple-touch-icon\" href=\"{root}apple-touch-icon.png\">\
          <link rel=\"stylesheet\" href=\"{root}style.css\">\
          <title>{title}</title></head><body>\
          {nav}{body}\
@@ -441,6 +443,14 @@ mod tests {
         assert!(
             r.html
                 .contains("<link rel=\"stylesheet\" href=\"../style.css\">")
+        );
+        // Full favicon set (SVG + `.ico` fallback for browsers without SVG-favicon
+        // support, e.g. Safari) — root-relative from a sub-page.
+        assert!(r.html.contains("href=\"../favicon.svg\""));
+        assert!(r.html.contains("href=\"../favicon.ico\""));
+        assert!(
+            r.html
+                .contains("rel=\"apple-touch-icon\" href=\"../apple-touch-icon.png\"")
         );
         assert!(r.html.contains("← Roteiro home"));
         assert!(r.html.contains("← Back to roteiro.dev"));
