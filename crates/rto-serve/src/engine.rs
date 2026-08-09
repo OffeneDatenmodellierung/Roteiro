@@ -86,6 +86,10 @@ pub enum EngineError {
     /// The requested model is not one this engine serves.
     #[error("model `{0}` is not served (see GET /v1/models)")]
     UnknownModel(String),
+    /// The operation is not implemented by the active engine (e.g. embeddings on
+    /// a chat-only engine) — a 501, not an internal failure.
+    #[error("not supported: {0}")]
+    Unsupported(String),
     /// Loading a model or running inference failed.
     #[error("inference failed: {0}")]
     Inference(String),
@@ -136,7 +140,7 @@ pub trait Engine: Send + Sync + 'static {
     /// support).
     fn embed(&self, model: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, EngineError> {
         let _ = (model, inputs);
-        Err(EngineError::Inference(
+        Err(EngineError::Unsupported(
             "this engine does not support embeddings".to_owned(),
         ))
     }

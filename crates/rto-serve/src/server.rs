@@ -155,6 +155,11 @@ async fn chat_json(state: Shared, req: ChatRequest) -> Response {
             EngineError::UnknownModel(m).to_string(),
             "invalid_request_error",
         ),
+        Ok(Err(e @ EngineError::Unsupported(_))) => error(
+            StatusCode::NOT_IMPLEMENTED,
+            e.to_string(),
+            "not_implemented",
+        ),
         Ok(Err(e @ EngineError::Inference(_))) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             e.to_string(),
@@ -208,6 +213,11 @@ async fn embeddings(State(state): State<Shared>, Json(body): Json<EmbeddingReque
             StatusCode::NOT_FOUND,
             EngineError::UnknownModel(m).to_string(),
             "invalid_request_error",
+        ),
+        Ok(Err(e @ EngineError::Unsupported(_))) => error(
+            StatusCode::NOT_IMPLEMENTED,
+            e.to_string(),
+            "not_implemented",
         ),
         Ok(Err(e @ EngineError::Inference(_))) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -646,6 +656,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn embeddings_empty_input_is_400() {
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "model": "echo", "input": [] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
