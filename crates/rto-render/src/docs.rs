@@ -10,7 +10,7 @@
 
 use std::fmt::Write as _;
 
-use pulldown_cmark::{Options, Parser, html};
+use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
 
 /// A rendered ADR: its title (for the index) and the full themed HTML page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,16 +40,55 @@ pub fn markdown_to_html(md: &str) -> String {
 }
 
 /// Render `md` to HTML: resolve `[[wiki-links]]` (ADR links use `adr_prefix` as
-/// their href prefix), then run `CommonMark` with GitHub tables/strikethrough.
+/// their href prefix), rewrite ordinary `[…](*.md)` links to their rendered
+/// `.html` targets, then run `CommonMark` with GitHub tables/strikethrough.
 fn render_markdown(md: &str, adr_prefix: &str) -> String {
     let pre = rewrite_wiki_links(md, adr_prefix);
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(&pre, opts);
+    // Rewrite link destinations pointing at local Markdown files to the HTML the
+    // site actually serves (e.g. `adr/0001-….md` → `adr/0001-….html`).
+    let parser = Parser::new_ext(&pre, opts).map(|event| match event {
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: rewrite_doc_link(&dest_url).map_or(dest_url, CowStr::from),
+            title,
+            id,
+        }),
+        other => other,
+    });
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
+}
+
+/// Rewrite a relative link to a local Markdown file so it points at the rendered
+/// HTML page the site serves, preserving any `#fragment`. Returns `None` for
+/// external, protocol-relative, `mailto:`, pure-anchor, or non-`.md` links, which
+/// are left unchanged.
+fn rewrite_doc_link(dest: &str) -> Option<String> {
+    if dest.starts_with("http://")
+        || dest.starts_with("https://")
+        || dest.starts_with("//")
+        || dest.starts_with("mailto:")
+        || dest.starts_with('#')
+    {
+        return None;
+    }
+    let (path, frag) = dest
+        .split_once('#')
+        .map_or((dest, None), |(p, f)| (p, Some(f)));
+    let stem = path.strip_suffix(".md")?;
+    Some(match frag {
+        Some(frag) => format!("{stem}.html#{frag}"),
+        None => format!("{stem}.html"),
+    })
 }
 
 /// Render one ADR markdown document to a themed HTML page. Leading YAML
@@ -350,6 +389,24 @@ mod tests {
             stray.contains("<a href=\"0001-x.html\">ADR-0001</a>"),
             "unterminated backtick must not shield: {stray}"
         );
+    }
+
+    #[test]
+    fn markdown_md_links_are_rewritten_to_html() {
+        // Ordinary `[text](path.md)` links must point at the rendered `.html`,
+        // preserving fragments; external and anchor links are left alone.
+        let html = markdown_to_html(
+            "See [ADR-1](adr/0001-x.md) and [§2](adr/0001-x.md#context) and \
+             [home](https://x.dev) and [top](#intro).\n",
+        );
+        assert!(html.contains("href=\"adr/0001-x.html\""), "{html}");
+        assert!(html.contains("href=\"adr/0001-x.html#context\""), "{html}");
+        assert!(
+            html.contains("href=\"https://x.dev\""),
+            "external unchanged: {html}"
+        );
+        assert!(html.contains("href=\"#intro\""), "anchor unchanged: {html}");
+        assert!(!html.contains(".md\""), "no raw .md hrefs remain: {html}");
     }
 
     #[test]
