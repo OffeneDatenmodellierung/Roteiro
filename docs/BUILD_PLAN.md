@@ -505,7 +505,7 @@ the [Stage 9](#stage-9--importers--v090--graphify-delivered-latmd--codegraph-pen
   facts **survive a subsequent code-changing sync**; an end-to-end CLI test per
   source.
 
-### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; text + PDF ingestion delivered)*
+### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; text + PDF ingestion + semantic dedup delivered)*
 **Goal:** make `inferred` edges meaningful by embedding **real content**, not
 just node names, and extend ingestion to docs/PDFs/images.
 - **Text-content ingestion (first, zero new deps) — delivered.** Extraction now
@@ -528,8 +528,16 @@ just node names, and extend ingestion to docs/PDFs/images.
   pure-Rust stance) or a candle vision model (heavy, weights required). De-risk
   (MSRV + `deny`) and record an ADR before committing; keep behind its own
   feature. **This is the one genuinely uncertain item in the backlog.**
-- **Semantic duplication check:** join the structural dedup from Stage 4 using
-  the embedding similarity already built.
+- **Semantic duplication check — delivered.** `roteiro duplicates` (alias `dup`)
+  unifies two signals over content-bearing nodes: **exact** structural dupes (two
+  `file` nodes sharing a git blob — byte-identical content at different paths) and
+  **semantic** near-dupes (nodes with captured `meta.content` whose embeddings
+  are near-identical, default ≥ 0.9). A symbol's `blob_hash` records only *which*
+  file it came from, so exact matching is restricted to `file` nodes; pure
+  identifier similarity stays the province of `infer`'s `related` edges. The
+  report is deterministic (exact-first, then similarity, ties by key), bounded by
+  `--limit`, and JSON-emitting under the shared query schema. Built with
+  `--features inference` (offline hashing embedder).
 - **Dependency-aware invalidation (from the codegraph comparison):** once
   per-node embeddings/AI-context are *cached*, a changed symbol must invalidate
   the cached context of its **dependents** (callers, referencing docs) — the

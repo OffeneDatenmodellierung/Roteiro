@@ -19,6 +19,8 @@
 
 use std::collections::HashSet;
 
+use serde::Serialize;
+
 use crate::store::{Store, StoreError};
 use crate::{Edge, EdgeKind, Node};
 
@@ -240,9 +242,171 @@ pub fn infer_edges_with(
     Ok(edges)
 }
 
+/// Tuning for [`duplicates`].
+#[derive(Debug, Clone, Copy)]
+pub struct DuplicateConfig {
+    /// Minimum cosine similarity for a *semantic* near-duplicate pair
+    /// (`0.0..=1.0`). Exact (identical-content) pairs are reported regardless of
+    /// this threshold.
+    pub min_similarity: f64,
+    /// Maximum pairs to return (the highest-ranked are kept).
+    pub limit: usize,
+}
+
+impl Default for DuplicateConfig {
+    fn default() -> Self {
+        // Near-duplicate content clusters high; 0.9 keeps precision high so the
+        // report stays actionable rather than noisy.
+        Self {
+            min_similarity: 0.9,
+            limit: 50,
+        }
+    }
+}
+
+/// One duplication finding: a pair of nodes that are either identical in content
+/// (`exact`) or highly similar. `a` and `b` are ordered (`a < b`) so each
+/// unordered pair is reported exactly once.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DuplicatePair {
+    /// Natural key of the first node (lexicographically smaller).
+    pub a: String,
+    /// Natural key of the second node.
+    pub b: String,
+    /// Cosine similarity of the two nodes' embeddings (`0.0..=1.0`).
+    pub similarity: f64,
+    /// Whether the two nodes share identical content — the same git blob hash —
+    /// a *structural* duplicate, independent of the embedding.
+    pub exact: bool,
+}
+
+/// A duplication report over the content-bearing nodes of the graph.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DuplicateReport {
+    /// Stable schema tag (shared with the query surface, [`crate::SCHEMA`]).
+    pub schema: &'static str,
+    /// Total duplicate pairs found, before truncation to the limit.
+    pub total: usize,
+    /// The pairs, ranked exact-first then by descending similarity (ties by key),
+    /// truncated to [`DuplicateConfig::limit`].
+    pub pairs: Vec<DuplicatePair>,
+}
+
+/// Report likely-duplicate content over the graph using the default hashing
+/// embedding: nodes with identical content (the same git blob hash — the
+/// *structural* dedup) and nodes whose embeddings are near-identical (the
+/// *semantic* dedup), unified into one ranked report.
+///
+/// # Errors
+/// Returns [`StoreError`] if the store cannot be read.
+pub fn duplicates(store: &Store, config: DuplicateConfig) -> Result<DuplicateReport, StoreError> {
+    duplicates_with(store, config, &HashEmbedder)
+}
+
+/// Like [`duplicates`], but using a caller-supplied [`Embedder`].
+///
+/// Two complementary signals are unified:
+/// - **Exact (structural):** two `file` nodes sharing a git blob hash — byte-for-
+///   byte identical file content at different paths. A symbol's `blob_hash` only
+///   records *which* blob it came from (many symbols share one file's blob), so
+///   only `file`-kind nodes qualify for exact matching.
+/// - **Semantic:** two nodes with captured `meta.content` (a doc body, PDF text,
+///   or a doc-comment) whose embeddings are near-identical. Nodes without real
+///   content are excluded — pure identifier similarity is already the province of
+///   [`infer_edges`]'s `related` suggestions; duplication is a stronger claim.
+///
+/// # Errors
+/// Returns [`StoreError`] if the store cannot be read.
+pub fn duplicates_with(
+    store: &Store,
+    config: DuplicateConfig,
+    embedder: &dyn Embedder,
+) -> Result<DuplicateReport, StoreError> {
+    /// A node in scope for duplication: its key, whether it is a `file` (so its
+    /// blob hash denotes whole-content identity), its blob hash, whether it has
+    /// real captured content, and its embedding.
+    struct Cand {
+        key: String,
+        is_file: bool,
+        blob: Option<String>,
+        has_content: bool,
+        vec: Vec<f32>,
+    }
+
+    let mut cands: Vec<Cand> = Vec::new();
+    for key in store.all_keys()? {
+        let Some(node) = store.get_node(&key)? else {
+            continue;
+        };
+        let is_file = node.kind == crate::NodeKind::File;
+        let has_content = node
+            .meta
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        // A node is in scope only if it can duplicate by content: an identical
+        // file (exact) or a node carrying real embeddable content (semantic).
+        let file_with_blob = is_file && node.blob_hash.is_some();
+        if !file_with_blob && !has_content {
+            continue;
+        }
+        cands.push(Cand {
+            key: node.key.clone(),
+            is_file,
+            blob: node.blob_hash.clone(),
+            has_content,
+            vec: embedder.embed(&node_text(&node)),
+        });
+    }
+    // Sort by key so the i<j sweep yields canonical `a < b` pairs and ties are
+    // broken deterministically.
+    cands.sort_by(|x, y| x.key.cmp(&y.key));
+
+    let mut pairs = Vec::new();
+    for (i, a) in cands.iter().enumerate() {
+        for b in cands.iter().skip(i + 1) {
+            // Exact: two files that are the same blob (whole-content identity).
+            let exact = a.is_file
+                && b.is_file
+                && matches!((&a.blob, &b.blob), (Some(x), Some(y)) if x == y);
+            // Semantic: both carry real content and embed near-identically.
+            let sim = similarity(&a.vec, &b.vec);
+            let semantic = a.has_content && b.has_content && sim >= config.min_similarity;
+            if exact || semantic {
+                pairs.push(DuplicatePair {
+                    a: a.key.clone(),
+                    b: b.key.clone(),
+                    similarity: sim,
+                    exact,
+                });
+            }
+        }
+    }
+    let total = pairs.len();
+    // Exact duplicates first, then highest similarity, then key order.
+    pairs.sort_by(|p, q| {
+        q.exact
+            .cmp(&p.exact)
+            .then_with(|| {
+                q.similarity
+                    .partial_cmp(&p.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| (&p.a, &p.b).cmp(&(&q.a, &q.b)))
+    });
+    pairs.truncate(config.limit);
+    Ok(DuplicateReport {
+        schema: crate::query::SCHEMA,
+        total,
+        pairs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InferenceConfig, embed, infer_edges, node_text, similarity};
+    use super::{
+        DuplicateConfig, InferenceConfig, duplicates, embed, infer_edges, node_text, similarity,
+    };
     use crate::{EdgeKind, FactSet, Node, NodeKind, Provenance, Store};
 
     #[test]
@@ -434,6 +598,75 @@ mod tests {
         assert!(
             strict <= loose,
             "stricter re-run must not accumulate: {strict} vs {loose}"
+        );
+    }
+
+    #[test]
+    fn duplicates_reports_exact_and_semantic_pairs() {
+        let mut store = Store::open_in_memory().expect("store");
+        // Two files with identical content share a git blob oid → exact dupes.
+        let mut fa = Node::new("file:a.rs", NodeKind::File, "a.rs");
+        fa.blob_hash = Some("OID1".to_owned());
+        let mut fb = Node::new("file:copy/a.rs", NodeKind::File, "a.rs");
+        fb.blob_hash = Some("OID1".to_owned());
+        // Two docs with (embedding-)identical bodies but no shared blob → a
+        // semantic near-duplicate, not an exact one.
+        let body = "token validation and oauth login flow session refresh handling";
+        let mut da = Node::new("file:docs/x.md", NodeKind::Doc, "x.md");
+        da.path = Some("docs/x.md".to_owned());
+        da.meta = serde_json::json!({ "content": body });
+        let mut db = Node::new("file:docs/y.md", NodeKind::Doc, "y.md");
+        db.path = Some("docs/y.md".to_owned());
+        db.meta = serde_json::json!({ "content": body });
+        // An unrelated content node must never be paired.
+        let mut solo = Node::new("file:docs/z.md", NodeKind::Doc, "z.md");
+        solo.path = Some("docs/z.md".to_owned());
+        solo.meta = serde_json::json!({ "content": "quokkas graze on rottnest island" });
+
+        store
+            .apply_factset(
+                &FactSet::new()
+                    .with_node(fa)
+                    .with_node(fb)
+                    .with_node(da)
+                    .with_node(db)
+                    .with_node(solo),
+            )
+            .expect("apply");
+
+        let report = duplicates(&store, DuplicateConfig::default()).expect("dup");
+        assert_eq!(report.total, report.pairs.len(), "no truncation expected");
+
+        // Canonical ordering: every pair has a < b, reported once.
+        for p in &report.pairs {
+            assert!(p.a < p.b, "pair not canonically ordered: {p:?}");
+            assert!((0.0..=1.0).contains(&p.similarity));
+        }
+        // The exact (same-blob) file pair is present, flagged exact, and ranks
+        // first.
+        let exacts: Vec<_> = report.pairs.iter().filter(|p| p.exact).collect();
+        assert_eq!(exacts.len(), 1, "one exact pair");
+        assert_eq!(
+            (exacts[0].a.as_str(), exacts[0].b.as_str()),
+            ("file:a.rs", "file:copy/a.rs")
+        );
+        assert!(report.pairs[0].exact, "exact pairs sort first");
+        // The semantic doc pair is present and *not* flagged exact.
+        assert!(
+            report.pairs.iter().any(|p| p.a == "file:docs/x.md"
+                && p.b == "file:docs/y.md"
+                && !p.exact
+                && p.similarity >= 0.9),
+            "semantic doc duplicate missing: {:?}",
+            report.pairs
+        );
+        // The unrelated node is never paired.
+        assert!(
+            report
+                .pairs
+                .iter()
+                .all(|p| p.a != "file:docs/z.md" && p.b != "file:docs/z.md"),
+            "unrelated node must not be a duplicate",
         );
     }
 
