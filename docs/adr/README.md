@@ -7,3 +7,5 @@
 | [0003](0003-pluggable-embedding-models.md) | Pluggable embedding models — tiny static default, opt-in local models | Accepted |
 | [0004](0004-spec-blueprint-authoring-pillar.md) | Spec/Blueprint authoring pillar — tiered, graph-grounded, check-gated | Accepted |
 | [0005](0005-image-ocr-vision-ingestion.md) | Image ingestion — tiered OCR (pure-Rust) + optional vision understanding | Accepted |
+| [0006](0006-local-model-serving.md) | Local model serving — reuse pulled models over an OpenAI-compatible endpoint | Accepted |
+| [0007](0007-configuration-file.md) | Configuration file — a single project-level TOML with layered precedence | Accepted |
