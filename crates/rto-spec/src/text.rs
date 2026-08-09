@@ -1,5 +1,15 @@
 //! Small Markdown text helpers shared by the ADR and annotation scanners.
 
+/// Best-effort language token from a file extension (mirrors the extractor).
+/// Shared by the ADR and lat.md symbol-key builders.
+pub(crate) fn lang_for(path: &str) -> &str {
+    match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("rs") => "rust",
+        Some(other) => other,
+        None => "text",
+    }
+}
+
 /// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`,
 /// trimmed of leading/trailing `-`. Shared by the ADR and lat.md section keys.
 #[must_use]
