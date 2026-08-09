@@ -15,7 +15,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
-use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason, ModelInfo};
+use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo};
 
 /// Default context window when the caller does not set one.
 const DEFAULT_N_CTX: u32 = 4096;
@@ -76,7 +76,11 @@ impl Engine for LlamaEngine {
             .collect()
     }
 
-    fn chat(&self, req: &ChatRequest) -> Result<Completion, EngineError> {
+    fn chat_stream(
+        &self,
+        req: &ChatRequest,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<CompletionStats, EngineError> {
         let path = self
             .path_for(&req.model)
             .ok_or_else(|| EngineError::UnknownModel(req.model.clone()))?;
@@ -148,7 +152,6 @@ impl Engine for LlamaEngine {
             ])
         };
 
-        let mut content = String::new();
         let mut completion_tokens = 0u32;
         let mut finish_reason = FinishReason::Length;
         let mut n_cur = i32::try_from(tokens.len()).unwrap_or(i32::MAX);
@@ -163,10 +166,12 @@ impl Engine for LlamaEngine {
                 finish_reason = FinishReason::Stop;
                 break;
             }
+            // Emit the exact detokenized piece: no trimming, so the streamed text
+            // and `completion_tokens` stay consistent and match OpenAI behaviour.
             let piece = model
                 .token_to_piece(token, &mut decoder, false, None)
                 .map_err(|e| EngineError::Inference(format!("detokenize: {e}")))?;
-            content.push_str(&piece);
+            on_token(&piece);
 
             batch.clear();
             batch
@@ -178,10 +183,7 @@ impl Engine for LlamaEngine {
                 .map_err(|e| EngineError::Inference(format!("decode: {e}")))?;
         }
 
-        // Return the exact detokenized text: trimming would desync `content`
-        // from `completion_tokens` and diverge from OpenAI behaviour.
-        Ok(Completion {
-            content,
+        Ok(CompletionStats {
             prompt_tokens,
             completion_tokens,
             finish_reason,

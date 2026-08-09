@@ -792,9 +792,15 @@ and make the served model **code-aware** by handing it Roteiro's graph tools.
   installed generative models from the registry, warns on a non-loopback bind,
   and serves them — verified end-to-end against a local `qwen3-0.6b` on Metal.
   CI installs the C/C++ toolchain so `--all-features` builds the feature.
-- **Remaining sub-PRs:** 19b streaming + **auto-register the graph tools**
-  (function-calling → MCP tools → graph); 19c `/v1/embeddings`. The tool
-  auto-registration is the differentiator (a graph-grounded served model).
+- **Delivered — 19b (streaming):** `stream: true` returns Server-Sent
+  `chat.completion.chunk` events (role chunk → content deltas → finish → `data:
+  [DONE]`). The `Engine` trait is now streaming-first (`chat_stream` with a token
+  callback; `chat` accumulates); the server bridges the blocking decode loop to
+  SSE over a channel. Verified live against `qwen3-0.6b`.
+- **Remaining sub-PRs:** **auto-register the graph tools** (function-calling →
+  MCP tools → graph) — the differentiator; then `/v1/embeddings`. llama-cpp-2 has
+  no tool scaffolding, so tools are hand-rolled (Qwen tool-schema injection +
+  `<tool_call>` parsing + a bounded server-side execute-and-loop).
 - **Engine: llama.cpp** (`llama-cpp-2`), behind an opt-in `serve` feature (pulls a
   C/C++ toolchain: cmake + clang + libclang). Chosen after a head-to-head de-risk
   (candle vs mistral.rs vs llama.cpp on MSRV 1.94 + strict `cargo deny`): it is the

@@ -11,6 +11,19 @@ pub struct ModelInfo {
     pub id: String,
 }
 
+/// Token accounting and stop reason for a completion (the non-text result of
+/// generation — the text is either accumulated into a [`Completion`] or streamed
+/// token-by-token).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionStats {
+    /// Tokens in the (templated) prompt.
+    pub prompt_tokens: u32,
+    /// Tokens generated in the completion.
+    pub completion_tokens: u32,
+    /// Why generation stopped: `stop` (natural end) or `length` (hit the cap).
+    pub finish_reason: FinishReason,
+}
+
 /// The outcome of a chat completion: the assistant text plus token accounting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Completion {
@@ -79,16 +92,38 @@ pub enum EngineError {
 }
 
 /// An inference backend the `/v1` server can drive. Implementors serialise their
-/// own concurrency as needed; the server may call [`Engine::chat`] from multiple
-/// request tasks.
+/// own concurrency as needed; the server may call these from multiple request
+/// tasks.
 pub trait Engine: Send + Sync + 'static {
     /// The models this engine serves (installed only; never downloads).
     fn models(&self) -> Vec<ModelInfo>;
 
-    /// Run a chat completion, blocking until the full response is generated.
+    /// Generate a completion, invoking `on_token` with each decoded text piece
+    /// as it is produced (for streaming), and returning the final token
+    /// accounting. Blocks until generation finishes.
     ///
     /// # Errors
     /// [`EngineError::UnknownModel`] if `req.model` is not served;
     /// [`EngineError::Inference`] if model load or decoding fails.
-    fn chat(&self, req: &ChatRequest) -> Result<Completion, EngineError>;
+    fn chat_stream(
+        &self,
+        req: &ChatRequest,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<CompletionStats, EngineError>;
+
+    /// Run a chat completion to completion, accumulating the streamed text into a
+    /// single [`Completion`]. The non-streaming path is this default.
+    ///
+    /// # Errors
+    /// As [`Engine::chat_stream`].
+    fn chat(&self, req: &ChatRequest) -> Result<Completion, EngineError> {
+        let mut content = String::new();
+        let stats = self.chat_stream(req, &mut |piece| content.push_str(piece))?;
+        Ok(Completion {
+            content,
+            prompt_tokens: stats.prompt_tokens,
+            completion_tokens: stats.completion_tokens,
+            finish_reason: stats.finish_reason,
+        })
+    }
 }
