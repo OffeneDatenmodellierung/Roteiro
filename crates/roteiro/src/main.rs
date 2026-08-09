@@ -1125,12 +1125,18 @@ fn run_spec_draft(
     out: Option<&str>,
 ) -> anyhow::Result<()> {
     use rto_graph::{
-        GenConfig, LocalGenerator, ModelKind, Platform, REGISTRY, is_installed, model_dir,
+        GenConfig, LocalGenerator, ModelKind, Platform, REGISTRY, ResourceTier, is_installed,
+        model_dir,
     };
 
     let (scaffold, label, ctx) = build_scaffold(topic, title, kind)?;
 
-    let Some(spec) = REGISTRY.iter().find(|m| m.kind == ModelKind::Generative) else {
+    // Default to the low-tier generative pick (runs anywhere); a bigger tier is
+    // opt-in via `roteiro model pull`.
+    let Some(spec) = REGISTRY
+        .iter()
+        .find(|m| m.kind == ModelKind::Generative && m.tier == ResourceTier::Low)
+    else {
         anyhow::bail!("no generative model in the registry");
     };
     let installed = spec
@@ -1179,8 +1185,8 @@ fn run_spec_draft(
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`spec draft` needs a local instruct model: build with \
-         `--features inference-local-models`, then `roteiro model pull \
-         qwen2.5-0.5b-instruct`. (`spec scaffold` works with no model.)"
+         `--features inference-local-models`, then `roteiro model pull qwen3-0.6b`. \
+         (`spec scaffold` works with no model.)"
     )
 }
 

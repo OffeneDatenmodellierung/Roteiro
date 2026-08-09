@@ -1,19 +1,45 @@
 //! Offline text generation with a small quantized (GGUF) instruct model —
 //! ADR-0004 Tier 1, extending ADR-0003's `inference-local-models` tier from
 //! embedding to *generation*. CPU-only, pure-Rust (candle), no network at run
-//! time. The model is a Qwen2-family GGUF (`ChatML`), loaded once and reused.
+//! time. The model is a Qwen2- or Qwen3-family GGUF (`ChatML`), dispatched on the
+//! GGUF's `general.architecture`, loaded once and reused.
 //!
 //! Only built with `--features inference-local-models`.
 
+use std::io::Seek;
 use std::path::Path;
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::quantized_qwen2::ModelWeights;
+use candle_transformers::models::{quantized_qwen2, quantized_qwen3};
 use tokenizers::Tokenizer;
 
 use super::LocalModelError;
+
+/// A loaded quantized instruct model — Qwen2 or Qwen3, selected by the GGUF's
+/// `general.architecture`. Both candle model types share the same
+/// `from_gguf`/`forward`/`clear_kv_cache` shape, so this enum is a thin dispatch.
+enum Weights {
+    Qwen2(quantized_qwen2::ModelWeights),
+    Qwen3(quantized_qwen3::ModelWeights),
+}
+
+impl Weights {
+    fn forward(&mut self, x: &Tensor, offset: usize) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Qwen2(m) => m.forward(x, offset),
+            Self::Qwen3(m) => m.forward(x, offset),
+        }
+    }
+
+    fn clear_kv_cache(&mut self) {
+        match self {
+            Self::Qwen2(m) => m.clear_kv_cache(),
+            Self::Qwen3(m) => m.clear_kv_cache(),
+        }
+    }
+}
 
 /// Local filenames the generator expects under a model directory.
 const GGUF_FILE: &str = "model.gguf";
@@ -46,20 +72,24 @@ impl Default for GenConfig {
 
 /// A loaded quantized instruct model, reusable across many `generate` calls.
 pub struct LocalGenerator {
-    model: ModelWeights,
+    model: Weights,
     tokenizer: Tokenizer,
     device: Device,
     /// End-of-turn / EOS token ids resolved from the tokenizer.
     eos: Vec<u32>,
+    /// Whether to suppress Qwen3's `<think>` reasoning block (Qwen3 only): for
+    /// drafting we want the answer, not the chain-of-thought.
+    suppress_think: bool,
 }
 
 impl LocalGenerator {
-    /// Load a Qwen2-family GGUF model and its tokenizer from `model_dir`
-    /// (expects `model.gguf` + `tokenizer.json`).
+    /// Load a Qwen2- or Qwen3-family GGUF model and its tokenizer from
+    /// `model_dir` (expects `model.gguf` + `tokenizer.json`). The architecture is
+    /// read from the GGUF `general.architecture` metadata and dispatched.
     ///
     /// # Errors
-    /// Returns [`LocalModelError`] if a file is missing/unreadable, the GGUF is
-    /// not a Qwen2 model, or the tokenizer fails to load.
+    /// Returns [`LocalModelError`] if a file is missing/unreadable, the GGUF
+    /// architecture is unsupported, or the tokenizer fails to load.
     pub fn load(model_dir: &Path) -> Result<Self, LocalModelError> {
         let device = Device::Cpu;
         let tokenizer = Tokenizer::from_file(model_dir.join(TOKENIZER_FILE))
@@ -67,7 +97,30 @@ impl LocalGenerator {
 
         let mut file = std::fs::File::open(model_dir.join(GGUF_FILE))?;
         let content = gguf_file::Content::read(&mut file)?;
-        let model = ModelWeights::from_gguf(content, &mut file, &device)?;
+        // Read the architecture before `content` is moved into `from_gguf` below
+        // (the owned copy is needed because that move ends the metadata borrow);
+        // default to qwen2 for older GGUFs that omit the key.
+        let arch = match content
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok())
+        {
+            Some(a) => a.clone(),
+            None => "qwen2".to_owned(),
+        };
+        // `Content::read` left the cursor past the header; `from_gguf` seeks to
+        // absolute tensor offsets, so rewind to the file start.
+        file.rewind()?;
+        let model = match arch.as_str() {
+            "qwen2" => Weights::Qwen2(quantized_qwen2::ModelWeights::from_gguf(
+                content, &mut file, &device,
+            )?),
+            "qwen3" => Weights::Qwen3(quantized_qwen3::ModelWeights::from_gguf(
+                content, &mut file, &device,
+            )?),
+            other => return Err(LocalModelError::UnsupportedArch(other.to_owned())),
+        };
+        let suppress_think = arch == "qwen3";
 
         // ChatML end-of-turn `<|im_end|>` and the base `<|endoftext|>`; resolved
         // from the tokenizer so a differing vocab still stops correctly. A model
@@ -88,6 +141,7 @@ impl LocalGenerator {
             tokenizer,
             device,
             eos,
+            suppress_think,
         })
     }
 
@@ -108,7 +162,7 @@ impl LocalGenerator {
         // if a previous `generate` call errored out mid-decode.
         self.model.clear_kv_cache();
 
-        let prompt = chatml(system, user);
+        let prompt = chatml(system, user, self.suppress_think);
         let encoding = self
             .tokenizer
             .encode(prompt, true)
@@ -151,13 +205,23 @@ impl LocalGenerator {
     }
 }
 
-/// Wrap a user message (and optional system message) in the Qwen `ChatML` template.
-fn chatml(system: Option<&str>, user: &str) -> String {
+/// Wrap a user message (and optional system message) in the Qwen `ChatML`
+/// template. When `suppress_think` is set (Qwen3), an empty `<think></think>`
+/// block is opened and closed after the assistant turn so the model skips its
+/// reasoning trace and emits the answer directly — the right default for
+/// drafting. Qwen2 ignores it (it has no thinking mode), so it is only added for
+/// Qwen3.
+fn chatml(system: Option<&str>, user: &str, suppress_think: bool) -> String {
     let system = system.unwrap_or("You are a precise technical writer.");
+    let think = if suppress_think {
+        "<think>\n\n</think>\n\n"
+    } else {
+        ""
+    };
     format!(
         "<|im_start|>system\n{system}<|im_end|>\n\
          <|im_start|>user\n{user}<|im_end|>\n\
-         <|im_start|>assistant\n"
+         <|im_start|>assistant\n{think}"
     )
 }
 
@@ -167,9 +231,20 @@ mod tests {
 
     #[test]
     fn chatml_wraps_system_and_user() {
-        let p = chatml(Some("Be terse."), "Hello");
+        let p = chatml(Some("Be terse."), "Hello", false);
         assert!(p.starts_with("<|im_start|>system\nBe terse.<|im_end|>"));
         assert!(p.contains("<|im_start|>user\nHello<|im_end|>"));
         assert!(p.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn chatml_suppresses_qwen3_thinking() {
+        // Qwen3: an empty <think></think> block follows the assistant turn so the
+        // model answers directly instead of emitting a reasoning trace.
+        let p = chatml(None, "Hi", true);
+        assert!(p.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        // Qwen2: no thinking block.
+        let q = chatml(None, "Hi", false);
+        assert!(q.ends_with("<|im_start|>assistant\n"));
     }
 }
