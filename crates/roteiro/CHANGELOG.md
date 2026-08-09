@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.12...roteiro-v0.0.13) - 2026-08-09
+
+### Added
+
+- *(serve)* vision serving — multimodal /v1/chat/completions via llama.cpp mtmd (ADR-0006)
+- *(serve)* /v1/embeddings from GGUF via llama.cpp (ADR-0006, completes Stage 19)
+- *(serve)* auto-register graph tools — code-aware serving (ADR-0006, Stage 19b)
+- *(serve)* wire `roteiro serve --models` + [serve] config (ADR-0006, Stage 19a)
+- *(config)* wire [ingest] content toggles into sync (ADR-0007)
+- *(config)* layered roteiro.toml with CLI>project>user>default precedence (Stage 18)
+- *(generator)* Qwen3 support + curated generative tiers (low/mid/high)
+- *(models)* opinionated model matrix — resource tiers per section
+- *(extract)* Tier A image OCR via ocrs/rten (Stage 12, ADR-0005)
+- *(context)* dependency-aware per-node context cache (Stage 12)
+- *(infer)* semantic + structural duplicate detection (Stage 12)
+- *(extract)* ingest PDF text into meta.content (Stage 12, feature-gated)
+- *(spec)* warn on debug builds in `spec draft` (candle is slow unoptimized)
+- *(spec)* `roteiro spec draft` — Tier 1 offline local-model drafting (completes Stage 13)
+- *(spec)* blueprint scaffold kind — `spec scaffold --kind blueprint`
+- *(spec)* `roteiro spec scaffold` — grounded, check-clean ADR skeletons (Stage 13, Tier 0)
+- *(spec)* `roteiro spec context` — graph-grounded authoring context (Stage 13, Tier 0)
+
+### Fixed
+
+- *(serve)* address PR #86 review — tool loop robustness
+- *(config)* address PR #79 review — repo-root discovery, provenance help, missing-feature warn
+- *(spec)* PR #56 review — validate `--kind` before the graph build
+
+### Other
+
+- Merge branch 'main' into feat/streaming-downloads
+- *(models)* stream model downloads to disk instead of buffering in memory
+- *(models)* decouple the model registry/pull from the candle feature
+
 ## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.11...roteiro-v0.0.12) - 2026-08-09
 
 ### Added
