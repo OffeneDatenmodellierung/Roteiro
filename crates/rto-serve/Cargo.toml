@@ -14,18 +14,14 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# The llama.cpp inference core (the `Engine` trait + `LlamaEngine`). The `llama`
+# feature turns on the real C++ engine (ADR-0006).
+rto-llama = { workspace = true }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 tokio-stream = "0.1"
 # Decode `image_url` data-URIs (base64) in multimodal chat requests.
 base64 = "0.22"
-# The llama.cpp inference engine (ADR-0006). Opt-in: pulls a C/C++ toolchain
-# (cmake, clang, libclang) to build vendored llama.cpp. The crate's pure-Rust
-# core (types, `Engine` trait, the `/v1` server) builds and tests without it.
-llama-cpp-2 = { version = "0.1.154", optional = true }
-# Incremental UTF-8 decode for `token_to_piece` (multi-byte tokens split across
-# decode steps). Already in the tree via `llama-cpp-2`; only pulled with `llama`.
-encoding_rs = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
@@ -35,7 +31,7 @@ http-body-util = "0.1"
 [features]
 # The real llama.cpp-backed engine. Off by default so the default build stays
 # pure-Rust; `roteiro`'s `serve` feature turns it on.
-llama = ["dep:llama-cpp-2", "llama-cpp-2/mtmd", "dep:encoding_rs"]
+llama = ["rto-llama/llama"]
 
 [lints]
 workspace = true

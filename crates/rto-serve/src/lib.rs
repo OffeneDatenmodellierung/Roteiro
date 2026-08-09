@@ -8,15 +8,18 @@
 //! real llama.cpp-backed [`llama::LlamaEngine`] lives behind the `llama` feature.
 //! Graph-tool auto-registration and `/v1/embeddings` land in later PRs.
 
-pub mod engine;
 pub mod server;
 pub mod tools;
 pub mod types;
 
+// The inference core now lives in `rto-llama`; re-export it so `rto_serve::engine`
+// / `rto_serve::llama` (and the engine types) keep resolving for this crate's
+// modules and existing callers.
+pub use rto_llama::engine;
 #[cfg(feature = "llama")]
-pub mod llama;
+pub use rto_llama::llama;
 
-pub use engine::{
+pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
 pub use server::{app, app_with_tools, serve_blocking, serve_blocking_with_tools};
