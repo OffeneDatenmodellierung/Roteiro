@@ -414,27 +414,65 @@ fn run_ocr(
     engine.get_text(&input).ok()
 }
 
-/// Describe an image with the local vision model (or `None` when `image-vision`
-/// is off, the model is not installed, the image is too large, or generation
-/// yields nothing).
-///
-/// The model is loaded fresh per image so its KV cache never carries over between
-/// images. It is a large (~1.4 GiB) model and generation is slow, so this is the
-/// opt-in, slow path (images in a repo are typically few); loading once across a
-/// sync is a future optimisation.
+/// Describe an image with the GGUF vision-language model (`smolvlm-500m-gguf`)
+/// through the shared llama.cpp engine (`rto-llama`, ADR-0003 v1.2) — no candle.
+/// Returns `None` when `image-vision` is off, the model is not installed, the
+/// image is too large, or generation yields nothing. The engine (model +
+/// `mmproj`) is loaded once per process and reused across images (a fresh
+/// context per call keeps KV cache from carrying over).
 #[cfg(feature = "image-vision")]
 fn vlm_content(bytes: &[u8]) -> Option<String> {
-    let dir = crate::models::model_dir("moondream2");
-    if !dir.join("model.gguf").exists()
-        || !dir.join("tokenizer.json").exists()
-        || !image_dimensions_ok(bytes)
-    {
-        // Not installed → vision is inert (run `roteiro model pull moondream2`).
+    use rto_llama::Engine as _;
+
+    if !image_dimensions_ok(bytes) {
         return None;
     }
-    let mut vlm = crate::localmodel::LocalVlm::load(&dir).ok()?;
-    let text = vlm.describe(bytes).ok()?;
-    (!text.trim().is_empty()).then_some(text)
+    let engine = vlm_engine()?;
+    let completion = engine
+        .chat(&rto_llama::ChatRequest {
+            model: VLM_MODEL.to_owned(),
+            messages: vec![rto_llama::Message {
+                role: "user".to_owned(),
+                content: "Describe this image in one or two sentences.".to_owned(),
+            }],
+            images: vec![bytes.to_vec()],
+            temperature: 0.0,
+            max_tokens: 128,
+        })
+        .ok()?;
+    let text = completion.content.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The GGUF vision-language model backing `image-vision`.
+#[cfg(feature = "image-vision")]
+const VLM_MODEL: &str = "smolvlm-500m-gguf";
+
+/// The process-wide vision engine, built lazily from the installed
+/// `smolvlm-500m-gguf` (`model.gguf` + `mmproj.gguf`). `None` when the model is
+/// not installed — vision is then inert (run `roteiro model pull smolvlm-500m-gguf`).
+#[cfg(feature = "image-vision")]
+fn vlm_engine() -> Option<&'static rto_llama::llama::LlamaEngine> {
+    use std::sync::OnceLock;
+    static ENGINE: OnceLock<Option<rto_llama::llama::LlamaEngine>> = OnceLock::new();
+    ENGINE
+        .get_or_init(|| {
+            let dir = crate::models::model_dir(VLM_MODEL);
+            let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
+            if !gguf.exists() || !mmproj.exists() {
+                return None;
+            }
+            rto_llama::llama::LlamaEngine::new(
+                vec![rto_llama::llama::Served {
+                    name: VLM_MODEL.to_owned(),
+                    path: gguf,
+                    mmproj: Some(mmproj),
+                }],
+                0,
+            )
+            .ok()
+        })
+        .as_ref()
 }
 
 #[cfg(not(feature = "image-vision"))]
@@ -458,7 +496,7 @@ pub(crate) fn image_env_tag() -> u64 {
     }
     #[cfg(feature = "image-vision")]
     {
-        any |= fold_installed_model(&mut hash, "moondream2");
+        any |= fold_installed_model(&mut hash, "smolvlm-500m-gguf");
     }
     if any { hash | 1 } else { 0 }
 }

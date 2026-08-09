@@ -190,38 +190,11 @@ impl ModelSpec {
 /// (e.g. Apple MLX builds) are added here as `MacosArm64` variants when they
 /// exist — until then the host resolves to the `Standard` variant.
 pub const REGISTRY: &[ModelSpec] = &[
-    ModelSpec {
-        name: "all-minilm-l6-v2",
-        kind: ModelKind::Embedding,
-        role: ModelRole::None,
-        tier: ResourceTier::Low,
-        dim: 384,
-        licence: "Apache-2.0",
-        description: "sentence-transformers/all-MiniLM-L6-v2 — small, fast general-purpose embeddings",
-        size_mib: 90,
-        variants: &[ModelVariant {
-            platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "config.json",
-                    url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
-                    sha256: "",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
-                    sha256: "",
-                },
-                ModelFile {
-                    name: "model.safetensors",
-                    url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
-                    sha256: "",
-                },
-            ],
-        }],
-    },
-    // Mid embedding tier: a stronger general-purpose BERT sentence-transformer,
-    // loadable by the same `LocalEmbedder` as MiniLM (standard BERT arch).
+    // Embedding models are **GGUF** (llama.cpp via rto-llama): they serve
+    // `/v1/embeddings` and back `roteiro infer --model` through the shared engine
+    // — no candle. The GGUF embeds its own tokenizer, so only `model.gguf` is
+    // needed. `bge-small` is the low-tier default (below); bge-base/large are the
+    // mid/high picks.
     ModelSpec {
         name: "bge-base-en-v1.5",
         kind: ModelKind::Embedding,
@@ -229,32 +202,17 @@ pub const REGISTRY: &[ModelSpec] = &[
         tier: ResourceTier::Mid,
         dim: 768,
         licence: "MIT",
-        description: "BAAI/bge-base-en-v1.5 — stronger English embeddings (768-d)",
-        size_mib: 420,
+        description: "BAAI/bge-base-en-v1.5 (F16 GGUF) — stronger English embeddings (768-d)",
+        size_mib: 209,
         variants: &[ModelVariant {
             platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "config.json",
-                    url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/config.json",
-                    sha256: "bc00af31a4a31b74040d73370aa83b62da34c90b75eb77bfa7db039d90abd591",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json",
-                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
-                },
-                ModelFile {
-                    name: "model.safetensors",
-                    url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/model.safetensors",
-                    sha256: "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7",
-                },
-            ],
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/CompendiumLabs/bge-base-en-v1.5-gguf/resolve/main/bge-base-en-v1.5-f16.gguf",
+                sha256: "88360fdf8521af0ac08d43818bd272da679ab97c685d9b273c48efd01a4187c2",
+            }],
         }],
     },
-    // High embedding tier: the strongest BERT sentence-transformer our loader
-    // handles (bigger/better embeddings than this are decoder-based — e.g.
-    // gte-Qwen2-7B — and need a future decoder-embedding loader).
     ModelSpec {
         name: "bge-large-en-v1.5",
         kind: ModelKind::Embedding,
@@ -262,33 +220,18 @@ pub const REGISTRY: &[ModelSpec] = &[
         tier: ResourceTier::High,
         dim: 1024,
         licence: "MIT",
-        description: "BAAI/bge-large-en-v1.5 — strongest BERT embeddings we load (1024-d)",
-        size_mib: 1340,
+        description: "BAAI/bge-large-en-v1.5 (F16 GGUF) — strongest English embeddings (1024-d)",
+        size_mib: 639,
         variants: &[ModelVariant {
             platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "config.json",
-                    url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/config.json",
-                    sha256: "446712fac367857b4b1302762fe1cd7bfa8b3c4b77b4dc5d77c4025407660896",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/tokenizer.json",
-                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
-                },
-                ModelFile {
-                    name: "model.safetensors",
-                    url: "https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/model.safetensors",
-                    sha256: "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
-                },
-            ],
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/CompendiumLabs/bge-large-en-v1.5-gguf/resolve/main/bge-large-en-v1.5-f16.gguf",
+                sha256: "3379a0e9cea28fc6d7136df8ea7a88ef99ccce5963b9a6f7af9609997be762e3",
+            }],
         }],
     },
-    // GGUF embedding model for the llama.cpp serving path (ADR-0006
-    // `/v1/embeddings`, and the Stage-20 direction of unifying embeddings on
-    // GGUF). The GGUF embeds its own tokenizer, so only `model.gguf` is needed;
-    // served via llama.cpp, not the candle safetensors loader above.
+    // The low-tier embedding default.
     ModelSpec {
         name: "bge-small-en-v1.5-gguf",
         kind: ModelKind::Embedding,
@@ -468,35 +411,6 @@ pub const REGISTRY: &[ModelSpec] = &[
                     name: "text-recognition.rten",
                     url: "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
                     sha256: "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
-                },
-            ],
-        }],
-    },
-    // ADR-0005 Tier B: Moondream2, a small vision-language model (candle
-    // `quantized_moondream`) that *describes* an image — for diagrams/photos OCR
-    // can't capture. Q4_0 GGUF; weights Apache-2.0 (vikhyatk/moondream2). Loaded
-    // via `LocalVlm` (needs `image-vision`, which pulls candle).
-    ModelSpec {
-        name: "moondream2",
-        kind: ModelKind::Vision,
-        role: ModelRole::None,
-        tier: ResourceTier::Low,
-        dim: 0,
-        licence: "Apache-2.0",
-        description: "Moondream2 (Q4_0 GGUF) — tiny offline vision-language model for `image-vision`",
-        size_mib: 1445,
-        variants: &[ModelVariant {
-            platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "model.gguf",
-                    url: "https://huggingface.co/santiagomed/candle-moondream/resolve/main/model-q4_0.gguf",
-                    sha256: "cdde43dcf5f4249111ad36cadd8810ea88bf3aabb33de2bab0146e50a31d78c0",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/santiagomed/candle-moondream/resolve/main/tokenizer.json",
-                    sha256: "337da36be7a71a6e88aa9148967a7bc8736f4b47c7de8e19ba92b89e80734cfc",
                 },
             ],
         }],
@@ -812,8 +726,8 @@ mod tests {
 
     #[test]
     fn variant_selection_falls_back_to_standard() {
-        let spec = find("all-minilm-l6-v2").expect("registered");
-        // MiniLM only ships a Standard variant, so both hosts resolve to it.
+        let spec = find("bge-base-en-v1.5").expect("registered");
+        // It only ships a Standard variant, so both hosts resolve to it.
         let mac = spec.variant_for(Platform::MacosArm64).expect("mac");
         let std = spec.variant_for(Platform::Standard).expect("std");
         assert_eq!(mac.platform, Platform::Standard);

@@ -26,13 +26,14 @@ thiserror = { workspace = true }
 tree-sitter = "0.26.11"
 tree-sitter-rust = "0.24.2"
 
-# `inference-local-models` only (candle BERT embedder + checksum). CPU-only —
-# no cuda/metal/mkl features, so it builds on any CI box. See ADR-0003.
-candle-core = { version = "0.11", optional = true }
-candle-nn = { version = "0.11", optional = true }
-candle-transformers = { version = "0.11", optional = true }
-tokenizers = { version = "0.23.1", default-features = false, features = ["onig"], optional = true }
+# `models` only: SHA-256 verification for the registry/store.
 sha2 = { version = "0.10", optional = true }
+
+# `image-vision` only (ADR-0005 Tier B, ADR-0003 v1.1): image *understanding* via
+# a GGUF vision-language model through the shared llama.cpp core (`rto-llama`) —
+# no candle. Pure-Rust trait + types build without the C++ engine; the `llama`
+# feature turns it on.
+rto-llama = { workspace = true, optional = true }
 
 # `pdf-text` only: pure-Rust PDF text extraction (fonts/CMaps handled internally).
 # Opt-in — pulls a large tree (lopdf + font/crypto parsers) that the default and
@@ -62,17 +63,6 @@ inference = []
 # model tier (embedding, generative, OCR) so they share one registry and the
 # `roteiro model` commands without pulling candle. Adds only `sha2`.
 models = ["dep:sha2"]
-# The opt-in pluggable-model tier (ADR-0003): a candle-backed BERT embedder and
-# GGUF instruct generator. Pulls candle/tokenizers — none of which the default or
-# plain `inference` builds contain. Builds on the shared `models` registry.
-inference-local-models = [
-    "inference",
-    "models",
-    "dep:candle-core",
-    "dep:candle-nn",
-    "dep:candle-transformers",
-    "dep:tokenizers",
-]
 # Ingest text from PDF documents into `meta.content` so inference embeds their
 # meaning, not just the filename. Opt-in (off by default): pulls `pdf-extract`
 # and its font/PDF-parsing tree. See ADR-0003-adjacent content-ingestion notes
@@ -82,11 +72,11 @@ pdf-text = ["dep:pdf-extract"]
 # (off by default): pulls the pure-Rust `ocrs`/`rten` OCR tree. Reuses the shared
 # `models` registry to fetch the OCR models with consent. See [`crate::extract`].
 image-ocr = ["models", "dep:ocrs", "dep:rten", "dep:image"]
-# Describe images via a local vision-language model (ADR-0005 Tier B). Opt-in
-# (off by default): pulls candle (via `inference-local-models`) + `image`. When
-# combined with `image-ocr`, OCR runs always and the VLM only on text-sparse
-# images. See [`crate::extract`] and [`crate::localmodel::vision`].
-image-vision = ["inference-local-models", "dep:image"]
+# Describe images via a local GGUF vision-language model through llama.cpp
+# (ADR-0005 Tier B; ADR-0003 v1.1 — no candle). Opt-in (off by default): pulls
+# `rto-llama` (the C++ engine) + `image`. When combined with `image-ocr`, OCR
+# runs always and the VLM only on text-sparse images. See [`crate::extract`].
+image-vision = ["models", "dep:rto-llama", "rto-llama/llama", "dep:image"]
 
 [lints]
 workspace = true
