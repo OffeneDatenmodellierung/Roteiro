@@ -18,12 +18,22 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 /// Bump whenever extraction changes what it produces, so the content-addressed
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
 /// blob — the version is folded into the cache key. See [`crate::sync`].
-pub(crate) const EXTRACT_VERSION: u32 = 2;
+///
+/// The `pdf-text` feature changes what PDFs extract to, so it occupies a
+/// distinct version namespace: a `pdf-text` build and a default build never
+/// serve each other stale (content-bearing vs content-free) PDF facts from a
+/// shared cache.
+pub(crate) const EXTRACT_VERSION: u32 = if cfg!(feature = "pdf-text") { 103 } else { 3 };
 
-/// Max characters of embeddable content (markdown body / doc-comment) captured
-/// into a node's `meta.content`, to keep the store small while giving inference
-/// real text to embed.
+/// Max characters of embeddable content (markdown body / doc-comment / PDF text)
+/// captured into a node's `meta.content`, to keep the store small while giving
+/// inference real text to embed.
 const MAX_CONTENT: usize = 1500;
+
+/// PDFs larger than this are not text-extracted — `pdf-extract` builds the full
+/// document text in memory, so cap the work a pathological file can impose.
+#[cfg(feature = "pdf-text")]
+const MAX_PDF_BYTES: usize = 20 * 1024 * 1024;
 
 /// Turns one source blob into the nodes and edges derived from it.
 pub trait Extractor {
@@ -71,13 +81,18 @@ fn file_node(path: &str, blob_id: &str, bytes: &[u8], lang: Option<&str>) -> Nod
         .fold(0usize, |n, &b| n + usize::from(b == b'\n'));
     let end = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
     let mut meta = serde_json::json!({ "bytes": bytes.len(), "lines": lines });
-    // For prose files, capture the (capped) body so inference embeds *meaning*,
-    // not just the filename.
-    if is_prose(path) {
-        let content = cap_content(&String::from_utf8_lossy(bytes));
-        if !content.is_empty() {
-            meta["content"] = serde_json::Value::from(content);
-        }
+    // Capture the (capped) body so inference embeds *meaning*, not just the
+    // filename: prose files decode as UTF-8; PDFs go through `pdf_content` (only
+    // when the `pdf-text` feature is on, otherwise it is a no-op).
+    let content = if is_prose(path) {
+        cap_content(&String::from_utf8_lossy(bytes))
+    } else if let Some(text) = pdf_content(path, bytes) {
+        cap_content(&text)
+    } else {
+        String::new()
+    };
+    if !content.is_empty() {
+        meta["content"] = serde_json::Value::from(content);
     }
     Node {
         key: file_key(path),
@@ -112,6 +127,31 @@ fn doc_comment_body(raw: &str) -> Option<String> {
             .collect();
         return Some(cleaned.join(" "));
     }
+    None
+}
+
+/// Extract the text of a PDF blob for embedding, or `None` when `path` is not a
+/// PDF, the `pdf-text` feature is off, the file is too large, or extraction
+/// yields no usable text.
+///
+/// `pdf-extract` handles fonts/CMaps internally but can panic on some malformed
+/// documents; the call is panic-guarded so a bad PDF degrades to a plain file
+/// node rather than aborting the whole sync.
+#[cfg(feature = "pdf-text")]
+fn pdf_content(path: &str, bytes: &[u8]) -> Option<String> {
+    if extension(path) != Some("pdf") || bytes.len() > MAX_PDF_BYTES {
+        return None;
+    }
+    let owned = bytes.to_vec();
+    let text = std::panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&owned).ok())
+        .ok()
+        .flatten()?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// No-op when the `pdf-text` feature is off: PDFs become plain file nodes.
+#[cfg(not(feature = "pdf-text"))]
+fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
     None
 }
 
@@ -607,6 +647,54 @@ mod inner {
         // A non-prose file gets no content.
         let rs = FileNodeExtractor.extract("notes.bin", "b", b"\x00\x01binary");
         assert!(rs.nodes[0].meta.get("content").is_none());
+    }
+
+    /// Build a one-page PDF with a single Helvetica text run, computing exact
+    /// byte offsets for the xref table so `pdf-extract` can parse it.
+    #[cfg(feature = "pdf-text")]
+    fn minimal_pdf(text: &str) -> Vec<u8> {
+        let content = format!("BT /F1 24 Tf 72 720 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, obj) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{obj}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref_start = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for off in &offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[cfg(feature = "pdf-text")]
+    #[test]
+    fn pdf_file_captures_text_content() {
+        let pdf = minimal_pdf("Hello Roteiro");
+        let facts = FileNodeExtractor.extract("docs/guide.pdf", "b", &pdf);
+        let content = facts.nodes[0].meta["content"].as_str().unwrap();
+        assert!(content.contains("Hello Roteiro"), "got: {content:?}");
+        // A malformed PDF degrades to a plain file node — no panic, no content.
+        let bad = FileNodeExtractor.extract("docs/bad.pdf", "b", b"%PDF-1.4\ngarbage");
+        assert!(bad.nodes[0].meta.get("content").is_none());
     }
 
     #[test]

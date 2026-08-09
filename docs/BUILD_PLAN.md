@@ -505,7 +505,7 @@ the [Stage 9](#stage-9--importers--v090--graphify-delivered-latmd--codegraph-pen
   facts **survive a subsequent code-changing sync**; an end-to-end CLI test per
   source.
 
-### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; content ingestion delivered)*
+### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; text + PDF ingestion delivered)*
 **Goal:** make `inferred` edges meaningful by embedding **real content**, not
 just node names, and extend ingestion to docs/PDFs/images.
 - **Text-content ingestion (first, zero new deps) — delivered.** Extraction now
@@ -515,8 +515,14 @@ just node names, and extend ingestion to docs/PDFs/images.
   cache gained an **extractor version** in its key (`EXTRACT_VERSION`), so an
   extraction-logic change retires stale cache entries instead of serving
   content-less facts for unchanged blobs.
-- **PDF text:** a pure-Rust extractor (e.g. `pdf-extract`/`lopdf`, licence-gated)
-  → `doc` nodes with text → embedded. Feature-gated.
+- **PDF text — delivered (feature-gated).** `pdf-extract` (pure-Rust; fonts/CMaps
+  handled internally) captures a PDF's text into `meta.content` behind the opt-in
+  `pdf-text` feature, so the default and `inference*` builds pull none of its
+  tree. Extraction is panic-guarded (a malformed PDF degrades to a plain file
+  node, never aborting sync) and size-capped. The unmaintained transitive
+  `ttf-parser` carries a scoped `deny` exception (opt-in feature only), and
+  `pdf-text` occupies a distinct `EXTRACT_VERSION` namespace so a `pdf-text` build
+  and a default build never serve each other stale PDF facts from a shared cache.
 - **Image scanning:** OCR/vision over images. **Needs its own decision (like
   candle):** pure-Rust OCR is weak; real OCR is C++ FFI (tesseract — against the
   pure-Rust stance) or a candle vision model (heavy, weights required). De-risk
