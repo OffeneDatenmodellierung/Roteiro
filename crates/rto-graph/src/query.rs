@@ -283,6 +283,9 @@ pub struct SearchHit {
 /// # Errors
 /// Returns [`StoreError`] on query failure.
 pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>, StoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let q = query.trim().to_lowercase();
     // Tokens are separated by whitespace or the `::` path separator; a lone `:`
     // (as in a `sym:rust:…` key) does not split a token.

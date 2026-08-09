@@ -59,6 +59,15 @@ const DOC_KINDS: &[&str] = &["adr", "adr_section", "blueprint", "doc", "lat_sect
 /// # Errors
 /// Returns [`StoreError`] on query failure.
 pub fn context(store: &Store, topic: &str, limit: usize) -> Result<SpecContext, StoreError> {
+    if limit == 0 {
+        return Ok(SpecContext {
+            schema: SPEC_SCHEMA,
+            topic: topic.to_owned(),
+            symbols: Vec::new(),
+            docs: Vec::new(),
+            related_adrs: Vec::new(),
+        });
+    }
     // Over-fetch candidates so we can keep the top `limit` of each category.
     let hits = search(store, topic, limit.saturating_mul(3).max(30))?;
 
@@ -375,5 +384,23 @@ mod tests {
             "scaffold must be check-clean: {:?}",
             report.violations
         );
+    }
+
+    #[test]
+    fn scaffold_has_no_code_block_indentation() {
+        use super::scaffold_adr;
+        let store = seeded();
+        let ctx = context(&store, "validate_token", 10).expect("context");
+        let md = scaffold_adr("validate_token", None, "0099", "2026-08-09", &ctx);
+        // The `\`-line-continuations in the template strip source indentation, so
+        // no line begins with whitespace; a 4-space indent would (wrongly) render
+        // the frontmatter/headings as a CommonMark code block.
+        for (i, line) in md.lines().enumerate() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "line {} has leading whitespace: {line:?}",
+                i + 1
+            );
+        }
     }
 }
