@@ -1803,15 +1803,23 @@ fn serve_models_endpoint(
 ) -> anyhow::Result<()> {
     use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
 
-    // Resolve which installed generative models to serve: the `[serve] models`
-    // allow-list if set, otherwise every installed generative model.
+    // Serve every installed **GGUF** generative/embedding model (llama.cpp path):
+    // generative GGUFs answer `/v1/chat/completions`, embedding GGUFs answer
+    // `/v1/embeddings`. A GGUF model is one whose variant ships a `model.gguf`
+    // file — this excludes the candle safetensors embedders; the kind filter
+    // excludes vision/OCR models, which the text `/v1` cannot serve. The
+    // `[serve] models` allow-list narrows it further if set.
     let host = Platform::host();
     let wanted = cfg.serve.models.as_deref();
     let served: Vec<rto_serve::llama::Served> = REGISTRY
         .iter()
-        .filter(|m| m.kind == ModelKind::Generative)
+        .filter(|m| matches!(m.kind, ModelKind::Generative | ModelKind::Embedding))
         .filter(|m| wanted.is_none_or(|w| w.iter().any(|n| n == m.name)))
-        .filter(|m| m.variant_for(host).is_some_and(|v| is_installed(m.name, v)))
+        .filter(|m| {
+            m.variant_for(host).is_some_and(|v| {
+                v.files.iter().any(|f| f.name == "model.gguf") && is_installed(m.name, v)
+            })
+        })
         .map(|m| rto_serve::llama::Served {
             name: m.name.to_owned(),
             path: model_dir(m.name).join("model.gguf"),
@@ -1819,8 +1827,10 @@ fn serve_models_endpoint(
         .collect();
     if served.is_empty() {
         anyhow::bail!(
-            "no installed generative models to serve — pull one first \
-             (`roteiro model pull qwen3-0.6b`; see `roteiro model list`)"
+            "no installed GGUF models to serve — pull one first \
+             (`roteiro model pull qwen3-0.6b` for chat, or \
+             `roteiro model pull bge-small-en-v1.5-gguf` for embeddings; \
+             see `roteiro model list`)"
         );
     }
 

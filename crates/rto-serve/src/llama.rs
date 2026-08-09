@@ -189,4 +189,75 @@ impl Engine for LlamaEngine {
             finish_reason,
         })
     }
+
+    fn embed(&self, model: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, EngineError> {
+        let path = self
+            .path_for(model)
+            .ok_or_else(|| EngineError::UnknownModel(model.to_owned()))?;
+        let mut warm = self
+            .warm
+            .lock()
+            .map_err(|_| EngineError::Inference("engine mutex poisoned".to_owned()))?;
+        if warm.as_ref().map(|w| w.name.as_str()) != Some(model) {
+            let params = LlamaModelParams::default();
+            let loaded = LlamaModel::load_from_file(&self.backend, &path, &params)
+                .map_err(|e| EngineError::Inference(format!("load `{model}`: {e}")))?;
+            *warm = Some(Warm {
+                name: model.to_owned(),
+                model: loaded,
+            });
+        }
+        let model_ref = &warm.as_ref().expect("just loaded").model;
+
+        let n_ctx = NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::MIN);
+        let mut out = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            // A fresh embeddings-enabled context per input; pooling defaults to the
+            // model's own type (CLS for BGE), giving one sentence vector.
+            let ctx_params = LlamaContextParams::default()
+                .with_n_ctx(Some(n_ctx))
+                .with_embeddings(true);
+            let mut ctx = model_ref
+                .new_context(&self.backend, ctx_params)
+                .map_err(|e| EngineError::Inference(format!("embedding context: {e}")))?;
+
+            let tokens = model_ref
+                .str_to_token(input, AddBos::Always)
+                .map_err(|e| EngineError::Inference(format!("tokenize: {e}")))?;
+            if tokens.is_empty() {
+                return Err(EngineError::Inference(
+                    "empty input tokenizes to nothing".to_owned(),
+                ));
+            }
+
+            let mut batch = LlamaBatch::new(tokens.len(), 1);
+            for (i, token) in tokens.iter().enumerate() {
+                let pos = i32::try_from(i).unwrap_or(i32::MAX);
+                // Enable output for every token so pooling sees the whole sequence.
+                batch
+                    .add(*token, pos, &[0], true)
+                    .map_err(|e| EngineError::Inference(format!("embedding batch: {e}")))?;
+            }
+            ctx.decode(&mut batch)
+                .map_err(|e| EngineError::Inference(format!("embedding decode: {e}")))?;
+
+            let vector = ctx
+                .embeddings_seq_ith(0)
+                .map_err(|e| EngineError::Inference(format!("read embedding: {e}")))?;
+            out.push(l2_normalize(vector));
+        }
+        Ok(out)
+    }
+}
+
+/// L2-normalise an embedding (unit length), so cosine similarity is a dot
+/// product — the convention OpenAI clients expect. A zero vector is returned
+/// unchanged.
+fn l2_normalize(v: &[f32]) -> Vec<f32> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        v.iter().map(|x| x / norm).collect()
+    } else {
+        v.to_vec()
+    }
 }

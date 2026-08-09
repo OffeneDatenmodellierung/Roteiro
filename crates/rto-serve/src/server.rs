@@ -21,7 +21,8 @@ use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason};
 use crate::tools::{ToolRegistry, chat_with_tools};
 use crate::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessageDto,
-    ChunkChoice, Delta, ErrorResponse, ModelList, ModelObject, Usage,
+    ChunkChoice, Delta, EmbeddingObject, EmbeddingRequest, EmbeddingResponse, ErrorResponse,
+    ModelList, ModelObject, Usage,
 };
 
 /// How many tool round-trips a single request may take before the model's last
@@ -58,6 +59,7 @@ fn router(state: Shared) -> Router {
     Router::new()
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/embeddings", post(embeddings))
         .with_state(state)
 }
 
@@ -153,6 +155,11 @@ async fn chat_json(state: Shared, req: ChatRequest) -> Response {
             EngineError::UnknownModel(m).to_string(),
             "invalid_request_error",
         ),
+        Ok(Err(e @ EngineError::Unsupported(_))) => error(
+            StatusCode::NOT_IMPLEMENTED,
+            e.to_string(),
+            "not_implemented",
+        ),
         Ok(Err(e @ EngineError::Inference(_))) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             e.to_string(),
@@ -173,6 +180,79 @@ fn complete(state: &AppState, req: &ChatRequest) -> Result<Completion, EngineErr
     match &state.tools {
         Some(tools) => chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS),
         None => state.engine.chat(req),
+    }
+}
+
+/// `POST /v1/embeddings` — one embedding vector per input string.
+async fn embeddings(State(state): State<Shared>, Json(body): Json<EmbeddingRequest>) -> Response {
+    let model = body.model;
+    let inputs = body.input.into_vec();
+    if inputs.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "`input` must not be empty",
+            "invalid_request_error",
+        );
+    }
+    if !state.engine.models().iter().any(|m| m.id == model) {
+        return error(
+            StatusCode::NOT_FOUND,
+            EngineError::UnknownModel(model).to_string(),
+            "invalid_request_error",
+        );
+    }
+
+    let engine = state.engine.clone();
+    let (model_for_task, inputs_for_task) = (model.clone(), inputs);
+    let result =
+        tokio::task::spawn_blocking(move || engine.embed(&model_for_task, &inputs_for_task)).await;
+
+    match result {
+        Ok(Ok(vectors)) => Json(build_embedding_response(&model, vectors)).into_response(),
+        Ok(Err(EngineError::UnknownModel(m))) => error(
+            StatusCode::NOT_FOUND,
+            EngineError::UnknownModel(m).to_string(),
+            "invalid_request_error",
+        ),
+        Ok(Err(e @ EngineError::Unsupported(_))) => error(
+            StatusCode::NOT_IMPLEMENTED,
+            e.to_string(),
+            "not_implemented",
+        ),
+        Ok(Err(e @ EngineError::Inference(_))) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            e.to_string(),
+            "inference_error",
+        ),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("embedding task failed: {e}"),
+            "inference_error",
+        ),
+    }
+}
+
+/// Assemble the OpenAI embeddings response from the per-input vectors.
+fn build_embedding_response(model: &str, vectors: Vec<Vec<f32>>) -> EmbeddingResponse {
+    let data = vectors
+        .into_iter()
+        .enumerate()
+        .map(|(index, embedding)| EmbeddingObject {
+            object: "embedding",
+            embedding,
+            index,
+        })
+        .collect();
+    EmbeddingResponse {
+        object: "list",
+        data,
+        model: model.to_owned(),
+        // Token accounting is not tracked for embeddings on this local endpoint.
+        usage: Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        },
     }
 }
 
@@ -389,6 +469,14 @@ mod tests {
                 finish_reason: FinishReason::Stop,
             })
         }
+
+        fn embed(&self, model: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, EngineError> {
+            if model != "echo" {
+                return Err(EngineError::UnknownModel(model.to_owned()));
+            }
+            // A fixed 3-d vector per input so tests can assert count and shape.
+            Ok(inputs.iter().map(|_| vec![1.0, 2.0, 3.0]).collect())
+        }
     }
 
     fn test_app() -> axum::Router {
@@ -507,6 +595,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn embeddings_return_a_vector_per_input() {
+        // Array input → one embedding per element, in order.
+        let body = serde_json::json!({ "model": "echo", "input": ["alpha", "beta"] });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["object"], "list");
+        assert_eq!(json["data"].as_array().unwrap().len(), 2);
+        assert_eq!(json["data"][0]["object"], "embedding");
+        assert_eq!(json["data"][0]["embedding"].as_array().unwrap().len(), 3);
+        assert_eq!(json["data"][1]["index"], 1);
+    }
+
+    #[tokio::test]
+    async fn embeddings_accept_a_single_string_and_reject_unknown_model() {
+        // Single-string input is accepted (OpenAI allows string or array).
+        let ok = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "model": "echo", "input": "hello" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let json = body_json(ok).await;
+        assert_eq!(json["data"].as_array().unwrap().len(), 1);
+
+        // An unknown model is a 404.
+        let bad = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "model": "nope", "input": "hi" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn embeddings_empty_input_is_400() {
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "model": "echo", "input": [] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

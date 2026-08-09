@@ -780,7 +780,7 @@ set once, not retyped as flags — reproducible and shareable when committed.
   deterministically; flags override it; no config is still a working default;
   `roteiro config` shows the merged result and each value's provenance.
 
-### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → 🚧 *in progress (19a delivered)*
+### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → ✅ *delivered (models + chat + streaming + graph tools + embeddings)*
 **Goal:** reuse the models a user already pulled by exposing them over an
 **opt-in, loopback OpenAI-compatible endpoint** — offline, no second download —
 and make the served model **code-aware** by handing it Roteiro's graph tools.
@@ -809,7 +809,14 @@ and make the served model **code-aware** by handing it Roteiro's graph tools.
   on). The loop is unit-tested end-to-end with a scripted engine; live tool
   emission needs a capable model (the 0.6B tier reasons about the call but is too
   small to reliably emit the syntax — qwen3-8b+ recommended for tool use).
-- **Remaining sub-PR:** `/v1/embeddings`.
+- **Delivered — `/v1/embeddings` (completes Stage 19):** served from **GGUF**
+  embedding models via llama.cpp (`with_embeddings` + model-default pooling, L2-
+  normalised) — resolving ADR-0006's open question in favour of GGUF, which is
+  the Stage-20 "embeddings → GGUF" direction rather than bolting on the candle
+  BERT path. Adds a `bge-small-en-v1.5-gguf` registry entry (384-d, MIT); `serve
+  --models` now serves any installed GGUF generative/embedding model (vision/OCR
+  excluded). Verified live: 384-d unit-norm vectors, cosine 0.75 between
+  paraphrases. `input` accepts a string or array; unit-tested via a mock.
 - **Engine: llama.cpp** (`llama-cpp-2`), behind an opt-in `serve` feature (pulls a
   C/C++ toolchain: cmake + clang + libclang). Chosen after a head-to-head de-risk
   (candle vs mistral.rs vs llama.cpp on MSRV 1.94 + strict `cargo deny`): it is the
@@ -912,7 +919,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
 | v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`/`[ingest]`, CLI>project>user>default |
-| v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ⛔ opt-in `serve`; our `/v1` + auto-registered graph tools |
+| v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ✅ opt-in `serve` — `/v1/models`+`chat`+streaming+`embeddings`, auto-registered graph tools |
 | v0.x | 20 | Inference-core direction (unify on llama.cpp) + coding/reasoning models | ⛔ staged candle→llama.cpp migration (ADR-0003 amendment); opt-in coding/reasoning registry entries |
 | — | — | Shipped alongside Stage 12: curated low/mid/high **model matrix** ([ADR-0003](adr/0003-pluggable-embedding-models.md)) + streaming, checksum-verified model downloads | ✅ `roteiro model list` by section→tier; `download_verified` (constant memory) |
 
