@@ -42,6 +42,8 @@ pub struct Config {
     pub infer: InferConfig,
     /// `roteiro duplicates` tuning.
     pub duplicates: DuplicatesConfig,
+    /// `roteiro sync` content-ingestion toggles.
+    pub ingest: IngestConfig,
 }
 
 /// `[models]` — override the registry tier defaults for this project.
@@ -52,6 +54,38 @@ pub struct ModelsConfig {
     pub embedding: Option<String>,
     /// Registry name of the generative model `spec draft` defaults to.
     pub generative: Option<String>,
+}
+
+/// `[ingest]` — which blob content `roteiro sync` extracts for embedding. Each
+/// toggle is `Some(false)` to disable a content class the binary supports; unset
+/// (or `true`) leaves it on. A toggle cannot enable a class the binary was not
+/// built with (the `pdf-text`/`image-ocr`/`image-vision` features).
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct IngestConfig {
+    /// Embed the UTF-8 body of prose files (Markdown, plain text).
+    pub prose: Option<bool>,
+    /// Extract text from PDF documents.
+    pub pdf: Option<bool>,
+    /// OCR literal text from images.
+    pub ocr: Option<bool>,
+    /// Describe images with a vision model.
+    pub vision: Option<bool>,
+}
+
+impl IngestConfig {
+    /// Resolve to the graph-layer [`rto_graph::IngestConfig`], defaulting each
+    /// unset toggle to on.
+    #[must_use]
+    pub fn resolve(&self) -> rto_graph::IngestConfig {
+        let default = rto_graph::IngestConfig::default();
+        rto_graph::IngestConfig {
+            prose: self.prose.unwrap_or(default.prose),
+            pdf: self.pdf.unwrap_or(default.pdf),
+            ocr: self.ocr.unwrap_or(default.ocr),
+            vision: self.vision.unwrap_or(default.vision),
+        }
+    }
 }
 
 /// `[infer]` — defaults for the similarity-inference command.
@@ -101,6 +135,12 @@ impl Config {
                     .min_similarity
                     .or(self.duplicates.min_similarity),
                 limit: over.duplicates.limit.or(self.duplicates.limit),
+            },
+            ingest: IngestConfig {
+                prose: over.ingest.prose.or(self.ingest.prose),
+                pdf: over.ingest.pdf.or(self.ingest.pdf),
+                ocr: over.ingest.ocr.or(self.ingest.ocr),
+                vision: over.ingest.vision.or(self.ingest.vision),
             },
         }
     }

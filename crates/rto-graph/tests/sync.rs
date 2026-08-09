@@ -186,7 +186,7 @@ fn rust_extraction_produces_derived_graph_with_cross_file_calls() {
     let cache = cache_for(&repo);
     let mut store = Store::open_in_memory().expect("store");
 
-    let r = sync(&mut store, &repo, &cache, &Registry).expect("sync");
+    let r = sync(&mut store, &repo, &cache, &Registry::default()).expect("sync");
     assert!(!r.no_op);
 
     // Symbol nodes are derived from both files.
@@ -223,7 +223,7 @@ fn rust_extraction_produces_derived_graph_with_cross_file_calls() {
     );
 
     // A second sync over the unchanged tree is a cache-stable no-op.
-    let r2 = sync(&mut store, &repo, &cache, &Registry).expect("resync");
+    let r2 = sync(&mut store, &repo, &cache, &Registry::default()).expect("resync");
     assert!(r2.no_op);
     assert_eq!(r2.nodes, r.nodes);
     assert_eq!(r2.edges, r.edges);
@@ -247,7 +247,7 @@ fn dirty_overlay_previews_uncommitted_edits() {
     let mut store = Store::open_in_memory().expect("store");
 
     // A clean working tree: no overlay, committed symbols present.
-    let r0 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("clean");
+    let r0 = sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("clean");
     assert_eq!(r0.blobs_dirty, 0);
     assert!(
         store
@@ -264,7 +264,7 @@ fn dirty_overlay_previews_uncommitted_edits() {
 
     // Edit a tracked file WITHOUT committing: the new symbol is previewed.
     write(&dir, "util.rs", "pub fn helper() {}\npub fn added() {}\n");
-    let r1 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("dirty");
+    let r1 = sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("dirty");
     assert!(!r1.no_op);
     assert_eq!(r1.blobs_dirty, 1);
     assert_eq!(
@@ -280,13 +280,13 @@ fn dirty_overlay_previews_uncommitted_edits() {
     );
 
     // Re-running with the same dirty state is a no-op.
-    let r2 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("resync");
+    let r2 = sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("resync");
     assert!(r2.no_op);
     assert_eq!(r2.blobs_dirty, 1);
 
     // Deleting a tracked file in the working tree drops its symbols.
     std::fs::remove_file(dir.join("util.rs")).expect("rm");
-    let r3 = sync_worktree(&mut store, &repo, &cache, &Registry).expect("deleted");
+    let r3 = sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("deleted");
     assert!(!r3.no_op);
     assert!(
         store
@@ -296,7 +296,7 @@ fn dirty_overlay_previews_uncommitted_edits() {
     );
 
     // A committed-only sync supersedes the overlay, restoring the HEAD view.
-    let r4 = sync(&mut store, &repo, &cache, &Registry).expect("committed");
+    let r4 = sync(&mut store, &repo, &cache, &Registry::default()).expect("committed");
     assert!(!r4.no_op);
     assert_eq!(r4.blobs_dirty, 0);
     assert!(

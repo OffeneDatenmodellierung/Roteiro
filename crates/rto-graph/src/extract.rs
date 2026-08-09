@@ -67,23 +67,116 @@ pub trait Extractor {
     /// Implementations must be deterministic: identical inputs must always
     /// produce an identical fact set.
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet;
+
+    /// Runtime inputs — beyond `(path, bytes)` — that change extraction output
+    /// and so must be folded into the sync cache key: the installed image-model
+    /// identity (OCR + vision) and any [`IngestConfig`] toggles. The default is
+    /// the image-model tag alone; [`Registry`] additionally folds in its
+    /// ingestion config so toggling content off re-extracts affected blobs
+    /// instead of serving stale, content-bearing facts.
+    fn env_tag(&self) -> u64 {
+        image_env_tag()
+    }
+}
+
+/// Runtime ingestion toggles (ADR-0007 `[ingest]`): which blob content is
+/// extracted for embedding. Every toggle defaults to **on**, and a toggle only
+/// gates content *within a build that supports it* — turning `pdf` on cannot
+/// extract PDF text in a binary built without the `pdf-text` feature, but
+/// turning it off suppresses that content in a binary that has it.
+// Four independent content toggles: a flat bool-per-class struct is the clearest
+// representation (a state enum or bitflags would obscure, not clarify).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngestConfig {
+    /// Embed the UTF-8 body of prose files (Markdown, plain text).
+    pub prose: bool,
+    /// Extract text from PDF documents (needs the `pdf-text` feature).
+    pub pdf: bool,
+    /// OCR literal text from images (needs the `image-ocr` feature).
+    pub ocr: bool,
+    /// Describe images with a vision model (needs the `image-vision` feature).
+    pub vision: bool,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            prose: true,
+            pdf: true,
+            ocr: true,
+            vision: true,
+        }
+    }
+}
+
+impl IngestConfig {
+    /// A cache-key contribution that is **`0` when every toggle is on** (the
+    /// default), so the common case leaves existing cache keys untouched. Each
+    /// disabled toggle sets a distinct bit, so turning content off changes the
+    /// key and re-extracts affected blobs.
+    fn disabled_bits(self) -> u64 {
+        u64::from(!self.prose)
+            | (u64::from(!self.pdf) << 1)
+            | (u64::from(!self.ocr) << 2)
+            | (u64::from(!self.vision) << 3)
+    }
 }
 
 /// Dispatches extraction to a language-aware extractor by file extension,
-/// falling back to [`FileNodeExtractor`] when no language is registered. After
-/// the language extractor runs, [`crate::markers`] appends any intent-debt
-/// markers (TODOs, stubs, deferred-work notes) found in the blob.
+/// falling back to a plain file node when no language is registered. After the
+/// language extractor runs, [`crate::markers`] appends any intent-debt markers
+/// (TODOs, stubs, deferred-work notes) found in the blob. Carries the runtime
+/// [`IngestConfig`] applied to content extraction.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Registry;
+pub struct Registry {
+    /// Which blob content to extract for embedding.
+    pub ingest: IngestConfig,
+}
+
+impl Registry {
+    /// A registry with the given ingestion toggles.
+    #[must_use]
+    pub fn new(ingest: IngestConfig) -> Self {
+        Self { ingest }
+    }
+}
 
 impl Extractor for Registry {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet {
-        let mut facts = match extension(path).as_deref() {
-            Some("rs") => RustExtractor.extract(path, blob_id, bytes),
-            _ => FileNodeExtractor.extract(path, blob_id, bytes),
-        };
+        let mut facts = extract_facts(path, blob_id, bytes, self.ingest);
         crate::markers::augment(&mut facts, path, blob_id, bytes);
         facts
+    }
+
+    fn env_tag(&self) -> u64 {
+        let img = image_env_tag();
+        let disabled = self.ingest.disabled_bits();
+        if disabled == 0 {
+            // All-on default: preserve existing cache keys exactly.
+            img
+        } else {
+            // FNV-1a fold of both components — deterministic and stable. As with
+            // any 64-bit hash a collision with the all-on key is possible but
+            // vanishingly unlikely, and a collision only costs a spurious cache
+            // hit/miss, never incorrect facts.
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            for b in img.to_le_bytes().into_iter().chain(disabled.to_le_bytes()) {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h
+        }
+    }
+}
+
+/// Shared extraction dispatch used by [`Registry`] and the standalone
+/// extractors: pick the language extractor by extension, applying `ingest` to
+/// content extraction.
+fn extract_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
+    match extension(path).as_deref() {
+        Some("rs") => rust_facts(path, blob_id, bytes, ingest),
+        _ => FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest)),
     }
 }
 
@@ -100,8 +193,16 @@ fn file_key(path: &str) -> String {
     format!("file:{path}")
 }
 
-/// Build the shared `file` node for a source blob.
-fn file_node(path: &str, blob_id: &str, bytes: &[u8], lang: Option<&str>) -> Node {
+/// Build the shared `file` node for a source blob. `ingest` gates which content
+/// is embedded (ADR-0007 `[ingest]`): a disabled class yields no content, as if
+/// the file carried none.
+fn file_node(
+    path: &str,
+    blob_id: &str,
+    bytes: &[u8],
+    lang: Option<&str>,
+    ingest: IngestConfig,
+) -> Node {
     let name = path.rsplit('/').next().unwrap_or(path).to_owned();
     let lines = bytes
         .iter()
@@ -110,12 +211,13 @@ fn file_node(path: &str, blob_id: &str, bytes: &[u8], lang: Option<&str>) -> Nod
     let mut meta = serde_json::json!({ "bytes": bytes.len(), "lines": lines });
     // Capture the (capped) body so inference embeds *meaning*, not just the
     // filename: prose files decode as UTF-8; PDFs go through `pdf_content` (only
-    // when the `pdf-text` feature is on, otherwise it is a no-op).
-    let content = if is_prose(path) {
+    // when the `pdf-text` feature is on, otherwise it is a no-op). Each class is
+    // gated by its `ingest` toggle so a project can suppress it without a rebuild.
+    let content = if ingest.prose && is_prose(path) {
         cap_content(&String::from_utf8_lossy(bytes))
-    } else if let Some(text) = pdf_content(path, bytes) {
+    } else if let Some(text) = ingest.pdf.then(|| pdf_content(path, bytes)).flatten() {
         cap_content(&text)
-    } else if let Some(text) = image_content(path, bytes) {
+    } else if let Some(text) = image_content(path, bytes, ingest) {
         cap_content(&text)
     } else {
         String::new()
@@ -194,19 +296,24 @@ fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
 /// model re-extracts affected images instead of serving stale (content-free)
 /// facts.
 #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
-fn image_content(path: &str, bytes: &[u8]) -> Option<String> {
+fn image_content(path: &str, bytes: &[u8], ingest: IngestConfig) -> Option<String> {
     if !is_image(path) || bytes.len() > MAX_IMAGE_BYTES {
         return None;
     }
     // OCR reads literal text (cheap, accurate); the vision model *describes* the
     // image (slow). Smart composition (ADR-0005): always OCR; run the VLM only
     // when OCR text is sparse — a diagram/photo rather than a text screenshot —
-    // and store both when both fire.
-    let ocr = ocr_content(bytes);
+    // and store both when both fire. Each stage is additionally gated by its
+    // `ingest` toggle so a project can disable OCR and/or vision at runtime.
+    let ocr = if ingest.ocr { ocr_content(bytes) } else { None };
     let sparse = ocr
         .as_deref()
         .is_none_or(|t| t.split_whitespace().count() < min_ocr_words());
-    let vision = if sparse { vlm_content(bytes) } else { None };
+    let vision = if ingest.vision && sparse {
+        vlm_content(bytes)
+    } else {
+        None
+    };
     match (ocr, vision) {
         (Some(o), Some(v)) => Some(format!("{o}\n\n{v}")),
         (Some(o), None) => Some(o),
@@ -217,7 +324,7 @@ fn image_content(path: &str, bytes: &[u8]) -> Option<String> {
 
 /// No-op when neither image feature is on: images become plain file nodes.
 #[cfg(not(any(feature = "image-ocr", feature = "image-vision")))]
-fn image_content(_path: &str, _bytes: &[u8]) -> Option<String> {
+fn image_content(_path: &str, _bytes: &[u8], _ingest: IngestConfig) -> Option<String> {
     None
 }
 
@@ -428,7 +535,13 @@ pub struct FileNodeExtractor;
 
 impl Extractor for FileNodeExtractor {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet {
-        FactSet::new().with_node(file_node(path, blob_id, bytes, None))
+        FactSet::new().with_node(file_node(
+            path,
+            blob_id,
+            bytes,
+            None,
+            IngestConfig::default(),
+        ))
     }
 }
 
@@ -442,43 +555,48 @@ pub struct RustExtractor;
 
 impl Extractor for RustExtractor {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet {
-        let mut parser = tree_sitter::Parser::new();
-        // The Rust grammar is compiled in, so this only fails on a version
-        // mismatch — a build-time invariant, not a runtime input error.
-        if parser
-            .set_language(&tree_sitter_rust::LANGUAGE.into())
-            .is_err()
-        {
-            return FileNodeExtractor.extract(path, blob_id, bytes);
-        }
-        let Some(tree) = parser.parse(bytes, None) else {
-            return FileNodeExtractor.extract(path, blob_id, bytes);
-        };
+        rust_facts(path, blob_id, bytes, IngestConfig::default())
+    }
+}
 
-        let mut walk = RustWalk {
-            path,
-            blob_id,
-            src: bytes,
-            nodes: vec![file_node(path, blob_id, bytes, Some("rust"))],
-            edges: Vec::new(),
-        };
-        let root = tree.root_node();
-        let mut cursor = root.walk();
-        let children: Vec<_> = root.children(&mut cursor).collect();
-        for child in children {
-            walk.visit(child, &[]);
-        }
+/// Extract Rust facts, applying `ingest` to the file node's embedded content.
+/// Shared by [`RustExtractor`] (default toggles) and [`Registry`] (its config).
+fn rust_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
+    let mut parser = tree_sitter::Parser::new();
+    // The Rust grammar is compiled in, so this only fails on a version
+    // mismatch — a build-time invariant, not a runtime input error.
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest));
+    }
+    let Some(tree) = parser.parse(bytes, None) else {
+        return FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest));
+    };
 
-        // Deterministic ordering so the cached fact set is byte-stable
-        // regardless of traversal incidentals.
-        walk.nodes.sort_by(|a, b| a.key.cmp(&b.key));
-        walk.edges.sort_by(|a, b| {
-            (a.kind.as_str(), &a.src, &a.dst).cmp(&(b.kind.as_str(), &b.src, &b.dst))
-        });
-        FactSet {
-            nodes: walk.nodes,
-            edges: walk.edges,
-        }
+    let mut walk = RustWalk {
+        path,
+        blob_id,
+        src: bytes,
+        nodes: vec![file_node(path, blob_id, bytes, Some("rust"), ingest)],
+        edges: Vec::new(),
+    };
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let children: Vec<_> = root.children(&mut cursor).collect();
+    for child in children {
+        walk.visit(child, &[]);
+    }
+
+    // Deterministic ordering so the cached fact set is byte-stable regardless of
+    // traversal incidentals.
+    walk.nodes.sort_by(|a, b| a.key.cmp(&b.key));
+    walk.edges
+        .sort_by(|a, b| (a.kind.as_str(), &a.src, &a.dst).cmp(&(b.kind.as_str(), &b.src, &b.dst)));
+    FactSet {
+        nodes: walk.nodes,
+        edges: walk.edges,
     }
 }
 
@@ -942,10 +1060,12 @@ mod inner {
         assert!(super::is_image("c.jpg"));
         assert!(!super::is_image("d.gif"));
         // A non-image path returns None without ever looking for models.
-        assert!(super::image_content("notes.txt", b"hello").is_none());
+        assert!(
+            super::image_content("notes.txt", b"hello", super::IngestConfig::default()).is_none()
+        );
         // An oversized image is rejected by the size guard, before model lookup.
         let big = vec![0u8; super::MAX_IMAGE_BYTES + 1];
-        assert!(super::image_content("shot.png", &big).is_none());
+        assert!(super::image_content("shot.png", &big, super::IngestConfig::default()).is_none());
     }
 
     #[test]
@@ -969,14 +1089,69 @@ mod inner {
 
     #[test]
     fn registry_dispatches_by_extension() {
-        let rs = Registry.extract("src/lib.rs", "b", SAMPLE.as_bytes());
+        let rs = Registry::default().extract("src/lib.rs", "b", SAMPLE.as_bytes());
         assert!(rs.nodes.len() > 1, "rust file yields symbols");
-        let txt = Registry.extract("notes.txt", "b", b"hello\n");
+        let txt = Registry::default().extract("notes.txt", "b", b"hello\n");
         assert_eq!(
             txt.nodes.len(),
             1,
             "non-code file falls back to a file node"
         );
         assert_eq!(txt.nodes[0].kind, NodeKind::File);
+    }
+
+    #[test]
+    fn ingest_prose_toggle_gates_embedded_content() {
+        use super::IngestConfig;
+
+        let content = |ingest: IngestConfig| {
+            Registry::new(ingest)
+                .extract("notes.md", "b", b"# Title\n\nBody text.\n")
+                .nodes[0]
+                .meta
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        };
+
+        // Default (prose on) embeds the markdown body; disabling prose drops it.
+        assert!(
+            content(IngestConfig::default()).is_some_and(|c| c.contains("Body text")),
+            "prose content embedded by default"
+        );
+        assert_eq!(
+            content(IngestConfig {
+                prose: false,
+                ..IngestConfig::default()
+            }),
+            None,
+            "disabling prose suppresses the embedded body"
+        );
+    }
+
+    #[test]
+    fn env_tag_stable_by_default_and_shifts_when_gated() {
+        use super::IngestConfig;
+
+        // All-on is the default: its tag must equal a plain `Registry` so existing
+        // caches are untouched.
+        let all_on = Registry::new(IngestConfig::default()).env_tag();
+        assert_eq!(all_on, Registry::default().env_tag());
+
+        // Each disabled toggle changes the tag (forcing re-extraction), and
+        // distinct disabled sets produce distinct tags.
+        let no_prose = Registry::new(IngestConfig {
+            prose: false,
+            ..IngestConfig::default()
+        })
+        .env_tag();
+        let no_pdf = Registry::new(IngestConfig {
+            pdf: false,
+            ..IngestConfig::default()
+        })
+        .env_tag();
+        assert_ne!(no_prose, all_on);
+        assert_ne!(no_pdf, all_on);
+        assert_ne!(no_prose, no_pdf);
     }
 }
