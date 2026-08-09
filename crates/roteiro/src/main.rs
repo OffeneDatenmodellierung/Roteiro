@@ -692,29 +692,32 @@ fn run_import_graphify(path: &str, json: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Re-import is authoritative over Graphify's own edges only; apply the layer
-    // to the live graph and persist it so it is durable across future syncs.
-    store.delete_edges_by_src_ref(rto_spec::GRAPHIFY_REF)?;
-    store.apply_factset(&facts)?;
-    store.put_import(rto_spec::GRAPHIFY_REF, &facts)?;
+    // Apply and persist the whole Graphify layer authoritatively: this replaces
+    // any prior Graphify import (its edges, including grounding links), validates
+    // each edge against the current graph — dropping cross-references to code
+    // that is not present — and stores only the validated layer, so it is durable
+    // across future syncs without keeping stale data.
+    let applied = store.apply_import_layer(rto_spec::GRAPHIFY_REF, &facts)?;
 
     let r = &imported.report;
     if json {
         let mut report = serde_json::to_value(r)?;
         report["docs_linked_to_files"] = serde_json::json!(linked);
+        report["edges_pruned_stale"] = serde_json::json!(applied.edges_pruned);
         report["durable"] = serde_json::json!(true);
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
             "imported graphify: {} node(s) ({} dropped as code), {} inferred edge(s) \
              ({} ast dropped, {} dangling skipped), {} hyperedge group(s); \
-             {linked} doc(s) linked to files — persisted (durable across syncs)",
+             {linked} doc(s) linked to files, {} stale pruned — persisted (durable)",
             r.nodes_imported,
             r.nodes_dropped_code,
             r.edges_imported,
             r.edges_dropped_ast,
             r.edges_skipped_dangling,
             r.hyperedges_imported,
+            applied.edges_pruned,
         );
     }
     Ok(())
