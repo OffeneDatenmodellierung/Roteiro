@@ -99,6 +99,9 @@ pub struct ServeConfig {
     /// Restrict which installed generative models to serve (default: all
     /// installed generative models).
     pub models: Option<Vec<String>>,
+    /// Auto-register the graph tools so the served model can query the codebase
+    /// (ADR-0006). Default `true`.
+    pub tools: Option<bool>,
 }
 
 /// `[infer]` — defaults for the similarity-inference command.
@@ -158,6 +161,7 @@ impl Config {
             serve: ServeConfig {
                 addr: over.serve.addr.clone().or(self.serve.addr.clone()),
                 models: over.serve.models.clone().or(self.serve.models.clone()),
+                tools: over.serve.tools.or(self.serve.tools),
             },
         }
     }

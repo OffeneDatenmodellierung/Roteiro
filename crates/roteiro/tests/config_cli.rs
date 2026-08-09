@@ -28,7 +28,7 @@ fn config_reflects_project_toml_and_rejects_malformed() {
     std::fs::write(
         dir.join("roteiro.toml"),
         "[infer]\nmin_confidence = 0.66\n[duplicates]\nlimit = 7\n[ingest]\npdf = false\n\
-         [serve]\naddr = \"127.0.0.1:9100\"\n",
+         [serve]\naddr = \"127.0.0.1:9100\"\ntools = false\n",
     )
     .expect("write config");
 
@@ -41,6 +41,7 @@ fn config_reflects_project_toml_and_rejects_malformed() {
     assert_eq!(cfg["duplicates"]["limit"], 7);
     assert_eq!(cfg["ingest"]["pdf"], false);
     assert_eq!(cfg["serve"]["addr"], "127.0.0.1:9100");
+    assert_eq!(cfg["serve"]["tools"], false);
 
     // Human output labels provenance.
     let human = roteiro(&dir, &["config"]);

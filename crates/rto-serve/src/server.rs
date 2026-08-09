@@ -17,22 +17,48 @@ use axum::routing::{get, post};
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::engine::{ChatRequest, Engine, EngineError, FinishReason};
+use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason};
+use crate::tools::{ToolRegistry, chat_with_tools};
 use crate::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessageDto,
     ChunkChoice, Delta, ErrorResponse, ModelList, ModelObject, Usage,
 };
 
-/// Shared handler state: the inference engine behind an `Arc` so request tasks
-/// share one instance.
-type Shared = Arc<dyn Engine>;
+/// How many tool round-trips a single request may take before the model's last
+/// output is returned regardless (ADR-0006 server-side execute-and-loop).
+const MAX_TOOL_ROUNDS: usize = 4;
 
-/// Build the `/v1` router over `engine`.
-pub fn app(engine: Shared) -> Router {
+/// Shared handler state: the inference engine and, optionally, the graph tools
+/// the served model may call.
+struct AppState {
+    engine: Arc<dyn Engine>,
+    tools: Option<Arc<dyn ToolRegistry>>,
+}
+type Shared = Arc<AppState>;
+
+/// Build the `/v1` router over `engine`, with no tools.
+pub fn app(engine: Arc<dyn Engine>) -> Router {
+    router(Arc::new(AppState {
+        engine,
+        tools: None,
+    }))
+}
+
+/// Build the `/v1` router over `engine` with `tools` auto-registered — the model
+/// may call them to query the graph while answering (ADR-0006).
+pub fn app_with_tools(engine: Arc<dyn Engine>, tools: Arc<dyn ToolRegistry>) -> Router {
+    router(Arc::new(AppState {
+        engine,
+        tools: Some(tools),
+    }))
+}
+
+/// Assemble the router over a fully-built [`AppState`].
+fn router(state: Shared) -> Router {
     Router::new()
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
-        .with_state(engine)
+        .with_state(state)
 }
 
 /// Serve the `/v1` app on `addr`, blocking the calling thread until shutdown.
@@ -40,20 +66,38 @@ pub fn app(engine: Shared) -> Router {
 /// # Errors
 /// Returns an error if the tokio runtime cannot start, the address cannot be
 /// bound, or the server exits abnormally.
-pub fn serve_blocking(engine: Shared, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+pub fn serve_blocking(engine: Arc<dyn Engine>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    serve_router(app(engine), addr)
+}
+
+/// Like [`serve_blocking`], with graph tools auto-registered (ADR-0006).
+///
+/// # Errors
+/// As [`serve_blocking`].
+pub fn serve_blocking_with_tools(
+    engine: Arc<dyn Engine>,
+    tools: Arc<dyn ToolRegistry>,
+    addr: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    serve_router(app_with_tools(engine, tools), addr)
+}
+
+/// Run `router` on `addr`, blocking until shutdown.
+fn serve_router(router: Router, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app(engine)).await?;
+        axum::serve(listener, router).await?;
         Ok(())
     })
 }
 
 /// `GET /v1/models` — the installed models this server serves.
-async fn list_models(State(engine): State<Shared>) -> Json<ModelList> {
-    let data = engine
+async fn list_models(State(state): State<Shared>) -> Json<ModelList> {
+    let data = state
+        .engine
         .models()
         .into_iter()
         .map(|m| ModelObject {
@@ -71,7 +115,7 @@ async fn list_models(State(engine): State<Shared>) -> Json<ModelList> {
 /// `POST /v1/chat/completions` — a full JSON completion, or an SSE stream of
 /// `chat.completion.chunk` events when `stream: true`.
 async fn chat_completions(
-    State(engine): State<Shared>,
+    State(state): State<Shared>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> Response {
     let stream = body.stream == Some(true);
@@ -81,7 +125,7 @@ async fn chat_completions(
     };
     // Validate the model up front so the streaming and non-streaming paths agree:
     // an unknown model is a 404 either way, not a 200 SSE that fails mid-stream.
-    if !engine.models().iter().any(|m| m.id == req.model) {
+    if !state.engine.models().iter().any(|m| m.id == req.model) {
         return error(
             StatusCode::NOT_FOUND,
             EngineError::UnknownModel(req.model).to_string(),
@@ -89,18 +133,18 @@ async fn chat_completions(
         );
     }
     if stream {
-        stream_chat(engine, req)
+        stream_chat(state, req)
     } else {
-        chat_json(engine, req).await
+        chat_json(state, req).await
     }
 }
 
 /// Non-streaming path: run one blocking completion on a worker thread and return
-/// a single JSON body.
-async fn chat_json(engine: Shared, req: ChatRequest) -> Response {
+/// a single JSON body. With tools registered, the model may call them first.
+async fn chat_json(state: Shared, req: ChatRequest) -> Response {
     let model = req.model.clone();
     // Inference blocks (llama.cpp decode loop); keep it off the async runtime.
-    let result = tokio::task::spawn_blocking(move || engine.chat(&req)).await;
+    let result = tokio::task::spawn_blocking(move || complete(&state, &req)).await;
 
     match result {
         Ok(Ok(completion)) => Json(build_response(&model, &completion)).into_response(),
@@ -123,6 +167,15 @@ async fn chat_json(engine: Shared, req: ChatRequest) -> Response {
     }
 }
 
+/// Run a completion honouring registered tools: the agentic tool loop
+/// (ADR-0006) when tools are present, otherwise a plain generation. Blocking.
+fn complete(state: &AppState, req: &ChatRequest) -> Result<Completion, EngineError> {
+    match &state.tools {
+        Some(tools) => chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS),
+        None => state.engine.chat(req),
+    }
+}
+
 /// A message from the blocking generation worker to the SSE stream.
 enum StreamMsg {
     /// The first chunk: announce the assistant role.
@@ -138,7 +191,7 @@ enum StreamMsg {
 /// Streaming path: run generation on a blocking worker that feeds token deltas
 /// over a channel, and surface them as OpenAI `chat.completion.chunk` SSE events
 /// terminated by `data: [DONE]`.
-fn stream_chat(engine: Shared, req: ChatRequest) -> Response {
+fn stream_chat(state: Shared, req: ChatRequest) -> Response {
     let id = format!("chatcmpl-{}", next_id());
     let created = unix_seconds();
     let model = req.model.clone();
@@ -148,15 +201,30 @@ fn stream_chat(engine: Shared, req: ChatRequest) -> Response {
         // A dropped receiver (client disconnected) just makes sends fail — the
         // generation loop then runs to completion harmlessly.
         let _ = tx.send(StreamMsg::Role);
-        let mut on_token = |piece: &str| {
-            let _ = tx.send(StreamMsg::Delta(piece.to_owned()));
-        };
-        match engine.chat_stream(&req, &mut on_token) {
-            Ok(stats) => {
-                let _ = tx.send(StreamMsg::Done(stats.finish_reason));
+        if state.tools.is_some() {
+            // The tool loop runs multiple generations, so it is resolved fully
+            // and then the final answer is emitted as one delta (tool-mode
+            // streaming is not token-incremental).
+            match complete(&state, &req) {
+                Ok(completion) => {
+                    let _ = tx.send(StreamMsg::Delta(completion.content));
+                    let _ = tx.send(StreamMsg::Done(completion.finish_reason));
+                }
+                Err(e) => {
+                    let _ = tx.send(StreamMsg::Failed(e.to_string()));
+                }
             }
-            Err(e) => {
-                let _ = tx.send(StreamMsg::Failed(e.to_string()));
+        } else {
+            let mut on_token = |piece: &str| {
+                let _ = tx.send(StreamMsg::Delta(piece.to_owned()));
+            };
+            match state.engine.chat_stream(&req, &mut on_token) {
+                Ok(usage) => {
+                    let _ = tx.send(StreamMsg::Done(usage.finish_reason));
+                }
+                Err(e) => {
+                    let _ = tx.send(StreamMsg::Failed(e.to_string()));
+                }
             }
         }
     });
