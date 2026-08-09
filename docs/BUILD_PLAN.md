@@ -505,14 +505,16 @@ the [Stage 9](#stage-9--importers--v090--graphify-delivered-latmd--codegraph-pen
   facts **survive a subsequent code-changing sync**; an end-to-end CLI test per
   source.
 
-### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** *(completes Stage 8)*
+### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; content ingestion delivered)*
 **Goal:** make `inferred` edges meaningful by embedding **real content**, not
 just node names, and extend ingestion to docs/PDFs/images.
-- **Text-content ingestion (first, zero new deps):** during extraction, capture
-  markdown bodies and Rust doc-comments/comments and feed them to the embedder,
-  so inference relates docs ↔ code by *meaning* (today it embeds only names +
-  file stem). This alone lifts inferred-edge quality and lights up the
-  Graphify-imported doc nodes against real code.
+- **Text-content ingestion (first, zero new deps) — delivered.** Extraction now
+  captures markdown/prose bodies (`file:` nodes) and Rust doc-comments (symbol
+  nodes) into `meta.content` (capped, whitespace-collapsed), and `node_text`
+  embeds it, so inference relates docs ↔ code by *meaning*. The content-addressed
+  cache gained an **extractor version** in its key (`EXTRACT_VERSION`), so an
+  extraction-logic change retires stale cache entries instead of serving
+  content-less facts for unchanged blobs.
 - **PDF text:** a pure-Rust extractor (e.g. `pdf-extract`/`lopdf`, licence-gated)
   → `doc` nodes with text → embedded. Feature-gated.
 - **Image scanning:** OCR/vision over images. **Needs its own decision (like
@@ -755,7 +757,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ✅ Graphify shipped; lat.md + codegraph completed in Stage 11 |
 | v0.10.x | 10 | CI-canonical artifacts | 🚧 artifact `export`/`load` shipped (v0.0.10); **CI publish/fetch etc. → Stage 14** |
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ✅ durable+validated imports, lat.md importer, codegraph oracle (`compare_codegraph`) |
-| v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
+| v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | 🚧 content ingestion ✅ (+ cache versioning); PDF/image/dedup/invalidation remaining (image OCR needs a decision) |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ✅ ADR-0004; Tier 0 (`spec context`/`scaffold`) + Tier 1 (`spec draft`, Qwen2.5-0.5B GGUF via candle) |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |

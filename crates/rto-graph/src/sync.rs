@@ -295,10 +295,16 @@ fn resolve_calls(facts: &mut FactSet) {
 
 /// Content-addressed cache key for a blob at a given path: the blob oid (kept
 /// as the leading, well-distributed shard) suffixed with a stable 64-bit hash
-/// of the path. Sharing across branches/worktrees is preserved (same path+oid →
-/// same key) while duplicate content at distinct paths stays distinct.
+/// of the path and the [`crate::extract::EXTRACT_VERSION`]. Sharing across
+/// branches/worktrees is preserved (same path+oid+version → same key) while
+/// duplicate content at distinct paths stays distinct; bumping the extractor
+/// version retires every old entry so a re-extraction is forced.
 fn cache_key(path: &str, oid: &str) -> String {
-    format!("{oid}-{:016x}", fnv1a64(path.as_bytes()))
+    format!(
+        "{oid}-{:016x}-v{}",
+        fnv1a64(path.as_bytes()),
+        crate::extract::EXTRACT_VERSION,
+    )
 }
 
 /// FNV-1a (64-bit). Dependency-free and deterministic; used only to derive
@@ -365,5 +371,9 @@ mod tests {
         assert_ne!(cache_key("src/a.rs", "aaa"), cache_key("src/a.rs", "bbb"));
         // Key stays sharded on the oid so the cache's 2-char shard is well spread.
         assert!(cache_key("src/a.rs", oid).starts_with("abc123-"));
+        // The extractor version is folded in, so a bump retires old entries.
+        assert!(
+            cache_key("src/a.rs", oid).ends_with(&format!("-v{}", crate::extract::EXTRACT_VERSION))
+        );
     }
 }

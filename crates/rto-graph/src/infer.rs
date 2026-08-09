@@ -142,8 +142,10 @@ impl Embedder for HashEmbedder {
     }
 }
 
-/// The text embedded for a node: its name plus the file stem (basename without
-/// extension) for a little path context.
+/// The text embedded for a node: its name, the file stem (basename without
+/// extension) for a little path context, and — when extraction captured it — the
+/// node's real content (a markdown body or a doc-comment, in `meta.content`), so
+/// similarity reflects *meaning* rather than just the identifier.
 fn node_text(node: &Node) -> String {
     let mut text = node.name.clone();
     if let Some(path) = &node.path
@@ -153,6 +155,10 @@ fn node_text(node: &Node) -> String {
     {
         text.push(' ');
         text.push_str(stem);
+    }
+    if let Some(content) = node.meta.get("content").and_then(|v| v.as_str()) {
+        text.push(' ');
+        text.push_str(content);
     }
     text
 }
@@ -236,8 +242,22 @@ pub fn infer_edges_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{InferenceConfig, embed, infer_edges, similarity};
+    use super::{InferenceConfig, embed, infer_edges, node_text, similarity};
     use crate::{EdgeKind, FactSet, Node, NodeKind, Provenance, Store};
+
+    #[test]
+    fn node_text_includes_captured_content() {
+        let mut n = Node::new("file:docs/auth.md", NodeKind::Doc, "auth.md");
+        n.path = Some("docs/auth.md".to_owned());
+        n.meta = serde_json::json!({ "content": "token validation and OAuth flow" });
+        let text = node_text(&n);
+        assert!(text.contains("auth.md")); // name
+        assert!(text.contains("auth")); // stem
+        assert!(text.contains("token validation and OAuth flow")); // captured body
+        // A node with no content still embeds name + stem.
+        let plain = Node::new("sym:rust:a.rs#foo", NodeKind::Fn, "foo");
+        assert_eq!(node_text(&plain), "foo");
+    }
 
     #[test]
     fn embedding_is_deterministic_and_unit_length() {
