@@ -530,7 +530,7 @@ just node names, and extend ingestion to docs/PDFs/images.
   code; PDF/image ingestion each add labelled `inferred` facts behind their
   features; the default/`inference` builds stay unchanged.
 
-### Stage 13 — Spec/Blueprint authoring pillar  → **v0.13.x** 🚧 *in progress (ADR-0004 accepted; Tier 0 `spec context` delivered)*
+### Stage 13 — Spec/Blueprint authoring pillar  → **v0.13.x** 🚧 *in progress (ADR-0004 accepted; Tier 0 `spec context` + `spec scaffold` delivered)*
 **Goal:** the intent interview + house-style ADR/blueprint + **graph-grounded,
 correct build/deploy plan** generation — the front door ADR-0001 always
 envisioned (`roteiro spec`), sharpened by GitHub **spec-kit**'s phases
@@ -718,7 +718,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.10.x | 10 | CI-canonical artifacts | 🚧 artifact `export`/`load` shipped (v0.0.10); **CI publish/fetch etc. → Stage 14** |
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ✅ durable+validated imports, lat.md importer, codegraph oracle (`compare_codegraph`) |
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
-| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | 🚧 ADR-0004 ✅; Tier 0 `spec context` ✅; scaffold + Tier 1 remaining |
+| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | 🚧 ADR-0004 ✅; Tier 0 `spec context` + `spec scaffold` ✅; blueprint kind + Tier 1 remaining |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |

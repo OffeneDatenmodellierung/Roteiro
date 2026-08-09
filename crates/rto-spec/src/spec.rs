@@ -59,6 +59,15 @@ const DOC_KINDS: &[&str] = &["adr", "adr_section", "blueprint", "doc", "lat_sect
 /// # Errors
 /// Returns [`StoreError`] on query failure.
 pub fn context(store: &Store, topic: &str, limit: usize) -> Result<SpecContext, StoreError> {
+    if limit == 0 {
+        return Ok(SpecContext {
+            schema: SPEC_SCHEMA,
+            topic: topic.to_owned(),
+            symbols: Vec::new(),
+            docs: Vec::new(),
+            related_adrs: Vec::new(),
+        });
+    }
     // Over-fetch candidates so we can keep the top `limit` of each category.
     let hits = search(store, topic, limit.saturating_mul(3).max(30))?;
 
@@ -122,6 +131,135 @@ fn edges_of(edges: &[rto_graph::EdgeRef], kind: &str) -> Vec<String> {
         .filter(|e| e.kind == kind)
         .map(|e| e.node.clone())
         .collect()
+}
+
+/// Generate a **house-style ADR skeleton** for `topic`, grounded in `ctx`:
+/// correct frontmatter (id `adr_id`, `Draft`), the house section headings with
+/// placeholders, a clarify **interview checklist**, and a build-plan outline. The
+/// `[[…]]` links it emits — affected symbols and related ADRs — are drawn from
+/// the graph, so they resolve and the scaffold is `roteiro check`-clean by
+/// construction. `date` is `YYYY-MM-DD` (the caller supplies today's date).
+#[must_use]
+pub fn scaffold_adr(
+    topic: &str,
+    title: Option<&str>,
+    adr_id: &str,
+    date: &str,
+    ctx: &SpecContext,
+) -> String {
+    use std::fmt::Write as _;
+
+    let title = title.unwrap_or(topic);
+    // Grounded links: affected symbols as `[[path#Symbol]]`, related ADRs as
+    // `[[docs/adr/…md]]` — both resolve against real nodes.
+    let symbol_links: Vec<String> = ctx
+        .symbols
+        .iter()
+        .filter_map(|s| symbol_link_target(&s.node.key))
+        .map(|t| format!("[[{t}]]"))
+        .collect();
+    let adr_links: Vec<String> = ctx
+        .docs
+        .iter()
+        .filter(|d| d.kind == "adr")
+        .filter_map(|d| d.path.clone())
+        .map(|p| format!("[[{p}]]"))
+        .collect();
+    let files: Vec<String> = {
+        let mut fs: Vec<String> = ctx
+            .symbols
+            .iter()
+            .filter_map(|s| s.node.path.clone())
+            .collect();
+        fs.sort();
+        fs.dedup();
+        fs
+    };
+
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "---\n\
+         Title: {title}\n\
+         Space: ARCH\n\
+         Parent: ADRs\n\n\
+         # ADR-specific metadata (unknown keys are ignored; used for indexing/search)\n\
+         type: adr\n\
+         adr-id: \"{adr_id}\"\n\
+         status: Draft                       # Draft | For Review | Accepted | Rejected | Superseded\n\
+         architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH\n\
+         domain: Developer Tooling\n\
+         decision-makers: [\"The Roteiro Project Team\"]\n\
+         superseded-by:\n\
+         version: \"0.1\"\n\
+         last-modified: {date}\n\
+         confluence-url:\n\
+         ---\n\n\
+         # ADR-{adr_id}: {title}\n\n\
+         | | |\n|---|---|\n\
+         | **State** | Draft |\n\
+         | **Architectural Significance** | MEDIUM |\n\
+         | **Domain** | Developer Tooling |\n\
+         | **Document version** | 0.1 |\n\n\
+         ## Reference\n\n\
+         _Scaffolded by `roteiro spec` and grounded in the graph — the links below\n\
+         already resolve against real nodes; fill in the prose._\n\n"
+    );
+
+    if !adr_links.is_empty() {
+        let _ = writeln!(out, "Related decisions: {}.\n", adr_links.join(", "));
+    }
+    if !symbol_links.is_empty() {
+        let _ = writeln!(out, "Affected code: {}.\n", symbol_links.join(", "));
+    }
+
+    out.push_str(
+        "## Summary\n\n\
+         _TODO: the decision in a sentence or two._\n\n\
+         ## Context\n\n\
+         _TODO: the forces at play and why a decision is needed now._\n\n\
+         ## Interview — clarify before writing\n\n\
+         - [ ] What problem does this solve, and who has it?\n\
+         - [ ] Which existing ADRs does this relate to or supersede? (see Reference)\n\
+         - [ ] Are the affected symbols above the right scope — anything missing?\n\
+         - [ ] What options were considered, and why this one?\n\
+         - [ ] What are the consequences, costs, and risks?\n\n\
+         ## Decision makers\n\n\
+         - The Roteiro Project Team\n\n\
+         ## Recommended option\n\n_TODO._\n\n\
+         ## Options considered + consequences\n\n_TODO._\n\n\
+         ## Consequences\n\n_TODO._\n\n\
+         ## Build-plan outline (grounded)\n\n",
+    );
+
+    if files.is_empty() && adr_links.is_empty() {
+        out.push_str("_No related graph facts found for this topic yet._\n\n");
+    } else {
+        for f in &files {
+            let _ = writeln!(out, "- Touches `{f}`");
+        }
+        if !adr_links.is_empty() {
+            let _ = writeln!(out, "- Reconcile with: {}", adr_links.join(", "));
+        }
+        out.push('\n');
+    }
+
+    let _ = write!(
+        out,
+        "## Document version history\n\n\
+         | Version | Date | Notes |\n\
+         |---------|------|-------|\n\
+         | 0.1 | {date} | Draft scaffold generated by `roteiro spec scaffold`. |\n"
+    );
+    out
+}
+
+/// The `path#Symbol` wiki-link target reconstructed from a `sym:<lang>:<path>#…`
+/// key (dropping the `sym:<lang>:` prefix), or `None` if not a symbol key.
+fn symbol_link_target(key: &str) -> Option<&str> {
+    key.strip_prefix("sym:")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(_lang, target)| target)
 }
 
 #[cfg(test)]
@@ -204,5 +342,65 @@ mod tests {
         let store = seeded();
         let ctx = context(&store, "   ", 10).expect("context");
         assert!(ctx.symbols.is_empty() && ctx.docs.is_empty());
+    }
+
+    #[test]
+    fn scaffold_is_grounded_and_check_clean() {
+        use super::scaffold_adr;
+        let mut store = seeded();
+        let ctx = context(&store, "validate_token", 10).expect("context");
+        let md = scaffold_adr(
+            "validate_token",
+            Some("Token validation"),
+            "0099",
+            "2026-08-09",
+            &ctx,
+        );
+
+        // House frontmatter + title with the given id.
+        assert!(md.contains("adr-id: \"0099\""), "{md}");
+        assert!(md.contains("# ADR-0099: Token validation"));
+        // Grounded affected-code link and the interview checklist.
+        assert!(
+            md.contains("[[src/auth.rs#validate_token]]"),
+            "grounded link: {md}"
+        );
+        assert!(md.contains("- [ ] What problem does this solve"));
+
+        // It parses as a house ADR and its links resolve to a real node — so it
+        // is `check`-clean by construction.
+        let doc = crate::parse_adr("docs/adr/0099-token-validation.md", &md).expect("parse");
+        assert!(
+            doc.links
+                .iter()
+                .any(|l| l.target_key == "sym:rust:src/auth.rs#validate_token"),
+            "the scaffold's link must resolve to the real symbol: {:?}",
+            doc.links,
+        );
+        let report = crate::run(&mut store, std::slice::from_ref(&doc), &[]).expect("check");
+        assert_eq!(
+            report.violations.len(),
+            0,
+            "scaffold must be check-clean: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn scaffold_has_no_code_block_indentation() {
+        use super::scaffold_adr;
+        let store = seeded();
+        let ctx = context(&store, "validate_token", 10).expect("context");
+        let md = scaffold_adr("validate_token", None, "0099", "2026-08-09", &ctx);
+        // The `\`-line-continuations in the template strip source indentation, so
+        // no line begins with whitespace; a 4-space indent would (wrongly) render
+        // the frontmatter/headings as a CommonMark code block.
+        for (i, line) in md.lines().enumerate() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "line {} has leading whitespace: {line:?}",
+                i + 1
+            );
+        }
     }
 }
