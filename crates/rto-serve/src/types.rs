@@ -156,7 +156,9 @@ pub struct ChunkChoice {
     pub index: u32,
     /// The incremental delta for this chunk.
     pub delta: Delta,
-    /// Set only on the final chunk: `stop` | `length`.
+    /// Serialized as `null` on every chunk until the final one, which carries
+    /// `stop` | `length` — matching OpenAI's streaming shape (intermediate
+    /// chunks include an explicit `"finish_reason": null`).
     pub finish_reason: Option<&'static str>,
 }
 

@@ -79,6 +79,15 @@ async fn chat_completions(
         Ok(req) => req,
         Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
     };
+    // Validate the model up front so the streaming and non-streaming paths agree:
+    // an unknown model is a 404 either way, not a 200 SSE that fails mid-stream.
+    if !engine.models().iter().any(|m| m.id == req.model) {
+        return error(
+            StatusCode::NOT_FOUND,
+            EngineError::UnknownModel(req.model).to_string(),
+            "invalid_request_error",
+        );
+    }
     if stream {
         stream_chat(engine, req)
     } else {
@@ -404,6 +413,28 @@ mod tests {
             "finish: {text}"
         );
         assert!(text.contains("data: [DONE]"), "terminator: {text}");
+    }
+
+    #[tokio::test]
+    async fn streaming_unknown_model_is_404_not_a_stream() {
+        // An unknown model must 404 up front, not open a 200 SSE that fails later.
+        let body = serde_json::json!({
+            "model": "nope",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+        });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
