@@ -1904,7 +1904,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "limit": { "type": "integer" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
                     },
                     "required": ["query"],
                 }),
@@ -1950,11 +1950,15 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             }
             "search" => {
                 let query = str_arg("query").ok_or("`search` needs a string `query`")?;
+                // `limit` is model-controlled: clamp to 1..=25 (results are
+                // truncated before feed-back anyway) so a huge value can't
+                // waste work; the schema advertises the same bound.
                 let limit = args
                     .get("limit")
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|n| usize::try_from(n).ok())
-                    .unwrap_or(10);
+                    .unwrap_or(10)
+                    .clamp(1, 25);
                 let r = rto_graph::search(&store, query, limit).map_err(|e| e.to_string())?;
                 serde_json::to_string(&r).map_err(|e| e.to_string())
             }

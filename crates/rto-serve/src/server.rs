@@ -201,7 +201,11 @@ fn stream_chat(state: Shared, req: ChatRequest) -> Response {
         // A dropped receiver (client disconnected) just makes sends fail — the
         // generation loop then runs to completion harmlessly.
         let _ = tx.send(StreamMsg::Role);
-        if state.tools.is_some() {
+        // Only take the (non-incremental) tool path when the registry actually
+        // advertises tools — an empty registry falls back to `engine.chat` in
+        // `complete`, so match that here and keep token-by-token streaming.
+        let use_tools = state.tools.as_ref().is_some_and(|t| !t.tools().is_empty());
+        if use_tools {
             // The tool loop runs multiple generations, so it is resolved fully
             // and then the final answer is emitted as one delta (tool-mode
             // streaming is not token-incremental).

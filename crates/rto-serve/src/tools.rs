@@ -13,8 +13,9 @@ use std::fmt::Write as _;
 
 use crate::engine::{ChatRequest, Completion, Engine, EngineError, Message};
 
-/// Max characters of a tool result fed back into the conversation, so a large
-/// query result cannot blow the context window.
+/// Max **bytes** of a tool result fed back into the conversation, so a large
+/// query result cannot blow the context window. (`truncate` caps by UTF-8 bytes,
+/// backing up to a char boundary.)
 const MAX_TOOL_RESULT: usize = 4000;
 
 /// A callable tool advertised to the model.
@@ -74,22 +75,28 @@ pub fn chat_with_tools(
     });
     messages.extend(req.messages.iter().cloned());
 
-    let mut last: Option<Completion> = None;
-    for _ in 0..max_rounds.max(1) {
-        let sub = ChatRequest {
+    let generate = |messages: &[Message]| {
+        engine.chat(&ChatRequest {
             model: req.model.clone(),
-            messages: messages.clone(),
+            messages: messages.to_vec(),
             temperature: req.temperature,
             max_tokens: req.max_tokens,
-        };
-        let completion = engine.chat(&sub)?;
+        })
+    };
+
+    for _ in 0..max_rounds.max(1) {
+        let completion = generate(&messages)?;
 
         let Some(call) = parse_tool_call(&completion.content) else {
             // No tool call: this is the model's final answer.
             return Ok(completion);
         };
 
-        // Execute the tool and feed the (bounded) result back as a `tool` turn.
+        // Execute the tool and feed the (bounded) result back. The response is a
+        // `user` turn (not a `tool` role): `Message` is only guaranteed to render
+        // system/user/assistant, so this stays portable across chat templates —
+        // the `<tool_response>` marker carries the semantics, as the system prompt
+        // told the model to expect.
         let result = registry
             .call(&call.name, &call.arguments)
             .unwrap_or_else(|e| format!("tool `{}` error: {e}", call.name));
@@ -98,18 +105,18 @@ pub fn chat_with_tools(
             content: completion.content.clone(),
         });
         messages.push(Message {
-            role: "tool".to_owned(),
+            role: "user".to_owned(),
             content: format!("<tool_response>{}</tool_response>", truncate(&result)),
         });
-        last = Some(completion);
     }
 
-    // Exhausted the round budget still calling tools: return the last generation
-    // so the caller always gets *something* rather than an error.
-    last.map_or_else(|| engine.chat(req), Ok)
+    // Round budget exhausted while still calling tools: run one final generation
+    // over the accumulated context (including the last tool response) but do not
+    // execute any further tools, so the last result actually informs the answer.
+    generate(&messages)
 }
 
-/// Cap a tool result to [`MAX_TOOL_RESULT`] characters (on a char boundary).
+/// Cap a tool result to [`MAX_TOOL_RESULT`] bytes (backing up to a char boundary).
 fn truncate(s: &str) -> String {
     if s.len() <= MAX_TOOL_RESULT {
         return s.to_owned();
