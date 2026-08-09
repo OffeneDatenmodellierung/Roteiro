@@ -12,7 +12,9 @@
 use std::path::PathBuf;
 
 mod embedder;
+mod generator;
 pub use embedder::{LocalEmbedder, LocalModelError};
+pub use generator::{GenConfig, LocalGenerator};
 
 /// A host platform that a model may have a tuned variant for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,12 +66,23 @@ pub struct ModelVariant {
     pub files: &'static [ModelFile],
 }
 
-/// A model the user can pull and use for inference.
+/// What a registry model is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    /// A text-embedding model (the inference layer, ADR-0003).
+    Embedding,
+    /// A generative instruct model (spec/blueprint drafting, ADR-0004 Tier 1).
+    Generative,
+}
+
+/// A model the user can pull and use.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelSpec {
     /// Unique registry name (e.g. `all-minilm-l6-v2`).
     pub name: &'static str,
-    /// Embedding dimensionality.
+    /// What the model is for.
+    pub kind: ModelKind,
+    /// Embedding dimensionality (0 for generative models).
     pub dim: usize,
     /// SPDX licence of the model weights.
     pub licence: &'static str,
@@ -103,33 +116,62 @@ impl ModelSpec {
 /// per-platform artifact and verify its checksum. Larger/re-encoded variants
 /// (e.g. Apple MLX builds) are added here as `MacosArm64` variants when they
 /// exist — until then the host resolves to the `Standard` variant.
-pub const REGISTRY: &[ModelSpec] = &[ModelSpec {
-    name: "all-minilm-l6-v2",
-    dim: 384,
-    licence: "Apache-2.0",
-    description: "sentence-transformers/all-MiniLM-L6-v2 — small, fast general-purpose embeddings",
-    size_mib: 90,
-    variants: &[ModelVariant {
-        platform: Platform::Standard,
-        files: &[
-            ModelFile {
-                name: "config.json",
-                url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
-                sha256: "",
-            },
-            ModelFile {
-                name: "tokenizer.json",
-                url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
-                sha256: "",
-            },
-            ModelFile {
-                name: "model.safetensors",
-                url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
-                sha256: "",
-            },
-        ],
-    }],
-}];
+pub const REGISTRY: &[ModelSpec] = &[
+    ModelSpec {
+        name: "all-minilm-l6-v2",
+        kind: ModelKind::Embedding,
+        dim: 384,
+        licence: "Apache-2.0",
+        description: "sentence-transformers/all-MiniLM-L6-v2 — small, fast general-purpose embeddings",
+        size_mib: 90,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "config.json",
+                    url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
+                    sha256: "",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                    sha256: "",
+                },
+                ModelFile {
+                    name: "model.safetensors",
+                    url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
+                    sha256: "",
+                },
+            ],
+        }],
+    },
+    // ADR-0004 Tier 1: a tiny Apache-2.0 instruct model for offline spec/blueprint
+    // drafting (Qwen2 arch, ChatML). Stored locally as `model.gguf` + its
+    // tokenizer (which lives in the base instruct repo, not the GGUF repo).
+    ModelSpec {
+        name: "qwen2.5-0.5b-instruct",
+        kind: ModelKind::Generative,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Qwen2.5-0.5B-Instruct (Q4_K_M GGUF) — tiny offline instruct model for `spec draft`",
+        size_mib: 410,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                    sha256: "",
+                },
+                ModelFile {
+                    name: "tokenizer.json",
+                    url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json",
+                    sha256: "",
+                },
+            ],
+        }],
+    },
+];
 
 /// Look up a model spec by name.
 #[must_use]
@@ -207,7 +249,7 @@ pub fn ensure_model_dir(name: &str) -> std::io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Platform, REGISTRY, find, sha256_hex, store_root, verify_sha256};
+    use super::{ModelKind, Platform, REGISTRY, find, sha256_hex, store_root, verify_sha256};
     use std::path::Path;
 
     #[test]
@@ -215,7 +257,13 @@ mod tests {
         assert!(!REGISTRY.is_empty());
         for spec in REGISTRY {
             assert!(!spec.name.is_empty());
-            assert!(spec.dim > 0);
+            // Embedding models carry a dimension; generative models do not.
+            assert_eq!(
+                spec.dim > 0,
+                spec.kind == ModelKind::Embedding,
+                "{}",
+                spec.name
+            );
             assert!(!spec.variants.is_empty());
             // Every model must have a Standard variant so any host resolves.
             assert!(

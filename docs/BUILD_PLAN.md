@@ -532,7 +532,7 @@ just node names, and extend ingestion to docs/PDFs/images.
   code; PDF/image ingestion each add labelled `inferred` facts behind their
   features; the default/`inference` builds stay unchanged.
 
-### Stage 13 — Spec/Blueprint authoring pillar  → **v0.13.x** 🚧 *in progress (ADR-0004 accepted; **Tier 0 complete** — `spec context` + `spec scaffold` adr/blueprint; Tier 1 next)*
+### Stage 13 — Spec/Blueprint authoring pillar  → **v0.13.x** ✅ *delivered (ADR-0004; Tier 0 `spec context`/`spec scaffold` + Tier 1 local-model `spec draft`)*
 **Goal:** the intent interview + house-style ADR/blueprint + **graph-grounded,
 correct build/deploy plan** generation — the front door ADR-0001 always
 envisioned (`roteiro spec`), sharpened by GitHub **spec-kit**'s phases
@@ -558,6 +558,15 @@ so generated plans reference *real* symbols/ADRs/deps and are `check`-gated.
 - **DoD:** tier-0 produces a valid, `check`-passing house-style skeleton grounded
   in real graph facts with **no** model; tier-1 drafts prose from a small local
   model offline; both artifacts are `check`-gated.
+- **Delivered.** `roteiro spec context` (graph search + neighbourhood grounding),
+  `roteiro spec scaffold --kind adr|blueprint` (house-style, grounded,
+  `check`-clean skeletons + interview checklist + build-plan outline), and
+  `roteiro spec draft` — Tier 1: a tiny **Qwen2.5-0.5B-Instruct** GGUF (Apache-2.0)
+  run offline via **candle** `quantized_qwen2` (behind `inference-local-models`,
+  pulled with consent through the ADR-0003 registry) fills the scaffold's `_TODO_`
+  sections from grounded prompts; falls back to the plain scaffold with no model.
+  Tiers 2/3 (larger local model, agent review) and a bundled skill are natural
+  follow-ups. Blueprint scaffold modelled on Thalweg's `docs/blueprints`.
 
 ### Stage 16 — Commit-time correctness gate  → **v0.x** *(execution order: after Stage 13, immediately before Stage 14)*
 **Goal:** guarantee the knowledge base is not just *fresh* (what `sync` gives)
@@ -747,7 +756,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.10.x | 10 | CI-canonical artifacts | 🚧 artifact `export`/`load` shipped (v0.0.10); **CI publish/fetch etc. → Stage 14** |
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ✅ durable+validated imports, lat.md importer, codegraph oracle (`compare_codegraph`) |
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ⛔ content-first (0 deps); image OCR/vision needs a decision |
-| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | 🚧 ADR-0004 ✅; **Tier 0 complete** (`spec context` + `spec scaffold` adr/blueprint); Tier 1 (local generative) remaining |
+| v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ✅ ADR-0004; Tier 0 (`spec context`/`scaffold`) + Tier 1 (`spec draft`, Qwen2.5-0.5B GGUF via candle) |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
