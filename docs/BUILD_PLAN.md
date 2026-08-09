@@ -16,12 +16,14 @@ tracking) shipped independently, and **Stage 11** is complete — durable +
 validated imports, the lat.md importer, and the codegraph validation oracle — so
 the migration path off all three incumbents is finished. What each stage
 *deferred* is tracked honestly as first-class stages in §5b. Remaining order:
-**Stage 13** (spec/blueprint authoring pillar — *next*) → **Stage 12** (inference
-content/PDF/image ingestion + semantic dedup) → **Stage 16** (commit-time
-correctness gate) → **Stage 14** (v1.0 hardening). **A note on stage numbers:**
-they are labels, not execution order — Stage 15 shipped early, Stage 13 is being
-taken before Stage 12, and Stage 16 is sequenced last before the Stage 14 freeze
-because it touches sync, check, and hooks together. **A note on version labels:**
+**Stage 13** (spec/blueprint authoring pillar — *in progress*, Tier 0 done) →
+**Stage 12** (inference content/PDF/image ingestion + semantic dedup) → **Stage
+16** (commit-time correctness gate) → **Stage 14** (v1.0 hardening) → **Stage 17**
+(tool-agnostic agent instructions & context-aware review, post-v1.0). **A note on
+stage numbers:** they are labels, not execution order — Stage 15 shipped early,
+Stage 13 is being taken before Stage 12, and Stages 16/17 are sequenced around the
+Stage 14 freeze (16 just before, 17 just after) because they depend on the final
+sync/check/standards surface. **A note on version labels:**
 the per-stage `v0.x` headings are *nominal targets*; because the workspace is
 pre-1.0, release-plz bumps `feat` commits as patches, so real tags are `0.0.n`
 (Stage 1 → v0.0.2 … artifacts → v0.0.10 … Stage 11 → v0.0.12). §7 maps them.
@@ -664,6 +666,33 @@ and footnotes.
   feature's own API docs still self-report a handful of markers (they name the
   categories); the ignore directives are the intended remedy where it matters.
 
+### Stage 17 — Agent instructions & context-aware review (tool-agnostic)  → **post-v1.0** *(execution order: after Stage 14, the last stage)*
+**Goal:** make every calling agent — Copilot code review, Claude Code, Cursor,
+cloud agents, future contributors — Roteiro-aware, via **tool-agnostic** files
+rather than one vendor's format, so the same standards drive review and
+authoring everywhere. Sequenced **after Stage 14** so the standards it encodes
+are final (v1.0-frozen), not a moving target.
+- **Canonical `AGENTS.md`** (the emerging cross-tool standard many agents read):
+  the contribution + review standards in one place — provenance invariants (no
+  unlabelled edges; `inferred` ⇒ confidence), MSRV 1.94, clippy pedantic
+  `-D warnings`, `roteiro check` + `cargo deny` stay green, deterministic
+  extraction, feature-gate heavy deps, one-concern PRs, house ADR/blueprint
+  style. Vendor shims (e.g. `.github/copilot-instructions.md`) **reference** it
+  rather than duplicate, so there is a single source of truth.
+- **A review skill/checklist** any agent can consume — a review-focused
+  `.github/skills/code-review/` skill for Copilot, mirrored as a generic
+  checklist doc for other tools (enabling the Copilot skill is a repo-settings
+  step for the owner).
+- **Stretch (investigate):** wire Roteiro's own MCP (`roteiro serve`) into agent
+  reviews so a reviewer queries the graph (`explain`/`debt`/`path`/`search`) —
+  dogfooding the one query surface for reviews, not just the diff. Feasibility is
+  open: GitHub's docs confirm MCP servers are configurable in repo Copilot
+  settings but do not state whether the hosted reviewer can reach a **self-hosted**
+  MCP; record the finding before committing.
+- **DoD:** a tool-agnostic instructions file measurably shapes an agent review
+  (attribution shows it was read); the review checklist/skill exists; the
+  MCP-for-review feasibility is recorded (done or explicitly deferred).
+
 ---
 
 ## 6. Cross-cutting concerns
@@ -722,6 +751,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
+| post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
 
 ---
 
