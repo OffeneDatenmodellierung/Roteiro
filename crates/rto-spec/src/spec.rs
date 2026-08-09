@@ -150,31 +150,11 @@ pub fn scaffold_adr(
     use std::fmt::Write as _;
 
     let title = title.unwrap_or(topic);
-    // Grounded links: affected symbols as `[[path#Symbol]]`, related ADRs as
-    // `[[docs/adr/…md]]` — both resolve against real nodes.
-    let symbol_links: Vec<String> = ctx
-        .symbols
-        .iter()
-        .filter_map(|s| symbol_link_target(&s.node.key))
-        .map(|t| format!("[[{t}]]"))
-        .collect();
-    let adr_links: Vec<String> = ctx
-        .docs
-        .iter()
-        .filter(|d| d.kind == "adr")
-        .filter_map(|d| d.path.clone())
-        .map(|p| format!("[[{p}]]"))
-        .collect();
-    let files: Vec<String> = {
-        let mut fs: Vec<String> = ctx
-            .symbols
-            .iter()
-            .filter_map(|s| s.node.path.clone())
-            .collect();
-        fs.sort();
-        fs.dedup();
-        fs
-    };
+    let Grounded {
+        symbol_links,
+        adr_links,
+        files,
+    } = grounded(ctx);
 
     let mut out = String::new();
     let _ = write!(
@@ -254,6 +234,105 @@ pub fn scaffold_adr(
     out
 }
 
+/// Generate a **house-style blueprint (technical implementation plan)** skeleton
+/// for `topic`, grounded in `ctx`. Blueprints have no YAML frontmatter: an
+/// `— Technical Implementation Plan` H1, a grounding intro citing related ADRs
+/// and affected code, a `Status` blockquote, then numbered sections (scope →
+/// crate placement → design → testing → phased build order → risks) plus a
+/// clarify interview. Grounded `[[…]]` links resolve against real nodes.
+#[must_use]
+pub fn scaffold_blueprint(topic: &str, title: Option<&str>, ctx: &SpecContext) -> String {
+    use std::fmt::Write as _;
+
+    let title = title.unwrap_or(topic);
+    let Grounded {
+        symbol_links,
+        adr_links,
+        files,
+    } = grounded(ctx);
+
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "# {title} — Technical Implementation Plan\n\n\
+         _Scaffolded by `roteiro spec` and grounded in the graph — a build plan\n\
+         for {topic}. The links below resolve against real nodes; fill in the\n\
+         design._\n\n"
+    );
+    if !adr_links.is_empty() {
+        let _ = writeln!(out, "Grounded in: {}.\n", adr_links.join(", "));
+    }
+    if !symbol_links.is_empty() {
+        let _ = writeln!(out, "Touches: {}.\n", symbol_links.join(", "));
+    }
+
+    out.push_str("> **Status.** Design → build.\n\n---\n\n");
+    out.push_str(
+        "## 0. What this plan covers\n\n\
+         _TODO: the operator-facing surface (CLI/API) and scope._\n\n\
+         ## 1. Crate placement\n\n",
+    );
+    if files.is_empty() {
+        out.push_str("_TODO: which crates/modules this touches._\n\n");
+    } else {
+        for f in &files {
+            let _ = writeln!(out, "- `{f}`");
+        }
+        out.push('\n');
+    }
+    out.push_str(
+        "## 2. Design\n\n_TODO: the load-bearing decisions and how the pieces fit._\n\n\
+         ## 3. Interview — clarify before building\n\n\
+         - [ ] What is the operator-facing surface (CLI/API)?\n\
+         - [ ] Which crates/modules does this touch? (see Crate placement)\n\
+         - [ ] Which ADRs/decisions does it realise? (see grounding)\n\
+         - [ ] What are the phases / build order?\n\
+         - [ ] What are the risks and the invariants it must always satisfy?\n\n\
+         ## 4. Testing\n\n_TODO._\n\n\
+         ## 5. Phased build order\n\n_TODO._\n\n\
+         ## 6. Risks & invariants\n\n_TODO._\n",
+    );
+    out
+}
+
+/// The grounded `[[…]]` links and affected files for a scaffold, drawn from the
+/// graph so they resolve.
+struct Grounded {
+    symbol_links: Vec<String>,
+    adr_links: Vec<String>,
+    files: Vec<String>,
+}
+
+/// Build the grounded links from `ctx`: affected symbols as `[[path#Symbol]]`,
+/// related ADRs as `[[docs/adr/…md]]`, and the deduped affected file paths.
+fn grounded(ctx: &SpecContext) -> Grounded {
+    let symbol_links = ctx
+        .symbols
+        .iter()
+        .filter_map(|s| symbol_link_target(&s.node.key))
+        .map(|t| format!("[[{t}]]"))
+        .collect();
+    let adr_links = ctx
+        .docs
+        .iter()
+        .filter(|d| d.kind == "adr")
+        .filter_map(|d| d.path.clone())
+        .map(|p| format!("[[{p}]]"))
+        .collect();
+    let mut files: Vec<String> = ctx
+        .symbols
+        .iter()
+        .filter_map(|s| s.node.path.clone())
+        .collect();
+    files.sort();
+    files.dedup();
+    Grounded {
+        symbol_links,
+        adr_links,
+        files,
+    }
+}
+
 /// The `path#Symbol` wiki-link target reconstructed from a `sym:<lang>:<path>#…`
 /// key (dropping the `sym:<lang>:` prefix), or `None` if not a symbol key.
 fn symbol_link_target(key: &str) -> Option<&str> {
@@ -271,11 +350,14 @@ mod tests {
         let mut store = Store::open_in_memory().expect("store");
         let facts = FactSet::new()
             .with_node(Node::new("file:src/auth.rs", NodeKind::File, "auth.rs"))
-            .with_node(Node::new(
-                "sym:rust:src/auth.rs#validate_token",
-                NodeKind::Fn,
-                "validate_token",
-            ))
+            .with_node(Node {
+                path: Some("src/auth.rs".to_owned()),
+                ..Node::new(
+                    "sym:rust:src/auth.rs#validate_token",
+                    NodeKind::Fn,
+                    "validate_token",
+                )
+            })
             .with_node(Node::new(
                 "sym:rust:src/auth.rs#login",
                 NodeKind::Fn,
@@ -388,19 +470,50 @@ mod tests {
 
     #[test]
     fn scaffold_has_no_code_block_indentation() {
-        use super::scaffold_adr;
+        use super::{scaffold_adr, scaffold_blueprint};
         let store = seeded();
         let ctx = context(&store, "validate_token", 10).expect("context");
-        let md = scaffold_adr("validate_token", None, "0099", "2026-08-09", &ctx);
-        // The `\`-line-continuations in the template strip source indentation, so
+        // The `\`-line-continuations in the templates strip source indentation, so
         // no line begins with whitespace; a 4-space indent would (wrongly) render
         // the frontmatter/headings as a CommonMark code block.
-        for (i, line) in md.lines().enumerate() {
-            assert!(
-                !line.starts_with(' ') && !line.starts_with('\t'),
-                "line {} has leading whitespace: {line:?}",
-                i + 1
-            );
+        let adr = scaffold_adr("validate_token", None, "0099", "2026-08-09", &ctx);
+        let blueprint = scaffold_blueprint("validate_token", None, &ctx);
+        for md in [&adr, &blueprint] {
+            for (i, line) in md.lines().enumerate() {
+                assert!(
+                    !line.starts_with(' ') && !line.starts_with('\t'),
+                    "line {} has leading whitespace: {line:?}",
+                    i + 1
+                );
+            }
         }
+    }
+
+    #[test]
+    fn blueprint_is_grounded_and_house_style() {
+        use super::scaffold_blueprint;
+        let store = seeded();
+        let ctx = context(&store, "validate_token", 10).expect("context");
+        let md = scaffold_blueprint("validate_token", Some("Token flow"), &ctx);
+
+        // House blueprint shape: no YAML frontmatter, the `— Technical
+        // Implementation Plan` H1, a Status blockquote, numbered sections.
+        assert!(
+            md.starts_with("# Token flow — Technical Implementation Plan"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("---\nTitle:"),
+            "blueprints have no frontmatter"
+        );
+        assert!(md.contains("> **Status.** Design → build."));
+        assert!(md.contains("## 1. Crate placement"));
+        // Grounded: the affected code is linked and its file is listed.
+        assert!(
+            md.contains("[[src/auth.rs#validate_token]]"),
+            "grounded link: {md}"
+        );
+        assert!(md.contains("`src/auth.rs`"), "affected file listed: {md}");
+        assert!(md.contains("- [ ] What is the operator-facing surface"));
     }
 }
