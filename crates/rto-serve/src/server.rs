@@ -725,6 +725,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn too_many_images_is_400() {
+        let img = serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="},
+        });
+        let parts: Vec<serde_json::Value> = (0..9).map(|_| img.clone()).collect();
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": parts}],
+        });
+        assert_eq!(post_chat(body).await, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn non_image_data_uri_is_400() {
         let body = serde_json::json!({
             "model": "echo",

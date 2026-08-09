@@ -88,6 +88,10 @@ pub struct ChatMessageDto {
 /// against a request decoding an unbounded blob into memory.
 const MAX_IMAGE_B64_LEN: usize = 28 * 1024 * 1024;
 
+/// Max images per request — bounds total decode work/allocation so a flood of
+/// small images cannot exhaust memory or CPU.
+const MAX_IMAGES: usize = 8;
+
 /// Decode an `image_url` into raw (still-encoded, e.g. PNG/JPEG) image bytes.
 /// Only `data:image/*;base64,…` URIs are accepted — a local server does not fetch
 /// remote URLs (avoids SSRF), the payload must be a base64 image, and it is size-
@@ -158,6 +162,11 @@ impl ChatCompletionRequest {
                                         "images are only supported in the last user message"
                                             .to_owned(),
                                     );
+                                }
+                                if images.len() >= MAX_IMAGES {
+                                    return Err(format!(
+                                        "too many images (max {MAX_IMAGES} per request)"
+                                    ));
                                 }
                                 images.push(decode_image_url(&image_url.url)?);
                             }
