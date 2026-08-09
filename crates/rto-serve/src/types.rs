@@ -174,6 +174,61 @@ pub struct Delta {
     pub content: Option<String>,
 }
 
+/// A `POST /v1/embeddings` request. `input` accepts a single string or an array
+/// of strings (both via [`EmbeddingInput`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbeddingRequest {
+    /// The embedding model id (must be one of `/v1/models`).
+    pub model: String,
+    /// One or more texts to embed.
+    pub input: EmbeddingInput,
+}
+
+/// The `input` field: OpenAI allows either a string or an array of strings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    /// A single text.
+    One(String),
+    /// A batch of texts.
+    Many(Vec<String>),
+}
+
+impl EmbeddingInput {
+    /// Normalise to a vector of input strings.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            EmbeddingInput::One(s) => vec![s],
+            EmbeddingInput::Many(v) => v,
+        }
+    }
+}
+
+/// The `POST /v1/embeddings` response.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddingResponse {
+    /// Always `"list"`.
+    pub object: &'static str,
+    /// One entry per input, in request order.
+    pub data: Vec<EmbeddingObject>,
+    /// The model that produced the embeddings.
+    pub model: String,
+    /// Token accounting (`completion_tokens` is always 0 for embeddings).
+    pub usage: Usage,
+}
+
+/// One embedding in an [`EmbeddingResponse`].
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddingObject {
+    /// Always `"embedding"`.
+    pub object: &'static str,
+    /// The embedding vector.
+    pub embedding: Vec<f32>,
+    /// The input's position in the request.
+    pub index: usize,
+}
+
 /// An OpenAI-shaped error body: `{ "error": { "message", "type" } }`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorResponse {

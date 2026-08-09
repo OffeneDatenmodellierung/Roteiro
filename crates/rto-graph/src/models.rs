@@ -249,6 +249,27 @@ pub const REGISTRY: &[ModelSpec] = &[
             ],
         }],
     },
+    // GGUF embedding model for the llama.cpp serving path (ADR-0006
+    // `/v1/embeddings`, and the Stage-20 direction of unifying embeddings on
+    // GGUF). The GGUF embeds its own tokenizer, so only `model.gguf` is needed;
+    // served via llama.cpp, not the candle safetensors loader above.
+    ModelSpec {
+        name: "bge-small-en-v1.5-gguf",
+        kind: ModelKind::Embedding,
+        tier: ResourceTier::Low,
+        dim: 384,
+        licence: "MIT",
+        description: "BAAI/bge-small-en-v1.5 (F16 GGUF) — small English embeddings (384-d), served via llama.cpp",
+        size_mib: 65,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-f16.gguf",
+                sha256: "f0b2fef971e8366438bfd2d9aefea1b0115919389448806d290237f638bae999",
+            }],
+        }],
+    },
     // ADR-0004 Tier 1: Apache-2.0 Qwen3 instruct GGUFs for offline spec/blueprint
     // drafting, curated low/mid/high. Stored as `model.gguf` + its `tokenizer.json`
     // (which lives in the base instruct repo, not the GGUF repo — all Qwen3 sizes

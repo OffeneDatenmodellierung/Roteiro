@@ -126,4 +126,18 @@ pub trait Engine: Send + Sync + 'static {
             finish_reason: stats.finish_reason,
         })
     }
+
+    /// Produce one embedding vector per input string, using `model`. Defaults to
+    /// unsupported; an embedding-capable engine overrides it.
+    ///
+    /// # Errors
+    /// [`EngineError::UnknownModel`] if `model` is not served, or
+    /// [`EngineError::Inference`] on failure (including engines with no embedding
+    /// support).
+    fn embed(&self, model: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, EngineError> {
+        let _ = (model, inputs);
+        Err(EngineError::Inference(
+            "this engine does not support embeddings".to_owned(),
+        ))
+    }
 }
