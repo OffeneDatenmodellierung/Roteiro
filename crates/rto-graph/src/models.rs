@@ -493,7 +493,27 @@ pub fn download_verified(
 ) -> Result<(), DownloadError> {
     use sha2::{Digest, Sha256};
 
+    /// Removes the partial file on drop unless disarmed — best-effort cleanup so
+    /// *any* early return (network drop, disk full, fsync/rename failure, checksum
+    /// mismatch) never leaves a stray `.partial` behind.
+    struct PartialGuard<'a> {
+        path: &'a Path,
+        armed: bool,
+    }
+    impl Drop for PartialGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                std::fs::remove_file(self.path).ok();
+            }
+        }
+    }
+
     let tmp = dest.with_extension("partial");
+    let mut guard = PartialGuard {
+        path: &tmp,
+        armed: true,
+    };
+
     let mut writer = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16]; // 64 KiB chunks
@@ -519,7 +539,7 @@ pub fn download_verified(
             let _ = write!(got, "{byte:02x}");
         }
         if !got.eq_ignore_ascii_case(expected_sha256) {
-            std::fs::remove_file(&tmp).ok();
+            // `guard` removes the partial file on return.
             return Err(DownloadError::Checksum {
                 expected: expected_sha256.to_owned(),
                 got,
@@ -527,11 +547,13 @@ pub fn download_verified(
         }
     }
     // Atomic install: remove any existing file first (Windows `rename` fails if
-    // the destination exists), then rename the verified temp into place.
+    // the destination exists), then rename the verified temp into place. If
+    // either fails, `guard` cleans up the partial.
     if dest.exists() {
         std::fs::remove_file(dest)?;
     }
     std::fs::rename(&tmp, dest)?;
+    guard.armed = false; // installed successfully — nothing to clean up
     Ok(())
 }
 
@@ -545,6 +567,21 @@ mod tests {
 
     #[test]
     fn download_verified_streams_and_checks() {
+        // A reader that yields `.0` bytes then errors — to exercise the mid-stream
+        // I/O-failure cleanup path.
+        struct FailReader(usize);
+        impl std::io::Read for FailReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom"));
+                }
+                let n = buf.len().min(self.0);
+                buf[..n].fill(b'x');
+                self.0 -= n;
+                Ok(n)
+            }
+        }
+
         let dir = std::env::temp_dir().join(format!("roteiro-dl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let payload = b"the streamed model bytes";
@@ -561,6 +598,13 @@ mod tests {
         assert!(matches!(err, DownloadError::Checksum { .. }));
         assert!(!bad.exists());
         assert!(!bad.with_extension("partial").exists());
+
+        // A read error mid-stream → error, and the partial file is cleaned up.
+        let dropped = dir.join("dropped.bin");
+        let err = download_verified(FailReader(100), &dropped, "").unwrap_err();
+        assert!(matches!(err, DownloadError::Io(_)));
+        assert!(!dropped.exists());
+        assert!(!dropped.with_extension("partial").exists());
 
         // Empty (unpinned) hash → installed without verification.
         let unpinned = dir.join("unpinned.bin");
