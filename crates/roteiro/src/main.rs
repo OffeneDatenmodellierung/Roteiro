@@ -1350,8 +1350,8 @@ fn run_spec_draft(
     out: Option<&str>,
 ) -> anyhow::Result<()> {
     use rto_graph::{
-        GenConfig, LocalGenerator, ModelKind, Platform, REGISTRY, ResourceTier, find_model,
-        is_installed, model_dir,
+        GenConfig, LocalGenerator, ModelKind, ModelRole, Platform, REGISTRY, ResourceTier,
+        find_model, is_installed, model_dir,
     };
 
     let (scaffold, label, ctx) = build_scaffold(ingest, topic, title, kind)?;
@@ -1365,9 +1365,14 @@ fn run_spec_draft(
         .and_then(find_model)
         .filter(|m| m.kind == ModelKind::Generative)
         .or_else(|| {
-            REGISTRY
-                .iter()
-                .find(|m| m.kind == ModelKind::Generative && m.tier == ResourceTier::Low)
+            // Deterministic default as the registry grows: the low-tier *instruct*
+            // model (qwen3-0.6b), not just any low-tier generative (which now
+            // includes coding/reasoning picks).
+            REGISTRY.iter().find(|m| {
+                m.kind == ModelKind::Generative
+                    && m.role == ModelRole::Instruct
+                    && m.tier == ResourceTier::Low
+            })
         })
     else {
         anyhow::bail!("no generative model in the registry");
