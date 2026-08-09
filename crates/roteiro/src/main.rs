@@ -692,6 +692,9 @@ fn run_compare_codegraph(path: &str, json: bool) -> anyhow::Result<()> {
         for key in report.codegraph_only_sample.iter().take(10) {
             println!("  codegraph-only: {key}");
         }
+        for key in report.roteiro_only_sample.iter().take(10) {
+            println!("  roteiro-only:   {key}");
+        }
     }
     Ok(())
 }

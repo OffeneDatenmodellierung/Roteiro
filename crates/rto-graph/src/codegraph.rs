@@ -14,10 +14,10 @@
 //! (`Store.open`); Roteiro uses `::`, so keys map as
 //! `sym:rust:<path>#<qualified_name with '.'→'::'>`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::store::{Store, StoreError};
 use crate::{EdgeKind, NodeKind};
@@ -97,13 +97,15 @@ pub fn compare(db_path: &Path, store: &Store) -> Result<OracleReport, OracleErro
     )?;
     ensure_codegraph(&conn, db_path)?;
 
+    // `meta` is guaranteed to exist by `ensure_codegraph`, so a missing row means
+    // no commit was recorded (→ None); a real read error propagates.
     let source_commit = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'snapshot_source_commit'",
             [],
             |r| r.get::<_, String>(0),
         )
-        .ok();
+        .optional()?;
 
     // codegraph side: comparable Rust symbols and internal calls.
     let cg_symbols = codegraph_symbols(&conn)?;
@@ -129,24 +131,24 @@ pub fn compare(db_path: &Path, store: &Store) -> Result<OracleReport, OracleErro
 
     // Of the non-exact remainder, a symbol both tools found in the same file
     // under the same leaf name (but a different scope, e.g. `#foo` vs
-    // `#tests::foo`) is a scoping difference, not a real gap. Group the
-    // remainder by (path, leaf) to separate those from genuine divergence.
+    // `#tests::foo`) is a scoping difference, not a real gap. Count per
+    // `(path, leaf)` so multiplicity is preserved: when a file has more symbols
+    // with a leaf on one side, the surplus is a genuine gap, not a scope diff.
     let cg_rest: Vec<&String> = cg_symbols.difference(&ro_symbols).collect();
     let ro_rest: Vec<&String> = ro_symbols.difference(&cg_symbols).collect();
-    let cg_rest_leaves: BTreeSet<(String, String)> = cg_rest.iter().map(|k| path_leaf(k)).collect();
-    let ro_rest_leaves: BTreeSet<(String, String)> = ro_rest.iter().map(|k| path_leaf(k)).collect();
-    let scope_diff = cg_rest_leaves.intersection(&ro_rest_leaves).count();
+    let mut leaf_counts: BTreeMap<(String, String), [usize; 2]> = BTreeMap::new();
+    for k in &cg_rest {
+        leaf_counts.entry(path_leaf(k)).or_default()[0] += 1;
+    }
+    for k in &ro_rest {
+        leaf_counts.entry(path_leaf(k)).or_default()[1] += 1;
+    }
+    let scope_diff: usize = leaf_counts.values().map(|[c, r]| (*c).min(*r)).sum();
 
-    let cg_only: Vec<String> = cg_rest
-        .into_iter()
-        .filter(|k| !ro_rest_leaves.contains(&path_leaf(k)))
-        .cloned()
-        .collect();
-    let ro_only: Vec<String> = ro_rest
-        .into_iter()
-        .filter(|k| !cg_rest_leaves.contains(&path_leaf(k)))
-        .cloned()
-        .collect();
+    // Genuine gaps are the per-group surplus on each side; the sample keys are
+    // the actual surplus symbols (deterministic — `*_rest` are sorted).
+    let cg_only = surplus_keys(&cg_rest, &leaf_counts, 0);
+    let ro_only = surplus_keys(&ro_rest, &leaf_counts, 1);
 
     let calls_agree = cg_calls.iter().filter(|c| ro_calls.contains(*c)).count();
 
@@ -177,17 +179,19 @@ fn is_comparable_kind(kind: &NodeKind) -> bool {
     )
 }
 
-/// Confirm the snapshot has codegraph's core tables.
+/// Confirm the snapshot has codegraph's core tables (including `meta`, which
+/// [`compare`] reads). A real read error propagates; only a genuinely absent
+/// table yields [`OracleError::NotCodegraph`].
 fn ensure_codegraph(conn: &Connection, path: &Path) -> Result<(), OracleError> {
-    for table in ["files", "nodes", "edges"] {
-        let present: bool = conn
+    for table in ["files", "nodes", "edges", "meta"] {
+        let present: Option<i64> = conn
             .query_row(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
                 [table],
-                |_| Ok(true),
+                |r| r.get(0),
             )
-            .unwrap_or(false);
-        if !present {
+            .optional()?;
+        if present.is_none() {
             return Err(OracleError::NotCodegraph(format!(
                 "{} has no `{table}` table",
                 path.display()
@@ -201,6 +205,33 @@ fn ensure_codegraph(conn: &Connection, path: &Path) -> Result<(), OracleError> {
 /// (`.`-scoped): `sym:rust:<path>#<qualified with '.'→'::'>`.
 fn symbol_key(path: &str, qualified: &str) -> String {
     format!("sym:rust:{path}#{}", qualified.replace('.', "::"))
+}
+
+/// The genuine-gap keys on one `side` (0 = codegraph, 1 = Roteiro): for each
+/// `(path, leaf)` group, the surplus over the other side (`max(0, mine - other)`)
+/// worth of keys, drawn in order from the (sorted) `rest`. Symbols matched by a
+/// same-leaf counterpart on the other side are scope diffs, not gaps, and are
+/// skipped.
+fn surplus_keys(
+    rest: &[&String],
+    counts: &BTreeMap<(String, String), [usize; 2]>,
+    side: usize,
+) -> Vec<String> {
+    let other = 1 - side;
+    let mut budget: BTreeMap<(String, String), usize> = counts
+        .iter()
+        .map(|(k, c)| (k.clone(), c[side].saturating_sub(c[other])))
+        .collect();
+    let mut out = Vec::new();
+    for key in rest {
+        if let Some(remaining) = budget.get_mut(&path_leaf(key))
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            out.push((*key).clone());
+        }
+    }
+    out
 }
 
 /// The `(path, leaf-name)` of a `sym:rust:<path>#<qual>` key, where the leaf is
@@ -374,6 +405,51 @@ mod tests {
         assert_eq!(report.calls_codegraph, 1);
         assert_eq!(report.calls_agree, 1);
         assert_eq!(report.calls_codegraph_only, 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// When a file has more same-leaf symbols on one side than the other, the
+    /// surplus is a genuine gap — not silently absorbed as a scope diff.
+    #[test]
+    fn multiplicity_surplus_is_a_genuine_gap() {
+        let dir = std::env::temp_dir().join(format!("roteiro-oracle-mult-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db = dir.join("cg.db");
+        let conn = Connection::open(&db).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
+             CREATE TABLE nodes (id INTEGER PRIMARY KEY, file_id INTEGER, type TEXT,
+                 name TEXT, qualified_name TEXT);
+             CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+                 target_id INTEGER, relation TEXT);
+             CREATE TABLE meta (key TEXT, value TEXT);
+             INSERT INTO files VALUES (1, 'src/lib.rs');
+             -- codegraph: two `run` functions under different (dropped) scopes.
+             INSERT INTO nodes VALUES (1, 1, 'function', 'run', 'a.run');
+             INSERT INTO nodes VALUES (2, 1, 'function', 'run', 'b.run');",
+        )
+        .expect("seed");
+
+        // Roteiro has only one `run` (leaf `run`) in that file, under a scope
+        // that matches neither codegraph key exactly.
+        let mut store = Store::open_in_memory().expect("store");
+        store
+            .apply_factset(&FactSet::new().with_node(Node::new(
+                "sym:rust:src/lib.rs#tests::run",
+                NodeKind::Fn,
+                "run",
+            )))
+            .expect("apply");
+
+        let report = compare(&db, &store).expect("compare");
+        // One leaf pair is a scope diff; the extra codegraph `run` is a real gap.
+        assert_eq!(report.symbols_scope_diff, 1);
+        assert_eq!(
+            report.codegraph_only, 1,
+            "the surplus `run` is a genuine gap"
+        );
+        assert_eq!(report.roteiro_only, 0);
 
         std::fs::remove_dir_all(&dir).ok();
     }
