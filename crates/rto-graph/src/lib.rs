@@ -14,6 +14,7 @@
 mod artifact;
 mod cache;
 mod codegraph;
+mod context;
 mod extract;
 mod git;
 #[cfg(feature = "inference")]
@@ -31,6 +32,9 @@ mod sync;
 pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
 pub use cache::{CacheError, ObjectCache};
 pub use codegraph::{ORACLE_SCHEMA, OracleError, OracleReport, compare as compare_codegraph};
+pub use context::{
+    ContextRefresh, NodeContext, build_context, context, dependents, refresh_contexts,
+};
 pub use extract::{Extractor, FileNodeExtractor, Registry, RustExtractor};
 pub use git::{BlobRef, GitError, Repo};
 #[cfg(feature = "inference")]

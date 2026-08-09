@@ -505,7 +505,7 @@ the [Stage 9](#stage-9--importers--v090--graphify-delivered-latmd--codegraph-pen
   facts **survive a subsequent code-changing sync**; an end-to-end CLI test per
   source.
 
-### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; text + PDF ingestion + semantic dedup delivered)*
+### Stage 12 — Inference ingestion: content, PDF, image + semantic dedup  → **v0.12.x** 🚧 *(completes Stage 8; text + PDF ingestion, semantic dedup, dependency-aware context cache delivered; image OCR/vision remains)*
 **Goal:** make `inferred` edges meaningful by embedding **real content**, not
 just node names, and extend ingestion to docs/PDFs/images.
 - **Text-content ingestion (first, zero new deps) — delivered.** Extraction now
@@ -538,12 +538,20 @@ just node names, and extend ingestion to docs/PDFs/images.
   report is deterministic (exact-first, then similarity, ties by key), bounded by
   `--limit`, and JSON-emitting under the shared query schema. Built with
   `--features inference` (offline hashing embedder).
-- **Dependency-aware invalidation (from the codegraph comparison):** once
-  per-node embeddings/AI-context are *cached*, a changed symbol must invalidate
-  the cached context of its **dependents** (callers, referencing docs) — the
-  graph edges we already have make this codegraph-style "dirty propagation"
-  natural. The derived graph itself needs no propagation (it re-resolves at
-  assembly); this applies only to cached inferred context.
+- **Dependency-aware invalidation (from the codegraph comparison) — delivered.**
+  A per-node **context bundle** (the node + its one-hop, provenance-labelled
+  neighbourhood) is now cached in the store (`node_context` table), keyed by a
+  **fingerprint** that folds in the node's own content *and* every neighbour's
+  content signature. Because context reaches one hop out, a change to a node or
+  any of its dependents (callers, referencing docs) moves the fingerprint and the
+  cached entry is rebuilt on next read — the codegraph-style "dirty propagation",
+  realised content-addressably (the fingerprint *is* the validity check). Surface:
+  `roteiro context <key>` (cached bundle) and `roteiro context --refresh`
+  (reconcile: rebuild stale, prune deleted; reports rebuilt/reused/pruned); the
+  `rto_graph::{context, build_context, refresh_contexts, dependents}` API. The
+  cache survives `rebuild` (like imports) and is invalidated only by fingerprint.
+  The derived graph itself still needs no propagation (it re-resolves at
+  assembly); this is the durable slot a future expensive per-node summary lives in.
 - **DoD:** a doc's *content* produces an inferred edge to semantically-related
   code; PDF/image ingestion each add labelled `inferred` facts behind their
   features; the default/`inference` builds stay unchanged.
