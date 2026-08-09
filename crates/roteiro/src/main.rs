@@ -906,8 +906,14 @@ fn run_model_list() {
                 } else {
                     String::new()
                 };
+                // Generative sub-role (instruct/coding/reasoning); empty otherwise.
+                let role = spec
+                    .role
+                    .as_str()
+                    .map(|r| format!(", {r}"))
+                    .unwrap_or_default();
                 println!(
-                    "  [{tier_label}] {mark}  {name}  ({licence}{dim}, ~{size} MiB)\n      {desc}",
+                    "  [{tier_label}] {mark}  {name}  ({licence}{role}{dim}, ~{size} MiB)\n      {desc}",
                     name = spec.name,
                     licence = spec.licence,
                     size = spec.size_mib,
