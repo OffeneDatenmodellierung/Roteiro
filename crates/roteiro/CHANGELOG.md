@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.12...roteiro-v0.0.13) - 2026-08-09
+
+### Added
+
+- *(generator)* Qwen3 support + curated generative tiers (low/mid/high)
+- *(models)* opinionated model matrix — resource tiers per section
+- *(extract)* Tier A image OCR via ocrs/rten (Stage 12, ADR-0005)
+- *(context)* dependency-aware per-node context cache (Stage 12)
+- *(infer)* semantic + structural duplicate detection (Stage 12)
+- *(extract)* ingest PDF text into meta.content (Stage 12, feature-gated)
+- *(spec)* warn on debug builds in `spec draft` (candle is slow unoptimized)
+- *(spec)* `roteiro spec draft` — Tier 1 offline local-model drafting (completes Stage 13)
+- *(spec)* blueprint scaffold kind — `spec scaffold --kind blueprint`
+- *(spec)* `roteiro spec scaffold` — grounded, check-clean ADR skeletons (Stage 13, Tier 0)
+- *(spec)* `roteiro spec context` — graph-grounded authoring context (Stage 13, Tier 0)
+
+### Fixed
+
+- *(spec)* PR #56 review — validate `--kind` before the graph build
+
+### Other
+
+- *(models)* decouple the model registry/pull from the candle feature
+
 ## [0.0.12](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.11...roteiro-v0.0.12) - 2026-08-09
 
 ### Added
