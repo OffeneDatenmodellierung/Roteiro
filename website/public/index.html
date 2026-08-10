@@ -115,6 +115,17 @@ directly on the object graph. Three consequences fall out of that:</p>
 byte-for-byte from git alone, with no external database to keep in sync. It works
 with your repository, not beside it.</p>
 
+<div class="note"><strong>How does a team stay in sync?</strong> The graph store lives
+under <code>.git/roteiro/</code> and is <em>never committed</em> — it's a local,
+reproducible <em>cache</em>, like <code>target/</code>. Nothing team-critical lives
+only there: the graph is a pure function of the <strong>committed</strong> code, ADRs and
+<code>@rto:</code> annotations, which git already shares on push/pull. So syncing the
+graph <em>is</em> syncing git — everyone at the same commit re-derives the identical
+graph (the hooks do it on pull), or fetches the CI-published artifact to skip even
+that (and to get the <span class="pill inferred">inferred</span> layer without running
+models locally). The graph travels <strong>with</strong> git, not beside it — that's why the
+SQLite file isn't committed (it would bloat history and conflict on merge).</div>
+
 <h2 id="build">Install &amp; build</h2>
 
 <p>Roteiro is a Rust workspace (MSRV 1.94). Install the lean default build from
