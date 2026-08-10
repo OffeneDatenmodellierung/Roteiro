@@ -269,8 +269,11 @@ pub struct ChangedFile {
 /// their new blob oid) and paths deleted. See [`Repo::diff_trees`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TreeDiff {
-    /// Blobs present in the new tree with content differing from the old — the
-    /// paths whose facts must be re-extracted — as `(path, new blob oid)`.
+    /// Blobs whose *tree entry* differs from the old tree — a changed blob oid,
+    /// or a mode change (e.g. the executable bit) on otherwise-identical content —
+    /// as `(path, new blob oid)`. These are the paths to re-extract; a mode-only
+    /// change re-extracts to identical facts (extraction is content-addressed), a
+    /// harmless cache hit.
     pub changed: Vec<BlobRef>,
     /// Blobs present in the old tree but absent from the new — paths whose facts
     /// must be dropped.
