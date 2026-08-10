@@ -242,7 +242,8 @@ enum Command {
         addr: Option<String>,
         /// Model server (`--models`): terminate TLS in-process using this PEM
         /// certificate-chain file (paired with `--tls-key`). Overrides
-        /// `[serve] tls_cert`. Without both, the endpoint serves plain HTTP.
+        /// `[serve] tls_cert`. Set both `--tls-cert` and `--tls-key` for HTTPS,
+        /// or neither for plain HTTP; setting only one is an error.
         #[arg(long, value_name = "FILE")]
         tls_cert: Option<String>,
         /// Model server (`--models`): the PEM private-key file for `--tls-cert`.
@@ -2322,7 +2323,10 @@ fn serve_models_endpoint(
             std::path::PathBuf::from(key),
         )),
         (Some(_), None) | (None, Some(_)) => {
-            anyhow::bail!("TLS needs both a certificate and a key (--tls-cert and --tls-key)");
+            anyhow::bail!(
+                "TLS needs both a certificate and a key — set both `--tls-cert`/`--tls-key` \
+                 (or `[serve] tls_cert`/`tls_key`), or neither for plain HTTP"
+            );
         }
         (None, None) => None,
     };

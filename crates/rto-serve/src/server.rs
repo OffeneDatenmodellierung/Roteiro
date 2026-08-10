@@ -129,9 +129,14 @@ fn serve_router_tls(
     key: &std::path::Path,
 ) -> anyhow::Result<()> {
     // The `tls-rustls-no-provider` feature ships no crypto provider, so install
-    // ring process-wide. Idempotent: a second call (or one already made by `ureq`)
-    // returns `Err`, which we ignore.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // ring — but only if none is set yet (another component, e.g. `ureq`, may have
+    // installed one already). `install_default`'s sole failure mode is "a provider
+    // is already installed", so guarding on `get_default` means the only ignored
+    // outcome is a benign race where another thread installed one between the check
+    // and the call; ring is the only provider this build ever installs.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -951,18 +956,16 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn serve_tls_reports_a_missing_certificate() {
-        use std::path::Path;
         use std::sync::Arc;
         let engine: Arc<dyn Engine> = Arc::new(MockEngine);
         let addr = "127.0.0.1:0".parse().expect("addr");
-        let err = super::serve_blocking_tls(
-            engine,
-            None,
-            addr,
-            Path::new("/nonexistent/roteiro-cert.pem"),
-            Path::new("/nonexistent/roteiro-key.pem"),
-        )
-        .expect_err("a missing certificate must error, not bind");
+        // A guaranteed-absent path under the platform temp dir (portable; not a
+        // hard-coded POSIX path), unique per process so a stray real file can't
+        // make this flaky.
+        let missing =
+            std::env::temp_dir().join(format!("roteiro-no-such-cert-{}.pem", std::process::id()));
+        let err = super::serve_blocking_tls(engine, None, addr, &missing, &missing)
+            .expect_err("a missing certificate must error, not bind");
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("cert") || msg.contains("tls"),
