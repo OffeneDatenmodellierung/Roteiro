@@ -4,18 +4,19 @@
 //!
 //! "Intent debt" is the class of signals that say *something is missing* or
 //! *left for later*: `TODO`/`FIXME`/`HACK` comments (in any case for the
-//! unambiguous tags), `todo!()`/`unimplemented!()` stubs, "not implemented"
-//! panics, and deferral phrases (`for now`, `deferred`, unchecked `- [ ]`
+//! unambiguous tags), `todo!()`/`unimplemented!()` stubs, and deferral phrases
+//! (`for now`, `deferred`, `not implemented`, `placeholder`, unchecked `- [ ]`
 //! items). The scan is line-based so it works uniformly over code, docs, and
 //! ADRs; [`augment`] attaches each finding to its innermost enclosing symbol (or
 //! the file) via a `contains` edge.
 //!
 //! The unambiguous tags (`TODO`, `todo!(`, `BUG:`) match anywhere on a line. The
-//! noisier prose phrases (`for now`, `deferred`, `placeholder`, …) are restricted
-//! to *comment* context in code files — keyed off the file's [`CommentSyntax`] —
-//! so they no longer flag identifiers, string literals, or running code. Prose
-//! and unknown files carry no such syntax and are scanned in full, since there
-//! every line is effectively prose.
+//! noisier prose phrases (`for now`, `deferred`, `not implemented`,
+//! `placeholder`, …) are restricted to *comment* context in code files — keyed
+//! off the file's [`CommentSyntax`] — so in code they are detected only inside
+//! comments, never in identifiers, string literals, or running code. Prose and
+//! unknown files carry no such syntax and are scanned in full, since there every
+//! line is effectively prose.
 //!
 //! Opt-out: a source can suppress false positives with an inline directive —
 //! `roteiro:ignore` on a line skips that line, and `roteiro:ignore-file`
@@ -195,11 +196,12 @@ fn comment_syntax(path: &str) -> Option<&'static CommentSyntax> {
 }
 
 /// The comment text of a single `line` under `syn`, dropping code. Tracks block
-/// comments across lines via `in_block`. Best-effort: it does not model string
-/// literals, so a comment delimiter *inside* a string is honoured — which only
-/// ever widens what counts as a comment, never narrows it below the previous
-/// scan-everything default, so it cannot introduce a false negative that the old
-/// behaviour would have caught.
+/// comments across lines via `in_block`. It is a lightweight approximation of a
+/// real lexer: it does not model string literals, so a comment delimiter *inside*
+/// a string is treated as opening a comment. That bias is deliberate — it only
+/// ever *widens* what counts as a comment, so a genuine in-comment phrase is
+/// never missed; the cost is that a phrase after a `//`-in-a-string could still
+/// be reported, which is no worse than the old scan-everything behaviour.
 fn comment_portion(line: &str, syn: &CommentSyntax, in_block: &mut bool) -> String {
     let mut out = String::new();
     let mut i = 0usize;
@@ -578,6 +580,28 @@ plain line, nothing here
             categories_in("PLAN.md", "We will defer the audit; deferred to v2.\n")[0].1,
             MarkerCategory::Deferred
         );
+    }
+
+    #[test]
+    fn non_slash_comment_syntaxes_gate_phrases() {
+        // `#` line comments (Python/shell): phrase in a comment fires, in a string
+        // does not.
+        assert_eq!(
+            categories_in("m.py", "x = 1  # placeholder for now\n")[0].1,
+            MarkerCategory::Stub
+        );
+        assert!(categories_in("m.py", "msg = \"deferred until later\"\n").is_empty());
+        // `#` also covers shell.
+        assert_eq!(
+            categories_in("run.sh", "# deferred to a follow-up\n")[0].1,
+            MarkerCategory::Deferred
+        );
+        // `--` line comments (SQL): comment fires, a quoted string does not.
+        assert_eq!(
+            categories_in("q.sql", "SELECT 1; -- placeholder query\n")[0].1,
+            MarkerCategory::Stub
+        );
+        assert!(categories_in("q.sql", "SELECT 'deferred' AS status;\n").is_empty());
     }
 
     #[test]
