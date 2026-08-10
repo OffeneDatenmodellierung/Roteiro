@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.14...rto-graph-v0.0.15) - 2026-08-10
+
+### Added
+
+- *(store)* tag nodes with a provenance layer
+- *(store)* edge-level delta persistence, determinism-safe
+
+### Other
+
+- *(git)* TreeDiff.changed covers mode-only changes (PR #150 review)
+- *(git)* subtree-pruning tree diff (incremental-sync primitive)
+- Merge pull request #147 from OffeneDatenmodellierung/fix/edge-identity-collision
+- Merge pull request #144 from OffeneDatenmodellierung/feat/edge-delta
+
 ## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.13...rto-graph-v0.0.14) - 2026-08-10
 
 ### Added
