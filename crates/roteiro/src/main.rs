@@ -305,6 +305,24 @@ enum ModelAction {
     },
 }
 
+/// Expand a leading `~/` (or a bare `~`) to the user's home directory; any other
+/// path is returned unchanged. Used for config paths such as `[paths]
+/// model_store`.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if path == "~"
+        && let Some(h) = home()
+    {
+        return std::path::PathBuf::from(h);
+    }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(h) = home()
+    {
+        return std::path::Path::new(&h).join(rest);
+    }
+    std::path::PathBuf::from(path)
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Load layered config once (project `roteiro.toml` + user `~/.roteiro/
@@ -314,17 +332,36 @@ fn main() -> anyhow::Result<()> {
     // Resolve the ingestion toggles once; every command that (re)builds the graph
     // extracts with the same set so they share one cache, never thrashing it.
     let ingest = cfg.effective.ingest.resolve();
+    // Paths excluded from the intent-debt scan (`[debt] ignore`), shared by
+    // `debt` and `check`'s debt summary.
+    let debt_ignore: &[String] = cfg.effective.debt.ignore.as_deref().unwrap_or(&[]);
+    // Honour `[paths] model_store` before any command touches the model store.
+    // The registry lives behind the `models` feature; on a build without it a
+    // configured path is inert, so we warn rather than silently ignore it.
+    if let Some(dir) = cfg.effective.paths.model_store.as_deref() {
+        let dir = expand_tilde(dir);
+        #[cfg(feature = "models")]
+        rto_graph::set_model_store(dir);
+        #[cfg(not(feature = "models"))]
+        {
+            let _ = dir;
+            eprintln!(
+                "warning: `[paths] model_store` is set but this build lacks the \
+                 `models` feature; the setting has no effect"
+            );
+        }
+    }
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
         Command::Check {
             json,
             committed,
             staged,
-        } => run_check(ingest, json, committed, staged),
+        } => run_check(ingest, json, committed, staged, debt_ignore),
         Command::Review { json, base } => run_review(ingest, json, base.as_deref()),
         Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
-        Command::Debt { kind, json } => run_debt(ingest, &kind, json),
+        Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
@@ -666,6 +703,7 @@ fn run_check(
     json: bool,
     committed: bool,
     staged: bool,
+    debt_ignore: &[String],
 ) -> anyhow::Result<()> {
     let source = if staged {
         GraphSource::Index
@@ -691,7 +729,10 @@ fn run_check(
             report.violations.len(),
         );
         // Report intent debt alongside drift (a summary, not a gate).
-        println!("{}", debt_summary(&rto_graph::debt(&store, &[])?));
+        println!(
+            "{}",
+            debt_summary(&rto_graph::debt(&store, &[], debt_ignore)?)
+        );
     }
 
     if report.has_violations() {
@@ -1936,11 +1977,16 @@ fn run_context(
 
 /// List intent-debt markers (TODOs, stubs, deferred work) in the graph, grouped
 /// by category. A report, not a gate: it always exits zero.
-fn run_debt(ingest: rto_graph::IngestConfig, kinds: &[String], json: bool) -> anyhow::Result<()> {
+fn run_debt(
+    ingest: rto_graph::IngestConfig,
+    kinds: &[String],
+    json: bool,
+    debt_ignore: &[String],
+) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
-    let report = rto_graph::debt(&store, kinds)?;
+    let report = rto_graph::debt(&store, kinds, debt_ignore)?;
     if json {
         emit_json(&report)?;
     } else {
@@ -2342,7 +2388,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                             .collect()
                     })
                     .unwrap_or_default();
-                let r = rto_graph::debt(&store, &categories).map_err(|e| e.to_string())?;
+                let r = rto_graph::debt(&store, &categories, &[]).map_err(|e| e.to_string())?;
                 serde_json::to_string(&r).map_err(|e| e.to_string())
             }
             other => Err(format!("unknown tool `{other}`")),
@@ -2529,7 +2575,7 @@ fn vault_summary(
         })
         .collect();
 
-    let debt = rto_graph::debt(store, &[])?
+    let debt = rto_graph::debt(store, &[], &[])?
         .by_category
         .into_iter()
         .collect();
