@@ -44,8 +44,8 @@ fn write(dir: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).expect("write");
 }
 
-fn fresh_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roteiro-init-cli-{}", std::process::id()));
+fn fresh_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("roteiro-init-cli-{}-{name}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).expect("mkdir");
     dir
@@ -54,8 +54,11 @@ fn fresh_dir() -> PathBuf {
 #[test]
 fn init_installs_hooks_and_checkout_refreshes_graph() {
     let bindir = Path::new(BIN).parent().unwrap().to_str().unwrap();
-    let dir = fresh_dir();
+    let dir = fresh_dir("hooks");
     git(&dir, None, &["init", "-q"]);
+    // Pin the hooks path so an ambient global `core.hooksPath` can't send the
+    // managed hooks elsewhere and break the `.git/hooks` assertions below.
+    git(&dir, None, &["config", "core.hooksPath", ".git/hooks"]);
     write(
         &dir,
         "src/main.rs",
@@ -114,6 +117,32 @@ fn init_installs_hooks_and_checkout_refreshes_graph() {
     assert!(
         !json.contains("#added"),
         "graph should reflect main, not feature: {json}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn init_honours_core_hookspath() {
+    let dir = fresh_dir("hookspath");
+    git(&dir, None, &["init", "-q"]);
+    // Point git at a custom hooks directory.
+    git(&dir, None, &["config", "core.hooksPath", "team-hooks"]);
+    write(&dir, "src/main.rs", "fn main() {}\n");
+    git(&dir, None, &["add", "."]);
+    git(&dir, None, &["commit", "-q", "-m", "init"]);
+
+    let out = roteiro(&dir, &["init"]);
+    assert!(out.status.success(), "init failed: {out:?}");
+
+    // Hooks are installed where git actually looks, not in .git/hooks.
+    assert!(
+        dir.join("team-hooks/pre-commit").exists(),
+        "managed hook should be installed under core.hooksPath",
+    );
+    assert!(
+        !dir.join(".git/hooks/pre-commit").exists(),
+        "no hook should be installed in the default .git/hooks when core.hooksPath is set",
     );
 
     std::fs::remove_dir_all(&dir).ok();
