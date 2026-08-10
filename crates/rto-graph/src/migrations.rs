@@ -99,6 +99,20 @@ CREATE TABLE node_context (
 );
 ";
 
+/// Migration 6: tag each node with the layer that produced it, mirroring
+/// `edges.provenance`. `sync` owns the *derived* layer; `check`/`import` own the
+/// *authored*/*inferred* layers. Existing rows were all written by producers that
+/// are derived (extraction) or re-applied every build (authored/import), so
+/// back-filling `'derived'` is correct for the derived majority and harmless for
+/// the rest, which are rewritten with their true provenance on the next
+/// `check`/`reapply_imports`. A future incremental `sync` uses this to delete/
+/// replace only derived nodes for changed paths, leaving other layers intact.
+const M0006_NODE_PROVENANCE: &str = "
+ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'derived'
+    CHECK (provenance IN ('derived','authored','inferred'));
+CREATE INDEX idx_nodes_provenance ON nodes(provenance);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -120,6 +134,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 5,
         sql: M0005_NODE_CONTEXT,
+    },
+    Migration {
+        version: 6,
+        sql: M0006_NODE_PROVENANCE,
     },
 ];
 

@@ -10,7 +10,7 @@
 //!
 //! Keys are path-based (`blueprint:<path>`), since a blueprint has no numeric id.
 
-use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
+use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 
 use crate::adr::{Section, WikiLink, first_h1, resolve_target};
 
@@ -51,7 +51,8 @@ impl BlueprintDoc {
             key.clone(),
             NodeKind::Other("blueprint".into()),
             self.title.clone(),
-        );
+        )
+        .with_provenance(Provenance::Authored);
         node.path = Some(self.path.clone());
         let mut fs = FactSet::new().with_node(node);
 
@@ -61,7 +62,8 @@ impl BlueprintDoc {
                 skey.clone(),
                 NodeKind::Other("blueprint_section".into()),
                 section.title.clone(),
-            );
+            )
+            .with_provenance(Provenance::Authored);
             snode.path = Some(self.path.clone());
             fs = fs.with_node(snode).with_edge(Edge::authored(
                 key.clone(),

@@ -2,11 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How an edge in the graph was produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How an edge or node in the graph was produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provenance {
-    /// Deterministically extracted from source ASTs (tree-sitter).
+    /// Deterministically extracted from source ASTs (tree-sitter). The default:
+    /// the overwhelmingly common node/edge, and the correct value when a legacy
+    /// cached fact set (serialized before nodes carried provenance) omits it.
+    #[default]
     Derived,
     /// Authored by a human or agent in an ADR, blueprint, or annotation.
     Authored,

@@ -12,7 +12,7 @@
 //! *edges* are resolved later, at assembly time, once every file's symbols are
 //! known (see [`crate::sync`]) — a single blob cannot resolve cross-file calls.
 
-use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
+use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 
 /// Version of the extraction *output* (node/edge shape and captured `meta`).
 /// Bump whenever extraction changes what it produces, so the content-addressed
@@ -241,6 +241,7 @@ fn file_node(
         lang: lang.map(ToOwned::to_owned),
         blob_hash: Some(blob_id.to_owned()),
         span: Some(Span::new(0, end)),
+        provenance: Provenance::Derived,
         meta,
     }
 }
@@ -731,6 +732,7 @@ impl RustWalk<'_> {
             lang: Some("rust".to_owned()),
             blob_hash: Some(self.blob_id.to_owned()),
             span: Some(span(node)),
+            provenance: Provenance::Derived,
             meta: serde_json::Value::Object(meta),
         });
         self.link_parent(&key, scope);
@@ -801,6 +803,7 @@ impl RustWalk<'_> {
             lang: Some("rust".to_owned()),
             blob_hash: None,
             span: None,
+            provenance: Provenance::Derived,
             meta: serde_json::Value::Null,
         });
         self.edges
@@ -1188,6 +1191,7 @@ fn append_import_facts(
                     lang: Some(def.lang.to_owned()),
                     blob_hash: None,
                     span: None,
+                    provenance: Provenance::Derived,
                     meta: serde_json::Value::Null,
                 });
                 edges.push(Edge::derived(file_key(path), key, EdgeKind::Imports));
@@ -1314,6 +1318,7 @@ fn tag_facts(
             lang: Some(lang.to_owned()),
             blob_hash: Some(blob_id.to_owned()),
             span: Some(Span::new(start, end)),
+            provenance: Provenance::Derived,
             meta: serde_json::Value::Object(meta),
         });
 

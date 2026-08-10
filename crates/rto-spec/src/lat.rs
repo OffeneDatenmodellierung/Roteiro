@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
+use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 
 use crate::annotate::is_comment_line;
 use crate::text::{scan_wiki_links, slugify};
@@ -261,7 +261,8 @@ fn import_file(
         if let Some((level, heading)) = heading(line) {
             title.get_or_insert_with(|| heading.to_owned());
             let key = section_key(path, &slugify(heading));
-            let mut node = Node::new(key.clone(), NodeKind::Other("lat_section".into()), heading);
+            let mut node = Node::new(key.clone(), NodeKind::Other("lat_section".into()), heading)
+                .with_provenance(Provenance::Authored);
             node.path = Some(path.to_owned());
             facts.nodes.push(node);
             report.sections += 1;
@@ -295,7 +296,8 @@ fn import_file(
     }
 
     let name = title.unwrap_or_else(|| stem_of(path));
-    let mut node = Node::new(doc.clone(), NodeKind::Doc, name);
+    let mut node =
+        Node::new(doc.clone(), NodeKind::Doc, name).with_provenance(Provenance::Authored);
     node.path = Some(path.to_owned());
     // Emit the doc node last so it is present; order does not affect the store.
     facts.nodes.push(node);

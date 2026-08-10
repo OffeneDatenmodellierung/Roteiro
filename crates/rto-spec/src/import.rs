@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
+use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 use serde::Deserialize;
 
 /// `src_ref` stamped on every edge imported from Graphify, so it can be told
@@ -191,7 +191,8 @@ pub fn import_graphify(json: &str) -> Result<GraphifyImport, ImportError> {
         } else {
             n.label.clone()
         };
-        let mut node = Node::new(node_key.clone(), node_kind(&n.file_type), name);
+        let mut node = Node::new(node_key.clone(), node_kind(&n.file_type), name)
+            .with_provenance(Provenance::Inferred);
         node.path.clone_from(&n.source_file);
         node.meta = serde_json::json!({
             "graphify_id": n.id,
@@ -252,7 +253,8 @@ pub fn import_graphify(json: &str) -> Result<GraphifyImport, ImportError> {
         } else {
             h.label.clone()
         };
-        let mut group = Node::new(gkey.clone(), NodeKind::Other("group".to_owned()), name);
+        let mut group = Node::new(gkey.clone(), NodeKind::Other("group".to_owned()), name)
+            .with_provenance(Provenance::Inferred);
         group.meta = serde_json::json!({ "graphify_id": h.id, "kind": "hyperedge" });
         facts.nodes.push(group);
         for member in members {
@@ -338,6 +340,8 @@ mod tests {
         assert_eq!(n.kind, NodeKind::Other("concept".to_owned()));
         assert_eq!(n.path.as_deref(), Some("docs/adr/0059.md"));
         assert_eq!(n.meta["graphify_id"], "adr59");
+        // Graphify nodes are the inferred layer (heuristic import).
+        assert_eq!(n.provenance, Provenance::Inferred);
 
         // A `document` node maps to NodeKind::Doc.
         let d = out

@@ -26,7 +26,7 @@
 //
 // roteiro:ignore-file — this file defines the detection vocabulary.
 
-use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Span};
+use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 
 /// The category of an intent-debt [`Marker`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +439,7 @@ pub fn augment(facts: &mut FactSet, path: &str, blob_id: &str, bytes: &[u8]) {
             lang: None,
             blob_hash: Some(blob_id.to_owned()),
             span: Some(m.span),
+            provenance: Provenance::Derived,
             meta: serde_json::json!({
                 "category": m.category.as_str(),
                 "text": m.text,

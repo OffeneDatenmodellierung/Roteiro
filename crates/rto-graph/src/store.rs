@@ -46,8 +46,7 @@ pub struct ImportApplied {
 }
 
 /// Qualified node columns for `SELECT`s that alias the `nodes` table as `n`.
-const NODE_COLS: &str =
-    "n.key, n.kind, n.name, n.path, n.lang, n.blob_hash, n.span_start, n.span_end, n.meta";
+const NODE_COLS: &str = "n.key, n.kind, n.name, n.path, n.lang, n.blob_hash, n.span_start, n.span_end, n.provenance, n.meta";
 
 /// `SELECT` prefix that yields an [`Edge`] row (endpoints resolved back to keys).
 const EDGE_SELECT: &str = "SELECT ns.key AS src, nd.key AS dst, e.kind, e.provenance, \
@@ -701,13 +700,13 @@ fn upsert_node(conn: &Connection, node: &Node) -> Result<(), StoreError> {
         None => (None, None),
     };
     conn.execute(
-        "INSERT INTO nodes (key, kind, name, path, lang, blob_hash, span_start, span_end, meta)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO nodes (key, kind, name, path, lang, blob_hash, span_start, span_end, provenance, meta)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(key) DO UPDATE SET
              kind = excluded.kind, name = excluded.name, path = excluded.path,
              lang = excluded.lang, blob_hash = excluded.blob_hash,
              span_start = excluded.span_start, span_end = excluded.span_end,
-             meta = excluded.meta",
+             provenance = excluded.provenance, meta = excluded.meta",
         params![
             node.key,
             node.kind.as_str(),
@@ -717,6 +716,7 @@ fn upsert_node(conn: &Connection, node: &Node) -> Result<(), StoreError> {
             node.blob_hash,
             span_start,
             span_end,
+            node.provenance.as_str(),
             meta,
         ],
     )?;
@@ -877,6 +877,9 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, StoreError> {
         _ => None,
     };
     let meta: String = row.get("meta")?;
+    let provenance: String = row.get("provenance")?;
+    let provenance = Provenance::from_token(&provenance)
+        .ok_or_else(|| StoreError::Corrupt(format!("unknown node provenance: {provenance}")))?;
     Ok(Node {
         key: row.get("key")?,
         kind: NodeKind::from_token(&kind),
@@ -885,6 +888,7 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, StoreError> {
         lang: row.get("lang")?,
         blob_hash: row.get("blob_hash")?,
         span,
+        provenance,
         meta: serde_json::from_str(&meta)?,
     })
 }
@@ -923,6 +927,7 @@ mod tests {
             lang: Some("rust".to_owned()),
             blob_hash: Some("deadbeef".to_owned()),
             span: Some(Span::new(10, 42)),
+            provenance: Provenance::Derived,
             meta: serde_json::json!({"vis": "pub"}),
         }
     }
@@ -1187,7 +1192,7 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        assert_eq!(store.schema_version().expect("version"), 5);
+        assert_eq!(store.schema_version().expect("version"), 6);
     }
 
     #[test]
@@ -1358,7 +1363,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 5);
+            assert_eq!(store.schema_version().expect("version"), 6);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

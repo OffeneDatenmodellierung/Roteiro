@@ -215,6 +215,14 @@ pub struct Node {
     pub blob_hash: Option<String>,
     /// Byte span within the source blob, if applicable.
     pub span: Option<Span>,
+    /// Which layer produced this node: [`Provenance::Derived`] (tree-sitter
+    /// extraction), [`Provenance::Authored`] (ADR/blueprint/lat sections), or
+    /// [`Provenance::Inferred`] (Graphify import). Lets layer-scoped operations —
+    /// e.g. a derived-only incremental `sync` — target one layer without
+    /// disturbing the others. Defaults to `Derived`, which is also the correct
+    /// value for a legacy cached fact set serialized before nodes carried it.
+    #[serde(default)]
+    pub provenance: Provenance,
     /// Arbitrary structured metadata.
     #[serde(default)]
     pub meta: serde_json::Value,
@@ -222,7 +230,8 @@ pub struct Node {
 
 impl Node {
     /// Construct a node with the given key, kind, and name; all optional fields
-    /// unset and `meta` null.
+    /// unset, `meta` null, and provenance [`Provenance::Derived`] (extraction is
+    /// the common case — authored/inferred producers call [`Node::with_provenance`]).
     #[must_use]
     pub fn new(key: impl Into<String>, kind: NodeKind, name: impl Into<String>) -> Self {
         Self {
@@ -233,8 +242,17 @@ impl Node {
             lang: None,
             blob_hash: None,
             span: None,
+            provenance: Provenance::Derived,
             meta: serde_json::Value::Null,
         }
+    }
+
+    /// Set the producing layer, returning the node (builder style). Used by the
+    /// authored (ADR/blueprint/lat) and inferred (Graphify) producers.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Provenance) -> Self {
+        self.provenance = provenance;
+        self
     }
 }
 
@@ -471,5 +489,27 @@ mod tests {
         assert_eq!(fs.edges.len(), 1);
         assert!(!fs.is_empty());
         assert!(FactSet::new().is_empty());
+    }
+
+    #[test]
+    fn node_provenance_defaults_and_builder() {
+        // A legacy cached fact set (serialized before nodes carried provenance)
+        // must still deserialize — the field defaults to Derived, the correct
+        // value for the derived-only extraction cache. This is what keeps existing
+        // `.git/roteiro` object caches loadable after the schema change.
+        let legacy = r#"{"key":"k","kind":"fn","name":"n","path":null,"lang":null,"blob_hash":null,"span":null,"meta":null}"#;
+        let node: Node = serde_json::from_str(legacy).expect("legacy node deserializes");
+        assert_eq!(node.provenance, Provenance::Derived);
+        // New nodes default to Derived; the builder sets the authored/inferred layer.
+        assert_eq!(
+            Node::new("k", NodeKind::Fn, "n").provenance,
+            Provenance::Derived
+        );
+        assert_eq!(
+            Node::new("k", NodeKind::Adr, "n")
+                .with_provenance(Provenance::Authored)
+                .provenance,
+            Provenance::Authored
+        );
     }
 }
