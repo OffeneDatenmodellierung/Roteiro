@@ -1976,7 +1976,15 @@ fn serve_models_endpoint(
         .map(|s| s.name.clone())
         .collect::<Vec<_>>()
         .join(", ");
-    let engine = rto_serve::llama::LlamaEngine::new(served, 0)
+    // Keep models resident up to the configured budget (MiB → bytes), loading on
+    // demand and unloading the least-recently-used past it (ADR-0006). Unset ⇒ 0
+    // ⇒ a single resident model.
+    let budget_bytes = cfg
+        .serve
+        .memory_budget_mb
+        .unwrap_or(0)
+        .saturating_mul(1024 * 1024);
+    let engine = rto_serve::llama::LlamaEngine::new_with_budget(served, 0, budget_bytes)
         .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
     let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
 

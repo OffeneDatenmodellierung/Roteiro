@@ -1,8 +1,17 @@
 //! The llama.cpp-backed [`Engine`] (ADR-0006), behind the `llama` feature.
 //!
-//! Loads a plain GGUF (embedded tokenizer + chat template come for free), keeps
-//! one model warm, and serialises requests through a mutex — llama.cpp batching
-//! is a later enhancement. Serves only the models it was handed; never downloads.
+//! Loads a plain GGUF (embedded tokenizer + chat template come for free) and
+//! serialises requests through a mutex — llama.cpp batching is a later
+//! enhancement. Serves only the models it was handed; never downloads.
+//!
+//! **Model residency.** Loaded models are held in a small memory-bounded LRU
+//! ([`ModelCache`]): each request loads its model on demand and keeps it warm,
+//! and when the resident set exceeds the byte budget the least-recently-used
+//! models are unloaded — so a process serving several models (or alternating
+//! between an embedding and a generative model) swaps them in and out in real
+//! time instead of thrashing a single slot, while a memory-limited host caps how
+//! many stay resident. The default budget keeps a single model, matching the
+//! previous one-slot behaviour.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -43,29 +52,112 @@ pub struct LlamaEngine {
     backend: LlamaBackend,
     served: Vec<Served>,
     n_ctx: u32,
-    warm: Mutex<Option<Warm>>,
+    cache: Mutex<ModelCache>,
 }
 
-/// The single model kept loaded between requests.
-struct Warm {
+/// One loaded model held in the residency cache.
+struct Loaded {
     name: String,
+    /// On-disk GGUF size, used as a proxy for the model's memory footprint when
+    /// deciding what to evict (the real RSS is not cheaply available).
+    bytes: u64,
     model: LlamaModel,
+}
+
+/// A memory-bounded LRU of loaded models. Entries are ordered least- to
+/// most-recently-used; the sum of resident `bytes` is kept at or below
+/// `budget_bytes`, except that the most-recently-used model is always retained
+/// even if it alone exceeds the budget (a request for a model must be servable).
+struct ModelCache {
+    budget_bytes: u64,
+    loaded: Vec<Loaded>,
+}
+
+/// Given resident model sizes ordered LRU→MRU and a byte budget, the number of
+/// oldest entries to evict so the remainder fits the budget — always keeping at
+/// least the most-recently-used entry (the one a request just needs). A budget of
+/// `0` therefore keeps exactly one model resident.
+fn lru_evict_count(sizes_lru_to_mru: &[u64], budget_bytes: u64) -> usize {
+    let mut total: u64 = sizes_lru_to_mru.iter().sum();
+    let mut evict = 0;
+    while sizes_lru_to_mru.len() - evict > 1 && total > budget_bytes {
+        total -= sizes_lru_to_mru[evict];
+        evict += 1;
+    }
+    evict
 }
 
 impl LlamaEngine {
     /// Build an engine serving `served`, with an `n_ctx` context window
-    /// (`0` selects the default). Initialises the llama.cpp backend once.
+    /// (`0` selects the default). Keeps a single model resident; use
+    /// [`LlamaEngine::new_with_budget`] to hold several. Initialises the
+    /// llama.cpp backend once.
     ///
     /// # Errors
     /// Returns an error if the llama.cpp backend fails to initialise.
     pub fn new(served: Vec<Served>, n_ctx: u32) -> anyhow::Result<Self> {
+        Self::new_with_budget(served, n_ctx, 0)
+    }
+
+    /// Build an engine that keeps as many models resident as fit within
+    /// `budget_bytes` of (GGUF-size-proxied) memory, unloading the
+    /// least-recently-used past that cap. `0` keeps a single model (the default).
+    ///
+    /// # Errors
+    /// Returns an error if the llama.cpp backend fails to initialise.
+    pub fn new_with_budget(
+        served: Vec<Served>,
+        n_ctx: u32,
+        budget_bytes: u64,
+    ) -> anyhow::Result<Self> {
         let backend = LlamaBackend::init()?;
         Ok(Self {
             backend,
             served,
             n_ctx: if n_ctx == 0 { DEFAULT_N_CTX } else { n_ctx },
-            warm: Mutex::new(None),
+            cache: Mutex::new(ModelCache {
+                budget_bytes,
+                loaded: Vec::new(),
+            }),
         })
+    }
+
+    /// Ensure the model named `name` (GGUF at `path`) is resident in `cache`,
+    /// loading it and evicting least-recently-used models past the budget if
+    /// needed, then promoting it to most-recently-used. Returns its index (always
+    /// the last, most-recently-used slot).
+    fn ensure_loaded(
+        &self,
+        cache: &mut ModelCache,
+        name: &str,
+        path: &Path,
+    ) -> Result<usize, EngineError> {
+        if let Some(i) = cache.loaded.iter().position(|l| l.name == name) {
+            // Already resident — promote to most-recently-used.
+            let entry = cache.loaded.remove(i);
+            cache.loaded.push(entry);
+        } else {
+            // The GGUF size is the residency budget's footprint proxy, so a
+            // failure to read it must surface — a silent `0` would let a model
+            // count as free and break the eviction invariant. (The file is about
+            // to be loaded from this same path, so this rarely fails.)
+            let bytes = std::fs::metadata(path)
+                .map_err(|e| EngineError::Inference(format!("stat model `{name}`: {e}")))?
+                .len();
+            let params = LlamaModelParams::default();
+            let model = LlamaModel::load_from_file(&self.backend, path, &params)
+                .map_err(|e| EngineError::Inference(format!("load `{name}`: {e}")))?;
+            cache.loaded.push(Loaded {
+                name: name.to_owned(),
+                bytes,
+                model,
+            });
+            // Evict oldest models now that the newcomer (MRU) is resident.
+            let sizes: Vec<u64> = cache.loaded.iter().map(|l| l.bytes).collect();
+            let evict = lru_evict_count(&sizes, cache.budget_bytes);
+            cache.loaded.drain(0..evict);
+        }
+        Ok(cache.loaded.len() - 1)
     }
 
     /// Resolve a served model name to its GGUF path.
@@ -324,22 +416,15 @@ impl Engine for LlamaEngine {
         let path = served.path.clone();
         let mmproj = served.mmproj.clone();
 
-        let mut warm = self
-            .warm
+        let mut cache = self
+            .cache
             .lock()
             .map_err(|_| EngineError::Inference("engine mutex poisoned".to_owned()))?;
 
-        // Load lazily and keep warm; a different model evicts the previous one.
-        if warm.as_ref().map(|w| w.name.as_str()) != Some(req.model.as_str()) {
-            let params = LlamaModelParams::default();
-            let model = LlamaModel::load_from_file(&self.backend, &path, &params)
-                .map_err(|e| EngineError::Inference(format!("load `{}`: {e}", req.model)))?;
-            *warm = Some(Warm {
-                name: req.model.clone(),
-                model,
-            });
-        }
-        let model = &warm.as_ref().expect("just loaded").model;
+        // Load lazily and keep warm in the memory-bounded LRU (evicting the
+        // least-recently-used model if the budget is exceeded).
+        let idx = self.ensure_loaded(&mut cache, &req.model, &path)?;
+        let model = &cache.loaded[idx].model;
 
         match (req.images.is_empty(), mmproj.as_deref()) {
             (true, _) => self.chat_text(model, req, on_token),
@@ -355,32 +440,29 @@ impl Engine for LlamaEngine {
         let path = self
             .path_for(model)
             .ok_or_else(|| EngineError::UnknownModel(model.to_owned()))?;
-        let mut warm = self
-            .warm
+        let mut cache = self
+            .cache
             .lock()
             .map_err(|_| EngineError::Inference("engine mutex poisoned".to_owned()))?;
-        if warm.as_ref().map(|w| w.name.as_str()) != Some(model) {
-            let params = LlamaModelParams::default();
-            let loaded = LlamaModel::load_from_file(&self.backend, &path, &params)
-                .map_err(|e| EngineError::Inference(format!("load `{model}`: {e}")))?;
-            *warm = Some(Warm {
-                name: model.to_owned(),
-                model: loaded,
-            });
-        }
-        let model_ref = &warm.as_ref().expect("just loaded").model;
+        let idx = self.ensure_loaded(&mut cache, model, &path)?;
+        let model_ref = &cache.loaded[idx].model;
 
         let n_ctx = NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::MIN);
+        // One embeddings-enabled context, reused across all inputs — creating a
+        // fresh context per input (re-allocating the KV cache each time) dominated
+        // the cost of embedding a whole repo. The KV cache is cleared between
+        // inputs so each is pooled independently. Pooling defaults to the model's
+        // own type (CLS for BGE), giving one sentence vector per input.
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(Some(n_ctx))
+            .with_embeddings(true);
+        let mut ctx = model_ref
+            .new_context(&self.backend, ctx_params)
+            .map_err(|e| EngineError::Inference(format!("embedding context: {e}")))?;
+
         let mut out = Vec::with_capacity(inputs.len());
         for input in inputs {
-            // A fresh embeddings-enabled context per input; pooling defaults to the
-            // model's own type (CLS for BGE), giving one sentence vector.
-            let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(Some(n_ctx))
-                .with_embeddings(true);
-            let mut ctx = model_ref
-                .new_context(&self.backend, ctx_params)
-                .map_err(|e| EngineError::Inference(format!("embedding context: {e}")))?;
+            ctx.clear_kv_cache();
 
             let tokens = model_ref
                 .str_to_token(input, AddBos::Always)
@@ -420,5 +502,37 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
         v.iter().map(|x| x / norm).collect()
     } else {
         v.to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lru_evict_count;
+
+    #[test]
+    fn budget_zero_keeps_a_single_model() {
+        // The default (budget 0) unloads everything but the most-recently-used.
+        assert_eq!(lru_evict_count(&[100, 100, 100], 0), 2);
+        assert_eq!(lru_evict_count(&[100], 0), 0, "never evict the only model");
+        assert_eq!(lru_evict_count(&[], 0), 0);
+    }
+
+    #[test]
+    fn budget_evicts_oldest_until_it_fits() {
+        // 300 bytes over a 250 budget → drop the oldest (100), leaving 200.
+        assert_eq!(lru_evict_count(&[100, 100, 100], 250), 1);
+        // Comfortably under budget → keep everything.
+        assert_eq!(lru_evict_count(&[100, 100, 100], 1000), 0);
+        // Exactly at budget → no eviction.
+        assert_eq!(lru_evict_count(&[100, 100, 100], 300), 0);
+    }
+
+    #[test]
+    fn mru_is_retained_even_if_it_alone_exceeds_budget() {
+        // A single resident model larger than the budget is still kept — a
+        // request for it must be servable.
+        assert_eq!(lru_evict_count(&[500], 10), 0);
+        // With an older small model present, only the old one is evicted.
+        assert_eq!(lru_evict_count(&[100, 500], 10), 1);
     }
 }

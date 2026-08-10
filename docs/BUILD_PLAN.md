@@ -887,8 +887,15 @@ serving), and broaden the opt-in model catalogue.
   `smolvlm-500m-gguf` + `mmproj` (candle moondream removed), and `spec draft`
   generates via the shared engine. candle-core/nn/transformers + tokenizers are
   gone from the tree; `inference-local-models`/`image-vision` now mean local
-  **llama.cpp** models. One inference core for serving and internal uses. (Perf
-  follow-up: `infer` embeds a fresh context per node — warm-context/batching.)
+  **llama.cpp** models. One inference core for serving and internal uses.
+  - **Perf follow-up — resolved.** `infer` created a fresh embeddings context per
+    node (re-allocating the KV cache each time); it now builds **one context per
+    `embed` batch** and clears the KV cache between inputs. And the engine's
+    single warm slot became a **memory-bounded LRU** (`ModelCache`): models load
+    on demand and the least-recently-used unload once the resident set (proxied
+    by GGUF size) exceeds a byte budget, so a process alternating models (or
+    `serve` over several) swaps them in real time instead of thrashing one slot.
+    `[serve] memory_budget_mb` sets the budget (unset/`0` = one resident).
 - **Acceleration / unify direction:** performance matters for the internal uses
   too (`spec draft`, `infer`), and llama.cpp is now proven fast + `deny`-clean, so
   it is the target for the **whole inference core** — a **staged migration off
