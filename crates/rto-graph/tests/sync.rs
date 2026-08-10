@@ -88,20 +88,29 @@ fn cold_then_noop_then_single_file_change() {
     assert_eq!(r2.nodes, 3);
     assert_eq!(r1.tree, r2.tree);
 
-    // (c) Change one file and commit: exactly one blob is re-extracted, the
-    // other two are served from the content-addressed cache.
+    // (c) Change one file and commit: the incremental fast path touches *only*
+    // the changed blob (tree-diff against the last-synced tree), carrying the two
+    // unchanged files' facts forward from the store rather than re-reading them.
     write(&dir, "b.txt", "beta changed\n");
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-q", "-m", "edit b"]);
 
     let r3 = sync(&mut store, &repo, &cache, &ex).expect("incremental sync");
     assert!(!r3.no_op);
-    assert_eq!(r3.blobs_total, 3);
+    assert_eq!(r3.blobs_total, 3, "the whole tree is still reported");
     assert_eq!(
         r3.blobs_extracted, 1,
         "only the changed blob is re-extracted"
     );
-    assert_eq!(r3.blobs_cached, 2, "unchanged blobs are cache hits");
+    assert_eq!(
+        r3.blobs_cached, 0,
+        "the incremental path processes only the changed blob; unchanged facts \
+         are carried forward from the store, not re-read"
+    );
+    assert_eq!(
+        r3.nodes, 3,
+        "unchanged file nodes survive the incremental sync"
+    );
     assert_ne!(r1.tree, r3.tree);
 
     std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -397,6 +406,95 @@ fn diff_trees_reports_added_modified_deleted_and_prunes_unchanged() {
         .find(|b| b.path == "src/c.rs")
         .expect("c in head");
     assert_eq!(&c_head.oid, c_oid, "diff oid matches the tree blob oid");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn incremental_sync_matches_a_full_rebuild() {
+    // The incremental committed sync must produce byte-for-byte the same derived
+    // graph as a full sync — including the hard case where a change in ONE file
+    // flips cross-file call resolution in an UNCHANGED file (a name that was
+    // unique becomes ambiguous, so a `calls` edge must disappear).
+    let dir = fresh_dir("incr-equiv");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "a.rs", "pub fn helper() -> u32 {\n    1\n}\n");
+    write(&dir, "b.rs", "pub fn caller() {\n    helper();\n}\n"); // unique helper → edge
+    write(&dir, "gone.rs", "pub fn gone() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let reg = Registry::default();
+
+    // Cold sync (full) — records the tree + env so the next sync can go incremental.
+    let mut incr = Store::open(&dir.join(".git/incr.db")).expect("open incr");
+    sync(&mut incr, &repo, &cache, &reg).expect("cold sync");
+
+    // Change set: delete gone.rs, add d.rs with a SECOND `helper` (ambiguity flip).
+    // b.rs is left UNCHANGED — its caller→helper edge must still disappear.
+    std::fs::remove_file(dir.join("gone.rs")).expect("rm");
+    write(&dir, "d.rs", "pub fn helper() -> u32 {\n    2\n}\n");
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "flip"]);
+    let repo = Repo::discover(&dir).expect("rediscover");
+
+    let r = sync(&mut incr, &repo, &cache, &reg).expect("incremental sync");
+    // Proof the fast path ran: it touched only the changed blob (d.rs added),
+    // not every file in the tree.
+    assert!(
+        r.blobs_extracted + r.blobs_cached <= 1,
+        "incremental should process only changed blobs, saw {}",
+        r.blobs_extracted + r.blobs_cached
+    );
+
+    // A fresh store at the same HEAD takes the full path (no prior sync state).
+    let mut full = Store::open(&dir.join(".git/full.db")).expect("open full");
+    sync(&mut full, &repo, &cache, &reg).expect("full sync");
+
+    // Canonicalise and compare the two derived graphs.
+    let canon = |fs: rto_graph::FactSet| -> (Vec<String>, Vec<String>) {
+        let mut ns: Vec<String> = fs
+            .nodes
+            .iter()
+            .map(|n| format!("{}|{}|{}", n.key, n.kind.as_str(), n.provenance.as_str()))
+            .collect();
+        let mut es: Vec<String> = fs
+            .edges
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}|{}|{}|{}",
+                    e.kind.as_str(),
+                    e.src,
+                    e.dst,
+                    e.provenance.as_str()
+                )
+            })
+            .collect();
+        ns.sort();
+        es.sort();
+        (ns, es)
+    };
+    let ci = canon(incr.export_factset().expect("export incr"));
+    let cf = canon(full.export_factset().expect("export full"));
+    assert_eq!(ci, cf, "incremental sync must equal a full rebuild");
+
+    // Sanity: the now-ambiguous caller→helper edge is gone in both, gone.rs dropped.
+    // Canonical edge form is "<kind>|<src>|<dst>|<prov>", so a `calls` edge starts
+    // with "calls|" — constrain the check to that kind, not any edge mentioning both.
+    assert!(
+        !cf.1
+            .iter()
+            .any(|e| e.starts_with("calls|") && e.contains("#caller") && e.contains("#helper")),
+        "the ambiguous calls edge must be dropped: {:?}",
+        cf.1
+    );
+    assert!(
+        !cf.0.iter().any(|n| n.contains("gone.rs")),
+        "deleted file dropped"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
