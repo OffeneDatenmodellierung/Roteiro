@@ -207,9 +207,11 @@ impl Store {
     /// # Errors
     /// Returns [`StoreError`] on a query failure; the transaction is rolled back.
     pub fn reconcile(&mut self, facts: &FactSet, tree: Option<&str>) -> Result<(), StoreError> {
-        let current = self.export_factset()?;
+        // Only the current *nodes* are needed to decide deletes/upserts — edges are
+        // replaced wholesale — so avoid `export_factset`, which also loads edges.
+        let current_nodes = self.all_nodes()?;
         let cur_by_key: std::collections::HashMap<&str, &Node> =
-            current.nodes.iter().map(|n| (n.key.as_str(), n)).collect();
+            current_nodes.iter().map(|n| (n.key.as_str(), n)).collect();
         let new_keys: std::collections::HashSet<&str> =
             facts.nodes.iter().map(|n| n.key.as_str()).collect();
 
@@ -218,7 +220,7 @@ impl Store {
         // can then be deleted safely, and reinsert the full set at the end.
         tx.execute("DELETE FROM edges", [])?;
         // Drop nodes that no longer exist.
-        for old in &current.nodes {
+        for old in &current_nodes {
             if !new_keys.contains(old.key.as_str()) {
                 tx.execute("DELETE FROM nodes WHERE key = ?1", [&old.key])?;
             }
@@ -860,15 +862,23 @@ mod tests {
         };
         let edge =
             |src: &str, dst: &str| Edge::derived(src.to_owned(), dst.to_owned(), EdgeKind::Calls);
+        // An inferred edge carries confidence and a src_ref — exercise both so the
+        // equivalence claim covers every edge field, not just derived calls.
+        let inferred = |src: &str, dst: &str, conf: f64| {
+            let mut e = Edge::inferred(src.to_owned(), dst.to_owned(), EdgeKind::Related, conf);
+            e.src_ref = Some("import:demo".to_owned());
+            e
+        };
 
         let facts1 = FactSet {
             nodes: vec![node("a", "A"), node("b", "B"), node("c", "C")],
-            edges: vec![edge("a", "b"), edge("b", "c")],
+            edges: vec![edge("a", "b"), edge("b", "c"), inferred("a", "c", 0.7)],
         };
-        // b changes (name), c is removed, d is added; edge b->c drops, a->d added.
+        // b changes (name), c is removed, d is added; edge b->c drops, a->d added,
+        // and the inferred edge's confidence changes.
         let facts2 = FactSet {
             nodes: vec![node("a", "A"), node("b", "B2"), node("d", "D")],
-            edges: vec![edge("a", "b"), edge("a", "d")],
+            edges: vec![edge("a", "b"), edge("a", "d"), inferred("a", "d", 0.9)],
         };
 
         // Path 1: rebuild facts1, then reconcile to facts2.
@@ -890,11 +900,13 @@ mod tests {
                 .iter()
                 .map(|e| {
                     format!(
-                        "{}\0{}\0{}\0{}",
+                        "{}\0{}\0{}\0{}\0{:?}\0{:?}",
                         e.kind.as_str(),
                         e.src,
                         e.dst,
-                        e.provenance.as_str()
+                        e.provenance.as_str(),
+                        e.confidence,
+                        e.src_ref
                     )
                 })
                 .collect();
