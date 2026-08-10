@@ -269,3 +269,18 @@ fn symbol_review(node: &rto_graph::Node, ctx: Option<&NodeContext>) -> SymbolRev
         related,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// Freeze the `--json` schema tags (see `docs/JSON_SCHEMA.md`). These are the
+    /// stable, versioned contracts; changing one is a breaking change that must
+    /// bump the version deliberately — so a change here is caught in CI.
+    #[test]
+    fn json_schema_tags_are_frozen() {
+        assert_eq!(super::REVIEW_SCHEMA, "roteiro.review/v1");
+        assert_eq!(rto_graph::SCHEMA, "roteiro.query/v1");
+        assert_eq!(rto_graph::ARTIFACT_SCHEMA, "roteiro.graph/v1");
+        assert_eq!(rto_graph::ORACLE_SCHEMA, "roteiro.oracle/v1");
+        assert_eq!(rto_spec::SPEC_SCHEMA, "roteiro.spec/v1");
+    }
+}

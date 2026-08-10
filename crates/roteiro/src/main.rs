@@ -2378,11 +2378,84 @@ fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyh
             count += 1;
         }
     }
+
+    // The overview note: what was scanned, structure, provenance, ADRs, debt.
+    let home = rto_render::render_home(&vault_summary(&repo, &store)?);
+    std::fs::write(out.join(&home.filename), &home.content)?;
+
     println!(
-        "rendered obsidian vault → {} ({count} note(s))",
-        out.display()
+        "rendered obsidian vault → {} ({count} note(s) + {})",
+        out.display(),
+        rto_render::HOME_NOTE
     );
     Ok(())
+}
+
+/// Aggregate the store into the figures the vault's `_Home` overview shows.
+fn vault_summary(
+    repo: &rto_graph::Repo,
+    store: &rto_graph::Store,
+) -> anyhow::Result<rto_render::VaultSummary> {
+    use rto_graph::{NodeKind, Provenance};
+
+    let project = repo
+        .workdir()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("this project")
+        .to_owned();
+
+    // Node counts by kind, most-frequent first (ties broken by kind for stability).
+    let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for node in store.all_nodes()? {
+        *by_kind.entry(node.kind.as_str().to_owned()).or_default() += 1;
+    }
+    let mut node_counts: Vec<(String, usize)> = by_kind.into_iter().collect();
+    node_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    // Edge counts per provenance (only non-zero classes). Store errors propagate
+    // rather than silently reporting a zero count.
+    let mut edge_provenance = Vec::new();
+    for p in [
+        Provenance::Derived,
+        Provenance::Authored,
+        Provenance::Inferred,
+    ] {
+        let n = store.edges_by_provenance(p)?.len();
+        if n > 0 {
+            edge_provenance.push((p.as_str().to_owned(), n));
+        }
+    }
+
+    // ADRs with their lifecycle status.
+    let adrs = store
+        .nodes_by_kind(&NodeKind::Adr)?
+        .into_iter()
+        .map(|n| rto_render::AdrEntry {
+            key: n.key,
+            name: n.name,
+            status: n
+                .meta
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned),
+        })
+        .collect();
+
+    let debt = rto_graph::debt(store, &[])?
+        .by_category
+        .into_iter()
+        .collect();
+
+    Ok(rto_render::VaultSummary {
+        project,
+        total_nodes: usize::try_from(store.node_count()?)?,
+        total_edges: usize::try_from(store.edge_count()?)?,
+        node_counts,
+        edge_provenance,
+        adrs,
+        debt,
+    })
 }
 
 /// Recursively copy the contents of `src` into `dst`.

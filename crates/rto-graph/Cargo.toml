@@ -1,6 +1,7 @@
 [package]
 name = "rto-graph"
 description = "Provenance-tagged codebase knowledge graph store for Roteiro"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
