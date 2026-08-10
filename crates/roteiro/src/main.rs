@@ -132,6 +132,11 @@ enum Command {
     Load {
         /// Artifact file to load (`-` reads from stdin).
         file: String,
+        /// Load even if the artifact's tree does not match the working `HEAD`.
+        /// By default a mismatch is refused, so a fetched CI artifact for a
+        /// different commit never installs a wrong graph (the hook then rebuilds).
+        #[arg(long)]
+        force: bool,
     },
     /// Import from an external knowledge graph (graphify, lat), or compare
     /// against a codegraph snapshot as a validation oracle.
@@ -309,7 +314,7 @@ fn main() -> anyhow::Result<()> {
         Command::Debt { kind, json } => run_debt(ingest, &kind, json),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Export { out } => run_export(ingest, out),
-        Command::Load { file } => run_load(&file),
+        Command::Load { file, force } => run_load(&file, force),
         Command::Init => run_init(ingest),
         Command::Render { target, out } => run_render(ingest, &target, out),
         Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
@@ -1972,8 +1977,12 @@ fn run_export(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::R
 }
 
 /// Load a graph artifact into the local store, replacing its contents. Lets a
-/// fresh clone obtain a ready-made graph without re-extraction.
-fn run_load(file: &str) -> anyhow::Result<()> {
+/// fresh clone (or a `post-merge`/`post-checkout` hook) obtain a ready-made graph
+/// without re-extraction. Unless `force`, the artifact's tree must match the
+/// working `HEAD` — so a CI artifact fetched for a different commit is refused
+/// (non-zero exit) and the caller rebuilds instead. A matching load also sets the
+/// sync state to that tree, so a following `sync` no-ops.
+fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
     use rto_graph::{GraphArtifact, Repo, Store};
 
     let json = if file == "-" {
@@ -1985,6 +1994,21 @@ fn run_load(file: &str) -> anyhow::Result<()> {
 
     let cwd = std::env::current_dir()?;
     let repo = Repo::discover(&cwd)?;
+
+    // Refuse an artifact built from a different tree than the current HEAD, so a
+    // fetched artifact never installs a graph that doesn't match the checkout.
+    if !force && let Some(artifact_tree) = &artifact.tree {
+        let head = repo.head_tree_id()?;
+        if *artifact_tree != head {
+            anyhow::bail!(
+                "artifact tree {} does not match HEAD tree {} — refusing to load a \
+                 mismatched graph (pass --force to override, or run `roteiro sync`)",
+                &artifact_tree[..artifact_tree.len().min(12)],
+                &head[..head.len().min(12)]
+            );
+        }
+    }
+
     let store_dir = repo.git_dir().join("roteiro");
     std::fs::create_dir_all(&store_dir)?;
     let mut store = Store::open(&store_dir.join("graph.db"))?;
