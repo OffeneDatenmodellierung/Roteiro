@@ -107,7 +107,10 @@ fn cold_then_noop_then_single_file_change() {
         "the incremental path processes only the changed blob; unchanged facts \
          are carried forward from the store, not re-read"
     );
-    assert_eq!(r3.nodes, 3, "unchanged file nodes survive the incremental sync");
+    assert_eq!(
+        r3.nodes, 3,
+        "unchanged file nodes survive the incremental sync"
+    );
     assert_ne!(r1.tree, r3.tree);
 
     std::fs::remove_dir_all(&dir).expect("cleanup");
