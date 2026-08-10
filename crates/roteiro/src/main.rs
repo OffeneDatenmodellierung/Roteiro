@@ -687,7 +687,7 @@ fn run_review(
     if json {
         emit_json(&review)?;
     } else {
-        print_review(&review);
+        print_review(&review, base);
     }
     if review.has_drift() {
         std::process::exit(1);
@@ -696,9 +696,12 @@ fn run_review(
 }
 
 /// Render a review report as a compact, scannable summary.
-fn print_review(review: &review::ReviewReport) {
+fn print_review(review: &review::ReviewReport, base: Option<&str>) {
     if review.changed_files == 0 {
-        println!("no working-tree changes to review");
+        match base {
+            Some(base) => println!("no changes in {base}..HEAD to review"),
+            None => println!("no working-tree changes to review"),
+        }
         return;
     }
     for file in &review.files {
