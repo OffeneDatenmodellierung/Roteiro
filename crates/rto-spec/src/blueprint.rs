@@ -14,8 +14,11 @@ use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
 
 use crate::adr::{Section, WikiLink, first_h1, resolve_target};
 
-/// The house-style marker in a blueprint's H1 (from `roteiro spec … blueprint`).
-const MARKER: &str = "Technical Implementation Plan";
+/// The house-style marker in a blueprint's H1 (from `roteiro spec … blueprint`),
+/// including the leading em dash so a doc whose H1 merely mentions the phrase in
+/// prose is not misclassified — detection matches the scaffold's `… —
+/// Technical Implementation Plan` exactly.
+const MARKER: &str = "— Technical Implementation Plan";
 
 /// A fully-parsed blueprint: title, section structure, and authored links.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +166,15 @@ mod tests {
         assert!(
             !is_blueprint("docs/notes/x.md", "# Just a note\n"),
             "neither marker nor path"
+        );
+        // The phrase alone (no leading em dash) does not qualify — the marker is
+        // anchored to the scaffold's `… — Technical Implementation Plan` H1.
+        assert!(
+            !is_blueprint(
+                "docs/notes/y.md",
+                "# Our Technical Implementation Plan overview\n"
+            ),
+            "phrase without the em-dash marker is not a blueprint"
         );
     }
 
