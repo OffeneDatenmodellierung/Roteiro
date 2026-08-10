@@ -556,12 +556,17 @@ impl Store {
         for row in rows {
             let (src_ref, json) = row?;
             let mut facts: FactSet = serde_json::from_str(&json)?;
-            // A layer persisted before nodes carried provenance deserializes its
-            // nodes as `Derived` via the serde default — but an import-layer node
-            // is *never* derived (derivation is `sync`'s job). Re-tag any such node
-            // to its true class so the derived/non-derived split stays trustworthy
-            // for a layer-scoped `sync`. Idempotent and runs on every reapply, so
-            // old stores self-heal; a no-op for fresh imports (already tagged).
+            // An import-layer node is *never* derived (derivation is `sync`'s job),
+            // so a `Derived` tag here is always wrong. It arises two ways, both
+            // repaired the same: a legacy layer persisted before nodes carried
+            // provenance (the field is absent → serde defaults `Derived`), or —
+            // anomalously — a layer that stored an explicit `"provenance":"derived"`
+            // (a producer/data bug). We deliberately repair *both* rather than only
+            // the absent case: leaving an explicit-`derived` import node in place
+            // would let a layer-scoped `sync` treat it as derived and delete it —
+            // the exact corruption this guards against — so repair is the safe
+            // recovery, not silent masking. Idempotent, runs on every reapply
+            // (old stores self-heal), and a no-op for correctly-tagged fresh imports.
             for node in &mut facts.nodes {
                 if node.provenance == Provenance::Derived {
                     node.provenance = import_node_provenance(&node.key);
