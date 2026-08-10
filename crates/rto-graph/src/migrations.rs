@@ -115,9 +115,11 @@ ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'derived'
 CREATE INDEX idx_nodes_provenance ON nodes(provenance);
 ";
 
-/// Migration 7: record the extractor environment alongside the synced tree.
-/// Extraction output depends on more than (path, bytes) — the installed image
-/// models and ingestion toggles (see `Extractor::env_tag`). The incremental
+/// Migration 7: record the extraction *identity* alongside the synced tree.
+/// Extraction output depends on more than (path, bytes) — the extractor code
+/// version (`EXTRACT_VERSION`) and its environment (installed image models,
+/// ingestion toggles; see `Extractor::env_tag`), the same components the content
+/// cache keys on. The incremental
 /// committed `sync` reconstructs unchanged paths' facts from the store (extracted
 /// under the *previous* env), so it is only sound when the env is unchanged;
 /// otherwise it must fall back to a full re-extraction. Persisting the env lets

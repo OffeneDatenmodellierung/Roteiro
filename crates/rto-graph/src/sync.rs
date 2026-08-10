@@ -81,14 +81,23 @@ pub fn sync(
         });
     }
 
-    // The extractor environment (installed image models + ingestion toggles) is
-    // part of extraction's identity. Recorded with the tree so the next sync can
-    // tell whether reusing the previous facts (the incremental path) is sound.
-    let env = format!("{:016x}", extractor.env_tag());
+    // The extraction *identity*: the extractor code version (`EXTRACT_VERSION`,
+    // bumped when extraction output changes) plus its environment (installed image
+    // models + ingestion toggles). Both change what an unchanged file extracts to,
+    // and both are folded into the content-cache key — so this mirrors that key.
+    // Recorded with the tree so the next sync can tell whether reusing the stored
+    // facts (the incremental path) is sound; a binary upgrade that bumps the
+    // version, or a model change, invalidates it and forces a full re-extraction.
+    let env = format!(
+        "v{}-e{:016x}",
+        crate::extract::EXTRACT_VERSION,
+        extractor.env_tag()
+    );
 
     // Fast path: if the last sync was a committed one at a known tree with the
-    // same env, update only the paths that changed. Falls back to a full
-    // re-extraction on any doubt (no prior tree, env changed, diff unavailable).
+    // same extraction identity, update only the paths that changed. Falls back to
+    // a full re-extraction on any doubt (no prior tree, identity changed, or an
+    // unavailable diff).
     if let Some(report) = try_incremental(store, repo, cache, extractor, &tree, &env)? {
         return Ok(report);
     }
