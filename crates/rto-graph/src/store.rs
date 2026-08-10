@@ -221,9 +221,9 @@ impl Store {
         // Edge identity is the full tuple, so a changed `confidence`/`src_ref`
         // counts as remove-old + add-new — keeping the result identical to a
         // wholesale rebuild, not the store's insert-time `DO NOTHING` semantics.
-        let new_edge_ids: std::collections::HashSet<String> =
+        let new_edge_ids: std::collections::HashSet<EdgeId> =
             facts.edges.iter().map(edge_identity).collect();
-        let cur_edge_ids: std::collections::HashSet<String> =
+        let cur_edge_ids: std::collections::HashSet<EdgeId> =
             current_edges.iter().map(edge_identity).collect();
 
         let tx = self.conn.transaction()?;
@@ -819,20 +819,27 @@ fn insert_edge_row(
     Ok(())
 }
 
-/// A stable string identity for an edge over **all** its fields — used by
-/// [`Store::reconcile`] to diff the edge set. The unit-separator (`\x1f`)
-/// delimiter never occurs in a key/token, so distinct edges never collide.
-fn edge_identity(edge: &Edge) -> String {
-    format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{}",
-        edge.src,
-        edge.dst,
-        edge.kind.as_str(),
-        edge.provenance.as_str(),
-        edge.confidence,
-        edge.src_ref.as_deref().unwrap_or(""),
+/// A hashable identity for an edge over **all** its fields — used by
+/// [`Store::reconcile`] to diff the edge set. A tuple (not a delimiter-joined
+/// string) so no field value can be confused with a separator: node keys embed
+/// git paths, which may legally contain any byte (including control characters),
+/// so a joined string could collapse distinct edges to one identity and drop an
+/// edge. Confidence is compared by its exact bit pattern (`f64::to_bits`, wrapped
+/// in `Option` so `None` and `Some(_)` stay distinct), the only non-`Eq` field.
+fn edge_identity(edge: &Edge) -> EdgeId {
+    (
+        edge.src.clone(),
+        edge.dst.clone(),
+        edge.kind.as_str().to_owned(),
+        edge.provenance.as_str().to_owned(),
+        edge.confidence.map(f64::to_bits),
+        edge.src_ref.clone(),
     )
 }
+
+/// The tuple form of an edge's full-field identity (see [`edge_identity`]):
+/// `(src, dst, kind, provenance, confidence-bits, src_ref)`.
+type EdgeId = (String, String, String, String, Option<u64>, Option<String>);
 
 /// Delete the edge row identified by `(src, dst, kind, provenance)` — the table's
 /// unique key — resolving the endpoint node keys to ids. A no-op if absent.
@@ -1186,6 +1193,43 @@ mod tests {
             Some(0.9),
             "confidence updated, not left stale"
         );
+    }
+
+    #[test]
+    fn edge_identity_does_not_collide_across_field_boundaries() {
+        // Node keys embed git paths, which may contain any byte — including the
+        // unit separator (`\x1f`). A delimiter-joined identity would map these two
+        // distinct edges to the same string (`a\x1fb\x1fc\x1f…`); the tuple identity
+        // must keep them apart, or reconcile would drop one edge as a "duplicate".
+        let e1 = super::edge_identity(&Edge::derived(
+            "a\u{1f}b".to_owned(),
+            "c".to_owned(),
+            EdgeKind::Calls,
+        ));
+        let e2 = super::edge_identity(&Edge::derived(
+            "a".to_owned(),
+            "b\u{1f}c".to_owned(),
+            EdgeKind::Calls,
+        ));
+        assert_ne!(
+            e1, e2,
+            "control chars in a key must not collapse identities"
+        );
+
+        // A confidence-only difference (same tuple otherwise) also stays distinct,
+        // and `None` (derived) never equals `Some(0.0)`.
+        let derived = super::edge_identity(&Edge::derived(
+            "a".to_owned(),
+            "b".to_owned(),
+            EdgeKind::Related,
+        ));
+        let inferred0 = super::edge_identity(&Edge::inferred(
+            "a".to_owned(),
+            "b".to_owned(),
+            EdgeKind::Related,
+            0.0,
+        ));
+        assert_ne!(derived, inferred0, "None vs Some(0.0) confidence differ");
     }
 
     #[test]
