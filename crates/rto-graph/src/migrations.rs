@@ -101,11 +101,13 @@ CREATE TABLE node_context (
 
 /// Migration 6: tag each node with the layer that produced it, mirroring
 /// `edges.provenance`. `sync` owns the *derived* layer; `check`/`import` own the
-/// *authored*/*inferred* layers. Existing rows were all written by producers that
-/// are derived (extraction) or re-applied every build (authored/import), so
-/// back-filling `'derived'` is correct for the derived majority and harmless for
-/// the rest, which are rewritten with their true provenance on the next
-/// `check`/`reapply_imports`. A future incremental `sync` uses this to delete/
+/// *authored*/*inferred* layers. Back-filling `'derived'` is correct for the
+/// derived majority (extraction). Authored/import rows are re-tagged with their
+/// true provenance on the next build: `check` re-applies ADR/blueprint facts
+/// (now tagged authored), and `reapply_imports` re-upserts import nodes, which
+/// the store repairs to non-derived on load (an import node is never derived), so
+/// a legacy persisted import layer — whose serialized nodes predate this column —
+/// is not left mislabelled. A future incremental `sync` uses the tag to delete/
 /// replace only derived nodes for changed paths, leaving other layers intact.
 const M0006_NODE_PROVENANCE: &str = "
 ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'derived'

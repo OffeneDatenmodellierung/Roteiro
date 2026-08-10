@@ -555,7 +555,19 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             let (src_ref, json) = row?;
-            out.push((src_ref, serde_json::from_str::<FactSet>(&json)?));
+            let mut facts: FactSet = serde_json::from_str(&json)?;
+            // A layer persisted before nodes carried provenance deserializes its
+            // nodes as `Derived` via the serde default — but an import-layer node
+            // is *never* derived (derivation is `sync`'s job). Re-tag any such node
+            // to its true class so the derived/non-derived split stays trustworthy
+            // for a layer-scoped `sync`. Idempotent and runs on every reapply, so
+            // old stores self-heal; a no-op for fresh imports (already tagged).
+            for node in &mut facts.nodes {
+                if node.provenance == Provenance::Derived {
+                    node.provenance = import_node_provenance(&node.key);
+                }
+            }
+            out.push((src_ref, facts));
         }
         Ok(out)
     }
@@ -917,6 +929,18 @@ fn row_to_edge(row: &rusqlite::Row) -> Result<Edge, StoreError> {
 
 fn to_u32(v: i64) -> Result<u32, StoreError> {
     u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("span offset out of range: {v}")))
+}
+
+/// The true provenance of an import-layer node, from its key namespace: Graphify
+/// nodes (`graphify:`) are [`Provenance::Inferred`]; every other import node (lat,
+/// …) is [`Provenance::Authored`]. Import-layer nodes are never derived, so this
+/// is used to repair a legacy `Derived` tag on load (see `load_import_layers`).
+fn import_node_provenance(key: &str) -> Provenance {
+    if key.starts_with("graphify:") {
+        Provenance::Inferred
+    } else {
+        Provenance::Authored
+    }
 }
 
 #[cfg(test)]
@@ -1511,6 +1535,47 @@ mod tests {
         let re = store.reapply_imports().expect("reapply");
         assert_eq!(re.edges_applied, 1);
         assert_eq!(re.edges_pruned, 0, "ghost edge was not persisted");
+    }
+
+    #[test]
+    fn legacy_import_layer_nodes_are_retagged_non_derived() {
+        // A layer persisted before nodes carried provenance: its node objects have
+        // no `provenance` field, so serde defaults them to Derived. On reapply the
+        // store must repair them — a Graphify node to Inferred, a lat node to
+        // Authored — so a later derived-only sync never mistakes them for derived.
+        let mut store = Store::open_in_memory().expect("open");
+        let legacy = r#"{"nodes":[
+            {"key":"graphify:doc1","kind":"doc","name":"d","path":null,"lang":null,"blob_hash":null,"span":null,"meta":null},
+            {"key":"lat:lat.md/a.md","kind":"doc","name":"a","path":null,"lang":null,"blob_hash":null,"span":null,"meta":null}
+        ],"edges":[]}"#;
+        store
+            .conn
+            .execute(
+                "INSERT INTO imports (src_ref, facts) VALUES ('import:legacy', ?1)",
+                [legacy],
+            )
+            .expect("seed legacy import row");
+
+        store.reapply_imports().expect("reapply");
+
+        let g = store
+            .get_node("graphify:doc1")
+            .expect("get")
+            .expect("graphify node");
+        assert_eq!(
+            g.provenance,
+            Provenance::Inferred,
+            "graphify import node repaired to inferred"
+        );
+        let l = store
+            .get_node("lat:lat.md/a.md")
+            .expect("get")
+            .expect("lat node");
+        assert_eq!(
+            l.provenance,
+            Provenance::Authored,
+            "lat import node repaired to authored"
+        );
     }
 
     /// `apply_import_layer` replaces the layer for a ref; `delete_import` removes.
