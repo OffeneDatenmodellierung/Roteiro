@@ -31,7 +31,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Scaffold Roteiro in the current repository (store, hooks, agent skill).
-    Init,
+    Init {
+        /// Install freshness hooks that fetch the CI-published graph artifact
+        /// (via `gh`) before rebuilding locally. Opt-in: the hooks only reach the
+        /// network with this flag, and fall back to a local rebuild on any miss.
+        #[arg(long)]
+        fetch: bool,
+    },
     /// Incrementally update the graph for the current tree (content-addressed).
     ///
     /// By default this includes uncommitted edits to tracked files (a
@@ -365,7 +371,7 @@ fn main() -> anyhow::Result<()> {
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
-        Command::Init => run_init(ingest),
+        Command::Init { fetch } => run_init(ingest, fetch),
         Command::Render { target, out } => run_render(ingest, &target, out),
         Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
         Command::Spec { action } => run_spec(&cfg.effective, ingest, action),
@@ -835,7 +841,7 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
 /// Scaffold Roteiro in the current repository: build the initial graph, install
 /// the managed git hooks (`post-checkout`/`post-merge`/`post-commit` freshness +
 /// a `pre-commit` drift gate), and add the `AGENTS.md` snippet.
-fn run_init(ingest: rto_graph::IngestConfig) -> anyhow::Result<()> {
+fn run_init(ingest: rto_graph::IngestConfig, fetch: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
 
     let report = build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
@@ -846,7 +852,7 @@ fn run_init(ingest: rto_graph::IngestConfig) -> anyhow::Result<()> {
     // otherwise the common git dir (shared across worktrees).
     let hooks_dir = repo.hooks_dir();
     for name in init::MANAGED_HOOKS {
-        match init::install_hook(&hooks_dir, name)? {
+        match init::install_hook(&hooks_dir, name, fetch)? {
             init::HookOutcome::Installed => println!("installed hook: {name}"),
             init::HookOutcome::Updated => println!("refreshed hook: {name}"),
             init::HookOutcome::SkippedForeign => {
