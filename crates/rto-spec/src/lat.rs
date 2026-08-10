@@ -149,13 +149,16 @@ pub fn import_lat_backlinks(
     let index = LatIndex::build(files);
     let mut edges = Vec::new();
     let mut unresolved = 0;
+    // The same reference can appear several times in one file (repeated markers,
+    // or several on a line); collapse to one edge per (file, section) pair so we
+    // never persist duplicates.
+    let mut seen = std::collections::BTreeSet::new();
     for ann in annotations {
         if let Some(target) = index.resolve_section(&ann.reference) {
-            edges.push(lat_edge(
-                format!("file:{}", ann.path),
-                target,
-                EdgeKind::References,
-            ));
+            let src = format!("file:{}", ann.path);
+            if seen.insert((src.clone(), target.clone())) {
+                edges.push(lat_edge(src, target, EdgeKind::References));
+            }
         } else {
             unresolved += 1;
         }
@@ -452,6 +455,30 @@ mod tests {
         assert_eq!(e.kind, EdgeKind::References);
         assert_eq!(e.provenance.as_str(), "authored");
         assert_eq!(e.src_ref.as_deref(), Some(LAT_REF));
+    }
+
+    #[test]
+    fn repeated_backlinks_in_a_file_collapse_to_one_edge() {
+        use super::{import_lat_backlinks, scan_lat_annotations};
+        let f = files();
+        // The same reference twice (two comment lines) → a single edge.
+        let anns = scan_lat_annotations(
+            "src/auth.rs",
+            "// @lat: [[auth#OAuth Flow]]\n// @lat: [[auth#OAuth Flow]]\n",
+        );
+        assert_eq!(anns.len(), 2, "both annotations are scanned");
+        let (edges, unresolved) = import_lat_backlinks(&f, &anns);
+        assert_eq!(unresolved, 0);
+        assert_eq!(edges.len(), 1, "duplicate (file, section) edge collapsed");
+
+        // The same reference twice on ONE comment line also collapses.
+        let same_line = scan_lat_annotations(
+            "src/auth.rs",
+            "// @lat: [[auth#OAuth Flow]] [[auth#OAuth Flow]]\n",
+        );
+        assert_eq!(same_line.len(), 2, "both refs on the line are scanned");
+        let (edges, _) = import_lat_backlinks(&f, &same_line);
+        assert_eq!(edges.len(), 1, "same-line duplicate collapsed");
     }
 
     #[test]
