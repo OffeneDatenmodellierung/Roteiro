@@ -266,6 +266,20 @@ impl Store {
         collect_nodes(&mut rows)
     }
 
+    /// Every node whose source `path` is `path`, ordered by key — the file node
+    /// plus the symbols and markers defined in it. Used to scope a change to the
+    /// graph (e.g. `roteiro review`).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`], [`StoreError::Json`], or
+    /// [`StoreError::Corrupt`] on decode failure.
+    pub fn nodes_by_path(&self, path: &str) -> Result<Vec<Node>, StoreError> {
+        let sql = format!("SELECT {NODE_COLS} FROM nodes n WHERE n.path = ?1 ORDER BY n.key");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([path])?;
+        collect_nodes(&mut rows)
+    }
+
     /// Every node in the store, ordered by key. Unlike [`Store::export_factset`]
     /// this decodes no edges, so it is cheap for node-only scans (e.g. search).
     ///

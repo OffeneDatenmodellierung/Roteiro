@@ -120,4 +120,48 @@ impl Repo {
         // implements `Drop`, so the bare field cannot be moved out directly.
         Ok(self.inner.find_object(id).map_err(ge)?.detach().data)
     }
+
+    /// Tracked files whose working-tree content differs from `HEAD` — the change
+    /// about to be committed. A file is *changed* when its working-copy bytes hash
+    /// to a different blob id than the committed one (content, not mtime), and
+    /// *deleted* when it is absent from the working tree. Untracked new files are
+    /// not reported (they are not in the `HEAD` tree). Same detection as
+    /// [`crate::sync_worktree`], surfaced for change-scoped tooling.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] on a git failure. In a bare repo (no working tree)
+    /// the change set is empty.
+    pub fn changed_files(&self) -> Result<Vec<ChangedFile>, GitError> {
+        let mut out = Vec::new();
+        let Some(workdir) = self.workdir() else {
+            return Ok(out);
+        };
+        for blob in self.walk_blobs()? {
+            match std::fs::read(workdir.join(&blob.path)) {
+                Ok(bytes) => {
+                    if self.blob_oid(&bytes)? != blob.oid {
+                        out.push(ChangedFile {
+                            path: blob.path,
+                            deleted: false,
+                        });
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => out.push(ChangedFile {
+                    path: blob.path,
+                    deleted: true,
+                }),
+                Err(e) => return Err(GitError::Git(e.to_string())),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// A tracked file that differs between the working tree and `HEAD`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    /// Repository-relative path.
+    pub path: String,
+    /// `true` when the file was removed from the working tree.
+    pub deleted: bool,
 }

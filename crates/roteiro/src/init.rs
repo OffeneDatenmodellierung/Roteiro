@@ -123,6 +123,10 @@ pub fn agents_section() -> String {
          - `roteiro check` — validate ADR/annotation drift in the working tree.\n\
          Run it before finishing a change; a managed `pre-commit` hook also runs\n\
          it and blocks a drift-introducing commit (`git commit --no-verify` skips).\n\
+         - `roteiro review [--json]` — a graph-grounded review of your current\n\
+         change: each touched symbol's callers/callees and governing ADRs, the\n\
+         drift and intent-debt it adds, and the dependents to re-check. Run it\n\
+         before finishing to review against the graph, not just the diff.\n\
          {AGENTS_MARKER}\n"
     )
 }

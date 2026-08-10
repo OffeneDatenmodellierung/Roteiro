@@ -765,6 +765,17 @@ cloud agents, future contributors — Roteiro-aware, via **tool-agnostic** files
 rather than one vendor's format, so the same standards drive review and
 authoring everywhere. Sequenced **after Stage 14** so the standards it encodes
 are final (v1.0-frozen), not a moving target.
+- **CLI-first `roteiro review` — delivered.** The context-aware review is a
+  **CLI command** (the MCP tools are a bonus, not the primary surface): for the
+  current working-tree change it reports, per touched symbol, its callers /
+  callees, the ADRs governing it, and related (inferred) docs; the intent-debt
+  and authored **drift** the change introduces (non-zero exit on drift); and the
+  **blast radius** of dependents to re-check — a graph-grounded review, not a
+  diff read in isolation. Human + `--json` (`roteiro.review/v1`). Built on a new
+  `Repo::changed_files` (same content-hash detection as `sync_worktree`) and
+  `Store::nodes_by_path`; the `AGENTS.md` snippet points agents at it. Covered by
+  an end-to-end test (clean-change context vs drift-fails). Range review (a
+  branch vs `main`, not just the working tree) is a follow-up.
 - **Canonical `AGENTS.md`** (the emerging cross-tool standard many agents read):
   the contribution + review standards in one place — provenance invariants (no
   unlabelled edges; `inferred` ⇒ confidence), MSRV 1.94, clippy pedantic
