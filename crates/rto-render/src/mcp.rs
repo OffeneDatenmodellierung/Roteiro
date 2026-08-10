@@ -87,6 +87,13 @@ impl GraphServer {
             tool_router: Self::tool_router(),
         }
     }
+
+    /// Run `f` with the locked store — the lock-and-query preamble shared by
+    /// every tool handler.
+    fn with_store<R>(&self, f: impl FnOnce(&Store) -> R) -> R {
+        let store = self.store.lock().expect("store mutex poisoned");
+        f(&store)
+    }
 }
 
 #[tool_router]
@@ -96,15 +103,9 @@ impl GraphServer {
                           provenance-labelled incoming/outgoing edges. \
                           Keys: sym:<lang>:<path>#<Name>, file:<path>, adr:<id>.")]
     async fn explain(&self, Parameters(args): Parameters<ExplainArgs>) -> CallToolResult {
-        let result = {
-            let store = self.store.lock().expect("store mutex poisoned");
-            explain(&store, &args.key)
-        };
+        let result = self.with_store(|store| explain(store, &args.key));
         match result {
-            Ok(Some(ex)) => match serde_json::to_string_pretty(&ex) {
-                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-                Err(e) => tool_error(&format!("serialize error: {e}")),
-            },
+            Ok(Some(ex)) => json_result(&ex),
             Ok(None) => CallToolResult::success(vec![ContentBlock::text(format!(
                 "no node with key `{}`",
                 args.key
@@ -117,15 +118,9 @@ impl GraphServer {
     #[tool(description = "List all nodes of a given kind (fn, struct, enum, \
                           trait, module, file, adr, …).")]
     async fn list_kind(&self, Parameters(args): Parameters<ListKindArgs>) -> CallToolResult {
-        let result = {
-            let store = self.store.lock().expect("store mutex poisoned");
-            list_kind(&store, &NodeKind::from_token(&args.kind))
-        };
+        let result = self.with_store(|store| list_kind(store, &NodeKind::from_token(&args.kind)));
         match result {
-            Ok(listing) => match serde_json::to_string_pretty(&listing) {
-                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-                Err(e) => tool_error(&format!("serialize error: {e}")),
-            },
+            Ok(listing) => json_result(&listing),
             Err(e) => tool_error(&format!("query error: {e}")),
         }
     }
@@ -138,15 +133,9 @@ impl GraphServer {
                           Args: from, to (node keys)."
     )]
     async fn path(&self, Parameters(args): Parameters<PathArgs>) -> CallToolResult {
-        let result = {
-            let store = self.store.lock().expect("store mutex poisoned");
-            path(&store, &args.from, &args.to)
-        };
+        let result = self.with_store(|store| path(store, &args.from, &args.to));
         match result {
-            Ok(p) => match serde_json::to_string_pretty(&p) {
-                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-                Err(e) => tool_error(&format!("serialize error: {e}")),
-            },
+            Ok(p) => json_result(&p),
             Err(e) => tool_error(&format!("query error: {e}")),
         }
     }
@@ -160,15 +149,9 @@ impl GraphServer {
                           enclosing symbol or file via a `contains` edge."
     )]
     async fn debt(&self, Parameters(args): Parameters<DebtArgs>) -> CallToolResult {
-        let result = {
-            let store = self.store.lock().expect("store mutex poisoned");
-            debt(&store, &args.kind)
-        };
+        let result = self.with_store(|store| debt(store, &args.kind));
         match result {
-            Ok(report) => match serde_json::to_string_pretty(&report) {
-                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-                Err(e) => tool_error(&format!("serialize error: {e}")),
-            },
+            Ok(report) => json_result(&report),
             Err(e) => tool_error(&format!("query error: {e}")),
         }
     }
@@ -196,6 +179,15 @@ impl ServerHandler for GraphServer {
 /// An error `tools/call` result carrying `message`.
 fn tool_error(message: &str) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message.to_owned())])
+}
+
+/// A successful `tools/call` result carrying `value` as pretty JSON, or a tool
+/// error if serialization fails. Shared by every tool handler.
+fn json_result<T: serde::Serialize>(value: &T) -> CallToolResult {
+    match serde_json::to_string_pretty(value) {
+        Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+        Err(e) => tool_error(&format!("serialize error: {e}")),
+    }
 }
 
 /// Build a current-thread-safe multi-thread tokio runtime.

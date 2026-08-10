@@ -115,8 +115,14 @@ const RULES: &[(&str, MarkerCategory, Mode)] = &[
     ("tbd", MarkerCategory::Deferred, Mode::Phrase),
 ];
 
-/// Maximum stored marker text length (in characters), to keep nodes small.
+/// Characters of marker text kept, to keep nodes small. On truncation an ellipsis
+/// is appended, so a stored value is at most this many characters plus the `…`.
 const MAX_TEXT: usize = 200;
+
+/// Characters of the marker *node name* kept — a compact label. As with
+/// [`MAX_TEXT`], a truncated name carries a trailing `…`, so it is at most this
+/// many characters plus one.
+const MAX_NAME: usize = 80;
 
 /// Inline opt-out placed on a line to skip *that line* during detection.
 const IGNORE_LINE: &str = "roteiro:ignore";
@@ -151,7 +157,7 @@ pub fn scan_markers(bytes: &[u8]) -> Vec<Marker> {
                 .unwrap_or(0);
             out.push(Marker {
                 category,
-                text: cap_text(line),
+                text: cap_chars(line, MAX_TEXT, true),
                 line: u32::try_from(idx + 1).unwrap_or(u32::MAX),
                 span: Span::new(offset, offset.saturating_add(raw_len)),
                 anchor: offset.saturating_add(lead),
@@ -244,16 +250,18 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
     needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Trim surrounding whitespace and cap to [`MAX_TEXT`] characters (appending an
-/// ellipsis when truncated).
-fn cap_text(line: &str) -> String {
-    let t = line.trim();
-    if t.chars().count() > MAX_TEXT {
-        let mut s: String = t.chars().take(MAX_TEXT).collect();
-        s.push('…');
-        s
+/// Keep at most `max` characters of `s`, appending an ellipsis when truncated
+/// (so a truncated result is `max` characters plus the `…`), optionally trimming
+/// surrounding whitespace first. Character-based so it never splits a multi-byte
+/// codepoint.
+fn cap_chars(s: &str, max: usize, trim: bool) -> String {
+    let s = if trim { s.trim() } else { s };
+    if s.chars().count() > max {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
     } else {
-        t.to_owned()
+        s.to_owned()
     }
 }
 
@@ -274,7 +282,7 @@ pub fn augment(facts: &mut FactSet, path: &str, blob_id: &str, bytes: &[u8]) {
         facts.nodes.push(Node {
             key: key.clone(),
             kind: NodeKind::Marker,
-            name: cap_name(&m.text),
+            name: cap_chars(&m.text, MAX_NAME, false),
             path: Some(path.to_owned()),
             lang: None,
             blob_hash: Some(blob_id.to_owned()),
@@ -300,18 +308,6 @@ fn innermost_container(nodes: &[Node], offset: u32) -> Option<String> {
         .filter(|(_, s)| s.start <= offset && offset < s.end)
         .min_by(|(a, sa), (b, sb)| (sa.end - sa.start, &a.key).cmp(&(sb.end - sb.start, &b.key)))
         .map(|(n, _)| n.key.clone())
-}
-
-/// A compact node name: the first 80 characters of the marker text.
-fn cap_name(text: &str) -> String {
-    const MAX_NAME: usize = 80;
-    if text.chars().count() > MAX_NAME {
-        let mut s: String = text.chars().take(MAX_NAME).collect();
-        s.push('…');
-        s
-    } else {
-        text.to_owned()
-    }
 }
 
 #[cfg(test)]
