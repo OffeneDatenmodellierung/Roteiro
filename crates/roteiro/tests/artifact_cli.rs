@@ -96,7 +96,10 @@ fn export_then_load_reproduces_graph_without_extraction() {
     git(&dst, &["add", "."]);
     git(&dst, &["commit", "-q", "-m", "different"]);
 
-    let loaded = roteiro(&dst, &["load", artifact.to_str().unwrap()]);
+    // `--force`: this destination's tree differs from the artifact's, which a
+    // plain `load` refuses (see `load_refuses_a_mismatched_tree`); the bootstrap
+    // case deliberately overrides.
+    let loaded = roteiro(&dst, &["load", "--force", artifact.to_str().unwrap()]);
     assert!(loaded.status.success(), "load failed: {loaded:?}");
     let msg = String::from_utf8_lossy(&loaded.stdout);
     assert!(msg.contains("nodes"), "load reports counts: {msg}");
@@ -139,5 +142,87 @@ fn load_rejects_unknown_schema() {
     .expect("write");
     let out = roteiro(&dir, &["load", bad.to_str().unwrap()]);
     assert!(!out.status.success(), "loading an unknown schema must fail");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn load_refuses_a_mismatched_tree() {
+    // A CI artifact is content-addressed by tree; loading one whose tree does not
+    // match the checkout would install a wrong graph, so it is refused (the hook
+    // then rebuilds). `--force` overrides for the fresh-clone bootstrap.
+    let dir = fresh_dir("verify");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub fn a() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "one"]);
+
+    let artifact = dir.join("g.json");
+    assert!(roteiro(&dir, &["sync"]).status.success());
+    assert!(
+        roteiro(&dir, &["export", "--out", artifact.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    // Same tree → load succeeds.
+    assert!(
+        roteiro(&dir, &["load", artifact.to_str().unwrap()])
+            .status
+            .success(),
+        "loading a matching artifact should succeed"
+    );
+
+    // Change the tree, then load the now-stale artifact → refused.
+    write(&dir, "src/lib.rs", "pub fn a() {}\npub fn b() {}\n");
+    git(&dir, &["commit", "-q", "-am", "two"]);
+    let stale = roteiro(&dir, &["load", artifact.to_str().unwrap()]);
+    assert!(
+        !stale.status.success(),
+        "a mismatched-tree load must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("does not match HEAD"),
+        "explains the mismatch: {}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+
+    // `--force` overrides.
+    assert!(
+        roteiro(&dir, &["load", "--force", artifact.to_str().unwrap()])
+            .status
+            .success(),
+        "--force loads a mismatched artifact"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn load_refuses_a_tree_less_artifact() {
+    // An artifact with no recorded tree can't be verified against HEAD, so it is
+    // refused by default (overridable with --force).
+    let dir = init_repo("notree");
+    let bad = dir.join("notree.json");
+    std::fs::write(
+        &bad,
+        r#"{"schema":"roteiro.graph/v1","tree":null,"facts":{"nodes":[],"edges":[]}}"#,
+    )
+    .expect("write");
+    let refused = roteiro(&dir, &["load", bad.to_str().unwrap()]);
+    assert!(
+        !refused.status.success(),
+        "a tree-less artifact must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no tree"),
+        "explains why: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        roteiro(&dir, &["load", "--force", bad.to_str().unwrap()])
+            .status
+            .success(),
+        "--force loads it anyway"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
