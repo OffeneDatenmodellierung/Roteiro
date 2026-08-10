@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.14...rto-graph-v0.0.15) - 2026-08-10
+
+### Added
+
+- *(sync)* incremental committed sync via tree diff
+- *(store)* tag nodes with a provenance layer
+- *(store)* edge-level delta persistence, determinism-safe
+
+### Fixed
+
+- *(sync)* incremental eligibility also invalidates on EXTRACT_VERSION (PR #152 review)
+- *(store)* repair legacy import-node provenance on load (PR #146 review)
+
+### Other
+
+- *(sync)* consistent blobs_total + robuster equivalence test (PR #152 review)
+- rustfmt the incremental-sync test (CI fmt fix)
+- Merge pull request #149 from OffeneDatenmodellierung/fix/legacy-import-provenance
+- *(store)* clarify import-node provenance repair covers both cases (PR #149 review)
+- Merge pull request #147 from OffeneDatenmodellierung/fix/edge-identity-collision
+- Merge pull request #144 from OffeneDatenmodellierung/feat/edge-delta
+
 ## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.13...rto-graph-v0.0.14) - 2026-08-10
 
 ### Added
