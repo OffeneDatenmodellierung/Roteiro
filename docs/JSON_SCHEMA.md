@@ -1,10 +1,11 @@
 # `--json` output schemas
 
-Every Roteiro command supports `--json` for machine consumption. The
-**graph-data** outputs carry a top-level `schema` tag of the form
-`roteiro.<name>/vN`; these are the stable, versioned contracts and are **frozen
-for v1.0**. Operational summaries (sync/check/import/config/model) are stable in
-shape but untagged (see below).
+Most Roteiro reporting commands accept `--json` for machine consumption (some —
+`init`, `render`, `load`, `spec scaffold` — have no JSON form). The **graph-data**
+outputs carry a top-level `schema` tag of the form `roteiro.<name>/vN`; these are
+the stable, versioned contracts and are **frozen for v1.0**. Operational
+summaries (sync/check/import/infer/config/model) are stable in shape but untagged
+(see below).
 
 ## Compatibility policy
 
@@ -19,7 +20,7 @@ shape but untagged (see below).
 
 | Schema tag | Emitted by | Payload |
 | --- | --- | --- |
-| `roteiro.query/v1` | `query`, `query --kind`, `context`, `path`, `debt`, `infer`, `duplicates` | The query surface: an explained node, a node context bundle, a kind listing, a path, a debt report, and the inference/duplicate reports (all share the query schema). |
+| `roteiro.query/v1` | `query`, `query --kind`, `context`, `path`, `debt`, `duplicates` | The query surface: an explained node, a node context bundle, a kind listing, a path, a debt report, and the duplicate report (all share the query schema). |
 | `roteiro.review/v1` | `review` | The graph-grounded review of the working-tree change (changed files, per-symbol context, drift, blast radius). |
 | `roteiro.graph/v1` | `export` (and consumed by `load`) | The portable, content-addressed graph artifact (`schema`, `tree`, `facts`). |
 | `roteiro.spec/v1` | `spec context`, `spec scaffold` | Graph-grounded spec/blueprint authoring context and skeletons. |
@@ -32,6 +33,7 @@ shape**, but do not (yet) carry a `schema` tag:
 
 - `sync --json` — `SyncReport` (tree id, blob/cache counts, node/edge totals).
 - `check --json` — `CheckReport` (ADR/link/annotation counts, violations).
+- `infer --json` — the inference run summary (suggested-edge count; feature-gated).
 - `import lat|graphify --json` — the importer's migration report.
 - `config --json` — the effective merged configuration.
 - `model list --json` — the model registry.
