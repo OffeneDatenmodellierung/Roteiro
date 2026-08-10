@@ -191,14 +191,51 @@ impl Store {
         for edge in &facts.edges {
             insert_edge(&tx, edge)?;
         }
-        match tree {
-            Some(tree) => tx.execute(
-                "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
-                 ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
-                [tree],
-            )?,
-            None => tx.execute("DELETE FROM sync_state WHERE id = 0", [])?,
-        };
+        write_sync_state(&tx, tree)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Bring the store to exactly `facts` (as [`Store::rebuild`] does) but writing
+    /// only the **changed node rows** instead of wiping and reinserting the whole
+    /// graph — the git-style "write only what differs". Nodes carry the heavy JSON
+    /// `meta`, so skipping unchanged nodes is the write saving on a large graph
+    /// with a small change; edges (lean, and FK-constrained on node ids) are still
+    /// replaced wholesale. The final state — nodes, edges, and `sync_state` — is
+    /// identical to `rebuild(facts, tree)`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] on a query failure; the transaction is rolled back.
+    pub fn reconcile(&mut self, facts: &FactSet, tree: Option<&str>) -> Result<(), StoreError> {
+        let current = self.export_factset()?;
+        let cur_by_key: std::collections::HashMap<&str, &Node> =
+            current.nodes.iter().map(|n| (n.key.as_str(), n)).collect();
+        let new_keys: std::collections::HashSet<&str> =
+            facts.nodes.iter().map(|n| n.key.as_str()).collect();
+
+        let tx = self.conn.transaction()?;
+        // Edges reference node ids (FK, no cascade); clear them first so any node
+        // can then be deleted safely, and reinsert the full set at the end.
+        tx.execute("DELETE FROM edges", [])?;
+        // Drop nodes that no longer exist.
+        for old in &current.nodes {
+            if !new_keys.contains(old.key.as_str()) {
+                tx.execute("DELETE FROM nodes WHERE key = ?1", [&old.key])?;
+            }
+        }
+        // Upsert only the nodes that are new or whose content changed.
+        for node in &facts.nodes {
+            if cur_by_key
+                .get(node.key.as_str())
+                .is_none_or(|cur| *cur != node)
+            {
+                upsert_node(&tx, node)?;
+            }
+        }
+        for edge in &facts.edges {
+            insert_edge(&tx, edge)?;
+        }
+        write_sync_state(&tx, tree)?;
         tx.commit()?;
         Ok(())
     }
@@ -598,6 +635,20 @@ fn node_row_id(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
         .optional()
 }
 
+/// Record (or clear) the last-synced `HEAD` tree id. Shared by `rebuild` and
+/// `reconcile` so both leave identical `sync_state`.
+fn write_sync_state(conn: &Connection, tree: Option<&str>) -> Result<(), StoreError> {
+    match tree {
+        Some(tree) => conn.execute(
+            "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
+             ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
+            [tree],
+        )?,
+        None => conn.execute("DELETE FROM sync_state WHERE id = 0", [])?,
+    };
+    Ok(())
+}
+
 fn upsert_node(conn: &Connection, node: &Node) -> Result<(), StoreError> {
     let meta = serde_json::to_string(&node.meta)?;
     let (span_start, span_end) = match node.span {
@@ -796,6 +847,69 @@ mod tests {
             span: Some(Span::new(10, 42)),
             meta: serde_json::json!({"vis": "pub"}),
         }
+    }
+
+    #[test]
+    fn reconcile_matches_a_full_rebuild() {
+        // reconcile must leave the store identical to a fresh rebuild, across an
+        // add, a remove, a content change, and edge churn.
+        let node = |k: &str, name: &str| {
+            let mut n = sample_node(k);
+            n.name = name.to_owned();
+            n
+        };
+        let edge =
+            |src: &str, dst: &str| Edge::derived(src.to_owned(), dst.to_owned(), EdgeKind::Calls);
+
+        let facts1 = FactSet {
+            nodes: vec![node("a", "A"), node("b", "B"), node("c", "C")],
+            edges: vec![edge("a", "b"), edge("b", "c")],
+        };
+        // b changes (name), c is removed, d is added; edge b->c drops, a->d added.
+        let facts2 = FactSet {
+            nodes: vec![node("a", "A"), node("b", "B2"), node("d", "D")],
+            edges: vec![edge("a", "b"), edge("a", "d")],
+        };
+
+        // Path 1: rebuild facts1, then reconcile to facts2.
+        let mut reconciled = Store::open_in_memory().expect("open");
+        reconciled.rebuild(&facts1, Some("t1")).expect("rebuild");
+        reconciled
+            .reconcile(&facts2, Some("t2"))
+            .expect("reconcile");
+
+        // Path 2: a fresh full rebuild of facts2.
+        let mut rebuilt = Store::open_in_memory().expect("open");
+        rebuilt.rebuild(&facts2, Some("t2")).expect("rebuild");
+
+        let canon = |fs: FactSet| {
+            let mut nodes = fs.nodes;
+            nodes.sort_by(|a, b| a.key.cmp(&b.key));
+            let mut edges: Vec<String> = fs
+                .edges
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}\0{}\0{}\0{}",
+                        e.kind.as_str(),
+                        e.src,
+                        e.dst,
+                        e.provenance.as_str()
+                    )
+                })
+                .collect();
+            edges.sort();
+            (nodes, edges)
+        };
+        assert_eq!(
+            canon(reconciled.export_factset().expect("export")),
+            canon(rebuilt.export_factset().expect("export")),
+            "reconcile must match a full rebuild",
+        );
+        assert_eq!(
+            reconciled.sync_state().expect("state").as_deref(),
+            Some("t2")
+        );
     }
 
     #[test]
