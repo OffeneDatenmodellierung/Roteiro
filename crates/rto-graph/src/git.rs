@@ -57,6 +57,25 @@ impl Repo {
         self.inner.git_dir()
     }
 
+    /// The directory git actually looks in for hooks. Honours `core.hooksPath`
+    /// (absolute, or relative to the working-tree root — else the git dir); when
+    /// unset it is `<common git dir>/hooks`, so managed hooks are shared across
+    /// linked worktrees. `roteiro init` installs into this so its hooks run
+    /// wherever git expects them.
+    #[must_use]
+    pub fn hooks_dir(&self) -> std::path::PathBuf {
+        if let Some(configured) = self.inner.config_snapshot().string("core.hooksPath") {
+            let bytes: &[u8] = configured.as_ref();
+            let path = std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
+            if path.is_absolute() {
+                return path;
+            }
+            let base = self.inner.workdir().unwrap_or_else(|| self.inner.git_dir());
+            return base.join(path);
+        }
+        self.common_dir().join("hooks")
+    }
+
     /// The working directory, if this is not a bare repository. The dirty
     /// overlay reads uncommitted file contents from here.
     #[must_use]
