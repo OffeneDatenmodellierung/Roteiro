@@ -11,9 +11,8 @@ name: Website
 #
 # The `deploy` job is INERT until the owner opts in: it only runs on the
 # canonical repo's `main` and only when the `CLOUDFLARE_API_TOKEN` secret is set.
-# See website/README.md for the one-time setup (add the two secrets, pin the
-# wrangler action to a SHA, and disable the Cloudflare Git-integration build so
-# the site is not deployed twice).
+# See website/README.md for the one-time setup (add the two secrets and disable
+# the Cloudflare Git-integration build so the site is not deployed twice).
 on:
   pull_request:
     paths:
