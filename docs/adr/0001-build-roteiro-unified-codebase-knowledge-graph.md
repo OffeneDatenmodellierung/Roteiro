@@ -97,6 +97,24 @@ Operational model: git hooks (`post-checkout`/`post-merge`) compare local store 
 
 Cost is engineering time only in all options (all tools open source, local-first); no vendor rack rates apply.
 
+## Implementation
+
+This ADR's decisions are linked into the code they govern, so `roteiro check`
+validates the design against the implementation (the ADR is dog-fooded like any
+other authored intent):
+
+- **The one provenance-tagged store** — [[crates/rto-graph/src/store.rs#Store]],
+  with the three-class model in [[crates/rto-graph/src/provenance.rs#Provenance]].
+- **Deterministic, content-addressed derived extraction** —
+  [[crates/rto-graph/src/extract.rs#Registry]] over the cache
+  [[crates/rto-graph/src/cache.rs#ObjectCache]], assembled incrementally by
+  [[crates/rto-graph/src/sync.rs#sync]] (with the working-tree overlay
+  [[crates/rto-graph/src/sync.rs#sync_worktree]]).
+- **The authored layer & drift gate** —
+  [[crates/rto-spec/src/check.rs#run]].
+- **Renderers as build-outputs of the one graph** (docs site, Obsidian vault,
+  MCP) — [[crates/rto-render/src/lib.rs#Target]].
+
 ## Advice Received
 
 Accepted by the project team without external advisory review — single-team open-source project; future significant changes will be superseding ADRs. Naming secured: `roteiro.dev` registered, crates.io names available, repo created at `OffeneDatenmodellierung/Roteiro`. Planned: circulate v0.x for review before implementation beyond crate-name reservation.
@@ -110,3 +128,4 @@ Accepted by the project team without external advisory review — single-team op
 |---------|------|-------|
 | 0.1 | 2026-08-07 | Initial draft: consolidation rationale, four options, Roteiro architecture (provenance model, three crates + CLI, content-addressed cache, CI-canonical artifacts, importers, MCP-optional). |
 | 1.0 | 2026-08-07 | Accepted. Naming secured (roteiro.dev, crates.io, OffeneDatenmodellierung/Roteiro); MIT OR Apache-2.0; attribution to The Roteiro Project Team. Stage 1 bootstrap started. |
+| 1.1 | 2026-08-10 | Added an **Implementation** section linking the ADR's decisions into the code (`[[path#Symbol]]`), so `roteiro check` validates this ADR against the implementation (Stage 14 self-check). |
