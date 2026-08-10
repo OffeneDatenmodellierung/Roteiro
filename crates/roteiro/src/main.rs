@@ -1395,7 +1395,22 @@ fn run_import_lat(ingest: rto_graph::IngestConfig, path: &str, json: bool) -> an
         anyhow::bail!("no .md files under {}", dir.display());
     }
 
-    let imported = rto_spec::import_lat(&files);
+    let mut imported = rto_spec::import_lat(&files);
+
+    // Also import `@lat:` backlinks from source comments across the committed
+    // tree: each resolved reference becomes an authored `file → lat section`
+    // edge folded into the same lat layer, so it persists and is re-derived with
+    // the rest of the import (and pruned on re-import).
+    let mut backlinks = Vec::new();
+    for blob in repo.walk_blobs()? {
+        let bytes = repo.read_blob(&blob.oid)?;
+        let text = String::from_utf8_lossy(&bytes);
+        backlinks.extend(rto_spec::scan_lat_annotations(&blob.path, &text));
+    }
+    let (backlink_edges, unresolved) = rto_spec::import_lat_backlinks(&files, &backlinks);
+    imported.report.backlinks_resolved = backlink_edges.len();
+    imported.report.backlinks_unresolved = unresolved;
+    imported.facts.edges.extend(backlink_edges);
 
     // Build the derived + authored graph first so code links validate against it.
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
@@ -1411,12 +1426,15 @@ fn run_import_lat(ingest: rto_graph::IngestConfig, path: &str, json: bool) -> an
     } else {
         println!(
             "imported lat.md: {} file(s), {} section(s), {} link(s) \
-             ({} to sections, {} to code); {} edge(s) applied, {} stale pruned — persisted (durable)",
+             ({} to sections, {} to code), {} backlink(s) ({} unresolved); \
+             {} edge(s) applied, {} stale pruned — persisted (durable)",
             r.files,
             r.sections,
             r.links_total,
             r.links_to_sections,
             r.links_to_code,
+            r.backlinks_resolved,
+            r.backlinks_unresolved,
             applied.edges_applied,
             applied.edges_pruned,
         );
