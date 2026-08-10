@@ -795,8 +795,9 @@ fn run_init(ingest: rto_graph::IngestConfig) -> anyhow::Result<()> {
     let nodes = store.node_count()?;
     let edges = store.edge_count()?;
 
-    // Hooks live under the common git dir so they are shared across worktrees.
-    let hooks_dir = repo.common_dir().join("hooks");
+    // Install where git actually looks for hooks — honours `core.hooksPath`, and
+    // otherwise the common git dir (shared across worktrees).
+    let hooks_dir = repo.hooks_dir();
     for name in init::MANAGED_HOOKS {
         match init::install_hook(&hooks_dir, name)? {
             init::HookOutcome::Installed => println!("installed hook: {name}"),

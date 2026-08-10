@@ -979,6 +979,14 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
   queries don't surface imports uniformly.
 - **Untracked-file overlay** — `sync_worktree` / worktree `check` / `review` do
   not overlay brand-new *untracked* files; needs a gitignore-aware dirwalk.
+- **Incremental extraction** — `sync` re-walks the whole tree and does a cache
+  lookup per blob every time; diff the `HEAD` tree against the last-synced tree to
+  touch only changed paths and carry unchanged files' cached facts forward.
+  Complements the `reconcile` delta-write with a delta-*read* (Stage 14 follow-up).
+- **Edge-level delta persistence** — `Store::reconcile` writes only changed *node*
+  rows but still replaces all *edges* wholesale (they're lean; the `f64`
+  confidence is awkward to match for precise deletes). A stable edge identity
+  would let edges be delta'd too.
 
 **Commit gate & review**
 - **`sync_index` (index-aware gate)** — the pre-commit `check`/`review` validate
@@ -1001,6 +1009,11 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
 
 **Config & hooks**
 - **Respect `core.hooksPath`** when installing managed hooks.
+- **Automatic hook-fetch (opt-in)** — CI publishes the graph artifact and
+  `roteiro load` verifies + installs it, but the managed hooks do *not* auto-fetch
+  on checkout (that would be silent network every checkout, against ADR-0001).
+  Add an opt-in (`roteiro init --fetch`, or a `[sync] fetch_artifact` toggle) that
+  wires the hooks to try the CI artifact then fall back to a local rebuild.
 - **Unwired config sections** — `[debt]` ignore-paths and a `[paths]` section
   (ADR-0007 follow-ups).
 
