@@ -137,7 +137,13 @@ impl LlamaEngine {
             let entry = cache.loaded.remove(i);
             cache.loaded.push(entry);
         } else {
-            let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
+            // The GGUF size is the residency budget's footprint proxy, so a
+            // failure to read it must surface — a silent `0` would let a model
+            // count as free and break the eviction invariant. (The file is about
+            // to be loaded from this same path, so this rarely fails.)
+            let bytes = std::fs::metadata(path)
+                .map_err(|e| EngineError::Inference(format!("stat model `{name}`: {e}")))?
+                .len();
             let params = LlamaModelParams::default();
             let model = LlamaModel::load_from_file(&self.backend, path, &params)
                 .map_err(|e| EngineError::Inference(format!("load `{name}`: {e}")))?;
