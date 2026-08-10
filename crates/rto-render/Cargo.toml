@@ -1,6 +1,7 @@
 [package]
 name = "rto-render"
 description = "Renderers for Roteiro: docs site, Obsidian vault, and optional MCP server"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

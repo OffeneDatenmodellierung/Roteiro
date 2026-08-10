@@ -1,6 +1,7 @@
 [package]
 name = "rto-llama"
 description = "Roteiro's llama.cpp inference core: the Engine trait + a llama.cpp-backed engine (generation, embeddings, vision), shared by serving and internal uses (ADR-0003/0006)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
