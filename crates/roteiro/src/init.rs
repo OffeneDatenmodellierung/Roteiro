@@ -26,8 +26,15 @@ pub const MANAGED_HOOKS: &[&str] = &["post-checkout", "post-merge", "post-commit
 /// `pre-commit` runs the **worktree-aware** `check` and blocks the commit on
 /// drift (non-zero exit); `git commit --no-verify` skips it. The freshness hooks
 /// run `sync --committed` and never fail the git operation.
+///
+/// When `fetch` is set (`roteiro init --fetch`), the freshness hooks first try to
+/// download the CI-published graph artifact and `load` it — a fast path that
+/// skips local extraction — falling back to a rebuild if `gh` is absent, the
+/// download fails, or the artifact's tree does not match `HEAD` (`load` refuses a
+/// stale artifact). `pre-commit` is unaffected. Network only happens with this
+/// opt-in.
 #[must_use]
-pub fn hook_script(name: &str) -> String {
+pub fn hook_script(name: &str, fetch: bool) -> String {
     let header = format!(
         "#!/bin/sh\n\
          # {HOOK_MARKER}: Roteiro knowledge-graph automation.\n\
@@ -46,6 +53,8 @@ pub fn hook_script(name: &str) -> String {
              \texit 1\n\
              }}\n"
         )
+    } else if fetch {
+        format!("{header}{FETCH_REFRESH}")
     } else {
         format!(
             "{header}\
@@ -54,6 +63,29 @@ pub fn hook_script(name: &str) -> String {
         )
     }
 }
+
+/// The freshness-hook body used with `--fetch`: try the CI artifact, else rebuild.
+/// Kept as a literal (no interpolation) so the shell `$tmp`/braces stay verbatim.
+const FETCH_REFRESH: &str = concat!(
+    "# Keep the Roteiro knowledge graph fresh after HEAD changes.\n",
+    "command -v roteiro >/dev/null 2>&1 || exit 0\n",
+    "# Opt-in fast path (`roteiro init --fetch`): try the CI-published graph\n",
+    "# artifact before rebuilding. `roteiro load` refuses an artifact whose tree\n",
+    "# does not match HEAD, so a stale asset falls through to a local rebuild.\n",
+    "if command -v gh >/dev/null 2>&1; then\n",
+    "\t# Portable temp file: GNU `mktemp` needs no args; BSD/macOS needs a\n",
+    "\t# template, so fall back to `-t`.\n",
+    "\ttmp=$(mktemp 2>/dev/null || mktemp -t roteiro-graph 2>/dev/null) || tmp=\"\"\n",
+    "\tif [ -n \"$tmp\" ] && \\\n",
+    "\t\tgh release download graph-latest --pattern roteiro-graph.json \\\n",
+    "\t\t\t--output \"$tmp\" --clobber >/dev/null 2>&1 && \\\n",
+    "\t\troteiro load \"$tmp\" >/dev/null 2>&1; then\n",
+    "\t\trm -f \"$tmp\"; exit 0\n",
+    "\tfi\n",
+    "\t[ -n \"$tmp\" ] && rm -f \"$tmp\"\n",
+    "fi\n",
+    "roteiro sync --committed >/dev/null 2>&1 || true\n",
+);
 
 /// Whether `content` is a Roteiro-managed hook (safe to overwrite).
 #[must_use]
@@ -73,11 +105,12 @@ pub enum HookOutcome {
 }
 
 /// Install (or refresh) one managed hook in `hooks_dir`, without clobbering a
-/// foreign hook of the same name.
+/// foreign hook of the same name. `fetch` selects the artifact-fast-path freshness
+/// hooks (see [`hook_script`]).
 ///
 /// # Errors
 /// Returns [`io::Error`] on filesystem failure.
-pub fn install_hook(hooks_dir: &Path, name: &str) -> io::Result<HookOutcome> {
+pub fn install_hook(hooks_dir: &Path, name: &str, fetch: bool) -> io::Result<HookOutcome> {
     fs::create_dir_all(hooks_dir)?;
     let path = hooks_dir.join(name);
     let outcome = match fs::read_to_string(&path) {
@@ -86,7 +119,7 @@ pub fn install_hook(hooks_dir: &Path, name: &str) -> io::Result<HookOutcome> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => HookOutcome::Installed,
         Err(e) => return Err(e),
     };
-    fs::write(&path, hook_script(name))?;
+    fs::write(&path, hook_script(name, fetch))?;
     set_executable(&path)?;
     Ok(outcome)
 }
@@ -195,7 +228,7 @@ mod tests {
 
     #[test]
     fn hook_is_recognisable_and_self_guarding() {
-        let s = hook_script("post-checkout");
+        let s = hook_script("post-checkout", false);
         assert!(is_managed_hook(&s));
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains("command -v roteiro"));
@@ -203,12 +236,35 @@ mod tests {
             s.contains("roteiro sync --committed"),
             "freshness hook syncs"
         );
+        // The default freshness hook does not touch the network.
+        assert!(!s.contains("gh release download"));
         assert!(!is_managed_hook("#!/bin/sh\necho other\n"));
     }
 
     #[test]
+    fn fetch_hook_tries_artifact_then_falls_back_to_sync() {
+        let s = hook_script("post-merge", true);
+        assert!(is_managed_hook(&s));
+        assert!(s.contains("command -v gh"), "guards on gh being installed");
+        assert!(
+            s.contains("gh release download graph-latest"),
+            "fetches the CI artifact"
+        );
+        assert!(s.contains("roteiro load"), "loads the fetched artifact");
+        assert!(
+            s.contains("roteiro sync --committed"),
+            "falls back to a local rebuild"
+        );
+        // `--fetch` only affects freshness hooks; pre-commit is unchanged.
+        assert_eq!(
+            hook_script("pre-commit", true),
+            hook_script("pre-commit", false)
+        );
+    }
+
+    #[test]
     fn pre_commit_hook_gates_on_check_and_is_skippable() {
-        let s = hook_script("pre-commit");
+        let s = hook_script("pre-commit", false);
         assert!(is_managed_hook(&s));
         assert!(s.contains("command -v roteiro"), "guards on install");
         assert!(s.contains("roteiro check"), "runs the worktree-aware check");
@@ -225,7 +281,7 @@ mod tests {
 
         // First install → created.
         assert_eq!(
-            install_hook(&hooks, "post-checkout").expect("install"),
+            install_hook(&hooks, "post-checkout", false).expect("install"),
             HookOutcome::Installed
         );
         let path = hooks.join("post-checkout");
@@ -239,7 +295,7 @@ mod tests {
 
         // Second install → updated (managed).
         assert_eq!(
-            install_hook(&hooks, "post-checkout").expect("reinstall"),
+            install_hook(&hooks, "post-checkout", false).expect("reinstall"),
             HookOutcome::Updated
         );
 
@@ -247,7 +303,7 @@ mod tests {
         let foreign = hooks.join("post-merge");
         std::fs::write(&foreign, "#!/bin/sh\necho mine\n").unwrap();
         assert_eq!(
-            install_hook(&hooks, "post-merge").expect("skip"),
+            install_hook(&hooks, "post-merge", false).expect("skip"),
             HookOutcome::SkippedForeign
         );
         assert_eq!(
