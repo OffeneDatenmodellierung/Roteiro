@@ -153,6 +153,9 @@ impl Repo {
                 Err(e) => return Err(GitError::Git(e.to_string())),
             }
         }
+        // `walk_blobs` order is an implementation detail; sort so `roteiro review`
+        // output is deterministic across platforms and gix versions.
+        out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
 }

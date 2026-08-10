@@ -151,15 +151,19 @@ pub fn build(
         });
     }
 
-    // Drift the change touches: violations naming a changed path.
-    let drift = violations
-        .iter()
-        .filter(|v| changed_paths.iter().any(|p| v.message.contains(p)))
-        .map(|v| DriftItem {
-            kind: v.kind.label().to_owned(),
-            message: v.message.clone(),
-        })
-        .collect();
+    // Drift the change touches. A violation belongs to the change when its
+    // message names a changed path *or* its subject node lives in a changed file
+    // — the latter catches a broken ADR link whose message leads with the ADR's
+    // node key (e.g. `adr:0001#decision: …`), not the ADR file path.
+    let mut drift = Vec::new();
+    for v in violations {
+        if violation_touches(store, v, &changed_paths)? {
+            drift.push(DriftItem {
+                kind: v.kind.label().to_owned(),
+                message: v.message.clone(),
+            });
+        }
+    }
 
     // Blast radius: one-hop dependents of the changed symbols, minus the changed
     // symbols themselves and anything defined in a changed file (already shown).
@@ -195,6 +199,28 @@ pub fn build(
     })
 }
 
+/// Whether an authored-layer `violation` belongs to the change: its message
+/// either names a changed path, or its subject node (the key before the first
+/// `": "` — node keys carry no colon-space) resolves to a node in a changed file.
+fn violation_touches(
+    store: &Store,
+    violation: &rto_spec::Violation,
+    changed_paths: &BTreeSet<&str>,
+) -> Result<bool, StoreError> {
+    if changed_paths.iter().any(|p| violation.message.contains(p)) {
+        return Ok(true);
+    }
+    if let Some((key, _)) = violation.message.split_once(": ")
+        && let Some(node) = store.get_node(key)?
+    {
+        return Ok(node
+            .path
+            .as_deref()
+            .is_some_and(|p| changed_paths.contains(p)));
+    }
+    Ok(false)
+}
+
 /// Classify a changed node's one-hop context into a reviewer-facing summary.
 // `callers`/`callees` are the standard call-graph terms; keep them despite being
 // one character apart.
@@ -205,6 +231,8 @@ fn symbol_review(node: &rto_graph::Node, ctx: Option<&NodeContext>) -> SymbolRev
     let mut governed_by = Vec::new();
     let mut related = Vec::new();
     if let Some(ctx) = ctx {
+        // `related` is specifically the similarity relation (`EdgeKind::Related`),
+        // not every inferred edge — inferred `references` etc. would be noise.
         for e in &ctx.incoming {
             if e.kind == "calls" {
                 callers.push(e.node.clone());
@@ -212,7 +240,7 @@ fn symbol_review(node: &rto_graph::Node, ctx: Option<&NodeContext>) -> SymbolRev
             if e.provenance == "authored" {
                 governed_by.push(e.node.clone());
             }
-            if e.provenance == "inferred" {
+            if e.kind == "related" {
                 related.push(Related {
                     node: e.node.clone(),
                     confidence: e.confidence,
@@ -223,7 +251,7 @@ fn symbol_review(node: &rto_graph::Node, ctx: Option<&NodeContext>) -> SymbolRev
             if e.kind == "calls" {
                 callees.push(e.node.clone());
             }
-            if e.provenance == "inferred" {
+            if e.kind == "related" {
                 related.push(Related {
                     node: e.node.clone(),
                     confidence: e.confidence,

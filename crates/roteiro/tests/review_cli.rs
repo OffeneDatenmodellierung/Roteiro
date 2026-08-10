@@ -41,8 +41,9 @@ fn write(dir: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).expect("write");
 }
 
-fn fresh_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roteiro-review-cli-{}", std::process::id()));
+fn fresh_dir(name: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("roteiro-review-cli-{}-{name}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).expect("mkdir");
     dir
@@ -61,7 +62,7 @@ const ADR: &str = "---\n\
 
 #[test]
 fn review_shows_context_for_a_clean_change_and_fails_on_drift() {
-    let dir = fresh_dir();
+    let dir = fresh_dir("context");
     write(
         &dir,
         "src/main.rs",
@@ -137,6 +138,41 @@ fn review_shows_context_for_a_clean_change_and_fails_on_drift() {
         "schema tag: {text}"
     );
     assert!(text.contains("\"drift\""), "drift field present: {text}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn review_detects_drift_from_editing_an_adr() {
+    // Regression: a broken link introduced by editing the *ADR* file. Its
+    // violation message leads with the ADR node key (`adr:0001#…`), not the ADR
+    // path, so drift attribution must resolve that key's node path.
+    let dir = fresh_dir("adr-edit");
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() {}\n",
+    );
+    write(&dir, "docs/adr/0001.md", ADR);
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // Edit only the ADR: add a link to a symbol that does not exist.
+    let edited = format!("{ADR}\nAnd also [[src/main.rs#missing]].\n");
+    write(&dir, "docs/adr/0001.md", &edited);
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "editing an ADR to add a dangling link must be caught as drift: {text}"
+    );
+    assert!(
+        text.contains("drift introduced by this change"),
+        "reports the ADR-edit drift: {text}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
