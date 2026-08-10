@@ -96,6 +96,57 @@ fn serve_router(router: Router, addr: std::net::SocketAddr) -> anyhow::Result<()
     })
 }
 
+/// Serve the `/v1` app over **TLS** on `addr`, blocking until shutdown — an
+/// in-process alternative to terminating TLS at a reverse proxy (ADR-0002
+/// follow-up). `cert` and `key` are paths to PEM files: a certificate chain and
+/// its private key (PKCS#8 or RSA). `tools`, when set, auto-registers the graph
+/// tools (as [`serve_blocking_with_tools`]).
+///
+/// # Errors
+/// Returns an error if the tokio runtime cannot start, the cert/key cannot be
+/// read or parsed, the address cannot be bound, or the server exits abnormally.
+#[cfg(feature = "tls")]
+pub fn serve_blocking_tls(
+    engine: Arc<dyn Engine>,
+    tools: Option<Arc<dyn ToolRegistry>>,
+    addr: std::net::SocketAddr,
+    cert: &std::path::Path,
+    key: &std::path::Path,
+) -> anyhow::Result<()> {
+    let router = match tools {
+        Some(tools) => app_with_tools(engine, tools),
+        None => app(engine),
+    };
+    serve_router_tls(router, addr, cert, key)
+}
+
+/// Run `router` on `addr` over TLS, blocking until shutdown.
+#[cfg(feature = "tls")]
+fn serve_router_tls(
+    router: Router,
+    addr: std::net::SocketAddr,
+    cert: &std::path::Path,
+    key: &std::path::Path,
+) -> anyhow::Result<()> {
+    // The `tls-rustls-no-provider` feature ships no crypto provider, so install
+    // ring process-wide. Idempotent: a second call (or one already made by `ureq`)
+    // returns `Err`, which we ignore.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+            .await
+            .map_err(|e| anyhow::anyhow!("loading TLS certificate/key: {e}"))?;
+        axum_server::bind_rustls(addr, config)
+            .serve(router.into_make_service())
+            .await?;
+        Ok(())
+    })
+}
+
 /// `GET /v1/models` — the installed models this server serves.
 async fn list_models(State(state): State<Shared>) -> Json<ModelList> {
     let data = state
@@ -891,5 +942,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // The TLS path loads the cert/key *before* binding, so a missing file is a
+    // clean error rather than a hang or a bound-but-broken listener. Exercises the
+    // ring-provider install + PEM-loading wiring without needing a live handshake
+    // (the actual serving is axum-server's, verified end-to-end via `curl -k`).
+    #[cfg(feature = "tls")]
+    #[test]
+    fn serve_tls_reports_a_missing_certificate() {
+        use std::path::Path;
+        use std::sync::Arc;
+        let engine: Arc<dyn Engine> = Arc::new(MockEngine);
+        let addr = "127.0.0.1:0".parse().expect("addr");
+        let err = super::serve_blocking_tls(
+            engine,
+            None,
+            addr,
+            Path::new("/nonexistent/roteiro-cert.pem"),
+            Path::new("/nonexistent/roteiro-key.pem"),
+        )
+        .expect_err("a missing certificate must error, not bind");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("cert") || msg.contains("tls"),
+            "error should name the certificate: {err}"
+        );
     }
 }

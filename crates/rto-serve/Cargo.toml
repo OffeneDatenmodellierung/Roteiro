@@ -23,6 +23,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"]
 tokio-stream = "0.1"
 # Decode `image_url` data-URIs (base64) in multimodal chat requests.
 base64 = "0.22"
+# `tls` only: in-app TLS termination (ADR-0002 follow-up). `tls-rustls-no-provider`
+# deliberately does NOT bundle a crypto provider, so we install *ring* explicitly
+# (below) — the same backend already in the tree via `ureq`, avoiding a second,
+# heavier `aws-lc-rs` C backend and its extra licence surface.
+axum-server = { version = "0.8", default-features = false, features = [
+    "tls-rustls-no-provider",
+], optional = true }
+# `tls` only: install the ring `CryptoProvider` before building the server config.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
@@ -33,6 +45,10 @@ http-body-util = "0.1"
 # The real llama.cpp-backed engine. Off by default so the default build stays
 # pure-Rust; `roteiro`'s `serve` feature turns it on.
 llama = ["rto-llama/llama"]
+# In-app TLS termination via rustls (ADR-0002 follow-up): serve HTTPS directly
+# instead of requiring a reverse proxy. Uses the ring provider (already vetted in
+# the tree); off by default.
+tls = ["dep:axum-server", "dep:rustls"]
 
 [lints]
 workspace = true
