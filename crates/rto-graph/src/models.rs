@@ -456,7 +456,15 @@ pub fn find(name: &str) -> Option<&'static ModelSpec> {
 /// Pure resolution of the model-store root from a `ROTEIRO_HOME` override and a
 /// home directory. Factored out so it is testable without mutating the process
 /// environment.
-fn store_root_from(roteiro_home: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+fn store_root_from(
+    model_store: Option<PathBuf>,
+    roteiro_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    // An explicit model-store dir (config `[paths] model_store`) wins verbatim.
+    if let Some(dir) = model_store {
+        return dir;
+    }
     if let Some(dir) = roteiro_home {
         return dir.join("models");
     }
@@ -465,11 +473,28 @@ fn store_root_from(roteiro_home: Option<PathBuf>, home: Option<PathBuf>) -> Path
         .join("models")
 }
 
-/// Root of the user-level model store (`~/.roteiro/models`), honouring
-/// `ROTEIRO_HOME` if set (for tests and non-standard layouts).
+/// A process-wide model-store override, set once from config `[paths]
+/// model_store` (the env is `unsafe` to mutate under edition 2024, so a
+/// `OnceLock` carries the config value instead).
+static MODEL_STORE_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Set the model-store directory for this process (config `[paths] model_store`).
+/// First call wins; later calls are ignored. Call once at startup, before any
+/// model operation.
+pub fn set_model_store(dir: PathBuf) {
+    let _ = MODEL_STORE_OVERRIDE.set(dir);
+}
+
+/// Root of the user-level model store (`~/.roteiro/models`). Honours, in order,
+/// the config override ([`set_model_store`]), `ROTEIRO_MODEL_STORE` (an explicit
+/// store dir), and `ROTEIRO_HOME` (its `models` subdir).
 #[must_use]
 pub fn store_root() -> PathBuf {
+    if let Some(dir) = MODEL_STORE_OVERRIDE.get() {
+        return dir.clone();
+    }
     store_root_from(
+        std::env::var_os("ROTEIRO_MODEL_STORE").map(PathBuf::from),
         std::env::var_os("ROTEIRO_HOME").map(PathBuf::from),
         std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
@@ -745,9 +770,19 @@ mod tests {
     fn store_root_resolution() {
         use super::store_root_from;
         use std::path::PathBuf;
-        // ROTEIRO_HOME override wins.
+        // An explicit model-store dir wins verbatim (config `[paths] model_store`).
         assert_eq!(
             store_root_from(
+                Some(PathBuf::from("/data/models")),
+                Some(PathBuf::from("/opt/rt")),
+                Some(PathBuf::from("/home/u"))
+            ),
+            Path::new("/data/models"),
+        );
+        // Else ROTEIRO_HOME's `models` subdir.
+        assert_eq!(
+            store_root_from(
+                None,
                 Some(PathBuf::from("/opt/rt")),
                 Some(PathBuf::from("/home/u"))
             ),
@@ -755,7 +790,7 @@ mod tests {
         );
         // Else falls back to <home>/.roteiro/models.
         assert_eq!(
-            store_root_from(None, Some(PathBuf::from("/home/u"))),
+            store_root_from(None, None, Some(PathBuf::from("/home/u"))),
             Path::new("/home/u/.roteiro/models"),
         );
         // The live resolver returns a `models`-suffixed path.

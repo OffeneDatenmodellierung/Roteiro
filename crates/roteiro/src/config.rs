@@ -46,6 +46,29 @@ pub struct Config {
     pub ingest: IngestConfig,
     /// `roteiro serve --models` local endpoint settings.
     pub serve: ServeConfig,
+    /// `roteiro debt` tuning (paths excluded from the intent-debt scan).
+    pub debt: DebtConfig,
+    /// Filesystem locations (the model store).
+    pub paths: PathsConfig,
+}
+
+/// `[debt]` — intent-debt reporting.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DebtConfig {
+    /// Glob patterns whose matching files are excluded from the intent-debt
+    /// report (e.g. `["vendor/**", "**/generated/*"]`). `*`/`?` match within a
+    /// path segment, `**` matches across segments.
+    pub ignore: Option<Vec<String>>,
+}
+
+/// `[paths]` — filesystem locations.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PathsConfig {
+    /// The model store directory (default `~/.roteiro/models`, or
+    /// `$ROTEIRO_HOME/models`). A leading `~/` is expanded to the home directory.
+    pub model_store: Option<String>,
 }
 
 /// `[models]` — override the registry tier defaults for this project.
@@ -168,6 +191,16 @@ impl Config {
                 models: over.serve.models.clone().or(self.serve.models.clone()),
                 tools: over.serve.tools.or(self.serve.tools),
                 memory_budget_mb: over.serve.memory_budget_mb.or(self.serve.memory_budget_mb),
+            },
+            debt: DebtConfig {
+                ignore: over.debt.ignore.clone().or(self.debt.ignore.clone()),
+            },
+            paths: PathsConfig {
+                model_store: over
+                    .paths
+                    .model_store
+                    .clone()
+                    .or(self.paths.model_store.clone()),
             },
         }
     }
