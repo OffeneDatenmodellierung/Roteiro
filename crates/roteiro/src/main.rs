@@ -44,10 +44,19 @@ enum Command {
         committed: bool,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
+    ///
+    /// By default this validates the working tree — tracked files as they are on
+    /// disk, unstaged edits included (not the git index) — so it catches drift
+    /// before a commit; pass `--committed` to validate only the `HEAD` tree (the
+    /// CI merge gate). Stage your whole change (or `git commit -a`) for the
+    /// working tree to match what will be committed.
     Check {
         /// Emit the check report as JSON.
         #[arg(long)]
         json: bool,
+        /// Validate only the committed `HEAD` tree, ignoring uncommitted edits.
+        #[arg(long)]
+        committed: bool,
     },
     /// Query the graph: explain a node, or list all nodes of a kind.
     Query {
@@ -282,7 +291,7 @@ fn main() -> anyhow::Result<()> {
     let ingest = cfg.effective.ingest.resolve();
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
-        Command::Check { json } => run_check(ingest, json),
+        Command::Check { json, committed } => run_check(ingest, json, committed),
         Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json),
@@ -509,23 +518,65 @@ fn open_graph() -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph:
     Ok((repo, store, cache))
 }
 
-/// Build the full graph into `store`: the derived code graph (via `sync`) plus
-/// the authored ADR layer read from the `HEAD` tree. Returns the authored-layer
-/// check report (used by `check`; ignored by `query`).
+/// The bytes of a tracked file's authored source: the committed `HEAD` blob when
+/// `committed`, otherwise its **working-tree** copy — the file as it is on disk,
+/// which includes any unstaged edits and is *not* the git index. (This matches
+/// [`rto_graph::sync_worktree`], which the derived graph is built from, so the
+/// authored and derived layers stay consistent.) Returns `Ok(None)` when a
+/// worktree file has been deleted, so the caller drops it.
+fn read_source(
+    repo: &rto_graph::Repo,
+    blob: &rto_graph::BlobRef,
+    committed: bool,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    if committed {
+        return Ok(Some(repo.read_blob(&blob.oid)?));
+    }
+    match repo.workdir() {
+        Some(workdir) => match std::fs::read(workdir.join(&blob.path)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            // Deleted in the working tree — not part of the state being committed.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        },
+        // A bare repo has no working tree; fall back to the committed blob.
+        None => Ok(Some(repo.read_blob(&blob.oid)?)),
+    }
+}
+
+/// Build the full graph into `store`: the derived code graph (via `sync` or, when
+/// not `committed`, `sync_worktree`) plus the authored ADR layer read from the
+/// matching tree. Returns the authored-layer check report (used by `check`;
+/// ignored by `query`).
 fn build_graph(
     repo: &rto_graph::Repo,
     store: &mut rto_graph::Store,
     cache: &rto_graph::ObjectCache,
     ingest: rto_graph::IngestConfig,
+    committed: bool,
 ) -> anyhow::Result<rto_spec::CheckReport> {
-    use rto_graph::{Registry, sync};
-    sync(store, repo, cache, &Registry::new(ingest))?;
+    use rto_graph::{Registry, sync, sync_worktree};
+    let registry = Registry::new(ingest);
+    // `committed` validates the `HEAD` tree (the CI merge gate); the default
+    // overlays uncommitted edits to tracked files, so `check` can gate a commit
+    // before it is made (Stage 16). Both keep the authored-layer source in step
+    // with the derived layer the sync just built.
+    if committed {
+        sync(store, repo, cache, &registry)?;
+    } else {
+        sync_worktree(store, repo, cache, &registry)?;
+    }
 
     let mut docs = Vec::new();
     let mut annotations = Vec::new();
     let mut malformed = Vec::new();
     for blob in repo.walk_blobs()? {
-        let bytes = repo.read_blob(&blob.oid)?;
+        // In worktree mode, parse the authored source as it stands on disk (the
+        // change about to be committed), not the committed blob; a deleted file
+        // is skipped. In committed mode, read the `HEAD` blob.
+        let Some(bytes) = read_source(repo, &blob, committed)? else {
+            continue;
+        };
         let text = String::from_utf8_lossy(&bytes);
         let file = std::path::Path::new(&blob.path);
         let is_md = file
@@ -565,9 +616,9 @@ fn build_graph(
 
 /// Validate the authored layer (ADR `[[…]]` links and `@rto:` annotations)
 /// against the derived graph; exit non-zero on drift.
-fn run_check(ingest: rto_graph::IngestConfig, json: bool) -> anyhow::Result<()> {
+fn run_check(ingest: rto_graph::IngestConfig, json: bool, committed: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    let report = build_graph(&repo, &mut store, &cache, ingest)?;
+    let report = build_graph(&repo, &mut store, &cache, ingest, committed)?;
 
     if json {
         emit_json(&report)?;
@@ -593,11 +644,12 @@ fn run_check(ingest: rto_graph::IngestConfig, json: bool) -> anyhow::Result<()> 
 }
 
 /// Scaffold Roteiro in the current repository: build the initial graph, install
-/// the `post-checkout`/`post-merge` hooks, and add the `AGENTS.md` snippet.
+/// the managed git hooks (`post-checkout`/`post-merge`/`post-commit` freshness +
+/// a `pre-commit` drift gate), and add the `AGENTS.md` snippet.
 fn run_init(ingest: rto_graph::IngestConfig) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
 
-    let report = build_graph(&repo, &mut store, &cache, ingest)?;
+    let report = build_graph(&repo, &mut store, &cache, ingest, true)?;
     let nodes = store.node_count()?;
     let edges = store.edge_count()?;
 
@@ -607,10 +659,14 @@ fn run_init(ingest: rto_graph::IngestConfig) -> anyhow::Result<()> {
         match init::install_hook(&hooks_dir, name)? {
             init::HookOutcome::Installed => println!("installed hook: {name}"),
             init::HookOutcome::Updated => println!("refreshed hook: {name}"),
-            init::HookOutcome::SkippedForeign => eprintln!(
-                "warning: existing non-Roteiro `{name}` hook left untouched; \
-                 add `roteiro sync --committed` to it to keep the graph fresh"
-            ),
+            init::HookOutcome::SkippedForeign => {
+                let advice = if *name == "pre-commit" {
+                    "add `roteiro check` to it to gate drift-introducing commits"
+                } else {
+                    "add `roteiro sync --committed` to it to keep the graph fresh"
+                };
+                eprintln!("warning: existing non-Roteiro `{name}` hook left untouched; {advice}");
+            }
         }
     }
 
@@ -683,7 +739,7 @@ fn run_infer(
     }
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     // Inference is authoritative over *its own* suggestions: clear prior
     // embedding-produced edges first so the result reflects exactly the current
@@ -750,7 +806,7 @@ fn run_duplicates(
     }
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     let report = rto_graph::duplicates(
         &store,
@@ -1081,7 +1137,7 @@ fn run_compare_codegraph(
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     // Build the derived graph so there is something to compare against.
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     let report = rto_graph::compare_codegraph(std::path::Path::new(path), &store)?;
 
@@ -1158,7 +1214,7 @@ fn run_import_lat(ingest: rto_graph::IngestConfig, path: &str, json: bool) -> an
     let imported = rto_spec::import_lat(&files);
 
     // Build the derived + authored graph first so code links validate against it.
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
     let applied = store.apply_import_layer(rto_spec::LAT_REF, &imported.facts)?;
 
     let r = &imported.report;
@@ -1246,7 +1302,7 @@ fn run_import_graphify(
     let imported = rto_spec::import_graphify(&text)?;
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     // Assemble the full import layer: Graphify's own nodes/edges plus grounding
     // links. When an imported node's `source_file` matches a `file:<path>` node
@@ -1335,7 +1391,7 @@ fn build_scaffold(
         anyhow::bail!("unknown --kind `{kind}` (expected: adr | blueprint)");
     }
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
     let root = repo
         .workdir()
         .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
@@ -1579,7 +1635,7 @@ fn run_spec_context(
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     let ctx = rto_spec::context(&store, topic, limit)?;
     if json {
@@ -1632,7 +1688,7 @@ fn run_query(
     use rto_graph::{NodeKind, explain, list_kind};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     match (key, kind) {
         (Some(key), _) => {
@@ -1693,7 +1749,7 @@ fn run_context(
     use rto_graph::{context, refresh_contexts};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     if refresh {
         let report = refresh_contexts(&store)?;
@@ -1739,7 +1795,7 @@ fn run_context(
 /// by category. A report, not a gate: it always exits zero.
 fn run_debt(ingest: rto_graph::IngestConfig, kinds: &[String], json: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     let report = rto_graph::debt(&store, kinds)?;
     if json {
@@ -1785,7 +1841,7 @@ fn run_path(
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     let result = rto_graph::path(&store, from, to)?;
     if json {
@@ -1817,7 +1873,7 @@ fn run_export(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::R
     use rto_graph::GraphArtifact;
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
     let artifact = GraphArtifact::from_store(&store)?;
     let json = artifact.to_json()?;
 
@@ -1885,7 +1941,7 @@ fn run_serve(
 #[cfg(feature = "mcp")]
 fn serve_mcp(ingest: rto_graph::IngestConfig, http: Option<String>) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
 
     match http {
         Some(addr) => {
@@ -1992,7 +2048,7 @@ fn serve_models_endpoint(
     // once so the served model can `explain`/`search`/`path`/`debt` this repo.
     if cfg.serve.tools.unwrap_or(true) {
         let (repo, mut store, cache) = open_graph()?;
-        build_graph(&repo, &mut store, &cache, ingest)?;
+        build_graph(&repo, &mut store, &cache, ingest, true)?;
         let tools = std::sync::Arc::new(GraphToolRegistry::new(store));
         eprintln!(
             "roteiro model server listening on http://{socket}/v1 (graph tools on) — serving: {names}"
@@ -2224,7 +2280,7 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
 /// (default `vault`).
 fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest)?;
+    build_graph(&repo, &mut store, &cache, ingest, true)?;
     let out = out.map_or_else(
         || std::path::PathBuf::from("vault"),
         std::path::PathBuf::from,

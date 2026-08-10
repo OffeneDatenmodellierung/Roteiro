@@ -634,7 +634,7 @@ so generated plans reference *real* symbols/ADRs/deps and are `check`-gated.
   no model. Tiers 2/3 (agent review) and a bundled skill are natural follow-ups.
   Blueprint scaffold modelled on Thalweg's `docs/blueprints`.
 
-### Stage 16 — Commit-time correctness gate  → **v0.x** *(execution order: after Stage 13, immediately before Stage 14)*
+### Stage 16 — Commit-time correctness gate  → **v0.x** ✅ *delivered* *(execution order: after Stage 13, immediately before Stage 14)*
 **Goal:** guarantee the knowledge base is not just *fresh* (what `sync` gives)
 but *correct* (no authored-vs-code drift) **at the point of a commit** — and
 checkable mid-work during a large change — instead of relying on a manual
@@ -665,6 +665,24 @@ follow-ups noted under Stages 2/4 ("making `check` working-tree-aware pairs with
 - **DoD:** worktree-aware `check` validates uncommitted state; a managed
   `pre-commit` hook blocks a drift-introducing commit and passes a clean one;
   `post-commit` refresh works; dogfooded on Roteiro; `--no-verify` documented.
+- **Status: delivered.** `roteiro check` is now **worktree-aware by default** —
+  it syncs via `sync_worktree` (dirty tracked-file overlay) and reads each ADR /
+  annotation from the working tree, so it validates the change *about to be
+  committed*; `--committed` keeps the `HEAD`-only form for the CI merge gate
+  (mirroring `sync`'s flag). `roteiro init` now installs a managed **`pre-commit`**
+  hook that runs the worktree-aware `check` and blocks a drift-introducing commit
+  (guarded on `roteiro` being installed; `git commit --no-verify` skips it), plus
+  a **`post-commit`** freshness hook (`sync --committed`) alongside the existing
+  `post-checkout`/`post-merge`. The `AGENTS.md` snippet points agents at the same
+  pre-finish `check`. An end-to-end test proves a working-tree edit that dangles an
+  authored link fails `check` while `check --committed` still passes; the hook
+  content (gate + `--no-verify` escape) is unit-tested. **Limitations** (both
+  shared with `sync_worktree`, follow-ups): untracked *new* files are not
+  overlaid; and validation is of the **working tree** (files on disk), not the
+  git **index**, so with a partially-staged commit the gate checks disk state,
+  not exactly what will be committed — staging the whole change (or `git commit
+  -a`) makes them identical. A precise index-aware overlay (`sync_index`) is the
+  planned follow-up.
 
 ### Stage 14 — v1.0 hardening  → **v1.0.0**
 **Goal:** the merged graph is the canonical source; ship stable (completes the
