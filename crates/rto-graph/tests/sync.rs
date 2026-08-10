@@ -345,3 +345,58 @@ fn cache_is_reused_across_independent_stores() {
 
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+#[test]
+fn diff_trees_reports_added_modified_deleted_and_prunes_unchanged() {
+    // The incremental-sync primitive: diffing two tree oids yields exactly the
+    // changed paths (added/modified with new oid, deleted), and never mentions an
+    // unchanged file — gix prunes equal subtrees, so cost tracks the change.
+    let dir = fresh_dir("difftrees");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/a.rs", "fn a() {}\n");
+    write(&dir, "src/b.rs", "fn b() {}\n");
+    write(&dir, "vendor/keep.rs", "fn keep() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    let t1 = Repo::discover(&dir)
+        .expect("discover")
+        .head_tree_id()
+        .expect("t1");
+
+    // Modify a, delete b, add c; leave the whole vendor/ subtree untouched.
+    write(&dir, "src/a.rs", "fn a() { let _x = 1; }\n");
+    std::fs::remove_file(dir.join("src/b.rs")).expect("rm b");
+    write(&dir, "src/c.rs", "fn c() {}\n");
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "changes"]);
+    let repo = Repo::discover(&dir).expect("rediscover");
+    let t2 = repo.head_tree_id().expect("t2");
+
+    let diff = repo.diff_trees(&t1, &t2).expect("diff");
+    let changed: Vec<&str> = diff.changed.iter().map(|b| b.path.as_str()).collect();
+    assert_eq!(
+        changed,
+        ["src/a.rs", "src/c.rs"],
+        "a modified + c added, sorted"
+    );
+    assert_eq!(diff.deleted, ["src/b.rs"], "b deleted");
+    assert!(
+        !changed.contains(&"vendor/keep.rs"),
+        "the unchanged subtree is pruned, not reported"
+    );
+    // The reported oid for the added file matches its committed blob.
+    let c_oid = &diff
+        .changed
+        .iter()
+        .find(|b| b.path == "src/c.rs")
+        .unwrap()
+        .oid;
+    let head = repo.walk_blobs().expect("walk");
+    let c_head = head
+        .iter()
+        .find(|b| b.path == "src/c.rs")
+        .expect("c in head");
+    assert_eq!(&c_head.oid, c_oid, "diff oid matches the tree blob oid");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

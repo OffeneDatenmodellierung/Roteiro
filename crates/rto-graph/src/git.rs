@@ -135,33 +135,25 @@ impl Repo {
             .map_err(ge)?
             .peel_to_tree()
             .map_err(ge)?;
-        let base: std::collections::HashMap<String, String> = walk_tree_blobs(&base_tree)?
-            .into_iter()
-            .map(|b| (b.path, b.oid))
-            .collect();
-        let head = self.walk_blobs()?;
-        let head_paths: std::collections::HashSet<&str> =
-            head.iter().map(|b| b.path.as_str()).collect();
+        let base_oid = base_tree.id().to_hex().to_string();
+        let head_oid = self.head_tree_id()?;
 
-        let mut out = Vec::new();
-        // Added or modified in HEAD relative to base.
-        for blob in &head {
-            if base.get(&blob.path) != Some(&blob.oid) {
-                out.push(ChangedFile {
-                    path: blob.path.clone(),
-                    deleted: false,
-                });
-            }
-        }
-        // Present in base but gone from HEAD.
-        for path in base.keys() {
-            if !head_paths.contains(path.as_str()) {
-                out.push(ChangedFile {
-                    path: path.clone(),
-                    deleted: true,
-                });
-            }
-        }
+        // Reuse the subtree-pruning tree diff, then flatten to the (path, deleted)
+        // shape this API exposes. `diff_trees` already sorts and prunes unchanged
+        // subtrees, so this is O(change) rather than a full walk of both trees.
+        let diff = self.diff_trees(&base_oid, &head_oid)?;
+        let mut out: Vec<ChangedFile> = diff
+            .changed
+            .into_iter()
+            .map(|b| ChangedFile {
+                path: b.path,
+                deleted: false,
+            })
+            .chain(diff.deleted.into_iter().map(|path| ChangedFile {
+                path,
+                deleted: true,
+            }))
+            .collect();
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
@@ -271,4 +263,113 @@ pub struct ChangedFile {
     pub path: String,
     /// `true` when the file was removed from the working tree.
     pub deleted: bool,
+}
+
+/// The blob-level difference between two trees: paths added or modified (with
+/// their new blob oid) and paths deleted. See [`Repo::diff_trees`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeDiff {
+    /// Blobs whose *tree entry* differs from the old tree — a changed blob oid,
+    /// or a mode change (e.g. the executable bit) on otherwise-identical content —
+    /// as `(path, new blob oid)`. These are the paths to re-extract; a mode-only
+    /// change re-extracts to identical facts (extraction is content-addressed), a
+    /// harmless cache hit.
+    pub changed: Vec<BlobRef>,
+    /// Blobs present in the old tree but absent from the new — paths whose facts
+    /// must be dropped.
+    pub deleted: Vec<String>,
+}
+
+impl Repo {
+    /// The blob-level diff between two tree object ids (`old` → `new`), pruning
+    /// unchanged subtrees: gix descends only into subtrees whose oid differs, so
+    /// the cost is proportional to the *change*, not the tree size. Renames are
+    /// reported as a delete plus an add (rewrite tracking is off), which is what
+    /// the path-scoped extractor wants. Results are sorted by path for determinism.
+    ///
+    /// This is the incremental-sync counterpart to [`Repo::walk_blobs`]: given the
+    /// last-synced tree and `HEAD`, it yields exactly the paths that changed.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if either id is not a tree, the diff fails, or a path
+    /// is not valid UTF-8.
+    pub fn diff_trees(&self, old: &str, new: &str) -> Result<TreeDiff, GitError> {
+        let old_tree = self.tree_by_hex(old)?;
+        let new_tree = self.tree_by_hex(new)?;
+
+        let mut changed = Vec::new();
+        let mut deleted = Vec::new();
+        let mut err: Option<GitError> = None;
+
+        let mut platform = old_tree.changes().map_err(ge)?;
+        platform.options(|o| {
+            o.track_rewrites(None);
+        });
+        platform
+            .for_each_to_obtain_tree(&new_tree, |change| {
+                use gix::object::tree::diff::Change;
+                let record = |path: &gix::bstr::BStr| -> Result<String, GitError> {
+                    String::from_utf8(path.to_vec())
+                        .map_err(|e| GitError::NonUtf8Path(e.into_bytes()))
+                };
+                match change {
+                    Change::Addition {
+                        location,
+                        entry_mode,
+                        id,
+                        ..
+                    }
+                    | Change::Modification {
+                        location,
+                        entry_mode,
+                        id,
+                        ..
+                    } => {
+                        if entry_mode.is_blob() {
+                            match record(location) {
+                                Ok(path) => changed.push(BlobRef {
+                                    path,
+                                    oid: id.to_hex().to_string(),
+                                }),
+                                Err(e) => err = Some(e),
+                            }
+                        }
+                    }
+                    Change::Deletion {
+                        location,
+                        entry_mode,
+                        ..
+                    } => {
+                        if entry_mode.is_blob() {
+                            match record(location) {
+                                Ok(path) => deleted.push(path),
+                                Err(e) => err = Some(e),
+                            }
+                        }
+                    }
+                    // Rewrite tracking is disabled, so renames arrive as
+                    // Deletion + Addition; this arm is unreachable in practice.
+                    Change::Rewrite { .. } => {}
+                }
+                Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue(()))
+            })
+            .map_err(ge)?;
+
+        if let Some(e) = err {
+            return Err(e);
+        }
+        changed.sort_by(|a, b| a.path.cmp(&b.path));
+        deleted.sort();
+        Ok(TreeDiff { changed, deleted })
+    }
+
+    /// Resolve a hex object id to a [`gix::Tree`].
+    fn tree_by_hex(&self, hex: &str) -> Result<gix::Tree<'_>, GitError> {
+        let id = gix::ObjectId::from_hex(hex.as_bytes()).map_err(ge)?;
+        self.inner
+            .find_object(id)
+            .map_err(ge)?
+            .peel_to_tree()
+            .map_err(ge)
+    }
 }
