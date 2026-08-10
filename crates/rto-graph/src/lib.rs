@@ -47,7 +47,7 @@ pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 pub use models::{
     DownloadError, ModelFile, ModelKind, ModelRole, ModelSpec, ModelVariant, Platform, REGISTRY,
     ResourceTier, download_verified, ensure_model_dir, find as find_model, is_installed, model_dir,
-    sha256_hex, store_root, verify_sha256,
+    set_model_store, sha256_hex, store_root, verify_sha256,
 };
 pub use provenance::Provenance;
 pub use query::{

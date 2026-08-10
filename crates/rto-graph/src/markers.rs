@@ -4,11 +4,19 @@
 //!
 //! "Intent debt" is the class of signals that say *something is missing* or
 //! *left for later*: `TODO`/`FIXME`/`HACK` comments (in any case for the
-//! unambiguous tags), `todo!()`/`unimplemented!()` stubs, "not implemented"
-//! panics, and deferral phrases (`for now`, `deferred`, unchecked `- [ ]`
-//! items). The scan is line-based and language-agnostic so it works uniformly
-//! over code, docs, and ADRs; [`augment`] attaches each finding to its innermost
-//! enclosing symbol (or the file) via a `contains` edge.
+//! unambiguous tags), `todo!()`/`unimplemented!()` stubs, and deferral phrases
+//! (`for now`, `deferred`, `not implemented`, `placeholder`, unchecked `- [ ]`
+//! items). The scan is line-based so it works uniformly over code, docs, and
+//! ADRs; [`augment`] attaches each finding to its innermost enclosing symbol (or
+//! the file) via a `contains` edge.
+//!
+//! The unambiguous tags (`TODO`, `todo!(`, `BUG:`) match anywhere on a line. The
+//! noisier prose phrases (`for now`, `deferred`, `not implemented`,
+//! `placeholder`, …) are restricted to *comment* context in code files — keyed
+//! off the file's [`CommentSyntax`] — so in code they are detected only inside
+//! comments, never in identifiers, string literals, or running code. Prose and
+//! unknown files carry no such syntax and are scanned in full, since there every
+//! line is effectively prose.
 //!
 //! Opt-out: a source can suppress false positives with an inline directive —
 //! `roteiro:ignore` on a line skips that line, and `roteiro:ignore-file`
@@ -94,26 +102,156 @@ enum Mode {
 /// unambiguous). `BUG`/`HACK`/`XXX` match uppercase anywhere, but in other cases
 /// only as an annotation (`Bug:`, `hack(`), since bare lowercase `bug`/`hack` are
 /// ordinary English. The prose phrases were already case-insensitive.
-const RULES: &[(&str, MarkerCategory, Mode)] = &[
-    ("todo!(", MarkerCategory::Stub, Mode::Substr),
-    ("unimplemented!(", MarkerCategory::Stub, Mode::Substr),
-    ("todo", MarkerCategory::Todo, Mode::Phrase),
-    ("fixme", MarkerCategory::Fixme, Mode::Phrase),
-    ("BUG", MarkerCategory::Fixme, Mode::Word),
-    ("HACK", MarkerCategory::Hack, Mode::Word),
-    ("XXX", MarkerCategory::Hack, Mode::Word),
-    ("bug", MarkerCategory::Fixme, Mode::Annotation),
-    ("hack", MarkerCategory::Hack, Mode::Annotation),
-    ("xxx", MarkerCategory::Hack, Mode::Annotation),
-    ("not yet implemented", MarkerCategory::Stub, Mode::Phrase),
-    ("not implemented", MarkerCategory::Stub, Mode::Phrase),
-    ("placeholder", MarkerCategory::Stub, Mode::Phrase),
-    ("for now", MarkerCategory::Deferred, Mode::Phrase),
-    ("deferred", MarkerCategory::Deferred, Mode::Phrase),
-    ("follow-up", MarkerCategory::Deferred, Mode::Phrase),
-    ("followup", MarkerCategory::Deferred, Mode::Phrase),
-    ("tbd", MarkerCategory::Deferred, Mode::Phrase),
+///
+/// The final `bool` is `comment_only`: when set, the rule fires only within a
+/// *comment* (in a code file with a known [`CommentSyntax`]). This restricts the
+/// noisy prose phrases — `for now`, `deferred`, `placeholder`, … — to comments,
+/// so they no longer flag identifiers, string literals, or ordinary code. The
+/// unambiguous tags (`TODO`, `todo!(`, `BUG:`) still match anywhere, and prose
+/// files (Markdown, plain text, unknown types) are scanned in full — see
+/// [`comment_syntax`].
+const RULES: &[(&str, MarkerCategory, Mode, bool)] = &[
+    ("todo!(", MarkerCategory::Stub, Mode::Substr, false),
+    ("unimplemented!(", MarkerCategory::Stub, Mode::Substr, false),
+    ("todo", MarkerCategory::Todo, Mode::Phrase, false),
+    ("fixme", MarkerCategory::Fixme, Mode::Phrase, false),
+    ("BUG", MarkerCategory::Fixme, Mode::Word, false),
+    ("HACK", MarkerCategory::Hack, Mode::Word, false),
+    ("XXX", MarkerCategory::Hack, Mode::Word, false),
+    ("bug", MarkerCategory::Fixme, Mode::Annotation, false),
+    ("hack", MarkerCategory::Hack, Mode::Annotation, false),
+    ("xxx", MarkerCategory::Hack, Mode::Annotation, false),
+    (
+        "not yet implemented",
+        MarkerCategory::Stub,
+        Mode::Phrase,
+        true,
+    ),
+    ("not implemented", MarkerCategory::Stub, Mode::Phrase, true),
+    ("placeholder", MarkerCategory::Stub, Mode::Phrase, true),
+    ("for now", MarkerCategory::Deferred, Mode::Phrase, true),
+    ("deferred", MarkerCategory::Deferred, Mode::Phrase, true),
+    ("follow-up", MarkerCategory::Deferred, Mode::Phrase, true),
+    ("followup", MarkerCategory::Deferred, Mode::Phrase, true),
+    ("tbd", MarkerCategory::Deferred, Mode::Phrase, true),
 ];
+
+/// Line- and block-comment syntax for a language, used to restrict the noisy
+/// prose phrases to comment context in code files.
+struct CommentSyntax {
+    /// Line-comment leaders; the rest of the line after one is comment text.
+    line: &'static [&'static str],
+    /// The block-comment open/close pair, if the language has one.
+    block: Option<(&'static str, &'static str)>,
+}
+
+/// `//` line comments plus `/* … */` blocks — the C family and its descendants.
+const SLASH_STAR: CommentSyntax = CommentSyntax {
+    line: &["//"],
+    block: Some(("/*", "*/")),
+};
+/// `#` line comments, no block form — scripting languages.
+const HASH: CommentSyntax = CommentSyntax {
+    line: &["#"],
+    block: None,
+};
+/// `--` line comments plus `/* … */` blocks — SQL.
+const DASH_STAR: CommentSyntax = CommentSyntax {
+    line: &["--"],
+    block: Some(("/*", "*/")),
+};
+/// `--` line comments, no block form — Lua/Haskell/Elm.
+const DASH: CommentSyntax = CommentSyntax {
+    line: &["--"],
+    block: None,
+};
+/// `;` line comments, no block form — Lisps.
+const SEMI: CommentSyntax = CommentSyntax {
+    line: &[";"],
+    block: None,
+};
+
+/// The comment syntax for a path's language, keyed by extension, or `None` for a
+/// prose or unknown file — where every line is treated as comment context, so
+/// the prose phrases are scanned in full (the previous behaviour). Restricting
+/// the phrases to comments only applies where we can reliably tell code from
+/// comment.
+fn comment_syntax(path: &str) -> Option<&'static CommentSyntax> {
+    let ext = path
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let syntax = match ext.as_str() {
+        "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "js" | "jsx" | "mjs" | "cjs"
+        | "ts" | "tsx" | "go" | "java" | "kt" | "kts" | "swift" | "scala" | "cs" | "php" | "m"
+        | "mm" | "rust" | "dart" | "zig" | "v" => &SLASH_STAR,
+        "py" | "rb" | "sh" | "bash" | "zsh" | "pl" | "pm" | "tcl" | "r" | "nim" => &HASH,
+        "sql" => &DASH_STAR,
+        "lua" | "hs" | "elm" | "adb" | "ads" => &DASH,
+        "el" | "lisp" | "clj" | "cljs" | "cljc" | "scm" | "ss" | "rkt" => &SEMI,
+        _ => return None,
+    };
+    Some(syntax)
+}
+
+/// The comment text of a single `line` under `syn`, dropping code. Tracks block
+/// comments across lines via `in_block`. It is a lightweight approximation of a
+/// real lexer: it does not model string literals, so a comment delimiter *inside*
+/// a string is treated as opening a comment. That bias is deliberate — it only
+/// ever *widens* what counts as a comment, so a genuine in-comment phrase is
+/// never missed; the cost is that a phrase after a `//`-in-a-string could still
+/// be reported, which is no worse than the old scan-everything behaviour.
+fn comment_portion(line: &str, syn: &CommentSyntax, in_block: &mut bool) -> String {
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < line.len() {
+        if *in_block {
+            let Some((_, close)) = syn.block else {
+                *in_block = false;
+                continue;
+            };
+            if let Some(rel) = line[i..].find(close) {
+                out.push_str(&line[i..i + rel]);
+                i += rel + close.len();
+                *in_block = false;
+                continue;
+            }
+            out.push_str(&line[i..]);
+            break;
+        }
+        // Earliest line-leader or block opener from the current offset.
+        let mut best: Option<(usize, Option<usize>)> = None;
+        for lead in syn.line {
+            if let Some(rel) = line[i..].find(lead) {
+                let pos = i + rel;
+                if best.is_none_or(|(bp, _)| pos < bp) {
+                    best = Some((pos, None));
+                }
+            }
+        }
+        if let Some((open, _)) = syn.block
+            && let Some(rel) = line[i..].find(open)
+        {
+            let pos = i + rel;
+            if best.is_none_or(|(bp, _)| pos < bp) {
+                best = Some((pos, Some(open.len())));
+            }
+        }
+        match best {
+            None => break,
+            Some((pos, None)) => {
+                out.push_str(&line[pos..]);
+                break;
+            }
+            Some((pos, Some(open_len))) => {
+                *in_block = true;
+                i = pos + open_len;
+            }
+        }
+    }
+    out
+}
 
 /// Characters of marker text kept, to keep nodes small. On truncation an ellipsis
 /// is appended, so a stored value is at most this many characters plus the `…`.
@@ -133,26 +271,36 @@ const IGNORE_LINE: &str = "roteiro:ignore";
 const IGNORE_FILE: &str = "roteiro:ignore-file";
 
 /// Scan `bytes` for intent-debt markers, one (highest-priority) per line, in
-/// ascending line order. Deterministic: identical bytes always yield identical
-/// markers.
+/// ascending line order. Deterministic: identical `(path, bytes)` always yield
+/// identical markers. `path` selects the language's [`CommentSyntax`], which
+/// restricts the noisy prose phrases to comment context in code files; prose and
+/// unknown files are scanned in full.
 #[must_use]
-pub fn scan_markers(bytes: &[u8]) -> Vec<Marker> {
+pub fn scan_markers(path: &str, bytes: &[u8]) -> Vec<Marker> {
     // Whole-file opt-out: a blob carrying the file directive is skipped entirely.
     if contains_bytes(bytes, IGNORE_FILE.as_bytes()) {
         return Vec::new();
     }
+    let syntax = comment_syntax(path);
+    let mut in_block = false;
     let mut out = Vec::new();
     let mut offset: u32 = 0;
     for (idx, raw) in bytes.split(|&b| b == b'\n').enumerate() {
         let raw_len = u32::try_from(raw.len()).unwrap_or(u32::MAX);
         let decoded = String::from_utf8_lossy(raw);
         let line = decoded.trim_end_matches('\r');
+        // The comment-only portion of the line (block state carried across
+        // lines). For a prose/unknown file the whole line counts as comment.
+        let comment = match syntax {
+            Some(syn) => comment_portion(line, syn, &mut in_block),
+            None => line.to_owned(),
+        };
         // Per-line opt-out.
         if line.contains(IGNORE_LINE) {
             offset = offset.saturating_add(raw_len).saturating_add(1);
             continue;
         }
-        if let Some(category) = classify(line) {
+        if let Some(category) = classify(line, &comment) {
             let lead = u32::try_from(raw.iter().take_while(|b| b.is_ascii_whitespace()).count())
                 .unwrap_or(0);
             out.push(Marker {
@@ -170,14 +318,18 @@ pub fn scan_markers(bytes: &[u8]) -> Vec<Marker> {
     out
 }
 
-/// Classify a single line into a marker category, or `None`.
-fn classify(line: &str) -> Option<MarkerCategory> {
-    for (needle, category, mode) in RULES {
+/// Classify a `line` into a marker category, or `None`. `comment` is the line's
+/// comment-only text (equal to `line` for prose/unknown files); a `comment_only`
+/// rule is matched against it instead of the full line, so prose phrases fire
+/// only inside comments.
+fn classify(line: &str, comment: &str) -> Option<MarkerCategory> {
+    for (needle, category, mode, comment_only) in RULES {
+        let hay = if *comment_only { comment } else { line };
         let hit = match mode {
-            Mode::Substr => line.contains(needle),
-            Mode::Word => find_bounded(line, needle, false).is_some(),
-            Mode::Phrase => find_bounded(line, needle, true).is_some(),
-            Mode::Annotation => find_annotation(line, needle).is_some(),
+            Mode::Substr => hay.contains(needle),
+            Mode::Word => find_bounded(hay, needle, false).is_some(),
+            Mode::Phrase => find_bounded(hay, needle, true).is_some(),
+            Mode::Annotation => find_annotation(hay, needle).is_some(),
         };
         if hit {
             return Some(*category);
@@ -272,7 +424,7 @@ fn cap_chars(s: &str, max: usize, trim: bool) -> String {
 /// Called by [`crate::Registry`] after the language extractor runs, so markers
 /// are cached alongside the rest of a blob's facts.
 pub fn augment(facts: &mut FactSet, path: &str, blob_id: &str, bytes: &[u8]) {
-    for m in scan_markers(bytes) {
+    for m in scan_markers(path, bytes) {
         let key = format!("marker:{path}#{}", m.line);
         // Resolve against the first non-whitespace byte, not the line start: an
         // indented symbol's tree-sitter span begins after its leading
@@ -315,8 +467,14 @@ mod tests {
     use super::{MarkerCategory, augment, scan_markers};
     use crate::{EdgeKind, FactSet, Node, NodeKind, Span};
 
+    // Scan as a prose/unknown file (no comment syntax → every line scanned).
     fn categories(src: &str) -> Vec<(u32, MarkerCategory)> {
-        scan_markers(src.as_bytes())
+        categories_in("", src)
+    }
+
+    // Scan as `path`, so a code language's comment syntax gates the prose phrases.
+    fn categories_in(path: &str, src: &str) -> Vec<(u32, MarkerCategory)> {
+        scan_markers(path, src.as_bytes())
             .into_iter()
             .map(|m| (m.line, m.category))
             .collect()
@@ -371,9 +529,85 @@ plain line, nothing here
     }
 
     #[test]
+    fn prose_phrases_are_comment_only_in_code_files() {
+        // In a code file the deferral phrases fire only inside a comment…
+        assert_eq!(
+            categories_in("a.rs", "    // just a placeholder for now\n")[0].1,
+            MarkerCategory::Stub
+        );
+        assert_eq!(
+            categories_in("a.rs", "let msg = format!(\"loaded {n} for now\");\n")
+                .first()
+                .map(|m| m.1),
+            None,
+            "a phrase in a string literal is not a marker"
+        );
+        // …including trailing comments after code, and C-style block comments.
+        assert_eq!(
+            categories_in("a.rs", "do_thing(); // deferred until v2\n")[0].1,
+            MarkerCategory::Deferred
+        );
+        assert_eq!(
+            categories_in("a.rs", "let x = 1; /* placeholder */ let y = 2;\n")[0].1,
+            MarkerCategory::Stub
+        );
+        // An identifier that merely contains a phrase is not a marker.
+        assert!(categories_in("a.rs", "let deferred_tasks = vec![];\n").is_empty());
+        // The unambiguous tags still fire anywhere, comment or not.
+        assert_eq!(
+            categories_in("a.rs", "let s = \"TODO: not a comment\";\n")[0].1,
+            MarkerCategory::Todo
+        );
+    }
+
+    #[test]
+    fn block_comments_span_lines_in_code_files() {
+        // A phrase inside a multi-line `/* … */` block is comment context on the
+        // interior line; code after the close is not.
+        let got = categories_in(
+            "a.rs",
+            "/* a note\n   deferred to later\n*/ let placeholder_var = 1;\n",
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], (2, MarkerCategory::Deferred));
+    }
+
+    #[test]
+    fn prose_files_scan_phrases_everywhere() {
+        // Markdown/plain-text carry no comment syntax, so the phrases still match
+        // as before — a spec that says "deferred" is intent debt.
+        assert_eq!(
+            categories_in("PLAN.md", "We will defer the audit; deferred to v2.\n")[0].1,
+            MarkerCategory::Deferred
+        );
+    }
+
+    #[test]
+    fn non_slash_comment_syntaxes_gate_phrases() {
+        // `#` line comments (Python/shell): phrase in a comment fires, in a string
+        // does not.
+        assert_eq!(
+            categories_in("m.py", "x = 1  # placeholder for now\n")[0].1,
+            MarkerCategory::Stub
+        );
+        assert!(categories_in("m.py", "msg = \"deferred until later\"\n").is_empty());
+        // `#` also covers shell.
+        assert_eq!(
+            categories_in("run.sh", "# deferred to a follow-up\n")[0].1,
+            MarkerCategory::Deferred
+        );
+        // `--` line comments (SQL): comment fires, a quoted string does not.
+        assert_eq!(
+            categories_in("q.sql", "SELECT 1; -- placeholder query\n")[0].1,
+            MarkerCategory::Stub
+        );
+        assert!(categories_in("q.sql", "SELECT 'deferred' AS status;\n").is_empty());
+    }
+
+    #[test]
     fn scanning_is_deterministic() {
         let src = b"// TODO one\ncode\n// FIXME two\n";
-        assert_eq!(scan_markers(src), scan_markers(src));
+        assert_eq!(scan_markers("a.rs", src), scan_markers("a.rs", src));
     }
 
     #[test]
@@ -385,7 +619,13 @@ plain line, nothing here
         assert_eq!(got[1].0, 3); // line 2 suppressed
 
         // A file directive suppresses everything in the blob.
-        assert!(scan_markers(b"// TODO x\n// note: roteiro:ignore-file\n// FIXME y\n").is_empty());
+        assert!(
+            scan_markers(
+                "a.rs",
+                b"// TODO x\n// note: roteiro:ignore-file\n// FIXME y\n"
+            )
+            .is_empty()
+        );
     }
 
     #[test]

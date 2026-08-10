@@ -118,12 +118,18 @@ pub struct DebtReport {
 }
 
 /// Inventory intent-debt markers in the graph, optionally restricted to the
-/// given `categories` (empty means all). Ordered by `(path, line)` so output is
-/// stable and reads top-to-bottom per file.
+/// given `categories` (empty means all) and excluding markers whose file path
+/// matches any `ignore` glob (config `[debt] ignore` — empty means keep all).
+/// Ordered by `(path, line)` so output is stable and reads top-to-bottom per
+/// file; `total` and `by_category` reflect the retained markers only.
 ///
 /// # Errors
 /// Returns [`StoreError`] on query failure.
-pub fn debt(store: &Store, categories: &[String]) -> Result<DebtReport, StoreError> {
+pub fn debt(
+    store: &Store,
+    categories: &[String],
+    ignore: &[String],
+) -> Result<DebtReport, StoreError> {
     let filter: std::collections::BTreeSet<&str> = categories.iter().map(String::as_str).collect();
     let mut items = Vec::new();
     let mut by_category: BTreeMap<String, usize> = BTreeMap::new();
@@ -135,6 +141,12 @@ pub fn debt(store: &Store, categories: &[String]) -> Result<DebtReport, StoreErr
             .unwrap_or("other")
             .to_owned();
         if !filter.is_empty() && !filter.contains(category.as_str()) {
+            continue;
+        }
+        // Drop markers under an ignored path (e.g. `vendor/**`) before counting.
+        if let Some(path) = node.path.as_deref()
+            && ignore.iter().any(|glob| glob_match(glob, path))
+        {
             continue;
         }
         let text = node
@@ -164,6 +176,49 @@ pub fn debt(store: &Store, categories: &[String]) -> Result<DebtReport, StoreErr
         by_category,
         items,
     })
+}
+
+/// Match a slash-separated `path` against a glob `pattern`, anchored end-to-end.
+/// `?` matches one non-`/` character, `*` matches any run within a single path
+/// segment, and `**` matches zero or more whole segments. Used for config
+/// `[debt] ignore` patterns (e.g. `vendor/**`, `**/generated/*`).
+#[must_use]
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').collect();
+    let seg: Vec<&str> = path.split('/').collect();
+    match_segments(&pat, &seg)
+}
+
+/// Anchored match of glob segments `pat` against path segments `seg`, with `**`
+/// consuming zero or more segments.
+fn match_segments(pat: &[&str], seg: &[&str]) -> bool {
+    match pat.first() {
+        None => seg.is_empty(),
+        Some(&"**") => (0..=seg.len()).any(|i| match_segments(&pat[1..], &seg[i..])),
+        Some(token) => {
+            !seg.is_empty() && match_token(token, seg[0]) && match_segments(&pat[1..], &seg[1..])
+        }
+    }
+}
+
+/// Match a single path segment `s` against a `pattern` token containing `*`
+/// (any run, no `/`) and `?` (one char, no `/`).
+fn match_token(pattern: &str, s: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let chars: Vec<char> = s.chars().collect();
+    match_token_chars(&pat, &chars)
+}
+
+/// Recursive char-slice matcher backing [`match_token`].
+fn match_token_chars(pat: &[char], chars: &[char]) -> bool {
+    match pat.first() {
+        None => chars.is_empty(),
+        Some('*') => (0..=chars.len()).any(|i| match_token_chars(&pat[1..], &chars[i..])),
+        Some('?') => !chars.is_empty() && match_token_chars(&pat[1..], &chars[1..]),
+        Some(&ch) => {
+            !chars.is_empty() && chars[0] == ch && match_token_chars(&pat[1..], &chars[1..])
+        }
+    }
 }
 
 /// One step along a [`Path`]: the edge traversed and the node it leads to.
@@ -458,7 +513,7 @@ fn placeholder_hop() -> PathHop {
 
 #[cfg(test)]
 mod tests {
-    use super::{SCHEMA, explain, list_kind, path, search};
+    use super::{SCHEMA, explain, glob_match, list_kind, path, search};
     use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
     fn seeded() -> Store {
@@ -660,5 +715,22 @@ mod tests {
         assert!(p.found);
         assert_eq!(p.length, 1, "the direct a->d edge is the shortest path");
         assert_eq!(p.hops[0].node, "d");
+    }
+
+    #[test]
+    fn glob_matches_segments_and_wildcards() {
+        // `**` spans segments (including zero) and anchors both ends.
+        assert!(glob_match("vendor/**", "vendor/lib/a.rs"));
+        assert!(glob_match("vendor/**", "vendor")); // zero trailing segments
+        assert!(glob_match("**/generated/*", "src/gen/generated/x.rs"));
+        assert!(glob_match("**/*.rs", "a/b/c.rs"));
+        // `*` and `?` stay within one segment.
+        assert!(glob_match("src/*.rs", "src/main.rs"));
+        assert!(!glob_match("src/*.rs", "src/sub/main.rs"));
+        assert!(glob_match("a?c.rs", "abc.rs"));
+        assert!(!glob_match("a?c.rs", "ac.rs"));
+        // Anchored: a bare name does not match a nested path.
+        assert!(!glob_match("generated", "src/generated"));
+        assert!(!glob_match("vendor/**", "third_party/vendor/a.rs"));
     }
 }

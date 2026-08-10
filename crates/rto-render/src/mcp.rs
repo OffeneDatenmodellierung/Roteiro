@@ -149,7 +149,7 @@ impl GraphServer {
                           enclosing symbol or file via a `contains` edge."
     )]
     async fn debt(&self, Parameters(args): Parameters<DebtArgs>) -> CallToolResult {
-        let result = self.with_store(|store| debt(store, &args.kind));
+        let result = self.with_store(|store| debt(store, &args.kind, &[]));
         match result {
             Ok(report) => json_result(&report),
             Err(e) => tool_error(&format!("query error: {e}")),
