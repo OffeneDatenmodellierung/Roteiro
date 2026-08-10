@@ -196,3 +196,33 @@ fn load_refuses_a_mismatched_tree() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn load_refuses_a_tree_less_artifact() {
+    // An artifact with no recorded tree can't be verified against HEAD, so it is
+    // refused by default (overridable with --force).
+    let dir = init_repo("notree");
+    let bad = dir.join("notree.json");
+    std::fs::write(
+        &bad,
+        r#"{"schema":"roteiro.graph/v1","tree":null,"facts":{"nodes":[],"edges":[]}}"#,
+    )
+    .expect("write");
+    let refused = roteiro(&dir, &["load", bad.to_str().unwrap()]);
+    assert!(
+        !refused.status.success(),
+        "a tree-less artifact must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no tree"),
+        "explains why: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        roteiro(&dir, &["load", "--force", bad.to_str().unwrap()])
+            .status
+            .success(),
+        "--force loads it anyway"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

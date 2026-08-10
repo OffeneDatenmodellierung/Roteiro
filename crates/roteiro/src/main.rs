@@ -1995,17 +1995,22 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let repo = Repo::discover(&cwd)?;
 
-    // Refuse an artifact built from a different tree than the current HEAD, so a
-    // fetched artifact never installs a graph that doesn't match the checkout.
-    if !force && let Some(artifact_tree) = &artifact.tree {
+    // Refuse an artifact that isn't provably for the current HEAD, so a fetched
+    // artifact never installs a graph that doesn't match the checkout. A missing
+    // tree can't be verified, so it is refused too (both overridable with --force).
+    if !force {
         let head = repo.head_tree_id()?;
-        if *artifact_tree != head {
-            anyhow::bail!(
-                "artifact tree {} does not match HEAD tree {} — refusing to load a \
-                 mismatched graph (pass --force to override, or run `roteiro sync`)",
-                &artifact_tree[..artifact_tree.len().min(12)],
-                &head[..head.len().min(12)]
-            );
+        let short = |t: &str| t[..t.len().min(12)].to_owned();
+        match artifact.tree.as_deref() {
+            Some(tree) if tree == head => {}
+            Some(tree) => anyhow::bail!(
+                "artifact tree {} does not match HEAD tree {} — refusing to load a mismatched graph (pass --force to override, or run `roteiro sync`)",
+                short(tree),
+                short(&head)
+            ),
+            None => anyhow::bail!(
+                "artifact records no tree, so it cannot be verified against HEAD — pass --force to load it anyway, or run `roteiro sync`"
+            ),
         }
     }
 

@@ -9,14 +9,21 @@ name: Graph artifact
 # checkout before installing it, so a stale asset is refused (the caller rebuilds).
 on:
   push:
+    # Every merge to main changes the HEAD tree, and the artifact is verified
+    # against that tree on load — so republish on *any* change (a docs-only merge
+    # still moves the tree, and a stale asset would be refused, defeating the fast
+    # path). Not path-filtered on purpose.
     branches: [main]
-    paths-ignore:
-      - "website/**"
-      - "docs/**"
   workflow_dispatch:
 
 permissions:
   contents: write # create/update the release
+
+# Serialise on the branch and cancel superseded runs, so two close-together
+# merges can't race and leave `graph-latest` pointing at the older artifact.
+concurrency:
+  group: graph-artifact-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   publish:
