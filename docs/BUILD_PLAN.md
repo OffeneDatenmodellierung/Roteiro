@@ -781,7 +781,7 @@ and footnotes.
   feature's own API docs still self-report a handful of markers (they name the
   categories); the ignore directives are the intended remedy where it matters.
 
-### Stage 17 — Agent instructions & context-aware review (tool-agnostic)  → ✅ *delivered (CLI-first `roteiro review` + tool-agnostic AGENTS.md/checklist; MCP-for-review recorded as deferred)*
+### Stage 17 — Agent instructions & context-aware review (tool-agnostic)  → ✅ *delivered (CLI-first `roteiro review` + tool-agnostic AGENTS.md/checklist; MCP-for-review feasibility resolved — feasible as an optional enhancement, see §5d)*
 **Goal:** make every calling agent — Copilot code review, Claude Code, Cursor,
 cloud agents, future contributors — Roteiro-aware, via **tool-agnostic** files
 rather than one vendor's format, so the same standards drive review and
@@ -817,7 +817,8 @@ are final (v1.0-frozen), not a moving target.
   MCP; record the finding before committing.
 - **DoD:** a tool-agnostic instructions file measurably shapes an agent review
   (attribution shows it was read); the review checklist/skill exists; the
-  MCP-for-review feasibility is recorded (done or explicitly deferred).
+  MCP-for-review feasibility is resolved (feasible — an optional enhancement now
+  that GitHub Copilot code review supports MCP; see §5d).
 
 ---
 
@@ -1034,9 +1035,25 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
   `todo!(`, `BUG:`) still match anywhere, and prose files scan in full.
 
 **Agent reviews**
-- **MCP-for-review** — feasibility recorded and deferred: a *hosted* GitHub
-  Copilot reviewer reaching a *self-hosted* MCP is unverified; the CLI-first
-  `roteiro review` is the portable path (Stage 17).
+- **MCP-for-review — ✅ feasibility resolved (feasible).** The blocker was that a
+  *hosted* GitHub Copilot reviewer reaching a Roteiro MCP was unverified. It is
+  now supported: GitHub shipped **Copilot code review + MCP servers (GA
+  2026-07-29)** — the PR reviewer can call read-only tools from a registered MCP
+  server (`local`/`stdio`/`http`/`sse`), configured under repo *Settings →
+  Copilot → MCP servers* (secrets via `COPILOT_MCP_`-prefixed *Agents* secrets;
+  no OAuth for remote servers), plus Agent skills (`.github/skills/*/SKILL.md`).
+  - **Concrete path for Roteiro:** expose the graph tools (`explain`/`search`/
+    `path`/`debt`, ADR-0002) as an **HTTP MCP over the CI-published `graph-latest`
+    artifact** — reachable by the hosted reviewer, no dev-machine loopback, and
+    always the canonical graph. (A `stdio` MCP the reviewer spawns is the
+    alternative, but it must reconstruct the graph in the review environment.)
+  - **Still the default:** the CLI-first `roteiro review` (Stage 17) remains the
+    portable, tool-agnostic path; the MCP wiring is an *optional enhancement* for
+    teams on GitHub Copilot code review, not a dependency. Implementation (host the
+    artifact-backed MCP + register it) is a discrete follow-up, now unblocked.
+  - Sources: GitHub Changelog, *Copilot code review: Agent skills and MCP now
+    generally available* (2026-07-29); GitHub Docs, *Configure MCP servers for
+    your repository*.
 
 ---
 
