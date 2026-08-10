@@ -240,6 +240,15 @@ enum Command {
         /// non-loopback address is warned about (no auth — front with a proxy).
         #[arg(long, value_name = "ADDR")]
         addr: Option<String>,
+        /// Model server (`--models`): terminate TLS in-process using this PEM
+        /// certificate-chain file (paired with `--tls-key`). Overrides
+        /// `[serve] tls_cert`. Set both `--tls-cert` and `--tls-key` for HTTPS,
+        /// or neither for plain HTTP; setting only one is an error.
+        #[arg(long, value_name = "FILE")]
+        tls_cert: Option<String>,
+        /// Model server (`--models`): the PEM private-key file for `--tls-cert`.
+        #[arg(long, value_name = "FILE")]
+        tls_key: Option<String>,
     },
 }
 
@@ -392,9 +401,21 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
         #[cfg(any(feature = "mcp", feature = "serve"))]
-        Command::Serve { models, http, addr } => {
-            run_serve(ingest, &cfg.effective, models, http, addr)
-        }
+        Command::Serve {
+            models,
+            http,
+            addr,
+            tls_cert,
+            tls_key,
+        } => run_serve(
+            ingest,
+            &cfg.effective,
+            models,
+            http,
+            addr,
+            tls_cert,
+            tls_key,
+        ),
     }
 }
 
@@ -2171,9 +2192,11 @@ fn run_serve(
     models: bool,
     http: Option<String>,
     addr: Option<String>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
 ) -> anyhow::Result<()> {
     if models {
-        serve_models_endpoint(cfg, ingest, addr)
+        serve_models_endpoint(cfg, ingest, addr, tls_cert, tls_key)
     } else {
         serve_mcp(ingest, http)
     }
@@ -2214,6 +2237,8 @@ fn serve_models_endpoint(
     cfg: &config::Config,
     ingest: rto_graph::IngestConfig,
     addr: Option<String>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
 ) -> anyhow::Result<()> {
     use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
 
@@ -2287,19 +2312,51 @@ fn serve_models_endpoint(
         .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
     let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
 
+    // TLS precedence mirrors `addr`: CLI flag > `[serve]` config. Both a cert and
+    // a key are required to terminate HTTPS; otherwise plain HTTP.
+    let tls = match (
+        tls_cert.or_else(|| cfg.serve.tls_cert.clone()),
+        tls_key.or_else(|| cfg.serve.tls_key.clone()),
+    ) {
+        (Some(cert), Some(key)) => Some((
+            std::path::PathBuf::from(cert),
+            std::path::PathBuf::from(key),
+        )),
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!(
+                "TLS needs both a certificate and a key — set both `--tls-cert`/`--tls-key` \
+                 (or `[serve] tls_cert`/`tls_key`), or neither for plain HTTP"
+            );
+        }
+        (None, None) => None,
+    };
+    let scheme = if tls.is_some() { "https" } else { "http" };
+
     // Auto-register the graph tools (ADR-0006) unless disabled: build the graph
     // once so the served model can `explain`/`search`/`path`/`debt` this repo.
-    if cfg.serve.tools.unwrap_or(true) {
-        let (repo, mut store, cache) = open_graph()?;
-        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-        let tools = std::sync::Arc::new(GraphToolRegistry::new(store));
-        eprintln!(
-            "roteiro model server listening on http://{socket}/v1 (graph tools on) — serving: {names}"
-        );
-        rto_serve::serve_blocking_with_tools(engine, tools, socket)
+    let tools: Option<std::sync::Arc<dyn rto_serve::ToolRegistry>> =
+        if cfg.serve.tools.unwrap_or(true) {
+            let (repo, mut store, cache) = open_graph()?;
+            build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+            Some(std::sync::Arc::new(GraphToolRegistry::new(store)))
+        } else {
+            None
+        };
+    let tools_note = if tools.is_some() {
+        " (graph tools on)"
     } else {
-        eprintln!("roteiro model server listening on http://{socket}/v1 — serving: {names}");
-        rto_serve::serve_blocking(engine, socket)
+        ""
+    };
+    eprintln!(
+        "roteiro model server listening on {scheme}://{socket}/v1{tools_note} — serving: {names}"
+    );
+
+    match tls {
+        Some((cert, key)) => rto_serve::serve_blocking_tls(engine, tools, socket, &cert, &key),
+        None => match tools {
+            Some(tools) => rto_serve::serve_blocking_with_tools(engine, tools, socket),
+            None => rto_serve::serve_blocking(engine, socket),
+        },
     }
 }
 
@@ -2432,6 +2489,8 @@ fn serve_models_endpoint(
     _cfg: &config::Config,
     _ingest: rto_graph::IngestConfig,
     _addr: Option<String>,
+    _tls_cert: Option<String>,
+    _tls_key: Option<String>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`serve --models` needs the `serve` feature (build with `--features serve`, \

@@ -131,6 +131,13 @@ pub struct ServeConfig {
     /// resident set (proxied by GGUF size) exceeds this. Unset/`0` keeps a single
     /// model resident — set it higher to keep several warm and swap in real time.
     pub memory_budget_mb: Option<u64>,
+    /// PEM certificate-chain file for in-app TLS. Set **both** this and `tls_key`
+    /// and `serve --models` terminates HTTPS itself (needs `--features serve`);
+    /// set **neither** and it serves plain HTTP (front with a proxy for TLS).
+    /// Setting exactly one is a startup error.
+    pub tls_cert: Option<String>,
+    /// PEM private-key file paired with `tls_cert` (PKCS#8 or RSA).
+    pub tls_key: Option<String>,
 }
 
 /// `[infer]` — defaults for the similarity-inference command.
@@ -192,6 +199,8 @@ impl Config {
                 models: over.serve.models.clone().or(self.serve.models.clone()),
                 tools: over.serve.tools.or(self.serve.tools),
                 memory_budget_mb: over.serve.memory_budget_mb.or(self.serve.memory_budget_mb),
+                tls_cert: over.serve.tls_cert.clone().or(self.serve.tls_cert.clone()),
+                tls_key: over.serve.tls_key.clone().or(self.serve.tls_key.clone()),
             },
             debt: DebtConfig {
                 ignore: over.debt.ignore.clone().or(self.debt.ignore.clone()),

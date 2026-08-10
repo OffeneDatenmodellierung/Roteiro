@@ -22,5 +22,7 @@ pub use rto_llama::llama;
 pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
+#[cfg(feature = "tls")]
+pub use server::serve_blocking_tls;
 pub use server::{app, app_with_tools, serve_blocking, serve_blocking_with_tools};
 pub use tools::{ToolDef, ToolRegistry, chat_with_tools};

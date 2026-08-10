@@ -64,7 +64,7 @@ image-vision = ["models", "rto-graph/image-vision"]
 # OpenAI-compatible `/v1` endpoint over installed models (ADR-0006). Pulls
 # `rto-serve` with its llama.cpp engine; also enables the internal llama.cpp uses
 # (`infer --model`, `spec draft`) via `inference-local-models`.
-serve = ["dep:rto-serve", "rto-serve/llama", "inference-local-models"]
+serve = ["dep:rto-serve", "rto-serve/llama", "rto-serve/tls", "inference-local-models"]
 
 [lints]
 workspace = true
