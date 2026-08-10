@@ -34,10 +34,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view graph-latest >/dev/null 2>&1 \
-            || gh release create graph-latest \
-                 --title "Latest graph artifact" \
-                 --notes "Rolling content-addressed graph for \`main\`, updated on each merge. Fetch with: curl -fsSL <this asset URL> | roteiro load -" \
-                 --prerelease \
-                 --target "${GITHUB_SHA}"
-          gh release upload graph-latest roteiro-graph.json --clobber
+          # Recreate the release each run so its tag/target tracks the merged
+          # commit (a plain upload would leave the release pointing at the first
+          # commit while the asset moves — misleading metadata). Deleting the tag
+          # too keeps them in step. The download URL (…/graph-latest/…) is stable.
+          gh release delete graph-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create graph-latest roteiro-graph.json \
+            --title "Latest graph artifact" \
+            --notes "Rolling content-addressed graph for \`main\`, rebuilt on each merge (target: ${GITHUB_SHA}). Fetch with: curl -fsSL <this asset URL> | roteiro load -" \
+            --prerelease \
+            --target "${GITHUB_SHA}"
