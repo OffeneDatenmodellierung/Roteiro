@@ -652,6 +652,7 @@ fn build_graph(
         GraphSource::Committed | GraphSource::Worktree => repo.walk_blobs()?,
     };
     let mut docs = Vec::new();
+    let mut blueprints = Vec::new();
     let mut annotations = Vec::new();
     let mut malformed = Vec::new();
     for blob in blobs {
@@ -680,12 +681,16 @@ fn build_graph(
                     message: format!("{}: cannot parse ADR: {e}", blob.path),
                 }),
             }
+        } else if is_md && rto_spec::is_blueprint(&blob.path, &text) {
+            // House-style blueprints (no frontmatter) author `[[…]]` links like
+            // ADRs; their links are drift-checked against the derived graph too.
+            blueprints.push(rto_spec::parse_blueprint(&blob.path, &text));
         } else {
             annotations.extend(rto_spec::scan_annotations(&blob.path, &text));
         }
     }
 
-    let mut report = rto_spec::run(store, &docs, &annotations)?;
+    let mut report = rto_spec::run(store, &docs, &blueprints, &annotations)?;
     report.violations.extend(malformed);
 
     // Re-apply any persisted import layers (Graphify, lat.md, …) on top of the
@@ -722,8 +727,9 @@ fn run_check(
             eprintln!("drift [{}]: {}", v.kind.label(), v.message);
         }
         println!(
-            "checked {} ADR(s): {} link(s) ok, {} annotation(s) ok, {} violation(s)",
+            "checked {} ADR(s), {} blueprint(s): {} link(s) ok, {} annotation(s) ok, {} violation(s)",
             report.adrs,
+            report.blueprints,
             report.links_ok,
             report.annotations_ok,
             report.violations.len(),

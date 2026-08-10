@@ -139,3 +139,55 @@ fn staged_check_validates_the_index_not_the_working_tree() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn check_validates_blueprint_links_like_adrs() {
+    // A house-style blueprint (no frontmatter, identified by its H1 marker) whose
+    // `[[…]]` link points at a real symbol passes `check`; a dangling link fails,
+    // exactly as ADR links do.
+    let dir = fresh_dir("blueprint");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Widget;\n");
+    write(
+        &dir,
+        "docs/plans/widget.md",
+        "# Widget — Technical Implementation Plan\n\n\
+         ## 1. Design\n\nThe core type is [[src/lib.rs#Widget]].\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    // The link resolves to a real symbol → check passes and counts the blueprint.
+    let ok = roteiro(&dir, &["check", "--committed"]);
+    assert!(
+        ok.status.success(),
+        "blueprint with a resolvable link should pass: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&ok.stdout).contains("1 blueprint(s)"),
+        "check reports the blueprint: {}",
+        String::from_utf8_lossy(&ok.stdout)
+    );
+
+    // Point the blueprint at a symbol that does not exist → drift, check fails.
+    write(
+        &dir,
+        "docs/plans/widget.md",
+        "# Widget — Technical Implementation Plan\n\n\
+         ## 1. Design\n\nGone: [[src/lib.rs#Ghost]].\n",
+    );
+    git(&dir, &["commit", "-qam", "dangle"]);
+    let bad = roteiro(&dir, &["check", "--committed"]);
+    assert!(
+        !bad.status.success(),
+        "a blueprint link to a missing symbol must fail check"
+    );
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("does not resolve"),
+        "reports the dangling blueprint link: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
