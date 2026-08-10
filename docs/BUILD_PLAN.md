@@ -19,9 +19,10 @@ tracking (Stage 15); the spec/blueprint authoring pillar (Stage 13 — Tier 0
 the dependency-aware context cache. Shipped alongside: a curated **low/mid/high
 model matrix** (ADR-0003), a GGUF-arch-dispatching generative loader (Qwen2/Qwen3),
 and **streaming, checksum-verified model downloads** (so the 20 GiB tier is safe
-to pull). What each stage *deferred* is tracked in §5b. **Remaining core:** **Stage
-16** (commit-time correctness gate) → **Stage 14** (v1.0 hardening) → **Stage 17**
-(tool-agnostic agent instructions & review, post-v1.0). **Newly decided
+to pull). What each stage *deferred* is tracked in §5b; smaller non-blocking follow-ups in
+§5d. **Remaining core:** **Stage 14** (v1.0 hardening) is the only stage still
+open — Stage 16 (commit-time gate) and Stage 17 (CLI-first `roteiro review` +
+tool-agnostic AGENTS.md) are ✅ delivered. **Newly decided
 (post-Stage-12, via ADRs — §5c):** **Stage 18** configuration file
 ([ADR-0007](adr/0007-configuration-file.md)) → **Stage 19** local model serving
 ([ADR-0006](adr/0006-local-model-serving.md), llama.cpp-backed, code-aware) →
@@ -684,32 +685,51 @@ follow-ups noted under Stages 2/4 ("making `check` working-tree-aware pairs with
   -a`) makes them identical. A precise index-aware overlay (`sync_index`) is the
   planned follow-up.
 
-### Stage 14 — v1.0 hardening  → **v1.0.0**
+### Stage 14 — v1.0 hardening  → **v1.0.0** 🚧 *in progress*
 **Goal:** the merged graph is the canonical source; ship stable (completes the
 [Stage 10](#stage-10--ci-canonical-artifacts--v010x-artifact-format-delivered) deferral).
-- **CI artifact publish/fetch:** CI publishes the content-addressed graph
-  artifact on merge; `post-checkout`/`post-merge` hooks fetch it (offline
-  fallback: rebuild). Local runs stay deterministic previews.
-- **Language breadth:** TypeScript/JavaScript and Python tree-sitter extractors
-  (Rust shipped in Stage 3).
-- **Deploy:** render docs in CI and publish the static output to Cloudflare
-  (Direct Upload + `CLOUDFLARE_API_TOKEN`/`ACCOUNT_ID` secrets), removing the
-  Rust-in-Pages build cost; or keep the Git-integration build.
-- **Freeze & polish:** `--json` schema frozen and versioned; performance targets
-  met; full docs; `roteiro check` authored-and-checks ADR-0001 itself.
-- **Per-crate crates.io READMEs:** every published crate (`rto-graph`,
-  `rto-spec`, `rto-render`, `roteiro`) ships a `README.md` wired via
-  `readme = "README.md"` in its `Cargo.toml`, stating the crate's role in the
-  workspace and linking back to <https://roteiro.dev> and the repo. So the
-  crates.io landing page is not empty and points to the canonical docs.
-- **Perf — subtree pruning (from the codegraph comparison):** `sync` walks the
-  whole `HEAD` tree today; instead **diff the last-synced tree oid against HEAD
-  and prune subtrees whose oid is unchanged** — the git-native, content-hash
-  (not mtime) version of codegraph's "skip unchanged subtrees," for large-repo
-  sync latency.
+- **Language breadth — ✅ delivered (exceeds target).** Not just TS/JS and
+  Python: a generic tree-sitter *tags* extractor covers **15 languages + SQL**
+  (see the Stage 3 delivery note). Rust keeps its dedicated walker.
+- **Obsidian export quality — ☐ TODO.** The vault renderer today emits one bare
+  note per node (frontmatter `key`/`kind`/`path` + incoming/outgoing wikilinks)
+  and nothing else — **no index/dashboard, no captured `meta.content` (doc
+  comments, prose, PDF/image text), no ADR status/decision text, no tags for the
+  graph view.** Upgrade it to a genuinely useful knowledge base: a **home/index
+  note** (scanned crates, node/edge counts by kind, provenance breakdown, ADR
+  list + statuses, intent-debt summary, entry-point MOCs by kind); **surface
+  `meta.content`** so notes carry the knowledge/content base; **status + purpose**
+  (ADR status in frontmatter, a purpose line from content); and **tags**
+  (`kind/…`, `provenance/…`) so Obsidian's built-in graph view is colourable and
+  filterable (optionally a curated `.canvas`). DoD: opening the vault gives a
+  clear overview of the scanned project(s), their status and purpose, a browsable
+  visual graph, and the content base — not a disconnected node dump.
+- **Per-crate crates.io READMEs — ☐ TODO.** Every published crate (`rto-graph`,
+  `rto-spec`, `rto-render`, `rto-serve`, `rto-llama`, `roteiro`) ships a
+  `README.md` wired via `readme = "README.md"` in its `Cargo.toml`, stating the
+  crate's role in the workspace and linking back to <https://roteiro.dev> and the
+  repo, so the crates.io landing page is not empty.
+- **Perf — subtree pruning — ☐ TODO** (from the codegraph comparison): `sync`
+  walks the whole `HEAD` tree today; instead **diff the last-synced tree oid
+  against HEAD and prune subtrees whose oid is unchanged** — the git-native,
+  content-hash (not mtime) version of codegraph's "skip unchanged subtrees," for
+  large-repo sync latency.
+- **`--json` schema freeze — ☐ TODO.** Declare and version the `--json` output
+  schemas (they already carry a `schema` tag, e.g. `roteiro.review/v1`) as stable
+  for v1.0, documented, with a compatibility policy.
+- **CI artifact publish/fetch — ☐ TODO.** CI publishes the content-addressed
+  graph artifact on merge; `post-checkout`/`post-merge` hooks fetch it (offline
+  fallback: rebuild). Local runs stay deterministic previews. (The artifact
+  *format* shipped in Stage 10; this is publish + hook-fetch.)
+- **Docs deploy — ☐ TODO.** Render docs in CI and publish the static output to
+  Cloudflare (Direct Upload + `CLOUDFLARE_API_TOKEN`/`ACCOUNT_ID` secrets),
+  removing the Rust-in-Pages build cost; or keep the Git-integration build.
+- **`roteiro check` self-governs ADR-0001 — ☐ TODO.** ADR-0001 links its own
+  authored intent into the code so `check` validates the design against the
+  implementation.
 - **DoD:** clean clone → `init` → hook fetches the CI artifact → `check` green,
-  offline; docs/vault reproducible byte-for-byte in CI; `--json` schema declared
-  stable.
+  offline; docs/vault reproducible byte-for-byte in CI; the Obsidian vault gives a
+  useful project overview; `--json` schema declared stable.
 
 ### Stage 15 — Intent-debt tracking (TODOs, stubs, deferred work)  → **delivered** *(independent; low-risk)*
 **Goal:** deterministically detect, log, and track **intent debt** — the markers
@@ -759,7 +779,7 @@ and footnotes.
   feature's own API docs still self-report a handful of markers (they name the
   categories); the ignore directives are the intended remedy where it matters.
 
-### Stage 17 — Agent instructions & context-aware review (tool-agnostic)  → **post-v1.0** *(execution order: after Stage 14, the last stage)*
+### Stage 17 — Agent instructions & context-aware review (tool-agnostic)  → ✅ *delivered (CLI-first `roteiro review` + tool-agnostic AGENTS.md/checklist; MCP-for-review recorded as deferred)*
 **Goal:** make every calling agent — Copilot code review, Claude Code, Cursor,
 cloud agents, future contributors — Roteiro-aware, via **tool-agnostic** files
 rather than one vendor's format, so the same standards drive review and
@@ -940,6 +960,56 @@ serving), and broaden the opt-in model catalogue.
   `model list`.
 - **DoD:** the inference-core migration path is recorded (ADR-0003 amendment) with
   at least generation moved or scheduled; the coding/reasoning entries pull and run.
+
+---
+
+## 5d. Ideas & deferred follow-ups (post-v1.0 backlog)
+
+Small, non-blocking refinements surfaced while delivering the stages above.
+Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
+
+**Extraction & graph**
+- **Scope-aware call resolver** — cross-file `calls` resolve by *unambiguous
+  simple name* today; resolve import paths and `Self`/receiver types to link
+  ambiguous callees (Stage 3 follow-up).
+- **Per-language `imports` edges** — the generic tags extractor emits
+  `defines`/`contains`/`calls` but not `imports` (Rust has them); grammar tags
+  queries don't surface imports uniformly.
+- **Untracked-file overlay** — `sync_worktree` / worktree `check` / `review` do
+  not overlay brand-new *untracked* files; needs a gitignore-aware dirwalk.
+
+**Commit gate & review**
+- **`sync_index` (index-aware gate)** — the pre-commit `check`/`review` validate
+  the *working tree*, not the staged *index*; an index-aware overlay would gate
+  exactly what is committed (from PR #109 review).
+- **Range review** — `roteiro review` covers the working-tree change; add a
+  branch-vs-`main` (commit-range) mode.
+
+**Authoring & importers**
+- **Blueprint parsing** — distinct from ADRs; deferred within Stage 4.
+- **`@lat:` backlinks** — import lat.md source-code backlink annotations as
+  `authored` edges (planned fast-follow; `resolve_lat_ref` already resolves them).
+
+**Serving & models**
+- **Per-model concurrency** — the llama.cpp engine serialises all requests
+  through one mutex; per-model parallelism / Metal batching is a later
+  enhancement (the memory-bounded LRU residency is delivered).
+- **In-app TLS (rustls)** for `serve`, as an alternative to proxy termination.
+- **Audio ingestion** — an inference-ingestion modality beyond text/PDF/image.
+
+**Config & hooks**
+- **Respect `core.hooksPath`** when installing managed hooks.
+- **Unwired config sections** — `[debt]` ignore-paths and a `[paths]` section
+  (ADR-0007 follow-ups).
+
+**Detection quality**
+- **Markers inside comments only** — restrict soft deferral phrases (`for now`,
+  `later`, …) to comments to cut prose false positives (Stage 15 follow-up).
+
+**Agent reviews**
+- **MCP-for-review** — feasibility recorded and deferred: a *hosted* GitHub
+  Copilot reviewer reaching a *self-hosted* MCP is unverified; the CLI-first
+  `roteiro review` is the portable path (Stage 17).
 
 ---
 
