@@ -553,7 +553,7 @@ mod tests {
             "the scaffold's link must resolve to the real symbol: {:?}",
             doc.links,
         );
-        let report = crate::run(&mut store, std::slice::from_ref(&doc), &[]).expect("check");
+        let report = crate::run(&mut store, std::slice::from_ref(&doc), &[], &[]).expect("check");
         assert_eq!(
             report.violations.len(),
             0,

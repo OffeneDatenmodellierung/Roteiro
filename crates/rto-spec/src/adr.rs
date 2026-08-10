@@ -246,8 +246,9 @@ fn split_frontmatter(text: &str) -> (&str, &str) {
     }
 }
 
-/// The text of the first `# ` heading in `body`, if any.
-fn first_h1(body: &str) -> Option<String> {
+/// The text of the first `# ` heading in `body`, if any. Shared with
+/// [`crate::blueprint`] for title extraction and blueprint detection.
+pub(crate) fn first_h1(body: &str) -> Option<String> {
     body.lines()
         .find_map(|l| l.strip_prefix("# ").map(|h| h.trim().to_owned()))
 }
@@ -277,8 +278,9 @@ fn strip_quotes(s: &str) -> &str {
 }
 
 /// Resolve a wiki-link's inner text to a graph node key: `path#Symbol` →
-/// `sym:<lang>:<path>#<Symbol>`, or `path` → `file:<path>`.
-fn resolve_target(raw: &str) -> Option<String> {
+/// `sym:<lang>:<path>#<Symbol>`, or `path` → `file:<path>`. Shared with
+/// [`crate::blueprint`], whose links resolve the same way.
+pub(crate) fn resolve_target(raw: &str) -> Option<String> {
     let (path, symbol) = match raw.split_once('#') {
         Some((p, s)) => (p.trim(), Some(s.trim())),
         None => (raw.trim(), None),

@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::adr::{AdrDoc, AdrStatus};
 use crate::annotate::Annotation;
+use crate::blueprint::BlueprintDoc;
 
 /// The category of an authored-layer drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,6 +56,8 @@ pub struct Violation {
 pub struct CheckReport {
     /// Number of ADRs parsed and applied.
     pub adrs: usize,
+    /// Number of blueprints parsed and applied.
+    pub blueprints: usize,
     /// Authored `[[…]]` links that resolved and became edges.
     pub links_ok: usize,
     /// `@rto:` annotations that resolved to an active ADR.
@@ -80,38 +83,46 @@ impl CheckReport {
 pub fn run(
     store: &mut Store,
     docs: &[AdrDoc],
+    blueprints: &[BlueprintDoc],
     annotations: &[Annotation],
 ) -> Result<CheckReport, StoreError> {
-    // 1. Materialise ADR/section nodes so links and annotations can reference
-    //    them (and so `@rto:` targets can be looked up by key).
+    // 1. Materialise ADR/blueprint section nodes so links and annotations can
+    //    reference them (and so `@rto:` targets can be looked up by key).
     for doc in docs {
         store.apply_factset(&doc.facts())?;
+    }
+    for bp in blueprints {
+        store.apply_factset(&bp.facts())?;
     }
 
     let mut report = CheckReport {
         adrs: docs.len(),
+        blueprints: blueprints.len(),
         ..CheckReport::default()
     };
 
-    // 2. Validate ADR `[[…]]` links against the code graph.
-    for doc in docs {
-        for link in &doc.links {
-            if store.get_node(&link.target_key)?.is_some() {
-                store.insert_edge(&Edge::authored(
-                    link.from.clone(),
-                    link.target_key.clone(),
-                    EdgeKind::References,
-                ))?;
-                report.links_ok += 1;
-            } else {
-                report.violations.push(Violation {
-                    kind: ViolationKind::BrokenLink,
-                    message: format!(
-                        "{}: authored link [[{}]] does not resolve ({} not found in graph)",
-                        link.from, link.raw, link.target_key
-                    ),
-                });
-            }
+    // 2. Validate ADR and blueprint `[[…]]` links against the code graph. Both
+    //    author `references` edges into real symbols/files and drift the same way.
+    let links = docs
+        .iter()
+        .flat_map(|d| &d.links)
+        .chain(blueprints.iter().flat_map(|b| &b.links));
+    for link in links {
+        if store.get_node(&link.target_key)?.is_some() {
+            store.insert_edge(&Edge::authored(
+                link.from.clone(),
+                link.target_key.clone(),
+                EdgeKind::References,
+            ))?;
+            report.links_ok += 1;
+        } else {
+            report.violations.push(Violation {
+                kind: ViolationKind::BrokenLink,
+                message: format!(
+                    "{}: authored link [[{}]] does not resolve ({} not found in graph)",
+                    link.from, link.raw, link.target_key
+                ),
+            });
         }
     }
 
@@ -190,7 +201,7 @@ mod tests {
         let doc = parse_adr("docs/adr/0001.md", adr).expect("parse");
         let anns = scan_annotations("src/store.rs", "//! @rto:0001\n");
 
-        let report = run(&mut store, &[doc], &anns).expect("run");
+        let report = run(&mut store, &[doc], &[], &anns).expect("run");
         assert!(!report.has_violations(), "{:?}", report.violations);
         assert_eq!(report.links_ok, 1);
         assert_eq!(report.annotations_ok, 1);
@@ -207,7 +218,7 @@ mod tests {
             "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n## Design\n\n[[src/store.rs#Ghost]]\n";
         let doc = parse_adr("docs/adr/0001.md", adr).expect("parse");
 
-        let report = run(&mut store, &[doc], &[]).expect("run");
+        let report = run(&mut store, &[doc], &[], &[]).expect("run");
         assert_eq!(report.violations.len(), 1);
         assert_eq!(report.violations[0].kind, ViolationKind::BrokenLink);
     }
@@ -221,7 +232,7 @@ mod tests {
         let doc = parse_adr("docs/adr/0002.md", superseded).expect("parse");
         let anns = scan_annotations("src/store.rs", "// @rto:0002\n// @rto:9999\n");
 
-        let report = run(&mut store, &[doc], &anns).expect("run");
+        let report = run(&mut store, &[doc], &[], &anns).expect("run");
         let kinds: Vec<_> = report.violations.iter().map(|v| v.kind).collect();
         assert!(kinds.contains(&ViolationKind::InactiveAdr));
         assert!(kinds.contains(&ViolationKind::UnknownAdr));
