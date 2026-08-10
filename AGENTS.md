@@ -49,8 +49,9 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny check` and `cargo audit` — clean. **Every new dependency's licence
-  must be on the allow-list** (MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception,
-  BSD-2/3-Clause, ISC, Zlib, Unicode-3.0). Verify each grammar/model dep.
+  must be on the allow-list** — the exact SPDX ids in `deny.toml`: MIT,
+  Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC,
+  Zlib, Unicode-3.0. Verify each grammar/model dep.
 - **Offline by default.** The default build needs no network and no model. Keep
   heavy dependencies (llama.cpp, GGUF models, PDF/OCR/vision, the model server)
   behind **feature flags** so the default build stays small, and never touch the
