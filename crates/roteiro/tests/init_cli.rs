@@ -56,6 +56,9 @@ fn init_installs_hooks_and_checkout_refreshes_graph() {
     let bindir = Path::new(BIN).parent().unwrap().to_str().unwrap();
     let dir = fresh_dir("hooks");
     git(&dir, None, &["init", "-q"]);
+    // Pin the hooks path so an ambient global `core.hooksPath` can't send the
+    // managed hooks elsewhere and break the `.git/hooks` assertions below.
+    git(&dir, None, &["config", "core.hooksPath", ".git/hooks"]);
     write(
         &dir,
         "src/main.rs",

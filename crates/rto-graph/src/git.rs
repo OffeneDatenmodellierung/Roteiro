@@ -64,7 +64,10 @@ impl Repo {
     /// wherever git expects them.
     #[must_use]
     pub fn hooks_dir(&self) -> std::path::PathBuf {
-        if let Some(configured) = self.inner.config_snapshot().string("core.hooksPath") {
+        let configured = self.inner.config_snapshot().string("core.hooksPath");
+        // An empty `core.hooksPath` (e.g. `git -c core.hooksPath=`) means "unset".
+        let configured = configured.filter(|c| !AsRef::<[u8]>::as_ref(c).is_empty());
+        if let Some(configured) = configured {
             let bytes: &[u8] = configured.as_ref();
             let path = std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
             if path.is_absolute() {
