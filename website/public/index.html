@@ -116,15 +116,18 @@ byte-for-byte from git alone, with no external database to keep in sync. It work
 with your repository, not beside it.</p>
 
 <div class="note"><strong>How does a team stay in sync?</strong> The graph store lives
-under <code>.git/roteiro/</code> and is <em>never committed</em> — it's a local,
-reproducible <em>cache</em>, like <code>target/</code>. Nothing team-critical lives
-only there: the graph is a pure function of the <strong>committed</strong> code, ADRs and
-<code>@rto:</code> annotations, which git already shares on push/pull. So syncing the
-graph <em>is</em> syncing git — everyone at the same commit re-derives the identical
-graph (the hooks do it on pull), or fetches the CI-published artifact to skip even
-that (and to get the <span class="pill inferred">inferred</span> layer without running
-models locally). The graph travels <strong>with</strong> git, not beside it — that's why the
-SQLite file isn't committed (it would bloat history and conflict on merge).</div>
+in git's per-worktree directory (<code>.git/roteiro/</code> in a normal clone; a
+linked worktree resolves its own git dir) and is <em>never committed</em> — it's a
+local, reproducible <em>cache</em>, like <code>target/</code>. Nothing team-critical
+lives only there: the <span class="pill derived">derived</span> and
+<span class="pill authored">authored</span> layers are a pure function of the
+<strong>committed</strong> code, ADRs and <code>@rto:</code> annotations, which git
+already shares on push/pull, so everyone at the same commit re-derives them
+identically (the hooks do it on pull). The <span class="pill inferred">inferred</span>
+layer needs models, so it's shared the other way — via the CI-published artifact,
+which a teammate fetches to get identical inferred edges without running inference.
+Either way the graph travels <strong>with</strong> git, not beside it — the SQLite file
+isn't committed (it would bloat history and conflict on merge).</div>
 
 <h2 id="build">Install &amp; build</h2>
 
