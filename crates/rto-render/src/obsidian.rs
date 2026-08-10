@@ -1,7 +1,8 @@
 //! The Obsidian-vault renderer: each graph node becomes a markdown note whose
 //! edges are `[[wikilinks]]`, so the provenance-tagged graph is browsable in
-//! Obsidian's graph view. Notes carry frontmatter `tags` (`roteiro/kind/<kind>`,
-//! provenance) so the graph is colourable/filterable, surface the captured
+//! Obsidian's graph view. Notes carry frontmatter `tags` (`roteiro/kind/*`,
+//! `roteiro/lang/*`, `roteiro/status/*`) so the graph is colourable/filterable —
+//! edge provenance is shown per-link in the body — surface the captured
 //! `meta.content` (doc comments, prose, PDF/image text) as the knowledge base,
 //! and show an ADR's status. A generated `_Home` note is the overview: what was
 //! scanned, counts by kind, provenance breakdown, ADR statuses, and intent-debt.

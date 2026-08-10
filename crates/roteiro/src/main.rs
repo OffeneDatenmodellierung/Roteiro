@@ -2413,18 +2413,19 @@ fn vault_summary(
     let mut node_counts: Vec<(String, usize)> = by_kind.into_iter().collect();
     node_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    // Edge counts per provenance (only non-zero classes).
-    let edge_provenance = [
+    // Edge counts per provenance (only non-zero classes). Store errors propagate
+    // rather than silently reporting a zero count.
+    let mut edge_provenance = Vec::new();
+    for p in [
         Provenance::Derived,
         Provenance::Authored,
         Provenance::Inferred,
-    ]
-    .into_iter()
-    .filter_map(|p| {
-        let n = store.edges_by_provenance(p).map_or(0, |e| e.len());
-        (n > 0).then(|| (p.as_str().to_owned(), n))
-    })
-    .collect();
+    ] {
+        let n = store.edges_by_provenance(p)?.len();
+        if n > 0 {
+            edge_provenance.push((p.as_str().to_owned(), n));
+        }
+    }
 
     // ADRs with their lifecycle status.
     let adrs = store
@@ -2448,8 +2449,8 @@ fn vault_summary(
 
     Ok(rto_render::VaultSummary {
         project,
-        total_nodes: usize::try_from(store.node_count()?).unwrap_or(usize::MAX),
-        total_edges: usize::try_from(store.edge_count()?).unwrap_or(usize::MAX),
+        total_nodes: usize::try_from(store.node_count()?)?,
+        total_edges: usize::try_from(store.edge_count()?)?,
         node_counts,
         edge_provenance,
         adrs,
