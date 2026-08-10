@@ -18,9 +18,7 @@ keeps the (slow) Rust build off Cloudflare's build infra. The deploy job is
 
 1. Add repo **secrets**: `CLOUDFLARE_API_TOKEN` (a Pages-edit token) and
    `CLOUDFLARE_ACCOUNT_ID`.
-2. **Pin** `cloudflare/wrangler-action` to a commit SHA in the workflow (repo
-   convention; it is currently on a version tag with a `TODO`).
-3. **Disable** the Cloudflare Pages *Git integration* build (below) so the site
+2. **Disable** the Cloudflare Pages *Git integration* build (below) so the site
    is not deployed twice.
 
 ### B. Cloudflare Pages Git integration (current)
