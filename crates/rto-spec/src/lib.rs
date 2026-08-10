@@ -8,6 +8,7 @@
 
 mod adr;
 mod annotate;
+mod blueprint;
 mod check;
 mod import;
 mod lat;
@@ -16,9 +17,13 @@ mod text;
 
 pub use adr::{AdrDoc, AdrMeta, AdrStatus, ParseError, Section, WikiLink, parse_adr};
 pub use annotate::{Annotation, scan_annotations};
+pub use blueprint::{BlueprintDoc, is_blueprint, parse_blueprint};
 pub use check::{CheckReport, Violation, ViolationKind, run};
 pub use import::{GRAPHIFY_REF, GraphifyImport, ImportError, ImportReport, import_graphify};
-pub use lat::{LAT_REF, LatImport, LatReport, import_lat, resolve_lat_ref};
+pub use lat::{
+    LAT_REF, LatAnnotation, LatImport, LatReport, import_lat, import_lat_backlinks,
+    resolve_lat_ref, scan_lat_annotations,
+};
 pub use spec::{
     SPEC_SCHEMA, SpecContext, SymbolContext, apply_drafts, context, draft_prompt, draft_targets,
     scaffold_adr, scaffold_blueprint,
