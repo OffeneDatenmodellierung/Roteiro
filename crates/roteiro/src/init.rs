@@ -1,5 +1,6 @@
-//! `roteiro init`: scaffold the graph and install the automation that keeps it
-//! fresh — `post-checkout` / `post-merge` git hooks and an `AGENTS.md` snippet.
+//! `roteiro init`: scaffold the graph and install the automation around it — the
+//! `post-checkout` / `post-merge` / `post-commit` freshness hooks, a `pre-commit`
+//! drift gate (Stage 16), and an `AGENTS.md` snippet.
 //!
 //! Everything written here is *managed*: each artifact carries a marker so a
 //! re-run updates Roteiro's own content in place and never clobbers a user's
@@ -14,19 +15,43 @@ const HOOK_MARKER: &str = "roteiro-managed";
 /// Marker identifying the Roteiro block in `AGENTS.md`.
 const AGENTS_MARKER: &str = "<!-- roteiro-managed -->";
 
-/// The git hooks Roteiro installs to refresh the graph after `HEAD` moves.
-pub const MANAGED_HOOKS: &[&str] = &["post-checkout", "post-merge"];
+/// The git hooks Roteiro installs. `post-checkout`/`post-merge`/`post-commit`
+/// keep the graph fresh after `HEAD` moves; `pre-commit` gates a commit that
+/// introduces authored-vs-code drift (Stage 16).
+pub const MANAGED_HOOKS: &[&str] = &["post-checkout", "post-merge", "post-commit", "pre-commit"];
 
-/// The content of a managed hook. Guards on `roteiro` being installed and never
-/// fails the git operation, so it is safe on machines without the tool.
+/// The content of a managed hook `name`. Every hook guards on `roteiro` being
+/// installed, so it is safe on machines without the tool.
+///
+/// `pre-commit` runs the **worktree-aware** `check` and blocks the commit on
+/// drift (non-zero exit); `git commit --no-verify` skips it. The freshness hooks
+/// run `sync --committed` and never fail the git operation.
 #[must_use]
-pub fn hook_script() -> String {
-    format!(
+pub fn hook_script(name: &str) -> String {
+    let header = format!(
         "#!/bin/sh\n\
-         # {HOOK_MARKER}: keep the Roteiro knowledge graph fresh after HEAD changes.\n\
-         # Delete this file to disable. Re-run `roteiro init` to reinstall.\n\
-         command -v roteiro >/dev/null 2>&1 && roteiro sync --committed >/dev/null 2>&1 || true\n"
-    )
+         # {HOOK_MARKER}: Roteiro knowledge-graph automation.\n\
+         # Delete this file to disable. Re-run `roteiro init` to reinstall.\n"
+    );
+    if name == "pre-commit" {
+        format!(
+            "{header}\
+             # Block a commit that introduces ADR/annotation drift. Skip once with\n\
+             # `git commit --no-verify`.\n\
+             command -v roteiro >/dev/null 2>&1 || exit 0\n\
+             roteiro check || {{\n\
+             \techo 'roteiro: commit blocked by knowledge-graph drift (see above); \
+             use `git commit --no-verify` to override.' >&2\n\
+             \texit 1\n\
+             }}\n"
+        )
+    } else {
+        format!(
+            "{header}\
+             # Keep the Roteiro knowledge graph fresh after HEAD changes.\n\
+             command -v roteiro >/dev/null 2>&1 && roteiro sync --committed >/dev/null 2>&1 || true\n"
+        )
+    }
 }
 
 /// Whether `content` is a Roteiro-managed hook (safe to overwrite).
@@ -60,7 +85,7 @@ pub fn install_hook(hooks_dir: &Path, name: &str) -> io::Result<HookOutcome> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => HookOutcome::Installed,
         Err(e) => return Err(e),
     };
-    fs::write(&path, hook_script())?;
+    fs::write(&path, hook_script(name))?;
     set_executable(&path)?;
     Ok(outcome)
 }
@@ -94,7 +119,9 @@ pub fn agents_section() -> String {
          Keys: `sym:<lang>:<path>#<Name>`, `file:<path>`, `adr:<id>`.\n\
          - `roteiro query --kind <kind> --json` — list nodes of a kind (`fn`, `adr`, …).\n\
          - `roteiro sync` — refresh the graph (git hooks do this automatically).\n\
-         - `roteiro check` — validate ADR/annotation drift.\n\
+         - `roteiro check` — validate ADR/annotation drift in the working tree.\n\
+         Run it before finishing a change; a managed `pre-commit` hook also runs\n\
+         it and blocks a drift-introducing commit (`git commit --no-verify` skips).\n\
          {AGENTS_MARKER}\n"
     )
 }
@@ -163,11 +190,27 @@ mod tests {
 
     #[test]
     fn hook_is_recognisable_and_self_guarding() {
-        let s = hook_script();
+        let s = hook_script("post-checkout");
         assert!(is_managed_hook(&s));
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains("command -v roteiro"));
+        assert!(
+            s.contains("roteiro sync --committed"),
+            "freshness hook syncs"
+        );
         assert!(!is_managed_hook("#!/bin/sh\necho other\n"));
+    }
+
+    #[test]
+    fn pre_commit_hook_gates_on_check_and_is_skippable() {
+        let s = hook_script("pre-commit");
+        assert!(is_managed_hook(&s));
+        assert!(s.contains("command -v roteiro"), "guards on install");
+        assert!(s.contains("roteiro check"), "runs the worktree-aware check");
+        assert!(s.contains("exit 1"), "blocks the commit on drift");
+        assert!(s.contains("--no-verify"), "documents the escape hatch");
+        // Distinct from the freshness hooks — it must not just sync.
+        assert!(!s.contains("roteiro sync"));
     }
 
     #[test]
