@@ -8,13 +8,13 @@
 //! and rebuilt in a single transaction — a deliberately simple DB-write model
 //! for this stage; incremental DB updates can come later.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::cache::{CacheError, ObjectCache};
 use crate::extract::Extractor;
 use crate::git::{GitError, Repo};
 use crate::store::StoreError;
-use crate::{Edge, EdgeKind, FactSet, NodeKind, Store};
+use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Store};
 
 /// Errors raised while syncing.
 #[derive(Debug, thiserror::Error)]
@@ -79,11 +79,24 @@ pub fn sync(
         });
     }
 
+    // The extractor environment (installed image models + ingestion toggles) is
+    // part of extraction's identity. Recorded with the tree so the next sync can
+    // tell whether reusing the previous facts (the incremental path) is sound.
+    let env = format!("{:016x}", extractor.env_tag());
+
+    // Fast path: if the last sync was a committed one at a known tree with the
+    // same env, update only the paths that changed. Falls back to a full
+    // re-extraction on any doubt (no prior tree, env changed, diff unavailable).
+    if let Some(report) = try_incremental(store, repo, cache, extractor, &tree, &env)? {
+        return Ok(report);
+    }
+
     let committed = extract_committed(repo, cache, extractor)?;
     let total = committed.by_path.len();
     let mut assembled = flatten(committed.by_path);
     resolve_calls(&mut assembled);
     store.reconcile(&assembled, Some(&tree))?;
+    store.set_sync_env(&env)?;
 
     Ok(SyncReport {
         no_op: false,
@@ -95,6 +108,120 @@ pub fn sync(
         edges: store.edge_count()?,
         tree,
     })
+}
+
+/// Attempt an incremental committed sync from the last-synced tree to `head_tree`.
+/// Returns `Ok(Some(report))` when it ran, `Ok(None)` when the fast path is not
+/// eligible (the caller then does a full sync).
+///
+/// It is sound because it produces the exact same **derived-only** graph a full
+/// sync would: it reconstructs the derived subgraph from the store (identified by
+/// the `Derived` provenance tag — unchanged paths' facts are a deterministic
+/// function of their unchanged blob content, so they equal a fresh extraction),
+/// drops the changed/deleted paths, extracts only the changed blobs, re-resolves
+/// cross-file `calls` globally, and feeds the result to the same [`Store::reconcile`]
+/// the full path uses. `check`/`reapply_imports` re-layer the authored/import
+/// facts afterward exactly as before — this only accelerates the derived layer.
+fn try_incremental(
+    store: &mut Store,
+    repo: &Repo,
+    cache: &ObjectCache,
+    extractor: &dyn Extractor,
+    head_tree: &str,
+    env: &str,
+) -> Result<Option<SyncReport>, SyncError> {
+    // Eligibility: a prior committed tree (a plain oid — worktree/index states
+    // carry a `:`-delimited marker), extracted under the same environment.
+    let Some(prior_tree) = store.sync_state()? else {
+        return Ok(None);
+    };
+    if prior_tree.contains(':') || store.sync_env()?.as_deref() != Some(env) {
+        return Ok(None);
+    }
+    // The prior tree object may have been pruned (gc); on any diff failure, fall
+    // back to the full path rather than guessing.
+    let Ok(diff) = repo.diff_trees(&prior_tree, head_tree) else {
+        return Ok(None);
+    };
+
+    // Reconstruct the derived subgraph from the store: every derived node, and
+    // every derived edge except `calls` (globally re-derived below from the full
+    // function set, since a changed file can flip name-resolution elsewhere).
+    let mut nodes: Vec<Node> = store.nodes_by_provenance(Provenance::Derived)?;
+    let mut edges: Vec<Edge> = store
+        .edges_by_provenance(Provenance::Derived)?
+        .into_iter()
+        .filter(|e| e.kind != EdgeKind::Calls)
+        .collect();
+
+    // Drop the changed and deleted paths' derived facts (their nodes, and any edge
+    // incident to them — per-blob derived edges are intra-file, so this is exact).
+    let touched: BTreeSet<&str> = diff
+        .changed
+        .iter()
+        .map(|b| b.path.as_str())
+        .chain(diff.deleted.iter().map(String::as_str))
+        .collect();
+    let dropped: HashSet<String> = nodes
+        .iter()
+        .filter(|n| n.path.as_deref().is_some_and(|p| touched.contains(p)))
+        .map(|n| n.key.clone())
+        .collect();
+    nodes.retain(|n| !dropped.contains(&n.key));
+    edges.retain(|e| !dropped.contains(&e.src) && !dropped.contains(&e.dst));
+
+    // Extract the changed blobs (cache-aware) and add their derived facts.
+    let env_tag = extractor.env_tag();
+    let mut extracted = 0usize;
+    let mut cached = 0usize;
+    for blob in &diff.changed {
+        let key = cache_key(&blob.path, &blob.oid, env_tag);
+        let facts = if let Some(facts) = cache.get(&key)? {
+            cached += 1;
+            facts
+        } else {
+            let bytes = repo.read_blob(&blob.oid)?;
+            let facts = extractor.extract(&blob.path, &blob.oid, &bytes);
+            cache.put(&key, &facts)?;
+            extracted += 1;
+            facts
+        };
+        nodes.extend(facts.nodes);
+        edges.extend(facts.edges);
+    }
+
+    // Prune orphaned import-target nodes — a path-less derived node (e.g.
+    // `import:rust:foo`) that no surviving edge references. A full sync emits it
+    // only while some file imports it, so dropping the now-unreferenced ones keeps
+    // the two paths identical.
+    let referenced: HashSet<&str> = edges
+        .iter()
+        .flat_map(|e| [e.src.as_str(), e.dst.as_str()])
+        .collect();
+    nodes.retain(|n| n.path.is_some() || referenced.contains(n.key.as_str()));
+
+    // Global call resolution over the full (reconstructed + changed) function set,
+    // then reconcile to derived-only — identical to what the full path produces.
+    let mut assembled = FactSet { nodes, edges };
+    resolve_calls(&mut assembled);
+    let total = assembled
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::File)
+        .count();
+    store.reconcile(&assembled, Some(head_tree))?;
+    store.set_sync_env(env)?;
+
+    Ok(Some(SyncReport {
+        no_op: false,
+        blobs_total: total,
+        blobs_extracted: extracted,
+        blobs_cached: cached,
+        blobs_dirty: 0,
+        nodes: store.node_count()?,
+        edges: store.edge_count()?,
+        tree: head_tree.to_owned(),
+    }))
 }
 
 /// Sync `store` to the working tree: the committed `HEAD` state with uncommitted

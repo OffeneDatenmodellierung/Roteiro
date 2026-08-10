@@ -115,6 +115,18 @@ ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'derived'
 CREATE INDEX idx_nodes_provenance ON nodes(provenance);
 ";
 
+/// Migration 7: record the extractor environment alongside the synced tree.
+/// Extraction output depends on more than (path, bytes) — the installed image
+/// models and ingestion toggles (see `Extractor::env_tag`). The incremental
+/// committed `sync` reconstructs unchanged paths' facts from the store (extracted
+/// under the *previous* env), so it is only sound when the env is unchanged;
+/// otherwise it must fall back to a full re-extraction. Persisting the env lets
+/// `sync` detect that. Nullable: a legacy row (or a non-committed sync) leaves it
+/// `NULL`, which reads as \"unknown\" and forces the safe full path.
+const M0007_SYNC_ENV: &str = "
+ALTER TABLE sync_state ADD COLUMN env TEXT;
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -140,6 +152,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         sql: M0006_NODE_PROVENANCE,
+    },
+    Migration {
+        version: 7,
+        sql: M0007_SYNC_ENV,
     },
 ];
 
