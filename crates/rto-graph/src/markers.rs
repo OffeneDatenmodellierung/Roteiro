@@ -115,10 +115,13 @@ const RULES: &[(&str, MarkerCategory, Mode)] = &[
     ("tbd", MarkerCategory::Deferred, Mode::Phrase),
 ];
 
-/// Maximum stored marker text length (in characters), to keep nodes small.
+/// Characters of marker text kept, to keep nodes small. On truncation an ellipsis
+/// is appended, so a stored value is at most this many characters plus the `…`.
 const MAX_TEXT: usize = 200;
 
-/// Maximum marker *node name* length (in characters) — a compact label.
+/// Characters of the marker *node name* kept — a compact label. As with
+/// [`MAX_TEXT`], a truncated name carries a trailing `…`, so it is at most this
+/// many characters plus one.
 const MAX_NAME: usize = 80;
 
 /// Inline opt-out placed on a line to skip *that line* during detection.
@@ -247,9 +250,10 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
     needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Cap `s` to `max` characters (appending an ellipsis when truncated),
-/// optionally trimming surrounding whitespace first. Character-based so it never
-/// splits a multi-byte codepoint.
+/// Keep at most `max` characters of `s`, appending an ellipsis when truncated
+/// (so a truncated result is `max` characters plus the `…`), optionally trimming
+/// surrounding whitespace first. Character-based so it never splits a multi-byte
+/// codepoint.
 fn cap_chars(s: &str, max: usize, trim: bool) -> String {
     let s = if trim { s.trim() } else { s };
     if s.chars().count() > max {
