@@ -37,10 +37,10 @@ pub fn hook_script(name: &str) -> String {
         format!(
             "{header}\
              # Block a commit that introduces ADR/annotation drift. Validates the\n\
-             # working tree (files on disk, not the staged index), so stage your\n\
-             # whole change — or `git commit -a`. Skip once with `git commit --no-verify`.\n\
+             # staged index — exactly what this commit will record. Skip once with\n\
+             # `git commit --no-verify`.\n\
              command -v roteiro >/dev/null 2>&1 || exit 0\n\
-             roteiro check || {{\n\
+             roteiro check --staged || {{\n\
              \techo 'roteiro: commit blocked by knowledge-graph drift (see above); \
              use `git commit --no-verify` to override.' >&2\n\
              \texit 1\n\
