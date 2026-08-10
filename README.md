@@ -11,26 +11,38 @@ Every edge in the graph records **how it was produced**:
 
 | Provenance | Source | Nature |
 |---|---|---|
-| `derived` | tree-sitter AST extraction | Deterministic — symbols, calls, imports |
+| `derived` | tree-sitter AST extraction (15+ languages) | Deterministic — symbols, calls, imports |
 | `authored` | ADRs, blueprints, `// @rto:` annotations | Curated intent, drift-checked in CI |
-| `inferred` | Docs, PDFs, embeddings | Fuzzy suggestions with confidence scores |
+| `inferred` | Docs, PDFs, images, embeddings | Fuzzy suggestions with confidence scores |
 
 One SQLite store. One query surface. Three renderers: a docs website, an
 Obsidian vault, and an optional MCP server (`--features mcp`) — all build
-outputs of the same graph, so what humans review is what agents query.
+outputs of the same graph, so what humans review is what agents query. Offline
+by default; git-native and content-addressed, so the graph is shareable across a
+team.
 
-## Status
+## Getting started
 
-**v0.0.1 — scaffold.** The workspace, provenance schema, and CLI surface exist;
-subcommands fail loudly until implemented. See
-[ADR-0001](docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
-for the full design and roadmap.
+```sh
+cargo install roteiro          # lean, fully-offline default build
+cd your-repo
+roteiro init                   # store + git hooks + AGENTS.md
+roteiro sync                   # build the graph
+roteiro review                 # graph-grounded review of your change
+```
+
+See <https://roteiro.dev> for the full guide (modes, local models, languages,
+config), and [ADR-0001](docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
+plus [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) for the design and roadmap.
+Contribution + review standards live in [`AGENTS.md`](AGENTS.md).
 
 ## Workspace
 
-- `crates/rto-graph` — SQLite store, provenance model, content-addressed cache
-- `crates/rto-spec` — house-style ADR/blueprint parsing, intent interview, `check`
-- `crates/rto-render` — docs site, Obsidian vault, MCP (feature-gated)
+- `crates/rto-graph` — SQLite store, provenance model, content-addressed cache, extraction, sync, query, inference
+- `crates/rto-spec` — house-style ADR/blueprint parsing, `check` (drift gate), importers, spec authoring
+- `crates/rto-render` — docs site, Obsidian vault, MCP server (feature-gated)
+- `crates/rto-serve` — local OpenAI-compatible model server (llama.cpp; feature-gated)
+- `crates/rto-llama` — llama.cpp inference core (generation, embeddings, vision), shared by serving and internal uses
 - `crates/roteiro` — umbrella CLI
 
 ## License
