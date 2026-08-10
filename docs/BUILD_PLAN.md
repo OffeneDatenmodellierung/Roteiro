@@ -974,31 +974,40 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
 - **Scope-aware call resolver** — cross-file `calls` resolve by *unambiguous
   simple name* today; resolve import paths and `Self`/receiver types to link
   ambiguous callees (Stage 3 follow-up).
-- **Per-language `imports` edges** — the generic tags extractor emits
-  `defines`/`contains`/`calls` but not `imports` (Rust has them); grammar tags
-  queries don't surface imports uniformly.
+- **Per-language `imports` edges — ✅ delivered (#138).** The generic tags
+  extractor now runs a per-language import query (Python/JS/TS/TSX/Go/Java/C/C++)
+  alongside tags, emitting `import:<lang>:<module>` nodes + `file → import`
+  `Imports` edges, mirroring the Rust walker.
 - **Untracked-file overlay** — `sync_worktree` / worktree `check` / `review` do
   not overlay brand-new *untracked* files; needs a gitignore-aware dirwalk.
 - **Incremental extraction** — `sync` re-walks the whole tree and does a cache
   lookup per blob every time; diff the `HEAD` tree against the last-synced tree to
   touch only changed paths and carry unchanged files' cached facts forward.
   Complements the `reconcile` delta-write with a delta-*read* (Stage 14 follow-up).
-- **Edge-level delta persistence** — `Store::reconcile` writes only changed *node*
-  rows but still replaces all *edges* wholesale (they're lean; the `f64`
-  confidence is awkward to match for precise deletes). A stable edge identity
-  would let edges be delta'd too.
+- **Edge-level delta persistence — ✅ delivered.** `Store::reconcile` diffs edges
+  by a stable full-tuple identity (`edge_identity`, incl. `confidence`/`src_ref`) —
+  deleting only removed rows and inserting only added ones, so unchanged edges keep
+  their rowid. The precondition that makes this free of a determinism cost was done
+  first: the four edge queries (`all_edges`/`edges_from`/`edges_to`/
+  `edges_by_provenance`) now order by **content** (`src, dst, kind, provenance`),
+  not rowid, so an incrementally reconciled store returns every query byte-identically
+  to a cold rebuild (proven by `reconcile_is_history_independent_for_edge_queries`).
 
 **Commit gate & review**
-- **`sync_index` (index-aware gate)** — the pre-commit `check`/`review` validate
-  the *working tree*, not the staged *index*; an index-aware overlay would gate
-  exactly what is committed (from PR #109 review).
-- **Range review** — `roteiro review` covers the working-tree change; add a
-  branch-vs-`main` (commit-range) mode.
+- **`sync_index` (index-aware gate) — ✅ delivered (#133).** `check --staged`
+  (and the `sync_index` engine behind it) validate the staged index, gating
+  exactly what a commit records.
+- **Range review — ✅ delivered (#131).** `roteiro review --base <ref>` reviews a
+  commit range against the committed graph.
 
 **Authoring & importers**
-- **Blueprint parsing** — distinct from ADRs; deferred within Stage 4.
-- **`@lat:` backlinks** — import lat.md source-code backlink annotations as
-  `authored` edges (planned fast-follow; `resolve_lat_ref` already resolves them).
+- **Blueprint parsing — ✅ delivered (#139).** House-style blueprints (no
+  frontmatter; identified by the `— Technical Implementation Plan` H1 or a
+  `docs/blueprint` path) parse into `blueprint`/`blueprint_section` nodes with
+  authored `[[…]]` links that `check` drift-validates like ADR links.
+- **`@lat:` backlinks — ✅ delivered (#137, #142).** `import --from lat` scans
+  source comments for `// @lat: [[…]]` backlinks and folds resolved
+  `file → lat section` `authored` edges (deduped) into the lat layer.
 
 **Serving & models**
 - **Per-model concurrency** — the llama.cpp engine serialises all requests
@@ -1008,18 +1017,21 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
 - **Audio ingestion** — an inference-ingestion modality beyond text/PDF/image.
 
 **Config & hooks**
-- **Respect `core.hooksPath`** when installing managed hooks.
-- **Automatic hook-fetch (opt-in)** — CI publishes the graph artifact and
-  `roteiro load` verifies + installs it, but the managed hooks do *not* auto-fetch
-  on checkout (that would be silent network every checkout, against ADR-0001).
-  Add an opt-in (`roteiro init --fetch`, or a `[sync] fetch_artifact` toggle) that
-  wires the hooks to try the CI artifact then fall back to a local rebuild.
-- **Unwired config sections** — `[debt]` ignore-paths and a `[paths]` section
-  (ADR-0007 follow-ups).
+- **Respect `core.hooksPath` — ✅ delivered.** Managed hooks install under
+  `repo.hooks_dir()` (honours `core.hooksPath`); covered by `init_honours_core_hookspath`.
+- **Automatic hook-fetch (opt-in) — ✅ delivered (#140).** `roteiro init --fetch`
+  installs freshness hooks that try the CI `graph-latest` artifact (`gh release
+  download` + `roteiro load`, which refuses a tree-mismatched asset) before
+  falling back to a local rebuild. No network without the flag.
+- **Unwired config sections — ✅ delivered (#134).** `[debt] ignore` (glob paths
+  excluded from the debt report) and `[paths] model_store` are now wired
+  (ADR-0007).
 
 **Detection quality**
-- **Markers inside comments only** — restrict soft deferral phrases (`for now`,
-  `later`, …) to comments to cut prose false positives (Stage 15 follow-up).
+- **Markers inside comments only — ✅ delivered (#136).** In code files (keyed off
+  a per-language comment syntax) the soft deferral phrases (`for now`, `deferred`,
+  `placeholder`, …) fire only inside comments; the unambiguous tags (`TODO`,
+  `todo!(`, `BUG:`) still match anywhere, and prose files scan in full.
 
 **Agent reviews**
 - **MCP-for-review** — feasibility recorded and deferred: a *hosted* GitHub

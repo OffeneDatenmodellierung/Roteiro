@@ -197,35 +197,53 @@ impl Store {
     }
 
     /// Bring the store to exactly `facts` (as [`Store::rebuild`] does) but writing
-    /// only the **changed node rows** instead of wiping and reinserting the whole
-    /// graph — the git-style "write only what differs". Nodes carry the heavy JSON
-    /// `meta`, so skipping unchanged nodes is the write saving on a large graph
-    /// with a small change; edges (lean, and FK-constrained on node ids) are still
-    /// replaced wholesale. The final state — nodes, edges, and `sync_state` — is
-    /// identical to `rebuild(facts, tree)`.
+    /// only what **differs** instead of wiping and reinserting the whole graph —
+    /// the git-style "write only the delta". Unchanged node rows (which carry the
+    /// heavy JSON `meta`) and unchanged edge rows are left untouched; only removed
+    /// rows are deleted and new/changed rows written. The final state — nodes,
+    /// edges, and `sync_state` — is identical to `rebuild(facts, tree)`.
+    ///
+    /// Leaving unchanged edges in place means their row ids do not match a cold
+    /// rebuild's — which is safe *because* every edge query is content-ordered
+    /// (`(src, dst, kind, provenance)`, see [`Store::all_edges`]), never by row
+    /// id. So an incrementally reconciled store and a fresh rebuild return every
+    /// query identically; the delta is invisible above the storage layer.
     ///
     /// # Errors
     /// Returns [`StoreError`] on a query failure; the transaction is rolled back.
     pub fn reconcile(&mut self, facts: &FactSet, tree: Option<&str>) -> Result<(), StoreError> {
-        // Only the current *nodes* are needed to decide deletes/upserts — edges are
-        // replaced wholesale — so avoid `export_factset`, which also loads edges.
         let current_nodes = self.all_nodes()?;
+        let current_edges = self.all_edges()?;
         let cur_by_key: std::collections::HashMap<&str, &Node> =
             current_nodes.iter().map(|n| (n.key.as_str(), n)).collect();
         let new_keys: std::collections::HashSet<&str> =
             facts.nodes.iter().map(|n| n.key.as_str()).collect();
 
+        // Edge identity is the full tuple, so a changed `confidence`/`src_ref`
+        // counts as remove-old + add-new — keeping the result identical to a
+        // wholesale rebuild, not the store's insert-time `DO NOTHING` semantics.
+        let new_edge_ids: std::collections::HashSet<String> =
+            facts.edges.iter().map(edge_identity).collect();
+        let cur_edge_ids: std::collections::HashSet<String> =
+            current_edges.iter().map(edge_identity).collect();
+
         let tx = self.conn.transaction()?;
-        // Edges reference node ids (FK, no cascade); clear them first so any node
-        // can then be deleted safely, and reinsert the full set at the end.
-        tx.execute("DELETE FROM edges", [])?;
-        // Drop nodes that no longer exist.
+        // 1. Delete removed edges first, so any node they reference can then be
+        //    dropped (edges are FK-constrained on node ids, with no cascade). A
+        //    removed node's edges are all removals, so they are gone before step 2.
+        for edge in &current_edges {
+            if !new_edge_ids.contains(&edge_identity(edge)) {
+                delete_edge(&tx, edge)?;
+            }
+        }
+        // 2. Drop nodes that no longer exist.
         for old in &current_nodes {
             if !new_keys.contains(old.key.as_str()) {
                 tx.execute("DELETE FROM nodes WHERE key = ?1", [&old.key])?;
             }
         }
-        // Upsert only the nodes that are new or whose content changed.
+        // 3. Upsert only the nodes that are new or whose content changed (an upsert
+        //    keeps the row id, so unchanged edges stay valid).
         for node in &facts.nodes {
             if cur_by_key
                 .get(node.key.as_str())
@@ -234,8 +252,11 @@ impl Store {
                 upsert_node(&tx, node)?;
             }
         }
+        // 4. Insert only the added edges (their endpoints now all exist).
         for edge in &facts.edges {
-            insert_edge(&tx, edge)?;
+            if !cur_edge_ids.contains(&edge_identity(edge)) {
+                insert_edge(&tx, edge)?;
+            }
         }
         write_sync_state(&tx, tree)?;
         tx.commit()?;
@@ -332,34 +353,56 @@ impl Store {
         collect_nodes(&mut rows)
     }
 
-    /// Edges whose source is the node with the given key.
+    /// Every edge in the store, with endpoints resolved to their node keys. Used
+    /// by [`Store::reconcile`] to diff the edge set.
+    ///
+    /// Ordered by the edge's **content** — `(src key, dst key, kind, provenance)`,
+    /// the table's unique tuple — not by row id. This makes the order a function
+    /// of the *graph*, not of insertion history, so an incrementally
+    /// [`reconcile`](Store::reconcile)d store and a cold [`rebuild`](Store::rebuild)
+    /// return edges identically. (The same reason node scans order by `key`.)
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] or [`StoreError::Corrupt`] on failure.
+    pub fn all_edges(&self) -> Result<Vec<Edge>, StoreError> {
+        let sql = format!("{EDGE_SELECT} ORDER BY ns.key, nd.key, e.kind, e.provenance");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        collect_edges(&mut rows)
+    }
+
+    /// Edges whose source is the node with the given key, in content order
+    /// (`(dst key, kind, provenance)` — `src` is fixed). Content-ordered rather
+    /// than by row id so the result is history-independent; see [`Store::all_edges`].
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] or [`StoreError::Corrupt`] on failure.
     pub fn edges_from(&self, key: &str) -> Result<Vec<Edge>, StoreError> {
-        let sql = format!("{EDGE_SELECT} WHERE ns.key = ?1 ORDER BY e.id");
+        let sql = format!("{EDGE_SELECT} WHERE ns.key = ?1 ORDER BY nd.key, e.kind, e.provenance");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([key])?;
         collect_edges(&mut rows)
     }
 
-    /// Edges whose destination is the node with the given key.
+    /// Edges whose destination is the node with the given key, in content order
+    /// (`(src key, kind, provenance)` — `dst` is fixed). See [`Store::all_edges`].
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] or [`StoreError::Corrupt`] on failure.
     pub fn edges_to(&self, key: &str) -> Result<Vec<Edge>, StoreError> {
-        let sql = format!("{EDGE_SELECT} WHERE nd.key = ?1 ORDER BY e.id");
+        let sql = format!("{EDGE_SELECT} WHERE nd.key = ?1 ORDER BY ns.key, e.kind, e.provenance");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([key])?;
         collect_edges(&mut rows)
     }
 
-    /// All edges with the given provenance.
+    /// All edges with the given provenance, in content order
+    /// (`(src key, dst key, kind)` — `provenance` is fixed). See [`Store::all_edges`].
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] or [`StoreError::Corrupt`] on failure.
     pub fn edges_by_provenance(&self, provenance: Provenance) -> Result<Vec<Edge>, StoreError> {
-        let sql = format!("{EDGE_SELECT} WHERE e.provenance = ?1 ORDER BY e.id");
+        let sql = format!("{EDGE_SELECT} WHERE e.provenance = ?1 ORDER BY ns.key, nd.key, e.kind");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([provenance.as_str()])?;
         collect_edges(&mut rows)
@@ -776,6 +819,39 @@ fn insert_edge_row(
     Ok(())
 }
 
+/// A stable string identity for an edge over **all** its fields — used by
+/// [`Store::reconcile`] to diff the edge set. The unit-separator (`\x1f`)
+/// delimiter never occurs in a key/token, so distinct edges never collide.
+fn edge_identity(edge: &Edge) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{}",
+        edge.src,
+        edge.dst,
+        edge.kind.as_str(),
+        edge.provenance.as_str(),
+        edge.confidence,
+        edge.src_ref.as_deref().unwrap_or(""),
+    )
+}
+
+/// Delete the edge row identified by `(src, dst, kind, provenance)` — the table's
+/// unique key — resolving the endpoint node keys to ids. A no-op if absent.
+fn delete_edge(conn: &Connection, edge: &Edge) -> Result<(), StoreError> {
+    conn.execute(
+        "DELETE FROM edges
+         WHERE src = (SELECT id FROM nodes WHERE key = ?1)
+           AND dst = (SELECT id FROM nodes WHERE key = ?2)
+           AND kind = ?3 AND provenance = ?4",
+        params![
+            edge.src,
+            edge.dst,
+            edge.kind.as_str(),
+            edge.provenance.as_str()
+        ],
+    )?;
+    Ok(())
+}
+
 fn collect_nodes(rows: &mut rusqlite::Rows) -> Result<Vec<Node>, StoreError> {
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
@@ -921,6 +997,189 @@ mod tests {
         assert_eq!(
             reconciled.sync_state().expect("state").as_deref(),
             Some("t2")
+        );
+    }
+
+    #[test]
+    fn reconcile_writes_only_the_edge_delta() {
+        // An unchanged edge must keep its row (proving reconcile does not wipe and
+        // reinsert the whole edge set); a removed edge's row goes; a new edge's row
+        // appears. Row identity is the SQLite `rowid` — stable unless deleted.
+        let n = |k: &str| sample_node(k);
+        let e =
+            |src: &str, dst: &str| Edge::derived(src.to_owned(), dst.to_owned(), EdgeKind::Calls);
+
+        let mut store = Store::open_in_memory().expect("open");
+        store
+            .rebuild(
+                &FactSet {
+                    nodes: vec![n("a"), n("b"), n("c")],
+                    edges: vec![e("a", "b"), e("b", "c")],
+                },
+                None,
+            )
+            .expect("rebuild");
+
+        // Map (src_key, dst_key) → rowid via the private connection.
+        let rowids = |store: &Store| -> std::collections::HashMap<(String, String), i64> {
+            let mut stmt = store
+                .conn
+                .prepare(
+                    "SELECT ns.key, nd.key, e.rowid FROM edges e \
+                     JOIN nodes ns ON ns.id = e.src JOIN nodes nd ON nd.id = e.dst",
+                )
+                .expect("prepare");
+            stmt.query_map([], |r| {
+                Ok((
+                    (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("query")
+            .map(Result::unwrap)
+            .collect()
+        };
+
+        let before = rowids(&store);
+        let ab_rowid = before[&("a".to_owned(), "b".to_owned())];
+
+        // Keep a->b, drop b->c, add a->c.
+        store
+            .reconcile(
+                &FactSet {
+                    nodes: vec![n("a"), n("b"), n("c")],
+                    edges: vec![e("a", "b"), e("a", "c")],
+                },
+                None,
+            )
+            .expect("reconcile");
+
+        let after = rowids(&store);
+        assert_eq!(
+            after.get(&("a".to_owned(), "b".to_owned())),
+            Some(&ab_rowid),
+            "the unchanged edge keeps its row (not rewritten)"
+        );
+        assert!(
+            !after.contains_key(&("b".to_owned(), "c".to_owned())),
+            "the removed edge's row is gone"
+        );
+        assert!(
+            after.contains_key(&("a".to_owned(), "c".to_owned())),
+            "the added edge has a new row"
+        );
+    }
+
+    #[test]
+    fn reconcile_is_history_independent_for_edge_queries() {
+        // The whole point of the edge delta: it must be invisible above storage.
+        // A store reached by rebuild(f1)+reconcile(f2) has different edge row ids
+        // than a cold rebuild at f2, yet every edge query must return byte-for-byte
+        // the same result — order included — because the queries are content-ordered.
+        let n = |k: &str| sample_node(k);
+        let d =
+            |src: &str, dst: &str| Edge::derived(src.to_owned(), dst.to_owned(), EdgeKind::Calls);
+        let inf = |src: &str, dst: &str, c: f64| {
+            Edge::inferred(src.to_owned(), dst.to_owned(), EdgeKind::Related, c)
+        };
+        let f1 = FactSet {
+            nodes: vec![n("a"), n("b"), n("c")],
+            edges: vec![d("a", "b"), d("b", "c"), inf("a", "c", 0.7)],
+        };
+        let f2 = FactSet {
+            nodes: vec![n("a"), n("b"), n("d")],
+            edges: vec![d("a", "b"), d("a", "d"), inf("a", "d", 0.9)],
+        };
+
+        let mut incremental = Store::open_in_memory().expect("open");
+        incremental.rebuild(&f1, None).expect("rebuild");
+        incremental.reconcile(&f2, None).expect("reconcile");
+        let mut cold = Store::open_in_memory().expect("open");
+        cold.rebuild(&f2, None).expect("rebuild");
+
+        // Project to all fields so the comparison covers order *and* content.
+        let proj = |es: Vec<Edge>| -> Vec<String> {
+            es.into_iter()
+                .map(|e| {
+                    format!(
+                        "{}|{}|{}|{}|{:?}|{:?}",
+                        e.src,
+                        e.dst,
+                        e.kind.as_str(),
+                        e.provenance.as_str(),
+                        e.confidence,
+                        e.src_ref
+                    )
+                })
+                .collect()
+        };
+
+        for key in ["a", "b", "d"] {
+            assert_eq!(
+                proj(incremental.edges_from(key).expect("from")),
+                proj(cold.edges_from(key).expect("from")),
+                "edges_from({key}) must match a cold rebuild"
+            );
+            assert_eq!(
+                proj(incremental.edges_to(key).expect("to")),
+                proj(cold.edges_to(key).expect("to")),
+                "edges_to({key}) must match a cold rebuild"
+            );
+        }
+        assert_eq!(
+            proj(incremental.all_edges().expect("all")),
+            proj(cold.all_edges().expect("all")),
+            "all_edges must match a cold rebuild"
+        );
+        for p in [Provenance::Derived, Provenance::Inferred] {
+            assert_eq!(
+                proj(incremental.edges_by_provenance(p).expect("prov")),
+                proj(cold.edges_by_provenance(p).expect("prov")),
+                "edges_by_provenance({}) must match a cold rebuild",
+                p.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn reconcile_updates_confidence_on_an_unchanged_tuple() {
+        // A change to *only* an edge's confidence — same (src, dst, kind,
+        // provenance) — must still be applied. Edge identity includes confidence,
+        // so it is delete+add (matching a full rebuild), not the insert-time
+        // `DO NOTHING` that would leave the stale confidence in place.
+        let n = |k: &str| sample_node(k);
+        let inf = |c: f64| {
+            let mut e = Edge::inferred("a".to_owned(), "b".to_owned(), EdgeKind::Related, c);
+            e.src_ref = Some("import:demo".to_owned());
+            e
+        };
+
+        let mut store = Store::open_in_memory().expect("open");
+        store
+            .rebuild(
+                &FactSet {
+                    nodes: vec![n("a"), n("b")],
+                    edges: vec![inf(0.5)],
+                },
+                None,
+            )
+            .expect("rebuild");
+        store
+            .reconcile(
+                &FactSet {
+                    nodes: vec![n("a"), n("b")],
+                    edges: vec![inf(0.9)],
+                },
+                None,
+            )
+            .expect("reconcile");
+
+        let edges = store.edges_from("a").expect("edges");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            edges[0].confidence,
+            Some(0.9),
+            "confidence updated, not left stale"
         );
     }
 
