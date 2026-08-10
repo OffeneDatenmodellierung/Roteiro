@@ -122,10 +122,17 @@ crates.io, or build from source with the feature tiers you want.</p>
 <pre><code><span class="c"># Lean, fully-offline default build</span>
 cargo install roteiro
 
-<span class="c"># From source, with optional capabilities enabled</span>
+<span class="c"># Pick the capabilities you want</span>
+cargo install roteiro --features "inference,models,mcp"
+
+<span class="c"># Everything on — MCP, serving, local models, PDF/OCR/vision.</span>
+<span class="c"># Needs a C/C++ toolchain (the inference-local-models/serve/image-vision features build llama.cpp).</span>
+cargo install roteiro --all-features
+
+<span class="c"># …or build from source</span>
 git clone https://github.com/OffeneDatenmodellierung/Roteiro
 cd Roteiro
-cargo build --release --features "inference,models"</code></pre>
+cargo build --release --all-features</code></pre>
 
 <h3>Feature tiers</h3>
 <table>
@@ -137,6 +144,7 @@ cargo build --release --features "inference,models"</code></pre>
 <tr><td><code>pdf-text</code> · <code>image-ocr</code> · <code>image-vision</code></td><td>Ingest text from PDFs, OCR text from images, and describe images with a local vision model.</td></tr>
 <tr><td><code>serve</code></td><td>An OpenAI-compatible <code>/v1</code> model endpoint over your installed models (llama.cpp).</td></tr>
 <tr><td><code>mcp</code></td><td>The MCP graph server, exposing the graph to AI agents (stdio or HTTP).</td></tr>
+<tr><td><code>--all-features</code></td><td>Every capability above at once — the largest build. Requires a C/C++ toolchain because the serving and vision features compile llama.cpp.</td></tr>
 </table>
 
 <h2 id="modes">The four ways to run it</h2>
