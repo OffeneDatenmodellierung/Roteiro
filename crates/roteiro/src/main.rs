@@ -53,6 +53,11 @@ enum Command {
         /// Emit the review as JSON.
         #[arg(long)]
         json: bool,
+        /// Review the commit range `<base>..HEAD` (any revspec — a branch,
+        /// `HEAD~3`, a sha) against the committed graph, instead of the
+        /// working-tree change. Use for a whole-branch review (e.g. `--base main`).
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
@@ -308,7 +313,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
         Command::Check { json, committed } => run_check(ingest, json, committed),
-        Command::Review { json } => run_review(ingest, json),
+        Command::Review { json, base } => run_review(ingest, json, base.as_deref()),
         Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json),
@@ -660,14 +665,23 @@ fn run_check(ingest: rto_graph::IngestConfig, json: bool, committed: bool) -> an
     Ok(())
 }
 
-/// Assemble a graph-grounded review of the current working-tree change and print
-/// it (human or `--json`); exit non-zero if the change introduces drift.
-fn run_review(ingest: rto_graph::IngestConfig, json: bool) -> anyhow::Result<()> {
+/// Assemble a graph-grounded review and print it (human or `--json`); exit
+/// non-zero if the change introduces drift. With `base`, review the commit range
+/// `base..HEAD` against the committed graph; otherwise the working-tree change.
+fn run_review(
+    ingest: rto_graph::IngestConfig,
+    json: bool,
+    base: Option<&str>,
+) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    // Review the working tree: sync it in (overlaying uncommitted edits) so the
-    // graph and the change set agree, and capture the authored-layer drift.
-    let report = build_graph(&repo, &mut store, &cache, ingest, false)?;
-    let changed = repo.changed_files()?;
+    // Range review is over committed history, so build the committed (HEAD)
+    // graph; a working-tree review overlays uncommitted edits so the graph and
+    // the change set agree. Either way, capture the authored-layer drift.
+    let report = build_graph(&repo, &mut store, &cache, ingest, base.is_some())?;
+    let changed = match base {
+        Some(base) => repo.changed_between(base)?,
+        None => repo.changed_files()?,
+    };
     let review = review::build(&store, &changed, &report.violations)?;
 
     if json {

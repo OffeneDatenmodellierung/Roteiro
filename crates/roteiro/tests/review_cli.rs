@@ -176,3 +176,41 @@ fn review_detects_drift_from_editing_an_adr() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn range_review_covers_a_branch_vs_base() {
+    // `review --base <ref>` reviews the commit range against the committed graph,
+    // not the working tree.
+    let dir = fresh_dir("range");
+    write(&dir, "src/main.rs", "fn main() { a(); }\nfn a() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+
+    // A feature branch adds a function and a call — committed, clean working tree.
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { a(); b(); }\nfn a() {}\nfn b() {}\n",
+    );
+    git(&dir, &["commit", "-q", "-am", "add b"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "sync");
+
+    let out = roteiro(&dir, &["review", "--base", "main"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "range review should exit 0 (no drift): {text}"
+    );
+    assert!(
+        text.contains("src/main.rs [modified]"),
+        "reports the changed file: {text}"
+    );
+    assert!(
+        text.contains("fn b") && text.contains("called by: sym:rust:src/main.rs#main"),
+        "shows the new symbol's context from the committed graph: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
