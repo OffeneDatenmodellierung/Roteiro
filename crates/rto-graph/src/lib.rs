@@ -36,7 +36,7 @@ pub use context::{
     ContextRefresh, NodeContext, build_context, context, dependents, refresh_contexts,
 };
 pub use extract::{Extractor, FileNodeExtractor, IngestConfig, Registry, RustExtractor};
-pub use git::{BlobRef, GitError, Repo};
+pub use git::{BlobRef, ChangedFile, GitError, Repo};
 #[cfg(feature = "inference")]
 pub use infer::{
     DuplicateConfig, DuplicatePair, DuplicateReport, EMBED_REF, Embedder, HashEmbedder,

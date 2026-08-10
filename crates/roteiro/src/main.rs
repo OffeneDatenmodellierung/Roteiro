@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 
 mod config;
 mod init;
+mod review;
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +43,16 @@ enum Command {
         /// Sync only the committed `HEAD` tree, ignoring uncommitted edits.
         #[arg(long)]
         committed: bool,
+    },
+    /// Graph-grounded review of the current working-tree change: for each
+    /// touched symbol, its callers/callees, the ADRs governing it, related docs,
+    /// plus the intent-debt and authored drift the change introduces and the
+    /// blast radius of dependents to check. Non-zero exit when the change
+    /// introduces drift. The CLI-first review surface (MCP tools are a bonus).
+    Review {
+        /// Emit the review as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
@@ -292,6 +303,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
         Command::Check { json, committed } => run_check(ingest, json, committed),
+        Command::Review { json } => run_review(ingest, json),
         Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json),
@@ -641,6 +653,74 @@ fn run_check(ingest: rto_graph::IngestConfig, json: bool, committed: bool) -> an
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Assemble a graph-grounded review of the current working-tree change and print
+/// it (human or `--json`); exit non-zero if the change introduces drift.
+fn run_review(ingest: rto_graph::IngestConfig, json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    // Review the working tree: sync it in (overlaying uncommitted edits) so the
+    // graph and the change set agree, and capture the authored-layer drift.
+    let report = build_graph(&repo, &mut store, &cache, ingest, false)?;
+    let changed = repo.changed_files()?;
+    let review = review::build(&store, &changed, &report.violations)?;
+
+    if json {
+        emit_json(&review)?;
+    } else {
+        print_review(&review);
+    }
+    if review.has_drift() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Render a review report as a compact, scannable summary.
+fn print_review(review: &review::ReviewReport) {
+    if review.changed_files == 0 {
+        println!("no working-tree changes to review");
+        return;
+    }
+    for file in &review.files {
+        println!("\n{} [{}]", file.path, file.status);
+        for sym in &file.symbols {
+            println!("  {} {}", sym.kind, sym.name);
+            let show = |label: &str, keys: &[String]| {
+                if !keys.is_empty() {
+                    println!("    {label}: {}", keys.join(", "));
+                }
+            };
+            show("called by", &sym.callers);
+            show("calls", &sym.callees);
+            show("governed by", &sym.governed_by);
+            if !sym.related.is_empty() {
+                let rel: Vec<String> = sym.related.iter().map(|r| r.node.clone()).collect();
+                println!("    related: {}", rel.join(", "));
+            }
+        }
+        if !file.debt.is_empty() {
+            println!("  intent-debt: {}", file.debt.len());
+        }
+    }
+    if !review.impacted.is_empty() {
+        let names: Vec<&str> = review.impacted.iter().map(|i| i.key.as_str()).collect();
+        println!("\nimpacted (blast radius): {}", names.join(", "));
+    }
+    if review.has_drift() {
+        println!("\ndrift introduced by this change:");
+        for d in &review.drift {
+            println!("  [{}] {}", d.kind, d.message);
+        }
+    } else {
+        println!("\nno authored-layer drift introduced");
+    }
+    println!(
+        "\nreviewed {} changed file(s), {} impacted node(s), {} drift item(s)",
+        review.changed_files,
+        review.impacted.len(),
+        review.drift.len()
+    );
 }
 
 /// Scaffold Roteiro in the current repository: build the initial graph, install
