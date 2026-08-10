@@ -977,11 +977,11 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
   queries don't surface imports uniformly.
 - **Untracked-file overlay** — `sync_worktree` / worktree `check` / `review` do
   not overlay brand-new *untracked* files; needs a gitignore-aware dirwalk.
-- **Incremental extraction** — `sync` re-walks and cache-looks-up every blob each
-  time; use a two-tree diff (last-synced vs `HEAD`) to touch only changed paths
-  and carry unchanged files' cached facts forward. Complements the `reconcile`
-  delta-write with a delta-*read* (Stage 14 follow-up).
-- **Edge-level delta persist** — `Store::reconcile` writes only changed *node*
+- **Incremental extraction** — `sync` re-walks the whole tree and does a cache
+  lookup per blob every time; diff the `HEAD` tree against the last-synced tree to
+  touch only changed paths and carry unchanged files' cached facts forward.
+  Complements the `reconcile` delta-write with a delta-*read* (Stage 14 follow-up).
+- **Edge-level delta persistence** — `Store::reconcile` writes only changed *node*
   rows but still replaces all *edges* wholesale (they're lean; the `f64`
   confidence is awkward to match for precise deletes). A stable edge identity
   would let edges be delta'd too.
