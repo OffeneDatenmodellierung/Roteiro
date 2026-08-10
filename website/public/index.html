@@ -26,6 +26,7 @@ queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents 
   <a href="#how">How it works</a>
   <a href="#gitnative">Git-native</a>
   <a href="#build">Install &amp; build</a>
+  <a href="#adopt">Use it in your project</a>
   <a href="#modes">Modes</a>
   <a href="#models">Models</a>
   <a href="#config">Config</a>
@@ -146,6 +147,53 @@ cargo build --release --all-features</code></pre>
 <tr><td><code>mcp</code></td><td>The MCP graph server, exposing the graph to AI agents (stdio or HTTP).</td></tr>
 <tr><td><code>--all-features</code></td><td>Every capability above at once — the largest build. Requires a C/C++ toolchain because the serving and vision features compile llama.cpp.</td></tr>
 </table>
+
+<h2 id="adopt">Use it in your project</h2>
+
+<p>Adopting Roteiro in your own repository is one command. <code>roteiro init</code>
+scaffolds the store, installs the git hooks that keep it fresh and gate drift,
+and writes an <code>AGENTS.md</code> snippet so your AI agents are graph-aware.</p>
+
+<pre><code><span class="c"># From the root of your git repository</span>
+roteiro init
+<span class="c">#   builds the initial graph (stored under .git/, not committed)</span>
+<span class="c">#   installs managed git hooks (see below)</span>
+<span class="c">#   writes/updates an AGENTS.md section pointing agents at the graph</span></code></pre>
+
+<h3>What <code>init</code> sets up</h3>
+<table>
+<tr><th>Piece</th><th>What it does</th></tr>
+<tr><td>The store</td><td>A content-addressed graph under <code>.git/</code> — per-worktree, shared cache, never committed.</td></tr>
+<tr><td><code>post-checkout</code> · <code>post-merge</code> · <code>post-commit</code> hooks</td><td>Keep the graph fresh automatically as <code>HEAD</code> moves — no manual <code>sync</code>.</td></tr>
+<tr><td><code>pre-commit</code> hook</td><td>Runs <code>roteiro check</code> and <strong>blocks a commit that introduces drift</strong> (a dangling ADR link or a stale <code>@rto:</code> annotation). Skip once with <code>git commit --no-verify</code>.</td></tr>
+<tr><td><code>AGENTS.md</code></td><td>A managed section telling agents to query the graph and to run <code>roteiro review</code>/<code>check</code> — the cross-tool standard many agents read.</td></tr>
+</table>
+
+<h3>The everyday loop</h3>
+<p>After <code>init</code>, the hooks keep the graph current for you. As you work:</p>
+<pre><code><span class="c"># Review your change against the graph — not just the diff:</span>
+<span class="c"># each touched symbol's callers/callees, the ADRs governing it, the</span>
+<span class="c"># drift &amp; intent-debt it adds, and the dependents to re-check.</span>
+roteiro review
+
+<span class="c"># Verify authored intent still holds (the pre-commit hook runs this too):</span>
+roteiro check
+
+<span class="c"># Explain any node, or trace how two are connected:</span>
+roteiro query 'sym:rust:src/lib.rs#Thing'
+roteiro path 'file:src/main.rs' 'adr:0001'</code></pre>
+
+<h3>In CI</h3>
+<p>Make the graph a merge gate — <code>check</code> exits non-zero on drift, so a PR
+that breaks an ADR link or annotation fails the build:</p>
+<pre><code><span class="c"># In your pipeline (validates the committed HEAD tree)</span>
+cargo install roteiro          <span class="c"># or download a release binary</span>
+roteiro check --committed</code></pre>
+
+<div class="note"><strong>Authoring intent.</strong> Link decisions to code with ADRs
+(<code>[[path#Symbol]]</code> wiki-links) and inline <code>// @rto:&lt;adr-id&gt;</code>
+annotations. <code>check</code> keeps them honest; <code>roteiro spec</code> helps you
+draft house-style, graph-grounded ADRs to begin with.</div>
 
 <h2 id="modes">The four ways to run it</h2>
 
