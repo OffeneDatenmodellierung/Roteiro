@@ -470,6 +470,15 @@ mod tests {
         let (edges, unresolved) = import_lat_backlinks(&f, &anns);
         assert_eq!(unresolved, 0);
         assert_eq!(edges.len(), 1, "duplicate (file, section) edge collapsed");
+
+        // The same reference twice on ONE comment line also collapses.
+        let same_line = scan_lat_annotations(
+            "src/auth.rs",
+            "// @lat: [[auth#OAuth Flow]] [[auth#OAuth Flow]]\n",
+        );
+        assert_eq!(same_line.len(), 2, "both refs on the line are scanned");
+        let (edges, _) = import_lat_backlinks(&f, &same_line);
+        assert_eq!(edges.len(), 1, "same-line duplicate collapsed");
     }
 
     #[test]
