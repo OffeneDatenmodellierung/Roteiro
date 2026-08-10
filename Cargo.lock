@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "roteiro"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "rto-graph"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gix",
  "image",
@@ -2785,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "rto-llama"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "rto-render"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "axum",
  "pulldown-cmark",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "rto-serve"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "rto-spec"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "rto-graph",
  "serde",
