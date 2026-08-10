@@ -168,6 +168,33 @@ impl Store {
             .optional()?)
     }
 
+    /// The extractor environment recorded with the last committed [`sync`],
+    /// `None` if unset (a legacy row, or the last sync was a worktree/index
+    /// preview). The incremental committed `sync` compares this to the current
+    /// env and falls back to a full re-extraction when they differ.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn sync_env(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT env FROM sync_state WHERE id = 0", [], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// Record the extractor environment for the current synced tree. Called by a
+    /// committed `sync` right after it writes the tree, so a later sync can decide
+    /// whether the incremental fast path is sound. A no-op if no tree is recorded.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn set_sync_env(&self, env: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("UPDATE sync_state SET env = ?1 WHERE id = 0", [env])?;
+        Ok(())
+    }
+
     /// Atomically replace the entire graph with `facts`, recording `tree` as the
     /// synced state (or clearing it when `tree` is `None`). All existing nodes
     /// and edges are deleted first, so the store reflects exactly the given fact
@@ -336,6 +363,20 @@ impl Store {
         let sql = format!("SELECT {NODE_COLS} FROM nodes n WHERE n.path = ?1 ORDER BY n.key");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([path])?;
+        collect_nodes(&mut rows)
+    }
+
+    /// Every node produced by a given layer, ordered by key. The incremental
+    /// `sync` loads the `Derived` layer to reconstruct the extraction graph
+    /// without re-reading every blob.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`], [`StoreError::Json`], or
+    /// [`StoreError::Corrupt`] on decode failure.
+    pub fn nodes_by_provenance(&self, provenance: Provenance) -> Result<Vec<Node>, StoreError> {
+        let sql = format!("SELECT {NODE_COLS} FROM nodes n WHERE n.provenance = ?1 ORDER BY n.key");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([provenance.as_str()])?;
         collect_nodes(&mut rows)
     }
 
@@ -700,9 +741,14 @@ fn node_row_id(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
 /// `reconcile` so both leave identical `sync_state`.
 fn write_sync_state(conn: &Connection, tree: Option<&str>) -> Result<(), StoreError> {
     match tree {
+        // Clear `env` on every tree write: it is only valid for the tree a
+        // committed `sync` set it against, and that sync re-records it (via
+        // `set_sync_env`) immediately after. So a worktree/index sync, or any
+        // path that does not re-set it, leaves `env` NULL — reading as "unknown"
+        // and forcing the safe full re-extraction next time.
         Some(tree) => conn.execute(
             "INSERT INTO sync_state (id, tree) VALUES (0, ?1)
-             ON CONFLICT(id) DO UPDATE SET tree = excluded.tree",
+             ON CONFLICT(id) DO UPDATE SET tree = excluded.tree, env = NULL",
             [tree],
         )?,
         None => conn.execute("DELETE FROM sync_state WHERE id = 0", [])?,
@@ -1265,7 +1311,7 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        assert_eq!(store.schema_version().expect("version"), 6);
+        assert_eq!(store.schema_version().expect("version"), 7);
     }
 
     #[test]
@@ -1436,7 +1482,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 6);
+            assert_eq!(store.schema_version().expect("version"), 7);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");
