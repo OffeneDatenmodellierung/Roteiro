@@ -1,5 +1,22 @@
 //! Small Markdown text helpers shared by the ADR and annotation scanners.
 
+/// Best-effort language token from a file extension, **lowercased** to mirror the
+/// extractor (which treats extensions case-insensitively, so `FOO.RS` and
+/// `foo.rs` both yield `rust`) — otherwise an authored `[[FOO.RS#Bar]]` link would
+/// build `sym:RS:…` while the graph holds `sym:rust:…` and never resolve. Shared
+/// by the ADR and lat.md symbol-key builders.
+pub(crate) fn lang_for(path: &str) -> String {
+    match path
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("rs") => "rust".to_owned(),
+        Some(other) => other.to_owned(),
+        None => "text".to_owned(),
+    }
+}
+
 /// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`,
 /// trimmed of leading/trailing `-`. Shared by the ADR and lat.md section keys.
 #[must_use]
@@ -98,7 +115,15 @@ pub(crate) fn strip_code_spans(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_code_spans;
+    use super::{lang_for, strip_code_spans};
+
+    #[test]
+    fn lang_for_lowercases_extension_to_match_the_extractor() {
+        assert_eq!(lang_for("src/FOO.RS"), "rust", "case-insensitive rust");
+        assert_eq!(lang_for("a/b.rs"), "rust");
+        assert_eq!(lang_for("x.PY"), "py", "other extensions lowercased");
+        assert_eq!(lang_for("README"), "text", "no extension");
+    }
 
     #[test]
     fn removes_single_and_multi_backtick_spans() {

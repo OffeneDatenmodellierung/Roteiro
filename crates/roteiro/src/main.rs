@@ -327,11 +327,18 @@ fn provenance(proj: bool, usr: bool) -> &'static str {
     }
 }
 
+/// Print `value` as pretty JSON to stdout — the shared `--json` output path for
+/// every subcommand.
+fn emit_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
 /// Print the effective, merged configuration and each value's provenance
 /// (`project` / `user` / `default`) — the answer to "why did it use that?".
 fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&loaded.effective)?);
+        emit_json(&loaded.effective)?;
         return Ok(());
     }
     println!(
@@ -463,7 +470,7 @@ fn run_sync(
     };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         let tree = &report.tree[..report.tree.len().min(12)];
         let dirty = if report.blobs_dirty > 0 {
@@ -563,7 +570,7 @@ fn run_check(ingest: rto_graph::IngestConfig, json: bool) -> anyhow::Result<()> 
     let report = build_graph(&repo, &mut store, &cache, ingest)?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         for v in &report.violations {
             eprintln!("drift [{}]: {}", v.kind.label(), v.message);
@@ -708,7 +715,7 @@ fn run_infer(
             "embedder": embedder_label,
             "inferred_edges": count,
         });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         println!(
             "inferred {count} similarity edge(s) via {embedder_label} \
@@ -754,7 +761,7 @@ fn run_duplicates(
     )?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else if report.pairs.is_empty() {
         println!("no duplicate content found (min-similarity {min_similarity})");
     } else {
@@ -1079,7 +1086,7 @@ fn run_compare_codegraph(
     let report = rto_graph::compare_codegraph(std::path::Path::new(path), &store)?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         if let Some(commit) = &report.source_commit {
             let short = &commit[..commit.len().min(12)];
@@ -1160,7 +1167,7 @@ fn run_import_lat(ingest: rto_graph::IngestConfig, path: &str, json: bool) -> an
         report["edges_applied"] = serde_json::json!(applied.edges_applied);
         report["edges_pruned_stale"] = serde_json::json!(applied.edges_pruned);
         report["durable"] = serde_json::json!(true);
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         println!(
             "imported lat.md: {} file(s), {} section(s), {} link(s) \
@@ -1273,7 +1280,7 @@ fn run_import_graphify(
         report["docs_linked_to_files"] = serde_json::json!(linked);
         report["edges_pruned_stale"] = serde_json::json!(applied.edges_pruned);
         report["durable"] = serde_json::json!(true);
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         println!(
             "imported graphify: {} node(s) ({} dropped as code), {} inferred edge(s) \
@@ -1576,7 +1583,7 @@ fn run_spec_context(
 
     let ctx = rto_spec::context(&store, topic, limit)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&ctx)?);
+        emit_json(&ctx)?;
     } else {
         println!("context for \"{}\":", ctx.topic);
         if ctx.symbols.is_empty() && ctx.docs.is_empty() {
@@ -1635,7 +1642,7 @@ fn run_query(
                 );
             };
             if json {
-                println!("{}", serde_json::to_string_pretty(&ex)?);
+                emit_json(&ex)?;
             } else {
                 println!("{}  ({})  {}", ex.node.key, ex.node.kind, ex.node.name);
                 if let Some(path) = &ex.node.path {
@@ -1658,7 +1665,7 @@ fn run_query(
         (None, Some(kind)) => {
             let listing = list_kind(&store, &NodeKind::from_token(&kind))?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&listing)?);
+                emit_json(&listing)?;
             } else {
                 println!("{} ({}):", listing.kind, listing.nodes.len());
                 for n in &listing.nodes {
@@ -1691,7 +1698,7 @@ fn run_context(
     if refresh {
         let report = refresh_contexts(&store)?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            emit_json(&report)?;
         } else {
             println!(
                 "context cache refreshed: {} rebuilt, {} reused, {} pruned",
@@ -1708,7 +1715,7 @@ fn run_context(
         anyhow::bail!("no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)");
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&ctx)?);
+        emit_json(&ctx)?;
     } else {
         println!("{}  ({})  {}", ctx.node.key, ctx.node.kind, ctx.node.name);
         println!("  fingerprint: {}", ctx.fingerprint);
@@ -1736,7 +1743,7 @@ fn run_debt(ingest: rto_graph::IngestConfig, kinds: &[String], json: bool) -> an
 
     let report = rto_graph::debt(&store, kinds)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         for item in &report.items {
             let loc = match (&item.path, item.line) {
@@ -1782,7 +1789,7 @@ fn run_path(
 
     let result = rto_graph::path(&store, from, to)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        emit_json(&result)?;
     } else if result.found {
         println!("{from}");
         for hop in &result.hops {

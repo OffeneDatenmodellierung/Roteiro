@@ -288,19 +288,10 @@ fn resolve_target(raw: &str) -> Option<String> {
     }
     match symbol.filter(|s| !s.is_empty()) {
         Some(symbol) => {
-            let lang = lang_for(path);
+            let lang = crate::text::lang_for(path);
             Some(format!("sym:{lang}:{path}#{symbol}"))
         }
         None => Some(format!("file:{path}")),
-    }
-}
-
-/// Best-effort language token from a file extension (mirrors the extractor).
-fn lang_for(path: &str) -> &str {
-    match path.rsplit_once('.').map(|(_, ext)| ext) {
-        Some("rs") => "rust",
-        Some(other) => other,
-        None => "text",
     }
 }
 

@@ -232,7 +232,7 @@ fn resolve_link(index: &LatIndex, raw: &str) -> Option<(String, bool)> {
         return None;
     }
     let key = match rest.filter(|s| !s.is_empty()) {
-        Some(symbol) => format!("sym:{}:{head}#{symbol}", lang_for(head)),
+        Some(symbol) => format!("sym:{}:{head}#{symbol}", crate::text::lang_for(head)),
         None => format!("file:{head}"),
     };
     Some((key, true))
@@ -245,15 +245,6 @@ fn heading(line: &str) -> Option<(usize, &str)> {
         Some((hashes, line[hashes + 1..].trim()))
     } else {
         None
-    }
-}
-
-/// Best-effort language token from a file extension (mirrors the extractor).
-fn lang_for(path: &str) -> &str {
-    match path.rsplit_once('.').map(|(_, ext)| ext) {
-        Some("rs") => "rust",
-        Some(other) => other,
-        None => "text",
     }
 }
 
