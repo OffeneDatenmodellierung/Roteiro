@@ -55,6 +55,13 @@ fn make_node(i: usize, kind: NodeKind, full: bool) -> Node {
     let key = format!("k{i}");
     let meta = meta_variants()[i % meta_variants().len()].clone();
     let offset = u32::try_from(i).expect("index fits u32");
+    // Cycle the node provenance so the round-trip covers all three layers being
+    // persisted and reloaded (Derived/Authored/Inferred).
+    let provenance = [
+        Provenance::Derived,
+        Provenance::Authored,
+        Provenance::Inferred,
+    ][i % 3];
     if full {
         Node {
             key,
@@ -64,10 +71,11 @@ fn make_node(i: usize, kind: NodeKind, full: bool) -> Node {
             lang: Some("rust".to_owned()),
             blob_hash: Some(format!("blob{i}")),
             span: Some(Span::new(offset, offset + 7)),
+            provenance,
             meta,
         }
     } else {
-        let mut n = Node::new(key, kind, format!("name{i}"));
+        let mut n = Node::new(key, kind, format!("name{i}")).with_provenance(provenance);
         n.meta = meta;
         n
     }

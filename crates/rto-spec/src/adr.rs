@@ -7,7 +7,7 @@
 //! dependency-free (no `serde_yaml`, which is unmaintained and would trip the
 //! audit gate). See ADR-0001 / `docs/BUILD_PLAN.md` Q4.
 
-use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
+use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 use serde::{Deserialize, Serialize};
 
 /// ADR lifecycle states, exactly as the house style defines them.
@@ -131,14 +131,16 @@ impl AdrDoc {
     #[must_use]
     pub fn facts(&self) -> FactSet {
         let adr_key = self.key();
-        let mut adr = Node::new(adr_key.clone(), NodeKind::Adr, self.meta.title.clone());
+        let mut adr = Node::new(adr_key.clone(), NodeKind::Adr, self.meta.title.clone())
+            .with_provenance(Provenance::Authored);
         adr.path = Some(self.path.clone());
         adr.meta = serde_json::json!({ "status": self.meta.status.as_str() });
         let mut fs = FactSet::new().with_node(adr);
 
         for section in &self.sections {
             let key = format!("{adr_key}#{}", section.slug);
-            let mut node = Node::new(key.clone(), NodeKind::AdrSection, section.title.clone());
+            let mut node = Node::new(key.clone(), NodeKind::AdrSection, section.title.clone())
+                .with_provenance(Provenance::Authored);
             node.path = Some(self.path.clone());
             fs = fs.with_node(node).with_edge(Edge::authored(
                 adr_key.clone(),
@@ -355,6 +357,14 @@ mod tests {
             .find(|n| n.key == "adr:0007")
             .expect("adr node");
         assert_eq!(adr.meta["status"], "Accepted");
+        // Every ADR node is tagged as the authored layer (so a derived-only sync
+        // leaves them alone).
+        assert!(
+            fs.nodes
+                .iter()
+                .all(|n| n.provenance == rto_graph::Provenance::Authored),
+            "ADR nodes must be Authored"
+        );
         // adr contains its sections.
         assert_eq!(fs.edges.iter().filter(|e| e.src == "adr:0007").count(), 2);
     }
