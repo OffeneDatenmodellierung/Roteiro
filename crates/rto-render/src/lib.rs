@@ -11,7 +11,9 @@ pub mod mcp;
 pub use docs::{
     IndexEntry, RenderedAdr, markdown_to_html, render_adr, render_adr_index, render_doc,
 };
-pub use obsidian::{VaultNote, note_name, render_note};
+pub use obsidian::{
+    AdrEntry, HOME_NOTE, VaultNote, VaultSummary, note_name, render_home, render_note,
+};
 
 /// A render target for the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
