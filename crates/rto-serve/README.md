@@ -7,8 +7,9 @@ models, backed by llama.cpp.
 Serve `chat/completions` (streaming), `models`, and `embeddings` over the same
 models Roteiro uses internally, and optionally auto-register Roteiro's **graph
 tools** so the served model can query your codebase during a conversation. Bound
-to loopback by default; front a public bind with a reverse proxy. Pulled in via
-the `roteiro serve --features serve` build.
+to loopback by default; front a public bind with a reverse proxy. Enabled by
+building/installing `roteiro` with the `serve` Cargo feature
+(`cargo install roteiro --features serve`), then run `roteiro serve --models`.
 
 - **Docs:** <https://roteiro.dev>
 - **Source & issues:** <https://github.com/OffeneDatenmodellierung/Roteiro>

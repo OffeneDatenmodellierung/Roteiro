@@ -11,7 +11,8 @@ the one-shot **importers** (lat.md → authored, Graphify → inferred, codegrap
 validation oracle) and the tiered, graph-grounded **spec authoring**
 (`roteiro spec context`/`scaffold`/`draft`, ADR-0004).
 
-Dependency-free by design (no YAML crate — frontmatter is hand-parsed).
+No YAML dependency by design — ADR frontmatter is hand-parsed (`serde_yaml` is
+unmaintained), keeping the authored-layer parser lean.
 
 - **Docs:** <https://roteiro.dev>
 - **Source & issues:** <https://github.com/OffeneDatenmodellierung/Roteiro>
