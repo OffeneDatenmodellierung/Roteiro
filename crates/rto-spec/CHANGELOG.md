@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.13...rto-spec-v0.0.14) - 2026-08-10
+
+### Added
+
+- *(spec)* parse house-style blueprints into the authored layer
+
+### Fixed
+
+- *(lat)* dedup @lat: backlink edges (PR #137 review)
+- *(blueprint)* anchor H1 marker to the em dash (PR #139 review)
+- address PR #108 review — lang_for case-normalization + cap doc
+
+### Other
+
+- *(lat)* cover same-line duplicate backlinks (PR #142 review)
+- Merge pull request #139 from OffeneDatenmodellierung/feat/blueprint-parsing
+- fix crate README wording (PR #117 review follow-up)
+- *(crates)* per-crate crates.io READMEs + refresh root README (Stage 14)
+- remove duplicated helpers (Stage 14 health check)
+
 ## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.12...rto-spec-v0.0.13) - 2026-08-09
 
 ### Added
