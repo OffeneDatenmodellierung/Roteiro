@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.13...rto-graph-v0.0.14) - 2026-08-10
+
+### Added
+
+- *(config)* wire [debt] ignore-paths and [paths] model_store
+- *(init)* honour core.hooksPath when installing managed hooks
+- *(review)* CLI-first graph-grounded review of the current change (Stage 17)
+- *(extract)* broad multi-language symbol extraction via tree-sitter tags
+- *(models)* coding/reasoning generative models + role label (Stage 20)
+
+### Fixed
+
+- address PR #130 review — empty core.hooksPath = unset; hermetic test
+- address PR #125 review — reconcile reads only nodes; test inferred edges
+- address PR #112 review — ADR-edit drift, deterministic order, related-kind
+- address PR #108 review — lang_for case-normalization + cap doc
+- *(extract)* per-grammar config cache key + add SQL
+- address PR #99 review — v1.2 refs, dedup vlm doc, reject non-embedding model
+- *(models)* address PR #93 review — tokenizer.json + deterministic default
+
+### Other
+
+- address PR #134 review — glob anchoring and store_root_from doc
+- Merge branch 'main' into feat/sync-index
+- Merge pull request #131 from OffeneDatenmodellierung/feat/range-review
+- Merge branch 'main' into feat/store-reconcile
+- *(sync)* delta-persist via Store::reconcile instead of full wipe+reinsert (Stage 14)
+- remove duplicated helpers (Stage 14 health check)
+- remove candle — unify the whole inference core on llama.cpp (ADR-0003 v1.2)
+- Merge branch 'main' into feat/stage20-models
+
 ## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.12...rto-graph-v0.0.13) - 2026-08-09
 
 ### Added
