@@ -191,6 +191,64 @@ pub fn sync_worktree(
     })
 }
 
+/// Sync `store` to the **git index** — the staged tree that a commit would
+/// record. Unlike [`sync_worktree`] (files on disk) this reads each staged blob
+/// by its index object id, so it validates *exactly what is about to be
+/// committed* (partially-staged changes and all). New staged files are included;
+/// unstaged working-tree edits are not. Backs the index-aware pre-commit gate.
+///
+/// # Errors
+/// Returns a [`SyncError`] if git access, extraction caching, or the store
+/// reconcile fails.
+pub fn sync_index(
+    store: &mut Store,
+    repo: &Repo,
+    cache: &ObjectCache,
+    extractor: &dyn Extractor,
+) -> Result<SyncReport, SyncError> {
+    let staged = repo.index_files()?;
+    // A stable state id over the staged (path, oid) set, in its own `index:`
+    // namespace so it never collides with a committed tree id or a worktree dirty
+    // marker — repeated identical index syncs then no-op, while any staged change
+    // does not.
+    let mut buf = String::new();
+    for blob in &staged {
+        buf.push_str(&blob.path);
+        buf.push('\0');
+        buf.push_str(&blob.oid);
+        buf.push('\n');
+    }
+    let state = format!("index:{:016x}", fnv1a64(buf.as_bytes()));
+
+    if store.sync_state()?.as_deref() == Some(state.as_str()) {
+        return Ok(SyncReport {
+            no_op: true,
+            blobs_total: staged.len(),
+            nodes: store.node_count()?,
+            edges: store.edge_count()?,
+            tree: state,
+            ..SyncReport::default()
+        });
+    }
+
+    let extracted = extract_blobs(repo, cache, extractor, staged)?;
+    let total = extracted.by_path.len();
+    let mut assembled = flatten(extracted.by_path);
+    resolve_calls(&mut assembled);
+    store.reconcile(&assembled, Some(&state))?;
+
+    Ok(SyncReport {
+        no_op: false,
+        blobs_total: total,
+        blobs_extracted: extracted.extracted,
+        blobs_cached: extracted.cached,
+        blobs_dirty: 0,
+        nodes: store.node_count()?,
+        edges: store.edge_count()?,
+        tree: state,
+    })
+}
+
 /// The committed fact sets for the `HEAD` tree, one per path, plus the blob list
 /// (for overlay comparison) and cache-hit/miss counts.
 struct Committed {
@@ -206,7 +264,18 @@ fn extract_committed(
     cache: &ObjectCache,
     extractor: &dyn Extractor,
 ) -> Result<Committed, SyncError> {
-    let blobs = repo.walk_blobs()?;
+    extract_blobs(repo, cache, extractor, repo.walk_blobs()?)
+}
+
+/// Extract (or load from cache) the fact set for each blob in `blobs` — the
+/// shared core of [`extract_committed`] and [`sync_index`], differing only in
+/// which tree the blob list comes from (`HEAD` vs the git index).
+fn extract_blobs(
+    repo: &Repo,
+    cache: &ObjectCache,
+    extractor: &dyn Extractor,
+    blobs: Vec<crate::BlobRef>,
+) -> Result<Committed, SyncError> {
     let mut by_path = BTreeMap::new();
     let mut extracted = 0usize;
     let mut cached = 0usize;

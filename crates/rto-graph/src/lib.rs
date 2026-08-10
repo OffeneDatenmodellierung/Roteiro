@@ -55,4 +55,4 @@ pub use query::{
     SearchHit, debt, explain, list_kind, path, search,
 };
 pub use store::{ImportApplied, Store, StoreError};
-pub use sync::{SyncError, SyncReport, sync, sync_worktree};
+pub use sync::{SyncError, SyncReport, sync, sync_index, sync_worktree};

@@ -192,6 +192,35 @@ impl Repo {
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
+
+    /// The **staged** files: each regular blob in the git index with its staged
+    /// object id, sorted by path. This is the tree that a commit would record —
+    /// unlike [`Repo::changed_files`] (the working tree) — so it lets tooling gate
+    /// exactly what is about to be committed (the pre-commit index-aware `check`).
+    /// Conflict (unmerged) entries, directories, submodules and symlinks are
+    /// skipped.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if the index cannot be loaded or a path is not valid
+    /// UTF-8.
+    pub fn index_files(&self) -> Result<Vec<BlobRef>, GitError> {
+        use gix::index::entry::Mode;
+        let index = self.inner.index_or_load_from_head().map_err(ge)?;
+        let mut out = Vec::new();
+        for entry in index.entries() {
+            if entry.stage_raw() != 0 || !matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE) {
+                continue;
+            }
+            let path = String::from_utf8(entry.path(&index).to_vec())
+                .map_err(|e| GitError::NonUtf8Path(e.into_bytes()))?;
+            out.push(BlobRef {
+                path,
+                oid: entry.id.to_hex().to_string(),
+            });
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
 }
 
 /// Collect every blob reachable from `tree`, with full repository-relative paths.

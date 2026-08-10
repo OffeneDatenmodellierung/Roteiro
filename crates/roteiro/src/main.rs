@@ -62,17 +62,21 @@ enum Command {
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
     /// By default this validates the working tree — tracked files as they are on
-    /// disk, unstaged edits included (not the git index) — so it catches drift
-    /// before a commit; pass `--committed` to validate only the `HEAD` tree (the
-    /// CI merge gate). Stage your whole change (or `git commit -a`) for the
-    /// working tree to match what will be committed.
+    /// disk, unstaged edits included (not the git index). Pass `--staged` to
+    /// validate exactly the git index (what a commit would record — the precise
+    /// pre-commit gate), or `--committed` to validate only the `HEAD` tree (the
+    /// CI merge gate).
     Check {
         /// Emit the check report as JSON.
         #[arg(long)]
         json: bool,
         /// Validate only the committed `HEAD` tree, ignoring uncommitted edits.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "staged")]
         committed: bool,
+        /// Validate the git index — exactly what a commit would record (staged
+        /// changes only, not unstaged working-tree edits).
+        #[arg(long)]
+        staged: bool,
     },
     /// Query the graph: explain a node, or list all nodes of a kind.
     Query {
@@ -312,7 +316,11 @@ fn main() -> anyhow::Result<()> {
     let ingest = cfg.effective.ingest.resolve();
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
-        Command::Check { json, committed } => run_check(ingest, json, committed),
+        Command::Check {
+            json,
+            committed,
+            staged,
+        } => run_check(ingest, json, committed, staged),
         Command::Review { json, base } => run_review(ingest, json, base.as_deref()),
         Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
@@ -549,54 +557,69 @@ fn open_graph() -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph:
 fn read_source(
     repo: &rto_graph::Repo,
     blob: &rto_graph::BlobRef,
-    committed: bool,
+    source: GraphSource,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    if committed {
-        return Ok(Some(repo.read_blob(&blob.oid)?));
-    }
-    match repo.workdir() {
-        Some(workdir) => match std::fs::read(workdir.join(&blob.path)) {
-            Ok(bytes) => Ok(Some(bytes)),
-            // Deleted in the working tree — not part of the state being committed.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+    match source {
+        // Worktree: the file as it stands on disk (unstaged edits included), or
+        // `None` if it was deleted there.
+        GraphSource::Worktree => match repo.workdir() {
+            Some(workdir) => match std::fs::read(workdir.join(&blob.path)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            },
+            None => Ok(Some(repo.read_blob(&blob.oid)?)),
         },
-        // A bare repo has no working tree; fall back to the committed blob.
-        None => Ok(Some(repo.read_blob(&blob.oid)?)),
+        // Committed reads the `HEAD` blob; Index reads the staged blob — for both,
+        // `blob.oid` is already the right object (the blob list came from that
+        // tree), so read it directly.
+        GraphSource::Committed | GraphSource::Index => Ok(Some(repo.read_blob(&blob.oid)?)),
     }
 }
 
-/// Build the full graph into `store`: the derived code graph (via `sync` or, when
-/// not `committed`, `sync_worktree`) plus the authored ADR layer read from the
-/// matching tree. Returns the authored-layer check report (used by `check`;
-/// ignored by `query`).
+/// Which tree the graph is built from: the committed `HEAD`, the working tree
+/// (uncommitted edits on disk), or the git index (the staged tree a commit would
+/// record). Selects the sync engine and the authored-layer source together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphSource {
+    /// The committed `HEAD` tree (the CI merge gate).
+    Committed,
+    /// The working tree: `HEAD` plus uncommitted edits to tracked files on disk.
+    Worktree,
+    /// The git index — exactly what a commit would record (the pre-commit gate).
+    Index,
+}
+
+/// Build the full graph into `store`: the derived code graph plus the authored
+/// ADR layer, both from the tree named by `source`. Returns the authored-layer
+/// check report (used by `check`; ignored by `query`).
 fn build_graph(
     repo: &rto_graph::Repo,
     store: &mut rto_graph::Store,
     cache: &rto_graph::ObjectCache,
     ingest: rto_graph::IngestConfig,
-    committed: bool,
+    source: GraphSource,
 ) -> anyhow::Result<rto_spec::CheckReport> {
-    use rto_graph::{Registry, sync, sync_worktree};
+    use rto_graph::{Registry, sync, sync_index, sync_worktree};
     let registry = Registry::new(ingest);
-    // `committed` validates the `HEAD` tree (the CI merge gate); the default
-    // overlays uncommitted edits to tracked files, so `check` can gate a commit
-    // before it is made (Stage 16). Both keep the authored-layer source in step
-    // with the derived layer the sync just built.
-    if committed {
-        sync(store, repo, cache, &registry)?;
-    } else {
-        sync_worktree(store, repo, cache, &registry)?;
-    }
+    match source {
+        GraphSource::Committed => sync(store, repo, cache, &registry)?,
+        GraphSource::Worktree => sync_worktree(store, repo, cache, &registry)?,
+        GraphSource::Index => sync_index(store, repo, cache, &registry)?,
+    };
 
+    // The authored-layer file set must match the derived tree: the staged files
+    // in Index mode (so a staged-new ADR is seen), else the `HEAD` tree.
+    let blobs = match source {
+        GraphSource::Index => repo.index_files()?,
+        GraphSource::Committed | GraphSource::Worktree => repo.walk_blobs()?,
+    };
     let mut docs = Vec::new();
     let mut annotations = Vec::new();
     let mut malformed = Vec::new();
-    for blob in repo.walk_blobs()? {
-        // In worktree mode, parse the authored source as it stands on disk (the
-        // change about to be committed), not the committed blob; a deleted file
-        // is skipped. In committed mode, read the `HEAD` blob.
-        let Some(bytes) = read_source(repo, &blob, committed)? else {
+    for blob in blobs {
+        // Parse the authored source from the same tree the derived layer used.
+        let Some(bytes) = read_source(repo, &blob, source)? else {
             continue;
         };
         let text = String::from_utf8_lossy(&bytes);
@@ -638,9 +661,21 @@ fn build_graph(
 
 /// Validate the authored layer (ADR `[[…]]` links and `@rto:` annotations)
 /// against the derived graph; exit non-zero on drift.
-fn run_check(ingest: rto_graph::IngestConfig, json: bool, committed: bool) -> anyhow::Result<()> {
+fn run_check(
+    ingest: rto_graph::IngestConfig,
+    json: bool,
+    committed: bool,
+    staged: bool,
+) -> anyhow::Result<()> {
+    let source = if staged {
+        GraphSource::Index
+    } else if committed {
+        GraphSource::Committed
+    } else {
+        GraphSource::Worktree
+    };
     let (repo, mut store, cache) = open_graph()?;
-    let report = build_graph(&repo, &mut store, &cache, ingest, committed)?;
+    let report = build_graph(&repo, &mut store, &cache, ingest, source)?;
 
     if json {
         emit_json(&report)?;
@@ -677,7 +712,12 @@ fn run_review(
     // Range review is over committed history, so build the committed (HEAD)
     // graph; a working-tree review overlays uncommitted edits so the graph and
     // the change set agree. Either way, capture the authored-layer drift.
-    let report = build_graph(&repo, &mut store, &cache, ingest, base.is_some())?;
+    let source = if base.is_some() {
+        GraphSource::Committed
+    } else {
+        GraphSource::Worktree
+    };
+    let report = build_graph(&repo, &mut store, &cache, ingest, source)?;
     let changed = match base {
         Some(base) => repo.changed_between(base)?,
         None => repo.changed_files()?,
@@ -751,7 +791,7 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
 fn run_init(ingest: rto_graph::IngestConfig) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
 
-    let report = build_graph(&repo, &mut store, &cache, ingest, true)?;
+    let report = build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
     let nodes = store.node_count()?;
     let edges = store.edge_count()?;
 
@@ -841,7 +881,7 @@ fn run_infer(
     }
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     // Inference is authoritative over *its own* suggestions: clear prior
     // embedding-produced edges first so the result reflects exactly the current
@@ -908,7 +948,7 @@ fn run_duplicates(
     }
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     let report = rto_graph::duplicates(
         &store,
@@ -1239,7 +1279,7 @@ fn run_compare_codegraph(
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     // Build the derived graph so there is something to compare against.
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     let report = rto_graph::compare_codegraph(std::path::Path::new(path), &store)?;
 
@@ -1316,7 +1356,7 @@ fn run_import_lat(ingest: rto_graph::IngestConfig, path: &str, json: bool) -> an
     let imported = rto_spec::import_lat(&files);
 
     // Build the derived + authored graph first so code links validate against it.
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
     let applied = store.apply_import_layer(rto_spec::LAT_REF, &imported.facts)?;
 
     let r = &imported.report;
@@ -1404,7 +1444,7 @@ fn run_import_graphify(
     let imported = rto_spec::import_graphify(&text)?;
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     // Assemble the full import layer: Graphify's own nodes/edges plus grounding
     // links. When an imported node's `source_file` matches a `file:<path>` node
@@ -1493,7 +1533,7 @@ fn build_scaffold(
         anyhow::bail!("unknown --kind `{kind}` (expected: adr | blueprint)");
     }
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
     let root = repo
         .workdir()
         .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
@@ -1737,7 +1777,7 @@ fn run_spec_context(
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     let ctx = rto_spec::context(&store, topic, limit)?;
     if json {
@@ -1790,7 +1830,7 @@ fn run_query(
     use rto_graph::{NodeKind, explain, list_kind};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     match (key, kind) {
         (Some(key), _) => {
@@ -1851,7 +1891,7 @@ fn run_context(
     use rto_graph::{context, refresh_contexts};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     if refresh {
         let report = refresh_contexts(&store)?;
@@ -1897,7 +1937,7 @@ fn run_context(
 /// by category. A report, not a gate: it always exits zero.
 fn run_debt(ingest: rto_graph::IngestConfig, kinds: &[String], json: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     let report = rto_graph::debt(&store, kinds)?;
     if json {
@@ -1943,7 +1983,7 @@ fn run_path(
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     let result = rto_graph::path(&store, from, to)?;
     if json {
@@ -1975,7 +2015,7 @@ fn run_export(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::R
     use rto_graph::GraphArtifact;
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
     let artifact = GraphArtifact::from_store(&store)?;
     let json = artifact.to_json()?;
 
@@ -2067,7 +2107,7 @@ fn run_serve(
 #[cfg(feature = "mcp")]
 fn serve_mcp(ingest: rto_graph::IngestConfig, http: Option<String>) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     match http {
         Some(addr) => {
@@ -2174,7 +2214,7 @@ fn serve_models_endpoint(
     // once so the served model can `explain`/`search`/`path`/`debt` this repo.
     if cfg.serve.tools.unwrap_or(true) {
         let (repo, mut store, cache) = open_graph()?;
-        build_graph(&repo, &mut store, &cache, ingest, true)?;
+        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
         let tools = std::sync::Arc::new(GraphToolRegistry::new(store));
         eprintln!(
             "roteiro model server listening on http://{socket}/v1 (graph tools on) — serving: {names}"
@@ -2406,7 +2446,7 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
 /// (default `vault`).
 fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, true)?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
     let out = out.map_or_else(
         || std::path::PathBuf::from("vault"),
         std::path::PathBuf::from,

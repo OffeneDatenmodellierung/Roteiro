@@ -40,8 +40,8 @@ fn write(dir: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).expect("write");
 }
 
-fn fresh_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roteiro-check-cli-{}", std::process::id()));
+fn fresh_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("roteiro-check-cli-{}-{name}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).expect("mkdir");
     dir
@@ -62,7 +62,7 @@ const ADR: &str = "---\n\
 
 #[test]
 fn worktree_check_gates_a_drift_introducing_edit_that_committed_ignores() {
-    let dir = fresh_dir();
+    let dir = fresh_dir("worktree");
     git(&dir, &["init", "-q"]);
     // A symbol the ADR links to, and the ADR itself.
     write(&dir, "src/lib.rs", "pub struct Thing;\n");
@@ -97,6 +97,44 @@ fn worktree_check_gates_a_drift_introducing_edit_that_committed_ignores() {
     assert!(
         roteiro(&dir, &["check", "--committed"]).status.success(),
         "committed check should still pass — HEAD is unchanged"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn staged_check_validates_the_index_not_the_working_tree() {
+    // `check --staged` gates exactly what a commit records. Stage a change that
+    // dangles an authored link, then restore the file on disk (unstaged): the
+    // working-tree `check` passes, but `--staged` fails on the staged drift.
+    let dir = fresh_dir("staged");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    write(&dir, "docs/adr/0001-thing.md", ADR);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    // Stage the removal of `Thing`, then put it back on disk (unstaged).
+    write(&dir, "src/lib.rs", "pub struct Other;\n");
+    git(&dir, &["add", "src/lib.rs"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+
+    // Working tree still has Thing → the default (worktree) check passes.
+    assert!(
+        roteiro(&dir, &["check"]).status.success(),
+        "worktree check should pass (Thing is present on disk)"
+    );
+    // The index dropped Thing → the staged check fails on the dangling link.
+    let staged = roteiro(&dir, &["check", "--staged"]);
+    assert!(
+        !staged.status.success(),
+        "staged check must fail on drift the commit would record: {}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&staged.stderr).contains("does not resolve"),
+        "reports the dangling staged link: {}",
+        String::from_utf8_lossy(&staged.stderr)
     );
 
     std::fs::remove_dir_all(&dir).ok();
