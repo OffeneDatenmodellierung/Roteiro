@@ -890,8 +890,11 @@ impl RustWalk<'_> {
 // same fact shape as the Rust walker — a `file` node, one symbol node per
 // definition with `defines`/`contains` edges reflecting byte-range nesting, and
 // each function's callee simple-names in `meta.calls` — so cross-file (and
-// cross-language) call resolution in `crate::sync` works uniformly. A new
-// language is a row in `tag_lang_for`, not new code.
+// cross-language) call resolution in `crate::sync` works uniformly. Where the
+// language has an import query (`import_query_for`), it also emits `imports`
+// edges (`file → import` target), as the Rust walker does for `use`. A new
+// language is a row in `tag_lang_for` (and optionally `import_query_for`), not
+// new code.
 
 /// A language dispatched to the generic tags extractor: its label, grammar, and
 /// `tags.scm` source (from the grammar crate, or vendored under `src/queries/`).
@@ -1066,6 +1069,130 @@ fn tag_config(def: &TagLang) -> Option<TagConfig> {
         .clone()
 }
 
+/// A per-language tree-sitter query capturing import/include targets as `@path`.
+/// Run alongside the tags extraction so the generic languages emit `imports`
+/// edges (`file → import` node) the way the Rust walker does for `use`. `None`
+/// for a language whose imports we do not yet capture (it simply emits none).
+///
+/// Node names are grammar-specific; a query that fails to compile against its
+/// grammar is cached as absent (see [`import_query`]) rather than retried.
+fn import_query_for(lang: &str) -> Option<&'static str> {
+    Some(match lang {
+        // `import a.b.c`, `import a.b as d`, `from a.b import x`, `from . import x`.
+        "python" => {
+            "(import_statement name: (dotted_name) @path)\n\
+             (import_statement name: (aliased_import name: (dotted_name) @path))\n\
+             (import_from_statement module_name: (dotted_name) @path)\n\
+             (import_from_statement module_name: (relative_import) @path)"
+        }
+        // `import x from \"mod\"`, `export … from \"mod\"` — the module string.
+        "javascript" | "typescript" | "tsx" => {
+            "(import_statement source: (string (string_fragment) @path))\n\
+             (export_statement source: (string (string_fragment) @path))"
+        }
+        // Each spec's quoted path inside an `import ( … )` block or single import.
+        "go" => "(import_spec path: (interpreted_string_literal) @path)",
+        // `import a.b.C;` / `import static a.b.C;`.
+        "java" => {
+            "(import_declaration (scoped_identifier) @path)\n\
+             (import_declaration (identifier) @path)"
+        }
+        // `#include \"x.h\"` and `#include <x>` (C and, by inheritance, C++).
+        "c" | "cpp" => {
+            "(preproc_include path: (string_literal) @path)\n\
+             (preproc_include path: (system_lib_string) @path)"
+        }
+        _ => return None,
+    })
+}
+
+/// A compiled import query, shared across the blobs of one grammar.
+type ImportQuery = std::sync::Arc<tree_sitter::Query>;
+
+/// Cache of compiled import queries, keyed by [`TagLang::grammar_key`] (as with
+/// [`TAG_CONFIGS`]). `None` when the language has no import query or it does not
+/// compile against the grammar, so it is not retried per file.
+static IMPORT_QUERIES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<&'static str, Option<ImportQuery>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// The compiled import query for a language, building and caching it on first use.
+fn import_query(def: &TagLang) -> Option<ImportQuery> {
+    let mut cache = IMPORT_QUERIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(def.grammar_key)
+        .or_insert_with(|| {
+            let src = import_query_for(def.lang)?;
+            tree_sitter::Query::new(&def.language, src)
+                .ok()
+                .map(std::sync::Arc::new)
+        })
+        .clone()
+}
+
+/// Normalise a captured import target to a bare module string: strip surrounding
+/// quotes (`"…"`), C system-header brackets (`<…>`), and whitespace.
+fn normalize_import(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>')
+        .trim()
+        .to_owned()
+}
+
+/// Append `imports` edges for a blob by running its language's import query.
+/// Emits one `import:<lang>:<module>` node (deduped) and a `file → import`
+/// `Imports` edge per distinct target, mirroring the Rust walker's `use` handling.
+fn append_import_facts(
+    path: &str,
+    def: &TagLang,
+    bytes: &[u8],
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    use streaming_iterator::StreamingIterator as _;
+
+    let Some(query) = import_query(def) else {
+        return;
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&def.language).is_err() {
+        return;
+    }
+    let Some(tree) = parser.parse(bytes, None) else {
+        return;
+    };
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let Ok(raw) = cap.node.utf8_text(bytes) else {
+                continue;
+            };
+            let module = normalize_import(raw);
+            if module.is_empty() {
+                continue;
+            }
+            let key = format!("import:{}:{module}", def.lang);
+            if seen.insert(key.clone()) {
+                nodes.push(Node {
+                    key: key.clone(),
+                    kind: NodeKind::Other("import".into()),
+                    name: module,
+                    path: Some(path.to_owned()),
+                    lang: Some(def.lang.to_owned()),
+                    blob_hash: None,
+                    span: None,
+                    meta: serde_json::Value::Null,
+                });
+                edges.push(Edge::derived(file_key(path), key, EdgeKind::Imports));
+            }
+        }
+    }
+}
+
 /// Map a `tags.scm` syntax type (the tail of a `@definition.X` capture) to a
 /// graph node kind. Unrecognised kinds are kept verbatim under `Other`.
 fn tag_node_kind(syntax_type: &str) -> NodeKind {
@@ -1200,6 +1327,9 @@ fn tag_facts(
             )),
         }
     }
+
+    // Import/include edges (file → import target), where the language has a query.
+    append_import_facts(path, &def, bytes, &mut nodes, &mut edges);
 
     // Deterministic, duplicate-free output (two query patterns can capture the
     // same definition, and distinct symbols can share a qualified name).
@@ -1596,6 +1726,75 @@ mod inner {
                 .and_then(|n| n.lang.as_deref()),
             Some("typescript")
         );
+    }
+
+    // Extract `src` as `path` and collect the `import:<…>` targets it emits.
+    fn import_targets(path: &str, src: &[u8]) -> Vec<String> {
+        Registry::default()
+            .extract(path, "b", src)
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("import".into()))
+            .map(|n| n.key.clone())
+            .collect()
+    }
+
+    #[test]
+    fn extracts_imports_edges_per_language() {
+        // Each case: a file with import statements → the expected `import:` nodes,
+        // plus a `file → import` Imports edge.
+        let cases: &[(&str, &[u8], &[&str])] = &[
+            (
+                "app.py",
+                b"import os\nfrom a.b import c\nimport x.y as z\n",
+                &["import:python:os", "import:python:a.b", "import:python:x.y"],
+            ),
+            (
+                "m.js",
+                b"import foo from \"./mod.js\";\nexport { y } from \"./y.js\";\n",
+                &["import:javascript:./mod.js", "import:javascript:./y.js"],
+            ),
+            (
+                "svc.ts",
+                b"import { A } from \"./a\";\n",
+                &["import:typescript:./a"],
+            ),
+            (
+                "m.go",
+                b"package main\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n",
+                &["import:go:fmt", "import:go:os"],
+            ),
+            (
+                "M.java",
+                b"import java.util.List;\nimport static a.B.c;\n",
+                &["import:java:java.util.List", "import:java:a.B.c"],
+            ),
+            (
+                "m.c",
+                b"#include <stdio.h>\n#include \"local.h\"\n",
+                &["import:c:stdio.h", "import:c:local.h"],
+            ),
+            ("m.cpp", b"#include <vector>\n", &["import:cpp:vector"]),
+        ];
+        for (path, src, expected) in cases {
+            let got = import_targets(path, src);
+            for want in *expected {
+                assert!(
+                    got.iter().any(|k| k == want),
+                    "{path}: expected import node {want}, got {got:?}"
+                );
+            }
+            // The corresponding file → import edge is derived.
+            let fs = Registry::default().extract(path, "b", src);
+            for want in *expected {
+                assert!(
+                    fs.edges.iter().any(|e| e.kind == EdgeKind::Imports
+                        && e.src == format!("file:{path}")
+                        && &e.dst == want),
+                    "{path}: expected Imports edge to {want}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -26,6 +26,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tree-sitter = "0.26.12"
 tree-sitter-tags = "0.26.12"
+# tree-sitter 0.26's `QueryCursor::matches` yields a streaming iterator; needed to
+# walk import-statement query matches for the per-language `imports` edges.
+streaming-iterator = "0.1"
 # Language grammars for the generic tags-query extractor. Each ships a `tags.scm`
 # (surfacing `@definition.*` / `@reference.*`) that one shared extractor drives,
 # so a new language is a table row, not new code. Grammars runtime-depend only on
