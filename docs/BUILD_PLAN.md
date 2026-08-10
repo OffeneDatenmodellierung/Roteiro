@@ -676,8 +676,13 @@ follow-ups noted under Stages 2/4 ("making `check` working-tree-aware pairs with
   `post-checkout`/`post-merge`. The `AGENTS.md` snippet points agents at the same
   pre-finish `check`. An end-to-end test proves a working-tree edit that dangles an
   authored link fails `check` while `check --committed` still passes; the hook
-  content (gate + `--no-verify` escape) is unit-tested. Untracked *new* files are
-  still not overlaid (shared limitation with `sync_worktree`).
+  content (gate + `--no-verify` escape) is unit-tested. **Limitations** (both
+  shared with `sync_worktree`, follow-ups): untracked *new* files are not
+  overlaid; and validation is of the **working tree** (files on disk), not the
+  git **index**, so with a partially-staged commit the gate checks disk state,
+  not exactly what will be committed — staging the whole change (or `git commit
+  -a`) makes them identical. A precise index-aware overlay (`sync_index`) is the
+  planned follow-up.
 
 ### Stage 14 — v1.0 hardening  → **v1.0.0**
 **Goal:** the merged graph is the canonical source; ship stable (completes the

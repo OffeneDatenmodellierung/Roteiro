@@ -45,9 +45,11 @@ enum Command {
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
-    /// By default this validates the working tree (uncommitted edits to tracked
-    /// files included), so it can gate a commit before it is made; pass
-    /// `--committed` to validate only the `HEAD` tree (the CI merge gate).
+    /// By default this validates the working tree — tracked files as they are on
+    /// disk, unstaged edits included (not the git index) — so it catches drift
+    /// before a commit; pass `--committed` to validate only the `HEAD` tree (the
+    /// CI merge gate). Stage your whole change (or `git commit -a`) for the
+    /// working tree to match what will be committed.
     Check {
         /// Emit the check report as JSON.
         #[arg(long)]
@@ -517,9 +519,11 @@ fn open_graph() -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph:
 }
 
 /// The bytes of a tracked file's authored source: the committed `HEAD` blob when
-/// `committed`, otherwise its working-tree copy (the pre-commit state). Returns
-/// `Ok(None)` when a worktree file has been deleted, so the caller drops it —
-/// mirroring how [`rto_graph::sync_worktree`] overlays dirty and deleted files.
+/// `committed`, otherwise its **working-tree** copy — the file as it is on disk,
+/// which includes any unstaged edits and is *not* the git index. (This matches
+/// [`rto_graph::sync_worktree`], which the derived graph is built from, so the
+/// authored and derived layers stay consistent.) Returns `Ok(None)` when a
+/// worktree file has been deleted, so the caller drops it.
 fn read_source(
     repo: &rto_graph::Repo,
     blob: &rto_graph::BlobRef,

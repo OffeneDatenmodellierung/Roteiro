@@ -36,8 +36,9 @@ pub fn hook_script(name: &str) -> String {
     if name == "pre-commit" {
         format!(
             "{header}\
-             # Block a commit that introduces ADR/annotation drift. Skip once with\n\
-             # `git commit --no-verify`.\n\
+             # Block a commit that introduces ADR/annotation drift. Validates the\n\
+             # working tree (files on disk, not the staged index), so stage your\n\
+             # whole change — or `git commit -a`. Skip once with `git commit --no-verify`.\n\
              command -v roteiro >/dev/null 2>&1 || exit 0\n\
              roteiro check || {{\n\
              \techo 'roteiro: commit blocked by knowledge-graph drift (see above); \
