@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.13...roteiro-v0.0.14) - 2026-08-10
+
+### Added
+
+- *(render)* useful Obsidian vault — home overview, content, status, tags (Stage 14)
+- *(review)* CLI-first graph-grounded review of the current change (Stage 17)
+- *(check)* worktree-aware check + pre-commit drift gate (Stage 16)
+- *(spec)* draft generation via llama.cpp + ADR-0003 amendment (Stage 20)
+- *(models)* coding/reasoning generative models + role label (Stage 20)
+
+### Fixed
+
+- address PR #119 review — propagate store errors + accurate tag docs
+- address PR #112 review — ADR-edit drift, deterministic order, related-kind
+- address PR #99 review — v1.2 refs, dedup vlm doc, reject non-embedding model
+- *(spec)* address PR #94 review — strip <think>, correct backend docs
+- *(models)* address PR #93 review — tokenizer.json + deterministic default
+
+### Other
+
+- Merge branch 'main' into docs/json-schema-freeze
+- Merge branch 'main' into feat/obsidian-vault
+- clarify check validates the working tree, not the git index (PR #109 review)
+- Merge branch 'main' into feat/model-residency
+- remove duplicated helpers (Stage 14 health check)
+- remove candle — unify the whole inference core on llama.cpp (ADR-0003 v1.2)
+- Merge branch 'main' into feat/stage20-models
+
 ## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.12...roteiro-v0.0.13) - 2026-08-09
 
 ### Added

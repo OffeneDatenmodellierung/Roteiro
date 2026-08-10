@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.13...rto-spec-v0.0.14) - 2026-08-10
+
+### Fixed
+
+- address PR #108 review — lang_for case-normalization + cap doc
+
+### Other
+
+- *(crates)* per-crate crates.io READMEs + refresh root README (Stage 14)
+- remove duplicated helpers (Stage 14 health check)
+
 ## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.12...rto-spec-v0.0.13) - 2026-08-09
 
 ### Added

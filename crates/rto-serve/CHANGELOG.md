@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.13...rto-serve-v0.0.14) - 2026-08-10
+
+### Other
+
+- *(crates)* per-crate crates.io READMEs + refresh root README (Stage 14)
+- *(llama)* extract rto-llama inference core from rto-serve
+
 ## [0.0.13](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.12...rto-serve-v0.0.13) - 2026-08-09
 
 ### Added
