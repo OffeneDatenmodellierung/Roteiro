@@ -453,9 +453,11 @@ pub fn find(name: &str) -> Option<&'static ModelSpec> {
     REGISTRY.iter().find(|m| m.name == name)
 }
 
-/// Pure resolution of the model-store root from a `ROTEIRO_HOME` override and a
-/// home directory. Factored out so it is testable without mutating the process
-/// environment.
+/// Pure resolution of the model-store root, in precedence order: an explicit
+/// `model_store` directory (config `[paths] model_store` or `ROTEIRO_MODEL_STORE`,
+/// used verbatim), then `roteiro_home`'s `models` subdir (`ROTEIRO_HOME`), then
+/// `~/.roteiro/models` under the given home. Factored out so it is testable
+/// without mutating the process environment.
 fn store_root_from(
     model_store: Option<PathBuf>,
     roteiro_home: Option<PathBuf>,

@@ -57,8 +57,9 @@ pub struct Config {
 #[serde(default)]
 pub struct DebtConfig {
     /// Glob patterns whose matching files are excluded from the intent-debt
-    /// report (e.g. `["vendor/**", "**/generated/*"]`). `*`/`?` match within a
-    /// path segment, `**` matches across segments.
+    /// report (e.g. `["vendor/**", "**/generated/*"]`). Patterns are matched
+    /// anchored end-to-end against the whole repo-relative path (not a substring
+    /// match): `*`/`?` match within a path segment, `**` matches across segments.
     pub ignore: Option<Vec<String>>,
 }
 
