@@ -114,21 +114,55 @@ impl Repo {
     /// valid UTF-8.
     pub fn walk_blobs(&self) -> Result<Vec<BlobRef>, GitError> {
         let tree = self.inner.head_tree().map_err(ge)?;
-        let mut recorder = gix::traverse::tree::Recorder::default();
-        tree.traverse().breadthfirst(&mut recorder).map_err(ge)?;
+        walk_tree_blobs(&tree)
+    }
+
+    /// The tracked files that differ between `base` (any revspec — a branch,
+    /// `HEAD~3`, a sha) and the current `HEAD`, sorted by path. Used for
+    /// change-scoped tooling over a commit range (e.g. `roteiro review --base
+    /// main`), distinct from [`Repo::changed_files`], which compares the working
+    /// tree to `HEAD`. A path only in `HEAD` is added, only in `base` is deleted.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `base` cannot be resolved to a tree, a tree cannot
+    /// be traversed, or a path is not valid UTF-8.
+    pub fn changed_between(&self, base: &str) -> Result<Vec<ChangedFile>, GitError> {
+        let base_tree = self
+            .inner
+            .rev_parse_single(base)
+            .map_err(ge)?
+            .object()
+            .map_err(ge)?
+            .peel_to_tree()
+            .map_err(ge)?;
+        let base: std::collections::HashMap<String, String> = walk_tree_blobs(&base_tree)?
+            .into_iter()
+            .map(|b| (b.path, b.oid))
+            .collect();
+        let head = self.walk_blobs()?;
+        let head_paths: std::collections::HashSet<&str> =
+            head.iter().map(|b| b.path.as_str()).collect();
 
         let mut out = Vec::new();
-        for entry in recorder.records {
-            if !entry.mode.is_blob() {
-                continue;
+        // Added or modified in HEAD relative to base.
+        for blob in &head {
+            if base.get(&blob.path) != Some(&blob.oid) {
+                out.push(ChangedFile {
+                    path: blob.path.clone(),
+                    deleted: false,
+                });
             }
-            let path = String::from_utf8(entry.filepath.into())
-                .map_err(|e| GitError::NonUtf8Path(e.into_bytes()))?;
-            out.push(BlobRef {
-                path,
-                oid: entry.oid.to_hex().to_string(),
-            });
         }
+        // Present in base but gone from HEAD.
+        for path in base.keys() {
+            if !head_paths.contains(path.as_str()) {
+                out.push(ChangedFile {
+                    path: path.clone(),
+                    deleted: true,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
 
@@ -180,6 +214,25 @@ impl Repo {
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
+}
+
+/// Collect every blob reachable from `tree`, with full repository-relative paths.
+fn walk_tree_blobs(tree: &gix::Tree<'_>) -> Result<Vec<BlobRef>, GitError> {
+    let mut recorder = gix::traverse::tree::Recorder::default();
+    tree.traverse().breadthfirst(&mut recorder).map_err(ge)?;
+    let mut out = Vec::new();
+    for entry in recorder.records {
+        if !entry.mode.is_blob() {
+            continue;
+        }
+        let path = String::from_utf8(entry.filepath.into())
+            .map_err(|e| GitError::NonUtf8Path(e.into_bytes()))?;
+        out.push(BlobRef {
+            path,
+            oid: entry.oid.to_hex().to_string(),
+        });
+    }
+    Ok(out)
 }
 
 /// A tracked file that differs between the working tree and `HEAD`.
