@@ -219,8 +219,13 @@ pub struct Node {
     /// extraction), [`Provenance::Authored`] (ADR/blueprint/lat sections), or
     /// [`Provenance::Inferred`] (Graphify import). Lets layer-scoped operations —
     /// e.g. a derived-only incremental `sync` — target one layer without
-    /// disturbing the others. Defaults to `Derived`, which is also the correct
-    /// value for a legacy cached fact set serialized before nodes carried it.
+    /// disturbing the others.
+    ///
+    /// Defaults to `Derived` when absent — correct for a legacy *extraction*
+    /// object-cache entry (derived-only) written before this field existed. A
+    /// legacy persisted *import* layer also deserializes its nodes as `Derived`,
+    /// but the store repairs that on load (an import node is never derived), so
+    /// the default never mislabels a durable import layer.
     #[serde(default)]
     pub provenance: Provenance,
     /// Arbitrary structured metadata.
