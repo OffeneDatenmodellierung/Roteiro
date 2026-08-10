@@ -812,9 +812,10 @@ are final (v1.0-frozen), not a moving target.
 - **Stretch (investigate):** wire Roteiro's own MCP (`roteiro serve`) into agent
   reviews so a reviewer queries the graph (`explain`/`debt`/`path`/`search`) —
   dogfooding the one query surface for reviews, not just the diff. Feasibility is
-  open: GitHub's docs confirm MCP servers are configurable in repo Copilot
-  settings but do not state whether the hosted reviewer can reach a **self-hosted**
-  MCP; record the finding before committing.
+  **resolved (feasible)**: GitHub shipped Copilot code review + MCP servers (GA
+  2026-07-29), so the hosted reviewer can call read-only tools from a registered
+  MCP over `http`/`sse`; see §5d for the finding and the `graph-latest`-artifact
+  path.
 - **DoD:** a tool-agnostic instructions file measurably shapes an agent review
   (attribution shows it was read); the review checklist/skill exists; the
   MCP-for-review feasibility is resolved (feasible — an optional enhancement now
