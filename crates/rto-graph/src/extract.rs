@@ -1181,7 +1181,10 @@ fn append_import_facts(
                     key: key.clone(),
                     kind: NodeKind::Other("import".into()),
                     name: module,
-                    path: Some(path.to_owned()),
+                    // The import *target* is not owned by any one file (its key is
+                    // global): leave `path` unset, as the Rust walker does, so two
+                    // files importing the same module dedup to one stable node.
+                    path: None,
                     lang: Some(def.lang.to_owned()),
                     blob_hash: None,
                     span: None,
@@ -1729,12 +1732,21 @@ mod inner {
     }
 
     // Extract `src` as `path` and collect the `import:<…>` targets it emits.
+    // Every import node's key is global, so — like the Rust walker's — it must
+    // carry no `path`, keeping the node stable when several files import it.
     fn import_targets(path: &str, src: &[u8]) -> Vec<String> {
         Registry::default()
             .extract(path, "b", src)
             .nodes
             .iter()
             .filter(|n| n.kind == NodeKind::Other("import".into()))
+            .inspect(|n| {
+                assert!(
+                    n.path.is_none(),
+                    "import node must not be file-scoped: {}",
+                    n.key
+                );
+            })
             .map(|n| n.key.clone())
             .collect()
     }
