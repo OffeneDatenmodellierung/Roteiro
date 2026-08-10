@@ -11,13 +11,16 @@
 //! that dangle.
 //!
 //! lat also supports `// @lat: [[section]]` backlinks *from* source code (like
-//! `@rto:`); importing those as `authored` edges is a planned fast-follow —
-//! [`resolve_lat_ref`] already resolves such references to node keys.
+//! `@rto:`). [`scan_lat_annotations`] finds those on comment lines and
+//! [`import_lat_backlinks`] resolves them (via [`resolve_lat_ref`]) into
+//! `authored` `references` edges from the annotated file to the lat section,
+//! stamped [`LAT_REF`] so they live in — and are re-derived with — the lat layer.
 
 use std::collections::BTreeMap;
 
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
 
+use crate::annotate::is_comment_line;
 use crate::text::{scan_wiki_links, slugify};
 
 /// `src_ref` stamped on every edge imported from lat.md, so it can be told apart
@@ -46,6 +49,10 @@ pub struct LatReport {
     pub links_to_sections: usize,
     /// Links resolved to a code symbol or file.
     pub links_to_code: usize,
+    /// `@lat:` backlinks found in source comments that resolved to a lat section.
+    pub backlinks_resolved: usize,
+    /// `@lat:` backlinks whose reference named no known lat file (dropped).
+    pub backlinks_unresolved: usize,
 }
 
 /// Import a lat.md directory. `files` are `(repo-relative path, content)` pairs
@@ -83,6 +90,77 @@ fn section_key(path: &str, slug: &str) -> String {
 #[must_use]
 pub fn resolve_lat_ref(files: &[(String, String)], raw: &str) -> Option<String> {
     LatIndex::build(files).resolve_section(raw)
+}
+
+/// The marker introducing a lat backlink in a source comment (`// @lat: [[…]]`).
+const LAT_MARKER: &str = "@lat:";
+
+/// A `@lat:` backlink found in a source file: a code→lat reference carried in a
+/// `[[…]]` wiki-link on a comment line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatAnnotation {
+    /// Repository-relative path of the file the annotation is in.
+    pub path: String,
+    /// The raw lat reference from the `[[…]]` link (e.g. `auth#OAuth Flow`).
+    pub reference: String,
+    /// 1-based line number.
+    pub line: usize,
+}
+
+/// Find every `@lat:` backlink in `text`, tagged with `rel_path`. Recognition is
+/// restricted to comment lines (as with `@rto:`) so example tokens in string
+/// literals are not mistaken for real backlinks, and the reference must be a
+/// `[[…]]` wiki-link so a lat name containing spaces is delimited unambiguously.
+/// A single comment may carry several (`// @lat: [[a#x]] [[b#y]]`).
+#[must_use]
+pub fn scan_lat_annotations(rel_path: &str, text: &str) -> Vec<LatAnnotation> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if !is_comment_line(line) {
+            continue;
+        }
+        // Strip inline code spans so a documented `` `@lat: [[x]]` `` example is
+        // not counted, then take the wiki-links after the marker.
+        let stripped = crate::text::strip_code_spans(line);
+        let Some(pos) = stripped.find(LAT_MARKER) else {
+            continue;
+        };
+        let after = &stripped[pos + LAT_MARKER.len()..];
+        for reference in scan_wiki_links(after) {
+            out.push(LatAnnotation {
+                path: rel_path.to_owned(),
+                reference,
+                line: i + 1,
+            });
+        }
+    }
+    out
+}
+
+/// Resolve `@lat:` backlinks against the lat file set, returning `authored`
+/// `references` edges (`file:<path>` → lat section, stamped [`LAT_REF`]) and the
+/// number that named no known lat file. Only lat-section references resolve here;
+/// a backlink to a non-lat target is dropped (and counted unresolved).
+#[must_use]
+pub fn import_lat_backlinks(
+    files: &[(String, String)],
+    annotations: &[LatAnnotation],
+) -> (Vec<Edge>, usize) {
+    let index = LatIndex::build(files);
+    let mut edges = Vec::new();
+    let mut unresolved = 0;
+    for ann in annotations {
+        if let Some(target) = index.resolve_section(&ann.reference) {
+            edges.push(lat_edge(
+                format!("file:{}", ann.path),
+                target,
+                EdgeKind::References,
+            ));
+        } else {
+            unresolved += 1;
+        }
+    }
+    (edges, unresolved)
 }
 
 /// Index of lat file stems → repo-relative paths, for resolving `[[stem#…]]`
@@ -341,5 +419,53 @@ mod tests {
     #[test]
     fn ref_marker_is_stable() {
         assert_eq!(LAT_REF, "import:lat");
+    }
+
+    #[test]
+    fn scans_lat_backlinks_only_on_comment_lines() {
+        use super::scan_lat_annotations;
+        let src = "// @lat: [[auth#OAuth Flow]]\n\
+                   fn f() {}\n\
+                   let s = \"@lat: [[architecture]]\";\n\
+                   /* see @lat: [[architecture#Request Pipeline]] and [[auth]] */\n";
+        let anns = scan_lat_annotations("src/auth.rs", src);
+        // The string-literal one is skipped; the comment ones (3 refs) are kept.
+        assert_eq!(anns.len(), 3);
+        assert_eq!(anns[0].reference, "auth#OAuth Flow");
+        assert_eq!(anns[0].line, 1);
+        assert_eq!(anns[1].reference, "architecture#Request Pipeline");
+        assert_eq!(anns[1].line, 4);
+        assert_eq!(anns[2].reference, "auth");
+    }
+
+    #[test]
+    fn imports_backlinks_as_authored_file_to_section_edges() {
+        use super::{import_lat_backlinks, scan_lat_annotations};
+        let f = files();
+        let anns = scan_lat_annotations("src/auth.rs", "// @lat: [[auth#OAuth Flow]]\n");
+        let (edges, unresolved) = import_lat_backlinks(&f, &anns);
+        assert_eq!(unresolved, 0);
+        assert_eq!(edges.len(), 1);
+        let e = &edges[0];
+        assert_eq!(e.src, "file:src/auth.rs");
+        assert_eq!(e.dst, "lat:lat.md/auth.md#oauth-flow");
+        assert_eq!(e.kind, EdgeKind::References);
+        assert_eq!(e.provenance.as_str(), "authored");
+        assert_eq!(e.src_ref.as_deref(), Some(LAT_REF));
+    }
+
+    #[test]
+    fn backlink_to_unknown_lat_file_is_unresolved() {
+        use super::{import_lat_backlinks, scan_lat_annotations};
+        let f = files();
+        // `nope` is not a known lat file, and a code path never resolves as a
+        // backlink target.
+        let anns = scan_lat_annotations(
+            "src/x.rs",
+            "// @lat: [[nope#Section]]\n// @lat: [[src/auth.rs#validate]]\n",
+        );
+        let (edges, unresolved) = import_lat_backlinks(&f, &anns);
+        assert!(edges.is_empty());
+        assert_eq!(unresolved, 2);
     }
 }
