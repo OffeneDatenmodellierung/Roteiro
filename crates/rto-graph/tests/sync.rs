@@ -458,7 +458,7 @@ fn incremental_sync_matches_a_full_rebuild() {
         let mut ns: Vec<String> = fs
             .nodes
             .iter()
-            .map(|n| format!("{}|{:?}|{}", n.key, n.kind, n.provenance.as_str()))
+            .map(|n| format!("{}|{}|{}", n.key, n.kind.as_str(), n.provenance.as_str()))
             .collect();
         let mut es: Vec<String> = fs
             .edges
@@ -482,10 +482,12 @@ fn incremental_sync_matches_a_full_rebuild() {
     assert_eq!(ci, cf, "incremental sync must equal a full rebuild");
 
     // Sanity: the now-ambiguous caller→helper edge is gone in both, gone.rs dropped.
+    // Canonical edge form is "<kind>|<src>|<dst>|<prov>", so a `calls` edge starts
+    // with "calls|" — constrain the check to that kind, not any edge mentioning both.
     assert!(
         !cf.1
             .iter()
-            .any(|e| e.contains("#caller|") && e.contains("#helper")),
+            .any(|e| e.starts_with("calls|") && e.contains("#caller") && e.contains("#helper")),
         "the ambiguous calls edge must be dropped: {:?}",
         cf.1
     );

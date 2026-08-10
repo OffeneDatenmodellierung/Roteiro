@@ -40,7 +40,9 @@ pub struct SyncReport {
     pub tree: String,
     /// Whether the tree was unchanged and nothing was done.
     pub no_op: bool,
-    /// Total blobs in the tree.
+    /// Source files reflected in the graph — one `File` node per extracted blob.
+    /// Derived from the assembled graph (not the raw tree walk) so full and
+    /// incremental syncs report the same total for the same tree.
     pub blobs_total: usize,
     /// Blobs that were extracted (cache misses).
     pub blobs_extracted: usize,
@@ -92,9 +94,9 @@ pub fn sync(
     }
 
     let committed = extract_committed(repo, cache, extractor)?;
-    let total = committed.by_path.len();
     let mut assembled = flatten(committed.by_path);
     resolve_calls(&mut assembled);
+    let total = file_count(&assembled);
     store.reconcile(&assembled, Some(&tree))?;
     store.set_sync_env(&env)?;
 
@@ -204,11 +206,7 @@ fn try_incremental(
     // then reconcile to derived-only — identical to what the full path produces.
     let mut assembled = FactSet { nodes, edges };
     resolve_calls(&mut assembled);
-    let total = assembled
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .count();
+    let total = file_count(&assembled);
     store.reconcile(&assembled, Some(head_tree))?;
     store.set_sync_env(env)?;
 
@@ -451,6 +449,19 @@ fn flatten(by_path: BTreeMap<String, FactSet>) -> FactSet {
         assembled.edges.extend(facts.edges);
     }
     assembled
+}
+
+/// The number of source files reflected in an assembled fact set (one `File`
+/// node per extracted blob). Both the full and incremental sync paths derive
+/// `SyncReport::blobs_total` from the *assembled graph* this way — not from the
+/// raw blob list — so the two paths report the same total for the same tree (the
+/// graphs are identical; see the equivalence test).
+fn file_count(facts: &FactSet) -> usize {
+    facts
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::File)
+        .count()
 }
 
 /// Resolve the per-function call records (`meta.calls`) accumulated during
