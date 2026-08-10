@@ -83,7 +83,7 @@ pub fn sync(
     let total = committed.by_path.len();
     let mut assembled = flatten(committed.by_path);
     resolve_calls(&mut assembled);
-    store.rebuild(&assembled, Some(&tree))?;
+    store.reconcile(&assembled, Some(&tree))?;
 
     Ok(SyncReport {
         no_op: false,
@@ -177,7 +177,7 @@ pub fn sync_worktree(
 
     let mut assembled = flatten(by_path);
     resolve_calls(&mut assembled);
-    store.rebuild(&assembled, Some(&state))?;
+    store.reconcile(&assembled, Some(&state))?;
 
     Ok(SyncReport {
         no_op: false,
