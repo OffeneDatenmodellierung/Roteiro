@@ -726,7 +726,8 @@ Every hardening item below is delivered in code; what remains is cutting the
   whose tree does not match `HEAD`.
 - **Docs deploy — ✅ delivered.**
   [`.github/workflows/website.yml`](../.github/workflows/website.yml) renders the
-  site and Direct-Uploads it to Cloudflare Pages (`CLOUDFLARE_API_TOKEN`/`ACCOUNT_ID`),
+  site and Direct-Uploads it to Cloudflare Pages
+  (`CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`),
   off Cloudflare's build infra.
 - **`roteiro check` self-governs ADR-0001 — ✅ delivered.** ADR-0001 carries an
   **Implementation** section linking its decisions into the code via
