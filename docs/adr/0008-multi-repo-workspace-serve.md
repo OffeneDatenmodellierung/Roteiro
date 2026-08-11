@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0008"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
+version: "1.0"
 last-modified: 2026-08-11
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.1 |
+| **Document version** | 1.0 |
 
 ## Reference
 
@@ -109,11 +109,12 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
    `roteiro.toml`) lists repo roots, or `roteiro serve --workspace <root>`
    auto-discovers every git repo under a root. Project **names** derive from the
    repo directory (deduplicated), e.g. `roteiro`, `omnigent`.
-2. **On-demand, cached store resolution.** Factor the "discover repo → open
-   store" half of [[crates/roteiro/src/main.rs#open_graph]] into a reusable
-   resolver that takes a **repo path** (not just cwd). Workspace serve keeps an
-   LRU of open [[crates/rto-graph/src/store.rs#Store]] handles keyed by repo path,
-   opening `<repo>/.git/roteiro/graph.db` on first use.
+2. **On-demand, cached store resolution.** A [[crates/rto-graph/src/workspace.rs#Workspace]]
+   type resolves a project name to its store, opening
+   `<repo>/.git/roteiro/graph.db` on first use and caching the open
+   [[crates/rto-graph/src/store.rs#Store]] handle by name. The cache is bounded by
+   the registry (a handful of repos), so no eviction is needed; a repo with no
+   graph yet reports "run `roteiro sync`" rather than opening an empty store.
 3. **One model, shared.** The llama.cpp engine loads the configured model(s)
    once; all projects share them. This is the entire point — the graphs attach to
    a single warm model.
@@ -124,10 +125,14 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
      argument, plus a new `list_projects` tool. A missing `project` errors with
      the available names (or uses a configured default) — never a silent guess.
    - **OpenAI `/v1`** ([[crates/roteiro/src/main.rs#serve_models_endpoint]],
-     [[crates/rto-serve/src/server.rs#serve_blocking_with_tools]]): route by a
-     path prefix `/v1/<project>/chat/completions`, so the graph tools handed to
-     the model are pre-bound to that project's store. Prefer the path prefix to
-     overloading the `model` field, keeping `model` meaning the model.
+     [[crates/rto-serve/src/server.rs#serve_blocking_with_tools]]): the served
+     model's graph tools carry the **same `project` argument** and a
+     `list_projects` tool, so a natural-language question ("what does the auth
+     module in *beta* do?") resolves via `list_projects` → `search(project:
+     "beta", …)`. Implemented uniformly with MCP rather than as a
+     `/v1/<project>/…` path prefix: one selection mechanism across both surfaces,
+     and no bespoke HTTP routing. (A path prefix that pre-binds a project remains
+     a possible future convenience.)
 5. **Default unchanged.** With no `[workspace]`/`--workspace`, `serve` behaves
    exactly as today (cwd-scoped, no project selector). Loopback-only default is
    retained ([[crates/roteiro/src/config.rs#ServeConfig]]); a public bind must
@@ -196,4 +201,5 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 0.1 | 2026-08-11 | Draft for review. Proposes an opt-in workspace `serve`: one process, one resident model, per-repo graphs opened on demand behind an LRU store cache, explicit `project` selection on the MCP tools (+ `list_projects`) and `/v1/<project>/…` routing. Keeps single-repo cwd serve as the default; rejects N-servers, a proxy, and a merged mega-store. Grounded in `open_graph`, the two serve entry points, and the `[workspace]` config layer. |
+| 0.1 | 2026-08-11 | Draft for review. Proposes an opt-in workspace `serve`: one process, one resident model, per-repo graphs opened on demand behind a store cache, explicit `project` selection on the tools (+ `list_projects`). Keeps single-repo cwd serve as the default; rejects N-servers, a proxy, and a merged mega-store. Grounded in `open_graph`, the two serve entry points, and the `[workspace]` config layer. |
+| 1.0 | 2026-08-11 | Accepted and implemented. Added `rto_graph::Workspace` (name→store registry, opened on demand, cached), a `[workspace]` config table (`roots`/`repos`) and `serve --workspace <root>` (shallow repo discovery). Both tool surfaces are workspace-backed: the MCP tools and the `/v1` graph tools gained an optional `project` argument and a `list_projects` tool, exposed only when several projects are hosted. Single-repo serve is unchanged (the cwd repo is the sole default project). **Realised `/v1` selection as a uniform `project` tool argument, not a `/v1/<project>/…` path prefix** — one mechanism across MCP and `/v1`, no bespoke routing. |

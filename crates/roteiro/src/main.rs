@@ -266,6 +266,13 @@ enum Command {
         /// Model server (`--models`): the PEM private-key file for `--tls-cert`.
         #[arg(long, value_name = "FILE")]
         tls_key: Option<String>,
+        /// Workspace mode (ADR-0008): host every git repo under ROOT
+        /// (repeatable), so one server — holding the model once — answers
+        /// questions about many projects, selected per call by `project`.
+        /// Combined with `[workspace]` config. Omit for single-repo serving
+        /// (the current directory's repo).
+        #[arg(long, value_name = "ROOT")]
+        workspace: Vec<String>,
     },
 }
 
@@ -425,6 +432,7 @@ fn main() -> anyhow::Result<()> {
             addr,
             tls_cert,
             tls_key,
+            workspace,
         } => run_serve(
             ingest,
             &cfg.effective,
@@ -433,6 +441,7 @@ fn main() -> anyhow::Result<()> {
             addr,
             tls_cert,
             tls_key,
+            &workspace,
         ),
     }
 }
@@ -566,6 +575,18 @@ fn print_config_sections(loaded: &config::Loaded) {
         "  tools  = {:?}  ({})",
         e.serve.tools,
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
+    );
+
+    println!("[workspace]");
+    println!(
+        "  roots = {:?}  ({})",
+        e.workspace.roots,
+        source(p.workspace.roots.is_some(), u.workspace.roots.is_some())
+    );
+    println!(
+        "  repos = {:?}  ({})",
+        e.workspace.repos,
+        source(p.workspace.repos.is_some(), u.workspace.repos.is_some())
     );
 }
 
@@ -2291,6 +2312,7 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
 /// ADR-0006) or the MCP graph server. Each backend is feature-gated; a build
 /// lacking the relevant feature reports how to enable it.
 #[cfg(any(feature = "mcp", feature = "serve"))]
+#[allow(clippy::too_many_arguments)]
 fn run_serve(
     ingest: rto_graph::IngestConfig,
     cfg: &config::Config,
@@ -2299,36 +2321,94 @@ fn run_serve(
     addr: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    workspace_roots: &[String],
 ) -> anyhow::Result<()> {
+    let workspace = build_serve_workspace(&cfg.workspace, workspace_roots, ingest)?;
     if models {
-        serve_models_endpoint(cfg, ingest, addr, tls_cert, tls_key)
+        serve_models_endpoint(cfg, workspace, addr, tls_cert, tls_key)
     } else {
-        serve_mcp(ingest, http)
+        serve_mcp(workspace, http)
     }
 }
 
-/// Serve the graph over the Model Context Protocol. Builds the full graph, then
-/// serves over stdio (default) or streamable HTTP (`--http <addr>`).
-#[cfg(feature = "mcp")]
-fn serve_mcp(ingest: rto_graph::IngestConfig, http: Option<String>) -> anyhow::Result<()> {
-    let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+/// Assemble the [`rto_graph::Workspace`] a server hosts. With any workspace root
+/// (CLI `--workspace` or `[workspace]` config), collect every repo found and
+/// open their graphs on demand — **without** syncing (each repo's own hooks keep
+/// it fresh, ADR-0008). With none, fall back to single-repo serving: sync the
+/// current repo now (as `serve` always has) and host it as the sole project.
+fn build_serve_workspace(
+    ws_cfg: &config::WorkspaceConfig,
+    cli_roots: &[String],
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<rto_graph::Workspace> {
+    let mut repo_paths: Vec<std::path::PathBuf> = Vec::new();
+    let roots = cli_roots
+        .iter()
+        .map(String::as_str)
+        .chain(ws_cfg.roots.iter().flatten().map(String::as_str));
+    for root in roots {
+        repo_paths.extend(discover_repos_under(std::path::Path::new(root))?);
+    }
+    for repo in ws_cfg.repos.iter().flatten() {
+        repo_paths.push(std::path::PathBuf::from(repo));
+    }
 
+    if repo_paths.is_empty() {
+        // Single-repo serve: build the cwd repo's graph now and host it alone.
+        let (repo, mut store, cache) = open_graph()?;
+        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+        let name = repo
+            .workdir()
+            .and_then(std::path::Path::file_name)
+            .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+        return Ok(rto_graph::Workspace::single(name, store));
+    }
+    Ok(rto_graph::Workspace::from_repo_paths(repo_paths)?)
+}
+
+/// Git repos to host for a workspace `root`: the root itself if it is a repo,
+/// plus each immediate subdirectory that is one. Shallow by design — a code
+/// directory holding sibling checkouts is the common case, and a deep scan would
+/// be slow and surprising.
+fn discover_repos_under(root: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let is_repo = |dir: &std::path::Path| dir.join(".git").exists();
+    let mut repos = Vec::new();
+    if is_repo(root) {
+        repos.push(root.to_path_buf());
+    }
+    let entries = std::fs::read_dir(root)
+        .map_err(|e| anyhow::anyhow!("reading workspace root `{}`: {e}", root.display()))?;
+    let mut children: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && is_repo(p))
+        .collect();
+    children.sort();
+    repos.extend(children);
+    Ok(repos)
+}
+
+/// Serve the graph over the Model Context Protocol, over stdio (default) or
+/// streamable HTTP (`--http <addr>`). The `workspace` hosts one project
+/// (single-repo, already synced) or many (opened on demand); tools select one
+/// with `project` (ADR-0008).
+#[cfg(feature = "mcp")]
+fn serve_mcp(workspace: rto_graph::Workspace, http: Option<String>) -> anyhow::Result<()> {
     match http {
         Some(addr) => {
             let addr: std::net::SocketAddr = addr
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid --http address `{addr}`: {e}"))?;
             eprintln!("roteiro MCP server listening on http://{addr}/mcp");
-            rto_render::mcp::serve_http(store, addr).map_err(|e| anyhow::anyhow!("{e}"))
+            rto_render::mcp::serve_http(workspace, addr).map_err(|e| anyhow::anyhow!("{e}"))
         }
-        None => rto_render::mcp::serve_stdio(store).map_err(|e| anyhow::anyhow!("{e}")),
+        None => rto_render::mcp::serve_stdio(workspace).map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 
 /// MCP serving is unavailable without the `mcp` feature.
 #[cfg(all(not(feature = "mcp"), feature = "serve"))]
-fn serve_mcp(_ingest: rto_graph::IngestConfig, _http: Option<String>) -> anyhow::Result<()> {
+fn serve_mcp(_workspace: rto_graph::Workspace, _http: Option<String>) -> anyhow::Result<()> {
     anyhow::bail!(
         "MCP serving needs the `mcp` feature (build with `--features mcp`); \
          use `--models` for the OpenAI-compatible model endpoint"
@@ -2340,7 +2420,7 @@ fn serve_mcp(_ingest: rto_graph::IngestConfig, _http: Option<String>) -> anyhow:
 #[cfg(feature = "serve")]
 fn serve_models_endpoint(
     cfg: &config::Config,
-    ingest: rto_graph::IngestConfig,
+    workspace: rto_graph::Workspace,
     addr: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
@@ -2439,13 +2519,12 @@ fn serve_models_endpoint(
     };
     let scheme = if tls.is_some() { "https" } else { "http" };
 
-    // Auto-register the graph tools (ADR-0006) unless disabled: build the graph
-    // once so the served model can `explain`/`search`/`path`/`debt` this repo.
+    // Auto-register the graph tools (ADR-0006) unless disabled, so the served
+    // model can `explain`/`search`/`path`/`debt` — across every hosted project
+    // (ADR-0008), selected by a `project` argument.
     let tools: Option<std::sync::Arc<dyn rto_serve::ToolRegistry>> =
         if cfg.serve.tools.unwrap_or(true) {
-            let (repo, mut store, cache) = open_graph()?;
-            build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-            Some(std::sync::Arc::new(GraphToolRegistry::new(store)))
+            Some(std::sync::Arc::new(GraphToolRegistry::new(workspace)))
         } else {
             None
         };
@@ -2468,19 +2547,35 @@ fn serve_models_endpoint(
 }
 
 /// A [`rto_serve::ToolRegistry`] backing the served model with Roteiro's graph
-/// query tools (ADR-0006). Wraps the store in a mutex (queries take `&Store` and
-/// the registry is shared across request threads).
+/// query tools (ADR-0006), over a [`rto_graph::Workspace`] of one or more
+/// projects (ADR-0008). When several projects are hosted, every tool takes a
+/// `project` selector and a `list_projects` tool is offered; a single-project
+/// workspace behaves exactly as before (no `project` needed).
 #[cfg(feature = "serve")]
 struct GraphToolRegistry {
-    store: std::sync::Mutex<rto_graph::Store>,
+    workspace: rto_graph::Workspace,
 }
 
 #[cfg(feature = "serve")]
 impl GraphToolRegistry {
-    fn new(store: rto_graph::Store) -> Self {
-        Self {
-            store: std::sync::Mutex::new(store),
-        }
+    fn new(workspace: rto_graph::Workspace) -> Self {
+        Self { workspace }
+    }
+
+    /// Resolve `project` (if hosting several) and run `query` against its store,
+    /// serialising the result to JSON. Flattens the workspace/store/serialise
+    /// error layers into the registry's `String` error.
+    fn run<T: serde::Serialize>(
+        &self,
+        project: Option<&str>,
+        query: impl FnOnce(&rto_graph::Store) -> Result<T, rto_graph::StoreError>,
+    ) -> Result<String, String> {
+        let result = self
+            .workspace
+            .with_store(project, query)
+            .map_err(|e| e.to_string())?;
+        let value = result.map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
     }
 }
 
@@ -2488,7 +2583,25 @@ impl GraphToolRegistry {
 impl rto_serve::ToolRegistry for GraphToolRegistry {
     fn tools(&self) -> Vec<rto_serve::ToolDef> {
         use serde_json::json;
-        vec![
+        // Only expose project selection when several are hosted, so single-repo
+        // serving is unchanged and a lone model is not tempted to pass `project`.
+        let multi = self.workspace.is_multi();
+        // A `project` property spliced into each tool's schema when hosting many.
+        let project_prop = || {
+            json!({ "project": {
+                "type": "string",
+                "description": "Which hosted project to query (see `list_projects`).",
+            }})
+        };
+        let with_project = |mut props: serde_json::Value| {
+            if multi {
+                let obj = props.as_object_mut().expect("object schema");
+                obj.insert("project".to_owned(), project_prop()["project"].clone());
+            }
+            props
+        };
+
+        let mut tools = vec![
             rto_serve::ToolDef {
                 name: "explain".to_owned(),
                 description: "Explain a graph node by key (its record and immediate \
@@ -2496,7 +2609,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     .to_owned(),
                 parameters: json!({
                     "type": "object",
-                    "properties": { "key": { "type": "string" } },
+                    "properties": with_project(json!({ "key": { "type": "string" } })),
                     "required": ["key"],
                 }),
             },
@@ -2510,10 +2623,10 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     .to_owned(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_project(json!({
                         "query": { "type": "string" },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
-                    },
+                    })),
                     "required": ["query"],
                 }),
             },
@@ -2522,10 +2635,10 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 description: "Find a shortest path between two node keys.".to_owned(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_project(json!({
                         "from": { "type": "string" },
                         "to": { "type": "string" },
-                    },
+                    })),
                     "required": ["from", "to"],
                 }),
             },
@@ -2536,28 +2649,42 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     .to_owned(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_project(json!({
                         "categories": { "type": "array", "items": { "type": "string" } },
-                    },
+                    })),
                 }),
             },
-        ]
+        ];
+        if multi {
+            tools.push(rto_serve::ToolDef {
+                name: "list_projects".to_owned(),
+                description: "List the projects this server hosts. Pass one as `project` \
+                              to the other tools to query it (ADR-0008)."
+                    .to_owned(),
+                parameters: json!({ "type": "object", "properties": {} }),
+            });
+        }
+        tools
     }
 
     fn call(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| "store mutex poisoned".to_owned())?;
         let str_arg = |k: &str| args.get(k).and_then(serde_json::Value::as_str);
+        let project = str_arg("project");
         match name {
+            "list_projects" => serde_json::to_string(&serde_json::json!({
+                "projects": self.workspace.names(),
+            }))
+            .map_err(|e| e.to_string()),
             "explain" => {
-                let key = str_arg("key").ok_or("`explain` needs a string `key`")?;
-                let r = rto_graph::explain(&store, key).map_err(|e| e.to_string())?;
-                serde_json::to_string(&r).map_err(|e| e.to_string())
+                let key = str_arg("key")
+                    .ok_or("`explain` needs a string `key`")?
+                    .to_owned();
+                self.run(project, |store| rto_graph::explain(store, &key))
             }
             "search" => {
-                let query = str_arg("query").ok_or("`search` needs a string `query`")?;
+                let query = str_arg("query")
+                    .ok_or("`search` needs a string `query`")?
+                    .to_owned();
                 // `limit` is model-controlled: clamp to 1..=25 (results are
                 // truncated before feed-back anyway) so a huge value can't
                 // waste work; the schema advertises the same bound.
@@ -2567,14 +2694,16 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     .and_then(|n| usize::try_from(n).ok())
                     .unwrap_or(10)
                     .clamp(1, 25);
-                let r = rto_graph::search(&store, query, limit).map_err(|e| e.to_string())?;
-                serde_json::to_string(&r).map_err(|e| e.to_string())
+                self.run(project, |store| rto_graph::search(store, &query, limit))
             }
             "path" => {
-                let from = str_arg("from").ok_or("`path` needs a string `from`")?;
-                let to = str_arg("to").ok_or("`path` needs a string `to`")?;
-                let r = rto_graph::path(&store, from, to).map_err(|e| e.to_string())?;
-                serde_json::to_string(&r).map_err(|e| e.to_string())
+                let from = str_arg("from")
+                    .ok_or("`path` needs a string `from`")?
+                    .to_owned();
+                let to = str_arg("to")
+                    .ok_or("`path` needs a string `to`")?
+                    .to_owned();
+                self.run(project, |store| rto_graph::path(store, &from, &to))
             }
             "debt" => {
                 let categories: Vec<String> = args
@@ -2586,8 +2715,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                             .collect()
                     })
                     .unwrap_or_default();
-                let r = rto_graph::debt(&store, &categories, &[]).map_err(|e| e.to_string())?;
-                serde_json::to_string(&r).map_err(|e| e.to_string())
+                self.run(project, |store| rto_graph::debt(store, &categories, &[]))
             }
             other => Err(format!("unknown tool `{other}`")),
         }
@@ -2598,7 +2726,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
 #[cfg(all(not(feature = "serve"), feature = "mcp"))]
 fn serve_models_endpoint(
     _cfg: &config::Config,
-    _ingest: rto_graph::IngestConfig,
+    _workspace: rto_graph::Workspace,
     _addr: Option<String>,
     _tls_cert: Option<String>,
     _tls_key: Option<String>,
@@ -2926,5 +3054,34 @@ mod url_tests {
             source_blob_base("git@gitlab.com:o/r.git", "abc123"),
             Some("https://gitlab.com/o/r/-/blob/abc123".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::discover_repos_under;
+
+    #[test]
+    fn discovers_the_root_and_immediate_repo_subdirs_only() {
+        // A workspace root holding two repo checkouts and one plain directory.
+        let base = std::env::temp_dir().join(format!("rto-disc-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for sub in ["alpha/.git", "beta/.git", "notarepo", "beta/deep/.git"] {
+            std::fs::create_dir_all(base.join(sub)).expect("mkdir");
+        }
+        let found = discover_repos_under(&base).expect("scan");
+        // The root itself is not a repo here; `alpha` and `beta` are, in sorted
+        // order; `notarepo` is skipped and the scan is shallow (no `beta/deep`).
+        assert_eq!(found, vec![base.join("alpha"), base.join("beta")]);
+
+        // When the root itself is a repo, it is included first.
+        std::fs::create_dir_all(base.join(".git")).expect("mkdir root .git");
+        let found = discover_repos_under(&base).expect("scan");
+        assert_eq!(
+            found,
+            vec![base.clone(), base.join("alpha"), base.join("beta")]
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }
