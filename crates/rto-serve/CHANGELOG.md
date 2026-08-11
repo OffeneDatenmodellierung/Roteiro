@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.19...rto-serve-v1.0.0) - 2026-08-11
+## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.18...rto-serve-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
 
