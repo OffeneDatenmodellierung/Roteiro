@@ -1,12 +1,15 @@
 name: Graph artifact
 
-# On merge to `main`, publish the content-addressed graph artifact so the merged
-# graph is the canonical source (ADR-0001): a clone can fetch a ready-made graph
-# instead of rebuilding. The asset is attached to a rolling `graph-latest`
-# pre-release; its download URL is stable
-# (…/releases/download/graph-latest/roteiro-graph.json) while the asset is
-# replaced on each merge. `roteiro load` verifies the artifact's tree matches the
-# checkout before installing it, so a stale asset is refused (the caller rebuilds).
+# On merge to `main`, publish the merged graph's build-outputs so the graph is
+# the canonical source (ADR-0001) and downloadable without a local build:
+#   - `roteiro-graph.json` — the content-addressed graph a clone can `roteiro
+#     load` instead of rebuilding.
+#   - `roteiro-vault.zip` — the rendered Obsidian vault (dogfood): unzip and open
+#     as an Obsidian vault to browse Roteiro's own knowledge base.
+# Both attach to a rolling `graph-latest` pre-release with stable download URLs
+# (…/releases/download/graph-latest/<asset>) while the assets are replaced on each
+# merge. `roteiro load` verifies the graph's tree matches the checkout before
+# installing it, so a stale asset is refused (the caller rebuilds).
 on:
   push:
     # Every merge to main changes the HEAD tree, and the artifact is verified
@@ -37,6 +40,14 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Export the graph
         run: cargo run --quiet --package roteiro -- export --out roteiro-graph.json
+      - name: Render the Obsidian vault
+        # A build-output of the same graph (`roteiro render obsidian`), published
+        # alongside the graph so anyone can download and open Roteiro's own
+        # knowledge base in Obsidian without a local build. `render obsidian`
+        # syncs the graph itself, so no separate sync step is needed.
+        run: |
+          cargo run --quiet --package roteiro -- render obsidian --out vault
+          (cd vault && zip -qr ../roteiro-vault.zip .)
       - name: Publish to the graph-latest release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,10 +55,12 @@ jobs:
           # Recreate the release each run so its tag/target tracks the merged
           # commit (a plain upload would leave the release pointing at the first
           # commit while the asset moves — misleading metadata). Deleting the tag
-          # too keeps them in step. The download URL (…/graph-latest/…) is stable.
+          # too keeps them in step. The download URLs (…/graph-latest/…) are stable.
           gh release delete graph-latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create graph-latest roteiro-graph.json \
+          gh release create graph-latest roteiro-graph.json roteiro-vault.zip \
             --title "Latest graph artifact" \
-            --notes "Rolling content-addressed graph for \`main\`, rebuilt on each merge (target: ${GITHUB_SHA}). Fetch with: curl -fsSL <this asset URL> | roteiro load -" \
+            --notes "Rolling build-outputs of the \`main\` graph, rebuilt on each merge (target: ${GITHUB_SHA}).
+          - \`roteiro-graph.json\` — the content-addressed graph. Fetch with: \`curl -fsSL <asset URL> | roteiro load -\`.
+          - \`roteiro-vault.zip\` — the rendered Obsidian vault; unzip and open the folder as an Obsidian vault." \
             --prerelease \
             --target "${GITHUB_SHA}"
