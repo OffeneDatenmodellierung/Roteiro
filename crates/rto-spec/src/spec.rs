@@ -1,3 +1,6 @@
+// roteiro:ignore-file — the scaffold templates here intentionally contain the
+// generated document's `- [ ]` interview items and `_TODO_` placeholders; that
+// vocabulary is product content, not debt in this generator.
 //! The authoring pillar (`roteiro spec`, ADR-0004), Tier 0: deterministic,
 //! **graph-grounded** context assembly — no model, no network.
 //!

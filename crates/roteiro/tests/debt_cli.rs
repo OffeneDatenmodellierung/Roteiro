@@ -1,3 +1,5 @@
+// roteiro:ignore-file — the fixtures below deliberately embed `TODO`/`FIXME` to
+// exercise the detector; they are test data, not real debt in this repo.
 //! End-to-end test for `roteiro debt` with the `[debt] ignore` config (ADR-0007):
 //! markers under an ignored path (e.g. a vendored tree) are excluded from the
 //! report — both the totals and the item list — while others are kept.

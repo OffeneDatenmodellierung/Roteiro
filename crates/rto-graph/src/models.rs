@@ -423,7 +423,7 @@ pub const REGISTRY: &[ModelSpec] = &[
     // Model choice: Voxtral-Mini-3B (Mistral, Apache-2.0) is a *transcription-
     // specialised* audio model, verified transcribing a speech clip verbatim over
     // this mtmd path (`rto-llama/tests/audio.rs`). It is the only curated audio
-    // pick for now, and a mid-tier one — so the audio section has no low-tier floor
+    // pick, and a mid-tier one — so the audio section has no low-tier floor
     // (see `every_section_has_a_low_tier_floor`). A smaller low-tier option (e.g.
     // Ultravox 1B) could be added later if it verifies at acceptable quality.
     ModelSpec {

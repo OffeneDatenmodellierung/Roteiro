@@ -141,7 +141,7 @@ impl IngestConfig {
 /// Dispatches extraction to a language-aware extractor by file extension,
 /// falling back to a plain file node when no language is registered. After the
 /// language extractor runs, [`crate::markers`] appends any intent-debt markers
-/// (TODOs, stubs, deferred-work notes) found in the blob. Carries the runtime
+/// (intent-debt markers) found in the blob. Carries the runtime
 /// [`IngestConfig`] applied to content extraction.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Registry {

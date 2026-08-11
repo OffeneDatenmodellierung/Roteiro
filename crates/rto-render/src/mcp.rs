@@ -1,3 +1,5 @@
+// roteiro:ignore-file — the `debt` tool's own description and tests name the
+// intent-debt vocabulary (todo/fixme/stub/deferred); not real debt here.
 //! Model Context Protocol server exposing the query surface to agents, behind
 //! the `mcp` feature, built on the official [`rmcp`] SDK.
 //!

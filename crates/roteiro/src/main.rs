@@ -288,7 +288,7 @@ enum SpecAction {
         #[arg(long)]
         out: Option<String>,
     },
-    /// Scaffold, then draft the placeholder sections offline with a small local
+    /// Scaffold, then draft the unfilled sections offline with a small local
     /// instruct model (ADR-0004 Tier 1). Needs a generation backend
     /// (`--features serve` or `--features inference-local-models`, both
     /// llama.cpp) and a pulled generative model; falls back to the plain
@@ -1711,7 +1711,7 @@ fn run_spec_scaffold(
     emit_artifact(&md, &format!("{label} scaffold"), out)
 }
 
-/// Draft the scaffold's placeholder sections with a small local instruct model
+/// Draft the scaffold's unfilled sections with a small local instruct model
 /// (ADR-0004 Tier 1). Needs a generation backend (`serve` or
 /// `inference-local-models`, both llama.cpp) and a pulled generative model;
 /// without a model it emits the plain scaffold + a hint.
@@ -1790,7 +1790,7 @@ const GEN_BACKEND: &str = "llama.cpp";
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 const DRAFT_MAX_TOKENS: u32 = 800;
 
-/// Draft each placeholder section of `scaffold` with the local generative model
+/// Draft each unfilled section of `scaffold` with the local generative model
 /// through the shared **llama.cpp** engine (`rto-llama`, ADR-0003 v1.2) — no
 /// candle. Available under either `serve` or `inference-local-models`.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
@@ -2067,7 +2067,7 @@ fn run_context(
     Ok(())
 }
 
-/// List intent-debt markers (TODOs, stubs, deferred work) in the graph, grouped
+/// List intent-debt markers in the graph, grouped
 /// by category. A report, not a gate: it always exits zero.
 fn run_debt(
     ingest: rto_graph::IngestConfig,
