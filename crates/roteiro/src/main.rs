@@ -2438,7 +2438,11 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "search".to_owned(),
-                description: "Search graph nodes by text; returns the top matches with keys."
+                description: "Search graph nodes by text — names, keys, paths, and captured \
+                              content (doc comments, README/ADR/blueprint prose). Returns the \
+                              top matches with keys; curated ADRs/blueprints and READMEs rank \
+                              first, so this is the entry point for \"what is X / why\" questions. \
+                              Then call `explain` on a returned key for detail."
                     .to_owned(),
                 parameters: json!({
                     "type": "object",

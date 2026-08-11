@@ -28,7 +28,7 @@ use rmcp::{
         },
     },
 };
-use rto_graph::{NodeKind, Store, debt, explain, list_kind, path};
+use rto_graph::{NodeKind, Store, debt, explain, list_kind, path, search};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -45,6 +45,15 @@ type SharedStore = Arc<Mutex<Store>>;
 struct ExplainArgs {
     /// Node key, e.g. `sym:rust:<path>#<Name>`, `file:<path>`, or `adr:<id>`.
     key: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchArgs {
+    /// Free-text query; matches node names, keys, paths, and captured content.
+    query: String,
+    /// Max hits to return (default 10, capped at 25).
+    #[serde(default)]
+    limit: Option<u32>,
 }
 
 /// Arguments for the `list_kind` tool.
@@ -116,6 +125,23 @@ impl GraphServer {
         }
     }
 
+    /// Search the graph by text, ranked — the entry point for "what/why" questions.
+    #[tool(
+        description = "Search graph nodes by text — names, keys, paths, and captured \
+                          content (doc comments, README/ADR/blueprint prose). Returns \
+                          ranked hits with keys; curated ADRs/blueprints and READMEs rank \
+                          first, so it's the entry point for \"what is X / why\" questions. \
+                          Then `explain` a returned key. Args: query, optional limit."
+    )]
+    async fn search(&self, Parameters(args): Parameters<SearchArgs>) -> CallToolResult {
+        let limit = usize::try_from(args.limit.unwrap_or(10).clamp(1, 25)).unwrap_or(10);
+        let result = self.with_store(|store| search(store, &args.query, limit));
+        match result {
+            Ok(hits) => json_result(&hits),
+            Err(e) => tool_error(&format!("query error: {e}")),
+        }
+    }
+
     /// List all nodes of a given kind.
     #[tool(description = "List all nodes of a given kind (fn, struct, enum, \
                           trait, module, file, adr, …).")]
@@ -168,10 +194,12 @@ impl ServerHandler for GraphServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("roteiro", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Roteiro codebase knowledge graph. Use `explain` for a node's \
-             provenance-labelled neighbourhood, `list_kind` to enumerate a kind, \
-             `path` to find how two nodes are connected, and `debt` to list \
-             intent-debt markers (TODOs, stubs, deferred work)."
+            "Roteiro codebase knowledge graph. Start with `search` to find nodes by \
+             text (it searches captured content too — README/ADR/blueprint prose — \
+             and ranks curated docs first, so it answers \"what is X / why\"); then \
+             `explain` a key for its provenance-labelled neighbourhood. `list_kind` \
+             enumerates a kind, `path` finds how two nodes connect, and `debt` lists \
+             intent-debt markers."
                 .into(),
         );
         info
@@ -237,7 +265,7 @@ pub fn serve_http(store: Store, addr: SocketAddr) -> Result<(), McpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DebtArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs};
+    use super::{DebtArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs, SearchArgs};
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
     use std::sync::{Arc, Mutex};
@@ -300,6 +328,19 @@ mod tests {
         let text = text_of(&out);
         assert!(text.contains("sym:rust:a.rs#helper"));
         assert!(text.contains("sym:rust:a.rs#main"));
+    }
+
+    #[tokio::test]
+    async fn search_tool_finds_nodes_by_text() {
+        let server = seeded();
+        let out = server
+            .search(Parameters(SearchArgs {
+                query: "helper".into(),
+                limit: None,
+            }))
+            .await;
+        let text = text_of(&out);
+        assert!(text.contains("sym:rust:a.rs#helper"), "{text}");
     }
 
     #[tokio::test]
