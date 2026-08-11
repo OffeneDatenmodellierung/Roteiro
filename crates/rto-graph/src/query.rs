@@ -360,13 +360,14 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
         let path = node.path.as_deref().unwrap_or("").to_lowercase();
         // The captured knowledge base (doc comments, prose, ADR/README/blueprint
         // text) is searchable too, so a question's words find the *description*,
-        // not just a same-named symbol.
+        // not just a same-named symbol. Only lowercase when a node actually has
+        // content — most nodes (code symbols) don't, so skip the allocation.
         let content = node
             .meta
             .get("content")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_lowercase();
+            .map(str::to_lowercase);
+        let content = content.as_deref().unwrap_or("");
         // Require every token to appear somewhere (including content), so a
         // multi-word query narrows.
         if !tokens
@@ -422,11 +423,13 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
 }
 
 /// Whether `path` (already lowercased) is a README/overview doc — the natural
-/// landing for "what is this project" questions, so it is ranked up.
+/// landing for "what is this project" questions, so it is ranked up. Matches a
+/// `readme*` or `overview*` basename (blueprints, the other overview docs, are
+/// already boosted via their `authored` provenance).
 fn is_overview_path(path: &str) -> bool {
     path.rsplit('/')
         .next()
-        .is_some_and(|base| base.starts_with("readme"))
+        .is_some_and(|base| base.starts_with("readme") || base.starts_with("overview"))
 }
 
 /// Whether `path` (already lowercased) is test scaffolding, which should not
