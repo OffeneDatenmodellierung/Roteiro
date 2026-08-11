@@ -20,9 +20,10 @@ the dependency-aware context cache. Shipped alongside: a curated **low/mid/high
 model matrix** (ADR-0003), a GGUF-arch-dispatching generative loader (Qwen2/Qwen3),
 and **streaming, checksum-verified model downloads** (so the 20 GiB tier is safe
 to pull). What each stage *deferred* is tracked in §5b; smaller non-blocking follow-ups in
-§5d. **Remaining core:** **Stage 14** (v1.0 hardening) is the only stage still
-open — Stage 16 (commit-time gate) and Stage 17 (CLI-first `roteiro review` +
-tool-agnostic AGENTS.md) are ✅ delivered. **Newly decided
+§5d. **Remaining core:** **Stage 14** (v1.0 hardening) has all its hardening items
+delivered — only the `v1.0.0` release tag is pending — while Stage 16 (commit-time
+gate) and Stage 17 (CLI-first `roteiro review` + tool-agnostic AGENTS.md) are
+✅ delivered. **Newly decided
 (post-Stage-12, via ADRs — §5c):** **Stage 18** configuration file
 ([ADR-0007](adr/0007-configuration-file.md)) → **Stage 19** local model serving
 ([ADR-0006](adr/0006-local-model-serving.md), llama.cpp-backed, code-aware) →
@@ -687,51 +688,54 @@ follow-ups noted under Stages 2/4 ("making `check` working-tree-aware pairs with
   Brand-new **untracked** files are now also overlaid by the working-tree
   `sync`/`check`/`review` via a gitignore-aware dirwalk (`Repo::untracked_files`).
 
-### Stage 14 — v1.0 hardening  → **v1.0.0** 🚧 *in progress*
+### Stage 14 — v1.0 hardening  → **v1.0.0** ✅ *hardening delivered (release tag pending)*
 **Goal:** the merged graph is the canonical source; ship stable (completes the
 [Stage 10](#stage-10--ci-canonical-artifacts--v010x-artifact-format-delivered) deferral).
+Every hardening item below is delivered in code; what remains is cutting the
+`v1.0.0` release tag (crates are still on `v0.0.x`).
 - **Language breadth — ✅ delivered (exceeds target).** Not just TS/JS and
   Python: a generic tree-sitter *tags* extractor covers **15 languages + SQL**
   (see the Stage 3 delivery note). Rust keeps its dedicated walker.
-- **Obsidian export quality — ☐ TODO.** The vault renderer today emits one bare
-  note per node (frontmatter `key`/`kind`/`path` + incoming/outgoing wikilinks)
-  and nothing else — **no index/dashboard, no captured `meta.content` (doc
-  comments, prose, PDF/image text), no ADR status/decision text, no tags for the
-  graph view.** Upgrade it to a genuinely useful knowledge base: a **home/index
-  note** (scanned crates, node/edge counts by kind, provenance breakdown, ADR
-  list + statuses, intent-debt summary, entry-point MOCs by kind); **surface
-  `meta.content`** so notes carry the knowledge/content base; **status + purpose**
-  (ADR status in frontmatter, a purpose line from content); and **tags**
-  (`kind/…`, `provenance/…`) so Obsidian's built-in graph view is colourable and
-  filterable (optionally a curated `.canvas`). DoD: opening the vault gives a
-  clear overview of the scanned project(s), their status and purpose, a browsable
-  visual graph, and the content base — not a disconnected node dump.
-- **Per-crate crates.io READMEs — ☐ TODO.** Every published crate (`rto-graph`,
-  `rto-spec`, `rto-render`, `rto-serve`, `rto-llama`, `roteiro`) ships a
-  `README.md` wired via `readme = "README.md"` in its `Cargo.toml`, stating the
-  crate's role in the workspace and linking back to <https://roteiro.dev> and the
-  repo, so the crates.io landing page is not empty.
-- **Perf — subtree pruning — ☐ TODO** (from the codegraph comparison): `sync`
-  walks the whole `HEAD` tree today; instead **diff the last-synced tree oid
-  against HEAD and prune subtrees whose oid is unchanged** — the git-native,
-  content-hash (not mtime) version of codegraph's "skip unchanged subtrees," for
-  large-repo sync latency.
-- **`--json` schema freeze — ☐ TODO.** Declare and version the `--json` output
-  schemas (they already carry a `schema` tag, e.g. `roteiro.review/v1`) as stable
-  for v1.0, documented, with a compatibility policy.
-- **CI artifact publish/fetch — ☐ TODO.** CI publishes the content-addressed
-  graph artifact on merge; `post-checkout`/`post-merge` hooks fetch it (offline
-  fallback: rebuild). Local runs stay deterministic previews. (The artifact
-  *format* shipped in Stage 10; this is publish + hook-fetch.)
-- **Docs deploy — ☐ TODO.** Render docs in CI and publish the static output to
-  Cloudflare (Direct Upload + `CLOUDFLARE_API_TOKEN`/`ACCOUNT_ID` secrets),
-  removing the Rust-in-Pages build cost; or keep the Git-integration build.
-- **`roteiro check` self-governs ADR-0001 — ☐ TODO.** ADR-0001 links its own
-  authored intent into the code so `check` validates the design against the
-  implementation.
-- **DoD:** clean clone → `init` → hook fetches the CI artifact → `check` green,
-  offline; docs/vault reproducible byte-for-byte in CI; the Obsidian vault gives a
-  useful project overview; `--json` schema declared stable.
+- **Obsidian export quality — ✅ delivered.** The vault renderer
+  ([`rto-render/src/obsidian.rs`](../crates/rto-render/src/obsidian.rs)) emits a
+  generated **`_Home`** overview note (what was scanned, node/edge counts by kind,
+  provenance breakdown, ADR statuses, intent-debt summary) plus per-node notes
+  that carry frontmatter **`tags`** (`roteiro/kind/*`, `roteiro/lang/*`,
+  `roteiro/status/*` — colourable/filterable in Obsidian's graph view), **surface
+  the captured `meta.content`** (doc comments, prose, PDF/image text) as the
+  knowledge base, show an **ADR's status**, and render edges as provenance-labelled
+  wikilinks — a browsable knowledge base, not a node dump.
+- **Per-crate crates.io READMEs — ✅ delivered.** All six published crates
+  (`rto-graph`, `rto-spec`, `rto-render`, `rto-serve`, `rto-llama`, `roteiro`)
+  ship a `README.md` wired via `readme = "README.md"` in their `Cargo.toml`.
+- **Perf — subtree pruning — ✅ delivered** (from the codegraph comparison):
+  [`sync`](../crates/rto-graph/src/sync.rs) is an incremental, content-addressed
+  engine — a committed sync diffs the last-synced tree oid against `HEAD`
+  (`diff_trees`) and reuses unchanged blobs' cached fact sets, the git-native,
+  content-hash (not mtime) version of "skip unchanged subtrees."
+- **`--json` schema freeze — ✅ delivered.** The output schemas are versioned
+  (`roteiro.graph/v1`, `roteiro.query/v1`, `roteiro.review/v1`, `roteiro.oracle/v1`),
+  asserted stable in tests, and documented with a compatibility policy in
+  [`docs/JSON_SCHEMA.md`](JSON_SCHEMA.md).
+- **CI artifact publish/fetch — ✅ delivered.** On merge to `main`,
+  [`.github/workflows/graph-artifact.yml`](../.github/workflows/graph-artifact.yml)
+  publishes the content-addressed graph artifact to a rolling `graph-latest`
+  release; the managed `post-checkout`/`post-merge` hooks
+  ([`init.rs`](../crates/roteiro/src/init.rs)) `gh release download graph-latest`
+  → `roteiro load` it (offline fallback: rebuild). `load` refuses an artifact
+  whose tree does not match `HEAD`.
+- **Docs deploy — ✅ delivered.**
+  [`.github/workflows/website.yml`](../.github/workflows/website.yml) renders the
+  site and Direct-Uploads it to Cloudflare Pages (`CLOUDFLARE_API_TOKEN`/`ACCOUNT_ID`),
+  off Cloudflare's build infra.
+- **`roteiro check` self-governs ADR-0001 — ✅ delivered.** ADR-0001 carries an
+  **Implementation** section linking its decisions into the code via
+  `[[path#Symbol]]` (changelog 1.1), and [`check`](../crates/rto-spec/src/check.rs)
+  validates those links against the derived graph, failing on drift.
+- **DoD — met:** clean clone → `init` → hook fetches the CI artifact → `check`
+  green, offline; docs/vault reproducible in CI; the Obsidian vault gives a useful
+  project overview; the `--json` schema is declared stable. Remaining before the
+  milestone is purely the `v1.0.0` version bump/release.
 
 ### Stage 15 — Intent-debt tracking (TODOs, stubs, deferred work)  → **delivered** *(independent; low-risk)*
 **Goal:** deterministically detect, log, and track **intent debt** — the markers
