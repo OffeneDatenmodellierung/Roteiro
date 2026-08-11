@@ -251,7 +251,8 @@ enum Command {
         models: bool,
         /// MCP server: serve networked over streamable HTTP at ADDR (e.g.
         /// `127.0.0.1:8080`) instead of stdio. Terminate TLS at a reverse proxy.
-        #[arg(long, value_name = "ADDR")]
+        /// For the MCP-only server; with `--models`, use `--mcp` (+ `--addr`).
+        #[arg(long, value_name = "ADDR", conflicts_with = "models")]
         http: Option<String>,
         /// Model server (`--models`): bind ADDR (default `127.0.0.1:8017`). A
         /// non-loopback address is warned about (no auth — front with a proxy).
@@ -278,6 +279,12 @@ enum Command {
         /// first touch, but never serves a stale or missing graph (ADR-0008).
         #[arg(long)]
         sync_on_access: bool,
+        /// With `--models`: also mount the MCP graph server at `/mcp` on the
+        /// **same port**, so one process serves both `/v1` and `/mcp` over one
+        /// Workspace (needs `--features serve,mcp`). Only meaningful with
+        /// `--models` — the plain `serve` already is the MCP server.
+        #[arg(long, requires = "models")]
+        mcp: bool,
     },
 }
 
@@ -439,14 +446,18 @@ fn main() -> anyhow::Result<()> {
             tls_key,
             workspace,
             sync_on_access,
+            mcp,
         } => run_serve(
             ingest,
             &cfg.effective,
-            models,
-            http,
-            addr,
-            tls_cert,
-            tls_key,
+            ServeOptions {
+                models,
+                http,
+                addr,
+                tls_cert,
+                tls_key,
+                mcp,
+            },
             &workspace,
             sync_on_access,
         ),
@@ -2315,22 +2326,36 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dispatch `roteiro serve`: the OpenAI-compatible model endpoint (`--models`,
-/// ADR-0006) or the MCP graph server. Each backend is feature-gated; a build
-/// lacking the relevant feature reports how to enable it.
+/// The parsed `serve` flags (from the clap `Command::Serve` arm), bundled so the
+/// dispatch stays a single struct rather than a long argument list.
 #[cfg(any(feature = "mcp", feature = "serve"))]
-// These are the parsed `serve` CLI flags threaded straight through from the clap
-// `Command::Serve` variant; a params struct would just mirror that enum arm and
-// add indirection at the single call site.
-#[allow(clippy::too_many_arguments)]
+// Several fields (addr/TLS/mcp) are only read on the `serve` path; in an
+// mcp-only build the model endpoint is a stub, so they are legitimately unused.
+#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+struct ServeOptions {
+    /// Serve the OpenAI-compatible `/v1` model endpoint (`--models`).
+    models: bool,
+    /// MCP-only HTTP bind address (`--http`), when not serving `--models`.
+    http: Option<String>,
+    /// Model-server bind address (`--addr`).
+    addr: Option<String>,
+    /// In-process TLS certificate chain (`--tls-cert`).
+    tls_cert: Option<String>,
+    /// In-process TLS private key (`--tls-key`).
+    tls_key: Option<String>,
+    /// With `--models`, also mount `/mcp` on the same port (`--mcp`).
+    mcp: bool,
+}
+
+/// Dispatch `roteiro serve`: the OpenAI-compatible model endpoint (`--models`,
+/// ADR-0006) or the MCP graph server — optionally **both on one port** (`--models
+/// --mcp`, ADR-0008). Each backend is feature-gated; a build lacking the relevant
+/// feature reports how to enable it.
+#[cfg(any(feature = "mcp", feature = "serve"))]
 fn run_serve(
     ingest: rto_graph::IngestConfig,
     cfg: &config::Config,
-    models: bool,
-    http: Option<String>,
-    addr: Option<String>,
-    tls_cert: Option<String>,
-    tls_key: Option<String>,
+    opts: ServeOptions,
     workspace_roots: &[String],
     sync_on_access: bool,
 ) -> anyhow::Result<()> {
@@ -2371,10 +2396,10 @@ fn run_serve(
         install_workspace_reload(&ws, cfg.workspace.clone(), workspace_roots.to_vec());
         ws
     };
-    if models {
-        serve_models_endpoint(cfg, workspace, addr, tls_cert, tls_key)
+    if opts.models {
+        serve_models_endpoint(cfg, workspace, &opts)
     } else {
-        serve_mcp(workspace, http)
+        serve_mcp(workspace, opts.http)
     }
 }
 
@@ -2540,29 +2565,20 @@ fn serve_mcp(
 
 /// Serve installed generative models over the loopback, OpenAI-compatible `/v1`
 /// endpoint (ADR-0006). Serves only installed models; never downloads.
+/// Collect the installed GGUF models eligible to serve over `/v1` (ADR-0006):
+/// generative and embedding always, vision only with its `mmproj` projector;
+/// OCR/audio are sync-time ingestion models, not endpoints. Narrowed by the
+/// `[serve] models` allow-list if set. Returns the list; serving is the caller's.
 #[cfg(feature = "serve")]
-fn serve_models_endpoint(
-    cfg: &config::Config,
-    workspace: std::sync::Arc<rto_graph::Workspace>,
-    addr: Option<String>,
-    tls_cert: Option<String>,
-    tls_key: Option<String>,
-) -> anyhow::Result<()> {
+fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
     use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
-
-    // Serve every installed **GGUF** model over the llama.cpp path: generative →
-    // `/v1/chat/completions`, embedding → `/v1/embeddings`, vision → multimodal
-    // `/v1/chat/completions`. Servable = the variant ships a `model.gguf` (this
-    // excludes the OCR `.rten` model set), and — for vision — also an
-    // `mmproj.gguf` projector. OCR is not a served model. The
-    // `[serve] models` allow-list narrows it further if set.
     let host = Platform::host();
     let wanted = cfg.serve.models.as_deref();
     let has_file = |m: &rto_graph::ModelSpec, name: &str| {
         m.variant_for(host)
             .is_some_and(|v| v.files.iter().any(|f| f.name == name))
     };
-    let served: Vec<rto_serve::llama::Served> = REGISTRY
+    REGISTRY
         .iter()
         .filter(|m| wanted.is_none_or(|w| w.iter().any(|n| n == m.name)))
         .filter(|m| has_file(m, "model.gguf"))
@@ -2570,8 +2586,7 @@ fn serve_models_endpoint(
             ModelKind::Generative | ModelKind::Embedding => true,
             // A vision model is only servable with its multimodal projector.
             ModelKind::Vision => has_file(m, "mmproj.gguf"),
-            // OCR and audio are sync-time ingestion models, not `/v1` endpoints
-            // (the wire carries no audio) — see `roteiro sync`.
+            // OCR and audio are sync-time ingestion models, not `/v1` endpoints.
             ModelKind::Ocr | ModelKind::Audio => false,
         })
         .filter(|m| m.variant_for(host).is_some_and(|v| is_installed(m.name, v)))
@@ -2580,7 +2595,22 @@ fn serve_models_endpoint(
             path: model_dir(m.name).join("model.gguf"),
             mmproj: has_file(m, "mmproj.gguf").then(|| model_dir(m.name).join("mmproj.gguf")),
         })
-        .collect();
+        .collect()
+}
+
+#[cfg(feature = "serve")]
+fn serve_models_endpoint(
+    cfg: &config::Config,
+    workspace: std::sync::Arc<rto_graph::Workspace>,
+    opts: &ServeOptions,
+) -> anyhow::Result<()> {
+    let (addr, tls_cert, tls_key) = (
+        opts.addr.clone(),
+        opts.tls_cert.clone(),
+        opts.tls_key.clone(),
+    );
+
+    let served = served_models(cfg);
     if served.is_empty() {
         anyhow::bail!(
             "no installed GGUF models to serve — pull one first \
@@ -2622,32 +2652,57 @@ fn serve_models_endpoint(
         .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
     let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
 
-    // TLS precedence mirrors `addr`: CLI flag > `[serve]` config. Both a cert and
-    // a key are required to terminate HTTPS; otherwise plain HTTP.
-    let tls = match (
+    // TLS precedence mirrors `addr`: CLI flag > `[serve]` config.
+    let tls = resolve_serve_tls(
         tls_cert.or_else(|| cfg.serve.tls_cert.clone()),
         tls_key.or_else(|| cfg.serve.tls_key.clone()),
-    ) {
-        (Some(cert), Some(key)) => Some((
+    )?;
+    serve_v1_tail(cfg, workspace, opts, engine, socket, tls, &names)
+}
+
+/// Resolve the in-process TLS pair: both a cert and a key give HTTPS, neither
+/// gives plain HTTP, exactly one is an error. (CLI-over-config precedence is
+/// applied by the caller.)
+#[cfg(feature = "serve")]
+fn resolve_serve_tls(
+    cert: Option<String>,
+    key: Option<String>,
+) -> anyhow::Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+    match (cert, key) {
+        (Some(cert), Some(key)) => Ok(Some((
             std::path::PathBuf::from(cert),
             std::path::PathBuf::from(key),
-        )),
-        (Some(_), None) | (None, Some(_)) => {
-            anyhow::bail!(
-                "TLS needs both a certificate and a key — set both `--tls-cert`/`--tls-key` \
-                 (or `[serve] tls_cert`/`tls_key`), or neither for plain HTTP"
-            );
-        }
-        (None, None) => None,
-    };
-    let scheme = if tls.is_some() { "https" } else { "http" };
+        ))),
+        (Some(_), None) | (None, Some(_)) => anyhow::bail!(
+            "TLS needs both a certificate and a key — set both `--tls-cert`/`--tls-key` \
+             (or `[serve] tls_cert`/`tls_key`), or neither for plain HTTP"
+        ),
+        (None, None) => Ok(None),
+    }
+}
 
+/// Assemble the graph tools and serve the endpoint: `/v1` alone, or — with
+/// `--mcp` — `/v1` **and** `/mcp` merged on one port (ADR-0008). Blocks until
+/// shutdown.
+#[cfg(feature = "serve")]
+fn serve_v1_tail(
+    cfg: &config::Config,
+    workspace: std::sync::Arc<rto_graph::Workspace>,
+    opts: &ServeOptions,
+    engine: std::sync::Arc<dyn rto_serve::Engine>,
+    socket: std::net::SocketAddr,
+    tls: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    names: &str,
+) -> anyhow::Result<()> {
+    let scheme = if tls.is_some() { "https" } else { "http" };
     // Auto-register the graph tools (ADR-0006) unless disabled, so the served
     // model can `explain`/`search`/`path`/`debt` — across every hosted project
     // (ADR-0008), selected by a `project` argument.
     let tools: Option<std::sync::Arc<dyn rto_serve::ToolRegistry>> =
         if cfg.serve.tools.unwrap_or(true) {
-            Some(std::sync::Arc::new(GraphToolRegistry::new(workspace)))
+            Some(std::sync::Arc::new(GraphToolRegistry::new(
+                workspace.clone(),
+            )))
         } else {
             None
         };
@@ -2656,10 +2711,37 @@ fn serve_models_endpoint(
     } else {
         ""
     };
+
+    // `--models --mcp`: mount the MCP graph server at `/mcp` on the SAME port as
+    // `/v1`, so one process (one loaded model, one Workspace) serves both surfaces
+    // (ADR-0008). Both are just axum path prefixes, so the routers merge.
+    if opts.mcp {
+        #[cfg(feature = "mcp")]
+        {
+            let v1 = match tools {
+                Some(tools) => rto_serve::app_with_tools(engine, tools),
+                None => rto_serve::app(engine),
+            };
+            let combined = v1.merge(rto_render::mcp::mcp_router(workspace));
+            eprintln!(
+                "roteiro server listening on {scheme}://{socket} — /v1{tools_note} + /mcp — serving: {names}"
+            );
+            return match tls {
+                Some((cert, key)) => {
+                    rto_serve::serve_blocking_router_tls(combined, socket, &cert, &key)
+                }
+                None => rto_serve::serve_blocking_router(combined, socket),
+            };
+        }
+        #[cfg(not(feature = "mcp"))]
+        anyhow::bail!(
+            "`serve --models --mcp` needs the `mcp` feature (build with `--features serve,mcp`)"
+        );
+    }
+
     eprintln!(
         "roteiro model server listening on {scheme}://{socket}/v1{tools_note} — serving: {names}"
     );
-
     match tls {
         Some((cert, key)) => rto_serve::serve_blocking_tls(engine, tools, socket, &cert, &key),
         None => match tools {
@@ -2852,9 +2934,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
 fn serve_models_endpoint(
     _cfg: &config::Config,
     _workspace: std::sync::Arc<rto_graph::Workspace>,
-    _addr: Option<String>,
-    _tls_cert: Option<String>,
-    _tls_key: Option<String>,
+    _opts: &ServeOptions,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`serve --models` needs the `serve` feature (build with `--features serve`, \
