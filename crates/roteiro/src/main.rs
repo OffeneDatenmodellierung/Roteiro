@@ -797,10 +797,24 @@ fn run_review(
         GraphSource::Worktree
     };
     let report = build_graph(&repo, &mut store, &cache, ingest, source)?;
-    let changed = match base {
-        Some(base) => repo.changed_between(base)?,
-        None => repo.changed_files()?,
-    };
+    let changed =
+        if let Some(base) = base {
+            repo.changed_between(base)?
+        } else {
+            // Working-tree review: tracked edits/deletes, plus brand-new untracked
+            // files as additions — the overlaid graph already includes them, so the
+            // change set must too or their symbols would go unreviewed. The two sets
+            // are disjoint (tracked vs untracked), so a simple extend + sort suffices.
+            let mut changed = repo.changed_files()?;
+            changed.extend(repo.untracked_files()?.into_iter().map(|path| {
+                rto_graph::ChangedFile {
+                    path,
+                    deleted: false,
+                }
+            }));
+            changed.sort_by(|a, b| a.path.cmp(&b.path));
+            changed
+        };
     let review = review::build(&store, &changed, &report.violations)?;
 
     if json {
