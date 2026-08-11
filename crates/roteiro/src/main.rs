@@ -808,7 +808,7 @@ fn run_review(
             changed.extend(repo.untracked_files()?.into_iter().map(|path| {
                 rto_graph::ChangedFile {
                     path,
-                    deleted: false,
+                    status: rto_graph::ChangeStatus::Added,
                 }
             }));
             changed.sort_by(|a, b| a.path.cmp(&b.path));

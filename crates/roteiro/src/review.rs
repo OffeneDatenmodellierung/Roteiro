@@ -45,7 +45,9 @@ impl ReviewReport {
 pub struct FileReview {
     /// Repository-relative path.
     pub path: String,
-    /// `"modified"` or `"deleted"`.
+    /// Change status: currently `"added"`, `"modified"`, or `"deleted"`. This is
+    /// an **open set** within `roteiro.review/v1` — consumers must treat an
+    /// unrecognised value as a generic change (see `docs/JSON_SCHEMA.md`).
     pub status: &'static str,
     /// Symbols defined in the file, each with its graph neighbourhood.
     pub symbols: Vec<SymbolReview>,
@@ -118,7 +120,7 @@ pub fn build(
     let mut changed_keys: Vec<String> = Vec::new();
 
     for cf in changed {
-        if cf.deleted {
+        if cf.status == rto_graph::ChangeStatus::Deleted {
             files.push(FileReview {
                 path: cf.path.clone(),
                 status: "deleted",
@@ -145,7 +147,7 @@ pub fn build(
         }
         files.push(FileReview {
             path: cf.path.clone(),
-            status: "modified",
+            status: cf.status.as_str(),
             symbols,
             debt,
         });
