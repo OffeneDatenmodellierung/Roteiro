@@ -1,6 +1,6 @@
 //! End-to-end test for `roteiro search`: text search returns ranked hits over
-//! the graph, and a curated authored doc (an ADR) outranks a same-named test
-//! symbol — the "find, then explain" entry point exposed on the CLI.
+//! the graph, and a curated authored doc (an ADR) ranks at or above a same-named
+//! code symbol — the "find, then explain" entry point exposed on the CLI.
 
 use std::path::Path;
 use std::process::Command;
