@@ -286,8 +286,8 @@ enum SpecAction {
     },
     /// Scaffold, then draft the placeholder sections offline with a small local
     /// instruct model (ADR-0004 Tier 1). Needs a generation backend
-    /// (`--features serve` for llama.cpp, or `--features inference-local-models`
-    /// for candle) and a pulled generative model; falls back to the plain
+    /// (`--features serve` or `--features inference-local-models`, both
+    /// llama.cpp) and a pulled generative model; falls back to the plain
     /// scaffold otherwise.
     Draft {
         /// Topic the artifact is about (grounds the draft against the graph).
@@ -1672,12 +1672,12 @@ fn run_spec_scaffold(
 }
 
 /// Draft the scaffold's placeholder sections with a small local instruct model
-/// (ADR-0004 Tier 1). Needs a generation backend (`serve` → llama.cpp, or
-/// `inference-local-models` → candle) and a pulled generative model; without a
-/// model it emits the plain scaffold + a hint.
-// Stage 20: `spec draft` generation runs on **llama.cpp** (the `serve` feature's
-// engine) — the inference-core unify direction (ADR-0006) — falling back to the
-// candle `LocalGenerator` only on a `inference-local-models`-without-`serve` build.
+/// (ADR-0004 Tier 1). Needs a generation backend (`serve` or
+/// `inference-local-models`, both llama.cpp) and a pulled generative model;
+/// without a model it emits the plain scaffold + a hint.
+// Stage 20: `spec draft` generation runs on **llama.cpp** (the shared `rto-llama`
+// engine, ADR-0006) — available whenever either the `serve` or the
+// `inference-local-models` feature is on.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn run_spec_draft(
     cfg: &config::Config,
@@ -1820,7 +1820,7 @@ fn run_spec_draft(
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`spec draft` needs a generation backend: build with `--features serve` \
-         (llama.cpp) or `--features inference-local-models` (candle), then \
+         or `--features inference-local-models` (both llama.cpp), then \
          `roteiro model pull qwen3-0.6b`. (`spec scaffold` works with no model.)"
     )
 }
@@ -2245,8 +2245,8 @@ fn serve_models_endpoint(
     // Serve every installed **GGUF** model over the llama.cpp path: generative →
     // `/v1/chat/completions`, embedding → `/v1/embeddings`, vision → multimodal
     // `/v1/chat/completions`. Servable = the variant ships a `model.gguf` (this
-    // excludes the candle safetensors/`model-q4_0` entries), and — for vision —
-    // also an `mmproj.gguf` projector. OCR is not a served model. The
+    // excludes the OCR `.rten` model set), and — for vision — also an
+    // `mmproj.gguf` projector. OCR is not a served model. The
     // `[serve] models` allow-list narrows it further if set.
     let host = Platform::host();
     let wanted = cfg.serve.models.as_deref();

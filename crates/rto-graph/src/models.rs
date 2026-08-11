@@ -1,15 +1,17 @@
-//! Local model **registry** and on-disk store — the candle-free parts of the
-//! pluggable-models machinery (ADR-0003), shared by every model tier.
+//! Local model **registry** and on-disk store (ADR-0003), shared by every model
+//! tier.
 //!
 //! Holds a small in-binary registry of downloadable models with **per-platform
 //! variants**, host-aware variant selection, the model-store layout
-//! (`~/.roteiro/models/<name>/`), and SHA-256 verification. It touches neither
-//! candle nor the network: the candle-backed loaders live in
-//! [`crate::localmodel`] (feature `inference-local-models`), and the
-//! consent-gated download lives in the `roteiro` binary. This module is compiled
-//! whenever any model tier is enabled (feature `models`), so an OCR build
-//! (feature `image-ocr`) can reuse the registry and `roteiro model pull` without
-//! pulling candle.
+//! (`~/.roteiro/models/<name>/`), and SHA-256 verification. It only lists,
+//! resolves, and verifies models — it touches neither an inference engine nor the
+//! network. The actual loaders are feature-specific: the GGUF tiers (embedding /
+//! generative / vision / audio) load via the llama.cpp core (`rto-llama`, feature
+//! `inference-local-models`), while the OCR `.rten` set loads via `ocrs`/`rten`
+//! (feature `image-ocr`); the consent-gated download lives in the `roteiro`
+//! binary. This module is compiled whenever any model tier is enabled (feature
+//! `models`), so even an OCR-only build can reuse the registry and `roteiro model
+//! pull` without pulling the llama.cpp engine.
 
 use std::path::{Path, PathBuf};
 
@@ -251,10 +253,9 @@ pub const REGISTRY: &[ModelSpec] = &[
         }],
     },
     // ADR-0004 Tier 1: Apache-2.0 Qwen3 instruct GGUFs for offline spec/blueprint
-    // drafting, curated low/mid/high. Stored as `model.gguf` + its `tokenizer.json`
-    // (which lives in the base instruct repo, not the GGUF repo — all Qwen3 sizes
-    // share one tokenizer). Loaded via the GGUF-arch-dispatching `LocalGenerator`
-    // (Qwen2 GGUFs still load too). The low pick is the `spec draft` default.
+    // drafting, curated low/mid/high. GGUF-only — the embedded tokenizer serves
+    // llama.cpp, so no separate `tokenizer.json` is needed. The low pick is the
+    // `spec draft` default.
     ModelSpec {
         name: "qwen3-0.6b",
         kind: ModelKind::Generative,
@@ -266,18 +267,11 @@ pub const REGISTRY: &[ModelSpec] = &[
         size_mib: 380,
         variants: &[ModelVariant {
             platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "model.gguf",
-                    url: "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
-                    sha256: "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer.json",
-                    sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                },
-            ],
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
+                sha256: "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a",
+            }],
         }],
     },
     ModelSpec {
@@ -291,18 +285,11 @@ pub const REGISTRY: &[ModelSpec] = &[
         size_mib: 4795,
         variants: &[ModelVariant {
             platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "model.gguf",
-                    url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
-                    sha256: "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json",
-                    sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                },
-            ],
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+                sha256: "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+            }],
         }],
     },
     ModelSpec {
@@ -316,18 +303,11 @@ pub const REGISTRY: &[ModelSpec] = &[
         size_mib: 18845,
         variants: &[ModelVariant {
             platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "model.gguf",
-                    url: "https://huggingface.co/Qwen/Qwen3-32B-GGUF/resolve/main/Qwen3-32B-Q4_K_M.gguf",
-                    sha256: "efd971561896866f0e910cce52761ca77b1b138090c7f15fe284676d57d1f689",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/Qwen/Qwen3-32B/resolve/main/tokenizer.json",
-                    sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-                },
-            ],
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/Qwen/Qwen3-32B-GGUF/resolve/main/Qwen3-32B-Q4_K_M.gguf",
+                sha256: "efd971561896866f0e910cce52761ca77b1b138090c7f15fe284676d57d1f689",
+            }],
         }],
     },
     // Stage 20: opt-in coding + reasoning generative models for local use and
@@ -345,20 +325,11 @@ pub const REGISTRY: &[ModelSpec] = &[
         size_mib: 1841,
         variants: &[ModelVariant {
             platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "model.gguf",
-                    url: "https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf",
-                    sha256: "3da3afe6cf5c674ac195803ea0dd6fee7e1c228c2105c1ce8c66890d1d4ab460",
-                },
-                // Also ships the tokenizer so the candle `LocalGenerator` fallback
-                // can load it too, not only the llama.cpp path.
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct/resolve/main/tokenizer.json",
-                    sha256: "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
-                },
-            ],
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf",
+                sha256: "3da3afe6cf5c674ac195803ea0dd6fee7e1c228c2105c1ce8c66890d1d4ab460",
+            }],
         }],
     },
     ModelSpec {
@@ -372,18 +343,11 @@ pub const REGISTRY: &[ModelSpec] = &[
         size_mib: 1066,
         variants: &[ModelVariant {
             platform: Platform::Standard,
-            files: &[
-                ModelFile {
-                    name: "model.gguf",
-                    url: "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
-                    sha256: "1741e5b2d062b07acf048bf0d2c514dadf2a48f94e2b4aa0cfe069af3838ee2f",
-                },
-                ModelFile {
-                    name: "tokenizer.json",
-                    url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/tokenizer.json",
-                    sha256: "88145e3c3249adc2546ede277e9819d6e405e19072456e4b521cbc724bd60773",
-                },
-            ],
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
+                sha256: "1741e5b2d062b07acf048bf0d2c514dadf2a48f94e2b4aa0cfe069af3838ee2f",
+            }],
         }],
     },
     // ADR-0005 Tier A: the `ocrs` pure-Rust OCR model set (detection +
