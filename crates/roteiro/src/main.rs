@@ -933,6 +933,29 @@ fn run_init(ingest: rto_graph::IngestConfig, fetch: bool, vault: bool) -> anyhow
         if init::ensure_agents(&path)? {
             println!("wrote Roteiro section to {}", path.display());
         }
+
+        // Install the agent skill (the on-demand operational guide). Always the
+        // cross-tool `.agents/skills` location; also GitHub's `.github/skills`
+        // when the repo already uses `.github`, since its Copilot reviewer reads
+        // that path.
+        let mut skill_bases = vec![workdir.join(".agents")];
+        if workdir.join(".github").is_dir() {
+            skill_bases.push(workdir.join(".github"));
+        }
+        for base in &skill_bases {
+            let rel = init::skill_path(base);
+            let rel = rel.strip_prefix(workdir).unwrap_or(&rel);
+            match init::install_skill(base)? {
+                init::HookOutcome::Installed => println!("installed skill: {}", rel.display()),
+                init::HookOutcome::Updated => println!("refreshed skill: {}", rel.display()),
+                init::HookOutcome::SkippedForeign => {
+                    eprintln!(
+                        "warning: existing non-Roteiro `{}` left untouched",
+                        rel.display()
+                    );
+                }
+            }
+        }
     }
 
     // With `--vault`, render the vault once now so it exists immediately (the

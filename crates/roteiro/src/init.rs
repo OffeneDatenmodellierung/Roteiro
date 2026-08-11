@@ -1,10 +1,17 @@
 //! `roteiro init`: scaffold the graph and install the automation around it — the
 //! `post-checkout` / `post-merge` / `post-commit` freshness hooks, a `pre-commit`
-//! drift gate (Stage 16), and an `AGENTS.md` snippet.
+//! drift gate (Stage 16), an `AGENTS.md` snippet, and an installable agent
+//! `SKILL.md`.
 //!
 //! Everything written here is *managed*: each artifact carries a marker so a
 //! re-run updates Roteiro's own content in place and never clobbers a user's
 //! existing (foreign) hook or notes.
+//!
+//! `AGENTS.md` is the lean, always-on context; the `SKILL.md` is the deeper,
+//! on-demand operational guide (loaded only when relevant). The skill goes to the
+//! cross-tool `.agents/skills/roteiro/` location, plus GitHub's
+//! `.github/skills/roteiro/` when the repo already uses `.github` (its Copilot
+//! reviewer reads that path).
 
 use std::fs;
 use std::io;
@@ -172,21 +179,33 @@ pub fn agents_section() -> String {
         "{AGENTS_MARKER}\n\
          ## Roteiro knowledge graph\n\
          \n\
-         This repository has a Roteiro knowledge graph — code structure, ADR intent,\n\
-         and their links in one provenance-tagged store. Prefer querying it over\n\
-         grepping when orienting:\n\
+         This repository has a Roteiro knowledge graph — code structure, authored\n\
+         intent (ADRs, blueprints) and their links in one provenance-tagged store\n\
+         (every fact labelled `derived` | `authored` | `inferred`). Prefer querying\n\
+         it over grepping when orienting.\n\
          \n\
-         - `roteiro query <key> --json` — a node and its provenance-labelled edges.\n\
+         **Find, then explain:**\n\
+         \n\
+         - `roteiro serve --models` exposes a `search` tool (and an OpenAI-compatible\n\
+         `/v1` endpoint) — the entry point for \"what/why\" questions; it ranks curated\n\
+         ADRs/blueprints first. MCP agents get `search`/`explain`/`path`/`debt` directly.\n\
+         - `roteiro query <key> [--json]` — a node and its provenance-labelled edges.\n\
          Keys: `sym:<lang>:<path>#<Name>`, `file:<path>`, `adr:<id>`.\n\
-         - `roteiro query --kind <kind> --json` — list nodes of a kind (`fn`, `adr`, …).\n\
-         - `roteiro sync` — refresh the graph (git hooks do this automatically).\n\
-         - `roteiro check` — validate ADR/annotation drift in the working tree.\n\
-         Run it before finishing a change; a managed `pre-commit` hook also runs\n\
-         it and blocks a drift-introducing commit (`git commit --no-verify` skips).\n\
-         - `roteiro review [--json]` — a graph-grounded review of your current\n\
-         change: each touched symbol's callers/callees and governing ADRs, the\n\
-         drift and intent-debt it adds, and the dependents to re-check. Run it\n\
-         before finishing to review against the graph, not just the diff.\n\
+         - `roteiro query --kind <kind>` — list nodes of a kind (`fn`, `adr`, …).\n\
+         - `roteiro context <key>` — a node's callers, callees and governing ADRs.\n\
+         - `roteiro path <a> <b>` · `roteiro debt` — connections and intent-debt.\n\
+         \n\
+         **Plan a change:** `roteiro spec context <topic>` → `spec scaffold … --kind adr`\n\
+         → `spec draft <file>` (the first two need no model), then `roteiro check`.\n\
+         \n\
+         **Before finishing a change:** run `roteiro review [--json]` (a graph-grounded\n\
+         review of your change — callers/callees, governing ADRs, drift and blast\n\
+         radius) and `roteiro check` (fails on ADR/annotation drift; a managed\n\
+         `pre-commit` hook enforces it too, `git commit --no-verify` skips). `roteiro\n\
+         sync` refreshes the graph (git hooks do this automatically).\n\
+         \n\
+         For the full operational guide, see the installed skill at\n\
+         `.agents/skills/roteiro/SKILL.md`.\n\
          {AGENTS_MARKER}\n"
     )
 }
@@ -240,10 +259,60 @@ fn managed_block_range(content: &str) -> Option<(usize, usize)> {
     Some((start, second + AGENTS_MARKER.len()))
 }
 
+/// The relative sub-path, under a skills *base* dir (e.g. `.agents` or
+/// `.github`), of the managed skill file: `skills/roteiro/SKILL.md`.
+const SKILL_SUBPATH: [&str; 3] = ["skills", "roteiro", "SKILL.md"];
+
+/// The canonical Roteiro agent skill, embedded at build time. Written verbatim to
+/// each target skill dir. It carries the managed marker on its first line, so a
+/// re-run refreshes it in place and a foreign `SKILL.md` is left untouched.
+#[must_use]
+pub fn skill_markdown() -> &'static str {
+    include_str!("../assets/skill/SKILL.md")
+}
+
+/// Whether `content` is the Roteiro-managed skill (safe to overwrite).
+#[must_use]
+pub fn is_managed_skill(content: &str) -> bool {
+    content.contains(HOOK_MARKER)
+}
+
+/// The path a skill installed under `base_dir` lives at
+/// (`<base_dir>/skills/roteiro/SKILL.md`).
+#[must_use]
+pub fn skill_path(base_dir: &Path) -> std::path::PathBuf {
+    SKILL_SUBPATH
+        .iter()
+        .fold(base_dir.to_path_buf(), |p, seg| p.join(seg))
+}
+
+/// Install (or refresh) the managed agent skill under `base_dir` (typically
+/// `.agents` or `.github`), writing `<base_dir>/skills/roteiro/SKILL.md`. Mirrors
+/// [`install_hook`]: a Roteiro-managed file is refreshed, a foreign one is left
+/// untouched.
+///
+/// # Errors
+/// Returns [`io::Error`] on filesystem failure.
+pub fn install_skill(base_dir: &Path) -> io::Result<HookOutcome> {
+    let path = skill_path(base_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let outcome = match fs::read_to_string(&path) {
+        Ok(existing) if is_managed_skill(&existing) => HookOutcome::Updated,
+        Ok(_) => return Ok(HookOutcome::SkippedForeign),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => HookOutcome::Installed,
+        Err(e) => return Err(e),
+    };
+    fs::write(&path, skill_markdown())?;
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        HookOutcome, agents_section, ensure_agents, hook_script, install_hook, is_managed_hook,
+        HookOutcome, agents_section, ensure_agents, hook_script, install_hook, install_skill,
+        is_managed_hook, is_managed_skill, skill_markdown, skill_path,
     };
 
     fn tmp(name: &str) -> std::path::PathBuf {
@@ -403,6 +472,70 @@ mod tests {
             agents_section().matches("<!-- roteiro-managed -->").count(),
             2
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn agents_section_points_at_search_and_the_skill() {
+        let s = agents_section();
+        // The lean block names the discovery entry point and the deeper guide.
+        assert!(
+            s.contains("`search`"),
+            "search is the find-then-explain entry"
+        );
+        assert!(s.contains("roteiro review"), "review is still called out");
+        assert!(
+            s.contains(".agents/skills/roteiro/SKILL.md"),
+            "points at the installed skill for depth"
+        );
+    }
+
+    #[test]
+    fn skill_is_managed_and_a_valid_skill_document() {
+        let md = skill_markdown();
+        assert!(is_managed_skill(md), "skill carries the managed marker");
+        assert!(!is_managed_skill("---\nname: other\n---\n"));
+        // Portable SKILL.md contract: YAML frontmatter with name + description.
+        assert!(md.contains("name: roteiro"), "has a skill name");
+        assert!(
+            md.contains("description:"),
+            "has a description for relevance"
+        );
+        // Teaches the graph surface it is meant to.
+        assert!(md.contains("search"), "covers the search entry point");
+        assert!(md.contains("provenance"), "covers the provenance model");
+        assert!(md.contains("roteiro spec"), "covers the plan workflow");
+    }
+
+    #[test]
+    fn install_skill_creates_updates_and_skips_foreign() {
+        let dir = tmp("skill");
+        let base = dir.join(".agents");
+        let path = skill_path(&base);
+
+        // First install → created, at <base>/skills/roteiro/SKILL.md.
+        assert_eq!(
+            install_skill(&base).expect("install"),
+            HookOutcome::Installed
+        );
+        assert!(path.exists());
+        assert!(path.ends_with("skills/roteiro/SKILL.md"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), skill_markdown());
+
+        // Second install → refreshed in place (managed).
+        assert_eq!(
+            install_skill(&base).expect("reinstall"),
+            HookOutcome::Updated
+        );
+
+        // A foreign SKILL.md is left untouched.
+        std::fs::write(&path, "# my own skill\n").unwrap();
+        assert_eq!(
+            install_skill(&base).expect("skip"),
+            HookOutcome::SkippedForeign
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# my own skill\n");
 
         std::fs::remove_dir_all(&dir).ok();
     }

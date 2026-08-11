@@ -18,6 +18,13 @@ orienting:
 - `roteiro path <a> <b>` · `roteiro debt` — connections and outstanding
   intent-debt.
 
+For natural-language "what/why" questions, `roteiro serve --models` exposes a
+`search` tool and an OpenAI-compatible `/v1` endpoint; MCP agents get
+`search`/`explain`/`path`/`debt` directly. The deeper operational guide (node
+keys, when to use each tool, the plan/review flows) is the installable skill at
+[`.agents/skills/roteiro/SKILL.md`](.agents/skills/roteiro/SKILL.md) — also
+mirrored to `.github/skills/roteiro/` for the Copilot reviewer.
+
 **Before finishing a change**, run `roteiro review` and `roteiro check`.
 
 ## Provenance invariants (the core model — never violate)
