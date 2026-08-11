@@ -138,9 +138,9 @@ impl Repo {
         let base_oid = base_tree.id().to_hex().to_string();
         let head_oid = self.head_tree_id()?;
 
-        // Reuse the subtree-pruning tree diff, then flatten to the (path, deleted)
-        // shape this API exposes. `diff_trees` already sorts and prunes unchanged
-        // subtrees, so this is O(change) rather than a full walk of both trees.
+        // Reuse the subtree-pruning tree diff, then flatten to the `ChangedFile`
+        // (path, status) shape this API exposes. `diff_trees` already sorts and
+        // prunes unchanged subtrees, so this is O(change), not a full walk.
         let diff = self.diff_trees(&base_oid, &head_oid)?;
         // A tree diff's `changed` set conflates genuinely-new files with edits to
         // existing ones, so range review labels them `Modified` rather than

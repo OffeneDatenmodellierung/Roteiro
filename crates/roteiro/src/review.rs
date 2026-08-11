@@ -45,7 +45,9 @@ impl ReviewReport {
 pub struct FileReview {
     /// Repository-relative path.
     pub path: String,
-    /// `"added"`, `"modified"`, or `"deleted"`.
+    /// Change status: currently `"added"`, `"modified"`, or `"deleted"`. This is
+    /// an **open set** within `roteiro.review/v1` — consumers must treat an
+    /// unrecognised value as a generic change (see `docs/JSON_SCHEMA.md`).
     pub status: &'static str,
     /// Symbols defined in the file, each with its graph neighbourhood.
     pub symbols: Vec<SymbolReview>,

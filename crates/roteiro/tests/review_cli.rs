@@ -214,3 +214,32 @@ fn range_review_covers_a_branch_vs_base() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn review_labels_untracked_files_as_added() {
+    // A brand-new untracked file is overlaid into the working-tree review and
+    // labelled `[added]` — not `[modified]`, which it isn't.
+    let dir = fresh_dir("added");
+    write(&dir, "src/main.rs", "fn main() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // Written but never `git add`ed → untracked.
+    write(&dir, "src/extra.rs", "pub fn brand_new() {}\n");
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "no drift → exit 0: {text}");
+    assert!(
+        text.contains("src/extra.rs [added]"),
+        "an untracked new file must be labelled added, not modified: {text}"
+    );
+    assert!(
+        text.contains("fn brand_new"),
+        "the overlaid file's symbol is reviewed: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
