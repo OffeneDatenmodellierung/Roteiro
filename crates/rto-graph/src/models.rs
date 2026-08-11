@@ -3,12 +3,15 @@
 //!
 //! Holds a small in-binary registry of downloadable models with **per-platform
 //! variants**, host-aware variant selection, the model-store layout
-//! (`~/.roteiro/models/<name>/`), and SHA-256 verification. It touches neither an
-//! inference engine nor the network: models are loaded by the llama.cpp core
-//! (`rto-llama`, feature `inference-local-models`), and the consent-gated download
-//! lives in the `roteiro` binary. This module is compiled whenever any model tier
-//! is enabled (feature `models`), so even an OCR-only build (feature `image-ocr`)
-//! can reuse the registry and `roteiro model pull` without pulling the engine.
+//! (`~/.roteiro/models/<name>/`), and SHA-256 verification. It only lists,
+//! resolves, and verifies models — it touches neither an inference engine nor the
+//! network. The actual loaders are feature-specific: the GGUF tiers (embedding /
+//! generative / vision / audio) load via the llama.cpp core (`rto-llama`, feature
+//! `inference-local-models`), while the OCR `.rten` set loads via `ocrs`/`rten`
+//! (feature `image-ocr`); the consent-gated download lives in the `roteiro`
+//! binary. This module is compiled whenever any model tier is enabled (feature
+//! `models`), so even an OCR-only build can reuse the registry and `roteiro model
+//! pull` without pulling the llama.cpp engine.
 
 use std::path::{Path, PathBuf};
 
