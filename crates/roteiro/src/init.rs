@@ -89,6 +89,9 @@ const FETCH_REFRESH: &str = concat!(
     "# Opt-in fast path (`roteiro init --fetch`): try the CI-published graph\n",
     "# artifact before rebuilding. `roteiro load` refuses an artifact whose tree\n",
     "# does not match HEAD, so a stale asset falls through to a local rebuild.\n",
+    "# A flag records success rather than `exit`ing, so any step appended below\n",
+    "# (e.g. --vault's render) still runs.\n",
+    "loaded=0\n",
     "if command -v gh >/dev/null 2>&1; then\n",
     "\t# Portable temp file: GNU `mktemp` needs no args; BSD/macOS needs a\n",
     "\t# template, so fall back to `-t`.\n",
@@ -97,11 +100,12 @@ const FETCH_REFRESH: &str = concat!(
     "\t\tgh release download graph-latest --pattern roteiro-graph.json \\\n",
     "\t\t\t--output \"$tmp\" --clobber >/dev/null 2>&1 && \\\n",
     "\t\troteiro load \"$tmp\" >/dev/null 2>&1; then\n",
-    "\t\trm -f \"$tmp\"; exit 0\n",
+    "\t\tloaded=1\n",
     "\tfi\n",
     "\t[ -n \"$tmp\" ] && rm -f \"$tmp\"\n",
     "fi\n",
-    "roteiro sync --committed >/dev/null 2>&1 || true\n",
+    "# Rebuild locally only if the fast path didn't load a matching artifact.\n",
+    "[ \"$loaded\" = 1 ] || roteiro sync --committed >/dev/null 2>&1 || true\n",
 );
 
 /// Whether `content` is a Roteiro-managed hook (safe to overwrite).
@@ -277,8 +281,22 @@ mod tests {
             fresh.contains("roteiro sync --committed"),
             "still syncs first"
         );
-        // …and composes with --fetch…
-        assert!(hook_script("post-checkout", true, true).contains("roteiro render obsidian"));
+        // …and composes with --fetch. The fetch fast path must set a flag on a
+        // successful load rather than `exit`ing, or the appended vault render would
+        // be unreachable (regression guard, Copilot on #173).
+        let fetch_vault = hook_script("post-checkout", true, true);
+        assert!(
+            fetch_vault.contains("roteiro render obsidian"),
+            "vault render is present with --fetch --vault"
+        );
+        assert!(
+            fetch_vault.contains("loaded=1"),
+            "fetch success records a flag, not an early exit"
+        );
+        assert!(
+            !fetch_vault.contains("; exit 0"),
+            "no early `exit 0` that would short-circuit the appended vault render"
+        );
         // …but never touches the pre-commit gate.
         assert!(!hook_script("pre-commit", false, true).contains("render obsidian"));
     }
