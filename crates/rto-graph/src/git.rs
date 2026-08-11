@@ -107,6 +107,30 @@ impl Repo {
         Ok(tree.id().to_hex().to_string())
     }
 
+    /// Hex object id of the commit at `HEAD` — a stable permalink ref for the tree
+    /// the graph was built from (used to build source links).
+    ///
+    /// # Errors
+    /// Returns [`GitError::Git`] if `HEAD` cannot be resolved to a commit.
+    pub fn head_commit_id(&self) -> Result<String, GitError> {
+        Ok(self
+            .inner
+            .head_id()
+            .map_err(ge)?
+            .detach()
+            .to_hex()
+            .to_string())
+    }
+
+    /// The `origin` remote's fetch URL, if one is configured — e.g. to derive a
+    /// web "blob" base for source links. `None` when there is no `origin` remote.
+    #[must_use]
+    pub fn origin_url(&self) -> Option<String> {
+        let remote = self.inner.find_remote("origin").ok()?;
+        let url = remote.url(gix::remote::Direction::Fetch)?;
+        Some(url.to_bstring().to_string())
+    }
+
     /// Every blob reachable from the `HEAD` tree, with full paths.
     ///
     /// # Errors
