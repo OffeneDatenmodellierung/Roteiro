@@ -99,6 +99,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Search the graph by text — ranked hits over names, keys, paths and
+    /// captured content (doc/ADR/blueprint prose). The entry point for
+    /// "what/why" questions; then `query` a returned key to explain it.
+    Search {
+        /// Free-text query (one or more words).
+        query: String,
+        /// Maximum number of hits to return.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Emit the results as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Fetch a node's cached context bundle (its provenance-labelled
     /// neighbourhood), or refresh all cached contexts that have gone stale.
     Context {
@@ -379,6 +392,7 @@ fn main() -> anyhow::Result<()> {
         } => run_check(ingest, json, committed, staged, debt_ignore),
         Command::Review { json, base } => run_review(ingest, json, base.as_deref()),
         Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
+        Command::Search { query, limit, json } => run_search(ingest, &query, limit, json),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
@@ -918,6 +932,29 @@ fn run_init(ingest: rto_graph::IngestConfig, fetch: bool, vault: bool) -> anyhow
         let path = workdir.join("AGENTS.md");
         if init::ensure_agents(&path)? {
             println!("wrote Roteiro section to {}", path.display());
+        }
+
+        // Install the agent skill (the on-demand operational guide). Always the
+        // cross-tool `.agents/skills` location; also GitHub's `.github/skills`
+        // when the repo already uses `.github`, since its Copilot reviewer reads
+        // that path.
+        let mut skill_bases = vec![workdir.join(".agents")];
+        if workdir.join(".github").is_dir() {
+            skill_bases.push(workdir.join(".github"));
+        }
+        for base in &skill_bases {
+            let full = init::skill_path(base);
+            let rel = full.strip_prefix(workdir).unwrap_or(&full);
+            match init::install_skill(base)? {
+                init::HookOutcome::Installed => println!("installed skill: {}", rel.display()),
+                init::HookOutcome::Updated => println!("refreshed skill: {}", rel.display()),
+                init::HookOutcome::SkippedForeign => {
+                    eprintln!(
+                        "warning: existing non-Roteiro `{}` left untouched",
+                        rel.display()
+                    );
+                }
+            }
         }
     }
 
@@ -2008,6 +2045,33 @@ fn run_query(
         (None, None) => {
             anyhow::bail!("provide a node key to explain, or `--kind <kind>` to list nodes");
         }
+    }
+    Ok(())
+}
+
+/// Search the graph by text and print ranked hits (highest score first). A
+/// read-only report: it exits zero even when nothing matches, keeping stdout
+/// empty (or an empty JSON array) so it composes in scripts.
+fn run_search(
+    ingest: rto_graph::IngestConfig,
+    query: &str,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+
+    let hits = rto_graph::search(&store, query, limit)?;
+    if json {
+        emit_json(&hits)?;
+    } else if hits.is_empty() {
+        // Keep stdout empty on a miss; report to stderr.
+        eprintln!("no matches for `{query}`");
+    } else {
+        for hit in &hits {
+            println!("  {:>4}  {:<8}  {}", hit.score, hit.node.kind, hit.node.key);
+        }
+        println!("{} hit(s)", hits.len());
     }
     Ok(())
 }

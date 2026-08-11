@@ -227,7 +227,8 @@ draft house-style, graph-grounded ADRs to begin with.</div>
 <h3>1 · Offline mode <span style="font-weight:normal;color:var(--sub)">— the default</span></h3>
 <p>No models, no network. Build the graph, query it, verify authored intent, and
 render docs. This alone is a complete tool.</p>
-<pre><code><span class="c"># Scaffold the store, hooks and agent skill in your repo</span>
+<pre><code><span class="c"># Scaffold the store, git hooks, an AGENTS.md block and an agent skill</span>
+<span class="c"># (.agents/skills/roteiro/SKILL.md; also .github/skills when the repo uses .github)</span>
 roteiro init
 
 <span class="c"># Build / incrementally update the graph for the working tree</span>
@@ -301,7 +302,10 @@ provenance-tagged store, so answers are grounded in your actual code and decisio
 <h3>Structured — offline, no model</h3>
 <p>Precise lookups straight against the graph. Deterministic, instant, and
 scriptable (add <code>--json</code> to any of these).</p>
-<pre><code><span class="c"># Explain a node: its provenance-labelled neighbourhood</span>
+<pre><code><span class="c"># Find, then explain: ranked text search — curated ADRs/blueprints rank first</span>
+roteiro search "provenance model"
+
+<span class="c"># Explain a returned node: its provenance-labelled neighbourhood</span>
 roteiro query 'sym:rust:crates/rto-graph/src/store.rs#Store'
 
 <span class="c"># Everything relevant to a symbol — callers, callees, governing ADRs</span>
@@ -349,7 +353,12 @@ memory and hallucinate. Set it once in <code>roteiro.toml</code> under
 <div class="note"><strong>Already using an AI agent?</strong> Skip curl entirely — run
 <code>roteiro serve</code> (MCP mode) and your agent gets the same <code>search</code> /
 <code>context</code> / <code>path</code> / <code>debt</code> tools natively, grounded in the same
-graph. See <a href="#modes">MCP mode</a> above.</div>
+graph. See <a href="#modes">MCP mode</a> above. <code>roteiro init</code> also drops an
+<strong>agent skill</strong> at <code>.agents/skills/roteiro/SKILL.md</code> (the portable,
+cross-tool location; also <code>.github/skills/</code> for GitHub Copilot when the repo
+already uses <code>.github</code>) that teaches any agent how to drive the graph — when
+to <code>search</code> vs <code>query</code> vs <code>context</code>, the provenance model, and
+the plan/review flows.</div>
 
 <h2 id="plan">Plan a change</h2>
 
