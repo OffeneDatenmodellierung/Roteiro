@@ -251,7 +251,8 @@ enum Command {
         models: bool,
         /// MCP server: serve networked over streamable HTTP at ADDR (e.g.
         /// `127.0.0.1:8080`) instead of stdio. Terminate TLS at a reverse proxy.
-        #[arg(long, value_name = "ADDR")]
+        /// For the MCP-only server; with `--models`, use `--mcp` (+ `--addr`).
+        #[arg(long, value_name = "ADDR", conflicts_with = "models")]
         http: Option<String>,
         /// Model server (`--models`): bind ADDR (default `127.0.0.1:8017`). A
         /// non-loopback address is warned about (no auth — front with a proxy).
@@ -280,8 +281,9 @@ enum Command {
         sync_on_access: bool,
         /// With `--models`: also mount the MCP graph server at `/mcp` on the
         /// **same port**, so one process serves both `/v1` and `/mcp` over one
-        /// Workspace (needs `--features serve,mcp`).
-        #[arg(long)]
+        /// Workspace (needs `--features serve,mcp`). Only meaningful with
+        /// `--models` — the plain `serve` already is the MCP server.
+        #[arg(long, requires = "models")]
         mcp: bool,
     },
 }
@@ -2563,10 +2565,10 @@ fn serve_mcp(
 
 /// Serve installed generative models over the loopback, OpenAI-compatible `/v1`
 /// endpoint (ADR-0006). Serves only installed models; never downloads.
-/// The installed GGUF models to serve over `/v1` (ADR-0006): generative and
-/// embedding always, vision only with its `mmproj` projector; OCR/audio are
-/// sync-time ingestion models, not endpoints. Narrowed by the `[serve] models`
-/// allow-list if set.
+/// Collect the installed GGUF models eligible to serve over `/v1` (ADR-0006):
+/// generative and embedding always, vision only with its `mmproj` projector;
+/// OCR/audio are sync-time ingestion models, not endpoints. Narrowed by the
+/// `[serve] models` allow-list if set. Returns the list; serving is the caller's.
 #[cfg(feature = "serve")]
 fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
     use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
