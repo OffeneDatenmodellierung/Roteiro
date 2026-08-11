@@ -8,11 +8,12 @@ use std::process::Command;
 use rto_graph::{FactSet, Node, NodeKind, Store, Workspace, WorkspaceError};
 
 fn git_init(dir: &Path) {
-    Command::new("git")
+    let status = Command::new("git")
         .args(["-c", "init.defaultBranch=main", "init", "-q"])
         .current_dir(dir)
         .status()
         .expect("run git init");
+    assert!(status.success(), "git init failed in {}", dir.display());
 }
 
 /// Create a git repo at `dir` holding a graph with a single `fn` node named

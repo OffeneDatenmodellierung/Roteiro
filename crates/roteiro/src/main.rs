@@ -2312,6 +2312,9 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
 /// ADR-0006) or the MCP graph server. Each backend is feature-gated; a build
 /// lacking the relevant feature reports how to enable it.
 #[cfg(any(feature = "mcp", feature = "serve"))]
+// These are the parsed `serve` CLI flags threaded straight through from the clap
+// `Command::Serve` variant; a params struct would just mirror that enum arm and
+// add indirection at the single call site.
 #[allow(clippy::too_many_arguments)]
 fn run_serve(
     ingest: rto_graph::IngestConfig,
@@ -2656,21 +2659,21 @@ impl GraphToolRegistry {
 impl rto_serve::ToolRegistry for GraphToolRegistry {
     fn tools(&self) -> Vec<rto_serve::ToolDef> {
         use serde_json::json;
-        // Only expose project selection when several are hosted, so single-repo
-        // serving is unchanged and a lone model is not tempted to pass `project`.
-        let multi = self.workspace.is_multi();
-        // A `project` property spliced into each tool's schema when hosting many.
-        let project_prop = || {
-            json!({ "project": {
-                "type": "string",
-                "description": "Which hosted project to query (see `list_projects`).",
-            }})
-        };
+        // `project` is an optional selector on every tool, and `list_projects` is
+        // always offered — matching the MCP surface (whose schema the rmcp macro
+        // generates statically, so it can't hide them). Uniform beats an
+        // asymmetric surface; a single-project server resolves the sole project
+        // for a bare call, and `list_projects` simply returns that one.
         let with_project = |mut props: serde_json::Value| {
-            if multi {
-                let obj = props.as_object_mut().expect("object schema");
-                obj.insert("project".to_owned(), project_prop()["project"].clone());
-            }
+            let obj = props.as_object_mut().expect("object schema");
+            obj.insert(
+                "project".to_owned(),
+                json!({
+                    "type": "string",
+                    "description": "Optional: which hosted project to query (see \
+                                    `list_projects`); omit if the server hosts one.",
+                }),
+            );
             props
         };
 
@@ -2728,15 +2731,13 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 }),
             },
         ];
-        if multi {
-            tools.push(rto_serve::ToolDef {
-                name: "list_projects".to_owned(),
-                description: "List the projects this server hosts. Pass one as `project` \
-                              to the other tools to query it (ADR-0008)."
-                    .to_owned(),
-                parameters: json!({ "type": "object", "properties": {} }),
-            });
-        }
+        tools.push(rto_serve::ToolDef {
+            name: "list_projects".to_owned(),
+            description: "List the projects this server hosts (often just one). Pass one as \
+                          `project` to the other tools to query it (ADR-0008)."
+                .to_owned(),
+            parameters: json!({ "type": "object", "properties": {} }),
+        });
         tools
     }
 

@@ -162,7 +162,9 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
 
 - **New surface:** a `[workspace]` config table, a `--workspace` flag, and — on
   both the MCP and `/v1` tool surfaces — an optional `project` argument plus a
-  `list_projects` tool (exposed only when several projects are hosted).
+  `list_projects` tool. These are **always present but optional** (uniform across
+  both surfaces — the MCP schema is macro-generated and can't hide them); a
+  single-project server resolves the sole default for a bare call.
 - **Refactor, not rewrite:** [[crates/roteiro/src/main.rs#open_graph]] splits into
   a cwd convenience wrapper over a `(repo_path) -> (Repo, Store, cache)` resolver;
   the resolver is reused by both serve modes. All other callers keep the cwd
