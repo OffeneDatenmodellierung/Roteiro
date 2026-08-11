@@ -797,10 +797,28 @@ fn run_review(
         GraphSource::Worktree
     };
     let report = build_graph(&repo, &mut store, &cache, ingest, source)?;
-    let changed = match base {
-        Some(base) => repo.changed_between(base)?,
-        None => repo.changed_files()?,
-    };
+    let changed =
+        if let Some(base) = base {
+            repo.changed_between(base)?
+        } else {
+            // Working-tree review: tracked edits/deletes, plus brand-new untracked
+            // files as additions — the overlaid graph already includes them, so the
+            // change set must too or their symbols would go unreviewed.
+            let mut changed = repo.changed_files()?;
+            changed.extend(repo.untracked_files()?.into_iter().map(|path| {
+                rto_graph::ChangedFile {
+                    path,
+                    deleted: false,
+                }
+            }));
+            changed.sort_by(|a, b| a.path.cmp(&b.path));
+            // The two sets are normally disjoint (tracked vs untracked), but some
+            // intermediate git states can overlap — dedupe by path so the review
+            // never lists a file twice. A tracked entry sorts before its untracked
+            // duplicate only by chance, so prefer keeping the first of each path.
+            changed.dedup_by(|a, b| a.path == b.path);
+            changed
+        };
     let review = review::build(&store, &changed, &report.violations)?;
 
     if json {
@@ -2564,8 +2582,10 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
         });
     }
 
-    // Render lifetime docs (the Build Plan) as first-class root-level pages,
-    // and list them above the ADRs on the index.
+    // Render lifetime docs (the Build Plan and the house-style blueprints) as
+    // first-class root-level pages, and list them above the ADRs on the index.
+    // Their `[[docs/adr/…]]` links resolve into the `adr/` subdirectory (the
+    // `render_doc` prefix), which is correct for a root-level page.
     let mut lifetime = Vec::new();
     let build_plan = root.join("docs/BUILD_PLAN.md");
     if build_plan.is_file() {
@@ -2577,6 +2597,34 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
             href: "../build-plan.html".to_owned(),
             title: rendered.title,
         });
+    }
+    // Blueprints live under docs/blueprint(s)/ (ADR-0004); the overall project
+    // blueprint is one. Render each to a root-level page like the Build Plan.
+    for dir in ["docs/blueprint", "docs/blueprints"] {
+        let bp_dir = root.join(dir);
+        if !bp_dir.is_dir() {
+            continue;
+        }
+        let mut bps: Vec<_> = std::fs::read_dir(&bp_dir)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("README.md"))
+            .collect();
+        bps.sort();
+        for path in &bps {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("blueprint");
+            let md = std::fs::read_to_string(path)?;
+            let rendered = rto_render::render_doc(&md, stem);
+            std::fs::write(out.join(format!("{stem}.html")), &rendered.html)?;
+            lifetime.push(rto_render::IndexEntry {
+                href: format!("../{stem}.html"),
+                title: rendered.title,
+            });
+        }
     }
 
     std::fs::write(
