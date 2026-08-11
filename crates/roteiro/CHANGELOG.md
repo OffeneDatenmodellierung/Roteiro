@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.16...roteiro-v0.0.17) - 2026-08-11
+
+### Added
+
+- *(dogfood)* publish the Obsidian vault as a CI artifact; opt-in local refresh
+- *(review)* distinguish "added" files from "modified"
+
+### Fixed
+
+- *(init)* --fetch --vault reaches the vault render (PR #173 review)
+- *(review)* address PR #169 review — open-set doc, comment, added test
+
 ## [0.0.16](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.15...roteiro-v0.0.16) - 2026-08-11
 
 ### Added
