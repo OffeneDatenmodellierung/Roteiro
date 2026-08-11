@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.17...rto-graph-v0.0.18) - 2026-08-11
+
+### Other
+
+- Merge pull request #176 from OffeneDatenmodellierung/chore/debt-precision
+- *(debt)* precision pass — intent-debt now reflects real debt (97 → 6)
+
 ## [0.0.17](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.16...rto-graph-v0.0.17) - 2026-08-11
 
 ### Added
