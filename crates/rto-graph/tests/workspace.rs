@@ -66,6 +66,51 @@ fn workspace_routes_queries_to_the_right_project() {
 }
 
 #[test]
+fn reload_from_picks_up_added_and_dropped_repos() {
+    let base = std::env::temp_dir().join(format!("rto-ws-reload-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    repo_with_node(&base.join("alpha"), "sym:rust:a.rs#in_alpha");
+    repo_with_node(&base.join("beta"), "sym:rust:b.rs#in_beta");
+
+    // Start hosting just alpha (single ⇒ default).
+    let ws = Workspace::from_repo_paths([base.join("alpha")]).expect("build");
+    assert_eq!(ws.names(), vec!["alpha".to_owned()]);
+    // Warm its cache.
+    assert!(
+        ws.with_store(None, |s| s
+            .get_node("sym:rust:a.rs#in_alpha")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // Reload with beta added: both are now hosted (and it's multi-project).
+    let names = ws
+        .reload_from([base.join("alpha"), base.join("beta")])
+        .expect("reload");
+    assert_eq!(names, vec!["alpha".to_owned(), "beta".to_owned()]);
+    assert!(ws.is_multi());
+    assert!(
+        ws.with_store(Some("beta"), |s| s
+            .get_node("sym:rust:b.rs#in_beta")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // Reload down to just beta: alpha is gone (and beta becomes the default).
+    let names = ws.reload_from([base.join("beta")]).expect("reload");
+    assert_eq!(names, vec!["beta".to_owned()]);
+    assert!(matches!(
+        ws.resolve(Some("alpha")).unwrap_err(),
+        WorkspaceError::UnknownProject { .. }
+    ));
+    assert_eq!(ws.resolve(None).unwrap(), "beta");
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn a_registered_repo_without_a_graph_reports_no_graph() {
     let base = std::env::temp_dir().join(format!("rto-ws-nograph-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();

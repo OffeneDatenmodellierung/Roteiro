@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-11
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -176,12 +176,13 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
   query — so a project's updates appear on the next question with **no reload**.
   A `busy_timeout` on every store connection makes a read that lands during a
   concurrent sync-commit wait briefly rather than fail with `database is locked`.
-- **The registry is not hot-reloaded.** The *set* of hosted projects is fixed at
-  `serve` start (config + `--workspace` are read once). Adding or removing a repo
-  needs a restart — or a future reload trigger (a SIGHUP re-scan is the natural
-  follow-up; content freshness already needs none). A registered-but-unsynced
-  repo *is* picked up once its first sync lands, since a missing graph is not
-  cached.
+- **The registry reloads on `SIGHUP`.** The *set* of hosted projects is read at
+  `serve` start; sending the running server `SIGHUP` re-scans the roots and swaps
+  the registry in place — added repos become available, removed ones are dropped
+  (their cached store evicted), and still-present ones keep their warm connection
+  — with no restart and no dropped requests. (Windows has no `SIGHUP`; there the
+  set is fixed at start.) A registered-but-unsynced repo is picked up once its
+  first sync lands, since a missing graph is not cached.
 - **Security:** one port now exposes multiple graphs — acceptable on the
   loopback default, but the "front a public bind with a proxy" guidance from
   ADR-0006 becomes load-bearing. No new network exposure by default.
@@ -212,3 +213,4 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
 |---------|------|-------|
 | 0.1 | 2026-08-11 | Draft for review. Proposes an opt-in workspace `serve`: one process, one resident model, per-repo graphs opened on demand behind a store cache, explicit `project` selection on the tools (+ `list_projects`). Keeps single-repo cwd serve as the default; rejects N-servers, a proxy, and a merged mega-store. Grounded in `open_graph`, the two serve entry points, and the `[workspace]` config layer. |
 | 1.0 | 2026-08-11 | Accepted and implemented. Added `rto_graph::Workspace` (name→store registry, opened on demand, cached), a `[workspace]` config table (`roots`/`repos`) and `serve --workspace <root>` (shallow repo discovery). Both tool surfaces are workspace-backed: the MCP tools and the `/v1` graph tools gained an optional `project` argument and a `list_projects` tool, exposed only when several projects are hosted. Single-repo serve is unchanged (the cwd repo is the sole default project). **Realised `/v1` selection as a uniform `project` tool argument, not a `/v1/<project>/…` path prefix** — one mechanism across MCP and `/v1`, no bespoke routing. |
+| 1.1 | 2026-08-11 | Added `busy_timeout` on every store connection (a workspace read that lands during a project's concurrent `sync`-commit waits briefly instead of failing with `database is locked`), and **live registry reload on `SIGHUP`** — a dedicated thread re-scans the workspace roots and swaps the registry in place (added/removed repos, no restart). Content freshness already needed no reload (in-place `graph.db` writes are read on the next query). |

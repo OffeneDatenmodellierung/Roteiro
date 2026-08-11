@@ -270,8 +270,8 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 ///
 /// # Errors
 /// Returns an error if the runtime cannot start or the transport fails.
-pub fn serve_stdio(workspace: Workspace) -> Result<(), McpError> {
-    let shared: SharedWorkspace = Arc::new(workspace);
+pub fn serve_stdio(workspace: Arc<Workspace>) -> Result<(), McpError> {
+    let shared: SharedWorkspace = workspace;
     runtime()?.block_on(async move {
         let service = GraphServer::new(shared).serve(stdio()).await?;
         service.waiting().await?;
@@ -286,8 +286,8 @@ pub fn serve_stdio(workspace: Workspace) -> Result<(), McpError> {
 /// # Errors
 /// Returns an error if the runtime cannot start, the address cannot be bound, or
 /// the server fails.
-pub fn serve_http(workspace: Workspace, addr: SocketAddr) -> Result<(), McpError> {
-    let shared: SharedWorkspace = Arc::new(workspace);
+pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), McpError> {
+    let shared: SharedWorkspace = workspace;
     runtime()?.block_on(async move {
         let service = StreamableHttpService::new(
             move || Ok(GraphServer::new(shared.clone())),
