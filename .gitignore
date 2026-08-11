@@ -9,3 +9,6 @@ website/dist/
 
 # macOS Finder metadata
 .DS_Store
+# The Obsidian vault is a gitignored build-output (`roteiro render obsidian`),
+# regenerated locally / published as a CI artifact — never committed.
+/vault/

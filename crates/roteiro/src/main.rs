@@ -2665,17 +2665,28 @@ fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyh
     }
     std::fs::create_dir_all(&out)?;
 
+    // A web "blob" base for clickable Source links, from the origin remote + the
+    // rendered commit (an absolute URL, so it works in the downloaded vault too).
+    // `None` when there is no mappable remote — notes then omit the link.
+    let commit = repo.head_commit_id().ok();
+    let remote = repo.origin_url();
+    let source_base = match (remote.as_deref(), commit.as_deref()) {
+        (Some(r), Some(c)) => source_blob_base(r, c),
+        _ => None,
+    };
+
     let mut count = 0usize;
     for key in store.all_keys()? {
         if let Some(ex) = rto_graph::explain(&store, &key)? {
-            let note = rto_render::render_note(&ex);
+            let note = rto_render::render_note(&ex, source_base.as_deref());
             std::fs::write(out.join(&note.filename), &note.content)?;
             count += 1;
         }
     }
 
     // The overview note: what was scanned, structure, provenance, ADRs, debt.
-    let home = rto_render::render_home(&vault_summary(&repo, &store)?);
+    let repo_url = remote.as_deref().and_then(repo_web_root);
+    let home = rto_render::render_home(&vault_summary(&repo, &store, repo_url, commit)?);
     std::fs::write(out.join(&home.filename), &home.content)?;
 
     println!(
@@ -2690,6 +2701,8 @@ fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyh
 fn vault_summary(
     repo: &rto_graph::Repo,
     store: &rto_graph::Store,
+    repo_url: Option<String>,
+    commit: Option<String>,
 ) -> anyhow::Result<rto_render::VaultSummary> {
     use rto_graph::{NodeKind, Provenance};
 
@@ -2750,7 +2763,51 @@ fn vault_summary(
         edge_provenance,
         adrs,
         debt,
+        repo_url,
+        commit,
     })
+}
+
+/// Web root for a git remote URL (`https://<host>/<owner>/<repo>`), or `None` if
+/// it isn't a URL shape we can map. Handles `git@host:owner/repo(.git)`,
+/// `ssh://[user@]host/owner/repo(.git)`, and `http(s)://[user@]host/owner/repo(.git)`.
+fn repo_web_root(remote: &str) -> Option<String> {
+    let s = remote.trim();
+    // Normalise the remote's various spellings to `host/owner/repo…`.
+    let hostpath = if let Some(rest) = s.strip_prefix("git@") {
+        // `github.com:owner/repo` → `github.com/owner/repo`
+        rest.replacen(':', "/", 1)
+    } else {
+        let rest = s
+            .strip_prefix("ssh://")
+            .or_else(|| s.strip_prefix("https://"))
+            .or_else(|| s.strip_prefix("http://"))?;
+        // Strip any `user@` credentials prefix.
+        rest.rsplit_once('@').map_or(rest, |(_, r)| r).to_owned()
+    };
+    let hostpath = hostpath
+        .strip_suffix(".git")
+        .unwrap_or(&hostpath)
+        .trim_end_matches('/');
+    // Require at least `host/segment` so a bare host doesn't produce a broken link.
+    if hostpath.split('/').filter(|s| !s.is_empty()).count() < 2 {
+        return None;
+    }
+    Some(format!("https://{hostpath}"))
+}
+
+/// Web "blob" base for a file at `commit` on the `remote`'s host — e.g.
+/// `https://github.com/owner/repo/blob/<commit>` — so `<base>/<path>` links to the
+/// exact file. GitLab uses the `/-/blob/` infix; other hosts (GitHub, Gitea,
+/// Codeberg, …) use `/blob/`. `None` for an unmappable remote.
+fn source_blob_base(remote: &str, commit: &str) -> Option<String> {
+    let root = repo_web_root(remote)?;
+    let infix = if root.contains("gitlab") {
+        "/-/blob/"
+    } else {
+        "/blob/"
+    };
+    Some(format!("{root}{infix}{commit}"))
 }
 
 /// Recursively copy the contents of `src` into `dst`.
@@ -2767,4 +2824,39 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::{repo_web_root, source_blob_base};
+
+    #[test]
+    fn repo_web_root_maps_common_remote_forms() {
+        let want = Some("https://github.com/OffeneDatenmodellierung/Roteiro".to_owned());
+        for remote in [
+            "git@github.com:OffeneDatenmodellierung/Roteiro.git",
+            "https://github.com/OffeneDatenmodellierung/Roteiro.git",
+            "https://github.com/OffeneDatenmodellierung/Roteiro",
+            "ssh://git@github.com/OffeneDatenmodellierung/Roteiro.git",
+            "https://user:tok@github.com/OffeneDatenmodellierung/Roteiro.git",
+        ] {
+            assert_eq!(repo_web_root(remote), want, "{remote}");
+        }
+        // Unmappable / degenerate remotes yield no link rather than a broken one.
+        assert_eq!(repo_web_root("file:///tmp/x.git"), None);
+        assert_eq!(repo_web_root("git@github.com:"), None, "no owner/repo");
+    }
+
+    #[test]
+    fn source_blob_base_uses_host_specific_infix() {
+        assert_eq!(
+            source_blob_base("git@github.com:o/r.git", "abc123"),
+            Some("https://github.com/o/r/blob/abc123".to_owned())
+        );
+        // GitLab's blob path is `/-/blob/`.
+        assert_eq!(
+            source_blob_base("git@gitlab.com:o/r.git", "abc123"),
+            Some("https://gitlab.com/o/r/-/blob/abc123".to_owned())
+        );
+    }
 }
