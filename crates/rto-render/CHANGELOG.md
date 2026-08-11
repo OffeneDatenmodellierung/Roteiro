@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.19...rto-render-v0.0.20) - 2026-08-11
+
+### Added
+
+- *(serve)* multi-repo workspace serve — one instance, many graphs (ADR-0008)
+
+### Other
+
+- Merge pull request #189 from OffeneDatenmodellierung/feat/workspace-serve
+
 ## [0.0.19](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.18...rto-render-v0.0.19) - 2026-08-11
 
 ### Added
