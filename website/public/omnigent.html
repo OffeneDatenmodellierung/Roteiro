@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>Roteiro for an agent platform — a worked example with Omnigent &amp; polly</title>
+<meta name="description" content="Wire Roteiro into an AI agent platform: one endpoint serving both a graph-grounded /v1 model API and the /mcp graph tools, across many projects — with a worked Omnigent/polly example and a cheap→foundation model cascade.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1><img src="logo.svg" alt="" width="56" height="56" style="vertical-align:-14px;margin-right:.4rem">Roteiro</h1>
+<p class="tagline">Use it from an agent platform.</p>
+
+<p class="lead">Roteiro serves your codebase knowledge to an AI agent platform through
+<strong>one endpoint</strong> that exposes both a graph-grounded <code>/v1</code> model
+API and the <code>/mcp</code> graph tools, across <strong>many projects</strong> at once.
+This guide wires it into <a href="https://omnigent.dev">Omnigent</a>, using the
+<strong>polly</strong> orchestrator as a worked example, with a cheap→foundation model
+cascade that keeps grounding at every tier.</p>
+
+<nav class="toc">
+  <a href="index.html">← Home</a>
+  <a href="#shape">The shape</a>
+  <a href="#run">Run Roteiro</a>
+  <a href="#cascade">The cascade</a>
+  <a href="#polly">Wire it into polly</a>
+  <a href="#ops">Operating it</a>
+</nav>
+
+<h2 id="shape">The shape: one endpoint, two surfaces, many projects</h2>
+
+<p>A Roteiro graph is <strong>per-repo</strong>. A single <code>serve</code> process holds
+your model once and hosts <em>every</em> registered repo, opening each project's graph
+on demand (ADR-0008). It exposes two surfaces on the <strong>same port</strong>:</p>
+
+<table>
+<tr><th>Surface</th><th>What it is</th><th>Who uses it</th></tr>
+<tr><td><code>/v1</code></td><td>An OpenAI-compatible endpoint whose <em>served local model</em> answers questions by calling the graph tools itself — grounded, zero API cost.</td><td>The <strong>cheap tier</strong>: a local model as the first responder.</td></tr>
+<tr><td><code>/mcp</code></td><td>The raw graph tools (<code>search</code> / <code>explain</code> / <code>path</code> / <code>debt</code> / <code>list_projects</code>), callable by <em>any</em> model.</td><td><strong>Escalation</strong>: a foundation model that must stay grounded.</td></tr>
+</table>
+
+<p>Every tool takes an optional <code>project</code> argument, so one endpoint answers about
+any of your repos. This is why you only need <strong>one Roteiro process</strong>: <code>/v1</code>
+and <code>/mcp</code> are just path prefixes on the same server.</p>
+
+<h2 id="run">Run Roteiro</h2>
+
+<p>Point it at a directory of checkouts; each git repo under it becomes a project.
+Requires <code>--features serve,mcp</code>.</p>
+
+<pre><code><span class="c"># One process, one port (127.0.0.1:8017): both /v1 and /mcp, every repo under ~/code</span>
+roteiro serve --models --mcp --workspace ~/code
+
+<span class="c"># A client (your router) discovers projects with a plain GET — no model round-trip</span>
+curl -s http://127.0.0.1:8017/v1/projects
+<span class="c">#   {"object":"list","data":[{"id":"roteiro","object":"project"},{"id":"omnigent",…}]}</span>
+
+<span class="c"># Ask a grounded question, scoped to one project via the URL prefix</span>
+curl -s http://127.0.0.1:8017/v1/roteiro/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"Where is the git-native store?"}]}'</code></pre>
+
+<div class="note"><strong>Two ways to pick a project on <code>/v1</code>.</strong> Either the
+path prefix <code>/v1/&lt;project&gt;/…</code> (pre-binds it — the model needn't name it), or the
+plain <code>/v1</code> with a <code>project</code> argument the model passes per tool call. The MCP
+tools take the same <code>project</code> argument. Omit it entirely for a single-repo server.</div>
+
+<h2 id="cascade">The cascade: cheap-first, grounded at every tier</h2>
+
+<p>The pattern you want is a <strong>router</strong> that tries the cheapest capable tier and
+escalates only when needed — and, crucially, keeps the model grounded in the graph the
+whole way up. The key move is to make Roteiro's <em>local</em> model the cheapest tier,
+not a foundation-model call.</p>
+
+<table>
+<tr><th>Tier</th><th>Model</th><th>Grounding</th><th>Good for</th></tr>
+<tr><td>1</td><td><strong>qwen3-8b</strong> (Roteiro-local, via <code>/v1</code>)</td><td>Built in — the endpoint calls the tools</td><td>Straightforward what / where / why. Free, offline.</td></tr>
+<tr><td>2</td><td>a cheap foundation model (e.g. Claude Haiku)</td><td>Roteiro <code>/mcp</code> tools</td><td>Retrieval-ish work the small model fumbles.</td></tr>
+<tr><td>3</td><td>a frontier model (e.g. Claude Sonnet / Opus)</td><td>Roteiro <code>/mcp</code> tools</td><td>Hard reasoning, cross-repo synthesis, planning.</td></tr>
+</table>
+
+<div class="note"><strong>Never escalate to a bare model.</strong> Register Roteiro's
+<code>/mcp</code> so Tiers 2–3 keep the same graph tools (scoped by <code>project</code>). A
+foundation model without the graph loses the grounding that made Tier 1 trustworthy.
+Feed the Tier-1 tool results forward so the bigger model doesn't re-fetch.</div>
+
+<h2 id="polly">Wire it into polly</h2>
+
+<p><strong>polly</strong> is Omnigent's coding orchestrator: it plans and delegates to a roster
+of coding sub-agents and has a different-vendor reviewer double-check the work. Its config
+is a <code>config.yaml</code> bundle — the parts that matter here are the <code>executor</code>
+brain, the <code>tools.agents</code> roster, and an <code>mcp_servers</code> block that hands
+tools to the agent.</p>
+
+<p><strong>Give polly (and its investigators) the Roteiro graph</strong> by registering the
+one endpoint as an MCP server — so <code>explore</code> / <code>search</code> dispatches are
+graph-grounded rather than blind greps:</p>
+
+<pre><code><span class="c"># polly's config.yaml — the relevant parts (roster trimmed)</span>
+spec_version: 1
+name: polly
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk          <span class="c"># the orchestrator "brain"</span>
+
+<span class="c"># Register Roteiro's one endpoint as an MCP server: the streamable-HTTP</span>
+<span class="c"># transport at /mcp. Now search/explain/path/debt (scoped by `project`)</span>
+<span class="c"># are available to polly for grounded investigation.</span>
+mcp_servers:
+  - name: roteiro
+    transport: streamable-http
+    url: http://127.0.0.1:8017/mcp
+
+tools:
+  agents: [claude_code, codex, opencode, cursor, hermes, agy, pi]</code></pre>
+
+<p><strong>Add the cheap grounded tier</strong> by registering Roteiro's <code>/v1</code> as an
+OpenAI-compatible provider (one entry, or one per project via the <code>/v1/&lt;project&gt;</code>
+base URL). polly's read-mostly worker, <code>pi</code> — "the only worker that can run ANY
+gateway model" — is the natural place to route a Tier-1 grounded lookup before spending a
+frontier dispatch:</p>
+
+<pre><code><span class="c"># In your Omnigent provider config, add Roteiro as an OpenAI gateway.</span>
+<span class="c"># base_url is Roteiro's /v1 (optionally /v1/&lt;project&gt; to pre-bind a repo).</span>
+provider: openai
+base_url: http://127.0.0.1:8017/v1
+model: qwen3-8b                   <span class="c"># local, graph-grounded, free</span>
+
+<span class="c"># Then a dispatch can name it as the worker's model for a cheap grounded pass:</span>
+<span class="c">#   sys_session_send(title="explore-auth", args={purpose:"explore", model:"qwen3-8b"})</span>
+<span class="c"># escalating to a Claude model only when the local answer is weak.</span></code></pre>
+
+<div class="note"><strong>Discover the roster at runtime.</strong> polly already preflights
+its coding workers and calls <code>sys_list_models</code> / <code>sys_advise_models</code> to
+pick a model per task. Your router does the analogous thing for <em>projects</em>:
+<code>GET /v1/projects</code> to enumerate repos, then route each question to the right one.</div>
+
+<h2 id="ops">Operating it</h2>
+
+<div class="grid">
+  <div class="card"><h3>Add repos live</h3><p>Send the server <code>SIGHUP</code> and it re-scans the workspace roots — new checkouts become queryable, removed ones drop, with no restart (unix).</p></div>
+  <div class="card"><h3>Freshness</h3><p>Each repo's git hooks keep its graph current, and the server reads the latest committed state live. Add <code>--sync-on-access</code> to (re)build a project's graph on first touch instead.</p></div>
+  <div class="card"><h3>One model, many graphs</h3><p>The model loads once and is shared across every project's queries; per-model concurrency serialises safely. The graphs are cheap SQLite files opened on demand.</p></div>
+  <div class="card"><h3>Auth &amp; exposure</h3><p>The endpoint is loopback with no auth by design. One port now exposes several repos' graphs — front a non-loopback bind with a reverse proxy that terminates TLS and authenticates.</p></div>
+</div>
+
+<div class="note"><strong>Prefer stdio for a local subprocess.</strong> If your platform spawns
+a per-session MCP subprocess rather than calling a shared HTTP server, use <code>roteiro serve</code>
+(MCP over stdio) instead — same tools, same graph. The one-port HTTP setup above is for a
+long-lived shared server that many agents reach over the network.</div>
+
+<footer>
+<p>Roteiro — the pilot book for your codebase. <a href="index.html">Back to the overview</a>.
+Multi-project serving is <a href="index.html#modes">ADR-0008</a>.</p>
+</footer>
+
+</body>
+</html>
