@@ -2788,6 +2788,10 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         tools
     }
 
+    fn projects(&self) -> Vec<String> {
+        self.workspace.names()
+    }
+
     fn call(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
         let str_arg = |k: &str| args.get(k).and_then(serde_json::Value::as_str);
         let project = str_arg("project");

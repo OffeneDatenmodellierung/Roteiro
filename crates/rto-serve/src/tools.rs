@@ -40,6 +40,13 @@ pub trait ToolRegistry: Send + Sync {
     /// Returns human-readable error text (fed back to the model, not fatal) when
     /// the tool is unknown, the arguments are invalid, or the query fails.
     fn call(&self, name: &str, arguments: &serde_json::Value) -> Result<String, String>;
+
+    /// The named projects this registry can serve, for `GET /v1/projects` — the
+    /// hosted repos of a workspace (ADR-0008), so a client can discover them
+    /// without a model round-trip. Defaults to none (a single, unnamed source).
+    fn projects(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A tool call parsed out of a model's generation.

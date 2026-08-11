@@ -64,6 +64,7 @@ pub fn app_with_tools(engine: Arc<dyn Engine>, tools: Arc<dyn ToolRegistry>) -> 
 fn router(state: Shared) -> Router {
     Router::new()
         .route("/v1/models", get(list_models))
+        .route("/v1/projects", get(list_projects))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/{project}/models", get(list_models_scoped))
@@ -87,6 +88,10 @@ struct ScopedTools<'a> {
 impl ToolRegistry for ScopedTools<'_> {
     fn tools(&self) -> Vec<crate::tools::ToolDef> {
         self.inner.tools()
+    }
+
+    fn projects(&self) -> Vec<String> {
+        self.inner.projects()
     }
 
     fn call(&self, name: &str, arguments: &serde_json::Value) -> Result<String, String> {
@@ -204,6 +209,22 @@ async fn list_models(State(state): State<Shared>) -> Json<ModelList> {
         object: "list",
         data,
     })
+}
+
+/// `GET /v1/projects` — the workspace projects this server hosts (ADR-0008), so a
+/// client (e.g. an agent router) can discover them without a model round-trip.
+/// Empty for a single, unnamed source. Not an OpenAI-standard endpoint; shaped
+/// like `/v1/models` (`{ object: "list", data: [{ id, object: "project" }] }`).
+async fn list_projects(State(state): State<Shared>) -> Json<serde_json::Value> {
+    let data: Vec<serde_json::Value> = state
+        .tools
+        .as_ref()
+        .map(|t| t.projects())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| serde_json::json!({ "id": id, "object": "project" }))
+        .collect();
+    Json(serde_json::json!({ "object": "list", "data": data }))
 }
 
 /// `GET /v1/{project}/models` — the engine-level model list; the prefix is
@@ -706,6 +727,57 @@ mod tests {
             .unwrap();
         assert!(out.contains(r#""project":"alpha""#), "{out}");
         assert!(!out.contains("beta"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn projects_endpoint_lists_workspace_projects() {
+        use super::app_with_tools;
+        use crate::tools::{ToolDef, ToolRegistry};
+
+        // A registry that hosts two named projects.
+        struct TwoProjects;
+        impl ToolRegistry for TwoProjects {
+            fn tools(&self) -> Vec<ToolDef> {
+                Vec::new()
+            }
+            fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn projects(&self) -> Vec<String> {
+                vec!["alpha".to_owned(), "beta".to_owned()]
+            }
+        }
+        let app = app_with_tools(
+            std::sync::Arc::new(MockEngine),
+            std::sync::Arc::new(TwoProjects),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["object"], "list");
+        assert_eq!(json["data"][0]["id"], "alpha");
+        assert_eq!(json["data"][1]["id"], "beta");
+        assert_eq!(json["data"][0]["object"], "project");
+
+        // With no tools registered, the list is simply empty (single source).
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(resp).await["data"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
