@@ -100,7 +100,7 @@ pub enum EngineError {
     /// text-only model) — a client error (400), not an internal failure.
     #[error("{0}")]
     InvalidRequest(String),
-    /// The operation is not implemented by the active engine (e.g. embeddings on
+    /// The operation is unsupported by the active engine (e.g. embeddings on
     /// a chat-only engine) — a 501, not an internal failure.
     #[error("not supported: {0}")]
     Unsupported(String),

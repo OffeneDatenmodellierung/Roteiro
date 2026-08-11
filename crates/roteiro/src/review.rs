@@ -51,7 +51,7 @@ pub struct FileReview {
     pub status: &'static str,
     /// Symbols defined in the file, each with its graph neighbourhood.
     pub symbols: Vec<SymbolReview>,
-    /// Intent-debt markers (TODO/FIXME/stub/…) present in the file.
+    /// Intent-debt markers present in the file.
     pub debt: Vec<String>,
 }
 

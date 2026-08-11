@@ -98,7 +98,7 @@ fn serve_router(router: Router, addr: std::net::SocketAddr) -> anyhow::Result<()
 
 /// Serve the `/v1` app over **TLS** on `addr`, blocking until shutdown — an
 /// in-process alternative to terminating TLS at a reverse proxy (ADR-0002
-/// follow-up). `cert` and `key` are paths to PEM files: a certificate chain and
+/// addendum). `cert` and `key` are paths to PEM files: a certificate chain and
 /// its private key (PKCS#8 or RSA). `tools`, when set, auto-registers the graph
 /// tools (as [`serve_blocking_with_tools`]).
 ///

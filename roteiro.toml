@@ -1,0 +1,8 @@
+# Roteiro project configuration (ADR-0007).
+
+[debt]
+# Paths excluded from the intent-debt scan. These carry the debt *vocabulary* as
+# content, not as real code debt: planning docs record postponed work by design
+# (the Build Plan/ADRs), while changelogs, the website, and Cargo manifests name
+# the marker categories in prose. Code debt is what `roteiro debt` should surface.
+ignore = ["docs/**", "website/**", "**/CHANGELOG.md", "**/Cargo.toml"]

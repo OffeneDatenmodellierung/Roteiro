@@ -454,7 +454,7 @@ mod tests {
                 name: "First".into(),
                 status: Some("Accepted".into()),
             }],
-            debt: vec![("todo".into(), 4)],
+            debt: vec![("todo".into(), 4)], // roteiro:ignore
             repo_url: Some("https://github.com/org/repo".into()),
             commit: Some("abcdef0123456789".into()),
         };
@@ -465,7 +465,7 @@ mod tests {
         assert!(note.content.contains("| fn | 2 |"));
         assert!(note.content.contains("| derived | 1 |"));
         assert!(note.content.contains("**Accepted** — [[adr-0001|First]]"));
-        assert!(note.content.contains("| todo | 4 |"));
+        assert!(note.content.contains("| todo | 4 |")); // roteiro:ignore
         // A repository link + short-commit permalink note.
         assert!(
             note.content

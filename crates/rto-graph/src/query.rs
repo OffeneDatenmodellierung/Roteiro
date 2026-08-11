@@ -104,7 +104,7 @@ pub struct DebtItem {
 }
 
 /// The intent-debt inventory: every `marker` node, grouped and listed. A
-/// deterministic, provenance-`derived` view of what is incomplete or deferred.
+/// deterministic, provenance-`derived` view of what is incomplete or postponed.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DebtReport {
     /// Stable schema tag ([`SCHEMA`]).

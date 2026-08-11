@@ -1,3 +1,5 @@
+// roteiro:ignore-file — defines the Marker node and its category names, so it
+// names the intent-debt vocabulary; not real debt in this repo.
 //! In-memory graph domain types: nodes, edges, and the [`FactSet`] that groups
 //! the facts extracted from a single source blob.
 //!
