@@ -302,7 +302,10 @@ provenance-tagged store, so answers are grounded in your actual code and decisio
 <h3>Structured — offline, no model</h3>
 <p>Precise lookups straight against the graph. Deterministic, instant, and
 scriptable (add <code>--json</code> to any of these).</p>
-<pre><code><span class="c"># Explain a node: its provenance-labelled neighbourhood</span>
+<pre><code><span class="c"># Find, then explain: ranked text search — curated ADRs/blueprints rank first</span>
+roteiro search "provenance model"
+
+<span class="c"># Explain a returned node: its provenance-labelled neighbourhood</span>
 roteiro query 'sym:rust:crates/rto-graph/src/store.rs#Store'
 
 <span class="c"># Everything relevant to a symbol — callers, callees, governing ADRs</span>

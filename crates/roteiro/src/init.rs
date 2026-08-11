@@ -186,9 +186,11 @@ pub fn agents_section() -> String {
          \n\
          **Find, then explain:**\n\
          \n\
-         - `roteiro serve --models` exposes a `search` tool (and an OpenAI-compatible\n\
-         `/v1` endpoint) — the entry point for \"what/why\" questions; it ranks curated\n\
-         ADRs/blueprints first. MCP agents get `search`/`explain`/`path`/`debt` directly.\n\
+         - `roteiro search \"<text>\"` — ranked text search (names, keys, paths and\n\
+         captured prose); curated ADRs/blueprints rank first. The offline entry point\n\
+         for \"what/why\" questions — then `query` a returned key. (`roteiro serve\n\
+         --models` exposes the same as a `search` tool + an OpenAI `/v1` endpoint;\n\
+         MCP agents get `search`/`explain`/`path`/`debt` directly.)\n\
          - `roteiro query <key> [--json]` — a node and its provenance-labelled edges.\n\
          Keys: `sym:<lang>:<path>#<Name>`, `file:<path>`, `adr:<id>`.\n\
          - `roteiro query --kind <kind>` — list nodes of a kind (`fn`, `adr`, …).\n\

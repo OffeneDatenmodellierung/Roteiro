@@ -59,15 +59,20 @@ store.
 - `debt` — the intent-debt inventory (what's incomplete/postponed).
 - `list_kind` — every node of a kind (`fn`, `struct`, `adr`, …).
 
-**CLI** (any agent, human, or CI — add `--json` to any query for structured output):
+**CLI** (any agent, human, or CI — add `--json` to any command for structured output):
 
 ```sh
-roteiro query 'sym:rust:crates/rto-graph/src/store.rs#Store'  # explain a node
+roteiro search "provenance model"                             # ranked hits — start here
+roteiro query 'sym:rust:crates/rto-graph/src/store.rs#Store'  # explain a returned key
 roteiro query --kind adr                                       # list nodes of a kind
 roteiro context 'sym:rust:crates/rto-graph/src/sync.rs#sync'  # callers, callees, governing ADRs
 roteiro path 'file:src/main.rs' 'adr:0006'                    # shortest connection
 roteiro debt                                                   # outstanding intent-debt
 ```
+
+`roteiro search` is the CLI form of the `search` tool — same ranking, no server
+needed. It is the offline **find-then-explain** entry point: search for the
+topic, then `query` the key it returns.
 
 For **natural-language** questions, run `roteiro serve --models` and ask over the
 OpenAI-compatible `/v1` endpoint — the server calls `search`/`path`/`debt` for
