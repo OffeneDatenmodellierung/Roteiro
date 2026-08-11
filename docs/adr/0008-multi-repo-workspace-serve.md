@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-08-11
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -125,14 +125,16 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
      argument, plus a new `list_projects` tool. A missing `project` errors with
      the available names (or uses a configured default) — never a silent guess.
    - **OpenAI `/v1`** ([[crates/roteiro/src/main.rs#serve_models_endpoint]],
-     [[crates/rto-serve/src/server.rs#serve_blocking_with_tools]]): the served
-     model's graph tools carry the **same `project` argument** and a
-     `list_projects` tool, so a natural-language question ("what does the auth
-     module in *beta* do?") resolves via `list_projects` → `search(project:
-     "beta", …)`. Implemented uniformly with MCP rather than as a
-     `/v1/<project>/…` path prefix: one selection mechanism across both surfaces,
-     and no bespoke HTTP routing. (A path prefix that pre-binds a project remains
-     a possible future convenience.)
+     [[crates/rto-serve/src/server.rs#serve_blocking_with_tools]]): **two** ways to
+     select a project. (a) The served model's graph tools carry the **same
+     `project` argument** and a `list_projects` tool, so *"what does the auth
+     module in beta do?"* resolves via `list_projects` → `search(project: "beta",
+     …)` — uniform with MCP, no bespoke routing. (b) A **`/v1/{project}/…` path
+     prefix** pre-binds a project: a client points its `base_url` at
+     `…/v1/<project>` and every tool call is scoped to it without the model
+     naming it (an explicit `project` still overrides, allowing a cross-project
+     query). `GET /v1/projects` lets a client (e.g. an agent router) enumerate the
+     hosted projects without a model round-trip.
 5. **Default unchanged.** With no `[workspace]`/`--workspace`, `serve` behaves
    exactly as today (cwd-scoped, no project selector). Loopback-only default is
    retained ([[crates/roteiro/src/config.rs#ServeConfig]]); a public bind must
@@ -178,6 +180,10 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
   query — so a project's updates appear on the next question with **no reload**.
   A `busy_timeout` on every store connection makes a read that lands during a
   concurrent sync-commit wait briefly rather than fail with `database is locked`.
+  `serve --sync-on-access` opts into the opposite trade: (re)build a project's
+  graph on first touch (a first-open hook on the workspace), so a stale or
+  never-synced repo is prepared before it is served — slower first query, never
+  a stale answer.
 - **The registry reloads on `SIGHUP`.** The *set* of hosted projects is read at
   `serve` start; sending the running server `SIGHUP` re-scans the roots and swaps
   the registry in place — added repos become available, removed ones are dropped
@@ -216,3 +222,4 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
 | 0.1 | 2026-08-11 | Draft for review. Proposes an opt-in workspace `serve`: one process, one resident model, per-repo graphs opened on demand behind a store cache, explicit `project` selection on the tools (+ `list_projects`). Keeps single-repo cwd serve as the default; rejects N-servers, a proxy, and a merged mega-store. Grounded in `open_graph`, the two serve entry points, and the `[workspace]` config layer. |
 | 1.0 | 2026-08-11 | Accepted and implemented. Added `rto_graph::Workspace` (name→store registry, opened on demand, cached), a `[workspace]` config table (`roots`/`repos`) and `serve --workspace <root>` (shallow repo discovery). Both tool surfaces are workspace-backed: the MCP tools and the `/v1` graph tools gained an optional `project` argument and a `list_projects` tool, exposed only when several projects are hosted. Single-repo serve is unchanged (the cwd repo is the sole default project). **Realised `/v1` selection as a uniform `project` tool argument, not a `/v1/<project>/…` path prefix** — one mechanism across MCP and `/v1`, no bespoke routing. |
 | 1.1 | 2026-08-11 | Added `busy_timeout` on every store connection (a workspace read that lands during a project's concurrent `sync`-commit waits briefly instead of failing with `database is locked`), and **live registry reload on `SIGHUP`** — a dedicated thread re-scans the workspace roots and swaps the registry in place (added/removed repos, no restart). Content freshness already needed no reload (in-place `graph.db` writes are read on the next query). |
+| 1.2 | 2026-08-11 | Implemented the two optional extras this ADR left open. **`/v1/{project}/…` path routing** (`rto-serve`): a client uses `…/v1/<project>` as its base URL and tool calls are pre-bound to that project (a `ScopedTools` wrapper fills `project` when the model omits it); `models`/`embeddings` accept and ignore the prefix. **`serve --sync-on-access`**: a first-open hook on the `Workspace` (re)builds a project's graph on first touch, so a stale/never-synced repo is prepared before serving. Also added **`GET /v1/projects`** so a client-side router can enumerate hosted projects without a model round-trip. |

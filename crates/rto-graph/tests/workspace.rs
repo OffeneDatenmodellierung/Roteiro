@@ -4,6 +4,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use rto_graph::{FactSet, Node, NodeKind, Store, Workspace, WorkspaceError};
 
@@ -152,6 +153,48 @@ fn reload_reroutes_when_a_name_maps_to_a_different_repo() {
             .unwrap(),
         "must not still serve repo A's graph from a stale cache entry"
     );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn on_open_hook_prepares_the_graph_on_first_access() {
+    // A repo with `.git` but no graph yet; `--sync-on-access` should build it on
+    // first touch instead of erroring.
+    let base = std::env::temp_dir().join(format!("rto-ws-onopen-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let dir = base.join("proj");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    git_init(&dir);
+    let db = dir.join(".git").join("roteiro").join("graph.db");
+    assert!(!db.exists(), "no graph before first access");
+
+    let ws = Workspace::from_repo_paths([&dir])
+        .expect("build")
+        .with_on_open(Arc::new(|db: &Path| {
+            // Stand in for `roteiro sync`: create the graph with one node.
+            std::fs::create_dir_all(db.parent().unwrap()).map_err(|e| e.to_string())?;
+            let mut store = Store::open(db).map_err(|e| e.to_string())?;
+            let facts = FactSet::new().with_node(Node::new(
+                "sym:rust:z.rs#prepared",
+                NodeKind::Fn,
+                "prepared",
+            ));
+            store.apply_factset(&facts).map_err(|e| e.to_string())?;
+            Ok(())
+        }));
+
+    // First access runs the hook, which prepares the graph — so the query
+    // succeeds rather than hitting `NoGraph`.
+    assert!(
+        ws.with_store(None, |s| s
+            .get_node("sym:rust:z.rs#prepared")
+            .unwrap()
+            .is_some())
+            .unwrap(),
+        "the on-open hook should have built the graph"
+    );
+    assert!(db.exists(), "graph.db exists after first access");
 
     std::fs::remove_dir_all(&base).ok();
 }

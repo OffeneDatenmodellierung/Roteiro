@@ -273,6 +273,11 @@ enum Command {
         /// (the current directory's repo).
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
+        /// Workspace mode: (re)build each project's graph the first time it is
+        /// queried, instead of serving whatever its hooks last left. Slower on
+        /// first touch, but never serves a stale or missing graph (ADR-0008).
+        #[arg(long)]
+        sync_on_access: bool,
     },
 }
 
@@ -433,6 +438,7 @@ fn main() -> anyhow::Result<()> {
             tls_cert,
             tls_key,
             workspace,
+            sync_on_access,
         } => run_serve(
             ingest,
             &cfg.effective,
@@ -442,6 +448,7 @@ fn main() -> anyhow::Result<()> {
             tls_cert,
             tls_key,
             &workspace,
+            sync_on_access,
         ),
     }
 }
@@ -2325,6 +2332,7 @@ fn run_serve(
     tls_cert: Option<String>,
     tls_key: Option<String>,
     workspace_roots: &[String],
+    sync_on_access: bool,
 ) -> anyhow::Result<()> {
     use std::sync::Arc;
     let repo_paths = collect_workspace_repo_paths(&cfg.workspace, workspace_roots)?;
@@ -2338,13 +2346,26 @@ fn run_serve(
             .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
         Arc::new(rto_graph::Workspace::single(name, store))
     } else {
-        // Workspace serve: open existing graphs on demand (no sync — each repo's
-        // hooks keep it fresh, ADR-0008) and allow SIGHUP to reload the registry.
-        let ws = Arc::new(rto_graph::Workspace::from_repo_paths(&repo_paths)?);
+        // Workspace serve: open existing graphs on demand and allow SIGHUP to
+        // reload the registry. By default no sync (each repo's hooks keep it
+        // fresh, ADR-0008); with --sync-on-access, (re)build a project's graph on
+        // first touch.
+        let mut ws = rto_graph::Workspace::from_repo_paths(&repo_paths)?;
+        if sync_on_access {
+            ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
+                sync_project_graph(db, ingest).map_err(|e| e.to_string())
+            }));
+        }
+        let ws = Arc::new(ws);
         let names = ws.names();
         eprintln!(
-            "roteiro workspace: {} project(s) — {}",
+            "roteiro workspace: {} project(s){} — {}",
             names.len(),
+            if sync_on_access {
+                ", sync-on-access"
+            } else {
+                ""
+            },
             names.join(", ")
         );
         install_workspace_reload(&ws, cfg.workspace.clone(), workspace_roots.to_vec());
@@ -2378,6 +2399,30 @@ fn collect_workspace_repo_paths(
         repo_paths.push(std::path::PathBuf::from(repo));
     }
     Ok(repo_paths)
+}
+
+/// `serve --sync-on-access` hook: (re)build the graph for the repo whose store
+/// is `graph_db` (`<repo>/.git/roteiro/graph.db`), before it is first served.
+/// Rebuilds from the committed tree, matching how the freshness hooks sync.
+#[cfg(any(feature = "mcp", feature = "serve"))]
+fn sync_project_graph(
+    graph_db: &std::path::Path,
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<()> {
+    use rto_graph::{ObjectCache, Repo, Store};
+    // graph.db → roteiro → .git → repo directory (three parents up).
+    let repo_dir = graph_db
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("unexpected graph.db path: {}", graph_db.display()))?;
+    let repo = Repo::discover(repo_dir)?;
+    let store_dir = repo.git_dir().join("roteiro");
+    std::fs::create_dir_all(&store_dir)?;
+    let mut store = Store::open(&store_dir.join("graph.db"))?;
+    let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    Ok(())
 }
 
 /// Install a SIGHUP handler that re-scans the workspace roots and reloads the
@@ -2741,6 +2786,10 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             parameters: json!({ "type": "object", "properties": {} }),
         });
         tools
+    }
+
+    fn projects(&self) -> Vec<String> {
+        self.workspace.names()
     }
 
     fn call(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
