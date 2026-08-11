@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.19...rto-render-v1.0.0) - 2026-08-11
+
+First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
+
+### Added
+- The MCP server is **`Workspace`-backed** (ADR-0008): every tool takes an optional
+  `project` selector and a `list_projects` tool enumerates hosted projects. `mcp_router`
+  exposes the `/mcp` axum router for mounting alongside `/v1` on one port.
+
+
 ## [0.0.19](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.18...rto-render-v0.0.19) - 2026-08-11
 
 ### Added

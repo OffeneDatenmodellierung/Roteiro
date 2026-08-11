@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.19...roteiro-v1.0.0) - 2026-08-11
+
+First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
+
+### Added
+- **Multi-repo workspace serve (ADR-0008).** `roteiro serve --workspace <root>` (and
+  a `[workspace]` config table) hosts every git repo under a root from one process,
+  holding the model once and selecting a project per request. `--models --mcp` serves
+  the OpenAI `/v1` endpoint and the `/mcp` graph tools **on one port**; `--sync-on-access`
+  (re)builds a project's graph on first touch. `SIGHUP` reloads the registry live.
+
+### Changed
+- `serve` flags are validated in clap: `--mcp` requires `--models`, `--http` conflicts
+  with `--models`.
+
+
 ## [0.0.19](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.18...roteiro-v0.0.19) - 2026-08-11
 
 ### Added

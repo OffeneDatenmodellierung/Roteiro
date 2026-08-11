@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.18...rto-serve-v1.0.0) - 2026-08-11
+
+First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
+
+### Added
+- **Workspace-aware `/v1` (ADR-0008):** `/v1/{project}/…` path routing (pre-binds a
+  project), `GET /v1/projects` (client-side discovery), and `serve_blocking_router[_tls]`
+  to serve a caller-composed router — used to mount `/v1` and `/mcp` on one port.
+- `ToolRegistry::projects()` for enumerating hosted projects.
+
+
 ## [0.0.18](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.17...rto-serve-v0.0.18) - 2026-08-11
 
 ### Other
