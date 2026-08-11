@@ -14,17 +14,48 @@ summaries (sync/check/import/infer/config/model) are stable in shape but untagge
   ignore unknown fields.
 - A **breaking change** (removing/renaming a field, changing a type or meaning)
   **bumps the version** (`/v1` → `/v2`); the old shape is not silently reused.
-- The schema-tag strings are pinned by a freeze test, so a change is caught in CI.
+- **Deprecation, not surprise.** A field slated for removal is first documented as
+  deprecated (kept and populated as before) within its current major version, and
+  only dropped at the next `/vN` bump. There is no silent removal.
+- The schema-tag strings are pinned by a freeze test, so a version change is a
+  deliberate, reviewed edit — caught in CI, never accidental.
+
+### What is covered — and what is not
+
+The contract is the **presence, name, type, and meaning of documented fields**
+under a given `schema` tag. It deliberately does **not** cover:
+
+- **Field ordering** within an object, or JSON whitespace/pretty-printing.
+- **Human-readable text**: the non-`--json` output of any command, log lines, and
+  the exact wording of `message`/error strings (their *presence* is stable; their
+  prose is not a parsing target).
+- **Ordering of array elements** unless a field's docs state an explicit sort
+  (e.g. deterministic key order). When in doubt, sort on the consumer side.
+- **New enum values**: a documented string field (e.g. a node `kind`, a review
+  `status`) may gain new values within a major version — treat unknown values as
+  a safe "other", don't hard-fail.
+
+### For consumers
+
+- **Read the `schema` tag** and branch on its `/vN`; treat a higher `N` than you
+  know as "handle the fields you recognise, ignore the rest."
+- **Ignore unknown fields** rather than rejecting the document.
+- **Don't depend on field order or whitespace.** Parse structurally.
+- Prefer the tagged graph-data schemas for automation; treat the untagged
+  operational summaries as stable-within-a-release (see below).
 
 ## Versioned schemas (frozen)
 
-| Schema tag | Emitted by | Payload |
-| --- | --- | --- |
-| `roteiro.query/v1` | `query`, `query --kind`, `context`, `path`, `debt`, `duplicates` | The query surface: an explained node, a node context bundle, a kind listing, a path, a debt report, and the duplicate report (all share the query schema). |
-| `roteiro.review/v1` | `review` | The graph-grounded review of the working-tree change (changed files, per-symbol context, drift, blast radius). |
-| `roteiro.graph/v1` | `export` (and consumed by `load`) | The portable, content-addressed graph artifact (`schema`, `tree`, `facts`). |
-| `roteiro.spec/v1` | `spec context`, `spec scaffold` | Graph-grounded spec/blueprint authoring context and skeletons. |
-| `roteiro.oracle/v1` | `import codegraph` | The codegraph validation-oracle comparison report. |
+Each tag is a `const` in the code, so the emitter and the freeze test share one
+source of truth:
+
+| Schema tag | Const | Emitted by | Payload |
+| --- | --- | --- | --- |
+| `roteiro.query/v1` | `rto_graph::SCHEMA` | `query`, `query --kind`, `context`, `path`, `debt`, `duplicates` | The query surface: an explained node, a node context bundle, a kind listing, a path, a debt report, and the duplicate report (all share the query schema). |
+| `roteiro.review/v1` | `roteiro`'s `review::REVIEW_SCHEMA` | `review` | The graph-grounded review of a change (changed files with per-symbol context, authored-layer drift, blast radius). |
+| `roteiro.graph/v1` | `rto_graph::ARTIFACT_SCHEMA` | `export` (and consumed by `load`) | The portable, content-addressed graph artifact (`schema`, `tree`, `facts`). |
+| `roteiro.spec/v1` | `rto_spec::SPEC_SCHEMA` | `spec context`, `spec scaffold` | Graph-grounded spec/blueprint authoring context and skeletons. |
+| `roteiro.oracle/v1` | `rto_graph::ORACLE_SCHEMA` | `import codegraph` | The codegraph validation-oracle comparison report. |
 
 ## Operational summaries (stable shape, untagged)
 
@@ -38,5 +69,7 @@ shape**, but do not (yet) carry a `schema` tag:
 - `config --json` — the effective merged configuration.
 - `model list --json` — the model registry.
 
-Adding versioned `schema` tags to these is a small, additive follow-up; until
-then, treat their field shape as stable within a major release of Roteiro.
+The same **additive-within-a-release** promise applies to them: within a released
+major version their documented fields keep their name, type, and meaning, and only
+grow. Giving them explicit versioned `schema` tags is a small, additive follow-up;
+until then, pin to a Roteiro major version if you parse them.
