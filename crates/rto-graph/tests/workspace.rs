@@ -112,6 +112,51 @@ fn reload_from_picks_up_added_and_dropped_repos() {
 }
 
 #[test]
+fn reload_reroutes_when_a_name_maps_to_a_different_repo() {
+    // Two repos share a directory name ("proj") under different roots, so both
+    // resolve to the same project name but different `graph.db` files.
+    let base = std::env::temp_dir().join(format!("rto-ws-reroute-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    repo_with_node(&base.join("a").join("proj"), "sym:rust:x.rs#from_a");
+    repo_with_node(&base.join("b").join("proj"), "sym:rust:x.rs#from_b");
+
+    let ws = Workspace::from_repo_paths([base.join("a").join("proj")]).expect("build");
+    // Warm the cache against repo A.
+    assert!(
+        ws.with_store(None, |s| s
+            .get_node("sym:rust:x.rs#from_a")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // Reload the *same name* onto repo B: the cached handle for A must be
+    // evicted, so queries now hit B's graph — not the stale A connection.
+    let names = ws
+        .reload_from([base.join("b").join("proj")])
+        .expect("reload");
+    assert_eq!(names, vec!["proj".to_owned()]);
+    assert!(
+        ws.with_store(None, |s| s
+            .get_node("sym:rust:x.rs#from_b")
+            .unwrap()
+            .is_some())
+            .unwrap(),
+        "should now read repo B's graph"
+    );
+    assert!(
+        !ws.with_store(None, |s| s
+            .get_node("sym:rust:x.rs#from_a")
+            .unwrap()
+            .is_some())
+            .unwrap(),
+        "must not still serve repo A's graph from a stale cache entry"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn a_registered_repo_without_a_graph_reports_no_graph() {
     let base = std::env::temp_dir().join(format!("rto-ws-nograph-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();

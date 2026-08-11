@@ -2394,8 +2394,10 @@ fn install_workspace_reload(
 ) {
     let ws = ws.clone();
     std::thread::spawn(move || {
+        // A current-thread runtime with just the I/O driver — all unix signal
+        // handling needs (no timers), keeping this self-contained.
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+            .enable_io()
             .build()
         else {
             return;

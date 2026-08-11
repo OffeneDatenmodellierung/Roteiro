@@ -83,9 +83,22 @@ struct Inner {
     /// The project used when a call omits `project` (the sole project, if there
     /// is exactly one; otherwise `None` and a bare call is ambiguous).
     default: Option<String>,
-    /// Opened stores, cached by project name. `Store` is `!Sync` (it holds a
-    /// rusqlite connection), so each is behind its own `Mutex`.
-    cache: HashMap<String, Arc<Mutex<Store>>>,
+    /// Opened stores, cached by project name, tagged with the [`Source`] they
+    /// were opened from. `Store` is `!Sync` (it holds a rusqlite connection), so
+    /// each is behind its own `Mutex`. The tag lets a reload keep a warm
+    /// connection only when the project still maps to the *same* source, and
+    /// never serve a handle for a repo the name no longer points at.
+    cache: HashMap<String, (Source, Arc<Mutex<Store>>)>,
+}
+
+/// Whether two sources denote the same store: the same `graph.db` path, or the
+/// very same pre-opened handle.
+fn source_eq(a: &Source, b: &Source) -> bool {
+    match (a, b) {
+        (Source::Path(x), Source::Path(y)) => x == y,
+        (Source::Open(x), Source::Open(y)) => Arc::ptr_eq(x, y),
+        _ => false,
+    }
 }
 
 /// A named set of per-repo graphs, each opened on demand and cached. Cheap to
@@ -154,11 +167,13 @@ impl Workspace {
         let (projects, default) = build_registry(paths)?;
         let names: Vec<String> = projects.keys().cloned().collect();
         let mut inner = self.lock()?;
-        // Evict cached stores for projects that are gone or whose source changed
-        // path; keep warm connections for unchanged `Path` projects.
+        // Keep a warm connection only where the project still maps to the *same*
+        // source; drop it if the name is gone or now points at a different
+        // `graph.db` (or was a pre-opened `single` store), so a query never hits
+        // the wrong repo.
         inner
             .cache
-            .retain(|name, _| matches!(projects.get(name), Some(Source::Path(_))));
+            .retain(|name, (src, _)| projects.get(name).is_some_and(|new| source_eq(new, src)));
         inner.projects = projects;
         inner.default = default;
         Ok(names)
@@ -235,13 +250,16 @@ impl Workspace {
         // Fast path and pre-opened sources resolve under a single short lock.
         let db = {
             let mut inner = self.lock()?;
-            if let Some(handle) = inner.cache.get(name) {
+            if let Some((_, handle)) = inner.cache.get(name) {
                 return Ok(handle.clone());
             }
             match inner.projects.get(name) {
                 Some(Source::Open(handle)) => {
                     let handle = handle.clone();
-                    inner.cache.insert(name.to_owned(), handle.clone());
+                    inner.cache.insert(
+                        name.to_owned(),
+                        (Source::Open(handle.clone()), handle.clone()),
+                    );
                     return Ok(handle);
                 }
                 Some(Source::Path(db)) => db.clone(),
@@ -266,12 +284,25 @@ impl Workspace {
             });
         }
         let handle = Arc::new(Mutex::new(Store::open(&db)?));
+        let opened = Source::Path(db.clone());
         let mut inner = self.lock()?;
         // Another thread may have opened it while we were; prefer the existing.
-        if let Some(existing) = inner.cache.get(name) {
+        if let Some((_, existing)) = inner.cache.get(name) {
             return Ok(existing.clone());
         }
-        inner.cache.insert(name.to_owned(), handle.clone());
+        // Only cache if the registry still maps this name to the DB we opened —
+        // a concurrent `reload_from` may have remapped or removed it. If so,
+        // return the freshly-opened handle for this call (the caller resolved
+        // before the reload) but do not cache a now-stale mapping.
+        if inner
+            .projects
+            .get(name)
+            .is_some_and(|current| source_eq(current, &opened))
+        {
+            inner
+                .cache
+                .insert(name.to_owned(), (opened, handle.clone()));
+        }
         Ok(handle)
     }
 }
@@ -291,15 +322,15 @@ where
     P: AsRef<Path>,
 {
     let mut projects: BTreeMap<String, Source> = BTreeMap::new();
-    let mut seen_dbs: Vec<PathBuf> = Vec::new();
+    let mut seen_dbs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for path in paths {
         let repo = Repo::discover(path.as_ref())?;
         let db = repo.git_dir().join("roteiro").join("graph.db");
-        // De-duplicate the same repo reached via different paths.
-        if seen_dbs.contains(&db) {
+        // De-duplicate the same repo reached via different paths (O(1) lookup, so
+        // discovery stays linear even on a big workspace and every reload).
+        if !seen_dbs.insert(db.clone()) {
             continue;
         }
-        seen_dbs.push(db.clone());
         let base = repo
             .workdir()
             .and_then(Path::file_name)
