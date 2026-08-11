@@ -80,6 +80,12 @@ impl Store {
 
     fn from_conn(mut conn: Connection) -> Result<Self, StoreError> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Wait briefly for a concurrent writer instead of failing a read with
+        // `database is locked`. Matters for workspace `serve` (ADR-0008), where a
+        // long-lived server reads a project's graph while that repo's own
+        // `roteiro sync` commits an update to the same file. Syncs are
+        // sub-second, so this only ever costs a short wait, never a lost query.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrations::apply(&mut conn)?;
         Ok(Self { conn })
     }

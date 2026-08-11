@@ -50,6 +50,8 @@ pub struct Config {
     pub debt: DebtConfig,
     /// Filesystem locations (the model store).
     pub paths: PathsConfig,
+    /// `roteiro serve --workspace` — repos a single server can host (ADR-0008).
+    pub workspace: WorkspaceConfig,
 }
 
 /// `[debt]` — intent-debt reporting.
@@ -70,6 +72,19 @@ pub struct PathsConfig {
     /// The model store directory (default `~/.roteiro/models`, or
     /// `$ROTEIRO_HOME/models`). A leading `~/` is expanded to the home directory.
     pub model_store: Option<String>,
+}
+
+/// `[workspace]` — the repos one `roteiro serve` can host (ADR-0008). Naturally a
+/// user-layer setting (machine-specific), but merged like any table. Combined
+/// with `serve --workspace <root>`; empty ⇒ single-repo serve (the cwd's repo).
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WorkspaceConfig {
+    /// Directories to scan for git repos (each immediate subdirectory that is a
+    /// repo becomes a project, plus the root itself if it is one).
+    pub roots: Option<Vec<String>>,
+    /// Explicit repo paths to host, in addition to anything found under `roots`.
+    pub repos: Option<Vec<String>>,
 }
 
 /// `[models]` — override the registry tier defaults for this project.
@@ -216,6 +231,18 @@ impl Config {
                     .model_store
                     .clone()
                     .or(self.paths.model_store.clone()),
+            },
+            workspace: WorkspaceConfig {
+                roots: over
+                    .workspace
+                    .roots
+                    .clone()
+                    .or(self.workspace.roots.clone()),
+                repos: over
+                    .workspace
+                    .repos
+                    .clone()
+                    .or(self.workspace.repos.clone()),
             },
         }
     }

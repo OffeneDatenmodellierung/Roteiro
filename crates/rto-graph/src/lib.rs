@@ -28,6 +28,7 @@ mod provenance;
 mod query;
 mod store;
 mod sync;
+mod workspace;
 
 pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
 pub use cache::{CacheError, ObjectCache};
@@ -56,3 +57,4 @@ pub use query::{
 };
 pub use store::{ImportApplied, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_worktree};
+pub use workspace::{Workspace, WorkspaceError};

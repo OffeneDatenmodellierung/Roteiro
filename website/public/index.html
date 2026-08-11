@@ -360,6 +360,14 @@ already uses <code>.github</code>) that teaches any agent how to drive the graph
 to <code>search</code> vs <code>query</code> vs <code>context</code>, the provenance model, and
 the plan/review flows.</div>
 
+<div class="note"><strong>Many repos, one server.</strong> <code>roteiro serve
+--workspace ~/code</code> (or a <code>[workspace]</code> config) hosts every repo under a
+root from a <em>single</em> process — the model is loaded once and each project's
+graph is opened on demand (ADR-0008). The graph tools gain a <code>project</code>
+argument and a <code>list_projects</code> tool, so one endpoint answers questions about
+any of your projects: <em>"in <code>beta</code>, where is auth handled?"</em>. Omit
+<code>--workspace</code> for the single-repo default.</div>
+
 <h2 id="plan">Plan a change</h2>
 
 <p>Asking questions is one half; the other is <strong>writing intent down</strong>. The
@@ -459,7 +467,11 @@ limit          = 50                      <span class="c"># max pairs reported</s
 [serve]                                  <span class="c"># the local OpenAI-compatible endpoint</span>
 addr   = "127.0.0.1:8017"               <span class="c"># bind address (loopback by default)</span>
 models = ["qwen3-0.6b"]                 <span class="c"># which installed models to expose</span>
-tools  = true                            <span class="c"># expose graph tools to the model</span></code></pre>
+tools  = true                            <span class="c"># expose graph tools to the model</span>
+
+[workspace]                              <span class="c"># host many repos from one server (ADR-0008)</span>
+roots = ["~/code"]                       <span class="c"># scan for repos (each becomes a project)</span>
+repos = []                               <span class="c"># …or list explicit repo paths</span></code></pre>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed

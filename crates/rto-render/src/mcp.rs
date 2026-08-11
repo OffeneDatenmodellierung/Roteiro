@@ -11,7 +11,7 @@
 //! the same graph. See ADR-0002 for the decision to adopt `rmcp`.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -28,23 +28,27 @@ use rmcp::{
         },
     },
 };
-use rto_graph::{NodeKind, Store, debt, explain, list_kind, path, search};
+use rto_graph::{NodeKind, Store, StoreError, Workspace, debt, explain, list_kind, path, search};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 /// Errors from running the MCP server.
 type McpError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The store shared across sessions. `Store` is `Send` but not `Sync` (it holds
-/// a `rusqlite` connection), so a `Mutex` provides the `Sync` the async server
-/// requires; queries are brief and never hold the lock across an `.await`.
-type SharedStore = Arc<Mutex<Store>>;
+/// The workspace shared across sessions. A [`Workspace`] is `Send + Sync` (it
+/// serialises its own store access internally), so it is shared directly; each
+/// stdio session or HTTP connection queries the same registry.
+type SharedWorkspace = Arc<Workspace>;
 
 /// Arguments for the `explain` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ExplainArgs {
     /// Node key, e.g. `sym:rust:<path>#<Name>`, `file:<path>`, or `adr:<id>`.
     key: String,
+    /// Which hosted project to query, when this server hosts several (ADR-0008);
+    /// omit for a single-project server. See `list_projects`.
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -54,6 +58,9 @@ struct SearchArgs {
     /// Max hits to return (default 10, capped at 25).
     #[serde(default)]
     limit: Option<u32>,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
 }
 
 /// Arguments for the `list_kind` tool.
@@ -61,6 +68,9 @@ struct SearchArgs {
 struct ListKindArgs {
     /// Node kind token, e.g. `fn`, `struct`, `adr`, `file`.
     kind: String,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
 }
 
 /// Arguments for the `path` tool.
@@ -70,6 +80,9 @@ struct PathArgs {
     from: String,
     /// Goal node key.
     to: String,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
 }
 
 /// Arguments for the `debt` tool.
@@ -79,12 +92,17 @@ struct DebtArgs {
     /// deferred.
     #[serde(default)]
     kind: Vec<String>,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
 }
 
-/// The MCP server handler wrapping the graph store.
+/// The MCP server handler over a [`Workspace`] of one or more project graphs
+/// (ADR-0008). A single-project workspace serves exactly as before; with several,
+/// tools select one via `project` and `list_projects` enumerates them.
 #[derive(Clone)]
 struct GraphServer {
-    store: SharedStore,
+    workspace: SharedWorkspace,
     // Populated by the `#[tool_router]` macro and consumed by the
     // `#[tool_handler]`-generated routing; not read by hand.
     #[allow(dead_code)]
@@ -92,18 +110,35 @@ struct GraphServer {
 }
 
 impl GraphServer {
-    fn new(store: SharedStore) -> Self {
+    fn new(workspace: SharedWorkspace) -> Self {
         Self {
-            store,
+            workspace,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Run `f` with the locked store — the lock-and-query preamble shared by
-    /// every tool handler.
-    fn with_store<R>(&self, f: impl FnOnce(&Store) -> R) -> R {
-        let store = self.store.lock().expect("store mutex poisoned");
-        f(&store)
+    /// Run `f` against the selected project's store. Returns the inner query
+    /// result, or a project-resolution error (unknown/ambiguous `project`) as a
+    /// message string for the caller to surface as a tool error.
+    fn with_project<R>(
+        &self,
+        project: Option<&str>,
+        f: impl FnOnce(&Store) -> R,
+    ) -> Result<R, String> {
+        self.workspace
+            .with_store(project, f)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Collapse the `Result<Result<T, StoreError>, String>` a `with_project` query
+/// produces into a tool result: the JSON value, a query error, or a
+/// project-resolution error.
+fn query_result<T: serde::Serialize>(r: Result<Result<T, StoreError>, String>) -> CallToolResult {
+    match r {
+        Ok(Ok(value)) => json_result(&value),
+        Ok(Err(e)) => tool_error(&format!("query error: {e}")),
+        Err(e) => tool_error(&e),
     }
 }
 
@@ -114,14 +149,15 @@ impl GraphServer {
                           provenance-labelled incoming/outgoing edges. \
                           Keys: sym:<lang>:<path>#<Name>, file:<path>, adr:<id>.")]
     async fn explain(&self, Parameters(args): Parameters<ExplainArgs>) -> CallToolResult {
-        let result = self.with_store(|store| explain(store, &args.key));
+        let result = self.with_project(args.project.as_deref(), |store| explain(store, &args.key));
         match result {
-            Ok(Some(ex)) => json_result(&ex),
-            Ok(None) => CallToolResult::success(vec![ContentBlock::text(format!(
+            Ok(Ok(Some(ex))) => json_result(&ex),
+            Ok(Ok(None)) => CallToolResult::success(vec![ContentBlock::text(format!(
                 "no node with key `{}`",
                 args.key
             ))]),
-            Err(e) => tool_error(&format!("query error: {e}")),
+            Ok(Err(e)) => tool_error(&format!("query error: {e}")),
+            Err(e) => tool_error(&e),
         }
     }
 
@@ -135,22 +171,18 @@ impl GraphServer {
     )]
     async fn search(&self, Parameters(args): Parameters<SearchArgs>) -> CallToolResult {
         let limit = usize::try_from(args.limit.unwrap_or(10).clamp(1, 25)).unwrap_or(10);
-        let result = self.with_store(|store| search(store, &args.query, limit));
-        match result {
-            Ok(hits) => json_result(&hits),
-            Err(e) => tool_error(&format!("query error: {e}")),
-        }
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            search(store, &args.query, limit)
+        }))
     }
 
     /// List all nodes of a given kind.
     #[tool(description = "List all nodes of a given kind (fn, struct, enum, \
                           trait, module, file, adr, …).")]
     async fn list_kind(&self, Parameters(args): Parameters<ListKindArgs>) -> CallToolResult {
-        let result = self.with_store(|store| list_kind(store, &NodeKind::from_token(&args.kind)));
-        match result {
-            Ok(listing) => json_result(&listing),
-            Err(e) => tool_error(&format!("query error: {e}")),
-        }
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            list_kind(store, &NodeKind::from_token(&args.kind))
+        }))
     }
 
     /// Find a shortest path between two nodes.
@@ -161,11 +193,9 @@ impl GraphServer {
                           Args: from, to (node keys)."
     )]
     async fn path(&self, Parameters(args): Parameters<PathArgs>) -> CallToolResult {
-        let result = self.with_store(|store| path(store, &args.from, &args.to));
-        match result {
-            Ok(p) => json_result(&p),
-            Err(e) => tool_error(&format!("query error: {e}")),
-        }
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            path(store, &args.from, &args.to)
+        }))
     }
 
     /// List intent-debt markers (TODOs, stubs, deferred work).
@@ -177,11 +207,18 @@ impl GraphServer {
                           enclosing symbol or file via a `contains` edge."
     )]
     async fn debt(&self, Parameters(args): Parameters<DebtArgs>) -> CallToolResult {
-        let result = self.with_store(|store| debt(store, &args.kind, &[]));
-        match result {
-            Ok(report) => json_result(&report),
-            Err(e) => tool_error(&format!("query error: {e}")),
-        }
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            debt(store, &args.kind, &[])
+        }))
+    }
+
+    /// List the projects this server hosts (ADR-0008).
+    #[tool(
+        description = "List the projects this server hosts. Pass one as `project` to the \
+                          other tools to query it. A single-project server needs no `project`."
+    )]
+    async fn list_projects(&self) -> CallToolResult {
+        json_result(&serde_json::json!({ "projects": self.workspace.names() }))
     }
 }
 
@@ -228,12 +265,13 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 /// Serve the graph over stdio (for a local, agent-spawned server), blocking
-/// until stdin closes. Takes ownership of `store`.
+/// until stdin closes. Takes ownership of `workspace` (one project or many,
+/// ADR-0008).
 ///
 /// # Errors
 /// Returns an error if the runtime cannot start or the transport fails.
-pub fn serve_stdio(store: Store) -> Result<(), McpError> {
-    let shared: SharedStore = Arc::new(Mutex::new(store));
+pub fn serve_stdio(workspace: Workspace) -> Result<(), McpError> {
+    let shared: SharedWorkspace = Arc::new(workspace);
     runtime()?.block_on(async move {
         let service = GraphServer::new(shared).serve(stdio()).await?;
         service.waiting().await?;
@@ -243,13 +281,13 @@ pub fn serve_stdio(store: Store) -> Result<(), McpError> {
 
 /// Serve the graph over the streamable-HTTP transport at `addr`, on the `/mcp`
 /// path (for networked, multi-client access; terminate TLS at a reverse proxy).
-/// Takes ownership of `store`.
+/// Takes ownership of `workspace`.
 ///
 /// # Errors
 /// Returns an error if the runtime cannot start, the address cannot be bound, or
 /// the server fails.
-pub fn serve_http(store: Store, addr: SocketAddr) -> Result<(), McpError> {
-    let shared: SharedStore = Arc::new(Mutex::new(store));
+pub fn serve_http(workspace: Workspace, addr: SocketAddr) -> Result<(), McpError> {
+    let shared: SharedWorkspace = Arc::new(workspace);
     runtime()?.block_on(async move {
         let service = StreamableHttpService::new(
             move || Ok(GraphServer::new(shared.clone())),
@@ -268,9 +306,9 @@ mod tests {
     use super::{DebtArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs, SearchArgs};
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
+    use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Store, Workspace};
 
     fn seeded() -> GraphServer {
         let mut store = Store::open_in_memory().expect("store");
@@ -293,7 +331,7 @@ mod tests {
                 EdgeKind::Contains,
             ));
         store.apply_factset(&facts).expect("apply");
-        GraphServer::new(Arc::new(Mutex::new(store)))
+        GraphServer::new(Arc::new(Workspace::single("test", store)))
     }
 
     fn text_of(result: &rmcp::model::CallToolResult) -> String {
@@ -310,6 +348,7 @@ mod tests {
         let out = server
             .explain(Parameters(ExplainArgs {
                 key: "sym:rust:a.rs#main".into(),
+                project: None,
             }))
             .await;
         let text = text_of(&out);
@@ -323,7 +362,10 @@ mod tests {
     async fn list_kind_tool_lists_nodes() {
         let server = seeded();
         let out = server
-            .list_kind(Parameters(ListKindArgs { kind: "fn".into() }))
+            .list_kind(Parameters(ListKindArgs {
+                kind: "fn".into(),
+                project: None,
+            }))
             .await;
         let text = text_of(&out);
         assert!(text.contains("sym:rust:a.rs#helper"));
@@ -337,6 +379,7 @@ mod tests {
             .search(Parameters(SearchArgs {
                 query: "helper".into(),
                 limit: None,
+                project: None,
             }))
             .await;
         let text = text_of(&out);
@@ -349,6 +392,7 @@ mod tests {
         let out = server
             .explain(Parameters(ExplainArgs {
                 key: "sym:rust:a.rs#ghost".into(),
+                project: None,
             }))
             .await;
         assert!(text_of(&out).contains("no node with key"));
@@ -361,6 +405,7 @@ mod tests {
             .path(Parameters(PathArgs {
                 from: "sym:rust:a.rs#main".into(),
                 to: "sym:rust:a.rs#helper".into(),
+                project: None,
             }))
             .await;
         let json: serde_json::Value = serde_json::from_str(&text_of(&out)).expect("json");
@@ -386,6 +431,7 @@ mod tests {
             &server
                 .debt(Parameters(DebtArgs {
                     kind: vec!["stub".into()],
+                    project: None,
                 }))
                 .await,
         );
