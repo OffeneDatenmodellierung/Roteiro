@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.16...roteiro-v0.0.17) - 2026-08-11
+
+### Added
+
+- *(review)* distinguish "added" files from "modified"
+
+### Fixed
+
+- *(review)* address PR #169 review — open-set doc, comment, added test
+
 ## [0.0.16](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.15...roteiro-v0.0.16) - 2026-08-11
 
 ### Added

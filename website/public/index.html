@@ -129,6 +129,17 @@ which a teammate fetches to get identical inferred edges without running inferen
 Either way the graph travels <strong>with</strong> git, not beside it — the SQLite file
 isn't committed (it would bloat history and conflict on merge).</div>
 
+<div class="note"><strong>Dogfood: browse Roteiro's own graph.</strong> Every merge to
+<code>main</code> publishes the build-outputs of Roteiro's own graph to the rolling
+<a href="https://github.com/OffeneDatenmodellierung/Roteiro/releases/tag/graph-latest">graph-latest</a>
+release:
+<ul>
+<li><a href="https://github.com/OffeneDatenmodellierung/Roteiro/releases/download/graph-latest/roteiro-vault.zip"><strong>roteiro-vault.zip</strong></a> — the rendered <strong>Obsidian vault</strong>. Download, unzip, and <em>Open folder as vault</em> in Obsidian to explore the codebase as a linked, provenance-tagged graph (an <code>_Home</code> note gives the overview).</li>
+<li><a href="https://github.com/OffeneDatenmodellierung/Roteiro/releases/download/graph-latest/roteiro-graph.json"><strong>roteiro-graph.json</strong></a> — the content-addressed graph itself; <code>curl -fsSL &lt;url&gt; | roteiro load -</code>.</li>
+</ul>
+Both are build-outputs — regenerate either locally at any commit with
+<code>roteiro render obsidian</code> / <code>roteiro export</code>.</div>
+
 <h2 id="build">Install &amp; build</h2>
 
 <p>Roteiro is a Rust workspace (MSRV 1.94). Install the lean default build from

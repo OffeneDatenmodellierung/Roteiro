@@ -37,6 +37,10 @@ enum Command {
         /// network with this flag, and fall back to a local rebuild on any miss.
         #[arg(long)]
         fetch: bool,
+        /// Also regenerate the local Obsidian vault (`vault/`, gitignored) from
+        /// the graph on every checkout/merge/commit, so it stays current.
+        #[arg(long)]
+        vault: bool,
     },
     /// Incrementally update the graph for the current tree (content-addressed).
     ///
@@ -380,7 +384,7 @@ fn main() -> anyhow::Result<()> {
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
-        Command::Init { fetch } => run_init(ingest, fetch),
+        Command::Init { fetch, vault } => run_init(ingest, fetch, vault),
         Command::Render { target, out } => run_render(ingest, &target, out),
         Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
         Command::Spec { action } => run_spec(&cfg.effective, ingest, action),
@@ -885,7 +889,7 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
 /// Scaffold Roteiro in the current repository: build the initial graph, install
 /// the managed git hooks (`post-checkout`/`post-merge`/`post-commit` freshness +
 /// a `pre-commit` drift gate), and add the `AGENTS.md` snippet.
-fn run_init(ingest: rto_graph::IngestConfig, fetch: bool) -> anyhow::Result<()> {
+fn run_init(ingest: rto_graph::IngestConfig, fetch: bool, vault: bool) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
 
     let report = build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
@@ -896,7 +900,7 @@ fn run_init(ingest: rto_graph::IngestConfig, fetch: bool) -> anyhow::Result<()> 
     // otherwise the common git dir (shared across worktrees).
     let hooks_dir = repo.hooks_dir();
     for name in init::MANAGED_HOOKS {
-        match init::install_hook(&hooks_dir, name, fetch)? {
+        match init::install_hook(&hooks_dir, name, fetch, vault)? {
             init::HookOutcome::Installed => println!("installed hook: {name}"),
             init::HookOutcome::Updated => println!("refreshed hook: {name}"),
             init::HookOutcome::SkippedForeign => {
@@ -915,6 +919,12 @@ fn run_init(ingest: rto_graph::IngestConfig, fetch: bool) -> anyhow::Result<()> 
         if init::ensure_agents(&path)? {
             println!("wrote Roteiro section to {}", path.display());
         }
+    }
+
+    // With `--vault`, render the vault once now so it exists immediately (the
+    // installed hooks keep it fresh thereafter).
+    if vault {
+        render_obsidian(ingest, None)?;
     }
 
     println!("roteiro initialised — graph has {nodes} nodes, {edges} edges");

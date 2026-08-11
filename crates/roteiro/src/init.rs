@@ -31,17 +31,20 @@ pub const MANAGED_HOOKS: &[&str] = &["post-checkout", "post-merge", "post-commit
 /// download the CI-published graph artifact and `load` it — a fast path that
 /// skips local extraction — falling back to a rebuild if `gh` is absent, the
 /// download fails, or the artifact's tree does not match `HEAD` (`load` refuses a
-/// stale artifact). `pre-commit` is unaffected. Network only happens with this
-/// opt-in.
+/// stale artifact). Network only happens with this opt-in.
+///
+/// When `vault` is set (`roteiro init --vault`), the freshness hooks additionally
+/// regenerate the local Obsidian vault from the fresh graph. `pre-commit` is
+/// unaffected by either flag.
 #[must_use]
-pub fn hook_script(name: &str, fetch: bool) -> String {
+pub fn hook_script(name: &str, fetch: bool, vault: bool) -> String {
     let header = format!(
         "#!/bin/sh\n\
          # {HOOK_MARKER}: Roteiro knowledge-graph automation.\n\
          # Delete this file to disable. Re-run `roteiro init` to reinstall.\n"
     );
     if name == "pre-commit" {
-        format!(
+        return format!(
             "{header}\
              # Block a commit that introduces ADR/annotation drift. Validates the\n\
              # staged index — exactly what this commit will record. Skip once with\n\
@@ -52,17 +55,31 @@ pub fn hook_script(name: &str, fetch: bool) -> String {
              use `git commit --no-verify` to override.' >&2\n\
              \texit 1\n\
              }}\n"
-        )
-    } else if fetch {
-        format!("{header}{FETCH_REFRESH}")
-    } else {
-        format!(
-            "{header}\
-             # Keep the Roteiro knowledge graph fresh after HEAD changes.\n\
-             command -v roteiro >/dev/null 2>&1 && roteiro sync --committed >/dev/null 2>&1 || true\n"
-        )
+        );
     }
+    // Freshness hook: refresh the graph after HEAD moves, then — when
+    // `roteiro init --vault` opted in — regenerate the local Obsidian vault so it
+    // tracks the graph (a gitignored build-output, never committed).
+    let mut body = if fetch {
+        FETCH_REFRESH.to_owned()
+    } else {
+        "# Keep the Roteiro knowledge graph fresh after HEAD changes.\n\
+         command -v roteiro >/dev/null 2>&1 && roteiro sync --committed >/dev/null 2>&1 || true\n"
+            .to_owned()
+    };
+    if vault {
+        body.push_str(VAULT_REFRESH);
+    }
+    format!("{header}{body}")
 }
+
+/// Appended to the freshness hooks by `--vault`: rebuild the local Obsidian vault
+/// from the now-fresh graph. `render obsidian` syncs the graph itself and writes
+/// to the gitignored `vault/` dir; best-effort, never failing the git operation.
+const VAULT_REFRESH: &str = concat!(
+    "# Regenerate the local Obsidian vault (gitignored build-output) to match.\n",
+    "command -v roteiro >/dev/null 2>&1 && roteiro render obsidian >/dev/null 2>&1 || true\n",
+);
 
 /// The freshness-hook body used with `--fetch`: try the CI artifact, else rebuild.
 /// Kept as a literal (no interpolation) so the shell `$tmp`/braces stay verbatim.
@@ -72,6 +89,9 @@ const FETCH_REFRESH: &str = concat!(
     "# Opt-in fast path (`roteiro init --fetch`): try the CI-published graph\n",
     "# artifact before rebuilding. `roteiro load` refuses an artifact whose tree\n",
     "# does not match HEAD, so a stale asset falls through to a local rebuild.\n",
+    "# A flag records success rather than `exit`ing, so any step appended below\n",
+    "# (e.g. --vault's render) still runs.\n",
+    "loaded=0\n",
     "if command -v gh >/dev/null 2>&1; then\n",
     "\t# Portable temp file: GNU `mktemp` needs no args; BSD/macOS needs a\n",
     "\t# template, so fall back to `-t`.\n",
@@ -80,11 +100,12 @@ const FETCH_REFRESH: &str = concat!(
     "\t\tgh release download graph-latest --pattern roteiro-graph.json \\\n",
     "\t\t\t--output \"$tmp\" --clobber >/dev/null 2>&1 && \\\n",
     "\t\troteiro load \"$tmp\" >/dev/null 2>&1; then\n",
-    "\t\trm -f \"$tmp\"; exit 0\n",
+    "\t\tloaded=1\n",
     "\tfi\n",
     "\t[ -n \"$tmp\" ] && rm -f \"$tmp\"\n",
     "fi\n",
-    "roteiro sync --committed >/dev/null 2>&1 || true\n",
+    "# Rebuild locally only if the fast path didn't load a matching artifact.\n",
+    "[ \"$loaded\" = 1 ] || roteiro sync --committed >/dev/null 2>&1 || true\n",
 );
 
 /// Whether `content` is a Roteiro-managed hook (safe to overwrite).
@@ -106,11 +127,17 @@ pub enum HookOutcome {
 
 /// Install (or refresh) one managed hook in `hooks_dir`, without clobbering a
 /// foreign hook of the same name. `fetch` selects the artifact-fast-path freshness
-/// hooks (see [`hook_script`]).
+/// hooks, and `vault` appends local Obsidian-vault regeneration (see
+/// [`hook_script`]).
 ///
 /// # Errors
 /// Returns [`io::Error`] on filesystem failure.
-pub fn install_hook(hooks_dir: &Path, name: &str, fetch: bool) -> io::Result<HookOutcome> {
+pub fn install_hook(
+    hooks_dir: &Path,
+    name: &str,
+    fetch: bool,
+    vault: bool,
+) -> io::Result<HookOutcome> {
     fs::create_dir_all(hooks_dir)?;
     let path = hooks_dir.join(name);
     let outcome = match fs::read_to_string(&path) {
@@ -119,7 +146,7 @@ pub fn install_hook(hooks_dir: &Path, name: &str, fetch: bool) -> io::Result<Hoo
         Err(e) if e.kind() == io::ErrorKind::NotFound => HookOutcome::Installed,
         Err(e) => return Err(e),
     };
-    fs::write(&path, hook_script(name, fetch))?;
+    fs::write(&path, hook_script(name, fetch, vault))?;
     set_executable(&path)?;
     Ok(outcome)
 }
@@ -228,7 +255,7 @@ mod tests {
 
     #[test]
     fn hook_is_recognisable_and_self_guarding() {
-        let s = hook_script("post-checkout", false);
+        let s = hook_script("post-checkout", false, false);
         assert!(is_managed_hook(&s));
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains("command -v roteiro"));
@@ -236,14 +263,47 @@ mod tests {
             s.contains("roteiro sync --committed"),
             "freshness hook syncs"
         );
-        // The default freshness hook does not touch the network.
+        // The default freshness hook does not touch the network or render a vault.
         assert!(!s.contains("gh release download"));
+        assert!(!s.contains("render obsidian"), "vault render is opt-in");
         assert!(!is_managed_hook("#!/bin/sh\necho other\n"));
     }
 
     #[test]
+    fn vault_flag_appends_vault_render_to_freshness_hooks_only() {
+        // `--vault` adds a vault regeneration step to the freshness hooks…
+        let fresh = hook_script("post-merge", false, true);
+        assert!(
+            fresh.contains("roteiro render obsidian"),
+            "freshness hook regenerates the vault with --vault"
+        );
+        assert!(
+            fresh.contains("roteiro sync --committed"),
+            "still syncs first"
+        );
+        // …and composes with --fetch. The fetch fast path must set a flag on a
+        // successful load rather than `exit`ing, or the appended vault render would
+        // be unreachable (regression guard, Copilot on #173).
+        let fetch_vault = hook_script("post-checkout", true, true);
+        assert!(
+            fetch_vault.contains("roteiro render obsidian"),
+            "vault render is present with --fetch --vault"
+        );
+        assert!(
+            fetch_vault.contains("loaded=1"),
+            "fetch success records a flag, not an early exit"
+        );
+        assert!(
+            !fetch_vault.contains("; exit 0"),
+            "no early `exit 0` that would short-circuit the appended vault render"
+        );
+        // …but never touches the pre-commit gate.
+        assert!(!hook_script("pre-commit", false, true).contains("render obsidian"));
+    }
+
+    #[test]
     fn fetch_hook_tries_artifact_then_falls_back_to_sync() {
-        let s = hook_script("post-merge", true);
+        let s = hook_script("post-merge", true, false);
         assert!(is_managed_hook(&s));
         assert!(s.contains("command -v gh"), "guards on gh being installed");
         assert!(
@@ -255,16 +315,16 @@ mod tests {
             s.contains("roteiro sync --committed"),
             "falls back to a local rebuild"
         );
-        // `--fetch` only affects freshness hooks; pre-commit is unchanged.
+        // Neither `--fetch` nor `--vault` alters the pre-commit gate.
         assert_eq!(
-            hook_script("pre-commit", true),
-            hook_script("pre-commit", false)
+            hook_script("pre-commit", true, true),
+            hook_script("pre-commit", false, false)
         );
     }
 
     #[test]
     fn pre_commit_hook_gates_on_check_and_is_skippable() {
-        let s = hook_script("pre-commit", false);
+        let s = hook_script("pre-commit", false, false);
         assert!(is_managed_hook(&s));
         assert!(s.contains("command -v roteiro"), "guards on install");
         assert!(s.contains("roteiro check"), "runs the worktree-aware check");
@@ -281,7 +341,7 @@ mod tests {
 
         // First install → created.
         assert_eq!(
-            install_hook(&hooks, "post-checkout", false).expect("install"),
+            install_hook(&hooks, "post-checkout", false, false).expect("install"),
             HookOutcome::Installed
         );
         let path = hooks.join("post-checkout");
@@ -295,7 +355,7 @@ mod tests {
 
         // Second install → updated (managed).
         assert_eq!(
-            install_hook(&hooks, "post-checkout", false).expect("reinstall"),
+            install_hook(&hooks, "post-checkout", false, false).expect("reinstall"),
             HookOutcome::Updated
         );
 
@@ -303,7 +363,7 @@ mod tests {
         let foreign = hooks.join("post-merge");
         std::fs::write(&foreign, "#!/bin/sh\necho mine\n").unwrap();
         assert_eq!(
-            install_hook(&hooks, "post-merge", false).expect("skip"),
+            install_hook(&hooks, "post-merge", false, false).expect("skip"),
             HookOutcome::SkippedForeign
         );
         assert_eq!(
