@@ -2,6 +2,10 @@
 *.sqlite3
 .roteiro/
 website/dist/
+# The Obsidian vault is a build-output of the graph (`roteiro render obsidian`),
+# regenerated locally and published as a CI artifact — never committed (it would
+# be re-ingested by `sync`, and it churns on every code change).
+/vault/
 
 # macOS Finder metadata
 .DS_Store
