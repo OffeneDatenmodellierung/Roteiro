@@ -1,8 +1,7 @@
 //! The llama.cpp-backed [`Engine`] (ADR-0006), behind the `llama` feature.
 //!
-//! Loads a plain GGUF (embedded tokenizer + chat template come for free) and
-//! serialises requests through a mutex — llama.cpp batching is a later
-//! enhancement. Serves only the models it was handed; never downloads.
+//! Loads a plain GGUF (embedded tokenizer + chat template come for free). Serves
+//! only the models it was handed; never downloads.
 //!
 //! **Model residency.** Loaded models are held in a small memory-bounded LRU
 //! ([`ModelCache`]): each request loads its model on demand and keeps it warm,
@@ -12,10 +11,21 @@
 //! time instead of thrashing a single slot, while a memory-limited host caps how
 //! many stay resident. The default budget keeps a single model, matching the
 //! previous one-slot behaviour.
+//!
+//! **Concurrency.** The cache mutex is held only long enough to resolve, load,
+//! and hand out an [`Arc<LlamaModel>`] — it is released *before* generation, so
+//! two requests to *different* resident models decode concurrently (the common
+//! embedding + generative mixed workload no longer head-of-line-blocks). Requests
+//! to the *same* model instance are serialised through that model's own
+//! `gen_lock`, side-stepping any question of concurrent decode sharing one
+//! model's llama.cpp state; the [`Arc`] also keeps a model alive for an in-flight
+//! request even if it is evicted from the cache meanwhile. (Cross-model
+//! concurrency on the Metal backend is exercised by the `--ignored` stress test
+//! in `tests/concurrency.rs`.)
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -61,7 +71,15 @@ struct Loaded {
     /// On-disk GGUF size, used as a proxy for the model's memory footprint when
     /// deciding what to evict (the real RSS is not cheaply available).
     bytes: u64,
-    model: LlamaModel,
+    /// The loaded model, shared so a request can keep decoding on it after the
+    /// cache lock is dropped (and even after eviction) — the [`Arc`] outlives the
+    /// cache entry for the duration of any in-flight generation.
+    model: Arc<LlamaModel>,
+    /// Serialises generation on *this* model instance: requests to the same model
+    /// take this lock one at a time, while requests to different models hold
+    /// different locks and decode concurrently. Cloned out under the cache lock
+    /// and held across the whole decode.
+    gen_lock: Arc<Mutex<()>>,
 }
 
 /// A memory-bounded LRU of loaded models. Entries are ordered least- to
@@ -150,7 +168,8 @@ impl LlamaEngine {
             cache.loaded.push(Loaded {
                 name: name.to_owned(),
                 bytes,
-                model,
+                model: Arc::new(model),
+                gen_lock: Arc::new(Mutex::new(())),
             });
             // Evict oldest models now that the newcomer (MRU) is resident.
             let sizes: Vec<u64> = cache.loaded.iter().map(|l| l.bytes).collect();
@@ -158,6 +177,25 @@ impl LlamaEngine {
             cache.loaded.drain(0..evict);
         }
         Ok(cache.loaded.len() - 1)
+    }
+
+    /// Ensure `name` (GGUF at `path`) is resident and hand back cloned shared
+    /// handles — the model and its per-instance generation lock — releasing the
+    /// cache lock before returning. Holding the returned `Arc`s lets the caller
+    /// generate without pinning the cache: other models stay servable, and this
+    /// model survives eviction until the last handle drops.
+    fn resolve(
+        &self,
+        name: &str,
+        path: &Path,
+    ) -> Result<(Arc<LlamaModel>, Arc<Mutex<()>>), EngineError> {
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| EngineError::Inference("engine mutex poisoned".to_owned()))?;
+        let idx = self.ensure_loaded(&mut cache, name, path)?;
+        let l = &cache.loaded[idx];
+        Ok((Arc::clone(&l.model), Arc::clone(&l.gen_lock)))
     }
 
     /// Resolve a served model name to its GGUF path.
@@ -416,19 +454,18 @@ impl Engine for LlamaEngine {
         let path = served.path.clone();
         let mmproj = served.mmproj.clone();
 
-        let mut cache = self
-            .cache
+        // Resolve + load under the cache lock, clone the shared handles, then
+        // release the lock so generation on a *different* model can run
+        // concurrently (see the module-level "Concurrency" note).
+        let (model, gen_lock) = self.resolve(&req.model, &path)?;
+        // Serialise decode on this model instance.
+        let _gen = gen_lock
             .lock()
-            .map_err(|_| EngineError::Inference("engine mutex poisoned".to_owned()))?;
-
-        // Load lazily and keep warm in the memory-bounded LRU (evicting the
-        // least-recently-used model if the budget is exceeded).
-        let idx = self.ensure_loaded(&mut cache, &req.model, &path)?;
-        let model = &cache.loaded[idx].model;
+            .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
         match (req.images.is_empty(), mmproj.as_deref()) {
-            (true, _) => self.chat_text(model, req, on_token),
-            (false, Some(mmproj)) => self.chat_vision(model, mmproj, req, on_token),
+            (true, _) => self.chat_text(&model, req, on_token),
+            (false, Some(mmproj)) => self.chat_vision(&model, mmproj, req, on_token),
             (false, None) => Err(EngineError::InvalidRequest(format!(
                 "model `{}` is text-only and cannot accept images",
                 req.model
@@ -440,12 +477,12 @@ impl Engine for LlamaEngine {
         let path = self
             .path_for(model)
             .ok_or_else(|| EngineError::UnknownModel(model.to_owned()))?;
-        let mut cache = self
-            .cache
+        // Resolve + load under the cache lock, then release it before running the
+        // (potentially long) embedding pass; serialise on this model instance.
+        let (model_ref, gen_lock) = self.resolve(model, &path)?;
+        let _gen = gen_lock
             .lock()
-            .map_err(|_| EngineError::Inference("engine mutex poisoned".to_owned()))?;
-        let idx = self.ensure_loaded(&mut cache, model, &path)?;
-        let model_ref = &cache.loaded[idx].model;
+            .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
         let n_ctx = NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::MIN);
         // One embeddings-enabled context, reused across all inputs — creating a
