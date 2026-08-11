@@ -498,3 +498,75 @@ fn incremental_sync_matches_a_full_rebuild() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn untracked_overlay_includes_new_files_respecting_gitignore() {
+    // The working-tree sync overlays brand-new *untracked* files (not only edits
+    // to tracked files) so `check`/`review` see new-but-unstaged work — while
+    // honouring `.gitignore`.
+    let dir = fresh_dir("untracked-overlay");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "main.rs", "fn main() {}\n");
+    write(&dir, ".gitignore", "ignored.rs\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "committed"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+
+    // Baseline: clean tree, only the committed symbol.
+    let r0 = sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("clean");
+    assert_eq!(r0.blobs_dirty, 0);
+
+    // A brand-new untracked file (never `git add`ed) and a git-ignored one.
+    write(&dir, "fresh.rs", "pub fn brand_new() {}\n");
+    write(&dir, "ignored.rs", "pub fn hidden() {}\n");
+
+    let r = sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("untracked");
+    assert!(!r.no_op);
+    assert_eq!(
+        r.blobs_dirty, 1,
+        "only the untracked (non-ignored) file is new"
+    );
+    assert!(
+        store
+            .get_node("sym:rust:fresh.rs#brand_new")
+            .expect("q")
+            .is_some(),
+        "untracked new file should be overlaid into the graph",
+    );
+    assert!(
+        store
+            .get_node("sym:rust:ignored.rs#hidden")
+            .expect("q2")
+            .is_none(),
+        "git-ignored file must not be ingested",
+    );
+
+    // The low-level API classifies correctly: the new file is untracked, the
+    // ignored and tracked files are not.
+    let untracked = repo.untracked_files().expect("untracked");
+    assert!(untracked.contains(&"fresh.rs".to_owned()));
+    assert!(
+        !untracked.iter().any(|p| p == "ignored.rs"),
+        "ignored excluded"
+    );
+    assert!(
+        !untracked.iter().any(|p| p == "main.rs"),
+        "tracked excluded"
+    );
+
+    // Removing the untracked file returns to the committed baseline.
+    std::fs::remove_file(dir.join("fresh.rs")).expect("rm");
+    sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("removed");
+    assert!(
+        store
+            .get_node("sym:rust:fresh.rs#brand_new")
+            .expect("q3")
+            .is_none(),
+        "removing the untracked file drops its symbols",
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

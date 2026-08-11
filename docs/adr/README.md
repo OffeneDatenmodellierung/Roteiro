@@ -1,5 +1,9 @@
 # Architecture Decision Records
 
+> The ADRs record **decisions**. Their sibling in the authoring pillar (ADR-0004)
+> is the overall **[Project Blueprint](../blueprint/roteiro.md)** — a
+> graph-grounded, `check`-validated map of how the whole system fits together.
+
 | ADR | Title | State |
 |---|---|---|
 | [0001](0001-build-roteiro-unified-codebase-knowledge-graph.md) | Build Roteiro — a unified, provenance-tagged codebase knowledge graph (spec-store v2) | Accepted |
