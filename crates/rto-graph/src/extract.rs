@@ -26,7 +26,7 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 /// output also depends on *which* models are installed; that runtime state is
 /// folded into the cache key separately — see [`media_env_tag`] and
 /// [`crate::sync`].)
-pub(crate) const EXTRACT_VERSION: u32 = 4
+pub(crate) const EXTRACT_VERSION: u32 = 5
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "image-vision") {
@@ -730,8 +730,9 @@ impl Extractor for FileNodeExtractor {
 /// Derived extractor for Rust source, backed by tree-sitter. Emits a `file`
 /// node, one symbol node per `fn`/`struct`/`enum`/`trait`/`mod` (and a few
 /// others) with `defines`/`contains` edges reflecting lexical nesting, and
-/// `imports` edges for `use` declarations. Each function records the simple
-/// names it calls in `meta.calls` for later cross-file resolution.
+/// `imports` edges for `use` declarations. Each function records the (optionally
+/// scope-qualified) names it calls in `meta.calls` for later cross-file
+/// resolution — see [`RustWalk::callee_name`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RustExtractor;
 
@@ -992,17 +993,37 @@ impl RustWalk<'_> {
         }
     }
 
-    /// The simple callee name for a `call_expression`'s function child:
-    /// `foo()` → `foo`, `a::b::foo()` → `foo`, `x.foo()` → `foo`.
+    /// A callee descriptor for a `call_expression`'s function child, keeping the
+    /// *immediate* qualifier when the syntax supplies one so [`crate::sync`] can
+    /// resolve scope-aware (not just by unique simple name):
+    /// - `foo()` → `foo` (unqualified)
+    /// - `a::b::foo()` → `b::foo` (immediate module/type qualifier)
+    /// - `Type::assoc()` → `Type::assoc`
+    /// - `self.foo()` / `Self::foo()` → `Self::foo` (a same-impl method call,
+    ///   resolved via the caller's own type)
+    /// - `x.foo()` on a non-`self` receiver → `foo` (the receiver's type is
+    ///   unknown without type inference, so no qualifier is claimed)
     fn callee_name(&self, func: tree_sitter::Node) -> Option<String> {
         match func.kind() {
             "identifier" => Some(self.text(func).to_owned()),
-            "scoped_identifier" => func
-                .child_by_field_name("name")
-                .map(|n| self.text(n).to_owned()),
-            "field_expression" => func
-                .child_by_field_name("field")
-                .map(|n| self.text(n).to_owned()),
+            "scoped_identifier" => {
+                let name = func.child_by_field_name("name")?;
+                // The immediate qualifier is the last segment of the `path` child
+                // (`a::b` → `b`), which most closely scopes the call.
+                let qualifier = func
+                    .child_by_field_name("path")
+                    .and_then(|p| self.text(p).rsplit("::").next().map(str::to_owned));
+                Some(qualify_callee(qualifier.as_deref(), self.text(name)))
+            }
+            "field_expression" => {
+                let name = func.child_by_field_name("field")?;
+                // A call on the `self` receiver targets a method of the caller's
+                // own impl type; mark it `Self` so the resolver can bind it.
+                let on_self = func
+                    .child_by_field_name("value")
+                    .is_some_and(|v| self.text(v) == "self");
+                Some(qualify_callee(on_self.then_some("Self"), self.text(name)))
+            }
             _ => None,
         }
     }
@@ -1557,6 +1578,19 @@ fn qualify(scope: &[Scope], name: &str) -> String {
     let mut parts: Vec<&str> = scope.iter().map(|s| s.seg.as_str()).collect();
     parts.push(name);
     parts.join("::")
+}
+
+/// Combine an optional immediate qualifier with a callee `name` into the stored
+/// `meta.calls` descriptor. Path-relative qualifiers (`self`/`crate`/`super`) and
+/// an empty qualifier collapse to the bare name, since they don't scope a
+/// cross-file target; `Self` is preserved as the marker for a same-impl call.
+fn qualify_callee(qualifier: Option<&str>, name: &str) -> String {
+    match qualifier {
+        Some(q) if !q.is_empty() && !matches!(q, "self" | "crate" | "super") => {
+            format!("{q}::{name}")
+        }
+        _ => name.to_owned(),
+    }
 }
 
 /// Push a scope entry, returning the extended stack.

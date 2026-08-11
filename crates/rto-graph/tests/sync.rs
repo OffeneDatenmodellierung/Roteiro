@@ -570,3 +570,57 @@ fn untracked_overlay_includes_new_files_respecting_gitignore() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn scope_aware_calls_disambiguate_ambiguous_names() {
+    // Two functions named `render`: a free `a::render` and a method `S::render`.
+    // The bare name is ambiguous, so simple-name-only resolution would link
+    // *neither* caller. The qualifier (`a::render()`) and the `self` receiver
+    // (`self.render()`) each pick out exactly one target.
+    let dir = fresh_dir("scope-calls");
+    git(&dir, &["init", "-q"]);
+    write(
+        &dir,
+        "src/lib.rs",
+        "mod a {\n    pub fn render() {}\n}\n\
+         struct S;\n\
+         impl S {\n    \
+         fn render(&self) {}\n    \
+         fn go(&self) {\n        self.render();\n    }\n}\n\
+         fn drive() {\n    a::render();\n}\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "ambiguous render"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+    sync(&mut store, &repo, &cache, &Registry::default()).expect("sync");
+
+    let calls_from = |key: &str| -> Vec<String> {
+        let mut v: Vec<String> = store
+            .edges_from(key)
+            .expect("edges")
+            .into_iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .map(|e| e.dst)
+            .collect();
+        v.sort();
+        v
+    };
+
+    // `drive` calls `a::render()` → the module function, not `S::render`.
+    assert_eq!(
+        calls_from("sym:rust:src/lib.rs#drive"),
+        ["sym:rust:src/lib.rs#a::render"],
+        "a::render() must bind to the module fn, not the method",
+    );
+    // `S::go` calls `self.render()` → the same impl's method, not `a::render`.
+    assert_eq!(
+        calls_from("sym:rust:src/lib.rs#S::go"),
+        ["sym:rust:src/lib.rs#S::render"],
+        "self.render() must bind to S::render, not the module fn",
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

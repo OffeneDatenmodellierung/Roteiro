@@ -499,11 +499,19 @@ fn file_count(facts: &FactSet) -> usize {
 /// Resolve the per-function call records (`meta.calls`) accumulated during
 /// extraction into `calls` edges, now that every file's symbols are present.
 ///
-/// A callee simple-name is linked only when it resolves to **exactly one**
-/// function in the whole tree; ambiguous names (multiple `fn foo`) and unknown
-/// names (external/std calls) are left unresolved rather than guessed. This runs
-/// at assembly time — not per blob — because a single blob cannot see the
-/// definitions in other files.
+/// Resolution is deliberately conservative — it links a call only when the target
+/// is **unambiguous** — but scope-aware: a callee descriptor may carry the
+/// immediate qualifier the call site provided (`b::foo`, `Type::assoc`,
+/// `Self::method`; see [`crate::extract`]). A call resolves when either
+///
+/// 1. its simple name is unique across the whole tree (the base case), or
+/// 2. its name is ambiguous but a qualifier picks out **exactly one** matching
+///    function — the one whose immediate scope segment equals that qualifier
+///    (with `Self` bound to the caller's own impl type).
+///
+/// This never links a name it could not before (it is a strict superset), and it
+/// still refuses to guess when a qualifier leaves more than one candidate. Runs at
+/// assembly time — not per blob — since a single blob cannot see other files.
 fn resolve_calls(facts: &mut FactSet) {
     // Simple function name → the keys of functions with that name.
     let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -525,17 +533,74 @@ fn resolve_calls(facts: &mut FactSet) {
         let Some(calls) = n.meta.get("calls").and_then(|v| v.as_array()) else {
             continue;
         };
-        for callee in calls.iter().filter_map(|v| v.as_str()) {
-            if let Some(targets) = by_name.get(callee)
-                && targets.len() == 1
-            {
-                resolved.insert((n.key.clone(), targets[0].to_owned()));
+        // The caller's own type (for binding `Self::` calls) is the scope segment
+        // immediately before its name in its key, if it is a method.
+        let caller_self = self_type_of(&n.key);
+        for descriptor in calls.iter().filter_map(|v| v.as_str()) {
+            let (qualifier, name) = split_callee(descriptor);
+            let Some(candidates) = by_name.get(name) else {
+                continue;
+            };
+            let target = if candidates.len() == 1 {
+                // Unambiguous by simple name — the base case (unchanged behaviour).
+                Some(candidates[0])
+            } else if let Some(q) = qualifier {
+                // Ambiguous name; try the qualifier. `Self` binds to the caller's
+                // impl type — a free function has none, so such a call stays open.
+                let want = if q == "Self" { caller_self } else { Some(q) };
+                want.and_then(|want| unique_in_scope(candidates, want, name))
+            } else {
+                None
+            };
+            if let Some(dst) = target {
+                resolved.insert((n.key.clone(), dst.to_owned()));
             }
         }
     }
 
     for (src, dst) in resolved {
         facts.edges.push(Edge::derived(src, dst, EdgeKind::Calls));
+    }
+}
+
+/// The qualified suffix of a symbol key (`sym:<lang>:<path>#<qualified>` →
+/// `<qualified>`), i.e. the scope-segment path within its file.
+fn qualified_suffix(key: &str) -> &str {
+    key.rsplit_once('#').map_or(key, |(_, q)| q)
+}
+
+/// The caller's own type for binding a `Self::` call: the scope segment
+/// immediately before the function's name in its key (`Type::method` → `Type`),
+/// or `None` for a free function (no enclosing type).
+fn self_type_of(key: &str) -> Option<&str> {
+    let mut segs = qualified_suffix(key).rsplit("::");
+    segs.next()?; // the function's own name
+    segs.next() // the enclosing scope segment, if any
+}
+
+/// The single candidate whose immediate scope segment is `want` (so its key ends
+/// with the `want::name` segment pair), or `None` when zero or several match —
+/// segment-aware so `T::m` matches `a::T::m` but never `XT::m`.
+fn unique_in_scope<'a>(candidates: &[&'a str], want: &str, name: &str) -> Option<&'a str> {
+    let mut hit = None;
+    for &key in candidates {
+        let mut segs = qualified_suffix(key).rsplit("::");
+        if segs.next() == Some(name) && segs.next() == Some(want) {
+            if hit.is_some() {
+                return None; // more than one match at this scope — refuse to guess
+            }
+            hit = Some(key);
+        }
+    }
+    hit
+}
+
+/// Split a `meta.calls` descriptor into its immediate qualifier and simple name:
+/// `b::foo` → `(Some("b"), "foo")`, `foo` → `(None, "foo")`.
+fn split_callee(descriptor: &str) -> (Option<&str>, &str) {
+    match descriptor.rsplit_once("::") {
+        Some((qualifier, name)) => (Some(qualifier), name),
+        None => (None, descriptor),
     }
 }
 
