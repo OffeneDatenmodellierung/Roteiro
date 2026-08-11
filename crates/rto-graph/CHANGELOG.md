@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.15...rto-graph-v0.0.16) - 2026-08-11
+
+### Added
+
+- *(audio)* transcribe audio into the graph via llama.cpp mtmd ([#18](https://github.com/OffeneDatenmodellierung/Roteiro/pull/18))
+
+### Fixed
+
+- *(audio)* address PR #161 review — reject dual media; fix stale Ultravox docs
+
+### Other
+
+- Merge pull request #161 from OffeneDatenmodellierung/feat/audio-ingestion
+
 ## [0.0.15](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.14...rto-graph-v0.0.15) - 2026-08-10
 
 ### Added
