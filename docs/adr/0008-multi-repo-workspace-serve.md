@@ -126,7 +126,7 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
    - **OpenAI `/v1`** ([[crates/roteiro/src/main.rs#serve_models_endpoint]],
      [[crates/rto-serve/src/server.rs#serve_blocking_with_tools]]): route by a
      path prefix `/v1/<project>/chat/completions`, so the graph tools handed to
-     the model are pre-bound to that project's store. Prefer the path prefix over
+     the model are pre-bound to that project's store. Prefer the path prefix to
      overloading the `model` field, keeping `model` meaning the model.
 5. **Default unchanged.** With no `[workspace]`/`--workspace`, `serve` behaves
    exactly as today (cwd-scoped, no project selector). Loopback-only default is
