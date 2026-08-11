@@ -943,8 +943,8 @@ fn run_init(ingest: rto_graph::IngestConfig, fetch: bool, vault: bool) -> anyhow
             skill_bases.push(workdir.join(".github"));
         }
         for base in &skill_bases {
-            let rel = init::skill_path(base);
-            let rel = rel.strip_prefix(workdir).unwrap_or(&rel);
+            let full = init::skill_path(base);
+            let rel = full.strip_prefix(workdir).unwrap_or(&full);
             match init::install_skill(base)? {
                 init::HookOutcome::Installed => println!("installed skill: {}", rel.display()),
                 init::HookOutcome::Updated => println!("refreshed skill: {}", rel.display()),

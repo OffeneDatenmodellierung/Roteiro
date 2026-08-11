@@ -228,7 +228,7 @@ draft house-style, graph-grounded ADRs to begin with.</div>
 <p>No models, no network. Build the graph, query it, verify authored intent, and
 render docs. This alone is a complete tool.</p>
 <pre><code><span class="c"># Scaffold the store, git hooks, an AGENTS.md block and an agent skill</span>
-<span class="c"># (.agents/skills/roteiro/SKILL.md — plus .github/skills for Copilot)</span>
+<span class="c"># (.agents/skills/roteiro/SKILL.md; also .github/skills when the repo uses .github)</span>
 roteiro init
 
 <span class="c"># Build / incrementally update the graph for the working tree</span>
@@ -352,9 +352,10 @@ memory and hallucinate. Set it once in <code>roteiro.toml</code> under
 <code>context</code> / <code>path</code> / <code>debt</code> tools natively, grounded in the same
 graph. See <a href="#modes">MCP mode</a> above. <code>roteiro init</code> also drops an
 <strong>agent skill</strong> at <code>.agents/skills/roteiro/SKILL.md</code> (the portable,
-cross-tool location, plus <code>.github/skills/</code> for GitHub Copilot) that teaches
-any agent how to drive the graph — when to <code>search</code> vs <code>query</code> vs
-<code>context</code>, the provenance model, and the plan/review flows.</div>
+cross-tool location; also <code>.github/skills/</code> for GitHub Copilot when the repo
+already uses <code>.github</code>) that teaches any agent how to drive the graph — when
+to <code>search</code> vs <code>query</code> vs <code>context</code>, the provenance model, and
+the plan/review flows.</div>
 
 <h2 id="plan">Plan a change</h2>
 
