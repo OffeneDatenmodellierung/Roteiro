@@ -282,6 +282,21 @@ pub fn serve_stdio(workspace: Arc<Workspace>) -> Result<(), McpError> {
     })
 }
 
+/// Build the axum [`Router`](axum::Router) serving the MCP streamable-HTTP
+/// transport at the `/mcp` path, for mounting **standalone or merged into
+/// another app** — e.g. alongside the `/v1` model endpoint on one port
+/// (ADR-0008), so a single process serves both surfaces over one Workspace.
+/// Takes ownership of `workspace`.
+pub fn mcp_router(workspace: Arc<Workspace>) -> axum::Router {
+    let shared: SharedWorkspace = workspace;
+    let service = StreamableHttpService::new(
+        move || Ok(GraphServer::new(shared.clone())),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    axum::Router::new().nest_service("/mcp", service)
+}
+
 /// Serve the graph over the streamable-HTTP transport at `addr`, on the `/mcp`
 /// path (for networked, multi-client access; terminate TLS at a reverse proxy).
 /// Takes ownership of `workspace`.
@@ -290,14 +305,8 @@ pub fn serve_stdio(workspace: Arc<Workspace>) -> Result<(), McpError> {
 /// Returns an error if the runtime cannot start, the address cannot be bound, or
 /// the server fails.
 pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), McpError> {
-    let shared: SharedWorkspace = workspace;
+    let router = mcp_router(workspace);
     runtime()?.block_on(async move {
-        let service = StreamableHttpService::new(
-            move || Ok(GraphServer::new(shared.clone())),
-            Arc::new(LocalSessionManager::default()),
-            StreamableHttpServerConfig::default(),
-        );
-        let router = axum::Router::new().nest_service("/mcp", service);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, router).await?;
         Ok(())

@@ -125,6 +125,17 @@ pub fn serve_blocking_with_tools(
     serve_router(app_with_tools(engine, tools), addr)
 }
 
+/// Serve a caller-composed `router` on `addr`, blocking until shutdown. Lets the
+/// caller mount extra paths — e.g. merge an MCP service at `/mcp` alongside
+/// `/v1` on one port (ADR-0008) — building the `/v1` half with [`app`] /
+/// [`app_with_tools`].
+///
+/// # Errors
+/// As [`serve_blocking`].
+pub fn serve_blocking_router(router: Router, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    serve_router(router, addr)
+}
+
 /// Run `router` on `addr`, blocking until shutdown.
 fn serve_router(router: Router, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -158,6 +169,21 @@ pub fn serve_blocking_tls(
         Some(tools) => app_with_tools(engine, tools),
         None => app(engine),
     };
+    serve_router_tls(router, addr, cert, key)
+}
+
+/// Serve a caller-composed `router` on `addr` over TLS, blocking until shutdown
+/// — the TLS counterpart to [`serve_blocking_router`].
+///
+/// # Errors
+/// As [`serve_blocking_tls`].
+#[cfg(feature = "tls")]
+pub fn serve_blocking_router_tls(
+    router: Router,
+    addr: std::net::SocketAddr,
+    cert: &std::path::Path,
+    key: &std::path::Path,
+) -> anyhow::Result<()> {
     serve_router_tls(router, addr, cert, key)
 }
 
