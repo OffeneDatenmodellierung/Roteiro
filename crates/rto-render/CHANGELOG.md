@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.17...rto-render-v0.0.18) - 2026-08-11
+
+### Other
+
+- *(debt)* precision pass — intent-debt now reflects real debt (97 → 6)
+
 ## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.13...rto-render-v0.0.14) - 2026-08-10
 
 ### Added
