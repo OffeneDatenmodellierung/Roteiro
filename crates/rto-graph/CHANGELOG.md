@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.19...rto-graph-v1.0.0) - 2026-08-11
+
+First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
+
+### Added
+- **`Workspace`** (ADR-0008): a per-repo graph registry that opens each repo's store on
+  demand and caches it, with in-place reload (`reload_from`, source-validated eviction)
+  and an optional first-open hook (`with_on_open`).
+
+### Changed
+- Store connections set a `busy_timeout`, so a read that lands during a concurrent
+  `sync` waits briefly rather than failing with `database is locked`.
+
+
 ## [0.0.19](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.18...rto-graph-v0.0.19) - 2026-08-11
 
 ### Added

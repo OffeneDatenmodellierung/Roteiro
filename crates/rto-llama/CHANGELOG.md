@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v0.0.19...rto-llama-v1.0.0) - 2026-08-11
+
+First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
+
+### Changed
+- First stable release; no functional changes since 0.0.19.
+
+
 ## [0.0.18](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v0.0.17...rto-llama-v0.0.18) - 2026-08-11
 
 ### Other
