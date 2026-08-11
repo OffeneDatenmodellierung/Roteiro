@@ -142,16 +142,19 @@ impl Repo {
         // shape this API exposes. `diff_trees` already sorts and prunes unchanged
         // subtrees, so this is O(change) rather than a full walk of both trees.
         let diff = self.diff_trees(&base_oid, &head_oid)?;
+        // A tree diff's `changed` set conflates genuinely-new files with edits to
+        // existing ones, so range review labels them `Modified` rather than
+        // distinguishing `Added` (which would need the base file set).
         let mut out: Vec<ChangedFile> = diff
             .changed
             .into_iter()
             .map(|b| ChangedFile {
                 path: b.path,
-                deleted: false,
+                status: ChangeStatus::Modified,
             })
             .chain(diff.deleted.into_iter().map(|path| ChangedFile {
                 path,
-                deleted: true,
+                status: ChangeStatus::Deleted,
             }))
             .collect();
         out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -190,13 +193,13 @@ impl Repo {
                     if self.blob_oid(&bytes)? != blob.oid {
                         out.push(ChangedFile {
                             path: blob.path,
-                            deleted: false,
+                            status: ChangeStatus::Modified,
                         });
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => out.push(ChangedFile {
                     path: blob.path,
-                    deleted: true,
+                    status: ChangeStatus::Deleted,
                 }),
                 Err(e) => return Err(GitError::Git(e.to_string())),
             }
@@ -307,13 +310,36 @@ fn walk_tree_blobs(tree: &gix::Tree<'_>) -> Result<Vec<BlobRef>, GitError> {
     Ok(out)
 }
 
-/// A tracked file that differs between the working tree and `HEAD`.
+/// How a file changed relative to the comparison baseline — for review labelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeStatus {
+    /// A new file, absent from the baseline (e.g. a brand-new untracked file).
+    Added,
+    /// Present on both sides, with different content.
+    Modified,
+    /// Removed from the working tree (or the `HEAD` side of a range).
+    Deleted,
+}
+
+impl ChangeStatus {
+    /// Stable lowercase label (`added` | `modified` | `deleted`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// A file that differs between the working tree (or a base revision) and `HEAD`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
     /// Repository-relative path.
     pub path: String,
-    /// `true` when the file was removed from the working tree.
-    pub deleted: bool,
+    /// How the file changed.
+    pub status: ChangeStatus,
 }
 
 /// The blob-level difference between two trees: paths added or modified (with

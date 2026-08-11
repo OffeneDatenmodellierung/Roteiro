@@ -45,7 +45,7 @@ impl ReviewReport {
 pub struct FileReview {
     /// Repository-relative path.
     pub path: String,
-    /// `"modified"` or `"deleted"`.
+    /// `"added"`, `"modified"`, or `"deleted"`.
     pub status: &'static str,
     /// Symbols defined in the file, each with its graph neighbourhood.
     pub symbols: Vec<SymbolReview>,
@@ -118,7 +118,7 @@ pub fn build(
     let mut changed_keys: Vec<String> = Vec::new();
 
     for cf in changed {
-        if cf.deleted {
+        if cf.status == rto_graph::ChangeStatus::Deleted {
             files.push(FileReview {
                 path: cf.path.clone(),
                 status: "deleted",
@@ -145,7 +145,7 @@ pub fn build(
         }
         files.push(FileReview {
             path: cf.path.clone(),
-            status: "modified",
+            status: cf.status.as_str(),
             symbols,
             debt,
         });
