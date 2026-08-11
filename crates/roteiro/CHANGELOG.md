@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.18...roteiro-v0.0.19) - 2026-08-11
+
+### Added
+
+- *(init)* ship an installable agent skill; enrich the AGENTS.md block
+- *(cli)* add `roteiro search` — text search from the plain CLI
+- *(query)* search captured content + rank curated/overview above test symbols
+
+### Other
+
+- wire the new `roteiro search` CLI into the skill/AGENTS/website
+- address PR #182 review
+- *(test)* correct search_cli doc comment — code symbol, not test symbol
+
 ## [0.0.18](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.17...roteiro-v0.0.18) - 2026-08-11
 
 ### Other
