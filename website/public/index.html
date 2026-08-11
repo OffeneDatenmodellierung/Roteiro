@@ -29,6 +29,7 @@ queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents 
   <a href="#adopt">Use it in your project</a>
   <a href="#modes">Modes</a>
   <a href="#ask">Ask your code</a>
+  <a href="#plan">Plan a change</a>
   <a href="#models">Models</a>
   <a href="#config">Config</a>
   <a href="#languages">Languages</a>
@@ -349,6 +350,42 @@ memory and hallucinate. Set it once in <code>roteiro.toml</code> under
 <code>roteiro serve</code> (MCP mode) and your agent gets the same <code>search</code> /
 <code>context</code> / <code>path</code> / <code>debt</code> tools natively, grounded in the same
 graph. See <a href="#modes">MCP mode</a> above.</div>
+
+<h2 id="plan">Plan a change</h2>
+
+<p>Asking questions is one half; the other is <strong>writing intent down</strong>. The
+<code>spec</code> workflow turns a topic into a house-style, drift-checked ADR or
+blueprint, <em>grounded in the graph</em> — so a decision links to the real symbols it
+governs and <code>roteiro check</code> can hold code to it later. Three steps, and the
+first two need no model.</p>
+
+<pre><code><span class="c"># 1 · Gather grounded context for a topic — the symbols, files and</span>
+<span class="c">#     ADRs already related to it, straight from the graph (offline)</span>
+roteiro spec context "rate limiting"
+
+<span class="c"># 2 · Scaffold a house-style, check-clean skeleton with resolving</span>
+<span class="c">#     links and an interview checklist — no model needed (offline)</span>
+roteiro spec scaffold "rate limiting" --kind adr --out draft-adr.md
+
+<span class="c"># 3 · Draft the prose with a local generative model, filling the</span>
+<span class="c">#     placeholders from the graph context (needs --features serve</span>
+<span class="c">#     or inference-local-models, then a pulled model)</span>
+roteiro spec draft draft-adr.md
+
+<span class="c"># Then verify the authored links hold against the code (CI gate)</span>
+roteiro check</code></pre>
+
+<p>What <code>spec context</code> surfaces is real: for <em>“concurrency”</em> in this repo it
+returns the <code>Engine</code> trait, the concurrency test symbols that exercise it,
+and the blueprint section that governs them — the exact material a good ADR should
+cite. The skeleton it scaffolds is already <code>check</code>-clean, so you are filling in
+reasoning, not wiring up metadata.</p>
+
+<div class="note"><strong>Offline gets you most of the way.</strong>
+<code>spec context</code> and <code>spec scaffold</code> run with no model at all;
+only <code>spec draft</code> (the prose generation) needs a generative model. On a
+<strong>16&nbsp;GB MacBook Air (M3)</strong>, <code>qwen3-8b</code> drafts comfortably;
+<code>qwen3-0.6b</code> is the tiny built-in default if you just want a first pass.</div>
 
 <h2 id="models">Recommended local models</h2>
 
