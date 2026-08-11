@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.16...rto-graph-v0.0.17) - 2026-08-11
+
+### Added
+
+- *(review)* distinguish "added" files from "modified"
+
+### Fixed
+
+- *(review)* address PR #169 review — open-set doc, comment, added test
+
+### Other
+
+- Merge pull request #169 from OffeneDatenmodellierung/feat/review-added-status
+
 ## [0.0.16](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.15...rto-graph-v0.0.16) - 2026-08-11
 
 ### Added
