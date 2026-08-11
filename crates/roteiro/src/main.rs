@@ -2312,6 +2312,9 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
 /// ADR-0006) or the MCP graph server. Each backend is feature-gated; a build
 /// lacking the relevant feature reports how to enable it.
 #[cfg(any(feature = "mcp", feature = "serve"))]
+// These are the parsed `serve` CLI flags threaded straight through from the clap
+// `Command::Serve` variant; a params struct would just mirror that enum arm and
+// add indirection at the single call site.
 #[allow(clippy::too_many_arguments)]
 fn run_serve(
     ingest: rto_graph::IngestConfig,
@@ -2323,7 +2326,30 @@ fn run_serve(
     tls_key: Option<String>,
     workspace_roots: &[String],
 ) -> anyhow::Result<()> {
-    let workspace = build_serve_workspace(&cfg.workspace, workspace_roots, ingest)?;
+    use std::sync::Arc;
+    let repo_paths = collect_workspace_repo_paths(&cfg.workspace, workspace_roots)?;
+    let workspace: Arc<rto_graph::Workspace> = if repo_paths.is_empty() {
+        // Single-repo serve: build the cwd repo's graph now and host it alone.
+        let (repo, mut store, cache) = open_graph()?;
+        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+        let name = repo
+            .workdir()
+            .and_then(std::path::Path::file_name)
+            .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+        Arc::new(rto_graph::Workspace::single(name, store))
+    } else {
+        // Workspace serve: open existing graphs on demand (no sync — each repo's
+        // hooks keep it fresh, ADR-0008) and allow SIGHUP to reload the registry.
+        let ws = Arc::new(rto_graph::Workspace::from_repo_paths(&repo_paths)?);
+        let names = ws.names();
+        eprintln!(
+            "roteiro workspace: {} project(s) — {}",
+            names.len(),
+            names.join(", ")
+        );
+        install_workspace_reload(&ws, cfg.workspace.clone(), workspace_roots.to_vec());
+        ws
+    };
     if models {
         serve_models_endpoint(cfg, workspace, addr, tls_cert, tls_key)
     } else {
@@ -2331,16 +2357,15 @@ fn run_serve(
     }
 }
 
-/// Assemble the [`rto_graph::Workspace`] a server hosts. With any workspace root
-/// (CLI `--workspace` or `[workspace]` config), collect every repo found and
-/// open their graphs on demand — **without** syncing (each repo's own hooks keep
-/// it fresh, ADR-0008). With none, fall back to single-repo serving: sync the
-/// current repo now (as `serve` always has) and host it as the sole project.
-fn build_serve_workspace(
+/// Repo paths a workspace `serve` hosts: everything under the CLI `--workspace`
+/// roots and `[workspace]` config `roots` (each scanned), plus any explicit
+/// `repos`. Empty ⇒ single-repo serving of the current directory's repo. Shared
+/// by startup and by SIGHUP reload so both see the same set.
+#[cfg(any(feature = "mcp", feature = "serve"))]
+fn collect_workspace_repo_paths(
     ws_cfg: &config::WorkspaceConfig,
     cli_roots: &[String],
-    ingest: rto_graph::IngestConfig,
-) -> anyhow::Result<rto_graph::Workspace> {
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let mut repo_paths: Vec<std::path::PathBuf> = Vec::new();
     let roots = cli_roots
         .iter()
@@ -2352,24 +2377,71 @@ fn build_serve_workspace(
     for repo in ws_cfg.repos.iter().flatten() {
         repo_paths.push(std::path::PathBuf::from(repo));
     }
+    Ok(repo_paths)
+}
 
-    if repo_paths.is_empty() {
-        // Single-repo serve: build the cwd repo's graph now and host it alone.
-        let (repo, mut store, cache) = open_graph()?;
-        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-        let name = repo
-            .workdir()
-            .and_then(std::path::Path::file_name)
-            .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
-        return Ok(rto_graph::Workspace::single(name, store));
-    }
-    Ok(rto_graph::Workspace::from_repo_paths(repo_paths)?)
+/// Install a SIGHUP handler that re-scans the workspace roots and reloads the
+/// registry in place, so a running server picks up added/removed repos without a
+/// restart (ADR-0008). Runs on a dedicated thread with its own tokio runtime,
+/// independent of the serve runtime; reload is thread-safe (the `Workspace`
+/// serialises its own state). Best-effort: if SIGHUP cannot be registered, the
+/// server still runs, just without live reload.
+#[cfg(all(unix, any(feature = "mcp", feature = "serve")))]
+fn install_workspace_reload(
+    ws: &std::sync::Arc<rto_graph::Workspace>,
+    ws_cfg: config::WorkspaceConfig,
+    cli_roots: Vec<String>,
+) {
+    let ws = ws.clone();
+    std::thread::spawn(move || {
+        // A current-thread runtime with just the I/O driver — all unix signal
+        // handling needs (no timers), keeping this self-contained.
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+        else {
+            return;
+        };
+        rt.block_on(async move {
+            let mut hup =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        eprintln!("workspace reload disabled (cannot watch SIGHUP): {e}");
+                        return;
+                    }
+                };
+            eprintln!("send SIGHUP to reload the workspace (pick up added/removed repos)");
+            while hup.recv().await.is_some() {
+                let result = collect_workspace_repo_paths(&ws_cfg, &cli_roots)
+                    .and_then(|paths| ws.reload_from(paths).map_err(anyhow::Error::from));
+                match result {
+                    Ok(names) => eprintln!(
+                        "workspace reloaded: {} project(s) — {}",
+                        names.len(),
+                        names.join(", ")
+                    ),
+                    Err(e) => eprintln!("workspace reload failed (registry unchanged): {e}"),
+                }
+            }
+        });
+    });
+}
+
+/// On non-Unix, SIGHUP reload is unavailable; the server runs without it.
+#[cfg(all(not(unix), any(feature = "mcp", feature = "serve")))]
+fn install_workspace_reload(
+    _ws: &std::sync::Arc<rto_graph::Workspace>,
+    _ws_cfg: config::WorkspaceConfig,
+    _cli_roots: Vec<String>,
+) {
 }
 
 /// Git repos to host for a workspace `root`: the root itself if it is a repo,
 /// plus each immediate subdirectory that is one. Shallow by design — a code
 /// directory holding sibling checkouts is the common case, and a deep scan would
 /// be slow and surprising.
+#[cfg(any(feature = "mcp", feature = "serve"))]
 fn discover_repos_under(root: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let is_repo = |dir: &std::path::Path| dir.join(".git").exists();
     let mut repos = Vec::new();
@@ -2393,7 +2465,10 @@ fn discover_repos_under(root: &std::path::Path) -> anyhow::Result<Vec<std::path:
 /// (single-repo, already synced) or many (opened on demand); tools select one
 /// with `project` (ADR-0008).
 #[cfg(feature = "mcp")]
-fn serve_mcp(workspace: rto_graph::Workspace, http: Option<String>) -> anyhow::Result<()> {
+fn serve_mcp(
+    workspace: std::sync::Arc<rto_graph::Workspace>,
+    http: Option<String>,
+) -> anyhow::Result<()> {
     match http {
         Some(addr) => {
             let addr: std::net::SocketAddr = addr
@@ -2408,7 +2483,10 @@ fn serve_mcp(workspace: rto_graph::Workspace, http: Option<String>) -> anyhow::R
 
 /// MCP serving is unavailable without the `mcp` feature.
 #[cfg(all(not(feature = "mcp"), feature = "serve"))]
-fn serve_mcp(_workspace: rto_graph::Workspace, _http: Option<String>) -> anyhow::Result<()> {
+fn serve_mcp(
+    _workspace: std::sync::Arc<rto_graph::Workspace>,
+    _http: Option<String>,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "MCP serving needs the `mcp` feature (build with `--features mcp`); \
          use `--models` for the OpenAI-compatible model endpoint"
@@ -2420,7 +2498,7 @@ fn serve_mcp(_workspace: rto_graph::Workspace, _http: Option<String>) -> anyhow:
 #[cfg(feature = "serve")]
 fn serve_models_endpoint(
     cfg: &config::Config,
-    workspace: rto_graph::Workspace,
+    workspace: std::sync::Arc<rto_graph::Workspace>,
     addr: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
@@ -2553,12 +2631,12 @@ fn serve_models_endpoint(
 /// workspace behaves exactly as before (no `project` needed).
 #[cfg(feature = "serve")]
 struct GraphToolRegistry {
-    workspace: rto_graph::Workspace,
+    workspace: std::sync::Arc<rto_graph::Workspace>,
 }
 
 #[cfg(feature = "serve")]
 impl GraphToolRegistry {
-    fn new(workspace: rto_graph::Workspace) -> Self {
+    fn new(workspace: std::sync::Arc<rto_graph::Workspace>) -> Self {
         Self { workspace }
     }
 
@@ -2583,21 +2661,21 @@ impl GraphToolRegistry {
 impl rto_serve::ToolRegistry for GraphToolRegistry {
     fn tools(&self) -> Vec<rto_serve::ToolDef> {
         use serde_json::json;
-        // Only expose project selection when several are hosted, so single-repo
-        // serving is unchanged and a lone model is not tempted to pass `project`.
-        let multi = self.workspace.is_multi();
-        // A `project` property spliced into each tool's schema when hosting many.
-        let project_prop = || {
-            json!({ "project": {
-                "type": "string",
-                "description": "Which hosted project to query (see `list_projects`).",
-            }})
-        };
+        // `project` is an optional selector on every tool, and `list_projects` is
+        // always offered — matching the MCP surface (whose schema the rmcp macro
+        // generates statically, so it can't hide them). Uniform beats an
+        // asymmetric surface; a single-project server resolves the sole project
+        // for a bare call, and `list_projects` simply returns that one.
         let with_project = |mut props: serde_json::Value| {
-            if multi {
-                let obj = props.as_object_mut().expect("object schema");
-                obj.insert("project".to_owned(), project_prop()["project"].clone());
-            }
+            let obj = props.as_object_mut().expect("object schema");
+            obj.insert(
+                "project".to_owned(),
+                json!({
+                    "type": "string",
+                    "description": "Optional: which hosted project to query (see \
+                                    `list_projects`); omit if the server hosts one.",
+                }),
+            );
             props
         };
 
@@ -2655,15 +2733,13 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 }),
             },
         ];
-        if multi {
-            tools.push(rto_serve::ToolDef {
-                name: "list_projects".to_owned(),
-                description: "List the projects this server hosts. Pass one as `project` \
-                              to the other tools to query it (ADR-0008)."
-                    .to_owned(),
-                parameters: json!({ "type": "object", "properties": {} }),
-            });
-        }
+        tools.push(rto_serve::ToolDef {
+            name: "list_projects".to_owned(),
+            description: "List the projects this server hosts (often just one). Pass one as \
+                          `project` to the other tools to query it (ADR-0008)."
+                .to_owned(),
+            parameters: json!({ "type": "object", "properties": {} }),
+        });
         tools
     }
 
@@ -2726,7 +2802,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
 #[cfg(all(not(feature = "serve"), feature = "mcp"))]
 fn serve_models_endpoint(
     _cfg: &config::Config,
-    _workspace: rto_graph::Workspace,
+    _workspace: std::sync::Arc<rto_graph::Workspace>,
     _addr: Option<String>,
     _tls_cert: Option<String>,
     _tls_key: Option<String>,
@@ -3057,7 +3133,7 @@ mod url_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "mcp", feature = "serve")))]
 mod workspace_tests {
     use super::discover_repos_under;
 

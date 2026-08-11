@@ -6,9 +6,11 @@
 //! Two transports are offered (see [`serve_stdio`] / [`serve_http`]): stdio for
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
-//! same tools — `explain`, `list_kind`, `path`, and `debt` — as thin wrappers
-//! over the matching [`rto_graph`] query primitives, so agents and the CLI see
-//! the same graph. See ADR-0002 for the decision to adopt `rmcp`.
+//! same tools — `search`, `explain`, `list_kind`, `path`, `debt`, and
+//! `list_projects` — as thin wrappers over the matching [`rto_graph`] query
+//! primitives, so agents and the CLI see the same graph. Each tool takes an
+//! optional `project` selector for a multi-repo workspace (ADR-0008). See
+//! ADR-0002 for the decision to adopt `rmcp`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -98,8 +100,9 @@ struct DebtArgs {
 }
 
 /// The MCP server handler over a [`Workspace`] of one or more project graphs
-/// (ADR-0008). A single-project workspace serves exactly as before; with several,
-/// tools select one via `project` and `list_projects` enumerates them.
+/// (ADR-0008). Every tool takes an optional `project` selector and a
+/// `list_projects` tool enumerates the hosted projects; a single-project
+/// workspace resolves that sole project for a bare call, so it serves as before.
 #[derive(Clone)]
 struct GraphServer {
     workspace: SharedWorkspace,
@@ -270,8 +273,8 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 ///
 /// # Errors
 /// Returns an error if the runtime cannot start or the transport fails.
-pub fn serve_stdio(workspace: Workspace) -> Result<(), McpError> {
-    let shared: SharedWorkspace = Arc::new(workspace);
+pub fn serve_stdio(workspace: Arc<Workspace>) -> Result<(), McpError> {
+    let shared: SharedWorkspace = workspace;
     runtime()?.block_on(async move {
         let service = GraphServer::new(shared).serve(stdio()).await?;
         service.waiting().await?;
@@ -286,8 +289,8 @@ pub fn serve_stdio(workspace: Workspace) -> Result<(), McpError> {
 /// # Errors
 /// Returns an error if the runtime cannot start, the address cannot be bound, or
 /// the server fails.
-pub fn serve_http(workspace: Workspace, addr: SocketAddr) -> Result<(), McpError> {
-    let shared: SharedWorkspace = Arc::new(workspace);
+pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), McpError> {
+    let shared: SharedWorkspace = workspace;
     runtime()?.block_on(async move {
         let service = StreamableHttpService::new(
             move || Ok(GraphServer::new(shared.clone())),

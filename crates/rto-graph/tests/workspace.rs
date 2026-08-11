@@ -8,11 +8,12 @@ use std::process::Command;
 use rto_graph::{FactSet, Node, NodeKind, Store, Workspace, WorkspaceError};
 
 fn git_init(dir: &Path) {
-    Command::new("git")
+    let status = Command::new("git")
         .args(["-c", "init.defaultBranch=main", "init", "-q"])
         .current_dir(dir)
         .status()
         .expect("run git init");
+    assert!(status.success(), "git init failed in {}", dir.display());
 }
 
 /// Create a git repo at `dir` holding a graph with a single `fn` node named
@@ -61,6 +62,96 @@ fn workspace_routes_queries_to_the_right_project() {
         .with_store(None, |s| s.node_count().unwrap())
         .expect_err("bare call is ambiguous");
     assert!(matches!(err, WorkspaceError::AmbiguousProject { .. }));
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn reload_from_picks_up_added_and_dropped_repos() {
+    let base = std::env::temp_dir().join(format!("rto-ws-reload-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    repo_with_node(&base.join("alpha"), "sym:rust:a.rs#in_alpha");
+    repo_with_node(&base.join("beta"), "sym:rust:b.rs#in_beta");
+
+    // Start hosting just alpha (single ⇒ default).
+    let ws = Workspace::from_repo_paths([base.join("alpha")]).expect("build");
+    assert_eq!(ws.names(), vec!["alpha".to_owned()]);
+    // Warm its cache.
+    assert!(
+        ws.with_store(None, |s| s
+            .get_node("sym:rust:a.rs#in_alpha")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // Reload with beta added: both are now hosted (and it's multi-project).
+    let names = ws
+        .reload_from([base.join("alpha"), base.join("beta")])
+        .expect("reload");
+    assert_eq!(names, vec!["alpha".to_owned(), "beta".to_owned()]);
+    assert!(ws.is_multi());
+    assert!(
+        ws.with_store(Some("beta"), |s| s
+            .get_node("sym:rust:b.rs#in_beta")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // Reload down to just beta: alpha is gone (and beta becomes the default).
+    let names = ws.reload_from([base.join("beta")]).expect("reload");
+    assert_eq!(names, vec!["beta".to_owned()]);
+    assert!(matches!(
+        ws.resolve(Some("alpha")).unwrap_err(),
+        WorkspaceError::UnknownProject { .. }
+    ));
+    assert_eq!(ws.resolve(None).unwrap(), "beta");
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn reload_reroutes_when_a_name_maps_to_a_different_repo() {
+    // Two repos share a directory name ("proj") under different roots, so both
+    // resolve to the same project name but different `graph.db` files.
+    let base = std::env::temp_dir().join(format!("rto-ws-reroute-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    repo_with_node(&base.join("a").join("proj"), "sym:rust:x.rs#from_a");
+    repo_with_node(&base.join("b").join("proj"), "sym:rust:x.rs#from_b");
+
+    let ws = Workspace::from_repo_paths([base.join("a").join("proj")]).expect("build");
+    // Warm the cache against repo A.
+    assert!(
+        ws.with_store(None, |s| s
+            .get_node("sym:rust:x.rs#from_a")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // Reload the *same name* onto repo B: the cached handle for A must be
+    // evicted, so queries now hit B's graph — not the stale A connection.
+    let names = ws
+        .reload_from([base.join("b").join("proj")])
+        .expect("reload");
+    assert_eq!(names, vec!["proj".to_owned()]);
+    assert!(
+        ws.with_store(None, |s| s
+            .get_node("sym:rust:x.rs#from_b")
+            .unwrap()
+            .is_some())
+            .unwrap(),
+        "should now read repo B's graph"
+    );
+    assert!(
+        !ws.with_store(None, |s| s
+            .get_node("sym:rust:x.rs#from_a")
+            .unwrap()
+            .is_some())
+            .unwrap(),
+        "must not still serve repo A's graph from a stale cache entry"
+    );
 
     std::fs::remove_dir_all(&base).ok();
 }
