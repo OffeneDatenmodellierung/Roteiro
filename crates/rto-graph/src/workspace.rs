@@ -14,7 +14,9 @@
 //! The registry can be **reloaded** in place ([`Workspace::reload_from`]) so a
 //! long-lived server can pick up added/removed repos without a restart (a SIGHUP
 //! trigger); already-open stores for still-present projects keep their warm
-//! connections, and dropped projects are evicted.
+//! connections, and dropped projects are evicted. An optional first-open hook
+//! ([`Workspace::with_on_open`], `serve --sync-on-access`) (re)builds a project's
+//! graph the first time it is queried.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -52,6 +54,15 @@ pub enum WorkspaceError {
         name: String,
         /// The repo directory whose graph is missing.
         path: PathBuf,
+    },
+    /// The on-open hook (`serve --sync-on-access`) failed to prepare a project's
+    /// graph before it was first served.
+    #[error("failed to prepare project `{name}` on first access: {msg}")]
+    Prepare {
+        /// The project name.
+        name: String,
+        /// The hook's error message.
+        msg: String,
     },
     /// A store lock was poisoned by a panic in another thread.
     #[error("store lock poisoned")]
@@ -101,11 +112,19 @@ fn source_eq(a: &Source, b: &Source) -> bool {
     }
 }
 
+/// A hook run against a project's `graph.db` path the first time it is opened —
+/// used by `serve --sync-on-access` to (re)build a stale or missing graph before
+/// it is served (ADR-0008). Returns a human-readable error on failure.
+pub type OnOpen = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
+
 /// A named set of per-repo graphs, each opened on demand and cached. Cheap to
 /// hold: the stores are small `SQLite` files opened lazily; the caller (a server)
 /// holds the one expensive model. The registry is reloadable in place.
 pub struct Workspace {
     inner: Mutex<Inner>,
+    /// Optional first-open hook (`serve --sync-on-access`): run against a
+    /// project's `graph.db` path before it is opened, to sync it on demand.
+    on_open: Option<OnOpen>,
 }
 
 impl Workspace {
@@ -123,6 +142,7 @@ impl Workspace {
                 default: Some(name),
                 cache: HashMap::new(),
             }),
+            on_open: None,
         }
     }
 
@@ -146,7 +166,18 @@ impl Workspace {
                 default,
                 cache: HashMap::new(),
             }),
+            on_open: None,
         })
+    }
+
+    /// Set a first-open hook (`serve --sync-on-access`): before a project's store
+    /// is opened for the first time, `hook` is run against its `graph.db` path to
+    /// (re)build it. Applies to lazily-opened `Path` projects; a pre-opened
+    /// `single` store is already loaded, so the hook does not fire for it.
+    #[must_use]
+    pub fn with_on_open(mut self, hook: OnOpen) -> Self {
+        self.on_open = Some(hook);
+        self
     }
 
     /// Rebuild the registry from a fresh set of repo `paths`: added repos become
@@ -271,6 +302,15 @@ impl Workspace {
                 }
             }
         };
+        // `serve --sync-on-access`: (re)build this project's graph before opening
+        // it, so a stale or never-synced repo is prepared on first touch. Runs
+        // outside the registry lock (it does extraction I/O).
+        if let Some(on_open) = &self.on_open {
+            on_open(&db).map_err(|msg| WorkspaceError::Prepare {
+                name: name.to_owned(),
+                msg,
+            })?;
+        }
         if !db.exists() {
             return Err(WorkspaceError::NoGraph {
                 name: name.to_owned(),
