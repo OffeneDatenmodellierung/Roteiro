@@ -50,7 +50,9 @@ and <code>/mcp</code> are just path prefixes on the same server.</p>
 <h2 id="run">Run Roteiro</h2>
 
 <p>Point it at a directory of checkouts; each git repo under it becomes a project.
-Requires <code>--features serve,mcp</code>.</p>
+Serving both surfaces from one process (the <code>--models --mcp</code> command below)
+needs a build with <code>--features serve,mcp</code>; each surface alone needs only its
+own feature (<code>serve</code> for <code>/v1</code>, <code>mcp</code> for <code>/mcp</code>).</p>
 
 <pre><code><span class="c"># One process, one port (127.0.0.1:8017): both /v1 and /mcp, every repo under ~/code</span>
 roteiro serve --models --mcp --workspace ~/code
@@ -68,6 +70,12 @@ curl -s http://127.0.0.1:8017/v1/roteiro/chat/completions \
 path prefix <code>/v1/&lt;project&gt;/…</code> (pre-binds it — the model needn't name it), or the
 plain <code>/v1</code> with a <code>project</code> argument the model passes per tool call. The MCP
 tools take the same <code>project</code> argument. Omit it entirely for a single-repo server.</div>
+
+<div class="note"><strong>Older build?</strong> Single-port <code>--models --mcp</code> is
+recent. On a build without it, run the two surfaces as separate processes over the same
+workspace — <code>roteiro serve --models --workspace ~/code</code> for <code>/v1</code> and
+<code>roteiro serve --http 127.0.0.1:8080 --workspace ~/code</code> for <code>/mcp</code> —
+and point each client at its own port.</div>
 
 <h2 id="cascade">The cascade: cheap-first, grounded at every tier</h2>
 
