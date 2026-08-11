@@ -500,6 +500,20 @@ impl Engine for LlamaEngine {
         let path = served.path.clone();
         let mmproj = served.mmproj.clone();
 
+        // Pick the media modality from the request. A request carries at most one
+        // modality; both set at once is a client error (the projector splices one
+        // media stream), rejected up front so no model is loaded for it.
+        let modality = match (!req.images.is_empty(), !req.audio.is_empty()) {
+            (false, false) => None,
+            (true, false) => Some(Modality::Vision),
+            (false, true) => Some(Modality::Audio),
+            (true, true) => {
+                return Err(EngineError::InvalidRequest(
+                    "a request may carry images or audio, not both".to_owned(),
+                ));
+            }
+        };
+
         // Resolve + load under the cache lock, clone the shared handles, then
         // release the lock so generation on a *different* model can run
         // concurrently (see the module-level "Concurrency" note).
@@ -509,15 +523,6 @@ impl Engine for LlamaEngine {
             .lock()
             .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
-        // Pick the modality from the attached media. Images take precedence when
-        // both are somehow present; a media request needs the model's projector.
-        let modality = if !req.images.is_empty() {
-            Some(Modality::Vision)
-        } else if !req.audio.is_empty() {
-            Some(Modality::Audio)
-        } else {
-            None
-        };
         match (modality, mmproj.as_deref()) {
             (None, _) => self.chat_text(&model, req, on_token),
             (Some(m), Some(mmproj)) => self.chat_media(&model, mmproj, req, m, on_token),

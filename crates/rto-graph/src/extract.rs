@@ -441,7 +441,7 @@ const ASR_MODEL: &str = "voxtral-mini-3b";
 
 /// The process-wide audio engine, built lazily from the installed `ASR_MODEL`
 /// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed —
-/// transcription is then inert (run `roteiro model pull ultravox-v0_5-llama-3_2-1b`).
+/// transcription is then inert (run `roteiro model pull voxtral-mini-3b`).
 #[cfg(feature = "audio-transcribe")]
 fn asr_engine() -> Option<&'static rto_llama::llama::LlamaEngine> {
     use std::sync::OnceLock;

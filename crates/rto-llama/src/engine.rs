@@ -81,7 +81,8 @@ pub struct ChatRequest {
     /// order — non-empty only for requests to an audio-capable model. The
     /// projector (`mmproj`) decodes and resamples them via miniaudio, so the
     /// caller passes the original file bytes, not PCM. Mutually exclusive with
-    /// [`Self::images`] in practice (a request carries one media modality).
+    /// [`Self::images`]: a request that sets both is rejected as an invalid
+    /// request (a projector splices one media stream).
     pub audio: Vec<Vec<u8>>,
     /// Sampling temperature (`0.0` = greedy).
     pub temperature: f32,

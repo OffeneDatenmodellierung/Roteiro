@@ -7,13 +7,16 @@
 //! gate on the open question this modality raised: whether the llama.cpp `mtmd`
 //! audio path actually transcribes on the Metal backend.
 //!
-//! It needs the `llama` feature, the Ultravox audio model on disk, **and** a WAV
+//! It needs the `llama` feature, the Voxtral audio model on disk, **and** a WAV
 //! fixture, so it is `#[ignore]`d and self-skips when any are missing — CI
-//! compiles it under `--all-features` but does not run it. Run locally with a
-//! real speech clip (e.g. macOS `say -o /tmp/fox.wav --file-format=WAVE
-//! --data-format=LEI16@16000 "the quick brown fox"`), then:
+//! compiles it under `--all-features` but does not run it. Generate a real speech
+//! clip and run it with (on macOS — note `-v Samantha`: the *default* `say` voice
+//! can emit near-silence, which the model would then "transcribe" into
+//! hallucinated text):
 //!
 //! ```text
+//! say -v Samantha -o /tmp/fox.aiff "The quick brown fox jumps over the lazy dog."
+//! afconvert -f WAVE -d LEI16@16000 -c 1 /tmp/fox.aiff /tmp/fox.wav
 //! ROTEIRO_TEST_AUDIO_WAV=/tmp/fox.wav \
 //!   cargo test -p rto-llama --features llama --test audio -- --ignored --nocapture
 //! ```
@@ -39,7 +42,7 @@ fn model_file(name: &str, file: &str) -> Option<PathBuf> {
 }
 
 #[test]
-#[ignore = "needs the `llama` feature, the Ultravox GGUF on disk, and a WAV fixture; slow + Metal-dependent"]
+#[ignore = "needs the `llama` feature, the Voxtral GGUF on disk, and a WAV fixture; slow + Metal-dependent"]
 fn transcribes_speech_audio_via_mtmd() {
     let (Some(gguf), Some(mmproj)) = (
         model_file(MODEL, "model.gguf"),
