@@ -49,11 +49,15 @@ jobs:
 
   deploy:
     name: Deploy roteiro.dev
-    # Canonical repo's main only; the deploy step is further gated on the secret.
-    if: github.event_name == 'push' && github.repository == 'OffeneDatenmodellierung/Roteiro' && secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != ''
+    # Canonical repo's main only. The secret is NOT checked here: GitHub forbids
+    # the `secrets` context in a job-level `if`, which made the whole workflow
+    # fail to start. The deploy *step* below is gated on the secret (via `env`),
+    # so it skips cleanly when the owner has not opted in.
+    if: github.event_name == 'push' && github.repository == 'OffeneDatenmodellierung/Roteiro'
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,9 +69,9 @@ jobs:
         run: ./website/build.sh
       - name: Deploy to Cloudflare Pages (Direct Upload)
         # Skips cleanly until the owner adds the secret and enables this path.
-        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
         uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy website/dist --project-name=roteiro --branch=main
