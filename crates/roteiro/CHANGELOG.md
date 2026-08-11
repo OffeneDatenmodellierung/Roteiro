@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.18...roteiro-v0.0.19) - 2026-08-11
+
+### Added
+
+- *(query)* search captured content + rank curated/overview above test symbols
+
 ## [0.0.18](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.17...roteiro-v0.0.18) - 2026-08-11
 
 ### Other
