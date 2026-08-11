@@ -127,7 +127,8 @@ pub fn similarity(a: &[f32], b: &[f32]) -> f64 {
 
 /// A source of unit embedding vectors for text. The default [`HashEmbedder`] is
 /// the offline hashing embedding; the `inference-local-models` tier provides a
-/// candle-backed learned embedder implementing the same trait.
+/// llama.cpp-backed learned embedder (a local GGUF embedding model) implementing
+/// the same trait.
 pub trait Embedder {
     /// Embed `text` into a unit vector. All vectors from one embedder must share
     /// a dimensionality so they are comparable by [`similarity`].
@@ -181,7 +182,8 @@ pub fn infer_edges(store: &Store, config: InferenceConfig) -> Result<Vec<Edge>, 
 }
 
 /// Like [`infer_edges`], but using a caller-supplied [`Embedder`] (e.g. a
-/// candle-backed local model) instead of the default hashing embedding.
+/// llama.cpp-backed local GGUF embedding model) instead of the default hashing
+/// embedding.
 ///
 /// # Errors
 /// Returns [`StoreError`] if the store cannot be read.

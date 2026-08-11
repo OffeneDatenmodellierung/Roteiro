@@ -5,10 +5,10 @@
 //!
 //! This crate is the single place llama.cpp lives, so both **serving**
 //! (`rto-serve`'s `/v1` endpoint) and **internal uses** (`infer` embeddings,
-//! `sync` image understanding, `spec draft` generation) share one engine —
-//! candle's role is being retired in favour of it. It deliberately has **no
-//! HTTP/async deps**: the pure-Rust trait + types build without the C++ engine,
-//! which lands behind the `llama` feature.
+//! `sync` image understanding, `spec draft` generation) share one engine — it is
+//! Roteiro's sole local-inference engine (candle has been retired). It
+//! deliberately has **no HTTP/async deps**: the pure-Rust trait + types build
+//! without the C++ engine, which lands behind the `llama` feature.
 
 pub mod engine;
 
