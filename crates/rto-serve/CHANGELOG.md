@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.15...rto-serve-v0.0.16) - 2026-08-11
+
+### Added
+
+- *(serve)* in-app TLS for the model endpoint (ADR-0002 follow-up)
+
+### Other
+
+- address PR #155 review on TLS wiring
+
 ## [0.0.14](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.13...rto-serve-v0.0.14) - 2026-08-10
 
 ### Other
