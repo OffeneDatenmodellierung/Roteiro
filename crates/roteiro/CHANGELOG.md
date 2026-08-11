@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.19...roteiro-v0.0.20) - 2026-08-11
+
+### Added
+
+- *(serve)* live workspace reload on SIGHUP (ADR-0008)
+- *(serve)* multi-repo workspace serve — one instance, many graphs (ADR-0008)
+
+### Fixed
+
+- *(workspace)* correct reload cache eviction, dedup, and tokio features
+
+### Other
+
+- Merge branch 'main' into feat/workspace-reload
+- address PR #190 review on the workspace tool surface
+
 ## [0.0.19](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.18...roteiro-v0.0.19) - 2026-08-11
 
 ### Added
