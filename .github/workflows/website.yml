@@ -49,8 +49,11 @@ jobs:
 
   deploy:
     name: Deploy roteiro.dev
-    # Canonical repo's main only; the deploy step is further gated on the secret.
-    if: github.event_name == 'push' && github.repository == 'OffeneDatenmodellierung/Roteiro' && secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != ''
+    # Canonical repo's main only. The secret is NOT checked here: GitHub forbids
+    # the `secrets` context in a job-level `if`, which made the whole workflow
+    # fail to start. The deploy *step* below is gated on the secret (via `env`),
+    # so it skips cleanly when the owner has not opted in.
+    if: github.event_name == 'push' && github.repository == 'OffeneDatenmodellierung/Roteiro'
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
