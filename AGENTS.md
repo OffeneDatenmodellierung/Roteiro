@@ -11,12 +11,21 @@ it. The review checklist lives in [`docs/REVIEW_CHECKLIST.md`](docs/REVIEW_CHECK
 Roteiro maintains a provenance-tagged knowledge graph of itself. Prefer it when
 orienting:
 
+- `roteiro search "<text>"` — ranked text search; the offline **find-then-explain**
+  entry point (curated ADRs/blueprints rank first). Then `query` a returned key.
 - `roteiro query <key> --json` — a node and its provenance-labelled edges.
 - `roteiro review [--json]` — a **graph-grounded review of your current change**:
   each touched symbol's callers/callees, the ADRs governing it, the drift and
   intent-debt it introduces, and the dependents to re-check.
 - `roteiro path <a> <b>` · `roteiro debt` — connections and outstanding
   intent-debt.
+
+For natural-language "what/why" questions, `roteiro serve --models` exposes the
+same `search` (plus an OpenAI-compatible `/v1` endpoint); MCP agents get
+`search`/`explain`/`path`/`debt` directly. The deeper operational guide (node
+keys, when to use each tool, the plan/review flows) is the installable skill at
+[`.agents/skills/roteiro/SKILL.md`](.agents/skills/roteiro/SKILL.md) — also
+mirrored to `.github/skills/roteiro/` for the Copilot reviewer.
 
 **Before finishing a change**, run `roteiro review` and `roteiro check`.
 
