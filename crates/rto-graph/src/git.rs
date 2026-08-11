@@ -235,6 +235,57 @@ impl Repo {
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
+
+    /// Untracked, non-ignored regular files in the working tree — brand-new files
+    /// that are in neither `HEAD` nor the index, so [`Repo::walk_blobs`] and
+    /// [`Repo::changed_files`] (both HEAD-tree based) miss them. The working-tree
+    /// `sync`/`check`/`review` overlay these so a new-but-unstaged file is seen.
+    ///
+    /// Respects `.gitignore` / `.git/info/exclude` / global excludes, skips nested
+    /// repositories and non-regular files (symlinks, dirs, submodules), and returns
+    /// repository-relative, unix-separated paths, sorted. Empty in a bare repo.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] on a git failure or a non-UTF-8 path.
+    pub fn untracked_files(&self) -> Result<Vec<String>, GitError> {
+        use gix::dir::entry::{Kind, Status};
+        use gix::dir::walk::EmissionMode;
+
+        if self.inner.workdir().is_none() {
+            return Ok(Vec::new());
+        }
+        // Classify the working tree against the index; emit each untracked file
+        // (not whole collapsed dirs), leaving ignored files unemitted (the default)
+        // so `.gitignore` is honoured.
+        let index = self.inner.index_or_empty().map_err(ge)?;
+        let options = self
+            .inner
+            .dirwalk_options()
+            .map_err(ge)?
+            .emit_untracked(EmissionMode::Matching);
+        // A never-set interrupt flag: the walk is a bounded, synchronous pass, so
+        // there is nothing to cancel it from. (`gix` wants an owned/static flag;
+        // its private wrapper type isn't nameable, so build one via `Arc`.)
+        let never = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let iter = self
+            .inner
+            .dirwalk_iter(index, std::iter::empty::<&str>(), never.into(), options)
+            .map_err(ge)?;
+
+        let mut out = Vec::new();
+        for item in iter {
+            let entry = item.map_err(ge)?.entry;
+            // Only brand-new regular files; symlinks/dirs/submodules are excluded
+            // by the `File` disk kind, ignored files by the emission mode above.
+            if entry.status == Status::Untracked && entry.disk_kind == Some(Kind::File) {
+                let path = String::from_utf8(entry.rela_path.into())
+                    .map_err(|e| GitError::NonUtf8Path(e.into_bytes()))?;
+                out.push(path);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
 }
 
 /// Collect every blob reachable from `tree`, with full repository-relative paths.

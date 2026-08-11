@@ -216,8 +216,8 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     cached), deleted files are dropped. The sync state encodes the dirty set so
     repeated previews no-op while a committed `sync` supersedes the overlay.
     `roteiro sync` uses it by default; `--committed` selects committed-only
-    (for hooks/CI). New *untracked* files are not yet included (needs a
-    gitignore-aware dirwalk) — a small follow-up. Dogfooded (+N uncommitted) and
+    (for hooks/CI). Brand-new *untracked* files are also overlaid via a
+    gitignore-aware dirwalk (`Repo::untracked_files`). Dogfooded (+N uncommitted) and
     covered by a fixture test (edit → preview, delete → drop, committed
     supersede).
   - **Multi-language breadth — delivered.** Beyond the bespoke Rust walker, a
@@ -239,8 +239,9 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
     than silently degrading to the file-node fallback. All 15 grammar crates are
     MIT/Apache-2.0 and pass `cargo deny`.
   - **Follow-up:** cross-file `calls` resolve by unambiguous simple name today; a
-    scope-aware resolver (import paths + `Self` types) and untracked-file overlay
-    are later refinements. The generic extractor emits `contains`/`defines`/`calls`
+    scope-aware resolver (import paths + `Self` types) is a later refinement
+    (untracked-file overlay is now delivered). The generic extractor emits
+    `contains`/`defines`/`calls`
     but not `imports` (grammar tags queries do not surface imports uniformly);
     per-language import edges are a later refinement.
 
@@ -684,9 +685,8 @@ follow-ups noted under Stages 2/4 ("making `check` working-tree-aware pairs with
   `pre-commit` hook now gates the *staged* tree, not the working tree, and a
   partially-staged commit is checked precisely (a staged drift is caught even if
   the file is fixed on disk, and vice-versa). Covered by an end-to-end test.
-  Remaining limitation (shared with `sync_worktree`): brand-new **untracked**
-  files are not overlaid by the working-tree `check`/`review` — a gitignore-aware
-  dirwalk follow-up (§5d).
+  Brand-new **untracked** files are now also overlaid by the working-tree
+  `sync`/`check`/`review` via a gitignore-aware dirwalk (`Repo::untracked_files`).
 
 ### Stage 14 — v1.0 hardening  → **v1.0.0** ✅ *hardening delivered (release tag pending)*
 **Goal:** the merged graph is the canonical source; ship stable (completes the
@@ -984,8 +984,10 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
   extractor now runs a per-language import query (Python/JS/TS/TSX/Go/Java/C/C++)
   alongside tags, emitting `import:<lang>:<module>` nodes + `file → import`
   `Imports` edges, mirroring the Rust walker.
-- **Untracked-file overlay** — `sync_worktree` / worktree `check` / `review` do
-  not overlay brand-new *untracked* files; needs a gitignore-aware dirwalk.
+- **Untracked-file overlay — ✅ delivered.** `sync_worktree` and the working-tree
+  `check`/`review` now overlay brand-new *untracked* files via a gitignore-aware
+  dirwalk (`Repo::untracked_files`, gix `dirwalk`), honouring `.gitignore` and
+  skipping nested repos; review lists them as changes. Fixture-tested.
 - **Incremental extraction** — `sync` re-walks the whole tree and does a cache
   lookup per blob every time; diff the `HEAD` tree against the last-synced tree to
   touch only changed paths and carry unchanged files' cached facts forward.
