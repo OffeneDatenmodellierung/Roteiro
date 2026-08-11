@@ -160,19 +160,28 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
 
 ## Consequences
 
-- **New surface:** a `[workspace]` config table, a `--workspace` flag, a
-  `project` argument on the graph tools, a `list_projects` tool, and
-  `/v1/<project>/…` endpoint routing.
+- **New surface:** a `[workspace]` config table, a `--workspace` flag, and — on
+  both the MCP and `/v1` tool surfaces — an optional `project` argument plus a
+  `list_projects` tool (exposed only when several projects are hosted).
 - **Refactor, not rewrite:** [[crates/roteiro/src/main.rs#open_graph]] splits into
   a cwd convenience wrapper over a `(repo_path) -> (Repo, Store, cache)` resolver;
   the resolver is reused by both serve modes. All other callers keep the cwd
   behaviour untouched.
 - **Backwards compatible:** absent workspace config, every existing command and
   the default `serve` are unchanged; no migration.
-- **Freshness is the hooks' job.** Workspace serve opens whatever graph each repo
-  already has (kept fresh by that repo's managed hooks). An optional
-  `--sync-on-access` can rebuild a stale store on first touch; default is to
-  serve what exists and note staleness rather than block.
+- **Freshness is the hooks' job — and it is live.** Workspace serve opens
+  whatever graph each repo already has (kept fresh by that repo's managed hooks).
+  A project's own `roteiro sync` rewrites its `graph.db` **in place**, and the
+  server's cached connection reads the latest *committed* state on the next
+  query — so a project's updates appear on the next question with **no reload**.
+  A `busy_timeout` on every store connection makes a read that lands during a
+  concurrent sync-commit wait briefly rather than fail with `database is locked`.
+- **The registry is not hot-reloaded.** The *set* of hosted projects is fixed at
+  `serve` start (config + `--workspace` are read once). Adding or removing a repo
+  needs a restart — or a future reload trigger (a SIGHUP re-scan is the natural
+  follow-up; content freshness already needs none). A registered-but-unsynced
+  repo *is* picked up once its first sync lands, since a missing graph is not
+  cached.
 - **Security:** one port now exposes multiple graphs — acceptable on the
   loopback default, but the "front a public bind with a proxy" guidance from
   ADR-0006 becomes load-bearing. No new network exposure by default.
