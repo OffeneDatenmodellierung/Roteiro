@@ -55,12 +55,48 @@ pub fn app_with_tools(engine: Arc<dyn Engine>, tools: Arc<dyn ToolRegistry>) -> 
 }
 
 /// Assemble the router over a fully-built [`AppState`].
+///
+/// Alongside the plain `/v1/*` routes, a `/v1/{project}/*` prefix pre-binds the
+/// graph tools to one hosted project of a multi-repo workspace (ADR-0008): a
+/// client points its `base_url` at `…/v1/<project>` and every tool call the
+/// served model makes is scoped to that project without the model naming it.
+/// `models`/`embeddings` ignore the prefix (they are engine-level).
 fn router(state: Shared) -> Router {
     Router::new()
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/{project}/models", get(list_models_scoped))
+        .route(
+            "/v1/{project}/chat/completions",
+            post(chat_completions_scoped),
+        )
+        .route("/v1/{project}/embeddings", post(embeddings_scoped))
         .with_state(state)
+}
+
+/// A [`ToolRegistry`] that pre-binds a `project` for `/v1/{project}/…` requests:
+/// it forwards to the inner registry but fills in `project` on each tool call
+/// when the model did not name one (an explicit `project` in the call still
+/// wins, allowing a cross-project query).
+struct ScopedTools<'a> {
+    inner: &'a dyn ToolRegistry,
+    project: String,
+}
+
+impl ToolRegistry for ScopedTools<'_> {
+    fn tools(&self) -> Vec<crate::tools::ToolDef> {
+        self.inner.tools()
+    }
+
+    fn call(&self, name: &str, arguments: &serde_json::Value) -> Result<String, String> {
+        let mut arguments = arguments.clone();
+        if let Some(obj) = arguments.as_object_mut() {
+            obj.entry("project")
+                .or_insert_with(|| serde_json::Value::String(self.project.clone()));
+        }
+        self.inner.call(name, &arguments)
+    }
 }
 
 /// Serve the `/v1` app on `addr`, blocking the calling thread until shutdown.
@@ -170,12 +206,38 @@ async fn list_models(State(state): State<Shared>) -> Json<ModelList> {
     })
 }
 
+/// `GET /v1/{project}/models` — the engine-level model list; the prefix is
+/// accepted (and ignored) so a client can use `…/v1/<project>` as its base URL
+/// (ADR-0008).
+async fn list_models_scoped(
+    State(state): State<Shared>,
+    axum::extract::Path(_project): axum::extract::Path<String>,
+) -> Json<ModelList> {
+    list_models(State(state)).await
+}
+
 /// `POST /v1/chat/completions` — a full JSON completion, or an SSE stream of
 /// `chat.completion.chunk` events when `stream: true`.
 async fn chat_completions(
     State(state): State<Shared>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> Response {
+    run_chat(state, body, None).await
+}
+
+/// `POST /v1/{project}/chat/completions` — as [`chat_completions`], but the
+/// served model's tool calls are pre-bound to `project` (ADR-0008).
+async fn chat_completions_scoped(
+    State(state): State<Shared>,
+    axum::extract::Path(project): axum::extract::Path<String>,
+    Json(body): Json<ChatCompletionRequest>,
+) -> Response {
+    run_chat(state, body, Some(project)).await
+}
+
+/// Shared chat entry point: validate, then dispatch to the streaming or JSON
+/// path, carrying an optional project scope for the tool loop.
+async fn run_chat(state: Shared, body: ChatCompletionRequest, project: Option<String>) -> Response {
     let stream = body.stream == Some(true);
     let req = match body.into_engine_request() {
         Ok(req) => req,
@@ -191,18 +253,19 @@ async fn chat_completions(
         );
     }
     if stream {
-        stream_chat(state, req)
+        stream_chat(state, req, project)
     } else {
-        chat_json(state, req).await
+        chat_json(state, req, project).await
     }
 }
 
 /// Non-streaming path: run one blocking completion on a worker thread and return
 /// a single JSON body. With tools registered, the model may call them first.
-async fn chat_json(state: Shared, req: ChatRequest) -> Response {
+async fn chat_json(state: Shared, req: ChatRequest, project: Option<String>) -> Response {
     let model = req.model.clone();
     // Inference blocks (llama.cpp decode loop); keep it off the async runtime.
-    let result = tokio::task::spawn_blocking(move || complete(&state, &req)).await;
+    let result =
+        tokio::task::spawn_blocking(move || complete(&state, &req, project.as_deref())).await;
 
     match result {
         Ok(Ok(completion)) => Json(build_response(&model, &completion)).into_response(),
@@ -236,12 +299,37 @@ async fn chat_json(state: Shared, req: ChatRequest) -> Response {
 }
 
 /// Run a completion honouring registered tools: the agentic tool loop
-/// (ADR-0006) when tools are present, otherwise a plain generation. Blocking.
-fn complete(state: &AppState, req: &ChatRequest) -> Result<Completion, EngineError> {
-    match &state.tools {
-        Some(tools) => chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS),
-        None => state.engine.chat(req),
+/// (ADR-0006) when tools are present, otherwise a plain generation. When
+/// `project` is set (a `/v1/{project}/…` request), the tool calls are scoped to
+/// it (ADR-0008). Blocking.
+fn complete(
+    state: &AppState,
+    req: &ChatRequest,
+    project: Option<&str>,
+) -> Result<Completion, EngineError> {
+    let Some(tools) = &state.tools else {
+        return state.engine.chat(req);
+    };
+    match project {
+        Some(project) => {
+            let scoped = ScopedTools {
+                inner: tools.as_ref(),
+                project: project.to_owned(),
+            };
+            chat_with_tools(state.engine.as_ref(), &scoped, req, MAX_TOOL_ROUNDS)
+        }
+        None => chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS),
     }
+}
+
+/// `POST /v1/{project}/embeddings` — embeddings are engine-level; the prefix is
+/// accepted (and ignored) so `…/v1/<project>` works as a base URL (ADR-0008).
+async fn embeddings_scoped(
+    State(state): State<Shared>,
+    axum::extract::Path(_project): axum::extract::Path<String>,
+    Json(body): Json<EmbeddingRequest>,
+) -> Response {
+    embeddings(State(state), Json(body)).await
 }
 
 /// `POST /v1/embeddings` — one embedding vector per input string.
@@ -337,7 +425,7 @@ enum StreamMsg {
 /// Streaming path: run generation on a blocking worker that feeds token deltas
 /// over a channel, and surface them as OpenAI `chat.completion.chunk` SSE events
 /// terminated by `data: [DONE]`.
-fn stream_chat(state: Shared, req: ChatRequest) -> Response {
+fn stream_chat(state: Shared, req: ChatRequest, project: Option<String>) -> Response {
     let id = format!("chatcmpl-{}", next_id());
     let created = unix_seconds();
     let model = req.model.clone();
@@ -355,7 +443,7 @@ fn stream_chat(state: Shared, req: ChatRequest) -> Response {
             // The tool loop runs multiple generations, so it is resolved fully
             // and then the final answer is emitted as one delta (tool-mode
             // streaming is not token-incremental).
-            match complete(&state, &req) {
+            match complete(&state, &req, project.as_deref()) {
                 Ok(completion) => {
                     let _ = tx.send(StreamMsg::Delta(completion.content));
                     let _ = tx.send(StreamMsg::Done(completion.finish_reason));
@@ -583,6 +671,80 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[test]
+    fn scoped_tools_fills_project_only_when_absent() {
+        use super::ScopedTools;
+        use crate::tools::{ToolDef, ToolRegistry};
+
+        // A registry that echoes back the arguments it was called with.
+        struct Echo;
+        impl ToolRegistry for Echo {
+            fn tools(&self) -> Vec<ToolDef> {
+                Vec::new()
+            }
+            fn call(&self, _name: &str, args: &serde_json::Value) -> Result<String, String> {
+                Ok(args.to_string())
+            }
+        }
+        let scoped = ScopedTools {
+            inner: &Echo,
+            project: "beta".to_owned(),
+        };
+        // Omitted → the path project is injected.
+        let out = scoped
+            .call("search", &serde_json::json!({ "query": "x" }))
+            .unwrap();
+        assert!(out.contains(r#""project":"beta""#), "{out}");
+        // Explicit → the caller's choice wins (cross-project query stays possible).
+        let out = scoped
+            .call(
+                "search",
+                &serde_json::json!({ "query": "x", "project": "alpha" }),
+            )
+            .unwrap();
+        assert!(out.contains(r#""project":"alpha""#), "{out}");
+        assert!(!out.contains("beta"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn project_prefixed_routes_work() {
+        // `/v1/{project}/chat/completions` round-trips (the prefix is accepted; the
+        // scope only matters once tools are registered).
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": "hi there"}],
+        });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/myproj/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp).await["choices"][0]["message"]["content"],
+            "HI THERE"
+        );
+
+        // `/v1/{project}/models` returns the same engine-level list.
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/myproj/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["data"][0]["id"], "echo");
     }
 
     #[tokio::test]
