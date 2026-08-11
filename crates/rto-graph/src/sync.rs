@@ -232,14 +232,15 @@ fn try_incremental(
 }
 
 /// Sync `store` to the working tree: the committed `HEAD` state with uncommitted
-/// edits to **tracked** files overlaid on top (a pre-commit preview).
+/// working-tree changes overlaid on top (a pre-commit preview).
 ///
 /// Committed blobs come from the content-addressed cache as in [`sync`]; then
 /// each tracked file whose working copy differs from its committed blob is
 /// re-extracted in memory (never cached, since dirty content is not a git
-/// object), and deleted files are dropped. New *untracked* files are not yet
-/// included. The recorded sync state encodes the dirty set, so a later
-/// committed [`sync`] correctly supersedes the overlay.
+/// object), deleted files are dropped, and brand-new **untracked** files (found
+/// via a gitignore-aware dirwalk, [`Repo::untracked_files`]) are overlaid in.
+/// The recorded sync state encodes the dirty set, so a later committed [`sync`]
+/// correctly supersedes the overlay.
 ///
 /// # Errors
 /// Returns a [`SyncError`] if git access, extraction caching, working-tree I/O,
@@ -252,7 +253,6 @@ pub fn sync_worktree(
 ) -> Result<SyncReport, SyncError> {
     let tree = repo.head_tree_id()?;
     let committed = extract_committed(repo, cache, extractor)?;
-    let mut total = committed.by_path.len();
     let mut by_path = committed.by_path;
 
     // Overlay uncommitted edits to tracked files. A file is dirty when its
@@ -291,7 +291,6 @@ pub fn sync_worktree(
                     let woid = repo.blob_oid(&bytes)?;
                     by_path.insert(path.clone(), extractor.extract(&path, &woid, &bytes));
                     dirty.insert((path, woid));
-                    total += 1;
                 }
                 // Raced away between the walk and the read — nothing to add.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -299,6 +298,11 @@ pub fn sync_worktree(
             }
         }
     }
+
+    // The blob total is the file count of the *overlaid* graph — committed files,
+    // minus working-tree deletions, plus untracked additions — not the committed
+    // baseline, so it stays consistent whether files were added or removed.
+    let total = by_path.len();
 
     // Encode the dirty set into the sync state so repeated identical previews
     // no-op, but any committed change (which alters the plain tree id) does not.
