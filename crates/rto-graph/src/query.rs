@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::Serialize;
 
 use crate::store::{Store, StoreError};
-use crate::{Edge, NodeKind};
+use crate::{Edge, NodeKind, Provenance};
 
 /// The versioned schema tag emitted on every query result. Bump the version on
 /// any breaking change to the shape.
@@ -329,11 +329,15 @@ pub struct SearchHit {
     pub node: NodeSummary,
 }
 
-/// Deterministically search node names/keys/paths for `query`, ranked by
-/// relevance, returning at most `limit` hits. Case-insensitive; every
-/// whitespace/`::`-separated token in `query` must appear somewhere in the node.
-/// Scoring favours an exact name match, then a name substring, then per-token
-/// hits across name/key/path. Ties break by key so results are stable.
+/// Deterministically search nodes for `query`, ranked by relevance, returning at
+/// most `limit` hits. Case-insensitive; every whitespace/`::`-separated token must
+/// appear somewhere in the node's **name, key, path, or captured `meta.content`**
+/// (so a question's words find the *description*, e.g. a README/ADR, not only a
+/// same-named symbol). Scoring favours an exact name match, then a name/content
+/// substring, then per-token hits; it then **boosts curated intent** (`authored`
+/// ADRs/blueprints) and READMEs/overviews and **penalises test scaffolding**, so
+/// "what/why" questions land on the real answer rather than a same-named test
+/// helper. Ties break by key so results are stable.
 ///
 /// # Errors
 /// Returns [`StoreError`] on query failure.
@@ -354,30 +358,56 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
         let name = node.name.to_lowercase();
         let key = node.key.to_lowercase();
         let path = node.path.as_deref().unwrap_or("").to_lowercase();
-        // Require every token to appear somewhere, so a multi-word query narrows.
+        // The captured knowledge base (doc comments, prose, ADR/README/blueprint
+        // text) is searchable too, so a question's words find the *description*,
+        // not just a same-named symbol.
+        let content = node
+            .meta
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        // Require every token to appear somewhere (including content), so a
+        // multi-word query narrows.
         if !tokens
             .iter()
-            .all(|t| name.contains(t) || key.contains(t) || path.contains(t))
+            .all(|t| name.contains(t) || key.contains(t) || path.contains(t) || content.contains(t))
         {
             continue;
         }
-        let mut relevance = 0u32;
+        let mut relevance: i32 = 0;
         if name == q {
             relevance += 100;
         } else if name.contains(&q) {
             relevance += 60;
+        } else if content.contains(&q) {
+            relevance += 25;
         }
         for t in &tokens {
             if name.contains(t) {
                 relevance += 12;
             } else if key.contains(t) {
                 relevance += 6;
+            } else if content.contains(t) {
+                relevance += 8;
             } else if path.contains(t) {
                 relevance += 3;
             }
         }
+        // Curated intent (ADRs/blueprints — `authored`) is the best answer to a
+        // "what/why" question; a README/overview is the natural landing page; and
+        // test scaffolding should not outrank the real thing when it shares a name.
+        if node.provenance == Provenance::Authored {
+            relevance += 40;
+        }
+        if is_overview_path(&path) {
+            relevance += 30;
+        }
+        if is_test_path(&path) {
+            relevance -= 60;
+        }
         hits.push(SearchHit {
-            score: relevance,
+            score: u32::try_from(relevance.max(0)).unwrap_or(0),
             node: NodeSummary::from_node(&node),
         });
     }
@@ -389,6 +419,20 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
     });
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// Whether `path` (already lowercased) is a README/overview doc — the natural
+/// landing for "what is this project" questions, so it is ranked up.
+fn is_overview_path(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|base| base.starts_with("readme"))
+}
+
+/// Whether `path` (already lowercased) is test scaffolding, which should not
+/// outrank real content that happens to share a name.
+fn is_test_path(path: &str) -> bool {
+    path.contains("/tests/") || path.contains("/test/")
 }
 
 /// A candidate step out of a node during traversal: the edge used and the node
@@ -564,6 +608,59 @@ mod tests {
         // A blank query yields nothing; the limit is respected.
         assert!(search(&store, "   ", 10).expect("search").is_empty());
         assert!(search(&store, "a.rs", 1).expect("search").len() <= 1);
+    }
+
+    #[test]
+    fn search_prefers_curated_content_over_same_named_test_symbols() {
+        use crate::Provenance;
+        let mut store = Store::open_in_memory().expect("store");
+        // A same-named test helper (exact name, but test scaffolding)…
+        let mut test_fn = Node::new(
+            "sym:rust:crates/x/tests/cli.rs#roteiro",
+            NodeKind::Fn,
+            "roteiro",
+        );
+        test_fn.path = Some("crates/x/tests/cli.rs".into());
+        // …the authored ADR that actually answers "what is roteiro"…
+        let mut adr = Node::new("adr:0001", NodeKind::Adr, "Build Roteiro")
+            .with_provenance(Provenance::Authored);
+        adr.path = Some("docs/adr/0001.md".into());
+        adr.meta = serde_json::json!({ "content": "Roteiro is a provenance-tagged codebase knowledge graph." });
+        // …and a README whose *content* (not its name) describes the project.
+        let mut readme = Node::new("file:README.md", NodeKind::File, "README.md");
+        readme.path = Some("README.md".into());
+        readme.meta =
+            serde_json::json!({ "content": "Roteiro turns a repo into one knowledge graph." });
+        store
+            .apply_factset(
+                &FactSet::new()
+                    .with_node(test_fn)
+                    .with_node(adr)
+                    .with_node(readme),
+            )
+            .expect("apply");
+
+        let hits = search(&store, "roteiro", 10).expect("search");
+        let keys: Vec<&str> = hits.iter().map(|h| h.node.key.as_str()).collect();
+        let idx = |k: &str| keys.iter().position(|x| *x == k).expect("present");
+        // The authored ADR and the README (found *by content*) both outrank the
+        // same-named test helper.
+        assert!(
+            idx("adr:0001") < idx("sym:rust:crates/x/tests/cli.rs#roteiro"),
+            "authored ADR outranks the test symbol: {keys:?}"
+        );
+        assert!(
+            idx("file:README.md") < idx("sym:rust:crates/x/tests/cli.rs#roteiro"),
+            "README (matched via content) outranks the test symbol: {keys:?}"
+        );
+
+        // A content-only term finds the node even though no name/key/path has it.
+        let by_content = search(&store, "provenance-tagged", 10).expect("search");
+        assert_eq!(
+            by_content.first().map(|h| h.node.key.as_str()),
+            Some("adr:0001"),
+            "content search matches the ADR by its captured text"
+        );
     }
 
     #[test]
