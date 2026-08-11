@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.19...rto-serve-v0.0.20) - 2026-08-11
+
+### Added
+
+- *(serve)* serve /v1 and /mcp on one port — `serve --models --mcp` (ADR-0008)
+- *(serve)* GET /v1/projects — enumerate hosted projects (ADR-0008)
+- *(serve)* /v1/{project}/… path routing pre-binds a workspace project (ADR-0008)
+
 ## [0.0.18](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v0.0.17...rto-serve-v0.0.18) - 2026-08-11
 
 ### Other
