@@ -74,6 +74,10 @@ pub enum ModelKind {
     Ocr,
     /// A vision-language model for image *understanding* (ADR-0005 Tier B).
     Vision,
+    /// An audio-capable multimodal model for speech transcription (Stage 18;
+    /// served through the same llama.cpp `mtmd` path as [`Self::Vision`], with an
+    /// audio projector instead of a vision one).
+    Audio,
 }
 
 impl ModelKind {
@@ -85,6 +89,7 @@ impl ModelKind {
             Self::Generative => "generative",
             Self::Ocr => "ocr",
             Self::Vision => "vision",
+            Self::Audio => "audio",
         }
     }
 }
@@ -445,6 +450,43 @@ pub const REGISTRY: &[ModelSpec] = &[
             ],
         }],
     },
+    // Stage 18: audio transcription via an audio-capable llama.cpp `mtmd` model —
+    // the same multimodal path as vision, with an *audio* projector (a Whisper-
+    // style encoder, `mmproj.gguf`) instead of a vision one. So `roteiro sync` can
+    // transcribe spoken-word audio (wav/mp3/flac) into `meta.content`. Off by
+    // default (feature `audio-transcribe`).
+    //
+    // Model choice: Voxtral-Mini-3B (Mistral, Apache-2.0) is a *transcription-
+    // specialised* audio model, verified transcribing a speech clip verbatim over
+    // this mtmd path (`rto-llama/tests/audio.rs`). It is the only curated audio
+    // pick for now, and a mid-tier one — so the audio section has no low-tier floor
+    // (see `every_section_has_a_low_tier_floor`). A smaller low-tier option (e.g.
+    // Ultravox 1B) could be added later if it verifies at acceptable quality.
+    ModelSpec {
+        name: "voxtral-mini-3b",
+        kind: ModelKind::Audio,
+        role: ModelRole::None,
+        tier: ResourceTier::Mid,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Voxtral-Mini-3B (Mistral, Q4_K_M GGUF + Q8_0 audio mmproj) — speech transcription via llama.cpp mtmd",
+        size_mib: 3041,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[
+                ModelFile {
+                    name: "model.gguf",
+                    url: "https://huggingface.co/ggml-org/Voxtral-Mini-3B-2507-GGUF/resolve/main/Voxtral-Mini-3B-2507-Q4_K_M.gguf",
+                    sha256: "4705be8ec22ca23d12632f4b4a3691faa95917d90a06d3cf3c3ec0e91958f1a8",
+                },
+                ModelFile {
+                    name: "mmproj.gguf",
+                    url: "https://huggingface.co/ggml-org/Voxtral-Mini-3B-2507-GGUF/resolve/main/mmproj-Voxtral-Mini-3B-2507-Q8_0.gguf",
+                    sha256: "4f24c4ef3ce929d02ed9d1cfb050ae9a7365f057c0ddec0d489580982ebe0d02",
+                },
+            ],
+        }],
+    },
 ];
 
 /// Look up a model spec by name.
@@ -734,7 +776,10 @@ mod tests {
     #[test]
     fn every_section_has_a_low_tier_floor() {
         // The curated matrix must offer a runs-anywhere pick for each section, so
-        // `roteiro model list` always has a low-resource recommendation.
+        // `roteiro model list` always has a low-resource recommendation — except
+        // Audio: the only curated audio model (Voxtral, transcription-quality) is
+        // mid-tier and no low-tier audio pick is offered yet, so the audio section
+        // deliberately has no low-tier floor. See the audio registry entry.
         for kind in [
             ModelKind::Embedding,
             ModelKind::Generative,

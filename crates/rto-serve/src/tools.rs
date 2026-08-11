@@ -80,6 +80,7 @@ pub fn chat_with_tools(
             model: req.model.clone(),
             messages: messages.to_vec(),
             images: req.images.clone(),
+            audio: req.audio.clone(),
             temperature: req.temperature,
             max_tokens: req.max_tokens,
         })
@@ -273,6 +274,7 @@ mod tests {
                 content: "explain abc".to_owned(),
             }],
             images: vec![],
+            audio: vec![],
             temperature: 0.0,
             max_tokens: 64,
         };
@@ -303,6 +305,7 @@ mod tests {
                 content: "hi".to_owned(),
             }],
             images: vec![],
+            audio: vec![],
             temperature: 0.0,
             max_tokens: 64,
         };

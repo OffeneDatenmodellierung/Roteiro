@@ -51,8 +51,9 @@ pub struct Served {
     pub name: String,
     /// Path to the GGUF file on disk.
     pub path: PathBuf,
-    /// Path to the multimodal-projector GGUF (`mmproj`), for vision models —
-    /// enables image inputs on `/v1/chat/completions` (ADR-0006). `None` for
+    /// Path to the multimodal-projector GGUF (`mmproj`), for multimodal models —
+    /// enables image inputs on `/v1/chat/completions` (ADR-0006) for a vision
+    /// projector, or audio transcription for an audio projector. `None` for
     /// text-only models.
     pub mmproj: Option<PathBuf>,
 }
@@ -272,14 +273,19 @@ impl LlamaEngine {
         })
     }
 
-    /// Multimodal chat (ADR-0006): project images through `mmproj` and generate.
-    /// The images are placed at a media marker inside the last user turn; the OCR
-    /// use case is just a prompt ("transcribe the text in this image").
-    fn chat_vision(
+    /// Multimodal chat (ADR-0006): project the request's `modality` media
+    /// (images or audio) through `mmproj` and generate. The media are placed at
+    /// media markers inside the last user turn; the use case is just a prompt
+    /// ("transcribe the text in this image" / "transcribe this audio"). Both
+    /// modalities share this path — the projector decodes the raw file bytes
+    /// (images via `stb_image`, audio via miniaudio) and only the support check
+    /// and which byte vectors are read differ.
+    fn chat_media(
         &self,
         model: &LlamaModel,
         mmproj: &Path,
         req: &ChatRequest,
+        modality: Modality,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<CompletionStats, EngineError> {
         let mmproj = mmproj
@@ -287,21 +293,24 @@ impl LlamaEngine {
             .ok_or_else(|| EngineError::Inference("non-UTF-8 mmproj path".to_owned()))?;
         let mtmd = MtmdContext::init_from_file(mmproj, model, &MtmdContextParams::default())
             .map_err(|e| EngineError::Inference(format!("init projector: {e}")))?;
-        if !mtmd.support_vision() {
-            return Err(EngineError::Inference(
-                "this projector does not support images".to_owned(),
-            ));
+        if !modality.supported(&mtmd) {
+            return Err(EngineError::Inference(format!(
+                "this projector does not support {}",
+                modality.noun(),
+            )));
         }
 
-        let bitmaps = req
-            .images
+        // `from_buffer` decodes both images and audio from their raw file bytes
+        // (audio is auto-detected by magic bytes and resampled by miniaudio).
+        let bitmaps = modality
+            .media(req)
             .iter()
-            .map(|img| MtmdBitmap::from_buffer(&mtmd, img, false))
+            .map(|blob| MtmdBitmap::from_buffer(&mtmd, blob, false))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| EngineError::Inference(format!("decode image: {e}")))?;
+            .map_err(|e| EngineError::Inference(format!("decode {}: {e}", modality.noun())))?;
         let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
 
-        let prompt = vision_prompt(model, req, bitmaps.len())?;
+        let prompt = media_prompt(model, req, bitmaps.len())?;
         let chunks = mtmd
             .tokenize(
                 MtmdInputText {
@@ -315,8 +324,8 @@ impl LlamaEngine {
         let prompt_tokens = u32::try_from(chunks.total_tokens()).unwrap_or(u32::MAX);
 
         let mut ctx = self.new_context(model)?;
-        // `eval_chunks` decodes text + projected image embeddings into the context
-        // and returns the new position to continue generating from.
+        // `eval_chunks` decodes text + projected media (image/audio) embeddings
+        // into the context and returns the new position to continue generating.
         let n_past = chunks
             .eval_chunks(&mtmd, &ctx, 0, 0, 512, true)
             .map_err(|e| EngineError::Inference(format!("mtmd eval: {e}")))?;
@@ -337,13 +346,50 @@ impl LlamaEngine {
     }
 }
 
-/// Build the templated prompt for a vision request: prepend `n_images` media
-/// markers to the last user turn (where `mtmd` will splice the image embeddings),
-/// then apply the model's chat template.
-fn vision_prompt(
+/// Which media modality a multimodal request carries. Both flow through
+/// [`LlamaEngine::chat_media`]; only the projector support check and which byte
+/// vectors are read differ.
+#[derive(Debug, Clone, Copy)]
+enum Modality {
+    /// Images (PNG/JPEG bytes), projected through a vision `mmproj`.
+    Vision,
+    /// Audio clips (WAV/MP3/FLAC bytes), projected through an audio `mmproj`.
+    Audio,
+}
+
+impl Modality {
+    /// The request's media byte-vectors for this modality.
+    fn media(self, req: &ChatRequest) -> &[Vec<u8>] {
+        match self {
+            Self::Vision => &req.images,
+            Self::Audio => &req.audio,
+        }
+    }
+
+    /// Whether `mtmd`'s loaded projector supports this modality.
+    fn supported(self, mtmd: &MtmdContext) -> bool {
+        match self {
+            Self::Vision => mtmd.support_vision(),
+            Self::Audio => mtmd.support_audio(),
+        }
+    }
+
+    /// Plural noun for error messages (`images` / `audio`).
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Vision => "images",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+/// Build the templated prompt for a multimodal request: prepend `n_media` media
+/// markers to the last user turn (where `mtmd` will splice the projected image or
+/// audio embeddings), then apply the model's chat template.
+fn media_prompt(
     model: &LlamaModel,
     req: &ChatRequest,
-    n_images: usize,
+    n_media: usize,
 ) -> Result<String, EngineError> {
     let marker = mtmd_default_marker();
     let target = req
@@ -352,7 +398,7 @@ fn vision_prompt(
         .rposition(|m| m.role == "user")
         .unwrap_or(req.messages.len().saturating_sub(1));
     let mut markers = String::new();
-    for _ in 0..n_images {
+    for _ in 0..n_media {
         markers.push_str(marker);
         markers.push('\n');
     }
@@ -463,12 +509,22 @@ impl Engine for LlamaEngine {
             .lock()
             .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
-        match (req.images.is_empty(), mmproj.as_deref()) {
-            (true, _) => self.chat_text(&model, req, on_token),
-            (false, Some(mmproj)) => self.chat_vision(&model, mmproj, req, on_token),
-            (false, None) => Err(EngineError::InvalidRequest(format!(
-                "model `{}` is text-only and cannot accept images",
-                req.model
+        // Pick the modality from the attached media. Images take precedence when
+        // both are somehow present; a media request needs the model's projector.
+        let modality = if !req.images.is_empty() {
+            Some(Modality::Vision)
+        } else if !req.audio.is_empty() {
+            Some(Modality::Audio)
+        } else {
+            None
+        };
+        match (modality, mmproj.as_deref()) {
+            (None, _) => self.chat_text(&model, req, on_token),
+            (Some(m), Some(mmproj)) => self.chat_media(&model, mmproj, req, m, on_token),
+            (Some(m), None) => Err(EngineError::InvalidRequest(format!(
+                "model `{}` is text-only and cannot accept {}",
+                req.model,
+                m.noun(),
             ))),
         }
     }

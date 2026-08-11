@@ -528,6 +528,11 @@ fn print_config_sections(loaded: &config::Loaded) {
         e.ingest.vision,
         source(p.ingest.vision.is_some(), u.ingest.vision.is_some())
     );
+    println!(
+        "  audio  = {:?}  ({})",
+        e.ingest.audio,
+        source(p.ingest.audio.is_some(), u.ingest.audio.is_some())
+    );
     println!("[serve]");
     println!(
         "  addr   = {:?}  ({})",
@@ -1199,6 +1204,10 @@ fn run_model_list() {
             ModelKind::Vision,
             "Vision — image description (`roteiro sync` with --features image-vision)",
         ),
+        (
+            ModelKind::Audio,
+            "Audio — speech transcription (`roteiro sync` with --features audio-transcribe)",
+        ),
     ];
     let tiers = [
         (ResourceTier::Low, "low  (any laptop)"),
@@ -1306,6 +1315,9 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
         }
         rto_graph::ModelKind::Vision => {
             "roteiro sync (a build with --features image-vision describes images)".to_owned()
+        }
+        rto_graph::ModelKind::Audio => {
+            "roteiro sync (a build with --features audio-transcribe transcribes audio)".to_owned()
         }
     };
     println!(
@@ -1783,6 +1795,7 @@ fn draft_sections(
                     content: prompt,
                 }],
                 images: vec![],
+                audio: vec![],
                 temperature: 0.0,
                 max_tokens: DRAFT_MAX_TOKENS,
             })
@@ -2262,7 +2275,9 @@ fn serve_models_endpoint(
             ModelKind::Generative | ModelKind::Embedding => true,
             // A vision model is only servable with its multimodal projector.
             ModelKind::Vision => has_file(m, "mmproj.gguf"),
-            ModelKind::Ocr => false,
+            // OCR and audio are sync-time ingestion models, not `/v1` endpoints
+            // (the wire carries no audio) — see `roteiro sync`.
+            ModelKind::Ocr | ModelKind::Audio => false,
         })
         .filter(|m| m.variant_for(host).is_some_and(|v| is_installed(m.name, v)))
         .map(|m| rto_serve::llama::Served {

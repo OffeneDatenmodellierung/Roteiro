@@ -80,6 +80,7 @@ fn req(model: &str) -> ChatRequest {
             content: "Reply with the single word: ok".to_owned(),
         }],
         images: Vec::new(),
+        audio: Vec::new(),
         temperature: 0.0,
         max_tokens: 16,
     }

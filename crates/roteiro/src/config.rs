@@ -85,7 +85,8 @@ pub struct ModelsConfig {
 /// `[ingest]` — which blob content `roteiro sync` extracts for embedding. Each
 /// toggle is `Some(false)` to disable a content class the binary supports; unset
 /// (or `true`) leaves it on. A toggle cannot enable a class the binary was not
-/// built with (the `pdf-text`/`image-ocr`/`image-vision` features).
+/// built with (the `pdf-text`/`image-ocr`/`image-vision`/`audio-transcribe`
+/// features).
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IngestConfig {
@@ -97,6 +98,8 @@ pub struct IngestConfig {
     pub ocr: Option<bool>,
     /// Describe images with a vision model.
     pub vision: Option<bool>,
+    /// Transcribe spoken-word audio.
+    pub audio: Option<bool>,
 }
 
 impl IngestConfig {
@@ -110,6 +113,7 @@ impl IngestConfig {
             pdf: self.pdf.unwrap_or(default.pdf),
             ocr: self.ocr.unwrap_or(default.ocr),
             vision: self.vision.unwrap_or(default.vision),
+            audio: self.audio.unwrap_or(default.audio),
         }
     }
 }
@@ -193,6 +197,7 @@ impl Config {
                 pdf: over.ingest.pdf.or(self.ingest.pdf),
                 ocr: over.ingest.ocr.or(self.ingest.ocr),
                 vision: over.ingest.vision.or(self.ingest.vision),
+                audio: over.ingest.audio.or(self.ingest.audio),
             },
             serve: ServeConfig {
                 addr: over.serve.addr.clone().or(self.serve.addr.clone()),
