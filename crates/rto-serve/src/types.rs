@@ -184,6 +184,9 @@ impl ChatCompletionRequest {
             model: self.model,
             messages,
             images,
+            // The `/v1` wire does not accept audio attachments yet; audio is an
+            // internal ingestion path (`roteiro sync`), not a served endpoint.
+            audio: Vec::new(),
             temperature: self.temperature.unwrap_or(0.0).max(0.0),
             max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).max(1),
         })

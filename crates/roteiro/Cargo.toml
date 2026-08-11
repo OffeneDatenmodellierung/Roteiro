@@ -60,6 +60,11 @@ image-ocr = ["models", "rto-graph/image-ocr"]
 # (ADR-0005 Tier B; off by default). Uses the shared llama.cpp engine via
 # `rto-graph/image-vision` (smolvlm + mmproj) — no candle.
 image-vision = ["models", "rto-graph/image-vision"]
+# Transcribe spoken-word audio (wav/mp3/flac) during `roteiro sync` (Stage 18;
+# off by default). Uses the shared llama.cpp engine via
+# `rto-graph/audio-transcribe` (voxtral + audio mmproj) — no candle. Implies
+# `models` so `roteiro model pull voxtral-mini-3b` can fetch it.
+audio-transcribe = ["models", "rto-graph/audio-transcribe"]
 # Local model serving (`roteiro serve --models`): the opt-in, loopback,
 # OpenAI-compatible `/v1` endpoint over installed models (ADR-0006). Pulls
 # `rto-serve` with its llama.cpp engine; also enables the internal llama.cpp uses

@@ -77,6 +77,13 @@ pub struct ChatRequest {
     /// Images attached to the request (decoded, still-encoded PNG/JPEG bytes),
     /// in order — non-empty only for multimodal requests to a vision model.
     pub images: Vec<Vec<u8>>,
+    /// Audio clips attached to the request (raw encoded WAV/MP3/FLAC bytes), in
+    /// order — non-empty only for requests to an audio-capable model. The
+    /// projector (`mmproj`) decodes and resamples them via miniaudio, so the
+    /// caller passes the original file bytes, not PCM. Mutually exclusive with
+    /// [`Self::images`]: a request that sets both is rejected as an invalid
+    /// request (a projector splices one media stream).
+    pub audio: Vec<Vec<u8>>,
     /// Sampling temperature (`0.0` = greedy).
     pub temperature: f32,
     /// Maximum tokens to generate.

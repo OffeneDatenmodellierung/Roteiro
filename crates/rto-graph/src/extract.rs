@@ -19,17 +19,23 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
 /// blob — the version is folded into the cache key. See [`crate::sync`].
 ///
-/// The `pdf-text`, `image-ocr`, and `image-vision` features change what
-/// PDFs/images extract to, so each occupies a distinct version namespace: a
-/// feature build and a default build never serve each other stale (content-bearing
-/// vs content-free) facts from a shared cache. (Image output also depends on
-/// *which* models are installed; that runtime state is folded into the cache key
-/// separately — see [`image_env_tag`] and [`crate::sync`].)
+/// The `pdf-text`, `image-ocr`, `image-vision`, and `audio-transcribe` features
+/// change what PDFs/images/audio extract to, so each occupies a distinct version
+/// namespace: a feature build and a default build never serve each other stale
+/// (content-bearing vs content-free) facts from a shared cache. (Image/audio
+/// output also depends on *which* models are installed; that runtime state is
+/// folded into the cache key separately — see [`media_env_tag`] and
+/// [`crate::sync`].)
 pub(crate) const EXTRACT_VERSION: u32 = 4
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "image-vision") {
         400
+    } else {
+        0
+    }
+    + if cfg!(feature = "audio-transcribe") {
+        800
     } else {
         0
     };
@@ -60,6 +66,11 @@ const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
 #[cfg(feature = "image-vision")]
 const MIN_OCR_WORDS: usize = 8;
 
+/// Audio files larger than this (compressed bytes) are not transcribed — decode
+/// + inference time scales with duration, so cap the work a single clip imposes.
+#[cfg(feature = "audio-transcribe")]
+const MAX_AUDIO_BYTES: usize = 50 * 1024 * 1024;
+
 /// Turns one source blob into the nodes and edges derived from it.
 pub trait Extractor {
     /// Extract a [`FactSet`] from a blob's `path`, git `blob_id`, and `bytes`.
@@ -69,13 +80,13 @@ pub trait Extractor {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet;
 
     /// Runtime inputs — beyond `(path, bytes)` — that change extraction output
-    /// and so must be folded into the sync cache key: the installed image-model
-    /// identity (OCR + vision) and any [`IngestConfig`] toggles. The default is
-    /// the image-model tag alone; [`Registry`] additionally folds in its
-    /// ingestion config so toggling content off re-extracts affected blobs
+    /// and so must be folded into the sync cache key: the installed media-model
+    /// identity (OCR + vision + audio) and any [`IngestConfig`] toggles. The
+    /// default is the media-model tag alone; [`Registry`] additionally folds in
+    /// its ingestion config so toggling content off re-extracts affected blobs
     /// instead of serving stale, content-bearing facts.
     fn env_tag(&self) -> u64 {
-        image_env_tag()
+        media_env_tag()
     }
 }
 
@@ -97,6 +108,8 @@ pub struct IngestConfig {
     pub ocr: bool,
     /// Describe images with a vision model (needs the `image-vision` feature).
     pub vision: bool,
+    /// Transcribe spoken-word audio (needs the `audio-transcribe` feature).
+    pub audio: bool,
 }
 
 impl Default for IngestConfig {
@@ -106,6 +119,7 @@ impl Default for IngestConfig {
             pdf: true,
             ocr: true,
             vision: true,
+            audio: true,
         }
     }
 }
@@ -120,6 +134,7 @@ impl IngestConfig {
             | (u64::from(!self.pdf) << 1)
             | (u64::from(!self.ocr) << 2)
             | (u64::from(!self.vision) << 3)
+            | (u64::from(!self.audio) << 4)
     }
 }
 
@@ -150,18 +165,22 @@ impl Extractor for Registry {
     }
 
     fn env_tag(&self) -> u64 {
-        let img = image_env_tag();
+        let media = media_env_tag();
         let disabled = self.ingest.disabled_bits();
         if disabled == 0 {
             // All-on default: preserve existing cache keys exactly.
-            img
+            media
         } else {
             // FNV-1a fold of both components — deterministic and stable. As with
             // any 64-bit hash a collision with the all-on key is possible but
             // vanishingly unlikely, and a collision only costs a spurious cache
             // hit/miss, never incorrect facts.
             let mut h = 0xcbf2_9ce4_8422_2325u64;
-            for b in img.to_le_bytes().into_iter().chain(disabled.to_le_bytes()) {
+            for b in media
+                .to_le_bytes()
+                .into_iter()
+                .chain(disabled.to_le_bytes())
+            {
                 h ^= u64::from(b);
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             }
@@ -226,6 +245,8 @@ fn file_node(
     } else if let Some(text) = ingest.pdf.then(|| pdf_content(path, bytes)).flatten() {
         cap_content(&text)
     } else if let Some(text) = image_content(path, bytes, ingest) {
+        cap_content(&text)
+    } else if let Some(text) = audio_content(path, bytes, ingest) {
         cap_content(&text)
     } else {
         String::new()
@@ -301,7 +322,7 @@ fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
 /// or nothing is produced.
 ///
 /// Both extractors read the *installed* image models — that runtime dependency is
-/// reflected in the cache key via [`image_env_tag`], so installing/upgrading a
+/// reflected in the cache key via [`media_env_tag`], so installing/upgrading a
 /// model re-extracts affected images instead of serving stale (content-free)
 /// facts.
 #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
@@ -357,6 +378,94 @@ fn is_image(path: &str) -> bool {
     matches!(extension(path).as_deref(), Some("png" | "jpg" | "jpeg"))
 }
 
+/// Embeddable content for an audio blob: a transcript of its spoken words, or
+/// `None` when `path` is not audio, the clip is too large, the `audio` toggle is
+/// off, the `audio-transcribe` feature is off, or no model is installed.
+///
+/// Like the image extractors, this reads the *installed* audio model — that
+/// runtime dependency is reflected in the cache key via [`media_env_tag`], so
+/// installing/upgrading the model re-transcribes affected clips instead of serving
+/// stale (content-free) facts.
+#[cfg(feature = "audio-transcribe")]
+fn audio_content(path: &str, bytes: &[u8], ingest: IngestConfig) -> Option<String> {
+    if !ingest.audio || !is_audio(path) || bytes.len() > MAX_AUDIO_BYTES {
+        return None;
+    }
+    asr_content(bytes)
+}
+
+/// No-op when the `audio-transcribe` feature is off: audio files become plain
+/// file nodes.
+#[cfg(not(feature = "audio-transcribe"))]
+fn audio_content(_path: &str, _bytes: &[u8], _ingest: IngestConfig) -> Option<String> {
+    None
+}
+
+/// Whether `path` is an audio file the projector's miniaudio decoder can read
+/// (WAV/MP3/FLAC — the formats llama.cpp bundles support for).
+#[cfg(feature = "audio-transcribe")]
+fn is_audio(path: &str) -> bool {
+    matches!(extension(path).as_deref(), Some("wav" | "mp3" | "flac"))
+}
+
+/// Transcribe spoken-word audio with the GGUF audio model (`ASR_MODEL`) through
+/// the shared llama.cpp engine (`rto-llama`) — the raw file bytes are decoded and
+/// resampled by llama.cpp's bundled miniaudio, so no separate audio-decoding crate
+/// is needed. `None` when the model is not installed or generation yields nothing.
+#[cfg(feature = "audio-transcribe")]
+fn asr_content(bytes: &[u8]) -> Option<String> {
+    use rto_llama::Engine as _;
+
+    let engine = asr_engine()?;
+    let completion = engine
+        .chat(&rto_llama::ChatRequest {
+            model: ASR_MODEL.to_owned(),
+            messages: vec![rto_llama::Message {
+                role: "user".to_owned(),
+                content: "Transcribe this audio recording. Output only the spoken words, verbatim."
+                    .to_owned(),
+            }],
+            images: Vec::new(),
+            audio: vec![bytes.to_vec()],
+            temperature: 0.0,
+            max_tokens: 512,
+        })
+        .ok()?;
+    let text = completion.content.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The GGUF audio model backing `audio-transcribe`.
+#[cfg(feature = "audio-transcribe")]
+const ASR_MODEL: &str = "voxtral-mini-3b";
+
+/// The process-wide audio engine, built lazily from the installed `ASR_MODEL`
+/// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed —
+/// transcription is then inert (run `roteiro model pull voxtral-mini-3b`).
+#[cfg(feature = "audio-transcribe")]
+fn asr_engine() -> Option<&'static rto_llama::llama::LlamaEngine> {
+    use std::sync::OnceLock;
+    static ENGINE: OnceLock<Option<rto_llama::llama::LlamaEngine>> = OnceLock::new();
+    ENGINE
+        .get_or_init(|| {
+            let dir = crate::models::model_dir(ASR_MODEL);
+            let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
+            if !gguf.exists() || !mmproj.exists() {
+                return None;
+            }
+            rto_llama::llama::LlamaEngine::new(
+                vec![rto_llama::llama::Served {
+                    name: ASR_MODEL.to_owned(),
+                    path: gguf,
+                    mmproj: Some(mmproj),
+                }],
+                0,
+            )
+            .ok()
+        })
+        .as_ref()
+}
+
 /// Whether the image's pixel dimensions (read from its header, without decoding
 /// the pixels — so a decompression bomb is rejected cheaply) are within
 /// [`MAX_IMAGE_PIXELS`]. `false` if the header cannot be parsed or the limit is
@@ -393,7 +502,11 @@ fn ocr_content(bytes: &[u8]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-#[cfg(not(feature = "image-ocr"))]
+// Only the `any(image-ocr, image-vision)` version of `image_content` calls this,
+// so the no-op stub is needed only when that caller is compiled with image-ocr
+// off — i.e. image-vision on. Without this narrower gate it would be dead code in
+// an audio-only (no image feature) build.
+#[cfg(all(feature = "image-vision", not(feature = "image-ocr")))]
 fn ocr_content(_bytes: &[u8]) -> Option<String> {
     None
 }
@@ -445,6 +558,7 @@ fn vlm_content(bytes: &[u8]) -> Option<String> {
                 content: "Describe this image in one or two sentences.".to_owned(),
             }],
             images: vec![bytes.to_vec()],
+            audio: Vec::new(),
             temperature: 0.0,
             max_tokens: 128,
         })
@@ -484,19 +598,28 @@ fn vlm_engine() -> Option<&'static rto_llama::llama::LlamaEngine> {
         .as_ref()
 }
 
-#[cfg(not(feature = "image-vision"))]
+// Mirror of the `ocr_content` stub: needed only when the image path is compiled
+// (image-ocr on) with image-vision off, not in an audio-only build.
+#[cfg(all(feature = "image-ocr", not(feature = "image-vision")))]
 fn vlm_content(_bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// A cache-key component reflecting the image extractors' runtime environment:
-/// `0` when neither image feature is on or no models are installed, else a hash
-/// of the installed OCR/vision model identities. Folded into the sync cache key
-/// so installing/upgrading a model re-extracts affected images instead of serving
-/// stale facts (image output is not a pure function of the blob alone). See
-/// [`crate::sync`].
-#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
-pub(crate) fn image_env_tag() -> u64 {
+/// A cache-key component reflecting the media extractors' runtime environment:
+/// `0` when no media feature is on or no models are installed, else a hash of the
+/// installed OCR/vision/audio model identities. Folded into the sync cache key so
+/// installing/upgrading a model re-extracts affected images/audio instead of
+/// serving stale facts (media output is not a pure function of the blob alone).
+/// See [`crate::sync`].
+///
+/// The audio fold is `#[cfg]`-gated on `audio-transcribe`, so an image-only build
+/// produces exactly the same tag it did before audio existed — no cache churn.
+#[cfg(any(
+    feature = "image-ocr",
+    feature = "image-vision",
+    feature = "audio-transcribe"
+))]
+pub(crate) fn media_env_tag() -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut any = false;
     #[cfg(feature = "image-ocr")]
@@ -507,13 +630,21 @@ pub(crate) fn image_env_tag() -> u64 {
     {
         any |= fold_installed_model(&mut hash, "smolvlm-500m-gguf");
     }
+    #[cfg(feature = "audio-transcribe")]
+    {
+        any |= fold_installed_model(&mut hash, "voxtral-mini-3b");
+    }
     if any { hash | 1 } else { 0 }
 }
 
 /// If model `name` is fully installed, fold its host-variant checksums into
 /// `hash` and return `true`. Only the host-selected variant is hashed, so an
 /// unrelated platform variant does not perturb this host's tag.
-#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
+#[cfg(any(
+    feature = "image-ocr",
+    feature = "image-vision",
+    feature = "audio-transcribe"
+))]
 fn fold_installed_model(hash: &mut u64, name: &str) -> bool {
     let Some(variant) = crate::models::find(name)
         .and_then(|spec| spec.variant_for(crate::models::Platform::host()))
@@ -533,9 +664,13 @@ fn fold_installed_model(hash: &mut u64, name: &str) -> bool {
     true
 }
 
-/// `0` whenever neither image feature is compiled in.
-#[cfg(not(any(feature = "image-ocr", feature = "image-vision")))]
-pub(crate) fn image_env_tag() -> u64 {
+/// `0` whenever no media feature is compiled in.
+#[cfg(not(any(
+    feature = "image-ocr",
+    feature = "image-vision",
+    feature = "audio-transcribe"
+)))]
+pub(crate) fn media_env_tag() -> u64 {
     0
 }
 
@@ -1948,8 +2083,16 @@ mod inner {
             ..IngestConfig::default()
         })
         .env_tag();
+        let no_audio = Registry::new(IngestConfig {
+            audio: false,
+            ..IngestConfig::default()
+        })
+        .env_tag();
         assert_ne!(no_prose, all_on);
         assert_ne!(no_pdf, all_on);
+        assert_ne!(no_audio, all_on);
         assert_ne!(no_prose, no_pdf);
+        assert_ne!(no_audio, no_prose);
+        assert_ne!(no_audio, no_pdf);
     }
 }

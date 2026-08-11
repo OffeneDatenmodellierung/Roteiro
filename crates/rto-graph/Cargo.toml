@@ -102,6 +102,13 @@ image-ocr = ["models", "dep:ocrs", "dep:rten", "dep:image"]
 # `rto-llama` (the C++ engine) + `image`. When combined with `image-ocr`, OCR
 # runs always and the VLM only on text-sparse images. See [`crate::extract`].
 image-vision = ["models", "dep:rto-llama", "rto-llama/llama", "dep:image"]
+# Transcribe spoken-word audio (wav/mp3/flac) into `meta.content` via an
+# audio-capable GGUF model through the shared llama.cpp `mtmd` core — the same
+# path as `image-vision`, with an audio projector (Stage 18; no candle). Opt-in
+# (off by default): pulls `rto-llama` (the C++ engine). Audio is decoded and
+# resampled by llama.cpp's bundled miniaudio, so no extra audio-decoding crate is
+# needed. See [`crate::extract`].
+audio-transcribe = ["models", "dep:rto-llama", "rto-llama/llama"]
 
 [lints]
 workspace = true
