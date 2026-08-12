@@ -216,8 +216,17 @@ fn flatten_yaml_node(v: &Yaml, prefix: &str, file: &str, out: &mut Vec<ConfigKey
             }
         }
         Yaml::Array(items) => {
-            let parts: Vec<String> = items.iter().filter_map(yaml_scalar).collect();
-            push(out, file, prefix, format!("[{}]", parts.join(", ")));
+            // An all-scalar array renders as one compact leaf; if any element is a
+            // map/array, emit a sentinel rather than silently dropping it to `[]`
+            // (which would mislead the matcher/diff into a false equality).
+            let parts: Vec<Option<String>> = items.iter().map(yaml_scalar).collect();
+            let value = if parts.iter().all(Option::is_some) {
+                let scalars: Vec<String> = parts.into_iter().flatten().collect();
+                format!("[{}]", scalars.join(", "))
+            } else {
+                format!("[<{} items>]", items.len())
+            };
+            push(out, file, prefix, value);
         }
         other => {
             if let Some(s) = yaml_scalar(other) {
@@ -270,14 +279,15 @@ fn k8s_data(doc: &Yaml, field: &str, file: &str, out: &mut Vec<ConfigKey>, redac
         return;
     };
     for (k, v) in map {
-        if let Some(k) = k.as_str() {
-            let value = if redact {
-                "<redacted>".to_owned()
-            } else {
-                yaml_scalar(v).unwrap_or_default()
-            };
+        let Some(k) = k.as_str() else { continue };
+        if redact {
+            // A Secret's value is secret whatever its shape — always redact.
+            push(out, file, k, "<redacted>".to_owned());
+        } else if let Some(value) = yaml_scalar(v) {
             push(out, file, k, value);
         }
+        // A non-scalar ConfigMap value is skipped rather than emitted as `""`,
+        // which would mislead the matcher/diff.
     }
 }
 
@@ -437,6 +447,33 @@ mod tests {
         assert!(ks.iter().any(|k| k.key == "replicas" && k.value == "3"));
         // An array is one compact leaf (as for TOML/JSON).
         assert!(ks.iter().any(|k| k.key == "models" && k.value == "[a, b]"));
+    }
+
+    #[test]
+    fn yaml_array_of_objects_emits_a_sentinel_not_empty() {
+        // An array whose elements are maps must not silently render as `[]` (which
+        // would false-match another empty list) — a sentinel signals the structure.
+        let ks = flatten(
+            "values.yaml",
+            b"ingress:\n  hosts:\n    - host: a.example\n      paths: [/]\n    - host: b.example\n",
+        );
+        let hosts = ks
+            .iter()
+            .find(|k| k.key == "ingress.hosts")
+            .expect("hosts leaf");
+        assert_eq!(hosts.value, "[<2 items>]", "non-scalar array is a sentinel");
+    }
+
+    #[test]
+    fn k8s_configmap_skips_non_scalar_values() {
+        // A ConfigMap whose value is itself a map must be skipped, not emitted as "".
+        let cm = b"apiVersion: v1\nkind: ConfigMap\ndata:\n  flat: ok\n  nested:\n    a: 1\n";
+        let ks = flatten("cm.yaml", cm);
+        assert!(ks.iter().any(|k| k.key == "flat" && k.value == "ok"));
+        assert!(
+            !ks.iter().any(|k| k.key == "nested"),
+            "non-scalar ConfigMap value skipped, not emitted empty: {ks:?}"
+        );
     }
 
     #[test]

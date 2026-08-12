@@ -351,15 +351,16 @@ fn dockerfile_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfi
             continue;
         };
         let (image, stage) = parse_from(rest);
+        // Decide whether the image is an earlier stage against the stages seen *so
+        // far*, before recording this line's own alias — otherwise `FROM x AS x`
+        // would wrongly treat the external image `x` as an internal stage.
+        let is_internal_stage = stages.contains(&image.to_ascii_lowercase());
         if let Some(s) = stage {
             stages.insert(s.to_ascii_lowercase());
         }
         // Skip `scratch` and references to an earlier build stage — neither is an
         // external image to pin.
-        if image.is_empty()
-            || image.eq_ignore_ascii_case("scratch")
-            || stages.contains(&image.to_ascii_lowercase())
-        {
+        if image.is_empty() || image.eq_ignore_ascii_case("scratch") || is_internal_stage {
             continue;
         }
         let (name, tag, digest) = split_image(image);
@@ -1889,6 +1890,18 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|n| n.kind == NodeKind::Other("image_ref".into()))
+        );
+
+        // A stage alias equal to the image name (`FROM alpine AS alpine`) must not
+        // make the external `alpine` look like an internal stage — it is still a pin.
+        let c = reg.extract("Dockerfile", "d3", b"FROM alpine AS alpine\n");
+        assert!(
+            c.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Other("image_ref".into())
+                    && n.meta["image"] == "alpine"),
+            "FROM x AS x is an external pin, got: {:?}",
+            c.nodes
         );
     }
 
