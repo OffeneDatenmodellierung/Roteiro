@@ -165,6 +165,46 @@ impl Repo {
                 gitmodules = Some(entry.oid);
             }
         }
+        self.assemble_submodules(links, gitmodules)
+    }
+
+    /// Every git submodule pinned in the **staged index** (the tree a commit would
+    /// record), sorted by path. Same shape as [`Repo::submodules`] but reads the
+    /// gitlinks (and `.gitmodules`) from the index, so the index-aware sync — the
+    /// pre-commit gate — reflects a *staged* submodule bump, not the `HEAD` pin.
+    ///
+    /// # Errors
+    /// As [`Repo::submodules`], plus index-load failure.
+    pub fn index_submodules(&self) -> Result<Vec<Submodule>, GitError> {
+        use gix::index::entry::Mode;
+        let index = self.inner.index_or_load_from_head().map_err(ge)?;
+        let mut links: Vec<(String, String)> = Vec::new();
+        let mut gitmodules: Option<gix::ObjectId> = None;
+        for entry in index.entries() {
+            if entry.stage_raw() != 0 {
+                continue;
+            }
+            let path = String::from_utf8(entry.path(&index).to_vec())
+                .map_err(|e| GitError::NonUtf8Path(e.into_bytes()))?;
+            if entry.mode == Mode::COMMIT {
+                links.push((path, entry.id.to_hex().to_string()));
+            } else if path == ".gitmodules"
+                && matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE)
+            {
+                gitmodules = Some(entry.id);
+            }
+        }
+        self.assemble_submodules(links, gitmodules)
+    }
+
+    /// Assemble `(path, sha)` gitlinks into sorted [`Submodule`]s, resolving each
+    /// path's URL from the `.gitmodules` blob at `gitmodules` (when present). Shared
+    /// by the `HEAD`-tree and index submodule readers.
+    fn assemble_submodules(
+        &self,
+        links: Vec<(String, String)>,
+        gitmodules: Option<gix::ObjectId>,
+    ) -> Result<Vec<Submodule>, GitError> {
         if links.is_empty() {
             return Ok(Vec::new());
         }

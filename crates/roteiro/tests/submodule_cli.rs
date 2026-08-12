@@ -81,10 +81,20 @@ fn submodule_gitlink_becomes_a_pinned_submodule_node() {
         .current_dir(&base)
         .output()
         .expect("run explain");
+    assert!(e.status.success(), "query <key> failed: {e:?}");
     let ex: serde_json::Value = serde_json::from_slice(&e.stdout).expect("valid JSON");
     assert_eq!(ex["meta"]["sha"], sha, "pinned commit recorded: {ex}");
     assert_eq!(ex["meta"]["url"], "https://github.com/acme/app.git");
     assert_eq!(ex["meta"]["path"], "vendor/app");
+
+    // Index-aware sync (the pre-commit gate) reads staged gitlinks — exercise that
+    // path end-to-end: it must handle the gitlink in the index without error.
+    let staged = Command::new(BIN)
+        .args(["check", "--staged"])
+        .current_dir(&base)
+        .output()
+        .expect("run check --staged");
+    assert!(staged.status.success(), "check --staged failed: {staged:?}");
 
     std::fs::remove_dir_all(&base).ok();
 }
