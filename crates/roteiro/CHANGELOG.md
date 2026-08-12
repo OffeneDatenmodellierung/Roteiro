@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.0.0...roteiro-v2.0.0) - 2026-08-12
+
+### Added
+
+- *(graph)* git submodule pins (ADR-0009 derived deploy-artifact extraction, part 2)
+- *(links)* cross-repo config override matrix + drift view (ADR-0009 step 7)
+- *(links)* persist inferred cross-repo edges, read config keys from graph (ADR-0009 2b)
+- *(graph)* config-key nodes are graph-native (ADR-0009)
+- *(serve)* follow cross-repo links in the served tools (ADR-0009)
+- *(links)* infer cross-repo config links by key matching (ADR-0009)
+- *(links)* cross-repo authored links + `roteiro links` (ADR-0009)
+
+### Fixed
+
+- *(graph)* address PR #218 review — index-aware submodule pins
+- *(links)* address PR #215 review — flag constraints, per-file value lookup
+- *(links)* clear stale inferred edges + CI clippy, address PR #213 review
+
+### Other
+
+- *(serve)* address PR #210 review
+- *(links)* address PR #207 review
+- *(links)* address PR #206 review
+
 ## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v0.0.19...roteiro-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
