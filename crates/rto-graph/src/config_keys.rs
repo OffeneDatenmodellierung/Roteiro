@@ -126,8 +126,8 @@ fn flatten_json(v: &serde_json::Value, prefix: &str, file: &str, out: &mut Vec<C
     }
 }
 
-/// Parse `KEY=VALUE` lines (skipping blanks / `#` comments), trimming a single
-/// layer of surrounding quotes from the value.
+/// Parse `KEY=VALUE` lines (skipping blanks / `#` comments), stripping surrounding
+/// single/double quote characters from the value.
 fn flatten_env(text: &str, file: &str, out: &mut Vec<ConfigKey>) {
     for line in text.lines() {
         let line = line.trim();
@@ -140,6 +140,33 @@ fn flatten_env(text: &str, file: &str, out: &mut Vec<ConfigKey>) {
             push(out, file, key, val);
         }
     }
+}
+
+/// Whether a config key's *name* looks like it holds a secret (token, password,
+/// credential, …). Extraction **redacts the value** of such keys so secrets from
+/// `.env`/config files are never persisted into the graph store (which is
+/// queryable and exportable). Matched against the key with separators removed, so
+/// `API_KEY`, `apiKey`, and `api-key` all count.
+#[must_use]
+pub fn is_secret_key(key: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "secret",
+        "password",
+        "passwd",
+        "passphrase",
+        "token",
+        "apikey",
+        "credential",
+        "privatekey",
+        "accesskey",
+        "pwd",
+    ];
+    let flat: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    NEEDLES.iter().any(|n| flat.contains(n))
 }
 
 /// Normalise a dotted key for matching: lowercase, split on any non-alphanumeric
@@ -203,5 +230,21 @@ mod tests {
     fn normalize_bridges_conventions() {
         assert_eq!(normalize("SERVE_ADDR"), "serve.addr");
         assert_eq!(normalize("serve-addr"), "serve.addr");
+    }
+
+    #[test]
+    fn secret_keys_are_flagged_across_conventions() {
+        for k in [
+            "API_TOKEN",
+            "apiKey",
+            "db.password",
+            "AWS_SECRET_ACCESS_KEY",
+            "PWD",
+        ] {
+            assert!(is_secret_key(k), "{k} should be secret");
+        }
+        for k in ["serve.addr", "models.generative", "port", "workspace.roots"] {
+            assert!(!is_secret_key(k), "{k} should not be secret");
+        }
     }
 }

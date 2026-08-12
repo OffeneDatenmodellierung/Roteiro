@@ -277,22 +277,34 @@ fn file_node(
 /// Emit config-key facts for a config file (ADR-0009): the `file` node, plus a
 /// `config_key` node per flattened leaf — key `cfgkey:<path>#<dotted>`, name the
 /// dotted path, `meta` carrying the key and value — with a `contains` edge from
-/// the file. Deterministic: leaves are sorted by dotted key.
+/// the file. Deterministic: keys are de-duplicated (dotenv "last one wins") into
+/// a sorted map. Secret-looking values are redacted before they reach the store.
 fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
     let mut facts = FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest));
     let file = file_key(path);
-    let mut keys = crate::config_keys::flatten(path, bytes);
-    keys.sort_by(|a, b| a.key.cmp(&b.key));
-    for ck in keys {
-        let node_key = format!("cfgkey:{path}#{}", ck.key);
+    // A config file that repeats a key yields one node with the final value, and
+    // the emission order is deterministic regardless of parse order.
+    let mut by_key: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for ck in crate::config_keys::flatten(path, bytes) {
+        by_key.insert(ck.key, ck.value);
+    }
+    for (key, value) in by_key {
+        let node_key = format!("cfgkey:{path}#{key}");
+        // Redact the value of secret-looking keys so tokens/passwords from
+        // `.env`/config files are never persisted into the (exportable) store.
+        let value = if crate::config_keys::is_secret_key(&key) {
+            "<redacted>".to_owned()
+        } else {
+            value
+        };
         let mut node = Node::new(
             node_key.clone(),
             NodeKind::Other("config_key".into()),
-            ck.key.clone(),
+            key.clone(),
         );
         node.path = Some(path.to_owned());
         node.blob_hash = Some(blob_id.to_owned());
-        node.meta = serde_json::json!({ "key": ck.key, "value": ck.value });
+        node.meta = serde_json::json!({ "key": key, "value": value });
         facts = facts.with_node(node).with_edge(Edge::derived(
             file.clone(),
             node_key,
@@ -1692,9 +1704,28 @@ mod tests {
                 && e.kind == EdgeKind::Contains
         }));
 
-        // A `.env` (no extension) is recognised by name.
-        let env = reg.extract(".env", "env1", b"PORT=8080\n");
-        assert!(env.nodes.iter().any(|n| n.key == "cfgkey:.env#PORT"));
+        // A `.env` (no extension) is recognised by name; a repeated key yields one
+        // node with the last value; a secret value is redacted.
+        let env = reg.extract(".env", "env1", b"PORT=8080\nPORT=9090\nAPI_TOKEN=s3cr3t\n");
+        let port = env
+            .nodes
+            .iter()
+            .find(|n| n.key == "cfgkey:.env#PORT")
+            .expect("PORT node");
+        assert_eq!(port.meta["value"], "9090", "dotenv last-one-wins");
+        assert_eq!(
+            env.nodes
+                .iter()
+                .filter(|n| n.key == "cfgkey:.env#PORT")
+                .count(),
+            1
+        );
+        let token = env
+            .nodes
+            .iter()
+            .find(|n| n.key == "cfgkey:.env#API_TOKEN")
+            .expect("API_TOKEN node");
+        assert_eq!(token.meta["value"], "<redacted>", "secret not persisted");
         // A source file is unaffected.
         let rs = reg.extract("src/lib.rs", "x", b"pub fn f() {}\n");
         assert!(
