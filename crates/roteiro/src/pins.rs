@@ -16,15 +16,17 @@ pub struct SpokePin {
 }
 
 /// Detect which hub version `spoke_store` pins. Matches the spoke's `submodule`
-/// nodes (by URL → the hub's origin, or repo basename → hub name) and `image_ref`
-/// nodes (by image basename → hub name, then tag → a hub git ref) to the hub.
-/// Returns `None` when nothing pins the hub (the caller resolves against `HEAD`).
+/// nodes (by URL → the hub's origin, or repo basename → `hub_dir`) and `image_ref`
+/// nodes (by image basename → `hub_dir`, then tag → a hub git ref) to the hub.
+/// `hub_dir` is the hub repo's real **directory basename** — not the workspace
+/// display label, which carries a `-2`/`-3` collision suffix that would never match
+/// a URL/image basename. Returns `None` when nothing pins the hub.
 ///
 /// # Errors
 /// Propagates store or git errors.
 pub fn detect(
     spoke_store: &Store,
-    hub_name: &str,
+    hub_dir: &str,
     hub_origin: Option<&str>,
     hub_repo: &Repo,
 ) -> anyhow::Result<Option<SpokePin>> {
@@ -33,7 +35,7 @@ pub fn detect(
         let (Some(url), Some(sha)) = (meta_str(&n, "url"), meta_str(&n, "sha")) else {
             continue;
         };
-        if url_matches_hub(url, hub_name, hub_origin) {
+        if url_matches_hub(url, hub_dir, hub_origin) {
             let path = meta_str(&n, "path").unwrap_or("?");
             return Ok(Some(SpokePin {
                 rev: sha.to_owned(),
@@ -41,14 +43,15 @@ pub fn detect(
             }));
         }
     }
-    // An image whose name matches the hub → resolve its tag as a hub git ref.
+    // An image whose name matches the hub → resolve its tag as a hub git ref. Use
+    // `tree_id_at` (O(1), no blob walk) purely as an existence check for the ref.
     for n in spoke_store.nodes_by_kind(&NodeKind::Other("image_ref".into()))? {
         let (Some(image), Some(tag)) = (meta_str(&n, "image"), meta_str(&n, "tag")) else {
             continue;
         };
-        if image_basename(image) == hub_name {
+        if image_basename(image) == hub_dir {
             for candidate in [tag.to_owned(), format!("v{tag}")] {
-                if hub_repo.blobs_at(&candidate).is_ok() {
+                if hub_repo.tree_id_at(&candidate).is_ok() {
                     return Ok(Some(SpokePin {
                         rev: candidate,
                         via: format!("image {image}:{tag}"),
@@ -66,10 +69,10 @@ fn meta_str<'a>(node: &'a rto_graph::Node, key: &str) -> Option<&'a str> {
 }
 
 /// Whether a submodule URL points at the hub: its normalised form equals the hub's
-/// origin, or its repo basename equals the hub project name (so a local test repo
-/// with no remote still matches by directory name).
-fn url_matches_hub(url: &str, hub_name: &str, hub_origin: Option<&str>) -> bool {
-    hub_origin.is_some_and(|o| norm_url(o) == norm_url(url)) || repo_basename(url) == hub_name
+/// origin, or its repo basename equals the hub's directory name (so a local test
+/// repo with no remote still matches by directory name).
+fn url_matches_hub(url: &str, hub_dir: &str, hub_origin: Option<&str>) -> bool {
+    hub_origin.is_some_and(|o| norm_url(o) == norm_url(url)) || repo_basename(url) == hub_dir
 }
 
 /// Normalise a git URL for comparison: drop a trailing `/` and `.git`, lowercase.
@@ -104,11 +107,18 @@ mod tests {
             "anything",
             Some("https://github.com/acme/app")
         ));
-        // No origin match, but the repo basename equals the hub project name.
+        // No origin match, but the repo basename equals the hub's *directory* name.
         assert!(url_matches_hub("git@github.com:acme/app.git", "app", None));
         assert!(!url_matches_hub(
             "git@github.com:acme/other.git",
             "app",
+            None
+        ));
+        // The workspace *display* label (with a `-2` collision suffix) must not be
+        // used for matching — that's why the caller passes the real dir name.
+        assert!(!url_matches_hub(
+            "git@github.com:acme/app.git",
+            "app-2",
             None
         ));
     }

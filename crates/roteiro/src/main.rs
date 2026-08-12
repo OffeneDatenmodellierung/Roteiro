@@ -2583,8 +2583,21 @@ fn config_keys_at_rev(
     let repo = rto_graph::Repo::discover(repo_path)?;
     let cache = rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
     let reg = rto_graph::Registry::new(ingest);
+    config_keys_at_rev_with(&repo, &cache, reg, rev)
+}
+
+/// The config keys of `repo` at `rev`, reusing a caller-owned repo and object cache
+/// — the expensive-to-open resources — so resolving many pins under `--pinned` opens
+/// them once and pays only the (cache-aware) `sync_tree` per distinct rev. (The
+/// `Registry` is a `Copy` config, so it is passed by value.)
+fn config_keys_at_rev_with(
+    repo: &rto_graph::Repo,
+    cache: &rto_graph::ObjectCache,
+    reg: rto_graph::Registry,
+    rev: &str,
+) -> anyhow::Result<Vec<infer_links::ConfigKey>> {
     let mut store = rto_graph::Store::open_in_memory()?;
-    rto_graph::sync_tree(&mut store, &repo, &cache, &reg, rev)?;
+    rto_graph::sync_tree(&mut store, repo, cache, &reg, rev)?;
     Ok(store.config_keys()?)
 }
 
@@ -2680,7 +2693,7 @@ fn scan_workspace_infer(
 /// or `None` if it is unsynced or pins nothing recognisable to the hub.
 fn detect_spoke_pin(
     spoke_path: &std::path::Path,
-    hub_name: &str,
+    hub_dir: &str,
     hub_origin: Option<&str>,
     hub_repo: &rto_graph::Repo,
 ) -> anyhow::Result<Option<pins::SpokePin>> {
@@ -2689,7 +2702,7 @@ fn detect_spoke_pin(
         return Ok(None);
     }
     let store = rto_graph::Store::open(&db)?;
-    pins::detect(&store, hub_name, hub_origin, hub_repo)
+    pins::detect(&store, hub_dir, hub_origin, hub_repo)
 }
 
 /// Match every spoke against the right hub key set: the hub base (its `HEAD`, or the
@@ -2703,14 +2716,24 @@ fn resolve_infer_report(
     pin: PinnedHub<'_>,
 ) -> anyhow::Result<Vec<InferredRepo>> {
     let hub_base = by_project[hub_name].as_slice();
-    // Under `--pinned`, discover the hub repo once (to resolve each spoke's pin).
+    // Under `--pinned`, set the hub up **once** — repo, object cache, extractor, its
+    // real directory name (not the `-2`-suffixed workspace label) and origin — so
+    // per-rev work is just the cache-aware `sync_tree`.
     let hub = if pin.auto {
         let hub_path = project_paths
             .get(hub_name)
             .ok_or_else(|| anyhow::anyhow!("no path for hub `{hub_name}`"))?;
         let repo = rto_graph::Repo::discover(hub_path)?;
+        let cache =
+            rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
+        let reg = rto_graph::Registry::new(pin.ingest);
+        let dir = hub_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(hub_name)
+            .to_owned();
         let origin = repo.origin_url();
-        Some((repo, hub_path.clone(), origin))
+        Some((repo, cache, reg, dir, origin))
     } else {
         None
     };
@@ -2721,17 +2744,18 @@ fn resolve_infer_report(
     for (name, keys) in by_project.iter().filter(|(n, _)| n.as_str() != hub_name) {
         let (hub_rev, pin_via) = match &hub {
             // `--pinned`: resolve against the version this spoke pins, if any.
-            Some((repo, hub_path, origin)) => {
-                match detect_spoke_pin(&project_paths[name], hub_name, origin.as_deref(), repo)? {
+            Some((repo, cache, reg, dir, origin)) => {
+                match detect_spoke_pin(&project_paths[name], dir, origin.as_deref(), repo)? {
                     Some(p) => {
                         if !rev_cache.contains_key(&p.rev) {
-                            let k =
-                                config_keys_at_rev(hub_path, &p.rev, pin.ingest).map_err(|e| {
+                            let k = config_keys_at_rev_with(repo, cache, *reg, &p.rev).map_err(
+                                |e| {
                                     anyhow::anyhow!(
                                         "resolving hub `{hub_name}` at `{}`: {e}",
                                         p.rev
                                     )
-                                })?;
+                                },
+                            )?;
                             rev_cache.insert(p.rev.clone(), k);
                         }
                         (Some(p.rev), Some(p.via))

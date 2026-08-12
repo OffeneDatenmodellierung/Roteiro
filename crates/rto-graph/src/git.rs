@@ -155,6 +155,16 @@ impl Repo {
         walk_tree_blobs(&tree)
     }
 
+    /// The hex tree id an arbitrary revspec resolves to (a commit peels to its
+    /// tree) — an **O(1)** resolution that does not walk the tree, so it doubles as
+    /// a cheap "does this ref exist?" check (ADR-0009 step 8b/8c).
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `rev` cannot be resolved to a tree.
+    pub fn tree_id_at(&self, rev: &str) -> Result<String, GitError> {
+        Ok(self.tree_by_rev(rev)?.id().to_hex().to_string())
+    }
+
     /// Every git submodule pinned in the `HEAD` tree, sorted by path: a gitlink
     /// (commit) entry gives the path and the commit it points at, enriched with
     /// its `.gitmodules` URL when declared. The pinned commit is the **version a
