@@ -54,6 +54,11 @@ pub struct Config {
     pub workspace: WorkspaceConfig,
     /// `[[links]]` — authored cross-repo links to other workspace repos (ADR-0009).
     pub links: Vec<LinkDecl>,
+    /// `[pins]` — how to map a deployed artifact to a hub git ref when the default
+    /// tag guess doesn't fit this project's scheme (ADR-0009 step 8c). Keyed by the
+    /// hub/image name; value is a ref template with a `{tag}` placeholder, e.g.
+    /// `app = "release-{tag}"` maps image `app:1.2` → git ref `release-1.2`.
+    pub pins: std::collections::BTreeMap<String, String>,
 }
 
 /// `[debt]` — intent-debt reporting.
@@ -272,6 +277,12 @@ impl Config {
             } else {
                 over.links.clone()
             },
+            // Pins merge per key: the project layer overrides the user layer.
+            pins: {
+                let mut m = self.pins.clone();
+                m.extend(over.pins.clone());
+                m
+            },
         }
     }
 }
@@ -417,8 +428,21 @@ mod tests {
         // A malformed file is a hard error.
         std::fs::write(&project, "[infer]\nmin_confidence = = =\n").expect("write");
         assert!(
-            load_from(None, Some(project)).is_err(),
+            load_from(None, Some(project.clone())).is_err(),
             "malformed TOML must error"
+        );
+
+        // `[pins]` parses, and merges per key (project over user).
+        std::fs::write(&user, "[pins]\napp = \"v{tag}\"\nother = \"user-{tag}\"\n").expect("write");
+        std::fs::write(&project, "[pins]\napp = \"release-{tag}\"\n").expect("write");
+        let loaded = load_from(Some(user), Some(project)).expect("load");
+        assert_eq!(
+            loaded.effective.pins.get("app").map(String::as_str),
+            Some("release-{tag}")
+        );
+        assert_eq!(
+            loaded.effective.pins.get("other").map(String::as_str),
+            Some("user-{tag}")
         );
 
         std::fs::remove_dir_all(&dir).ok();

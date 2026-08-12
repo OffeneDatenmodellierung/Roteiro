@@ -510,7 +510,10 @@ like drift against the app's latest but is fine on the deployed version reads co
 Or let it figure the version out: <code>--pinned</code> reads <strong>each spoke's own pin</strong>
 (its submodule sha, or its Docker image tag resolved to a release) and resolves that spoke
 against exactly the hub version it vendors — so a fleet of deployments, each on a different
-version, is checked correctly in one pass.</div>
+version, is checked correctly in one pass. When image tags don't match git tags, a
+<code>[pins]</code> block maps them (<code>app = "release-{tag}"</code>); and if the hub's CI
+publishes a graph artifact per release, resolution loads that instead of re-extracting —
+so it works even against a shallow clone that lacks the old commit's blobs.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed

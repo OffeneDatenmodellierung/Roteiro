@@ -19,8 +19,11 @@ pub struct SpokePin {
 /// nodes (by URL → the hub's origin, or repo basename → `hub_dir`) and `image_ref`
 /// nodes (by image basename → `hub_dir`, then tag → a hub git ref) to the hub.
 /// `hub_dir` is the hub repo's real **directory basename** — not the workspace
-/// display label, which carries a `-2`/`-3` collision suffix that would never match
-/// a URL/image basename. Returns `None` when nothing pins the hub.
+/// display label (which carries a `-2`/`-3` collision suffix that would never match
+/// a URL/image basename). `templates` is the spoke's `[pins]` config: a hub/image
+/// name → ref template (`{tag}` placeholder), tried before the default
+/// `<tag>`/`v<tag>` guesses so a project whose git tags don't match its image tags
+/// still resolves (step 8c). Returns `None` when nothing pins the hub.
 ///
 /// # Errors
 /// Propagates store or git errors.
@@ -29,6 +32,7 @@ pub fn detect(
     hub_dir: &str,
     hub_origin: Option<&str>,
     hub_repo: &Repo,
+    templates: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Option<SpokePin>> {
     // A submodule pinning the hub → its exact commit sha (unambiguous).
     for n in spoke_store.nodes_by_kind(&NodeKind::Other("submodule".into()))? {
@@ -43,20 +47,26 @@ pub fn detect(
             }));
         }
     }
-    // An image whose name matches the hub → resolve its tag as a hub git ref. Use
-    // `tree_id_at` (O(1), no blob walk) purely as an existence check for the ref.
+    // An image whose name matches the hub → resolve its tag as a hub git ref: the
+    // configured `[pins]` template first, then the default `<tag>`/`v<tag>` guess.
+    // `tree_id_at` (O(1), no blob walk) is used purely as an existence check.
     for n in spoke_store.nodes_by_kind(&NodeKind::Other("image_ref".into()))? {
         let (Some(image), Some(tag)) = (meta_str(&n, "image"), meta_str(&n, "tag")) else {
             continue;
         };
-        if image_basename(image) == hub_dir {
-            for candidate in [tag.to_owned(), format!("v{tag}")] {
-                if hub_repo.tree_id_at(&candidate).is_ok() {
-                    return Ok(Some(SpokePin {
-                        rev: candidate,
-                        via: format!("image {image}:{tag}"),
-                    }));
-                }
+        if image_basename(image) != hub_dir {
+            continue;
+        }
+        let configured = templates
+            .get(hub_dir)
+            .map(|t| t.replace("{tag}", tag))
+            .into_iter();
+        for candidate in configured.chain([tag.to_owned(), format!("v{tag}")]) {
+            if hub_repo.tree_id_at(&candidate).is_ok() {
+                return Ok(Some(SpokePin {
+                    rev: candidate,
+                    via: format!("image {image}:{tag}"),
+                }));
             }
         }
     }
