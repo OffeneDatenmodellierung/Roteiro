@@ -26,7 +26,9 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 /// output also depends on *which* models are installed; that runtime state is
 /// folded into the cache key separately — see [`media_env_tag`] and
 /// [`crate::sync`].)
-pub(crate) const EXTRACT_VERSION: u32 = 5
+// Bumped 5 → 6 for config-key nodes (ADR-0009): config files now emit
+// `config_key` nodes, so cached extraction facts must be regenerated.
+pub(crate) const EXTRACT_VERSION: u32 = 6
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "image-vision") {
@@ -193,6 +195,11 @@ impl Extractor for Registry {
 /// extractors: pick the language extractor by extension, applying `ingest` to
 /// content extraction.
 fn extract_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
+    // Config files (TOML / JSON / .env) get config-key nodes rather than a plain
+    // file node, so their keys are first-class graph nodes (ADR-0009).
+    if crate::config_keys::is_config_path(path) {
+        return config_facts(path, blob_id, bytes, ingest);
+    }
     let ext = extension(path);
     match ext.as_deref() {
         // Rust keeps its dedicated AST walker (imports, impl scoping, richer calls).
@@ -265,6 +272,34 @@ fn file_node(
         provenance: Provenance::Derived,
         meta,
     }
+}
+
+/// Emit config-key facts for a config file (ADR-0009): the `file` node, plus a
+/// `config_key` node per flattened leaf — key `cfgkey:<path>#<dotted>`, name the
+/// dotted path, `meta` carrying the key and value — with a `contains` edge from
+/// the file. Deterministic: leaves are sorted by dotted key.
+fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
+    let mut facts = FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest));
+    let file = file_key(path);
+    let mut keys = crate::config_keys::flatten(path, bytes);
+    keys.sort_by(|a, b| a.key.cmp(&b.key));
+    for ck in keys {
+        let node_key = format!("cfgkey:{path}#{}", ck.key);
+        let mut node = Node::new(
+            node_key.clone(),
+            NodeKind::Other("config_key".into()),
+            ck.key.clone(),
+        );
+        node.path = Some(path.to_owned());
+        node.blob_hash = Some(blob_id.to_owned());
+        node.meta = serde_json::json!({ "key": ck.key, "value": ck.value });
+        facts = facts.with_node(node).with_edge(Edge::derived(
+            file.clone(),
+            node_key,
+            EdgeKind::Contains,
+        ));
+    }
+    facts
 }
 
 /// Strip doc-comment markers from a comment, returning its body — or `None` if
@@ -1630,6 +1665,43 @@ mod tests {
         assert_eq!(node.blob_hash.as_deref(), Some("abc123"));
         assert_eq!(node.meta["lines"], 2);
         assert_eq!(node.meta["bytes"], 8);
+    }
+
+    #[test]
+    fn config_files_emit_config_key_nodes() {
+        let reg = Registry::new(crate::IngestConfig::default());
+        let toml = b"[serve]\naddr = \"0.0.0.0:8443\"\ntools = false\n";
+        let a = reg.extract("config.toml", "cfg1", toml);
+        let b = reg.extract("config.toml", "cfg1", toml);
+        assert_eq!(a, b, "config extraction must be deterministic");
+
+        // The file node plus a config_key node per leaf.
+        assert!(a.nodes.iter().any(|n| n.key == "file:config.toml"));
+        let addr = a
+            .nodes
+            .iter()
+            .find(|n| n.key == "cfgkey:config.toml#serve.addr")
+            .expect("serve.addr config_key node");
+        assert_eq!(addr.kind, NodeKind::Other("config_key".into()));
+        assert_eq!(addr.name, "serve.addr");
+        assert_eq!(addr.meta["value"], "0.0.0.0:8443"); // unquoted
+        // A `contains` edge from the file to each config key.
+        assert!(a.edges.iter().any(|e| {
+            e.src == "file:config.toml"
+                && e.dst == "cfgkey:config.toml#serve.addr"
+                && e.kind == EdgeKind::Contains
+        }));
+
+        // A `.env` (no extension) is recognised by name.
+        let env = reg.extract(".env", "env1", b"PORT=8080\n");
+        assert!(env.nodes.iter().any(|n| n.key == "cfgkey:.env#PORT"));
+        // A source file is unaffected.
+        let rs = reg.extract("src/lib.rs", "x", b"pub fn f() {}\n");
+        assert!(
+            rs.nodes
+                .iter()
+                .all(|n| n.kind != NodeKind::Other("config_key".into()))
+        );
     }
 
     const SAMPLE: &str = r"

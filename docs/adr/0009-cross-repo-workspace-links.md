@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.2"
+version: "1.3"
 last-modified: 2026-08-12
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -214,3 +214,4 @@ prototype exercised.
 | 1.0 | 2026-08-12 | Accepted and first slice implemented. **Landed:** project-qualified keys (`parse_qualified`) and the resolver on [[crates/rto-graph/src/workspace.rs#Workspace]] (`resolve_qualified` — opens the target project on demand and returns `Ok(None)` for a drifted target); **authored** links via a `[[links]]` table in a spoke's `roteiro.toml`; and a `roteiro links` command that resolves every repo's declared links across the workspace, reports the target each resolves to, and **exits non-zero on drift** (the cross-repo `check` gate), with `--json`. Build-plan steps 1, 2, 4 done; step 6 delivered as a dedicated `links` command rather than folded into `check`. **Deferred, in order:** the **inferred** config-key matcher (step 3 — needs a config-key extractor so YAML/TOML keys become nodes); **derived** deploy-artifact extractors (Dockerfile/Helm/submodule); cross-repo **traversal in the served tools** (step 5 — the follow hop inside `serve`); the **web-graph/serve views** (step 7); and **version-pin resolution** at the spoke's pinned app sha (step 8, the load-bearing follow-on). |
 | 1.1 | 2026-08-12 | **Inferred** config-key matcher landed (build-plan step 3, first form). `roteiro links --infer [--hub <project>]` reads each workspace repo's config files, flattens them to dotted keys, and matches every spoke's keys against the hub's by normalised name (bridging `SERVE_ADDR` / `serve.addr` / `serve-addr`), reporting confidence-scored correspondences with no hand-authored links and flagging **orphans** (a spoke key with no hub counterpart — the drift candidate). Informational (exit 0). Dependency-free: **TOML, JSON, and `.env`** (parsers already in the tree). **YAML** is intentionally left out for now (no maintained, `cargo deny`-clean parser is worth adding for the current, non-Kubernetes use cases — revisit if a Helm/k8s config target arrives). Also deferred: promoting matches into graph-native `inferred` cross-repo *edges* (this slice matches at command time, it does not yet persist config-key nodes/edges); and the derived/traversal/views/version-pin follow-ons from v1.0. |
 | 1.2 | 2026-08-12 | **Serve-tool traversal landed** (build-plan step 5 — the live follow hop). The served graph tools on both surfaces — the `/v1` `GraphToolRegistry` ([[crates/roteiro/src/main.rs#GraphToolRegistry]]) and the MCP `GraphServer` ([[crates/rto-render/src/mcp.rs#GraphServer]]) — now accept a **project-qualified key** (`<project>::<key>`) in `explain` (and `path`): a qualified key opens the *target* project and resolves there via `Workspace::resolve_qualified`, overriding the call's `project` argument, so a served model looking at one repo can follow a cross-repo link straight into another's graph. `path` stays within a single graph (a qualified `from` selects the project; both endpoints are stripped to bare keys). Tool descriptions advertise the qualified form. Still deferred: graph-native `inferred` cross-repo *edges* (persisting config-key nodes + edges) and version-pin resolution. |
+| 1.3 | 2026-08-12 | **Config-key nodes are graph-native** (part of build-plan step 3). Config files (TOML / JSON / `.env`) now extract into `config_key` graph nodes during `sync` — key `cfgkey:<file>#<dotted>`, value in `meta`, with a `contains` edge from the file — so config keys are first-class, queryable (`query --kind config_key`) and visible in the graph view. The flatten/normalise parsing moved to [[crates/rto-graph/src/config_keys.rs#flatten]] and is now shared by the extractor and `roteiro links --infer` (one parser, no drift). `EXTRACT_VERSION` bumped 5→6. Still deferred: persisting the `inferred` cross-repo *edges* between these nodes (the ext-ref/version-pin model) and derived deploy-artifact extractors. |

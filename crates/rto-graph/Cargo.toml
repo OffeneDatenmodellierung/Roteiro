@@ -24,6 +24,9 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Parse TOML config files into config-key nodes during extraction (ADR-0009).
+# Same crate the roteiro config loader uses; permissive, `cargo deny`-clean.
+toml = "0.9"
 tree-sitter = "0.26.12"
 tree-sitter-tags = "0.26.12"
 # tree-sitter 0.26's `QueryCursor::matches` yields a streaming iterator; needed to
