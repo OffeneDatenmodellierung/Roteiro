@@ -147,15 +147,18 @@ Both are build-outputs — regenerate either locally at any commit with
 <p>Roteiro is a Rust workspace (MSRV 1.94). Install the lean default build from
 crates.io, or build from source with the feature tiers you want.</p>
 
-<pre><code><span class="c"># Lean, fully-offline default build</span>
-cargo install roteiro
+<pre><code><span class="c"># Lean, fully-offline default build (--locked uses the published lockfile)</span>
+cargo install roteiro --locked
+
+<span class="c"># Pin a specific release</span>
+cargo install roteiro@1.0.0 --locked
 
 <span class="c"># Pick the capabilities you want</span>
-cargo install roteiro --features "inference,models,mcp"
+cargo install roteiro --features "inference,models,mcp" --locked
 
 <span class="c"># Everything on — MCP, serving, local models, PDF/OCR/vision.</span>
 <span class="c"># Needs a C/C++ toolchain (the inference-local-models/serve/image-vision features build llama.cpp).</span>
-cargo install roteiro --all-features
+cargo install roteiro --all-features --locked
 
 <span class="c"># …or build from source</span>
 git clone https://github.com/OffeneDatenmodellierung/Roteiro
