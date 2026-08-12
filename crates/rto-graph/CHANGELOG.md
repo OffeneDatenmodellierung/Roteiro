@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.0.0...rto-graph-v2.0.0) - 2026-08-12
+
+### Added
+
+- *(links)* cross-repo authored links + `roteiro links` (ADR-0009)
+
+### Other
+
+- *(links)* address PR #206 review
+
 ## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.19...rto-graph-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
