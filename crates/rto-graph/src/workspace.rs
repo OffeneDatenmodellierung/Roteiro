@@ -297,6 +297,23 @@ impl Workspace {
             .map_err(WorkspaceError::from)
     }
 
+    /// Follow an **external-ref** placeholder node to the real node it stands for,
+    /// resolving its project-qualified target across the workspace (ADR-0009). An
+    /// external-ref lives in a spoke's store as a local stand-in for a node in the
+    /// hub's store (see [`crate::external_ref_node`]); this walks it through to the
+    /// hub. `Ok(None)` means either `node` is not an external-ref, or its target no
+    /// longer resolves — cross-repo drift (a removed or renamed hub key). Errors
+    /// distinguish the other failure modes, as [`Workspace::resolve_qualified`].
+    ///
+    /// # Errors
+    /// As [`Workspace::resolve_qualified`].
+    pub fn follow_external_ref(&self, node: &Node) -> Result<Option<Node>, WorkspaceError> {
+        match crate::external_ref_target(node) {
+            Some(qualified) => self.resolve_qualified(&qualified),
+            None => Ok(None),
+        }
+    }
+
     /// Lock the inner state, mapping a poisoned lock to [`WorkspaceError::Poisoned`].
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, WorkspaceError> {
         self.inner.lock().map_err(|_| WorkspaceError::Poisoned)
@@ -526,5 +543,34 @@ mod tests {
             ws.resolve_qualified("file:cfg.rs").unwrap_err(),
             WorkspaceError::Unqualified { .. }
         ));
+    }
+
+    #[test]
+    fn follow_external_ref_walks_a_placeholder_to_its_target() {
+        use crate::links::external_ref_node;
+        use crate::model::{Node, NodeKind};
+        let mut s = store();
+        // A real target node, plus a placeholder standing in for it (as it would
+        // live in a spoke store pointing back at this project).
+        s.apply_factset(&crate::model::FactSet::new().with_node(Node::new(
+            "file:cfg.rs",
+            NodeKind::File,
+            "cfg.rs",
+        )))
+        .unwrap();
+        let ws = Workspace::single("app", s);
+
+        // Following the placeholder resolves the qualified target to the real node.
+        let placeholder = external_ref_node("app::file:cfg.rs");
+        let hit = ws.follow_external_ref(&placeholder).unwrap();
+        assert_eq!(hit.map(|n| n.key), Some("file:cfg.rs".to_owned()));
+
+        // A placeholder for a removed target is drift (Ok(None)), not an error.
+        let gone = external_ref_node("app::file:gone.rs");
+        assert!(ws.follow_external_ref(&gone).unwrap().is_none());
+
+        // A plain (non-external-ref) node is simply not followed.
+        let plain = Node::new("file:cfg.rs", NodeKind::File, "cfg.rs");
+        assert!(ws.follow_external_ref(&plain).unwrap().is_none());
     }
 }

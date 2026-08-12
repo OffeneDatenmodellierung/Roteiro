@@ -488,7 +488,11 @@ the authored-vs-reality check of <code>roteiro check</code>, run <em>between</em
 Or skip the hand-authoring: <code>roteiro links --infer --hub app</code> auto-matches each
 repo's config keys (TOML / JSON / <code>.env</code>) against the hub's and flags orphan keys
 the app doesn't define. Config keys are first-class graph nodes too — <code>roteiro query
---kind config_key</code> lists them.</div>
+--kind config_key</code> lists them, and <code>--infer</code> reads the match candidates
+straight from those nodes. Add <code>--write</code> to <strong>persist</strong> the matches as
+durable <span class="pill inferred">inferred</span> cross-repo edges in each spoke's graph: an
+<code>external_ref</code> node stands in for the hub's key (so store integrity holds locally)
+and the resolver follows it across repos to the real node — surviving later syncs.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed

@@ -20,6 +20,7 @@ mod extract;
 mod git;
 #[cfg(feature = "inference")]
 mod infer;
+mod links;
 mod markers;
 mod migrations;
 mod model;
@@ -47,6 +48,9 @@ pub use git::{BlobRef, ChangeStatus, ChangedFile, GitError, Repo};
 pub use infer::{
     DuplicateConfig, DuplicatePair, DuplicateReport, EMBED_REF, Embedder, HashEmbedder,
     InferenceConfig, duplicates, duplicates_with, embed, infer_edges, infer_edges_with, similarity,
+};
+pub use links::{
+    EXTERNAL_REF_KIND, LINKS_REF, external_ref_key, external_ref_node, external_ref_target,
 };
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]

@@ -358,6 +358,32 @@ impl Store {
         collect_nodes(&mut rows)
     }
 
+    /// Every `config_key` node's flattened setting (ADR-0009), read back out of
+    /// the graph as [`crate::ConfigKey`]s — the graph-native source the cross-repo
+    /// link matcher (`roteiro links --infer`) consumes, so it never re-parses
+    /// config files. Ordered by node key (deterministic). A node missing the
+    /// `key`/`path` a well-formed `config_key` carries is skipped defensively.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`], [`StoreError::Json`], or
+    /// [`StoreError::Corrupt`] on decode failure.
+    pub fn config_keys(&self) -> Result<Vec<crate::ConfigKey>, StoreError> {
+        let nodes = self.nodes_by_kind(&NodeKind::Other(crate::config_keys::KIND.to_owned()))?;
+        let mut out = Vec::with_capacity(nodes.len());
+        for n in &nodes {
+            let key = n.meta.get("key").and_then(serde_json::Value::as_str);
+            let value = n.meta.get("value").and_then(serde_json::Value::as_str);
+            if let (Some(key), Some(file)) = (key, n.path.as_deref()) {
+                out.push(crate::ConfigKey {
+                    file: file.to_owned(),
+                    key: key.to_owned(),
+                    value: value.unwrap_or_default().to_owned(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Every node whose source `path` is `path`, ordered by key — the file node
     /// plus the symbols and markers defined in it. Used to scope a change to the
     /// graph (e.g. `roteiro review`).

@@ -176,6 +176,11 @@ enum Command {
         /// the repo with the most config keys).
         #[arg(long, value_name = "PROJECT")]
         hub: Option<String>,
+        /// With `--infer`: persist the inferred correspondences into each spoke's
+        /// graph as durable cross-repo edges (an `inferred` import layer that
+        /// survives sync), instead of only reporting them.
+        #[arg(long)]
+        write: bool,
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
@@ -445,10 +450,11 @@ fn main() -> anyhow::Result<()> {
             workspace,
             infer,
             hub,
+            write,
             json,
         } => {
             if infer {
-                run_links_infer(&cfg.effective, &workspace, hub.as_deref(), json)
+                run_links_infer(&cfg.effective, &workspace, hub.as_deref(), write, json)
             } else {
                 run_links(&cfg.effective, &workspace, json)
             }
@@ -2438,18 +2444,60 @@ struct InferredRepo {
     orphans: Vec<infer_links::ConfigKey>,
 }
 
+/// The `graph.db` path for the repo at `path` (`<repo>/.git/roteiro/graph.db`).
+fn graph_db_path(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let repo = rto_graph::Repo::discover(path)?;
+    Ok(repo.git_dir().join("roteiro").join("graph.db"))
+}
+
+/// The config keys of every in-scope repo, read **from each repo's graph** (its
+/// `config_key` nodes), keyed by project name (dir name, `-2`/`-3` on collision),
+/// alongside a name→path map for persistence and the names of repos with no graph
+/// yet (noted, not fatal). Reading from the graph — not re-parsing files — keeps
+/// the matcher and the stored nodes in lock-step (ADR-0009 feature 2b).
+type WorkspaceConfigKeys = (
+    std::collections::BTreeMap<String, Vec<infer_links::ConfigKey>>,
+    std::collections::BTreeMap<String, std::path::PathBuf>,
+    Vec<String>,
+);
+fn collect_workspace_config_keys(
+    paths: &[std::path::PathBuf],
+) -> anyhow::Result<WorkspaceConfigKeys> {
+    let mut by_project = std::collections::BTreeMap::new();
+    let mut project_paths = std::collections::BTreeMap::new();
+    let mut unsynced = Vec::new();
+    for (path, name) in workspace_project_names(paths) {
+        project_paths.insert(name.clone(), path.clone());
+        let db = graph_db_path(path)?;
+        if !db.exists() {
+            unsynced.push(name);
+            continue;
+        }
+        let keys = rto_graph::Store::open(&db)?.config_keys()?;
+        if !keys.is_empty() {
+            by_project.insert(name, keys);
+        }
+    }
+    Ok((by_project, project_paths, unsynced))
+}
+
 /// `roteiro links --infer`: match each workspace repo's config keys (TOML / JSON
 /// / `.env`) against a hub repo's, surfacing correspondences with no
-/// hand-authored links and flagging orphan keys (drift candidates). Informational
-/// — always exits zero (these are confidence-scored suggestions, not a gate).
+/// hand-authored links and flagging orphan keys (drift candidates). Config keys
+/// are read **from each repo's graph** (the `config_key` nodes a `sync` extracts),
+/// so a repo must have been synced. Informational — always exits zero (these are
+/// confidence-scored suggestions, not a gate).
+///
+/// With `write`, the correspondences are also persisted into each spoke's graph as
+/// an `inferred` cross-repo import layer (external-ref target + `references` edge,
+/// ADR-0009 feature 2b) that survives later syncs.
 fn run_links_infer(
     cfg: &config::Config,
     cli_roots: &[String],
     hub: Option<&str>,
+    write: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    use std::collections::BTreeMap;
-
     // Repos in scope (same set as `roteiro links`): workspace roots + the cwd repo.
     let mut path_set: std::collections::BTreeSet<std::path::PathBuf> =
         collect_workspace_repo_paths(&cfg.workspace, cli_roots)?
@@ -2480,19 +2528,20 @@ fn run_links_infer(
         );
     }
 
-    // Collect each repo's config keys, keyed by its `Workspace`-consistent project
-    // name (dir name, `-2`/`-3` on collision) so two same-named repos don't clash.
-    let mut by_project: BTreeMap<String, Vec<infer_links::ConfigKey>> = BTreeMap::new();
-    for (path, name) in workspace_project_names(&paths) {
-        let repo = rto_graph::Repo::discover(path)?;
-        let keys = infer_links::collect(&repo)?;
-        if !keys.is_empty() {
-            by_project.insert(name, keys);
-        }
-    }
+    // Config keys of every in-scope repo, read from its graph (see the helper).
+    let (by_project, project_paths, unsynced) = collect_workspace_config_keys(&paths)?;
     if by_project.len() < 2 {
+        let hint = if unsynced.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ({} repo(s) not synced: {})",
+                unsynced.len(),
+                unsynced.join(", ")
+            )
+        };
         return nothing(&format!(
-            "need at least two repos with config files (TOML / JSON / .env) — found {}",
+            "need at least two synced repos with config files (TOML / JSON / .env) — found {}{hint}",
             by_project.len()
         ));
     }
@@ -2529,12 +2578,58 @@ fn run_links_infer(
         })
         .collect();
 
+    // Optionally persist the correspondences into each spoke's graph as a durable
+    // `inferred` cross-repo import layer (ADR-0009 feature 2b).
+    let written = if write {
+        persist_inferred_links(&hub_name, &report, &project_paths)?
+    } else {
+        0
+    };
+
     if json {
-        emit_json(&serde_json::json!({ "hub": hub_name, "spokes": report }))?;
+        emit_json(&serde_json::json!({
+            "hub": hub_name,
+            "spokes": report,
+            "written": written,
+        }))?;
     } else {
         print_infer_report(&report, &hub_name, hub_keys.len());
+        if write {
+            println!("\npersisted {written} inferred cross-repo edge(s) into spoke graphs");
+        }
     }
     Ok(())
+}
+
+/// Persist each spoke's inferred correspondences into that spoke's graph as an
+/// `inferred` import layer (external-ref target nodes + `references` edges, under
+/// [`rto_graph::LINKS_REF`]), returning how many edges were applied. Re-applying
+/// is authoritative — the layer replaces any prior inferred links — and the layer
+/// survives later syncs (dangling edges pruned when a config key is removed).
+fn persist_inferred_links(
+    hub_name: &str,
+    report: &[InferredRepo],
+    project_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> anyhow::Result<usize> {
+    let mut written = 0usize;
+    for spoke in report {
+        // Apply the layer for *every* spoke, even with no matches: `apply_import_layer`
+        // is what clears this ref's prior edges, so a spoke whose matches have since
+        // disappeared must still be re-applied (with an empty layer) to remove its
+        // stale inferred links — otherwise the "authoritative re-apply" would leak them.
+        let facts = infer_links::link_facts(hub_name, &spoke.matches);
+        let path = project_paths
+            .get(&spoke.repo)
+            .ok_or_else(|| anyhow::anyhow!("no path for spoke `{}`", spoke.repo))?;
+        let db = graph_db_path(path)?;
+        if !db.exists() {
+            continue; // unsynced spoke: nothing to attach edges to
+        }
+        let mut store = rto_graph::Store::open(&db)?;
+        let applied = store.apply_import_layer(rto_graph::LINKS_REF, &facts)?;
+        written += applied.edges_applied;
+    }
+    Ok(written)
 }
 
 /// Human-readable rendering of the inferred cross-repo config report.
