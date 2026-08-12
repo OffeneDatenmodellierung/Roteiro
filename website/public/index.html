@@ -491,7 +491,9 @@ flags orphan keys the app doesn't define. <strong>Kubernetes</strong> spokes wor
 a manifest is mined for what a deployment actually overrides — ConfigMap/Secret <code>data</code>
 and each container's <code>image</code> and <code>env</code> — while Helm <code>values.yaml</code>
 flattens like any config, and a Dockerfile <code>FROM</code> becomes an <code>image_ref</code>
-node recording the version it pins. Config keys are first-class graph nodes too — <code>roteiro query
+node recording the version it pins. Git <strong>submodules</strong> are pinned too — each
+gitlink becomes a <code>submodule</code> node carrying the path, URL, and the exact commit
+sha the deployment vendors (<code>roteiro query --kind submodule</code>). Config keys are first-class graph nodes too — <code>roteiro query
 --kind config_key</code> lists them, and <code>--infer</code> reads the match candidates
 straight from those nodes. Add <code>--write</code> to <strong>persist</strong> the matches as
 durable <span class="pill inferred">inferred</span> cross-repo edges in each spoke's graph: an
