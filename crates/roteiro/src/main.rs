@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod infer_links;
 mod init;
+mod overview;
 mod review;
 
 #[derive(Parser)]
@@ -163,24 +164,39 @@ enum Command {
     /// With `--infer`, instead auto-match each repo's **config keys** (TOML / JSON
     /// / `.env`) against a hub repo's — surfacing correspondences with no
     /// hand-authored links, and flagging orphan keys (drift candidates).
+    ///
+    /// With `--matrix`, render the cross-repo **config override matrix + drift**
+    /// view (ADR-0009 "views") — every hub key against each spoke that overrides
+    /// it — as a text table, `--json`, or a self-contained `--html` page.
     Links {
         /// Workspace root to include (repeatable); combined with `[workspace]`
         /// config and the current repo.
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
         /// Infer links by matching config keys across repos, instead of verifying
-        /// authored `[[links]]`.
-        #[arg(long)]
+        /// authored `[[links]]`. Mutually exclusive with `--matrix`.
+        #[arg(long, conflicts_with = "matrix")]
         infer: bool,
-        /// With `--infer`: the source-of-truth project to match against (default:
-        /// the repo with the most config keys).
+        /// Render the cross-repo config override matrix + drift view instead of the
+        /// authored-link report.
+        #[arg(long)]
+        matrix: bool,
+        /// The source-of-truth project to match against (default: the repo with the
+        /// most config keys). Applies to `--infer` and `--matrix`.
         #[arg(long, value_name = "PROJECT")]
         hub: Option<String>,
         /// With `--infer`: persist the inferred correspondences into each spoke's
         /// graph as durable cross-repo edges (an `inferred` import layer that
         /// survives sync), instead of only reporting them.
-        #[arg(long)]
+        #[arg(long, requires = "infer")]
         write: bool,
+        /// With `--matrix`: write a self-contained HTML page (the `render web-graph`
+        /// output) to `--out` (default `roteiro-overview.html`; `-` for stdout).
+        #[arg(long, requires = "matrix")]
+        html: bool,
+        /// With `--matrix --html`: output file (default `roteiro-overview.html`).
+        #[arg(long, value_name = "FILE", requires = "html")]
+        out: Option<String>,
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
@@ -449,11 +465,16 @@ fn main() -> anyhow::Result<()> {
         Command::Links {
             workspace,
             infer,
+            matrix,
             hub,
             write,
+            html,
+            out,
             json,
         } => {
-            if infer {
+            if matrix {
+                run_links_matrix(&cfg.effective, &workspace, hub.as_deref(), html, out, json)
+            } else if infer {
                 run_links_infer(&cfg.effective, &workspace, hub.as_deref(), write, json)
             } else {
                 run_links(&cfg.effective, &workspace, json)
@@ -2481,23 +2502,33 @@ fn collect_workspace_config_keys(
     Ok((by_project, project_paths, unsynced))
 }
 
-/// `roteiro links --infer`: match each workspace repo's config keys (TOML / JSON
-/// / `.env`) against a hub repo's, surfacing correspondences with no
-/// hand-authored links and flagging orphan keys (drift candidates). Config keys
-/// are read **from each repo's graph** (the `config_key` nodes a `sync` extracts),
-/// so a repo must have been synced. Informational — always exits zero (these are
-/// confidence-scored suggestions, not a gate).
-///
-/// With `write`, the correspondences are also persisted into each spoke's graph as
-/// an `inferred` cross-repo import layer (external-ref target + `references` edge,
-/// ADR-0009 feature 2b) that survives later syncs.
-fn run_links_infer(
+/// A ready cross-repo inference over the workspace, or a reason there's nothing to
+/// show (an informational no-op the caller reports without failing).
+enum InferScan {
+    /// Nothing to infer/show, with a human reason (empty or single-repo workspace).
+    Nothing(String),
+    /// A hub was picked and every spoke matched against it.
+    Ready(InferReady),
+}
+
+/// The result of a successful workspace scan: the hub, each spoke's matches, and
+/// the raw per-project config keys (for values) and paths (for persistence).
+struct InferReady {
+    hub_name: String,
+    report: Vec<InferredRepo>,
+    by_project: std::collections::BTreeMap<String, Vec<infer_links::ConfigKey>>,
+    project_paths: std::collections::BTreeMap<String, std::path::PathBuf>,
+}
+
+/// Scan the in-scope repos (workspace roots + the cwd repo), read each one's config
+/// keys **from its graph**, pick the hub (named, else the repo with the most keys),
+/// and match every spoke against it. Shared by `--infer` and `--matrix`. Bails only
+/// on a bad `--hub`; an empty or single-repo workspace is a [`InferScan::Nothing`].
+fn scan_workspace_infer(
     cfg: &config::Config,
     cli_roots: &[String],
     hub: Option<&str>,
-    write: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<InferScan> {
     // Repos in scope (same set as `roteiro links`): workspace roots + the cwd repo.
     let mut path_set: std::collections::BTreeSet<std::path::PathBuf> =
         collect_workspace_repo_paths(&cfg.workspace, cli_roots)?
@@ -2510,25 +2541,13 @@ fn run_links_infer(
         path_set.insert(wd.to_path_buf());
     }
     let paths: Vec<std::path::PathBuf> = path_set.into_iter().collect();
-
-    // Having nothing to infer is a **successful no-op** (exit 0) — `--infer` is
-    // informational, so a CI script can run it opportunistically in a single repo
-    // without failing — but still say why.
-    let nothing = |reason: &str| -> anyhow::Result<()> {
-        if json {
-            emit_json(&serde_json::json!({ "hub": null, "spokes": [], "note": reason }))?;
-        } else {
-            eprintln!("nothing to infer — {reason}");
-        }
-        Ok(())
-    };
     if paths.is_empty() {
-        return nothing(
-            "no repos in scope; run inside a repo, pass `--workspace <root>`, or set `[workspace]`",
-        );
+        return Ok(InferScan::Nothing(
+            "no repos in scope; run inside a repo, pass `--workspace <root>`, or set `[workspace]`"
+                .to_owned(),
+        ));
     }
 
-    // Config keys of every in-scope repo, read from its graph (see the helper).
     let (by_project, project_paths, unsynced) = collect_workspace_config_keys(&paths)?;
     if by_project.len() < 2 {
         let hint = if unsynced.is_empty() {
@@ -2540,10 +2559,10 @@ fn run_links_infer(
                 unsynced.join(", ")
             )
         };
-        return nothing(&format!(
+        return Ok(InferScan::Nothing(format!(
             "need at least two synced repos with config files (TOML / JSON / .env) — found {}{hint}",
             by_project.len()
-        ));
+        )));
     }
 
     // Pick the hub: named, else the repo with the most config keys.
@@ -2578,25 +2597,158 @@ fn run_links_infer(
         })
         .collect();
 
+    Ok(InferScan::Ready(InferReady {
+        hub_name,
+        report,
+        by_project,
+        project_paths,
+    }))
+}
+
+/// `roteiro links --infer`: match each workspace repo's config keys (TOML / JSON
+/// / `.env`) against a hub repo's, surfacing correspondences with no
+/// hand-authored links and flagging orphan keys (drift candidates). Config keys
+/// are read **from each repo's graph** (the `config_key` nodes a `sync` extracts),
+/// so a repo must have been synced. Informational — always exits zero (these are
+/// confidence-scored suggestions, not a gate).
+///
+/// With `write`, the correspondences are also persisted into each spoke's graph as
+/// an `inferred` cross-repo import layer (external-ref target + `references` edge,
+/// ADR-0009 feature 2b) that survives later syncs.
+fn run_links_infer(
+    cfg: &config::Config,
+    cli_roots: &[String],
+    hub: Option<&str>,
+    write: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    // Having nothing to infer is a **successful no-op** (exit 0) — `--infer` is
+    // informational, so a CI script can run it opportunistically in a single repo
+    // without failing — but still say why.
+    let ready = match scan_workspace_infer(cfg, cli_roots, hub)? {
+        InferScan::Nothing(reason) => {
+            if json {
+                emit_json(&serde_json::json!({ "hub": null, "spokes": [], "note": reason }))?;
+            } else {
+                eprintln!("nothing to infer — {reason}");
+            }
+            return Ok(());
+        }
+        InferScan::Ready(r) => r,
+    };
+    let hub_key_count = ready.by_project[&ready.hub_name].len();
+
     // Optionally persist the correspondences into each spoke's graph as a durable
     // `inferred` cross-repo import layer (ADR-0009 feature 2b).
     let written = if write {
-        persist_inferred_links(&hub_name, &report, &project_paths)?
+        persist_inferred_links(&ready.hub_name, &ready.report, &ready.project_paths)?
     } else {
         0
     };
 
     if json {
         emit_json(&serde_json::json!({
-            "hub": hub_name,
-            "spokes": report,
+            "hub": ready.hub_name,
+            "spokes": ready.report,
             "written": written,
         }))?;
     } else {
-        print_infer_report(&report, &hub_name, hub_keys.len());
+        print_infer_report(&ready.report, &ready.hub_name, hub_key_count);
         if write {
             println!("\npersisted {written} inferred cross-repo edge(s) into spoke graphs");
         }
+    }
+    Ok(())
+}
+
+/// `roteiro links --matrix`: render the cross-repo **config override matrix + drift**
+/// view (ADR-0009 step 7). Reuses the `--infer` scan, then pivots the per-spoke
+/// matches into a hub-key × spoke grid — as a text table, `--json`, or a
+/// self-contained HTML page (`--html`, the "render web-graph" output).
+fn run_links_matrix(
+    cfg: &config::Config,
+    cli_roots: &[String],
+    hub: Option<&str>,
+    html: bool,
+    out: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let ready = match scan_workspace_infer(cfg, cli_roots, hub)? {
+        InferScan::Nothing(reason) => {
+            if json {
+                emit_json(
+                    &serde_json::json!({ "hub": null, "rows": [], "drift": [], "note": reason }),
+                )?;
+            } else {
+                eprintln!("nothing to show — {reason}");
+            }
+            return Ok(());
+        }
+        InferScan::Ready(r) => r,
+    };
+
+    // Hub key → value, so the matrix can flag which overrides actually differ.
+    let hub_values: std::collections::BTreeMap<String, String> = ready.by_project[&ready.hub_name]
+        .iter()
+        .map(|c| (c.key.clone(), c.value.clone()))
+        .collect();
+
+    // Turn each spoke's matches/orphans into matrix inputs, looking its own values
+    // back up from its config keys.
+    let spokes = ready
+        .report
+        .iter()
+        .map(|rep| {
+            // Key values by (file, key): a `config_key` node is per-(file, key), so
+            // the same key in two files must not collide to an arbitrary value.
+            let vals: std::collections::HashMap<(&str, &str), &str> = ready.by_project[&rep.repo]
+                .iter()
+                .map(|c| ((c.file.as_str(), c.key.as_str()), c.value.as_str()))
+                .collect();
+            overview::SpokeInput {
+                name: rep.repo.clone(),
+                matches: rep
+                    .matches
+                    .iter()
+                    .map(|m| overview::MatchInput {
+                        hub_key: m.hub_key.clone(),
+                        spoke_key: m.spoke_key.clone(),
+                        spoke_value: vals
+                            .get(&(m.spoke_file.as_str(), m.spoke_key.as_str()))
+                            .copied()
+                            .unwrap_or("")
+                            .to_owned(),
+                        confidence: m.confidence,
+                    })
+                    .collect(),
+                orphans: rep
+                    .orphans
+                    .iter()
+                    .map(|o| (o.key.clone(), o.value.clone()))
+                    .collect(),
+            }
+        })
+        .collect();
+
+    let matrix = overview::build(&ready.hub_name, &hub_values, spokes);
+
+    if json {
+        emit_json(&matrix)?;
+    } else if html {
+        let page = overview::render_html(&matrix);
+        let out = out.unwrap_or_else(|| "roteiro-overview.html".to_owned());
+        if out == "-" {
+            println!("{page}");
+        } else {
+            std::fs::write(&out, page)?;
+            eprintln!(
+                "wrote override matrix ({} row(s), {} drift) → {out}",
+                matrix.rows.len(),
+                matrix.drift.len()
+            );
+        }
+    } else {
+        print!("{}", overview::render_text(&matrix));
     }
     Ok(())
 }
