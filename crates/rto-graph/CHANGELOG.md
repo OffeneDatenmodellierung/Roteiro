@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.0.0...rto-graph-v2.0.0) - 2026-08-12
+
+### Added
+
+- *(graph)* derived deploy-artifact extraction — YAML/k8s config + Dockerfile pins (ADR-0009)
+- *(links)* persist inferred cross-repo edges, read config keys from graph (ADR-0009 2b)
+- *(graph)* config-key nodes are graph-native (ADR-0009)
+- *(links)* cross-repo authored links + `roteiro links` (ADR-0009)
+
+### Fixed
+
+- *(graph)* address PR #217 review — dockerfile stage alias, YAML non-scalars
+- *(links)* clear stale inferred edges + CI clippy, address PR #213 review
+- *(graph)* address PR #211 review — redact secrets, dedupe keys
+
+### Other
+
+- *(links)* address PR #206 review
+
 ## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v0.0.19...rto-graph-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
