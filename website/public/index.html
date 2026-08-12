@@ -486,8 +486,12 @@ links --workspace ~/code</code> resolves each link across the workspace and <str
 drift</strong> — a target the app no longer defines — exiting non-zero, so it's a CI gate:
 the authored-vs-reality check of <code>roteiro check</code>, run <em>between</em> repos (ADR-0009).
 Or skip the hand-authoring: <code>roteiro links --infer --hub app</code> auto-matches each
-repo's config keys (TOML / JSON / <code>.env</code>) against the hub's and flags orphan keys
-the app doesn't define. Config keys are first-class graph nodes too — <code>roteiro query
+repo's config keys (TOML / JSON / <code>.env</code> / <strong>YAML</strong>) against the hub's and
+flags orphan keys the app doesn't define. <strong>Kubernetes</strong> spokes work out of the box:
+a manifest is mined for what a deployment actually overrides — ConfigMap/Secret <code>data</code>
+and each container's <code>image</code> and <code>env</code> — while Helm <code>values.yaml</code>
+flattens like any config, and a Dockerfile <code>FROM</code> becomes an <code>image_ref</code>
+node recording the version it pins. Config keys are first-class graph nodes too — <code>roteiro query
 --kind config_key</code> lists them, and <code>--infer</code> reads the match candidates
 straight from those nodes. Add <code>--write</code> to <strong>persist</strong> the matches as
 durable <span class="pill inferred">inferred</span> cross-repo edges in each spoke's graph: an
