@@ -145,14 +145,29 @@ fn query_result<T: serde::Serialize>(r: Result<Result<T, StoreError>, String>) -
     }
 }
 
+/// Resolve a tool key against a `project`: a project-qualified key
+/// (`<project>::<key>`) follows a cross-repo link into that project (ADR-0009),
+/// overriding `project`; a bare key uses `project`. Owned parts so the query
+/// closure can capture them.
+fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
+    rto_graph::parse_qualified(key).map_or_else(
+        || (project.map(str::to_owned), key.to_owned()),
+        |(p, bare)| (Some(p.to_owned()), bare.to_owned()),
+    )
+}
+
 #[tool_router]
 impl GraphServer {
     /// Explain a node: its record and provenance-labelled incoming/outgoing edges.
     #[tool(description = "Explain a graph node: its record and its \
                           provenance-labelled incoming/outgoing edges. \
-                          Keys: sym:<lang>:<path>#<Name>, file:<path>, adr:<id>.")]
+                          Keys: sym:<lang>:<path>#<Name>, file:<path>, adr:<id>. \
+                          A key may be project-qualified (<project>::<key>) to follow a \
+                          cross-repo link into another hosted project (see list_projects).")]
     async fn explain(&self, Parameters(args): Parameters<ExplainArgs>) -> CallToolResult {
-        let result = self.with_project(args.project.as_deref(), |store| explain(store, &args.key));
+        // A project-qualified key follows a cross-repo link into that project.
+        let (proj, bare) = qualified_or(&args.key, args.project.as_deref());
+        let result = self.with_project(proj.as_deref(), |store| explain(store, &bare));
         match result {
             Ok(Ok(Some(ex))) => json_result(&ex),
             Ok(Ok(None)) => CallToolResult::success(vec![ContentBlock::text(format!(
@@ -193,12 +208,17 @@ impl GraphServer {
         description = "Find a shortest path between two graph nodes, following \
                           edges in either direction. Each hop records the edge kind, \
                           provenance, and traversal direction (outgoing/incoming). \
-                          Args: from, to (node keys)."
+                          Args: from, to (node keys). A path lives within one project: \
+                          a project-qualified `from` (<project>::<key>) selects that \
+                          project (see list_projects)."
     )]
     async fn path(&self, Parameters(args): Parameters<PathArgs>) -> CallToolResult {
-        query_result(self.with_project(args.project.as_deref(), |store| {
-            path(store, &args.from, &args.to)
-        }))
+        // A path lives within one graph: a qualified `from` selects the project,
+        // and a qualifier on either endpoint is stripped to a bare, in-store key.
+        let (proj, from_bare) = qualified_or(&args.from, args.project.as_deref());
+        let to_bare = rto_graph::parse_qualified(&args.to)
+            .map_or_else(|| args.to.clone(), |(_, b)| b.to_owned());
+        query_result(self.with_project(proj.as_deref(), |store| path(store, &from_bare, &to_bare)))
     }
 
     /// List intent-debt markers (TODOs, stubs, deferred work).
@@ -457,5 +477,56 @@ mod tests {
         let info = server.get_info();
         assert_eq!(info.server_info.name, "roteiro");
         assert!(info.capabilities.tools.is_some());
+    }
+
+    /// Create a git repo at `dir` whose graph holds a single struct node `key`.
+    fn repo_with_node(dir: &std::path::Path, key: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["-c", "init.defaultBranch=main", "init", "-q"])
+            .current_dir(dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git init failed in {}", dir.display());
+        let store_dir = dir.join(".git").join("roteiro");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let mut store = Store::open(&store_dir.join("graph.db")).unwrap();
+        store
+            .apply_factset(&FactSet::new().with_node(Node::new(key, NodeKind::Struct, key)))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn explain_follows_a_project_qualified_key() {
+        // A two-project workspace; each node exists only in its own repo.
+        let base = std::env::temp_dir().join(format!("rto-mcp-xrepo-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        repo_with_node(&base.join("app"), "sym:rust:a.rs#OnlyInApp");
+        repo_with_node(&base.join("deploy"), "sym:rust:b.rs#OnlyInDeploy");
+        let ws = Workspace::from_repo_paths([base.join("app"), base.join("deploy")]).unwrap();
+        let server = GraphServer::new(Arc::new(ws));
+
+        // A project-qualified key follows the link into `app` — even though the
+        // `project` argument names `deploy`, the qualifier wins.
+        let out = server
+            .explain(Parameters(ExplainArgs {
+                key: "app::sym:rust:a.rs#OnlyInApp".into(),
+                project: Some("deploy".into()),
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&text_of(&out)).expect("json");
+        assert_eq!(json["node"]["key"], "sym:rust:a.rs#OnlyInApp");
+
+        // A bare key still honours the `project` argument.
+        let out = server
+            .explain(Parameters(ExplainArgs {
+                key: "sym:rust:b.rs#OnlyInDeploy".into(),
+                project: Some("deploy".into()),
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&text_of(&out)).expect("json");
+        assert_eq!(json["node"]["key"], "sym:rust:b.rs#OnlyInDeploy");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

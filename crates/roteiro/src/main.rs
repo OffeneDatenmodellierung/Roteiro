@@ -3066,6 +3066,18 @@ fn serve_v1_tail(
     }
 }
 
+/// Resolve a tool-call key against a `project`: a project-qualified key
+/// (`<project>::<key>`) follows a **cross-repo link** into that project (ADR-0009),
+/// overriding the call's `project`; a bare key uses `project`. Owned parts, so a
+/// query closure can capture them.
+#[cfg(feature = "serve")]
+fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
+    match rto_graph::parse_qualified(key) {
+        Some((p, bare)) => (Some(p.to_owned()), bare.to_owned()),
+        None => (project.map(str::to_owned), key.to_owned()),
+    }
+}
+
 /// A [`rto_serve::ToolRegistry`] backing the served model with Roteiro's graph
 /// query tools (ADR-0006), over a [`rto_graph::Workspace`] of one or more
 /// projects (ADR-0008). When several projects are hosted, every tool takes a
@@ -3125,7 +3137,9 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             rto_serve::ToolDef {
                 name: "explain".to_owned(),
                 description: "Explain a graph node by key (its record and immediate \
-                              neighbours), e.g. `fn:foo` or `file:src/main.rs`."
+                              neighbours), e.g. `fn:foo` or `file:src/main.rs`. A key may be \
+                              project-qualified (`<project>::<key>`) to follow a cross-repo \
+                              link into another hosted project (see `list_projects`)."
                     .to_owned(),
                 parameters: json!({
                     "type": "object",
@@ -3152,7 +3166,10 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "path".to_owned(),
-                description: "Find a shortest path between two node keys.".to_owned(),
+                description: "Find a shortest path between two node keys. A path lives \
+                              within one project; a project-qualified `from` \
+                              (`<project>::<key>`) selects it (see `list_projects`)."
+                    .to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
@@ -3198,10 +3215,13 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             }))
             .map_err(|e| e.to_string()),
             "explain" => {
-                let key = str_arg("key")
-                    .ok_or("`explain` needs a string `key`")?
-                    .to_owned();
-                self.run(project, |store| rto_graph::explain(store, &key))
+                let key = str_arg("key").ok_or("`explain` needs a string `key`")?;
+                // A project-qualified key (`<project>::<key>`) follows a cross-repo
+                // link into that project, overriding the `project` argument (ADR-0009).
+                let (proj, bare) = qualified_or(key, project);
+                self.run(proj.as_deref(), move |store| {
+                    rto_graph::explain(store, &bare)
+                })
             }
             "search" => {
                 let query = str_arg("query")
@@ -3219,13 +3239,17 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 self.run(project, |store| rto_graph::search(store, &query, limit))
             }
             "path" => {
-                let from = str_arg("from")
-                    .ok_or("`path` needs a string `from`")?
-                    .to_owned();
-                let to = str_arg("to")
-                    .ok_or("`path` needs a string `to`")?
-                    .to_owned();
-                self.run(project, |store| rto_graph::path(store, &from, &to))
+                let from = str_arg("from").ok_or("`path` needs a string `from`")?;
+                let to = str_arg("to").ok_or("`path` needs a string `to`")?;
+                // A path lives within one graph; a qualified `from` selects the
+                // project, and a qualifier on either endpoint is stripped to a
+                // bare, in-store key (ADR-0009).
+                let (proj, from_bare) = qualified_or(from, project);
+                let to_bare = rto_graph::parse_qualified(to)
+                    .map_or_else(|| to.to_owned(), |(_, b)| b.to_owned());
+                self.run(proj.as_deref(), move |store| {
+                    rto_graph::path(store, &from_bare, &to_bare)
+                })
             }
             "debt" => {
                 let categories: Vec<String> = args
