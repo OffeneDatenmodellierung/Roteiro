@@ -121,6 +121,8 @@ fn infer_matches_config_keys_across_repos_and_flags_orphans() {
     git(&app, &["init", "-q"]);
     git(&app, &["add", "."]);
     git(&app, &["commit", "-q", "-m", "init"]);
+    // `--infer` reads config keys from the graph, so both repos must be synced.
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync failed");
 
     // Spoke: an .env that overrides two keys (different naming convention) and
     // sets one the app doesn't define (the orphan / drift candidate).
@@ -132,6 +134,10 @@ fn infer_matches_config_keys_across_repos_and_flags_orphans() {
     git(&deploy, &["init", "-q"]);
     git(&deploy, &["add", "."]);
     git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(
+        roteiro(&deploy, &["sync"]).status.success(),
+        "deploy sync failed"
+    );
 
     let base_s = base.to_str().unwrap();
     let out = roteiro(
@@ -174,6 +180,83 @@ fn infer_matches_config_keys_across_repos_and_flags_orphans() {
         orphans,
         vec!["MAX_CONNECTIONS"],
         "the app-undefined key is the orphan"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn infer_write_persists_cross_repo_edges_that_survive_sync() {
+    let base = std::env::temp_dir().join(format!("roteiro-infer-write-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub with two config keys; spoke overrides both under a different convention.
+    std::fs::write(
+        app.join("config.toml"),
+        "[serve]\naddr = \"127.0.0.1:8017\"\ntools = true\n",
+    )
+    .expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync failed");
+
+    std::fs::write(
+        deploy.join("prod.env"),
+        "SERVE_ADDR=0.0.0.0:8443\nSERVE_TOOLS=false\n",
+    )
+    .expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(
+        roteiro(&deploy, &["sync"]).status.success(),
+        "deploy sync failed"
+    );
+
+    let base_s = base.to_str().unwrap();
+
+    // Persist the inferred links into the spoke's graph.
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--write",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "infer --write failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["written"], 2, "two matches persisted as edges: {v}");
+
+    // The external-ref target nodes are now queryable in the spoke's graph.
+    let q = roteiro(&deploy, &["query", "--kind", "external_ref", "--json"]);
+    assert!(q.status.success(), "query failed: {q:?}");
+    let text = String::from_utf8_lossy(&q.stdout);
+    assert!(
+        text.contains("app::cfgkey:config.toml#serve.addr"),
+        "external-ref to the hub key must be present: {text}"
+    );
+
+    // A re-sync of the spoke must not drop the persisted layer (it is re-applied).
+    assert!(
+        roteiro(&deploy, &["sync"]).status.success(),
+        "deploy re-sync failed"
+    );
+    let q = roteiro(&deploy, &["query", "--kind", "external_ref", "--json"]);
+    let text = String::from_utf8_lossy(&q.stdout);
+    assert!(
+        text.contains("app::cfgkey:config.toml#serve.addr"),
+        "external-ref must survive a re-sync: {text}"
     );
 
     std::fs::remove_dir_all(&base).ok();

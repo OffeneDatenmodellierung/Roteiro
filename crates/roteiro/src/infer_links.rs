@@ -1,15 +1,20 @@
 //! Inferred cross-repo config-key **matching** (ADR-0009, the `inferred` path).
 //!
-//! `roteiro links --infer` reads each workspace repo's config files, flattens
-//! them to dotted keys, and matches every spoke repo's keys against a hub repo's
-//! by name — surfacing correspondences with no hand-authored `[[links]]` and
-//! flagging **orphans** (a spoke key with no hub counterpart, the drift signal).
+//! `roteiro links --infer` reads each workspace repo's `config_key` nodes **from
+//! its graph** (via [`rto_graph::Store::config_keys`] — the nodes a `sync`
+//! extracts from its TOML / JSON / `.env` files) and matches every spoke repo's
+//! keys against a hub repo's by name — surfacing correspondences with no
+//! hand-authored `[[links]]` and flagging **orphans** (a spoke key with no hub
+//! counterpart, the drift signal). Reading from the graph, not re-parsing files,
+//! keeps the matcher and the stored config-key nodes in lock-step.
 //!
-//! Parsing lives in [`rto_graph::config_keys`] (the same code the extraction
-//! pipeline turns into `config_key` graph nodes), so the matcher and the graph
-//! never disagree. This module is just the cross-repo matching over those keys.
+//! With `--write`, [`link_facts`] turns the matches into a durable `inferred`
+//! import layer per spoke: an **external-ref node** standing in for the hub's key
+//! (so store integrity holds), plus a `references` edge from the spoke's own
+//! `config_key` node to it — the cross-repo edge, followable via
+//! [`rto_graph::Workspace::follow_external_ref`] and re-applied after every sync.
 
-use rto_graph::Repo;
+use rto_graph::{Edge, EdgeKind, FactSet, LINKS_REF, external_ref_node};
 // Re-exported so callers name one `ConfigKey`; the graph and the matcher share it.
 pub use rto_graph::ConfigKey;
 
@@ -22,6 +27,8 @@ pub struct KeyMatch {
     pub spoke_file: String,
     /// The matched hub key.
     pub hub_key: String,
+    /// The hub source file (with `hub_key`, addresses the hub's `config_key` node).
+    pub hub_file: String,
     /// Match confidence in `0.0..=1.0` (name + value agreement).
     pub confidence: f64,
 }
@@ -63,6 +70,7 @@ pub fn match_against_hub(
                 spoke_key: s.key.clone(),
                 spoke_file: s.file.clone(),
                 hub_key: h.key.clone(),
+                hub_file: h.file.clone(),
                 confidence: conf,
             });
         } else if let Some([h]) = by_leaf.get(last_token(&n)).map(Vec::as_slice) {
@@ -72,6 +80,7 @@ pub fn match_against_hub(
                 spoke_key: s.key.clone(),
                 spoke_file: s.file.clone(),
                 hub_key: h.key.clone(),
+                hub_file: h.file.clone(),
                 confidence: 0.55,
             });
         } else {
@@ -82,20 +91,30 @@ pub fn match_against_hub(
     (matches, orphans)
 }
 
-/// Collect every config-key leaf from a repo's tracked config files (committed
-/// content, so the result is deterministic).
-///
-/// # Errors
-/// Propagates git errors from walking or reading blobs.
-pub fn collect(repo: &Repo) -> anyhow::Result<Vec<ConfigKey>> {
-    let mut keys = Vec::new();
-    for blob in repo.walk_blobs()? {
-        if rto_graph::is_config_path(&blob.path) {
-            let bytes = repo.read_blob(&blob.oid)?;
-            keys.extend(rto_graph::flatten_config(&blob.path, &bytes));
-        }
+/// Build the import-layer facts persisting one spoke's inferred cross-repo links
+/// (ADR-0009, feature 2b). For each `KeyMatch`, an **external-ref node** stands in
+/// for the hub's `config_key` node (`<hub_project>::cfgkey:<hub_file>#<hub_key>`)
+/// so store integrity holds, and an inferred `references` edge runs from the
+/// spoke's own `config_key` node to it, stamped [`LINKS_REF`]. Applied to the
+/// spoke store as an import layer, so it survives sync (dangling edges pruned when
+/// a config key is removed).
+#[must_use]
+pub fn link_facts(hub_project: &str, matches: &[KeyMatch]) -> FactSet {
+    let mut facts = FactSet::new();
+    for m in matches {
+        let spoke_node = format!("cfgkey:{}#{}", m.spoke_file, m.spoke_key);
+        let qualified = format!("{hub_project}::cfgkey:{}#{}", m.hub_file, m.hub_key);
+        let target = external_ref_node(&qualified);
+        let mut edge = Edge::inferred(
+            spoke_node,
+            target.key.clone(),
+            EdgeKind::References,
+            m.confidence,
+        );
+        edge.src_ref = Some(LINKS_REF.to_owned());
+        facts = facts.with_node(target).with_edge(edge);
     }
-    Ok(keys)
+    facts
 }
 
 #[cfg(test)]
@@ -120,8 +139,34 @@ mod tests {
         let (m, orphans) = match_against_hub(&spoke, &hub);
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].hub_key, "serve.addr");
+        assert_eq!(m[0].hub_file, "f");
         assert!(m[0].confidence >= 0.95);
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].key, "addr");
+    }
+
+    #[test]
+    fn link_facts_builds_an_external_ref_and_inferred_edge_per_match() {
+        let m = KeyMatch {
+            spoke_key: "SERVE_ADDR".into(),
+            spoke_file: "prod.env".into(),
+            hub_key: "serve.addr".into(),
+            hub_file: "config.toml".into(),
+            confidence: 0.9,
+        };
+        let facts = link_facts("app", std::slice::from_ref(&m));
+        // One external-ref node standing in for the hub key.
+        assert_eq!(facts.nodes.len(), 1);
+        assert_eq!(
+            facts.nodes[0].key,
+            "extref:app::cfgkey:config.toml#serve.addr"
+        );
+        // One inferred edge from the spoke's config-key node to it, LINKS_REF-stamped.
+        assert_eq!(facts.edges.len(), 1);
+        let e = &facts.edges[0];
+        assert_eq!(e.src, "cfgkey:prod.env#SERVE_ADDR");
+        assert_eq!(e.dst, "extref:app::cfgkey:config.toml#serve.addr");
+        assert_eq!(e.confidence, Some(0.9));
+        assert_eq!(e.src_ref.as_deref(), Some(LINKS_REF));
     }
 }

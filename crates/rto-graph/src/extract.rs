@@ -299,7 +299,7 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
         };
         let mut node = Node::new(
             node_key.clone(),
-            NodeKind::Other("config_key".into()),
+            NodeKind::Other(crate::config_keys::KIND.into()),
             key.clone(),
         );
         node.path = Some(path.to_owned());

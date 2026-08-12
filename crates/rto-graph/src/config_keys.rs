@@ -11,6 +11,10 @@
 //! Dependency-free beyond `toml`/`serde_json` (already in the tree); YAML is out
 //! of scope (it would need a new parser).
 
+/// The `NodeKind::Other` token for a config-key node (`cfgkey:<file>#<dotted>`).
+/// Shared by the extractor that emits them and the store reader that finds them.
+pub(crate) const KIND: &str = "config_key";
+
 /// A single leaf config setting: its dotted key, source file, and value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConfigKey {
