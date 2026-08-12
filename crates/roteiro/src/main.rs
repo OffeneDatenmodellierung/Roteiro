@@ -2450,6 +2450,37 @@ fn graph_db_path(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     Ok(repo.git_dir().join("roteiro").join("graph.db"))
 }
 
+/// The config keys of every in-scope repo, read **from each repo's graph** (its
+/// `config_key` nodes), keyed by project name (dir name, `-2`/`-3` on collision),
+/// alongside a name→path map for persistence and the names of repos with no graph
+/// yet (noted, not fatal). Reading from the graph — not re-parsing files — keeps
+/// the matcher and the stored nodes in lock-step (ADR-0009 feature 2b).
+type WorkspaceConfigKeys = (
+    std::collections::BTreeMap<String, Vec<infer_links::ConfigKey>>,
+    std::collections::BTreeMap<String, std::path::PathBuf>,
+    Vec<String>,
+);
+fn collect_workspace_config_keys(
+    paths: &[std::path::PathBuf],
+) -> anyhow::Result<WorkspaceConfigKeys> {
+    let mut by_project = std::collections::BTreeMap::new();
+    let mut project_paths = std::collections::BTreeMap::new();
+    let mut unsynced = Vec::new();
+    for (path, name) in workspace_project_names(paths) {
+        project_paths.insert(name.clone(), path.clone());
+        let db = graph_db_path(path)?;
+        if !db.exists() {
+            unsynced.push(name);
+            continue;
+        }
+        let keys = rto_graph::Store::open(&db)?.config_keys()?;
+        if !keys.is_empty() {
+            by_project.insert(name, keys);
+        }
+    }
+    Ok((by_project, project_paths, unsynced))
+}
+
 /// `roteiro links --infer`: match each workspace repo's config keys (TOML / JSON
 /// / `.env`) against a hub repo's, surfacing correspondences with no
 /// hand-authored links and flagging orphan keys (drift candidates). Config keys
@@ -2467,8 +2498,6 @@ fn run_links_infer(
     write: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    use std::collections::BTreeMap;
-
     // Repos in scope (same set as `roteiro links`): workspace roots + the cwd repo.
     let mut path_set: std::collections::BTreeSet<std::path::PathBuf> =
         collect_workspace_repo_paths(&cfg.workspace, cli_roots)?
@@ -2499,25 +2528,8 @@ fn run_links_infer(
         );
     }
 
-    // Collect each repo's config keys from its graph, keyed by project name (dir
-    // name, `-2`/`-3` on collision) so two same-named repos don't clash. Reading
-    // from the graph (not re-parsing files) keeps the matcher and the stored
-    // `config_key` nodes in lock-step; a repo with no graph yet is noted, not fatal.
-    let mut by_project: BTreeMap<String, Vec<infer_links::ConfigKey>> = BTreeMap::new();
-    let mut project_paths: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
-    let mut unsynced: Vec<String> = Vec::new();
-    for (path, name) in workspace_project_names(&paths) {
-        project_paths.insert(name.clone(), path.clone());
-        let db = graph_db_path(path)?;
-        if !db.exists() {
-            unsynced.push(name);
-            continue;
-        }
-        let keys = rto_graph::Store::open(&db)?.config_keys()?;
-        if !keys.is_empty() {
-            by_project.insert(name, keys);
-        }
-    }
+    // Config keys of every in-scope repo, read from its graph (see the helper).
+    let (by_project, project_paths, unsynced) = collect_workspace_config_keys(&paths)?;
     if by_project.len() < 2 {
         let hint = if unsynced.is_empty() {
             String::new()
@@ -2601,14 +2613,18 @@ fn persist_inferred_links(
 ) -> anyhow::Result<usize> {
     let mut written = 0usize;
     for spoke in report {
+        // Apply the layer for *every* spoke, even with no matches: `apply_import_layer`
+        // is what clears this ref's prior edges, so a spoke whose matches have since
+        // disappeared must still be re-applied (with an empty layer) to remove its
+        // stale inferred links — otherwise the "authoritative re-apply" would leak them.
         let facts = infer_links::link_facts(hub_name, &spoke.matches);
-        if facts.is_empty() {
-            continue;
-        }
         let path = project_paths
             .get(&spoke.repo)
             .ok_or_else(|| anyhow::anyhow!("no path for spoke `{}`", spoke.repo))?;
         let db = graph_db_path(path)?;
+        if !db.exists() {
+            continue; // unsynced spoke: nothing to attach edges to
+        }
         let mut store = rto_graph::Store::open(&db)?;
         let applied = store.apply_import_layer(rto_graph::LINKS_REF, &facts)?;
         written += applied.edges_applied;

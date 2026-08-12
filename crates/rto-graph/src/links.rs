@@ -56,7 +56,9 @@ pub fn external_ref_key(qualified: &str) -> String {
 /// so a node written by an older layer still resolves.
 #[must_use]
 pub fn external_ref_target(node: &Node) -> Option<String> {
-    if node.kind != NodeKind::Other(EXTERNAL_REF_KIND.to_owned()) {
+    // Compare by token so a hot resolver path never allocates a `NodeKind::Other`
+    // just to check the kind.
+    if node.kind.as_str() != EXTERNAL_REF_KIND {
         return None;
     }
     node.meta

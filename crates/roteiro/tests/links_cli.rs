@@ -259,5 +259,45 @@ fn infer_write_persists_cross_repo_edges_that_survive_sync() {
         "external-ref must survive a re-sync: {text}"
     );
 
+    // Now the hub loses every key the spoke matched: the spoke drops to *zero*
+    // matches. A re-`--write` must clear the stale inferred links (the layer is
+    // re-applied authoritatively even when empty), not leak them.
+    std::fs::write(app.join("config.toml"), "[database]\nhost = \"db\"\n").expect("rewrite");
+    git(&app, &["commit", "-aqm", "unrelated config"]);
+    assert!(
+        roteiro(&app, &["sync"]).status.success(),
+        "app re-sync failed"
+    );
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--write",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "re-infer --write failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["written"], 0, "no matches remain: {v}");
+    // The stale cross-repo *edge* must be cleared: the empty layer is applied
+    // authoritatively (not skipped), so the spoke's config key no longer has an
+    // inferred `references` edge into the hub. (Orphan external-ref nodes with no
+    // edges are cleaned by the next real re-sync, as with any import layer.)
+    let q = roteiro(&deploy, &["query", "cfgkey:prod.env#SERVE_ADDR", "--json"]);
+    assert!(q.status.success(), "query failed: {q:?}");
+    let ex: serde_json::Value = serde_json::from_slice(&q.stdout).expect("valid JSON");
+    let outgoing = ex["outgoing"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !outgoing
+            .iter()
+            .any(|e| e["node"].as_str().is_some_and(|n| n.starts_with("extref:"))),
+        "stale inferred cross-repo edge must be cleared when matches drop to zero: {ex}"
+    );
+
     std::fs::remove_dir_all(&base).ok();
 }
