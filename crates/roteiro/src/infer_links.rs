@@ -6,9 +6,10 @@
 //! automatically (no hand-authored `[[links]]`) and flagging **orphans**: a spoke
 //! key with no hub counterpart, the likely-drift signal.
 //!
-//! This slice is deliberately dependency-free — TOML and JSON parse with crates
-//! already in the tree, `.env` is a trivial line format. YAML (the common
-//! deployment format) needs a maintained parser and is the immediate follow-on.
+//! Deliberately dependency-free — TOML and JSON parse with crates already in the
+//! tree, `.env` is a trivial line format. YAML is intentionally out of scope for
+//! now (it would need a new parser dependency; revisit if a Helm/k8s target
+//! arrives).
 
 use rto_graph::Repo;
 
@@ -97,6 +98,25 @@ fn join(prefix: &str, seg: &str) -> String {
     }
 }
 
+/// A TOML leaf value as a plain string. Strings are emitted **unquoted** (so
+/// `addr = "127.0.0.1"` matches an env `ADDR=127.0.0.1` by value); other scalars
+/// and arrays keep their canonical rendering.
+fn toml_scalar(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// A JSON leaf value as a plain string — strings unquoted, matching [`toml_scalar`]
+/// so the same setting agrees across formats.
+fn json_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Recurse into TOML tables; every non-table (scalar, array, inline) is a leaf
 /// value keyed by its dotted path — so `serve.models = ["a"]` is one key.
 fn flatten_toml(v: &toml::Value, prefix: &str, file: &str, out: &mut Vec<ConfigKey>) {
@@ -106,7 +126,7 @@ fn flatten_toml(v: &toml::Value, prefix: &str, file: &str, out: &mut Vec<ConfigK
                 flatten_toml(val, &join(prefix, k), file, out);
             }
         }
-        other => push(out, file, prefix, other.to_string()),
+        other => push(out, file, prefix, toml_scalar(other)),
     }
 }
 
@@ -118,7 +138,7 @@ fn flatten_json(v: &serde_json::Value, prefix: &str, file: &str, out: &mut Vec<C
                 flatten_json(val, &join(prefix, k), file, out);
             }
         }
-        other => push(out, file, prefix, other.to_string()),
+        other => push(out, file, prefix, json_scalar(other)),
     }
 }
 
@@ -163,13 +183,17 @@ pub fn match_against_hub(
     hub: &[ConfigKey],
 ) -> (Vec<KeyMatch>, Vec<ConfigKey>) {
     use std::collections::HashMap;
-    // Index the hub by full normalised key and by leaf token.
+    // Index the hub by full normalised key, and by leaf token → *all* candidates
+    // (so an ambiguous leaf isn't silently resolved to an arbitrary one).
     let mut by_full: HashMap<String, &ConfigKey> = HashMap::new();
-    let mut by_leaf: HashMap<String, &ConfigKey> = HashMap::new();
+    let mut by_leaf: HashMap<String, Vec<&ConfigKey>> = HashMap::new();
     for h in hub {
         let n = normalize(&h.key);
         by_full.entry(n.clone()).or_insert(h);
-        by_leaf.entry(last_token(&n).to_owned()).or_insert(h);
+        by_leaf
+            .entry(last_token(&n).to_owned())
+            .or_default()
+            .push(h);
     }
     let mut matches = Vec::new();
     let mut orphans = Vec::new();
@@ -184,8 +208,9 @@ pub fn match_against_hub(
                 hub_key: h.key.clone(),
                 confidence: conf,
             });
-        } else if let Some(h) = by_leaf.get(last_token(&n)) {
-            // Same leaf name under a different path — a weaker, still-useful hint.
+        } else if let Some([h]) = by_leaf.get(last_token(&n)).map(Vec::as_slice) {
+            // Same leaf name under a different path — a weaker, still-useful hint,
+            // but only when it's *unambiguous* (exactly one hub key with that leaf).
             matches.push(KeyMatch {
                 spoke_key: s.key.clone(),
                 spoke_file: s.file.clone(),
@@ -193,6 +218,7 @@ pub fn match_against_hub(
                 confidence: 0.55,
             });
         } else {
+            // No full match, and either no leaf or an ambiguous one → orphan.
             orphans.push(s.clone());
         }
     }
@@ -225,19 +251,29 @@ mod tests {
             "a.toml",
             b"[serve]\naddr = \"0.0.0.0:8443\"\nmodels = [\"q8\"]\n",
         );
+        // TOML string scalars are unquoted, so they compare with env/JSON values.
         assert!(
             toml_keys
                 .iter()
-                .any(|k| k.key == "serve.addr" && k.value == "\"0.0.0.0:8443\"")
+                .any(|k| k.key == "serve.addr" && k.value == "0.0.0.0:8443")
         );
         // An array is one leaf key, not indexed noise.
         assert!(toml_keys.iter().any(|k| k.key == "serve.models"));
 
-        let json_keys = flatten("a.json", br#"{"serve":{"tools":false}}"#);
+        let json_keys = flatten(
+            "a.json",
+            br#"{"serve":{"tools":false,"addr":"0.0.0.0:8443"}}"#,
+        );
         assert!(
             json_keys
                 .iter()
                 .any(|k| k.key == "serve.tools" && k.value == "false")
+        );
+        // JSON string scalars are unquoted too — same setting agrees across formats.
+        assert!(
+            json_keys
+                .iter()
+                .any(|k| k.key == "serve.addr" && k.value == "0.0.0.0:8443")
         );
 
         let env_keys = flatten(".env", b"# c\nexport SERVE_ADDR=127.0.0.1:8017\nEMPTY=\n");
@@ -246,6 +282,47 @@ mod tests {
                 .iter()
                 .any(|k| k.key == "SERVE_ADDR" && k.value == "127.0.0.1:8017")
         );
+    }
+
+    #[test]
+    fn value_agreement_across_formats_lifts_confidence() {
+        // TOML hub and env spoke set the same address → unquoted values agree.
+        let hub = flatten("app.toml", b"[serve]\naddr = \"0.0.0.0:8443\"\n");
+        let spoke = flatten("prod.env", b"SERVE_ADDR=0.0.0.0:8443\n");
+        let (m, _) = match_against_hub(&spoke, &hub);
+        assert_eq!(m.len(), 1);
+        assert!(
+            m[0].confidence >= 0.95,
+            "matching values → high confidence: {:?}",
+            m[0]
+        );
+    }
+
+    #[test]
+    fn ambiguous_leaf_is_not_matched() {
+        // Two hub keys share the leaf `addr`; a spoke `bind` normalises to a
+        // different leaf and finds no full match — the ambiguous leaf is skipped,
+        // so it's reported as an orphan rather than an arbitrary pick.
+        let hub = vec![
+            ConfigKey {
+                file: "h".into(),
+                key: "serve.addr".into(),
+                value: "a".into(),
+            },
+            ConfigKey {
+                file: "h".into(),
+                key: "db.addr".into(),
+                value: "b".into(),
+            },
+        ];
+        let spoke = vec![ConfigKey {
+            file: "s".into(),
+            key: "addr".into(),
+            value: "x".into(),
+        }];
+        let (m, orphans) = match_against_hub(&spoke, &hub);
+        assert!(m.is_empty(), "ambiguous leaf must not match: {m:?}");
+        assert_eq!(orphans.len(), 1);
     }
 
     #[test]

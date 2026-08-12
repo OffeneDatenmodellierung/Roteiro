@@ -2463,6 +2463,23 @@ fn run_links_infer(
     }
     let paths: Vec<std::path::PathBuf> = path_set.into_iter().collect();
 
+    // Having nothing to infer is a **successful no-op** (exit 0) — `--infer` is
+    // informational, so a CI script can run it opportunistically in a single repo
+    // without failing — but still say why.
+    let nothing = |reason: &str| -> anyhow::Result<()> {
+        if json {
+            emit_json(&serde_json::json!({ "hub": null, "spokes": [], "note": reason }))?;
+        } else {
+            eprintln!("nothing to infer — {reason}");
+        }
+        Ok(())
+    };
+    if paths.is_empty() {
+        return nothing(
+            "no repos in scope; run inside a repo, pass `--workspace <root>`, or set `[workspace]`",
+        );
+    }
+
     // Collect each repo's config keys, keyed by its `Workspace`-consistent project
     // name (dir name, `-2`/`-3` on collision) so two same-named repos don't clash.
     let mut by_project: BTreeMap<String, Vec<infer_links::ConfigKey>> = BTreeMap::new();
@@ -2474,10 +2491,10 @@ fn run_links_infer(
         }
     }
     if by_project.len() < 2 {
-        anyhow::bail!(
-            "need at least two repos with config files to infer links (found {})",
+        return nothing(&format!(
+            "need at least two repos with config files (TOML / JSON / .env) — found {}",
             by_project.len()
-        );
+        ));
     }
 
     // Pick the hub: named, else the repo with the most config keys.
@@ -2515,41 +2532,41 @@ fn run_links_infer(
     if json {
         emit_json(&serde_json::json!({ "hub": hub_name, "spokes": report }))?;
     } else {
-        println!(
-            "inferred config links (hub: {hub_name}, {} keys)",
-            hub_keys.len()
-        );
-        let (mut nm, mut no) = (0usize, 0usize);
-        for r in &report {
-            println!(
-                "\n  {} — {} match(es), {} orphan(s)",
-                r.repo,
-                r.matches.len(),
-                r.orphans.len()
-            );
-            for m in &r.matches {
-                println!(
-                    "    {:<28} ~ {hub_name}::{:<24} ({:.2})",
-                    m.spoke_key, m.hub_key, m.confidence
-                );
-                nm += 1;
-            }
-            for o in &r.orphans {
-                println!(
-                    "    {:<28} orphan — no {hub_name} counterpart (drift?)",
-                    o.key
-                );
-                no += 1;
-            }
-        }
-        println!(
-            "\n{} match(es), {} orphan(s) across {} spoke(s)",
-            nm,
-            no,
-            report.len()
-        );
+        print_infer_report(&report, &hub_name, hub_keys.len());
     }
     Ok(())
+}
+
+/// Human-readable rendering of the inferred cross-repo config report.
+fn print_infer_report(report: &[InferredRepo], hub_name: &str, hub_keys: usize) {
+    println!("inferred config links (hub: {hub_name}, {hub_keys} keys)");
+    let (mut nm, mut no) = (0usize, 0usize);
+    for r in report {
+        println!(
+            "\n  {} — {} match(es), {} orphan(s)",
+            r.repo,
+            r.matches.len(),
+            r.orphans.len()
+        );
+        for m in &r.matches {
+            println!(
+                "    {:<28} ~ {hub_name}::{:<24} ({:.2})",
+                m.spoke_key, m.hub_key, m.confidence
+            );
+            nm += 1;
+        }
+        for o in &r.orphans {
+            println!(
+                "    {:<28} orphan — no {hub_name} counterpart (drift?)",
+                o.key
+            );
+            no += 1;
+        }
+    }
+    println!(
+        "\n{nm} match(es), {no} orphan(s) across {} spoke(s)",
+        report.len()
+    );
 }
 
 /// Assemble the full graph and write it as a portable JSON artifact.
