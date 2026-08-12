@@ -217,7 +217,7 @@ roteiro path 'file:src/main.rs' 'adr:0001'</code></pre>
 <p>Make the graph a merge gate — <code>check</code> exits non-zero on drift, so a PR
 that breaks an ADR link or annotation fails the build:</p>
 <pre><code><span class="c"># In your pipeline (validates the committed HEAD tree)</span>
-cargo install roteiro          <span class="c"># or download a release binary</span>
+cargo install roteiro --locked <span class="c"># or download a release binary</span>
 roteiro check --committed</code></pre>
 
 <div class="note"><strong>Authoring intent.</strong> Link decisions to code with ADRs
