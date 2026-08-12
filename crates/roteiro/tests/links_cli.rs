@@ -222,6 +222,20 @@ fn hub_rev_uses_a_published_graph_artifact_when_present() {
     );
     assert!(matched.contains(&"serve.tools".to_owned()), "{v}");
 
+    // A corrupt artifact is "not usable": resolution must fall back to extraction
+    // (no sentinel, but the real tree key still resolves), never abort.
+    std::fs::write(art_dir.join(format!("{tree}.json")), "{ not valid json").expect("corrupt");
+    let v = infer_json(&base, &["--hub-rev", &v1]);
+    let matched = matched_hub_keys(&v);
+    assert!(
+        !matched.contains(&"artifact.only".to_owned()),
+        "corrupt artifact must be ignored: {v}"
+    );
+    assert!(
+        matched.contains(&"serve.tools".to_owned()),
+        "fell back to extraction: {v}"
+    );
+
     std::fs::remove_dir_all(&base).ok();
 }
 

@@ -2621,16 +2621,21 @@ fn config_keys_from_artifact(
         .join("roteiro")
         .join("artifacts")
         .join(format!("{tree}.json"));
-    if !path.exists() {
+    // A missing, unreadable, corrupt, or tree-mismatched artifact is "not usable" —
+    // return `None` so the caller falls back to re-extraction rather than aborting.
+    let Ok(json) = std::fs::read_to_string(&path) else {
         return Ok(None);
-    }
-    let artifact = rto_graph::GraphArtifact::from_json(&std::fs::read_to_string(&path)?)?;
-    // Only trust an artifact that declares the very tree we asked for.
+    };
+    let Ok(artifact) = rto_graph::GraphArtifact::from_json(&json) else {
+        return Ok(None);
+    };
     if artifact.tree.as_deref() != Some(tree.as_str()) {
         return Ok(None);
     }
     let mut store = rto_graph::Store::open_in_memory()?;
-    store.rebuild(&artifact.facts, None)?;
+    if store.rebuild(&artifact.facts, None).is_err() {
+        return Ok(None);
+    }
     Ok(Some(store.config_keys()?))
 }
 
@@ -2736,9 +2741,8 @@ fn detect_spoke_pin(
     }
     let store = rto_graph::Store::open(&db)?;
     // The spoke's `[pins]` config supplies image/Helm → ref templates (ADR-0009 8c).
-    let templates = config::load(spoke_path)
-        .map(|l| l.effective.pins)
-        .unwrap_or_default();
+    // A malformed config is a hard error (the config contract), not silently ignored.
+    let templates = config::load(spoke_path)?.effective.pins;
     pins::detect(&store, hub_dir, hub_origin, hub_repo, &templates)
 }
 

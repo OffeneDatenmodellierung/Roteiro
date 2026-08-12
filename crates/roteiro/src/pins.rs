@@ -1,9 +1,10 @@
-//! Auto-detect the hub version a spoke deploys (ADR-0009 step 8b): read the
+//! Auto-detect the hub version a spoke deploys (ADR-0009 step 8b/8c): read the
 //! spoke's derived deploy-artifact nodes (`submodule` / `image_ref`, from the
 //! Dockerfile / gitlink extractors) and match one to the hub, yielding the git rev
 //! to resolve that spoke against. Submodules win — a sha resolves unambiguously; an
-//! image tag is tried as a hub git ref (`<tag>`, then `v<tag>`), the common
-//! release-tag == image-tag convention, needing no config.
+//! image tag is tried as a hub git ref via the spoke's `[pins]` template (step 8c)
+//! if configured, else the default `<tag>` / `v<tag>` guess (the common
+//! release-tag == image-tag convention, needing no config).
 
 use rto_graph::{NodeKind, Repo, Store};
 
