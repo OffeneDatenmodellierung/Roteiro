@@ -75,6 +75,7 @@ pdf-extract = { version = "0.12", optional = true }
 ocrs = { version = "0.12", optional = true }
 rten = { version = "0.24", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+yaml-rust2 = "0.11.0"
 
 [dev-dependencies]
 # Also needed by the integration tests in `tests/`, which don't inherit the

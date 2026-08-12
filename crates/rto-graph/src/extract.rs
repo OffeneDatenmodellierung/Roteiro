@@ -27,8 +27,10 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 /// folded into the cache key separately — see [`media_env_tag`] and
 /// [`crate::sync`].)
 // Bumped 5 → 6 for config-key nodes (ADR-0009): config files now emit
-// `config_key` nodes, so cached extraction facts must be regenerated.
-pub(crate) const EXTRACT_VERSION: u32 = 6
+// `config_key` nodes, so cached extraction facts must be regenerated. Bumped
+// 6 → 7 for YAML config keys + Dockerfile `image_ref` nodes (ADR-0009 derived
+// deploy-artifact extraction).
+pub(crate) const EXTRACT_VERSION: u32 = 7
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "image-vision") {
@@ -200,6 +202,11 @@ fn extract_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) 
     if crate::config_keys::is_config_path(path) {
         return config_facts(path, blob_id, bytes, ingest);
     }
+    // Dockerfiles yield `image_ref` nodes (the base-image version pin a spoke
+    // deploys) rather than a plain file node (ADR-0009 derived facts).
+    if is_dockerfile(path) {
+        return dockerfile_facts(path, blob_id, bytes, ingest);
+    }
     let ext = extension(path);
     match ext.as_deref() {
         // Rust keeps its dedicated AST walker (imports, impl scoping, richer calls).
@@ -312,6 +319,113 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
         ));
     }
     facts
+}
+
+/// The `NodeKind::Other` token for a container base-image reference extracted from
+/// a Dockerfile `FROM` (ADR-0009 derived deploy-artifact facts). Its `meta` carries
+/// `{image, tag, digest}` — the version pin a spoke deploys.
+pub(crate) const IMAGE_REF_KIND: &str = "image_ref";
+
+/// Whether `path` is a Dockerfile/Containerfile (by conventional name):
+/// `Dockerfile`, `Containerfile`, `Dockerfile.<x>`, or `*.dockerfile`.
+fn is_dockerfile(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    base == "dockerfile"
+        || base == "containerfile"
+        || base.starts_with("dockerfile.")
+        || base.ends_with(".dockerfile")
+}
+
+/// Extract each Dockerfile `FROM` external base image into an `image_ref` node
+/// (`imageref:<file>#<n>`, `meta {image, tag, digest}`) with a `references` edge
+/// from the file — the version pin a deployment spoke ships. Internal multi-stage
+/// references (`FROM <prior-stage>`) and `FROM scratch` are skipped.
+fn dockerfile_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
+    let mut facts = FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest));
+    let file = file_key(path);
+    let text = String::from_utf8_lossy(bytes);
+    let mut stages: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut idx = 0usize;
+    for line in text.lines() {
+        let Some(rest) = strip_from_prefix(line.trim()) else {
+            continue;
+        };
+        let (image, stage) = parse_from(rest);
+        // Decide whether the image is an earlier stage against the stages seen *so
+        // far*, before recording this line's own alias — otherwise `FROM x AS x`
+        // would wrongly treat the external image `x` as an internal stage.
+        let is_internal_stage = stages.contains(&image.to_ascii_lowercase());
+        if let Some(s) = stage {
+            stages.insert(s.to_ascii_lowercase());
+        }
+        // Skip `scratch` and references to an earlier build stage — neither is an
+        // external image to pin.
+        if image.is_empty() || image.eq_ignore_ascii_case("scratch") || is_internal_stage {
+            continue;
+        }
+        let (name, tag, digest) = split_image(image);
+        let node_key = format!("imageref:{path}#{idx}");
+        idx += 1;
+        let mut node = Node::new(
+            node_key.clone(),
+            NodeKind::Other(IMAGE_REF_KIND.into()),
+            image.to_owned(),
+        );
+        node.path = Some(path.to_owned());
+        node.blob_hash = Some(blob_id.to_owned());
+        node.meta = serde_json::json!({ "image": name, "tag": tag, "digest": digest });
+        facts = facts.with_node(node).with_edge(Edge::derived(
+            file.clone(),
+            node_key,
+            EdgeKind::References,
+        ));
+    }
+    facts
+}
+
+/// The remainder of a `FROM ` line (case-insensitive prefix), or `None`.
+fn strip_from_prefix(line: &str) -> Option<&str> {
+    let b = line.as_bytes();
+    (b.len() >= 5 && b[..4].eq_ignore_ascii_case(b"from") && b[4].is_ascii_whitespace())
+        .then(|| line[5..].trim_start())
+}
+
+/// Parse a `FROM` argument list into `(image, stage-alias)`: the first non-flag
+/// token is the image (leading `--platform=…` flags skipped), and an `AS <name>`
+/// suffix names the build stage.
+fn parse_from(rest: &str) -> (&str, Option<&str>) {
+    let image = rest
+        .split_whitespace()
+        .find(|t| !t.starts_with("--"))
+        .unwrap_or("");
+    let mut toks = rest.split_whitespace();
+    let mut stage = None;
+    while let Some(t) = toks.next() {
+        if t.eq_ignore_ascii_case("as") {
+            stage = toks.next();
+            break;
+        }
+    }
+    (image, stage)
+}
+
+/// Split an image reference into `(name, tag, digest)`. A `@sha256:…` digest wins;
+/// otherwise a tag is the `:`-suffix *after the last path segment* (so a registry
+/// `host:port/` prefix is never mistaken for a tag).
+fn split_image(image: &str) -> (String, Option<String>, Option<String>) {
+    if let Some((name, digest)) = image.split_once('@') {
+        return (name.to_owned(), None, Some(digest.to_owned()));
+    }
+    let seg = image.rfind('/').map_or(0, |i| i + 1);
+    if let Some(colon) = image[seg..].find(':') {
+        let at = seg + colon;
+        return (
+            image[..at].to_owned(),
+            Some(image[at + 1..].to_owned()),
+            None,
+        );
+    }
+    (image.to_owned(), None, None)
 }
 
 /// Strip doc-comment markers from a comment, returning its body — or `None` if
@@ -1659,7 +1773,7 @@ fn extend(scope: &[Scope], seg: &str, key: Option<String>) -> Vec<Scope> {
 #[cfg(test)]
 mod tests {
     use super::{Extractor, FileNodeExtractor, Registry, RustExtractor};
-    use crate::{EdgeKind, NodeKind};
+    use crate::{EdgeKind, Node, NodeKind};
 
     #[test]
     fn file_node_extractor_is_deterministic_and_tagged() {
@@ -1732,6 +1846,62 @@ mod tests {
             rs.nodes
                 .iter()
                 .all(|n| n.kind != NodeKind::Other("config_key".into()))
+        );
+    }
+
+    #[test]
+    fn dockerfile_emits_image_ref_nodes_and_skips_internal_stages() {
+        let reg = Registry::new(crate::IngestConfig::default());
+        // Multi-stage: a builder stage (external), an internal `FROM builder`
+        // (skipped), and a runtime external base pinned by digest.
+        let df = b"FROM --platform=linux/amd64 rust:1.90 AS builder\nRUN cargo build\n\
+                   FROM builder AS test\nFROM registry.io/app:1.2@sha256:abc AS run\nFROM scratch\n";
+        let a = reg.extract("Dockerfile", "d1", df);
+        let b = reg.extract("Dockerfile", "d1", df);
+        assert_eq!(a, b, "dockerfile extraction must be deterministic");
+
+        let refs: Vec<&Node> = a
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("image_ref".into()))
+            .collect();
+        // Two external images: rust:1.90 and the app digest. `FROM builder` and
+        // `FROM scratch` are not pins.
+        assert_eq!(refs.len(), 2, "got: {refs:?}");
+        let rust = refs
+            .iter()
+            .find(|n| n.meta["image"] == "rust")
+            .expect("rust");
+        assert_eq!(rust.meta["tag"], "1.90");
+        let app = refs
+            .iter()
+            .find(|n| n.meta["image"] == "registry.io/app:1.2")
+            .expect("app digest");
+        assert_eq!(app.meta["digest"], "sha256:abc");
+        // A `references` edge from the file to each image_ref.
+        assert!(
+            a.edges
+                .iter()
+                .any(|e| { e.src == "file:Dockerfile" && e.kind == EdgeKind::References })
+        );
+        // `Dockerfile.prod` is recognised too; a plain source file is not.
+        assert!(
+            reg.extract("Dockerfile.prod", "d2", b"FROM alpine:3\n")
+                .nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Other("image_ref".into()))
+        );
+
+        // A stage alias equal to the image name (`FROM alpine AS alpine`) must not
+        // make the external `alpine` look like an internal stage — it is still a pin.
+        let c = reg.extract("Dockerfile", "d3", b"FROM alpine AS alpine\n");
+        assert!(
+            c.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Other("image_ref".into())
+                    && n.meta["image"] == "alpine"),
+            "FROM x AS x is an external pin, got: {:?}",
+            c.nodes
         );
     }
 
