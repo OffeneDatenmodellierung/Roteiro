@@ -143,6 +143,172 @@ fn infer_resolves_against_a_pinned_hub_version() {
 }
 
 #[test]
+fn hub_rev_uses_a_published_graph_artifact_when_present() {
+    let base = std::env::temp_dir().join(format!("roteiro-artifact-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync");
+
+    // Export the hub graph, then inject a sentinel config key that is NOT in the
+    // actual tree, and publish it at the conventional artifact path for v1's tree.
+    // If resolution later surfaces the sentinel, it used the artifact — not extraction.
+    let export = roteiro(&app, &["export", "--out", "-"]);
+    assert!(export.status.success(), "export failed: {export:?}");
+    let mut art: serde_json::Value = serde_json::from_slice(&export.stdout).expect("artifact JSON");
+    art["facts"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "key": "cfgkey:art.toml#artifact.only", "kind": "config_key", "name": "artifact.only",
+            "path": "art.toml", "lang": null, "blob_hash": null, "span": null,
+            "provenance": "derived", "meta": { "key": "artifact.only", "value": "yes" }
+        }));
+    let tree = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD^{tree}"])
+            .current_dir(&app)
+            .output()
+            .expect("tree")
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let art_dir = app.join(".git/roteiro/artifacts");
+    std::fs::create_dir_all(&art_dir).expect("mkdir artifacts");
+    std::fs::write(art_dir.join(format!("{tree}.json")), art.to_string()).expect("write artifact");
+
+    // Spoke references a key only the *artifact* defines, plus a real one.
+    std::fs::write(
+        deploy.join("prod.env"),
+        "ARTIFACT_ONLY=yes\nSERVE_TOOLS=true\n",
+    )
+    .expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    let base_s = base.to_str().unwrap();
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--hub-rev",
+            &v1,
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "hub-rev infer failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let matched = matched_hub_keys(&v);
+    assert!(
+        matched.contains(&"artifact.only".to_owned()),
+        "resolution used the published artifact (sentinel key present): {v}"
+    );
+    assert!(matched.contains(&"serve.tools".to_owned()), "{v}");
+
+    // A corrupt artifact is "not usable": resolution must fall back to extraction
+    // (no sentinel, but the real tree key still resolves), never abort.
+    std::fs::write(art_dir.join(format!("{tree}.json")), "{ not valid json").expect("corrupt");
+    let v = infer_json(&base, &["--hub-rev", &v1]);
+    let matched = matched_hub_keys(&v);
+    assert!(
+        !matched.contains(&"artifact.only".to_owned()),
+        "corrupt artifact must be ignored: {v}"
+    );
+    assert!(
+        matched.contains(&"serve.tools".to_owned()),
+        "fell back to extraction: {v}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn pinned_uses_pins_config_template_for_image_tags() {
+    let base = std::env::temp_dir().join(format!("roteiro-pinstmpl-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub v1 (serve.tools), tagged `release-1.2` — a scheme the default `1.2`/`v1.2`
+    // guess would miss. Then v2 renames the key at HEAD.
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    git(&app, &["tag", "release-1.2"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    // Spoke: a Dockerfile pins image `app:1.2`, and `[pins]` says its git ref is
+    // `release-{tag}`. It also references the old key.
+    std::fs::write(deploy.join("Dockerfile"), "FROM registry.io/app:1.2\n").expect("write");
+    std::fs::write(deploy.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    std::fs::write(
+        deploy.join("roteiro.toml"),
+        "[pins]\napp = \"release-{tag}\"\n",
+    )
+    .expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    let base_s = base.to_str().unwrap();
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--pinned",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "pinned infer failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let spoke = &v["spokes"][0];
+    // The `[pins]` template resolved the image tag to the `release-1.2` git tag.
+    assert_eq!(
+        spoke["hub_rev"], "release-1.2",
+        "resolved via [pins] template: {v}"
+    );
+    assert!(
+        spoke["pin_via"].as_str().unwrap_or("").starts_with("image"),
+        "pinned via the image: {v}"
+    );
+    assert!(
+        matched_hub_keys(&v).contains(&"serve.tools".to_owned()),
+        "old key resolves at the deployed version: {v}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn pinned_auto_resolves_each_spoke_against_the_version_it_vendors() {
     let base = std::env::temp_dir().join(format!("roteiro-pinned-cli-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();

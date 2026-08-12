@@ -2596,9 +2596,47 @@ fn config_keys_at_rev_with(
     reg: rto_graph::Registry,
     rev: &str,
 ) -> anyhow::Result<Vec<infer_links::ConfigKey>> {
+    // Prefer a pre-published graph artifact for this version (ADR-0009 step 8c): it
+    // resolves even when the pinned commit's blobs aren't present locally (a shallow
+    // clone) and skips extraction entirely.
+    if let Some(keys) = config_keys_from_artifact(repo, rev)? {
+        return Ok(keys);
+    }
     let mut store = rto_graph::Store::open_in_memory()?;
     rto_graph::sync_tree(&mut store, repo, cache, &reg, rev)?;
     Ok(store.config_keys()?)
+}
+
+/// Config keys from a pre-published graph artifact for `rev`, if one exists at the
+/// conventional location (`<repo>/.git/roteiro/artifacts/<treeid>.json`) and its
+/// recorded tree matches — a hub's CI can `roteiro export` there per release.
+/// `None` when there is no usable artifact (the caller re-extracts).
+fn config_keys_from_artifact(
+    repo: &rto_graph::Repo,
+    rev: &str,
+) -> anyhow::Result<Option<Vec<infer_links::ConfigKey>>> {
+    let tree = repo.tree_id_at(rev)?;
+    let path = repo
+        .common_dir()
+        .join("roteiro")
+        .join("artifacts")
+        .join(format!("{tree}.json"));
+    // A missing, unreadable, corrupt, or tree-mismatched artifact is "not usable" —
+    // return `None` so the caller falls back to re-extraction rather than aborting.
+    let Ok(json) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let Ok(artifact) = rto_graph::GraphArtifact::from_json(&json) else {
+        return Ok(None);
+    };
+    if artifact.tree.as_deref() != Some(tree.as_str()) {
+        return Ok(None);
+    }
+    let mut store = rto_graph::Store::open_in_memory()?;
+    if store.rebuild(&artifact.facts, None).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(store.config_keys()?))
 }
 
 /// Scan the in-scope repos (workspace roots + the cwd repo), read each one's config
@@ -2702,7 +2740,10 @@ fn detect_spoke_pin(
         return Ok(None);
     }
     let store = rto_graph::Store::open(&db)?;
-    pins::detect(&store, hub_dir, hub_origin, hub_repo)
+    // The spoke's `[pins]` config supplies image/Helm → ref templates (ADR-0009 8c).
+    // A malformed config is a hard error (the config contract), not silently ignored.
+    let templates = config::load(spoke_path)?.effective.pins;
+    pins::detect(&store, hub_dir, hub_origin, hub_repo, &templates)
 }
 
 /// Match every spoke against the right hub key set: the hub base (its `HEAD`, or the
