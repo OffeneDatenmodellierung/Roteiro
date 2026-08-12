@@ -141,6 +141,20 @@ impl Repo {
         walk_tree_blobs(&tree)
     }
 
+    /// Every blob reachable from an arbitrary commit-or-tree `rev` (a hex oid),
+    /// with full paths — like [`Repo::walk_blobs`] but for any point in history,
+    /// not just `HEAD`. A commit oid is peeled to its tree, so a submodule pin (a
+    /// commit sha) works directly. The primitive for extracting a repo's graph at
+    /// the version a spoke pins (ADR-0009 step 8 — version-pin resolution).
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `rev` cannot be resolved to a tree, the tree cannot
+    /// be traversed, or a path is not valid UTF-8.
+    pub fn blobs_at(&self, rev: &str) -> Result<Vec<BlobRef>, GitError> {
+        let tree = self.tree_by_hex(rev)?;
+        walk_tree_blobs(&tree)
+    }
+
     /// Every git submodule pinned in the `HEAD` tree, sorted by path: a gitlink
     /// (commit) entry gives the path and the commit it points at, enriched with
     /// its `.gitmodules` URL when declared. The pinned commit is the **version a
@@ -151,6 +165,23 @@ impl Repo {
     /// be read, or a path is not valid UTF-8.
     pub fn submodules(&self) -> Result<Vec<Submodule>, GitError> {
         let tree = self.inner.head_tree().map_err(ge)?;
+        self.submodules_in_tree(&tree)
+    }
+
+    /// Every git submodule pinned at an arbitrary commit/tree `rev`, sorted by path
+    /// — like [`Repo::submodules`] but for a historical point, so a hub graph
+    /// extracted at a pinned version (ADR-0009 step 8) carries its own submodules
+    /// as they were then.
+    ///
+    /// # Errors
+    /// As [`Repo::submodules`], plus if `rev` cannot be resolved to a tree.
+    pub fn submodules_at(&self, rev: &str) -> Result<Vec<Submodule>, GitError> {
+        let tree = self.tree_by_hex(rev)?;
+        self.submodules_in_tree(&tree)
+    }
+
+    /// Collect the submodule gitlinks (and `.gitmodules` URLs) in `tree`.
+    fn submodules_in_tree(&self, tree: &gix::Tree<'_>) -> Result<Vec<Submodule>, GitError> {
         let mut recorder = gix::traverse::tree::Recorder::default();
         tree.traverse().breadthfirst(&mut recorder).map_err(ge)?;
 

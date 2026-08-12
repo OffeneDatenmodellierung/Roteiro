@@ -35,6 +35,106 @@ fn roteiro(dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("run roteiro")
 }
 
+fn head_sha(dir: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .expect("rev-parse");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn infer_resolves_against_a_pinned_hub_version() {
+    let base = std::env::temp_dir().join(format!("roteiro-hubrev-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub v1 defines `serve.tools`; v2 renames it to `serve.features`. Sync each so
+    // the HEAD graph reflects v2.
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2 rename"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    // Spoke references the *old* key (`SERVE_TOOLS`).
+    std::fs::write(deploy.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    let base_s = base.to_str().unwrap();
+
+    // Against HEAD: the hub no longer defines the key, so it's an orphan (drift).
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let spoke = &v["spokes"][0];
+    let orphans: Vec<&str> = spoke["orphans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["key"].as_str().unwrap())
+        .collect();
+    assert!(orphans.contains(&"SERVE_TOOLS"), "drift against HEAD: {v}");
+    assert_eq!(v["hub_rev"], serde_json::Value::Null);
+
+    // Against the pinned v1 (the version the spoke actually deploys): it resolves.
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--hub-rev",
+            &v1,
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "hub-rev infer failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(v["hub_rev"], v1, "reports the pinned rev");
+    let spoke = &v["spokes"][0];
+    let matched: Vec<&str> = spoke["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["hub_key"].as_str().unwrap())
+        .collect();
+    assert!(
+        matched.contains(&"serve.tools"),
+        "resolves at the pinned version: {v}"
+    );
+    assert!(
+        spoke["orphans"].as_array().unwrap().is_empty(),
+        "no drift once resolved against the deployed version: {v}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 #[test]
 fn links_resolve_across_repos_and_flag_drift() {
     let base = std::env::temp_dir().join(format!("roteiro-links-cli-{}", std::process::id()));

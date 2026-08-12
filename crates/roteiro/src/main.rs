@@ -185,6 +185,12 @@ enum Command {
         /// most config keys). Applies to `--infer` and `--matrix`.
         #[arg(long, value_name = "PROJECT")]
         hub: Option<String>,
+        /// Resolve against the hub at a **pinned version** (a commit sha / tag / any
+        /// git rev — e.g. the sha a spoke's submodule points at) instead of its
+        /// `HEAD`, so drift is measured against the version actually deployed
+        /// (ADR-0009 step 8). Applies to `--infer` and `--matrix`.
+        #[arg(long, value_name = "REV")]
+        hub_rev: Option<String>,
         /// With `--infer`: persist the inferred correspondences into each spoke's
         /// graph as durable cross-repo edges (an `inferred` import layer that
         /// survives sync), instead of only reporting them.
@@ -421,6 +427,9 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+// `main` is a one-arm-per-subcommand dispatcher; splitting the match further just
+// scatters the CLI wiring, so the line-count lint is noise here.
+#[allow(clippy::too_many_lines)]
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Load layered config once (project `roteiro.toml` + user `~/.roteiro/
@@ -467,15 +476,28 @@ fn main() -> anyhow::Result<()> {
             infer,
             matrix,
             hub,
+            hub_rev,
             write,
             html,
             out,
             json,
         } => {
+            let pin = PinnedHub {
+                rev: hub_rev.as_deref(),
+                ingest,
+            };
             if matrix {
-                run_links_matrix(&cfg.effective, &workspace, hub.as_deref(), html, out, json)
+                run_links_matrix(
+                    &cfg.effective,
+                    &workspace,
+                    hub.as_deref(),
+                    pin,
+                    html,
+                    out,
+                    json,
+                )
             } else if infer {
-                run_links_infer(&cfg.effective, &workspace, hub.as_deref(), write, json)
+                run_links_infer(&cfg.effective, &workspace, hub.as_deref(), pin, write, json)
             } else {
                 run_links(&cfg.effective, &workspace, json)
             }
@@ -2515,19 +2537,50 @@ enum InferScan {
 /// the raw per-project config keys (for values) and paths (for persistence).
 struct InferReady {
     hub_name: String,
+    /// The pinned hub rev the match was resolved against, if any (ADR-0009 step 8).
+    hub_rev: Option<String>,
     report: Vec<InferredRepo>,
     by_project: std::collections::BTreeMap<String, Vec<infer_links::ConfigKey>>,
     project_paths: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
 
+/// How to source the hub's config keys: its `HEAD` graph (`rev` is `None`), or a
+/// **pinned version** (`rev` set — the deployed hub commit/tag, ADR-0009 step 8),
+/// extracted in-memory with `ingest`.
+#[derive(Clone, Copy)]
+struct PinnedHub<'a> {
+    rev: Option<&'a str>,
+    ingest: rto_graph::IngestConfig,
+}
+
+/// The config keys of the repo at `repo_path` **as of `rev`** (any git rev), read
+/// from an ephemeral in-memory graph extracted at that point via
+/// [`rto_graph::sync_tree`] — content-addressed, so unchanged blobs are cache hits.
+/// Backs version-pin resolution (ADR-0009 step 8).
+fn config_keys_at_rev(
+    repo_path: &std::path::Path,
+    rev: &str,
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<Vec<infer_links::ConfigKey>> {
+    let repo = rto_graph::Repo::discover(repo_path)?;
+    let cache = rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
+    let reg = rto_graph::Registry::new(ingest);
+    let mut store = rto_graph::Store::open_in_memory()?;
+    rto_graph::sync_tree(&mut store, &repo, &cache, &reg, rev)?;
+    Ok(store.config_keys()?)
+}
+
 /// Scan the in-scope repos (workspace roots + the cwd repo), read each one's config
 /// keys **from its graph**, pick the hub (named, else the repo with the most keys),
-/// and match every spoke against it. Shared by `--infer` and `--matrix`. Bails only
-/// on a bad `--hub`; an empty or single-repo workspace is a [`InferScan::Nothing`].
+/// and match every spoke against it. With `pin.rev`, the hub's keys come from that
+/// pinned version instead of its `HEAD` (ADR-0009 step 8). Shared by `--infer` and
+/// `--matrix`. Bails only on a bad `--hub` (or an unresolvable pin); an empty or
+/// single-repo workspace is a [`InferScan::Nothing`].
 fn scan_workspace_infer(
     cfg: &config::Config,
     cli_roots: &[String],
     hub: Option<&str>,
+    pin: PinnedHub<'_>,
 ) -> anyhow::Result<InferScan> {
     // Repos in scope (same set as `roteiro links`): workspace roots + the cwd repo.
     let mut path_set: std::collections::BTreeSet<std::path::PathBuf> =
@@ -2548,7 +2601,7 @@ fn scan_workspace_infer(
         ));
     }
 
-    let (by_project, project_paths, unsynced) = collect_workspace_config_keys(&paths)?;
+    let (mut by_project, project_paths, unsynced) = collect_workspace_config_keys(&paths)?;
     if by_project.len() < 2 {
         let hint = if unsynced.is_empty() {
             String::new()
@@ -2582,6 +2635,17 @@ fn scan_workspace_infer(
             .map(|(k, _)| k.clone())
             .expect("non-empty"),
     };
+
+    // Version-pin resolution: swap the hub's HEAD keys for those of the pinned
+    // version the spokes actually deploy (ADR-0009 step 8), extracted in-memory.
+    if let Some(rev) = pin.rev {
+        let hub_path = project_paths
+            .get(&hub_name)
+            .ok_or_else(|| anyhow::anyhow!("no path for hub `{hub_name}`"))?;
+        let keys = config_keys_at_rev(hub_path, rev, pin.ingest)
+            .map_err(|e| anyhow::anyhow!("resolving hub `{hub_name}` at `{rev}`: {e}"))?;
+        by_project.insert(hub_name.clone(), keys);
+    }
     let hub_keys = &by_project[&hub_name];
 
     let report: Vec<InferredRepo> = by_project
@@ -2599,6 +2663,7 @@ fn scan_workspace_infer(
 
     Ok(InferScan::Ready(InferReady {
         hub_name,
+        hub_rev: pin.rev.map(str::to_owned),
         report,
         by_project,
         project_paths,
@@ -2619,13 +2684,14 @@ fn run_links_infer(
     cfg: &config::Config,
     cli_roots: &[String],
     hub: Option<&str>,
+    pin: PinnedHub<'_>,
     write: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     // Having nothing to infer is a **successful no-op** (exit 0) — `--infer` is
     // informational, so a CI script can run it opportunistically in a single repo
     // without failing — but still say why.
-    let ready = match scan_workspace_infer(cfg, cli_roots, hub)? {
+    let ready = match scan_workspace_infer(cfg, cli_roots, hub, pin)? {
         InferScan::Nothing(reason) => {
             if json {
                 emit_json(&serde_json::json!({ "hub": null, "spokes": [], "note": reason }))?;
@@ -2649,10 +2715,17 @@ fn run_links_infer(
     if json {
         emit_json(&serde_json::json!({
             "hub": ready.hub_name,
+            "hub_rev": ready.hub_rev,
             "spokes": ready.report,
             "written": written,
         }))?;
     } else {
+        if let Some(rev) = &ready.hub_rev {
+            println!(
+                "resolved against {} @ {rev} (pinned version)",
+                ready.hub_name
+            );
+        }
         print_infer_report(&ready.report, &ready.hub_name, hub_key_count);
         if write {
             println!("\npersisted {written} inferred cross-repo edge(s) into spoke graphs");
@@ -2669,11 +2742,12 @@ fn run_links_matrix(
     cfg: &config::Config,
     cli_roots: &[String],
     hub: Option<&str>,
+    pin: PinnedHub<'_>,
     html: bool,
     out: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let ready = match scan_workspace_infer(cfg, cli_roots, hub)? {
+    let ready = match scan_workspace_infer(cfg, cli_roots, hub, pin)? {
         InferScan::Nothing(reason) => {
             if json {
                 emit_json(
@@ -2730,7 +2804,14 @@ fn run_links_matrix(
         })
         .collect();
 
-    let matrix = overview::build(&ready.hub_name, &hub_values, spokes);
+    // When resolving a pinned version, label the hub with its rev so every output
+    // (text header, HTML title, JSON `hub`) says which version drift was measured
+    // against.
+    let hub_label = match &ready.hub_rev {
+        Some(rev) => format!("{} @ {rev}", ready.hub_name),
+        None => ready.hub_name.clone(),
+    };
+    let matrix = overview::build(&hub_label, &hub_values, spokes);
 
     if json {
         emit_json(&matrix)?;

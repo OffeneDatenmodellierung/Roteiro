@@ -502,7 +502,11 @@ and the resolver follows it across repos to the real node — surviving later sy
 Or see it all at once: <code>roteiro links --matrix --hub app</code> renders the cross-repo
 <strong>config override matrix</strong> — every hub key against each spoke that overrides it,
 with a drift list of keys the app doesn't define — as a text table, <code>--json</code>, or a
-self-contained <code>--html</code> page you open straight in a browser.</div>
+self-contained <code>--html</code> page you open straight in a browser.
+And because a deployment ships a <em>pinned</em> version, <code>--hub-rev &lt;sha&gt;</code>
+resolves drift against the hub graph <strong>at the version actually deployed</strong> (a
+submodule sha, a release commit) — extracted in memory, no checkout — so a key that looks
+like drift against the app's latest but is fine on the deployed version reads correctly.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed
