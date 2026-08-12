@@ -32,6 +32,7 @@ queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents 
   <a href="#plan">Plan a change</a>
   <a href="#models">Models</a>
   <a href="#config">Config</a>
+  <a href="#crossrepo">Cross-repo</a>
   <a href="#languages">Languages</a>
   <a href="#links">Links</a>
 </nav>
@@ -476,48 +477,92 @@ tools  = true                            <span class="c"># expose graph tools to
 roots = ["~/code"]                       <span class="c"># scan for repos (each becomes a project)</span>
 repos = []                               <span class="c"># …or list explicit repo paths</span>
 
-[[links]]                                <span class="c"># cross-repo links to another repo (ADR-0009)</span>
+[[links]]                                <span class="c"># authored cross-repo link (ADR-0009)</span>
 to = "app::sym:rust:src/config.rs#ServeConfig"  <span class="c"># a &lt;project&gt;::&lt;key&gt; in another repo</span>
-from = "file:values.prod.yaml"          <span class="c"># optional local anchor in this repo</span></code></pre>
+from = "file:k8s/deployment.yaml"       <span class="c"># optional local anchor in this repo</span>
 
-<div class="note"><strong>Link across repos.</strong> A deployment/config repo can declare
-<code>[[links]]</code> pointing at keys in another workspace repo (a hub app). <code>roteiro
-links --workspace ~/code</code> resolves each link across the workspace and <strong>flags
-drift</strong> — a target the app no longer defines — exiting non-zero, so it's a CI gate:
-the authored-vs-reality check of <code>roteiro check</code>, run <em>between</em> repos (ADR-0009).
-Or skip the hand-authoring: <code>roteiro links --infer --hub app</code> auto-matches each
-repo's config keys (TOML / JSON / <code>.env</code> / <strong>YAML</strong>) against the hub's and
-flags orphan keys the app doesn't define. <strong>Kubernetes</strong> spokes work out of the box:
-a manifest is mined for what a deployment actually overrides — ConfigMap/Secret <code>data</code>
-and each container's <code>image</code> and <code>env</code> — while Helm <code>values.yaml</code>
-flattens like any config, and a Dockerfile <code>FROM</code> becomes an <code>image_ref</code>
-node recording the version it pins. Git <strong>submodules</strong> are pinned too — each
-gitlink becomes a <code>submodule</code> node carrying the path, URL, and the exact commit
-sha the deployment vendors (<code>roteiro query --kind submodule</code>). Config keys are first-class graph nodes too — <code>roteiro query
---kind config_key</code> lists them, and <code>--infer</code> reads the match candidates
-straight from those nodes. Add <code>--write</code> to <strong>persist</strong> the matches as
-durable <span class="pill inferred">inferred</span> cross-repo edges in each spoke's graph: an
-<code>external_ref</code> node stands in for the hub's key (so store integrity holds locally)
-and the resolver follows it across repos to the real node — surviving later syncs.
-Or see it all at once: <code>roteiro links --matrix --hub app</code> renders the cross-repo
-<strong>config override matrix</strong> — every hub key against each spoke that overrides it,
-with a drift list of keys the app doesn't define — as a text table, <code>--json</code>, or a
-self-contained <code>--html</code> page you open straight in a browser.
-And because a deployment ships a <em>pinned</em> version, <code>--hub-rev &lt;sha&gt;</code>
-resolves drift against the hub graph <strong>at the version actually deployed</strong> (a
-submodule sha, a release commit) — extracted in memory, no checkout — so a key that looks
-like drift against the app's latest but is fine on the deployed version reads correctly.
-Or let it figure the version out: <code>--pinned</code> reads <strong>each spoke's own pin</strong>
-(its submodule sha, or its Docker image tag resolved to a release) and resolves that spoke
-against exactly the hub version it vendors — so a fleet of deployments, each on a different
-version, is checked correctly in one pass. When image tags don't match git tags, a
-<code>[pins]</code> block maps them (<code>app = "release-{tag}"</code>); and if the hub's CI
-publishes a graph artifact per release, resolution loads that instead of re-extracting —
-so it works even against a shallow clone that lacks the old commit's blobs.</div>
+[pins]                                   <span class="c"># map a deployed artifact → a hub git ref</span>
+app = "release-{tag}"                    <span class="c"># image app:1.4 → git ref release-1.4</span></code></pre>
+
+<div class="note"><strong>Interlink a hub app with its deployment repos.</strong> The
+<code>[[links]]</code> and <code>[pins]</code> tables belong to Roteiro's cross-repo
+layer — see <a href="#crossrepo">Cross-repo: a hub and its spokes</a> below.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed
 cache folds the ingestion config into its key.</div>
+
+<h2 id="crossrepo">Cross-repo: a hub and its spokes</h2>
+
+<p>A common shape: one <strong>hub</strong> application repo, and many <strong>spoke</strong>
+deployment/config repos that each pin a version of it and override its configuration.
+Roteiro joins their per-repo graphs at the workspace — <strong>a query-time join, never a
+merged store</strong>, so each repo's isolation holds — and answers the questions that
+boundary raises: <em>which deployment overrides <code>serve.addr</code>, and to what?
+which reference config the app no longer defines? and are they drifting from the version
+they actually deploy?</em> (<a href="adr/">ADR-0009</a>).</p>
+
+<h3>A spoke, as Roteiro sees it</h3>
+<p>A deployment repo is mostly config plus a pinned version — nothing to hand-author.
+<code>roteiro sync</code> extracts it into graph nodes:</p>
+<pre><code><span class="c"># deploy-web/ — a spoke repo</span>
+prod.env               <span class="c"># SERVE_ADDR, SERVE_TOOLS, …    → config_key nodes</span>
+k8s/deployment.yaml    <span class="c"># container image + env vars    → config_key + image</span>
+Dockerfile             <span class="c"># FROM registry/app:1.4         → image_ref  (the version it pins)</span>
+app/ (+ .gitmodules)   <span class="c"># the hub vendored @ &lt;sha&gt;       → submodule  (a version pin)</span>
+roteiro.toml           <span class="c"># [[links]] and [pins]          (optional)</span></code></pre>
+<p>YAML is <em>mined</em>, not blindly flattened: a Kubernetes manifest yields the
+container <code>image</code>, its literal <code>env</code>, and ConfigMap/Secret
+<code>data</code> — the settings a deployment actually overrides — while a Helm
+<code>values.yaml</code> flattens like any config. Secret values are redacted. Inspect
+exactly what was extracted with <code>roteiro query --kind config_key</code> (or
+<code>--kind image_ref</code> / <code>--kind submodule</code>).</p>
+
+<h3>See the overrides &amp; drift at a glance</h3>
+<p>Point <code>links</code> at your workspace. <code>--matrix</code> renders every hub key
+against each spoke that overrides it, plus a drift list of keys the app no longer defines —
+as a text table, <code>--json</code>, or a self-contained <code>--html</code> page you open
+in a browser:</p>
+<pre><code>roteiro links --matrix --hub app --workspace ~/code
+
+<span class="c"># cross-repo config overrides (hub: app, 2 spoke(s))</span>
+<span class="c">#</span>
+<span class="c">#   serve.addr = 127.0.0.1:8017</span>
+<span class="c">#     ≠ deploy-web:   0.0.0.0:8443     (0.90)   ← a real override</span>
+<span class="c">#     = deploy-batch: 127.0.0.1:8017   (0.98)   ← redundant restatement</span>
+<span class="c">#</span>
+<span class="c">#   drift — 1 orphan key(s):</span>
+<span class="c">#     deploy-web: DB_PASSWORD = &lt;redacted&gt;      ← the app doesn't define it</span></code></pre>
+
+<h3>Gate it in CI, or let it infer</h3>
+<p>For links that must never silently drift (a TLS path, the served model), declare them
+in the spoke and fail the build when a target vanishes — the authored-vs-reality check of
+<code>roteiro check</code>, run <em>between</em> repos:</p>
+<pre><code>roteiro links --workspace ~/code   <span class="c"># resolves every [[links]] entry; exits non-zero on drift</span>
+
+<span class="c"># Or skip the authoring — match config keys automatically:</span>
+roteiro links --infer --hub app    <span class="c"># correspondences + orphan (drift) keys, confidence-scored</span>
+roteiro links --infer --write      <span class="c"># …and persist them as durable inferred</span>
+                                   <span class="c">#    cross-repo edges that survive re-sync</span></code></pre>
+
+<h3>Resolve against the version actually deployed</h3>
+<p>A spoke rarely runs the hub's latest — it deploys a <em>pinned</em> version. Measuring
+drift against the hub's <code>HEAD</code> is then wrong twice: a key renamed since the spoke
+deployed looks like drift when it's fine, and a key the deployed version dropped is missed.
+<code>--pinned</code> reads each spoke's own pin (its submodule sha, or its Docker image tag)
+and resolves that spoke against exactly the hub version it vendors — materialising the hub
+graph at that commit <strong>in memory, no checkout</strong>:</p>
+<pre><code>roteiro links --infer --pinned --hub app --workspace ~/code
+
+<span class="c"># deploy-web — 4 match(es), 0 orphan(s)  @ 4e0d5a6afd (via submodule app)</span>
+
+<span class="c"># …or pin one explicit version for the whole workspace:</span>
+roteiro links --infer --hub app --hub-rev v1.4</code></pre>
+<p>When image tags don't match your git tags, map them in <code>[pins]</code>
+(<code>app = "release-{tag}"</code>, shown in <a href="#config">Config</a> above). And if the
+hub's CI publishes a graph artifact per release, resolution loads that instead of
+re-extracting — so it resolves even against a shallow clone that lacks the pinned commit's
+blobs.</p>
 
 <h2 id="languages">Languages</h2>
 
