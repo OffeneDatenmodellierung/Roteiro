@@ -2303,6 +2303,27 @@ struct LinkResult {
     detail: String,
 }
 
+/// Project (display) names for `paths`, matching how [`rto_graph::Workspace`]
+/// names them — the repo directory name, with `-2`/`-3`/… suffixes disambiguating
+/// collisions — so a report's `repo` label (and the `<project>` used in a link
+/// key) never diverge when two repos share a directory name.
+fn workspace_project_names(paths: &[std::path::PathBuf]) -> Vec<(&std::path::PathBuf, String)> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    paths
+        .iter()
+        .map(|p| {
+            let base = p
+                .file_name()
+                .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+            let n = counts.entry(base.clone()).or_insert(0);
+            *n += 1;
+            let name = if *n == 1 { base } else { format!("{base}-{n}") };
+            (p, name)
+        })
+        .collect()
+}
+
 /// Verify a workspace's authored cross-repo links (ADR-0009). For every repo in
 /// the workspace (the cwd repo plus any `--workspace`/`[workspace]` roots), read
 /// its `[[links]]` and resolve each project-qualified `to` against the other
@@ -2334,10 +2355,7 @@ fn run_links(cfg: &config::Config, cli_roots: &[String], json: bool) -> anyhow::
 
     // Collect each repo's declared links from its own config.
     let mut results: Vec<LinkResult> = Vec::new();
-    for path in &paths {
-        let repo_name = path
-            .file_name()
-            .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+    for (path, repo_name) in workspace_project_names(&paths) {
         let repo_cfg = config::load(path)?.effective;
         for link in &repo_cfg.links {
             let kind = link.kind.clone().unwrap_or_else(|| "references".to_owned());

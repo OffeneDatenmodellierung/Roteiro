@@ -281,7 +281,7 @@ impl Workspace {
     /// means the key is well-formed and the project exists but the node does not —
     /// i.e. **cross-repo drift** (a removed or renamed target). Errors distinguish
     /// the other failure modes so a caller can report them precisely:
-    /// [`WorkspaceError::Unqualified`] (not `project::key`),
+    /// [`WorkspaceError::Unqualified`] (not in `<project>::<key>` form),
     /// [`WorkspaceError::UnknownProject`] (target repo not in the workspace),
     /// [`WorkspaceError::NoGraph`] (target repo unsynced).
     ///

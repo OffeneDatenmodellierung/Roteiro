@@ -99,7 +99,8 @@ pub struct LinkDecl {
     /// `app::sym:rust:crates/roteiro/src/config.rs#ServeConfig`.
     pub to: String,
     /// Optional local anchor in *this* repo the link originates from, e.g.
-    /// `file:values.prod.yaml` (verified to exist when given).
+    /// `file:values.prod.yaml`. Recorded for provenance and shown in the report;
+    /// not currently resolved against this repo's graph.
     #[serde(default)]
     pub from: Option<String>,
     /// Relationship label for display (default `references`).
