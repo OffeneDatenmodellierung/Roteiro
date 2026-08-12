@@ -104,15 +104,25 @@ pub fn build(
                 hub_value: hub_value.clone(),
                 cells: BTreeMap::new(),
             });
-            row.cells.insert(
-                spoke.name.clone(),
-                Cell {
-                    value: m.spoke_value,
-                    spoke_key: m.spoke_key,
-                    confidence: m.confidence,
-                    differs,
-                },
-            );
+            let cell = Cell {
+                value: m.spoke_value,
+                spoke_key: m.spoke_key,
+                confidence: m.confidence,
+                differs,
+            };
+            // A spoke may set the same hub key in more than one file. Keep a *real*
+            // override visible: never let a redundant restatement (`differs = false`)
+            // overwrite a differing cell already recorded for this spoke+key.
+            match row.cells.entry(spoke.name.clone()) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(cell);
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    if cell.differs && !o.get().differs {
+                        o.insert(cell);
+                    }
+                }
+            }
             columns.insert(spoke.name.clone());
         }
         for (key, value) in spoke.orphans {
@@ -290,12 +300,14 @@ vertical-align:-1px;border:1px solid var(--line)}\
 .swatch.none{background:var(--bg)}\
 table.drift td:first-child{white-space:nowrap;color:var(--muted)}";
 
-/// Escape text for HTML body/attribute content.
+/// Escape text for HTML body or attribute content (both quote styles), so the
+/// helper stays safe if reused inside single-quoted attributes.
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]
@@ -343,6 +355,43 @@ mod tests {
         assert!(!tools.cells["deploy"].differs, "equal value is redundant");
         assert_eq!(m.drift.len(), 1);
         assert_eq!(m.drift[0].key, "MAX_CONNECTIONS");
+    }
+
+    #[test]
+    fn a_redundant_restatement_never_hides_a_real_override() {
+        // The same spoke sets serve.addr in two files — one matching the hub
+        // (redundant), one differing (a real override). The override must win
+        // regardless of the order they're fed in.
+        let hub_values = BTreeMap::from([("serve.addr".to_owned(), "127.0.0.1:8017".to_owned())]);
+        let same = || MatchInput {
+            hub_key: "serve.addr".to_owned(),
+            spoke_key: "serve.addr".to_owned(),
+            spoke_value: "127.0.0.1:8017".to_owned(),
+            confidence: 0.98,
+        };
+        let over = || MatchInput {
+            hub_key: "serve.addr".to_owned(),
+            spoke_key: "SERVE_ADDR".to_owned(),
+            spoke_value: "0.0.0.0:8443".to_owned(),
+            confidence: 0.9,
+        };
+        for matches in [vec![same(), over()], vec![over(), same()]] {
+            let m = build(
+                "app",
+                &hub_values,
+                vec![SpokeInput {
+                    name: "deploy".to_owned(),
+                    matches,
+                    orphans: vec![],
+                }],
+            );
+            let cell = &m.rows[0].cells["deploy"];
+            assert!(
+                cell.differs,
+                "override must survive a redundant restatement"
+            );
+            assert_eq!(cell.value, "0.0.0.0:8443");
+        }
     }
 
     #[test]

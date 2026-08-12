@@ -174,8 +174,8 @@ enum Command {
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
         /// Infer links by matching config keys across repos, instead of verifying
-        /// authored `[[links]]`.
-        #[arg(long)]
+        /// authored `[[links]]`. Mutually exclusive with `--matrix`.
+        #[arg(long, conflicts_with = "matrix")]
         infer: bool,
         /// Render the cross-repo config override matrix + drift view instead of the
         /// authored-link report.
@@ -188,14 +188,14 @@ enum Command {
         /// With `--infer`: persist the inferred correspondences into each spoke's
         /// graph as durable cross-repo edges (an `inferred` import layer that
         /// survives sync), instead of only reporting them.
-        #[arg(long)]
+        #[arg(long, requires = "infer")]
         write: bool,
         /// With `--matrix`: write a self-contained HTML page (the `render web-graph`
         /// output) to `--out` (default `roteiro-overview.html`; `-` for stdout).
-        #[arg(long)]
+        #[arg(long, requires = "matrix")]
         html: bool,
         /// With `--matrix --html`: output file (default `roteiro-overview.html`).
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", requires = "html")]
         out: Option<String>,
         /// Emit the report as JSON.
         #[arg(long)]
@@ -2699,9 +2699,11 @@ fn run_links_matrix(
         .report
         .iter()
         .map(|rep| {
-            let vals: std::collections::HashMap<&str, &str> = ready.by_project[&rep.repo]
+            // Key values by (file, key): a `config_key` node is per-(file, key), so
+            // the same key in two files must not collide to an arbitrary value.
+            let vals: std::collections::HashMap<(&str, &str), &str> = ready.by_project[&rep.repo]
                 .iter()
-                .map(|c| (c.key.as_str(), c.value.as_str()))
+                .map(|c| ((c.file.as_str(), c.key.as_str()), c.value.as_str()))
                 .collect();
             overview::SpokeInput {
                 name: rep.repo.clone(),
@@ -2712,7 +2714,7 @@ fn run_links_matrix(
                         hub_key: m.hub_key.clone(),
                         spoke_key: m.spoke_key.clone(),
                         spoke_value: vals
-                            .get(m.spoke_key.as_str())
+                            .get(&(m.spoke_file.as_str(), m.spoke_key.as_str()))
                             .copied()
                             .unwrap_or("")
                             .to_owned(),

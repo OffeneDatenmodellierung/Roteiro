@@ -303,6 +303,23 @@ fn infer_write_persists_cross_repo_edges_that_survive_sync() {
 }
 
 #[test]
+fn incompatible_link_flag_combinations_are_rejected() {
+    // clap constraints fail fast rather than silently running a surprising path.
+    for args in [
+        ["links", "--infer", "--matrix"].as_slice(),
+        ["links", "--write"].as_slice(), // --write without --infer
+        ["links", "--html"].as_slice(),  // --html without --matrix
+        ["links", "--out", "x.html"].as_slice(), // --out without --html
+    ] {
+        let out = roteiro(Path::new("."), args);
+        assert!(
+            !out.status.success(),
+            "expected {args:?} to be rejected by clap"
+        );
+    }
+}
+
+#[test]
 fn matrix_renders_override_grid_and_drift_across_formats() {
     let base = std::env::temp_dir().join(format!("roteiro-matrix-cli-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
