@@ -151,7 +151,7 @@ impl Repo {
     /// Returns [`GitError`] if `rev` cannot be resolved to a tree, the tree cannot
     /// be traversed, or a path is not valid UTF-8.
     pub fn blobs_at(&self, rev: &str) -> Result<Vec<BlobRef>, GitError> {
-        let tree = self.tree_by_hex(rev)?;
+        let tree = self.tree_by_rev(rev)?;
         walk_tree_blobs(&tree)
     }
 
@@ -176,7 +176,7 @@ impl Repo {
     /// # Errors
     /// As [`Repo::submodules`], plus if `rev` cannot be resolved to a tree.
     pub fn submodules_at(&self, rev: &str) -> Result<Vec<Submodule>, GitError> {
-        let tree = self.tree_by_hex(rev)?;
+        let tree = self.tree_by_rev(rev)?;
         self.submodules_in_tree(&tree)
     }
 
@@ -632,6 +632,20 @@ impl Repo {
         let id = gix::ObjectId::from_hex(hex.as_bytes()).map_err(ge)?;
         self.inner
             .find_object(id)
+            .map_err(ge)?
+            .peel_to_tree()
+            .map_err(ge)
+    }
+
+    /// Resolve **any git revspec** — a sha, a tag, a branch, `HEAD~1` — to its
+    /// tree. Unlike [`Repo::tree_by_hex`] (raw oids only), this accepts the tag /
+    /// branch names the pinned-version resolution (`--hub-rev`, an image tag) can
+    /// carry. Mirrors the resolution in [`Repo::changed_between`].
+    fn tree_by_rev(&self, rev: &str) -> Result<gix::Tree<'_>, GitError> {
+        self.inner
+            .rev_parse_single(rev)
+            .map_err(ge)?
+            .object()
             .map_err(ge)?
             .peel_to_tree()
             .map_err(ge)

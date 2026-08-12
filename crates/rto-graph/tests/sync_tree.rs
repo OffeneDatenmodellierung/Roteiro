@@ -82,7 +82,10 @@ fn sync_tree_materialises_the_graph_at_a_pinned_commit() {
     let head = rev(&base, "HEAD");
 
     let repo = Repo::discover(&base).expect("discover");
-    let cache = ObjectCache::open(base.join(".git/roteiro/objects")).expect("cache");
+    // The cache lives under the repo's common git dir (worktree-correct), matching
+    // production path resolution.
+    let cache =
+        ObjectCache::open(repo.common_dir().join("roteiro").join("objects")).expect("cache");
 
     let at_pin = config_keys_at(&repo, &cache, &v1);
     let at_head = config_keys_at(&repo, &cache, &head);

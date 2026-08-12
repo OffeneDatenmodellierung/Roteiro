@@ -41,7 +41,34 @@ fn head_sha(dir: &Path) -> String {
         .current_dir(dir)
         .output()
         .expect("rev-parse");
+    assert!(
+        out.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Run `links --infer --hub app --workspace <base> --json` plus `extra` and return
+/// the parsed report.
+fn infer_json(base: &Path, extra: &[&str]) -> serde_json::Value {
+    let base_s = base.to_str().unwrap();
+    let mut args = vec!["links", "--infer", "--hub", "app", "--workspace", base_s];
+    args.extend_from_slice(extra);
+    args.push("--json");
+    let out = roteiro(base, &args);
+    assert!(out.status.success(), "infer {extra:?} failed: {out:?}");
+    serde_json::from_slice(&out.stdout).expect("JSON")
+}
+
+/// The `hub_key`s a report's first spoke matched.
+fn matched_hub_keys(report: &serde_json::Value) -> Vec<String> {
+    report["spokes"][0]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["hub_key"].as_str().unwrap().to_owned())
+        .collect()
 }
 
 #[test]
@@ -60,6 +87,9 @@ fn infer_resolves_against_a_pinned_hub_version() {
     git(&app, &["add", "."]);
     git(&app, &["commit", "-q", "-m", "v1"]);
     let v1 = head_sha(&app);
+    // Tag v1 so we can pin by a *revspec* (a tag), not just a sha — the resolver
+    // must accept both.
+    git(&app, &["tag", "rel-1"]);
     assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
     std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
     git(&app, &["commit", "-aqm", "v2 rename"]);
@@ -72,64 +102,41 @@ fn infer_resolves_against_a_pinned_hub_version() {
     git(&deploy, &["commit", "-q", "-m", "init"]);
     assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
 
-    let base_s = base.to_str().unwrap();
-
     // Against HEAD: the hub no longer defines the key, so it's an orphan (drift).
-    let out = roteiro(
-        &base,
-        &[
-            "links",
-            "--infer",
-            "--hub",
-            "app",
-            "--workspace",
-            base_s,
-            "--json",
-        ],
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
-    let spoke = &v["spokes"][0];
-    let orphans: Vec<&str> = spoke["orphans"]
+    let head = infer_json(&base, &[]);
+    let orphans: Vec<&str> = head["spokes"][0]["orphans"]
         .as_array()
         .unwrap()
         .iter()
         .map(|o| o["key"].as_str().unwrap())
         .collect();
-    assert!(orphans.contains(&"SERVE_TOOLS"), "drift against HEAD: {v}");
-    assert_eq!(v["hub_rev"], serde_json::Value::Null);
+    assert!(
+        orphans.contains(&"SERVE_TOOLS"),
+        "drift against HEAD: {head}"
+    );
+    assert_eq!(head["hub_rev"], serde_json::Value::Null);
 
-    // Against the pinned v1 (the version the spoke actually deploys): it resolves.
-    let out = roteiro(
-        &base,
-        &[
-            "links",
-            "--infer",
-            "--hub",
-            "app",
-            "--hub-rev",
-            &v1,
-            "--workspace",
-            base_s,
-            "--json",
-        ],
-    );
-    assert!(out.status.success(), "hub-rev infer failed: {out:?}");
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
-    assert_eq!(v["hub_rev"], v1, "reports the pinned rev");
-    let spoke = &v["spokes"][0];
-    let matched: Vec<&str> = spoke["matches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["hub_key"].as_str().unwrap())
-        .collect();
+    // Against the pinned v1 — named by the *tag* `rel-1`, not a sha — it resolves.
+    let by_tag = infer_json(&base, &["--hub-rev", "rel-1"]);
+    assert_eq!(by_tag["hub_rev"], "rel-1", "reports the pinned rev (a tag)");
     assert!(
-        matched.contains(&"serve.tools"),
-        "resolves at the pinned version: {v}"
+        matched_hub_keys(&by_tag).contains(&"serve.tools".to_owned()),
+        "resolves at the pinned version: {by_tag}"
     );
     assert!(
-        spoke["orphans"].as_array().unwrap().is_empty(),
-        "no drift once resolved against the deployed version: {v}"
+        by_tag["spokes"][0]["orphans"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "no drift once resolved against the deployed version: {by_tag}"
+    );
+
+    // The same pin named by the raw sha resolves identically — any revspec works.
+    let by_sha = infer_json(&base, &["--hub-rev", &v1]);
+    assert_eq!(by_sha["hub_rev"], v1);
+    assert!(
+        matched_hub_keys(&by_sha).contains(&"serve.tools".to_owned()),
+        "sha pin resolves too: {by_sha}"
     );
 
     std::fs::remove_dir_all(&base).ok();
