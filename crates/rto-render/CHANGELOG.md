@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.0.0...rto-render-v2.0.0) - 2026-08-12
+
+### Added
+
+- *(serve)* follow cross-repo links in the served tools (ADR-0009)
+
+### Other
+
+- *(serve)* address PR #210 review
+
 ## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v0.0.19...rto-render-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
