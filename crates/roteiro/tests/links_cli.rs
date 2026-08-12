@@ -301,3 +301,98 @@ fn infer_write_persists_cross_repo_edges_that_survive_sync() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn matrix_renders_override_grid_and_drift_across_formats() {
+    let base = std::env::temp_dir().join(format!("roteiro-matrix-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub defines serve.addr + serve.tools.
+    std::fs::write(
+        app.join("config.toml"),
+        "[serve]\naddr = \"127.0.0.1:8017\"\ntools = true\n",
+    )
+    .expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync failed");
+
+    // Spoke overrides addr to a *different* value, restates tools identically, and
+    // sets one orphan key (drift).
+    std::fs::write(
+        deploy.join("prod.env"),
+        "SERVE_ADDR=0.0.0.0:8443\nSERVE_TOOLS=true\nMAX_CONNECTIONS=512\n",
+    )
+    .expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(
+        roteiro(&deploy, &["sync"]).status.success(),
+        "deploy sync failed"
+    );
+
+    let base_s = base.to_str().unwrap();
+    let common = ["links", "--matrix", "--hub", "app", "--workspace", base_s];
+
+    // JSON: serve.addr is a real override (differs), serve.tools is redundant, and
+    // MAX_CONNECTIONS is drift.
+    let mut json_args = common.to_vec();
+    json_args.push("--json");
+    let out = roteiro(&base, &json_args);
+    assert!(out.status.success(), "matrix --json failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["hub"], "app");
+    let rows = v["rows"].as_array().expect("rows");
+    let addr = rows
+        .iter()
+        .find(|r| r["hub_key"] == "serve.addr")
+        .expect("serve.addr row");
+    assert_eq!(
+        addr["cells"]["deploy"]["differs"], true,
+        "addr is an override"
+    );
+    let tools = rows
+        .iter()
+        .find(|r| r["hub_key"] == "serve.tools")
+        .expect("serve.tools row");
+    assert_eq!(
+        tools["cells"]["deploy"]["differs"], false,
+        "tools restated identically"
+    );
+    let drift: Vec<&str> = v["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(drift, vec!["MAX_CONNECTIONS"]);
+
+    // Text: marks the override with ≠ and lists drift.
+    let out = roteiro(&base, &common);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("≠ deploy: 0.0.0.0:8443"), "{text}");
+    assert!(
+        text.contains("drift") && text.contains("MAX_CONNECTIONS"),
+        "{text}"
+    );
+
+    // HTML: a self-contained page written to the requested file.
+    let html_path = base.join("overview.html");
+    let mut html_args = common.to_vec();
+    html_args.extend(["--html", "--out", html_path.to_str().unwrap()]);
+    let out = roteiro(&base, &html_args);
+    assert!(out.status.success(), "matrix --html failed: {out:?}");
+    let html = std::fs::read_to_string(&html_path).expect("html written");
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(html.contains("<style>"), "self-contained CSS");
+    assert!(html.contains("serve.addr") && html.contains("0.0.0.0:8443"));
+    assert!(html.contains("MAX_CONNECTIONS"), "drift shown");
+
+    std::fs::remove_dir_all(&base).ok();
+}

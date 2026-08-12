@@ -492,7 +492,11 @@ the app doesn't define. Config keys are first-class graph nodes too — <code>ro
 straight from those nodes. Add <code>--write</code> to <strong>persist</strong> the matches as
 durable <span class="pill inferred">inferred</span> cross-repo edges in each spoke's graph: an
 <code>external_ref</code> node stands in for the hub's key (so store integrity holds locally)
-and the resolver follows it across repos to the real node — surviving later syncs.</div>
+and the resolver follows it across repos to the real node — surviving later syncs.
+Or see it all at once: <code>roteiro links --matrix --hub app</code> renders the cross-repo
+<strong>config override matrix</strong> — every hub key against each spoke that overrides it,
+with a drift list of keys the app doesn't define — as a text table, <code>--json</code>, or a
+self-contained <code>--html</code> page you open straight in a browser.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed
