@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::git::{GitError, Repo};
+use crate::model::Node;
 use crate::store::{Store, StoreError};
 
 /// A failure resolving or opening a project's graph.
@@ -46,6 +47,12 @@ pub enum WorkspaceError {
     /// The workspace is registered but empty (no repos resolved).
     #[error("no projects registered")]
     Empty,
+    /// A cross-repo target was not a project-qualified key (`<project>::<key>`).
+    #[error("`{key}` is not a project-qualified key (expected `<project>::<key>`)")]
+    Unqualified {
+        /// The malformed key.
+        key: String,
+    },
     /// The project's graph store does not exist yet — its repo has not been
     /// synced (`roteiro sync`).
     #[error("project `{name}` has no graph yet — run `roteiro sync` in {}", .path.display())]
@@ -269,6 +276,27 @@ impl Workspace {
         Ok(f(&store))
     }
 
+    /// Resolve a **project-qualified** key `"<project>::<key>"` to its node across
+    /// the workspace, opening the target project on demand (ADR-0009). `Ok(None)`
+    /// means the key is well-formed and the project exists but the node does not —
+    /// i.e. **cross-repo drift** (a removed or renamed target). Errors distinguish
+    /// the other failure modes so a caller can report them precisely:
+    /// [`WorkspaceError::Unqualified`] (not in `<project>::<key>` form),
+    /// [`WorkspaceError::UnknownProject`] (target repo not in the workspace),
+    /// [`WorkspaceError::NoGraph`] (target repo unsynced).
+    ///
+    /// # Errors
+    /// As above, plus [`WorkspaceError::Store`] / [`WorkspaceError::Poisoned`].
+    pub fn resolve_qualified(&self, qualified: &str) -> Result<Option<Node>, WorkspaceError> {
+        let (project, key) =
+            parse_qualified(qualified).ok_or_else(|| WorkspaceError::Unqualified {
+                key: qualified.to_owned(),
+            })?;
+        let key = key.to_owned();
+        self.with_store(Some(project), move |s| s.get_node(&key))?
+            .map_err(WorkspaceError::from)
+    }
+
     /// Lock the inner state, mapping a poisoned lock to [`WorkspaceError::Poisoned`].
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, WorkspaceError> {
         self.inner.lock().map_err(|_| WorkspaceError::Poisoned)
@@ -350,6 +378,17 @@ impl Workspace {
 /// Comma-separated project names (for error messages).
 fn keys(projects: &BTreeMap<String, Source>) -> String {
     projects.keys().cloned().collect::<Vec<_>>().join(", ")
+}
+
+/// Split a **project-qualified** key `"<project>::<key>"` into `(project, key)`,
+/// or `None` if it carries no `::` separator (a bare, within-repo key). A project
+/// name never contains `::`; a bare key may itself contain single colons (e.g.
+/// `sym:rust:…`), so only the **first** double-colon separates the project
+/// (ADR-0009).
+#[must_use]
+pub fn parse_qualified(key: &str) -> Option<(&str, &str)> {
+    key.split_once("::")
+        .filter(|(project, bare)| !project.is_empty() && !bare.is_empty())
 }
 
 /// Discover repos at `paths` into a `(name → Source, default)` registry: each
@@ -444,5 +483,48 @@ mod tests {
         let again = ws.handle("a").unwrap();
         // The handle is held by both the cache and this local, so ≥ 2.
         assert!(Arc::strong_count(&again) >= 2);
+    }
+
+    #[test]
+    fn parse_qualified_splits_on_the_first_double_colon_only() {
+        // Bare keys carry single colons; only `::` separates the project.
+        assert_eq!(
+            parse_qualified("app::sym:rust:a.rs#B"),
+            Some(("app", "sym:rust:a.rs#B"))
+        );
+        assert_eq!(parse_qualified("app::file:x"), Some(("app", "file:x")));
+        // Not qualified / malformed.
+        assert_eq!(parse_qualified("sym:rust:a.rs#B"), None);
+        assert_eq!(parse_qualified("::x"), None);
+        assert_eq!(parse_qualified("app::"), None);
+    }
+
+    #[test]
+    fn resolve_qualified_finds_drift_and_bad_targets() {
+        use crate::model::{Node, NodeKind};
+        let mut s = store();
+        s.apply_factset(&crate::model::FactSet::new().with_node(Node::new(
+            "file:cfg.rs",
+            NodeKind::File,
+            "cfg.rs",
+        )))
+        .unwrap();
+        let ws = Workspace::single("app", s);
+
+        // Resolves an existing node in the named project.
+        let hit = ws.resolve_qualified("app::file:cfg.rs").unwrap();
+        assert_eq!(hit.map(|n| n.key), Some("file:cfg.rs".to_owned()));
+        // Well-formed but absent → drift (Ok(None)).
+        assert!(ws.resolve_qualified("app::file:gone.rs").unwrap().is_none());
+        // Unknown target project → an error the caller reports as drift.
+        assert!(matches!(
+            ws.resolve_qualified("ghost::file:x").unwrap_err(),
+            WorkspaceError::UnknownProject { .. }
+        ));
+        // Not project-qualified at all.
+        assert!(matches!(
+            ws.resolve_qualified("file:cfg.rs").unwrap_err(),
+            WorkspaceError::Unqualified { .. }
+        ));
     }
 }
