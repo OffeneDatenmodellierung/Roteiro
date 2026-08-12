@@ -484,7 +484,10 @@ from = "file:values.prod.yaml"          <span class="c"># optional local anchor 
 <code>[[links]]</code> pointing at keys in another workspace repo (a hub app). <code>roteiro
 links --workspace ~/code</code> resolves each link across the workspace and <strong>flags
 drift</strong> — a target the app no longer defines — exiting non-zero, so it's a CI gate:
-the authored-vs-reality check of <code>roteiro check</code>, run <em>between</em> repos (ADR-0009).</div>
+the authored-vs-reality check of <code>roteiro check</code>, run <em>between</em> repos (ADR-0009).
+Or skip the hand-authoring: <code>roteiro links --infer --hub app</code> auto-matches each
+repo's config keys (TOML / JSON / <code>.env</code>) against the hub's and flags orphan keys
+the app doesn't define.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed

@@ -7,6 +7,7 @@
 use clap::{Parser, Subcommand};
 
 mod config;
+mod infer_links;
 mod init;
 mod review;
 
@@ -158,11 +159,23 @@ enum Command {
     /// authored `[[links]]` against the other repos' graphs, reporting the target
     /// each resolves to and flagging **drift** (targets that no longer exist).
     /// Exits non-zero when any link is unresolved, so it works as a CI gate.
+    ///
+    /// With `--infer`, instead auto-match each repo's **config keys** (TOML / JSON
+    /// / `.env`) against a hub repo's — surfacing correspondences with no
+    /// hand-authored links, and flagging orphan keys (drift candidates).
     Links {
         /// Workspace root to include (repeatable); combined with `[workspace]`
         /// config and the current repo.
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
+        /// Infer links by matching config keys across repos, instead of verifying
+        /// authored `[[links]]`.
+        #[arg(long)]
+        infer: bool,
+        /// With `--infer`: the source-of-truth project to match against (default:
+        /// the repo with the most config keys).
+        #[arg(long, value_name = "PROJECT")]
+        hub: Option<String>,
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
@@ -428,7 +441,18 @@ fn main() -> anyhow::Result<()> {
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
-        Command::Links { workspace, json } => run_links(&cfg.effective, &workspace, json),
+        Command::Links {
+            workspace,
+            infer,
+            hub,
+            json,
+        } => {
+            if infer {
+                run_links_infer(&cfg.effective, &workspace, hub.as_deref(), json)
+            } else {
+                run_links(&cfg.effective, &workspace, json)
+            }
+        }
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
         Command::Init { fetch, vault } => run_init(ingest, fetch, vault),
@@ -2399,6 +2423,131 @@ fn run_links(cfg: &config::Config, cli_roots: &[String], json: bool) -> anyhow::
 
     if drift > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// One spoke project's inferred config correspondences with the hub (ADR-0009).
+#[derive(serde::Serialize)]
+struct InferredRepo {
+    /// The spoke project (repo dir name).
+    repo: String,
+    /// Config keys that matched a hub key.
+    matches: Vec<infer_links::KeyMatch>,
+    /// Config keys with no hub counterpart — likely drift.
+    orphans: Vec<infer_links::ConfigKey>,
+}
+
+/// `roteiro links --infer`: match each workspace repo's config keys (TOML / JSON
+/// / `.env`) against a hub repo's, surfacing correspondences with no
+/// hand-authored links and flagging orphan keys (drift candidates). Informational
+/// — always exits zero (these are confidence-scored suggestions, not a gate).
+fn run_links_infer(
+    cfg: &config::Config,
+    cli_roots: &[String],
+    hub: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+
+    // Repos in scope (same set as `roteiro links`): workspace roots + the cwd repo.
+    let mut path_set: std::collections::BTreeSet<std::path::PathBuf> =
+        collect_workspace_repo_paths(&cfg.workspace, cli_roots)?
+            .into_iter()
+            .collect();
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(repo) = rto_graph::Repo::discover(&cwd)
+        && let Some(wd) = repo.workdir()
+    {
+        path_set.insert(wd.to_path_buf());
+    }
+    let paths: Vec<std::path::PathBuf> = path_set.into_iter().collect();
+
+    // Collect each repo's config keys, keyed by its `Workspace`-consistent project
+    // name (dir name, `-2`/`-3` on collision) so two same-named repos don't clash.
+    let mut by_project: BTreeMap<String, Vec<infer_links::ConfigKey>> = BTreeMap::new();
+    for (path, name) in workspace_project_names(&paths) {
+        let repo = rto_graph::Repo::discover(path)?;
+        let keys = infer_links::collect(&repo)?;
+        if !keys.is_empty() {
+            by_project.insert(name, keys);
+        }
+    }
+    if by_project.len() < 2 {
+        anyhow::bail!(
+            "need at least two repos with config files to infer links (found {})",
+            by_project.len()
+        );
+    }
+
+    // Pick the hub: named, else the repo with the most config keys.
+    let hub_name = match hub {
+        Some(h) => {
+            if !by_project.contains_key(h) {
+                anyhow::bail!(
+                    "no repo named `{h}` with config (have: {})",
+                    by_project.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            h.to_owned()
+        }
+        None => by_project
+            .iter()
+            .max_by_key(|(_, v)| v.len())
+            .map(|(k, _)| k.clone())
+            .expect("non-empty"),
+    };
+    let hub_keys = &by_project[&hub_name];
+
+    let report: Vec<InferredRepo> = by_project
+        .iter()
+        .filter(|(name, _)| **name != hub_name)
+        .map(|(name, keys)| {
+            let (matches, orphans) = infer_links::match_against_hub(keys, hub_keys);
+            InferredRepo {
+                repo: name.clone(),
+                matches,
+                orphans,
+            }
+        })
+        .collect();
+
+    if json {
+        emit_json(&serde_json::json!({ "hub": hub_name, "spokes": report }))?;
+    } else {
+        println!(
+            "inferred config links (hub: {hub_name}, {} keys)",
+            hub_keys.len()
+        );
+        let (mut nm, mut no) = (0usize, 0usize);
+        for r in &report {
+            println!(
+                "\n  {} — {} match(es), {} orphan(s)",
+                r.repo,
+                r.matches.len(),
+                r.orphans.len()
+            );
+            for m in &r.matches {
+                println!(
+                    "    {:<28} ~ {hub_name}::{:<24} ({:.2})",
+                    m.spoke_key, m.hub_key, m.confidence
+                );
+                nm += 1;
+            }
+            for o in &r.orphans {
+                println!(
+                    "    {:<28} orphan — no {hub_name} counterpart (drift?)",
+                    o.key
+                );
+                no += 1;
+            }
+        }
+        println!(
+            "\n{} match(es), {} orphan(s) across {} spoke(s)",
+            nm,
+            no,
+            report.len()
+        );
     }
     Ok(())
 }

@@ -102,3 +102,79 @@ fn links_resolve_across_repos_and_flag_drift() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn infer_matches_config_keys_across_repos_and_flags_orphans() {
+    let base = std::env::temp_dir().join(format!("roteiro-infer-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub: a TOML config with a few keys.
+    std::fs::write(
+        app.join("config.toml"),
+        "[serve]\naddr = \"127.0.0.1:8017\"\ntools = true\n[models]\ngenerative = \"qwen3-0.6b\"\n",
+    )
+    .expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "init"]);
+
+    // Spoke: an .env that overrides two keys (different naming convention) and
+    // sets one the app doesn't define (the orphan / drift candidate).
+    std::fs::write(
+        deploy.join("prod.env"),
+        "SERVE_ADDR=0.0.0.0:8443\nSERVE_TOOLS=false\nMAX_CONNECTIONS=512\n",
+    )
+    .expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+
+    let base_s = base.to_str().unwrap();
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "infer is informational (exit 0): {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["hub"], "app");
+    let spoke = &v["spokes"][0];
+    assert_eq!(spoke["repo"], "deploy");
+    // SERVE_ADDR / SERVE_TOOLS match app's serve.addr / serve.tools by name.
+    let matched: Vec<&str> = spoke["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["hub_key"].as_str().unwrap())
+        .collect();
+    assert!(matched.contains(&"serve.addr"), "{matched:?}");
+    assert!(matched.contains(&"serve.tools"), "{matched:?}");
+    // MAX_CONNECTIONS has no app counterpart → orphan.
+    let orphans: Vec<&str> = spoke["orphans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        orphans,
+        vec!["MAX_CONNECTIONS"],
+        "the app-undefined key is the orphan"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
