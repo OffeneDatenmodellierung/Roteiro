@@ -208,7 +208,9 @@ impl GraphServer {
         description = "Find a shortest path between two graph nodes, following \
                           edges in either direction. Each hop records the edge kind, \
                           provenance, and traversal direction (outgoing/incoming). \
-                          Args: from, to (node keys)."
+                          Args: from, to (node keys). A path lives within one project: \
+                          a project-qualified `from` (<project>::<key>) selects that \
+                          project (see list_projects)."
     )]
     async fn path(&self, Parameters(args): Parameters<PathArgs>) -> CallToolResult {
         // A path lives within one graph: a qualified `from` selects the project,
@@ -480,11 +482,12 @@ mod tests {
     /// Create a git repo at `dir` whose graph holds a single struct node `key`.
     fn repo_with_node(dir: &std::path::Path, key: &str) {
         std::fs::create_dir_all(dir).unwrap();
-        std::process::Command::new("git")
+        let status = std::process::Command::new("git")
             .args(["-c", "init.defaultBranch=main", "init", "-q"])
             .current_dir(dir)
             .status()
-            .expect("git init");
+            .expect("run git");
+        assert!(status.success(), "git init failed in {}", dir.display());
         let store_dir = dir.join(".git").join("roteiro");
         std::fs::create_dir_all(&store_dir).unwrap();
         let mut store = Store::open(&store_dir.join("graph.db")).unwrap();

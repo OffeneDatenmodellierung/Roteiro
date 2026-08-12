@@ -3166,7 +3166,10 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "path".to_owned(),
-                description: "Find a shortest path between two node keys.".to_owned(),
+                description: "Find a shortest path between two node keys. A path lives \
+                              within one project; a project-qualified `from` \
+                              (`<project>::<key>`) selects it (see `list_projects`)."
+                    .to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
