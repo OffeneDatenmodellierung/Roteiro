@@ -487,7 +487,8 @@ drift</strong> — a target the app no longer defines — exiting non-zero, so i
 the authored-vs-reality check of <code>roteiro check</code>, run <em>between</em> repos (ADR-0009).
 Or skip the hand-authoring: <code>roteiro links --infer --hub app</code> auto-matches each
 repo's config keys (TOML / JSON / <code>.env</code>) against the hub's and flags orphan keys
-the app doesn't define.</div>
+the app doesn't define. Config keys are first-class graph nodes too — <code>roteiro query
+--kind config_key</code> lists them.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed

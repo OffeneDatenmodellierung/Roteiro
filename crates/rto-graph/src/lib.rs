@@ -14,6 +14,7 @@
 mod artifact;
 mod cache;
 mod codegraph;
+mod config_keys;
 mod context;
 mod extract;
 mod git;
@@ -33,6 +34,10 @@ mod workspace;
 pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
 pub use cache::{CacheError, ObjectCache};
 pub use codegraph::{ORACLE_SCHEMA, OracleError, OracleReport, compare as compare_codegraph};
+pub use config_keys::{
+    ConfigKey, flatten as flatten_config, is_config_path, is_secret_key,
+    normalize as normalize_config_key,
+};
 pub use context::{
     ContextRefresh, NodeContext, build_context, context, dependents, refresh_contexts,
 };
