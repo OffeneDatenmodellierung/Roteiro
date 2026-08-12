@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0009"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
+version: "1.0"
 last-modified: 2026-08-12
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.1 |
+| **Document version** | 1.0 |
 
 ## Reference
 
@@ -211,3 +211,4 @@ prototype exercised.
 | Version | Date | Notes |
 |---------|------|-------|
 | 0.1 | 2026-08-12 | Draft for review. Proposes a thin cross-repo link layer over the ADR-0008 workspace: project-qualified keys (`app::key`), `derived`/`authored`/`inferred` link records stored in the owning spoke, resolution as a join at `Workspace` (no merged store — isolation preserved), a traversable follow hop reusing the served tools' `project` selector, and cross-repo drift as a `check` finding. Rejects a merged mega-store (breaks isolation) and an external index (abandons provenance). Version-pin resolution against the pinned app sha noted as the load-bearing follow-on. Grounded in `Workspace`, `open_graph`, the config structs, the served tool registries, and `check::run`; motivated by a validated hub-and-spoke prototype. |
+| 1.0 | 2026-08-12 | Accepted and first slice implemented. **Landed:** project-qualified keys (`parse_qualified`) and the resolver ([[crates/rto-graph/src/workspace.rs#Workspace]]`::resolve_qualified` — opens the target project on demand and returns `Ok(None)` for a drifted target); **authored** links via a `[[links]]` table in a spoke's `roteiro.toml`; and a `roteiro links` command that resolves every repo's declared links across the workspace, reports the target each resolves to, and **exits non-zero on drift** (the cross-repo `check` gate), with `--json`. Build-plan steps 1, 2, 4 done; step 6 delivered as a dedicated `links` command rather than folded into `check`. **Deferred, in order:** the **inferred** config-key matcher (step 3 — needs a config-key extractor so YAML/TOML keys become nodes); **derived** deploy-artifact extractors (Dockerfile/Helm/submodule); cross-repo **traversal in the served tools** (step 5 — the follow hop inside `serve`); the **web-graph/serve views** (step 7); and **version-pin resolution** at the spoke's pinned app sha (step 8, the load-bearing follow-on). |

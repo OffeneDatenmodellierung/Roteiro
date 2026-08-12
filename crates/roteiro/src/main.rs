@@ -154,6 +154,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Verify cross-repo links across a workspace (ADR-0009): resolve each repo's
+    /// authored `[[links]]` against the other repos' graphs, reporting the target
+    /// each resolves to and flagging **drift** (targets that no longer exist).
+    /// Exits non-zero when any link is unresolved, so it works as a CI gate.
+    Links {
+        /// Workspace root to include (repeatable); combined with `[workspace]`
+        /// config and the current repo.
+        #[arg(long, value_name = "ROOT")]
+        workspace: Vec<String>,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export the assembled graph to a portable JSON artifact.
     Export {
         /// Output file (default: `roteiro-graph.json`); `-` writes to stdout.
@@ -415,6 +428,7 @@ fn main() -> anyhow::Result<()> {
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
+        Command::Links { workspace, json } => run_links(&cfg.effective, &workspace, json),
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
         Command::Init { fetch, vault } => run_init(ingest, fetch, vault),
@@ -595,17 +609,37 @@ fn print_config_sections(loaded: &config::Loaded) {
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
     );
 
+    print_workspace_section(e, p, u);
+}
+
+/// Print the `[workspace]` and `[[links]]` config sections (ADR-0008/0009), with
+/// each value's provenance. Split out of [`print_config_sections`] to keep it
+/// under the line budget.
+fn print_workspace_section(e: &config::Config, p: &config::Config, u: &config::Config) {
     println!("[workspace]");
     println!(
         "  roots = {:?}  ({})",
         e.workspace.roots,
-        source(p.workspace.roots.is_some(), u.workspace.roots.is_some())
+        provenance(p.workspace.roots.is_some(), u.workspace.roots.is_some())
     );
     println!(
         "  repos = {:?}  ({})",
         e.workspace.repos,
-        source(p.workspace.repos.is_some(), u.workspace.repos.is_some())
+        provenance(p.workspace.repos.is_some(), u.workspace.repos.is_some())
     );
+    if !e.links.is_empty() {
+        println!(
+            "[[links]]  ({} cross-repo link(s), ADR-0009)",
+            e.links.len()
+        );
+        for l in &e.links {
+            println!(
+                "  → {}  ({})",
+                l.to,
+                l.kind.as_deref().unwrap_or("references")
+            );
+        }
+    }
 }
 
 /// Sync the graph for the current repository, optionally including uncommitted
@@ -2252,6 +2286,105 @@ fn run_path(
     Ok(())
 }
 
+/// The outcome of resolving one authored cross-repo link (ADR-0009).
+#[derive(serde::Serialize)]
+struct LinkResult {
+    /// The repo (project) the link was declared in.
+    repo: String,
+    /// The declared local anchor (`from`), if any.
+    from: Option<String>,
+    /// The project-qualified target (`to`).
+    to: String,
+    /// The relationship label.
+    kind: String,
+    /// `ok` (resolved) or `drift` (target unresolved).
+    status: &'static str,
+    /// For a resolved link: the target node's kind and name; for drift: why.
+    detail: String,
+}
+
+/// Verify a workspace's authored cross-repo links (ADR-0009). For every repo in
+/// the workspace (the cwd repo plus any `--workspace`/`[workspace]` roots), read
+/// its `[[links]]` and resolve each project-qualified `to` against the other
+/// repos' graphs. A target that no longer resolves is **drift** — the cross-repo
+/// form of `roteiro check`. Exits non-zero if any link drifts.
+fn run_links(cfg: &config::Config, cli_roots: &[String], json: bool) -> anyhow::Result<()> {
+    use std::collections::BTreeSet;
+
+    // Repos in scope: the workspace roots/repos, plus the current repo so
+    // `roteiro links` run inside a spoke resolves against its siblings.
+    let mut paths: BTreeSet<std::path::PathBuf> =
+        collect_workspace_repo_paths(&cfg.workspace, cli_roots)?
+            .into_iter()
+            .collect();
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(repo) = rto_graph::Repo::discover(&cwd)
+        && let Some(wd) = repo.workdir()
+    {
+        paths.insert(wd.to_path_buf());
+    }
+    if paths.is_empty() {
+        anyhow::bail!(
+            "no repos in scope — run inside a repo, pass `--workspace <root>`, or set \
+             `[workspace]` in roteiro.toml"
+        );
+    }
+    let paths: Vec<std::path::PathBuf> = paths.into_iter().collect();
+    let workspace = rto_graph::Workspace::from_repo_paths(&paths)?;
+
+    // Collect each repo's declared links from its own config.
+    let mut results: Vec<LinkResult> = Vec::new();
+    for path in &paths {
+        let repo_name = path
+            .file_name()
+            .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+        let repo_cfg = config::load(path)?.effective;
+        for link in &repo_cfg.links {
+            let kind = link.kind.clone().unwrap_or_else(|| "references".to_owned());
+            let (status, detail) = match workspace.resolve_qualified(&link.to) {
+                Ok(Some(node)) => ("ok", format!("{} {}", node.kind.as_str(), node.name)),
+                Ok(None) => ("drift", "no such node in the target project".to_owned()),
+                Err(e) => ("drift", e.to_string()),
+            };
+            results.push(LinkResult {
+                repo: repo_name.clone(),
+                from: link.from.clone(),
+                to: link.to.clone(),
+                kind,
+                status,
+                detail,
+            });
+        }
+    }
+
+    let drift = results.iter().filter(|r| r.status == "drift").count();
+    if json {
+        emit_json(&results)?;
+    } else if results.is_empty() {
+        println!(
+            "no cross-repo links declared across {} repo(s) (add `[[links]]` to a repo's roteiro.toml)",
+            paths.len()
+        );
+    } else {
+        for r in &results {
+            let marker = if r.status == "ok" { "ok   " } else { "DRIFT" };
+            println!("  [{marker}] {} → {}  ({})", r.repo, r.to, r.detail);
+        }
+        println!(
+            "{} link(s) across {} repo(s): {} ok, {} drift",
+            results.len(),
+            paths.len(),
+            results.len() - drift,
+            drift
+        );
+    }
+
+    if drift > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Assemble the full graph and write it as a portable JSON artifact.
 fn run_export(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::Result<()> {
     use rto_graph::GraphArtifact;
@@ -2406,8 +2539,7 @@ fn run_serve(
 /// Repo paths a workspace `serve` hosts: everything under the CLI `--workspace`
 /// roots and `[workspace]` config `roots` (each scanned), plus any explicit
 /// `repos`. Empty ⇒ single-repo serving of the current directory's repo. Shared
-/// by startup and by SIGHUP reload so both see the same set.
-#[cfg(any(feature = "mcp", feature = "serve"))]
+/// by `serve` startup, SIGHUP reload, and `roteiro links` (ADR-0009).
 fn collect_workspace_repo_paths(
     ws_cfg: &config::WorkspaceConfig,
     cli_roots: &[String],
@@ -2511,7 +2643,6 @@ fn install_workspace_reload(
 /// plus each immediate subdirectory that is one. Shallow by design — a code
 /// directory holding sibling checkouts is the common case, and a deep scan would
 /// be slow and surprising.
-#[cfg(any(feature = "mcp", feature = "serve"))]
 fn discover_repos_under(root: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let is_repo = |dir: &std::path::Path| dir.join(".git").exists();
     let mut repos = Vec::new();
@@ -3262,7 +3393,7 @@ mod url_tests {
     }
 }
 
-#[cfg(all(test, any(feature = "mcp", feature = "serve")))]
+#[cfg(test)]
 mod workspace_tests {
     use super::discover_repos_under;
 

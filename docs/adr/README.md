@@ -14,4 +14,4 @@
 | [0006](0006-local-model-serving.md) | Local model serving — reuse pulled models over an OpenAI-compatible endpoint | Accepted |
 | [0007](0007-configuration-file.md) | Configuration file — a single project-level TOML with layered precedence | Accepted |
 | [0008](0008-multi-repo-workspace-serve.md) | Multi-repo workspace serve — one instance, many project graphs, one model | Accepted |
-| [0009](0009-cross-repo-workspace-links.md) | Cross-repo workspace links — interlink a hub app with its deployment repos | For Review |
+| [0009](0009-cross-repo-workspace-links.md) | Cross-repo workspace links — interlink a hub app with its deployment repos | Accepted |

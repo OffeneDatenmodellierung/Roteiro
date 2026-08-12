@@ -474,7 +474,17 @@ tools  = true                            <span class="c"># expose graph tools to
 
 [workspace]                              <span class="c"># host many repos from one server (ADR-0008)</span>
 roots = ["~/code"]                       <span class="c"># scan for repos (each becomes a project)</span>
-repos = []                               <span class="c"># …or list explicit repo paths</span></code></pre>
+repos = []                               <span class="c"># …or list explicit repo paths</span>
+
+[[links]]                                <span class="c"># cross-repo links to another repo (ADR-0009)</span>
+to = "app::sym:rust:src/config.rs#ServeConfig"  <span class="c"># a &lt;project&gt;::&lt;key&gt; in another repo</span>
+from = "file:values.prod.yaml"          <span class="c"># optional local anchor in this repo</span></code></pre>
+
+<div class="note"><strong>Link across repos.</strong> A deployment/config repo can declare
+<code>[[links]]</code> pointing at keys in another workspace repo (a hub app). <code>roteiro
+links --workspace ~/code</code> resolves each link across the workspace and <strong>flags
+drift</strong> — a target the app no longer defines — exiting non-zero, so it's a CI gate:
+the authored-vs-reality check of <code>roteiro check</code>, run <em>between</em> repos (ADR-0009).</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed

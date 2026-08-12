@@ -52,6 +52,8 @@ pub struct Config {
     pub paths: PathsConfig,
     /// `roteiro serve --workspace` — repos a single server can host (ADR-0008).
     pub workspace: WorkspaceConfig,
+    /// `[[links]]` — authored cross-repo links to other workspace repos (ADR-0009).
+    pub links: Vec<LinkDecl>,
 }
 
 /// `[debt]` — intent-debt reporting.
@@ -85,6 +87,24 @@ pub struct WorkspaceConfig {
     pub roots: Option<Vec<String>>,
     /// Explicit repo paths to host, in addition to anything found under `roots`.
     pub repos: Option<Vec<String>>,
+}
+
+/// One authored cross-repo link (ADR-0009): a `[[links]]` entry in a spoke repo's
+/// `roteiro.toml` declaring that this repo references a project-qualified key in
+/// another workspace repo. `roteiro links` resolves each against the workspace and
+/// flags drift (targets that no longer exist).
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+pub struct LinkDecl {
+    /// The project-qualified target: `<project>::<key>`, e.g.
+    /// `app::sym:rust:crates/roteiro/src/config.rs#ServeConfig`.
+    pub to: String,
+    /// Optional local anchor in *this* repo the link originates from, e.g.
+    /// `file:values.prod.yaml` (verified to exist when given).
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Relationship label for display (default `references`).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// `[models]` — override the registry tier defaults for this project.
@@ -243,6 +263,13 @@ impl Config {
                     .repos
                     .clone()
                     .or(self.workspace.repos.clone()),
+            },
+            // Links are per-repo (a spoke declares its own); the project layer wins
+            // outright when it has any, else the user layer's (rare).
+            links: if over.links.is_empty() {
+                self.links.clone()
+            } else {
+                over.links.clone()
             },
         }
     }

@@ -57,4 +57,4 @@ pub use query::{
 };
 pub use store::{ImportApplied, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_worktree};
-pub use workspace::{Workspace, WorkspaceError};
+pub use workspace::{Workspace, WorkspaceError, parse_qualified};
