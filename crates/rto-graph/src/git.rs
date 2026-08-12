@@ -141,6 +141,51 @@ impl Repo {
         walk_tree_blobs(&tree)
     }
 
+    /// Every git submodule pinned in the `HEAD` tree, sorted by path: a gitlink
+    /// (commit) entry gives the path and the commit it points at, enriched with
+    /// its `.gitmodules` URL when declared. The pinned commit is the **version a
+    /// deployment repo ships** (ADR-0009 derived facts). Empty when there are none.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if the tree cannot be traversed, `.gitmodules` cannot
+    /// be read, or a path is not valid UTF-8.
+    pub fn submodules(&self) -> Result<Vec<Submodule>, GitError> {
+        let tree = self.inner.head_tree().map_err(ge)?;
+        let mut recorder = gix::traverse::tree::Recorder::default();
+        tree.traverse().breadthfirst(&mut recorder).map_err(ge)?;
+
+        let mut links: Vec<(String, String)> = Vec::new();
+        let mut gitmodules: Option<gix::ObjectId> = None;
+        for entry in &recorder.records {
+            if entry.mode.is_commit() {
+                let path = String::from_utf8(entry.filepath.clone().into())
+                    .map_err(|e| GitError::NonUtf8Path(e.into_bytes()))?;
+                links.push((path, entry.oid.to_hex().to_string()));
+            } else if entry.mode.is_blob() && entry.filepath.as_slice() == b".gitmodules" {
+                gitmodules = Some(entry.oid);
+            }
+        }
+        if links.is_empty() {
+            return Ok(Vec::new());
+        }
+        let urls = match gitmodules {
+            Some(oid) => {
+                let bytes = self.read_blob(&oid.to_hex().to_string())?;
+                parse_gitmodules(&String::from_utf8_lossy(&bytes))
+            }
+            None => std::collections::HashMap::new(),
+        };
+        let mut out: Vec<Submodule> = links
+            .into_iter()
+            .map(|(path, sha)| {
+                let url = urls.get(&path).cloned();
+                Submodule { path, sha, url }
+            })
+            .collect();
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
     /// The tracked files that differ between `base` (any revspec — a branch,
     /// `HEAD~3`, a sha) and the current `HEAD`, sorted by path. Used for
     /// change-scoped tooling over a commit range (e.g. `roteiro review --base
@@ -334,6 +379,53 @@ fn walk_tree_blobs(tree: &gix::Tree<'_>) -> Result<Vec<BlobRef>, GitError> {
     Ok(out)
 }
 
+/// A git submodule pinned in a tree: its repo-relative path, the commit it points
+/// at (the gitlink oid — the **version pin** a deployment ships), and its
+/// configured URL from `.gitmodules` when registered there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submodule {
+    /// Repo-relative path the submodule is mounted at.
+    pub path: String,
+    /// Hex commit id the gitlink points at (the pinned version).
+    pub sha: String,
+    /// The submodule's URL from `.gitmodules`, if declared there.
+    pub url: Option<String>,
+}
+
+/// Parse a `.gitmodules` file into a `path → url` map. INI-like: each
+/// `[submodule "<name>"]` section carries a `path` and a `url`.
+fn parse_gitmodules(text: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let (mut path, mut url) = (None, None);
+    let mut in_submodule = false;
+    let mut flush = |path: &mut Option<String>, url: &mut Option<String>| {
+        if let (Some(p), Some(u)) = (path.take(), url.take()) {
+            map.insert(p, u);
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            flush(&mut path, &mut url);
+            in_submodule = line.starts_with("[submodule");
+        } else if in_submodule {
+            if let Some(v) = line
+                .strip_prefix("path")
+                .and_then(|r| r.trim_start().strip_prefix('='))
+            {
+                path = Some(v.trim().to_owned());
+            } else if let Some(v) = line
+                .strip_prefix("url")
+                .and_then(|r| r.trim_start().strip_prefix('='))
+            {
+                url = Some(v.trim().to_owned());
+            }
+        }
+    }
+    flush(&mut path, &mut url);
+    map
+}
+
 /// How a file changed relative to the comparison baseline — for review labelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeStatus {
@@ -472,5 +564,39 @@ impl Repo {
             .map_err(ge)?
             .peel_to_tree()
             .map_err(ge)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_gitmodules;
+
+    #[test]
+    fn parse_gitmodules_maps_path_to_url_in_either_field_order() {
+        let text = "\
+[submodule \"vendor/app\"]\n\
+\tpath = vendor/app\n\
+\turl = https://github.com/acme/app.git\n\
+[submodule \"libs/util\"]\n\
+\turl = git@github.com:acme/util.git\n\
+\tpath = libs/util\n";
+        let map = parse_gitmodules(text);
+        assert_eq!(
+            map.get("vendor/app").map(String::as_str),
+            Some("https://github.com/acme/app.git")
+        );
+        // URL declared before path in its section still maps.
+        assert_eq!(
+            map.get("libs/util").map(String::as_str),
+            Some("git@github.com:acme/util.git")
+        );
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn parse_gitmodules_ignores_non_submodule_sections() {
+        let map = parse_gitmodules("[core]\n\tbare = false\n[submodule \"a\"]\npath=a\nurl=u\n");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("a").map(String::as_str), Some("u"));
     }
 }

@@ -105,6 +105,7 @@ pub fn sync(
     let committed = extract_committed(repo, cache, extractor)?;
     let mut assembled = flatten(committed.by_path);
     resolve_calls(&mut assembled);
+    append_submodule_nodes(repo, &mut assembled)?;
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(&tree))?;
     store.set_sync_env(&env)?;
@@ -215,6 +216,7 @@ fn try_incremental(
     // then reconcile to derived-only — identical to what the full path produces.
     let mut assembled = FactSet { nodes, edges };
     resolve_calls(&mut assembled);
+    append_submodule_nodes(repo, &mut assembled)?;
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(head_tree))?;
     store.set_sync_env(env)?;
@@ -334,6 +336,7 @@ pub fn sync_worktree(
 
     let mut assembled = flatten(by_path);
     resolve_calls(&mut assembled);
+    append_submodule_nodes(repo, &mut assembled)?;
     store.reconcile(&assembled, Some(&state))?;
 
     Ok(SyncReport {
@@ -392,6 +395,7 @@ pub fn sync_index(
     let total = extracted.by_path.len();
     let mut assembled = flatten(extracted.by_path);
     resolve_calls(&mut assembled);
+    append_submodule_nodes(repo, &mut assembled)?;
     store.reconcile(&assembled, Some(&state))?;
 
     Ok(SyncReport {
@@ -481,6 +485,35 @@ fn flatten(by_path: BTreeMap<String, FactSet>) -> FactSet {
         assembled.edges.extend(facts.edges);
     }
     assembled
+}
+
+/// The `NodeKind::Other` token for a submodule-pin node (`submodule:<path>`).
+pub(crate) const SUBMODULE_KIND: &str = "submodule";
+
+/// Append this repo's submodule-pin nodes to `assembled`, replacing any already
+/// present. A submodule pin is a **tree-level** derived fact (a gitlink + its
+/// `.gitmodules` URL, ADR-0009), not a per-blob one, so it is recomputed on every
+/// sync rather than cached. Removing any existing submodule nodes first makes the
+/// incremental path — which reconstructs derived nodes from the store — produce
+/// exactly the full sync's result: an unchanged pin re-adds identically, a bumped
+/// pin's new sha wins, and a removed submodule leaves none behind. The nodes carry
+/// `path = .gitmodules` (so a `.gitmodules` deletion drops them) and stand alone
+/// (no edges — nothing in the graph is their guaranteed endpoint).
+fn append_submodule_nodes(repo: &Repo, assembled: &mut FactSet) -> Result<(), SyncError> {
+    let kind = NodeKind::Other(SUBMODULE_KIND.to_owned());
+    assembled.nodes.retain(|n| n.kind != kind);
+    for sm in repo.submodules()? {
+        let mut node = Node::new(
+            format!("submodule:{}", sm.path),
+            kind.clone(),
+            sm.path.clone(),
+        );
+        node.path = Some(".gitmodules".to_owned());
+        node.provenance = Provenance::Derived;
+        node.meta = serde_json::json!({ "path": sm.path, "url": sm.url, "sha": sm.sha });
+        assembled.nodes.push(node);
+    }
+    Ok(())
 }
 
 /// The number of source files reflected in an assembled fact set (one `File`
