@@ -35,6 +35,113 @@ fn roteiro(dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("run roteiro")
 }
 
+fn head_sha(dir: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .expect("rev-parse");
+    assert!(
+        out.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Run `links --infer --hub app --workspace <base> --json` plus `extra` and return
+/// the parsed report.
+fn infer_json(base: &Path, extra: &[&str]) -> serde_json::Value {
+    let base_s = base.to_str().unwrap();
+    let mut args = vec!["links", "--infer", "--hub", "app", "--workspace", base_s];
+    args.extend_from_slice(extra);
+    args.push("--json");
+    let out = roteiro(base, &args);
+    assert!(out.status.success(), "infer {extra:?} failed: {out:?}");
+    serde_json::from_slice(&out.stdout).expect("JSON")
+}
+
+/// The `hub_key`s a report's first spoke matched.
+fn matched_hub_keys(report: &serde_json::Value) -> Vec<String> {
+    report["spokes"][0]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["hub_key"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn infer_resolves_against_a_pinned_hub_version() {
+    let base = std::env::temp_dir().join(format!("roteiro-hubrev-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub v1 defines `serve.tools`; v2 renames it to `serve.features`. Sync each so
+    // the HEAD graph reflects v2.
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    // Tag v1 so we can pin by a *revspec* (a tag), not just a sha — the resolver
+    // must accept both.
+    git(&app, &["tag", "rel-1"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2 rename"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    // Spoke references the *old* key (`SERVE_TOOLS`).
+    std::fs::write(deploy.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    // Against HEAD: the hub no longer defines the key, so it's an orphan (drift).
+    let head = infer_json(&base, &[]);
+    let orphans: Vec<&str> = head["spokes"][0]["orphans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["key"].as_str().unwrap())
+        .collect();
+    assert!(
+        orphans.contains(&"SERVE_TOOLS"),
+        "drift against HEAD: {head}"
+    );
+    assert_eq!(head["hub_rev"], serde_json::Value::Null);
+
+    // Against the pinned v1 — named by the *tag* `rel-1`, not a sha — it resolves.
+    let by_tag = infer_json(&base, &["--hub-rev", "rel-1"]);
+    assert_eq!(by_tag["hub_rev"], "rel-1", "reports the pinned rev (a tag)");
+    assert!(
+        matched_hub_keys(&by_tag).contains(&"serve.tools".to_owned()),
+        "resolves at the pinned version: {by_tag}"
+    );
+    assert!(
+        by_tag["spokes"][0]["orphans"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "no drift once resolved against the deployed version: {by_tag}"
+    );
+
+    // The same pin named by the raw sha resolves identically — any revspec works.
+    let by_sha = infer_json(&base, &["--hub-rev", &v1]);
+    assert_eq!(by_sha["hub_rev"], v1);
+    assert!(
+        matched_hub_keys(&by_sha).contains(&"serve.tools".to_owned()),
+        "sha pin resolves too: {by_sha}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 #[test]
 fn links_resolve_across_repos_and_flag_drift() {
     let base = std::env::temp_dir().join(format!("roteiro-links-cli-{}", std::process::id()));

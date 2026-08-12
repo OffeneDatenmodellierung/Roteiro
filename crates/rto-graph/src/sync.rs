@@ -412,6 +412,47 @@ pub fn sync_index(
     })
 }
 
+/// Extract a repo's **derived graph at an arbitrary commit/tree `rev`** into
+/// `store`, replacing its contents — the same content-addressed extraction as
+/// [`sync`], but for a historical point rather than `HEAD`. Because extraction is
+/// keyed by `(path, blob oid, env)`, every blob unchanged versus another synced
+/// point is a cache hit, so resolving an older version only re-does what differs.
+///
+/// This backs **version-pin resolution** (ADR-0009 step 8): to resolve a spoke's
+/// cross-repo reference against the hub *version it deploys* (a submodule sha,
+/// an image tag → commit), extract the hub at that `rev` into an ephemeral store
+/// and resolve there. It populates the derived layer only (config keys, symbols,
+/// calls); authored/import layers are not re-applied, since this is a read-only
+/// resolution snapshot. No sync-state is recorded (`tree` carries `rev` for the
+/// report only).
+///
+/// # Errors
+/// Returns [`SyncError`] on git access, extraction caching, or store failure.
+pub fn sync_tree(
+    store: &mut Store,
+    repo: &Repo,
+    cache: &ObjectCache,
+    extractor: &dyn Extractor,
+    rev: &str,
+) -> Result<SyncReport, SyncError> {
+    let extracted = extract_blobs(repo, cache, extractor, repo.blobs_at(rev)?)?;
+    let mut assembled = flatten(extracted.by_path);
+    resolve_calls(&mut assembled);
+    append_submodule_nodes(repo.submodules_at(rev)?, &mut assembled);
+    let total = file_count(&assembled);
+    store.rebuild(&assembled, None)?;
+    Ok(SyncReport {
+        no_op: false,
+        blobs_total: total,
+        blobs_extracted: extracted.extracted,
+        blobs_cached: extracted.cached,
+        blobs_dirty: 0,
+        nodes: store.node_count()?,
+        edges: store.edge_count()?,
+        tree: rev.to_owned(),
+    })
+}
+
 /// The committed fact sets for the `HEAD` tree, one per path, plus the blob list
 /// (for overlay comparison) and cache-hit/miss counts.
 struct Committed {
