@@ -10,6 +10,7 @@ mod config;
 mod infer_links;
 mod init;
 mod overview;
+mod pins;
 mod review;
 
 #[derive(Parser)]
@@ -191,6 +192,12 @@ enum Command {
         /// (ADR-0009 step 8). Applies to `--infer` and `--matrix`.
         #[arg(long, value_name = "REV")]
         hub_rev: Option<String>,
+        /// With `--infer`: resolve **each spoke against the hub version it itself
+        /// pins** — read from the spoke's `submodule` / `image_ref` node — instead
+        /// of one version for all (ADR-0009 step 8b). Spokes with no detectable pin
+        /// fall back to the hub's `HEAD`.
+        #[arg(long, requires = "infer", conflicts_with_all = ["matrix", "hub_rev"])]
+        pinned: bool,
         /// With `--infer`: persist the inferred correspondences into each spoke's
         /// graph as durable cross-repo edges (an `inferred` import layer that
         /// survives sync), instead of only reporting them.
@@ -477,6 +484,7 @@ fn main() -> anyhow::Result<()> {
             matrix,
             hub,
             hub_rev,
+            pinned,
             write,
             html,
             out,
@@ -484,6 +492,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let pin = PinnedHub {
                 rev: hub_rev.as_deref(),
+                auto: pinned,
                 ingest,
             };
             if matrix {
@@ -2485,6 +2494,13 @@ struct InferredRepo {
     matches: Vec<infer_links::KeyMatch>,
     /// Config keys with no hub counterpart — likely drift.
     orphans: Vec<infer_links::ConfigKey>,
+    /// The hub rev this spoke resolved against, when it pins one (`--pinned`,
+    /// ADR-0009 step 8b); `None` means the hub's `HEAD`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hub_rev: Option<String>,
+    /// Where the pin came from (e.g. `submodule vendor/app`), when auto-detected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin_via: Option<String>,
 }
 
 /// The `graph.db` path for the repo at `path` (`<repo>/.git/roteiro/graph.db`).
@@ -2544,12 +2560,14 @@ struct InferReady {
     project_paths: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
 
-/// How to source the hub's config keys: its `HEAD` graph (`rev` is `None`), or a
-/// **pinned version** (`rev` set — the deployed hub commit/tag, ADR-0009 step 8),
-/// extracted in-memory with `ingest`.
+/// How to source the hub's config keys (ADR-0009 step 8): its `HEAD` graph (`rev`
+/// `None`, `auto` false), one **explicit pinned version** for all spokes (`rev`
+/// set, `--hub-rev`), or **each spoke's own pin** auto-detected (`auto`,
+/// `--pinned`). Extracted in-memory with `ingest`.
 #[derive(Clone, Copy)]
 struct PinnedHub<'a> {
     rev: Option<&'a str>,
+    auto: bool,
     ingest: rto_graph::IngestConfig,
 }
 
@@ -2565,8 +2583,21 @@ fn config_keys_at_rev(
     let repo = rto_graph::Repo::discover(repo_path)?;
     let cache = rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
     let reg = rto_graph::Registry::new(ingest);
+    config_keys_at_rev_with(&repo, &cache, reg, rev)
+}
+
+/// The config keys of `repo` at `rev`, reusing a caller-owned repo and object cache
+/// — the expensive-to-open resources — so resolving many pins under `--pinned` opens
+/// them once and pays only the (cache-aware) `sync_tree` per distinct rev. (The
+/// `Registry` is a `Copy` config, so it is passed by value.)
+fn config_keys_at_rev_with(
+    repo: &rto_graph::Repo,
+    cache: &rto_graph::ObjectCache,
+    reg: rto_graph::Registry,
+    rev: &str,
+) -> anyhow::Result<Vec<infer_links::ConfigKey>> {
     let mut store = rto_graph::Store::open_in_memory()?;
-    rto_graph::sync_tree(&mut store, &repo, &cache, &reg, rev)?;
+    rto_graph::sync_tree(&mut store, repo, cache, &reg, rev)?;
     Ok(store.config_keys()?)
 }
 
@@ -2646,20 +2677,8 @@ fn scan_workspace_infer(
             .map_err(|e| anyhow::anyhow!("resolving hub `{hub_name}` at `{rev}`: {e}"))?;
         by_project.insert(hub_name.clone(), keys);
     }
-    let hub_keys = &by_project[&hub_name];
 
-    let report: Vec<InferredRepo> = by_project
-        .iter()
-        .filter(|(name, _)| **name != hub_name)
-        .map(|(name, keys)| {
-            let (matches, orphans) = infer_links::match_against_hub(keys, hub_keys);
-            InferredRepo {
-                repo: name.clone(),
-                matches,
-                orphans,
-            }
-        })
-        .collect();
+    let report = resolve_infer_report(&by_project, &hub_name, &project_paths, pin)?;
 
     Ok(InferScan::Ready(InferReady {
         hub_name,
@@ -2668,6 +2687,99 @@ fn scan_workspace_infer(
         by_project,
         project_paths,
     }))
+}
+
+/// Open a spoke's graph and detect the hub version it pins (ADR-0009 step 8b),
+/// or `None` if it is unsynced or pins nothing recognisable to the hub.
+fn detect_spoke_pin(
+    spoke_path: &std::path::Path,
+    hub_dir: &str,
+    hub_origin: Option<&str>,
+    hub_repo: &rto_graph::Repo,
+) -> anyhow::Result<Option<pins::SpokePin>> {
+    let db = graph_db_path(spoke_path)?;
+    if !db.exists() {
+        return Ok(None);
+    }
+    let store = rto_graph::Store::open(&db)?;
+    pins::detect(&store, hub_dir, hub_origin, hub_repo)
+}
+
+/// Match every spoke against the right hub key set: the hub base (its `HEAD`, or the
+/// explicit `--hub-rev` already swapped into `by_project`), or — under `--pinned`
+/// (`pin.auto`) — the hub version each spoke *itself* pins, extracted per rev and
+/// cached (ADR-0009 step 8b). Records per-spoke which pin, if any, was used.
+fn resolve_infer_report(
+    by_project: &std::collections::BTreeMap<String, Vec<infer_links::ConfigKey>>,
+    hub_name: &str,
+    project_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
+    pin: PinnedHub<'_>,
+) -> anyhow::Result<Vec<InferredRepo>> {
+    let hub_base = by_project[hub_name].as_slice();
+    // Under `--pinned`, set the hub up **once** — repo, object cache, extractor, its
+    // real directory name (not the `-2`-suffixed workspace label) and origin — so
+    // per-rev work is just the cache-aware `sync_tree`.
+    let hub = if pin.auto {
+        let hub_path = project_paths
+            .get(hub_name)
+            .ok_or_else(|| anyhow::anyhow!("no path for hub `{hub_name}`"))?;
+        let repo = rto_graph::Repo::discover(hub_path)?;
+        let cache =
+            rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
+        let reg = rto_graph::Registry::new(pin.ingest);
+        let dir = hub_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(hub_name)
+            .to_owned();
+        let origin = repo.origin_url();
+        Some((repo, cache, reg, dir, origin))
+    } else {
+        None
+    };
+
+    let mut rev_cache: std::collections::BTreeMap<String, Vec<infer_links::ConfigKey>> =
+        std::collections::BTreeMap::new();
+    let mut report = Vec::new();
+    for (name, keys) in by_project.iter().filter(|(n, _)| n.as_str() != hub_name) {
+        let (hub_rev, pin_via) = match &hub {
+            // `--pinned`: resolve against the version this spoke pins, if any.
+            Some((repo, cache, reg, dir, origin)) => {
+                match detect_spoke_pin(&project_paths[name], dir, origin.as_deref(), repo)? {
+                    Some(p) => {
+                        if !rev_cache.contains_key(&p.rev) {
+                            let k = config_keys_at_rev_with(repo, cache, *reg, &p.rev).map_err(
+                                |e| {
+                                    anyhow::anyhow!(
+                                        "resolving hub `{hub_name}` at `{}`: {e}",
+                                        p.rev
+                                    )
+                                },
+                            )?;
+                            rev_cache.insert(p.rev.clone(), k);
+                        }
+                        (Some(p.rev), Some(p.via))
+                    }
+                    None => (None, None),
+                }
+            }
+            // Global: HEAD, or the explicit `--hub-rev` already in `hub_base`.
+            None => (pin.rev.map(str::to_owned), None),
+        };
+        let hub_keys: &[infer_links::ConfigKey] = match &hub_rev {
+            Some(rev) if pin.auto => rev_cache[rev].as_slice(),
+            _ => hub_base,
+        };
+        let (matches, orphans) = infer_links::match_against_hub(keys, hub_keys);
+        report.push(InferredRepo {
+            repo: name.clone(),
+            matches,
+            orphans,
+            hub_rev,
+            pin_via,
+        });
+    }
+    Ok(report)
 }
 
 /// `roteiro links --infer`: match each workspace repo's config keys (TOML / JSON
@@ -2866,12 +2978,27 @@ fn persist_inferred_links(
 }
 
 /// Human-readable rendering of the inferred cross-repo config report.
+/// Abbreviate a 40-hex commit sha to 10 chars; leave short refs (tags) as-is.
+fn short_rev(rev: &str) -> &str {
+    if rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()) {
+        &rev[..10]
+    } else {
+        rev
+    }
+}
+
 fn print_infer_report(report: &[InferredRepo], hub_name: &str, hub_keys: usize) {
     println!("inferred config links (hub: {hub_name}, {hub_keys} keys)");
     let (mut nm, mut no) = (0usize, 0usize);
     for r in report {
+        // Under `--pinned`, say which hub version this spoke resolved against.
+        let pin = match (&r.hub_rev, &r.pin_via) {
+            (Some(rev), Some(via)) => format!("  @ {} (via {via})", short_rev(rev)),
+            (Some(rev), None) => format!("  @ {}", short_rev(rev)),
+            _ => String::new(),
+        };
         println!(
-            "\n  {} — {} match(es), {} orphan(s)",
+            "\n  {} — {} match(es), {} orphan(s){pin}",
             r.repo,
             r.matches.len(),
             r.orphans.len()

@@ -143,6 +143,92 @@ fn infer_resolves_against_a_pinned_hub_version() {
 }
 
 #[test]
+fn pinned_auto_resolves_each_spoke_against_the_version_it_vendors() {
+    let base = std::env::temp_dir().join(format!("roteiro-pinned-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub v1 defines `serve.tools`; v2 renames it. Sync each; capture the v1 sha.
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    // Spoke references the old key AND vendors the hub as a submodule pinned to v1.
+    std::fs::write(deploy.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    std::fs::write(
+        deploy.join(".gitmodules"),
+        "[submodule \"app\"]\n\tpath = app\n\turl = https://github.com/acme/app.git\n",
+    )
+    .expect("write .gitmodules");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "prod.env", ".gitmodules"]);
+    // The gitlink pins the hub at its v1 commit.
+    git(
+        &deploy,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{v1},app"),
+        ],
+    );
+    git(&deploy, &["commit", "-q", "-m", "deploy pinned to app@v1"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    let base_s = base.to_str().unwrap();
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--pinned",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "pinned infer failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let spoke = &v["spokes"][0];
+    assert_eq!(spoke["repo"], "deploy");
+    // Auto-detected the v1 pin via the submodule, so the old key resolves.
+    assert_eq!(
+        spoke["hub_rev"], v1,
+        "resolved against the vendored version: {v}"
+    );
+    assert!(
+        spoke["pin_via"]
+            .as_str()
+            .unwrap_or("")
+            .contains("submodule app"),
+        "reports the pin source: {v}"
+    );
+    let matched: Vec<&str> = spoke["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["hub_key"].as_str().unwrap())
+        .collect();
+    assert!(
+        matched.contains(&"serve.tools"),
+        "resolves at the pinned version: {v}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn links_resolve_across_repos_and_flag_drift() {
     let base = std::env::temp_dir().join(format!("roteiro-links-cli-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();

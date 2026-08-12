@@ -506,7 +506,11 @@ self-contained <code>--html</code> page you open straight in a browser.
 And because a deployment ships a <em>pinned</em> version, <code>--hub-rev &lt;sha&gt;</code>
 resolves drift against the hub graph <strong>at the version actually deployed</strong> (a
 submodule sha, a release commit) — extracted in memory, no checkout — so a key that looks
-like drift against the app's latest but is fine on the deployed version reads correctly.</div>
+like drift against the app's latest but is fine on the deployed version reads correctly.
+Or let it figure the version out: <code>--pinned</code> reads <strong>each spoke's own pin</strong>
+(its submodule sha, or its Docker image tag resolved to a release) and resolves that spoke
+against exactly the hub version it vendors — so a fleet of deployments, each on a different
+version, is checked correctly in one pass.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed
