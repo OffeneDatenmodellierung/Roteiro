@@ -499,7 +499,7 @@ deployment/config repos that each pin a version of it and override its configura
 Roteiro joins their per-repo graphs at the workspace — <strong>a query-time join, never a
 merged store</strong>, so each repo's isolation holds — and answers the questions that
 boundary raises: <em>which deployment overrides <code>serve.addr</code>, and to what?
-which reference config the app no longer defines? and are they drifting from the version
+which reference config keys the app no longer defines? and are they drifting from the version
 they actually deploy?</em> (<a href="adr/">ADR-0009</a>).</p>
 
 <h3>A spoke, as Roteiro sees it</h3>
@@ -507,7 +507,7 @@ they actually deploy?</em> (<a href="adr/">ADR-0009</a>).</p>
 <code>roteiro sync</code> extracts it into graph nodes:</p>
 <pre><code><span class="c"># deploy-web/ — a spoke repo</span>
 prod.env               <span class="c"># SERVE_ADDR, SERVE_TOOLS, …    → config_key nodes</span>
-k8s/deployment.yaml    <span class="c"># container image + env vars    → config_key + image</span>
+k8s/deployment.yaml    <span class="c"># image, env, ConfigMap data    → config_key nodes</span>
 Dockerfile             <span class="c"># FROM registry/app:1.4         → image_ref  (the version it pins)</span>
 app/ (+ .gitmodules)   <span class="c"># the hub vendored @ &lt;sha&gt;       → submodule  (a version pin)</span>
 roteiro.toml           <span class="c"># [[links]] and [pins]          (optional)</span></code></pre>
