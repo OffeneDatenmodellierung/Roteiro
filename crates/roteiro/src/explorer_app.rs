@@ -35,28 +35,46 @@ const APP_JS: &str = include_str!("assets/app.js");
 const CYTOSCAPE_JS: &str = include_str!("assets/cytoscape.min.js");
 
 /// `text/html` for the shell; both scripts are served as `text/javascript`. All
-/// three are UTF-8 and cached briefly (they change only when the binary does).
+/// three are UTF-8.
 const HTML: &str = "text/html; charset=utf-8";
 const JS: &str = "text/javascript; charset=utf-8";
+
+/// `Cache-Control` for the assets, which change only when the binary does. The
+/// shell is the entry point, so it is cached only briefly; the scripts — chiefly
+/// the ~365 KB vendored cytoscape bundle — are cached for an hour so a browser
+/// re-uses them across page loads instead of re-fetching on every visit.
+const CACHE_HTML: &str = "public, max-age=300";
+const CACHE_JS: &str = "public, max-age=3600";
 
 /// Build the static web-app router: the HTML shell, the app script, and the
 /// vendored cytoscape bundle. Stateless (`Router`), so it merges cleanly into the
 /// stateful `/v1/graph/*` router the explorer server builds.
 pub fn router() -> Router {
     Router::new()
-        .route("/", get(|| async { asset(HTML, SHELL_HTML) }))
-        .route("/explorer", get(|| async { asset(HTML, SHELL_HTML) }))
-        .route("/app.js", get(|| async { asset(JS, APP_JS) }))
+        .route("/", get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML) }))
+        .route(
+            "/explorer",
+            get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML) }),
+        )
+        .route("/app.js", get(|| async { asset(JS, CACHE_JS, APP_JS) }))
         .route(
             "/vendor/cytoscape.min.js",
-            get(|| async { asset(JS, CYTOSCAPE_JS) }),
+            get(|| async { asset(JS, CACHE_JS, CYTOSCAPE_JS) }),
         )
 }
 
-/// One embedded asset as a `200 OK` with an explicit content-type. Bodies are
-/// `&'static str`, so serving copies nothing but the header.
-fn asset(content_type: &'static str, body: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, content_type)], body).into_response()
+/// One embedded asset as a `200 OK` with an explicit content-type and a
+/// `Cache-Control` so browsers actually cache it. Bodies are `&'static str`, so
+/// serving copies nothing but the headers.
+fn asset(content_type: &'static str, cache_control: &'static str, body: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cache_control),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -68,26 +86,35 @@ mod tests {
     use tower::ServiceExt as _; // for `oneshot`
 
     /// Drive one GET against the app router, returning `(status, content-type,
-    /// body)`.
-    async fn get(uri: &str) -> (StatusCode, String, String) {
+    /// cache-control, body)`.
+    async fn get(uri: &str) -> (StatusCode, String, String, String) {
         let resp = router()
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = resp.status();
-        let ct = resp
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_owned();
+        let headers = resp.headers();
+        let header_str = |name: header::HeaderName| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let ct = header_str(header::CONTENT_TYPE);
+        let cache = header_str(header::CACHE_CONTROL);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, ct, String::from_utf8_lossy(&body).into_owned())
+        (
+            status,
+            ct,
+            cache,
+            String::from_utf8_lossy(&body).into_owned(),
+        )
     }
 
     #[tokio::test]
     async fn root_serves_html_shell_referencing_app_and_cytoscape() {
-        let (status, ct, body) = get("/").await;
+        let (status, ct, _cache, body) = get("/").await;
         assert_eq!(status, StatusCode::OK);
         assert!(ct.starts_with("text/html"), "content-type was {ct}");
         assert!(body.contains("<!doctype html>"));
@@ -100,7 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn explorer_alias_serves_the_same_shell() {
-        let (status, ct, body) = get("/explorer").await;
+        let (status, ct, _cache, body) = get("/explorer").await;
         assert_eq!(status, StatusCode::OK);
         assert!(ct.starts_with("text/html"));
         assert!(body.contains("<!doctype html>"));
@@ -108,19 +135,28 @@ mod tests {
 
     #[tokio::test]
     async fn app_js_is_served_as_javascript() {
-        let (status, ct, body) = get("/app.js").await;
+        let (status, ct, cache, body) = get("/app.js").await;
         assert_eq!(status, StatusCode::OK);
         assert!(ct.contains("javascript"), "content-type was {ct}");
+        assert!(
+            cache.contains("max-age="),
+            "app.js must be cacheable: {cache}"
+        );
         assert!(!body.is_empty());
         // It must talk to the data API it is built against.
         assert!(body.contains("/v1/graph/workspaces"));
     }
 
     #[tokio::test]
-    async fn vendored_cytoscape_is_nonempty_javascript() {
-        let (status, ct, body) = get("/vendor/cytoscape.min.js").await;
+    async fn vendored_cytoscape_is_cacheable_nonempty_javascript() {
+        let (status, ct, cache, body) = get("/vendor/cytoscape.min.js").await;
         assert_eq!(status, StatusCode::OK);
         assert!(ct.contains("javascript"), "content-type was {ct}");
+        // The ~365 KB bundle must be cached by the browser, not re-fetched each load.
+        assert!(
+            cache.contains("max-age=") && cache.contains("public"),
+            "vendored bundle must send a caching Cache-Control: {cache}"
+        );
         assert!(
             body.len() > 100_000,
             "the vendored UMD bundle is substantial"

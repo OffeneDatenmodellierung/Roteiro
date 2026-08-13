@@ -137,47 +137,52 @@
       return;
     }
 
-    // Drift per spoke, so a hub-referencing box can show a ⚠ badge.
-    const driftBy = {};
-    for (const s of topology.spokes || []) driftBy[s.name] = s.driftCount || 0;
-
     const elements = [];
-    elements.push({
-      data: {
-        id: `p:${hub}`,
-        label: hub,
-        role: "hub",
-        sub: "app · source of truth",
-        drift: 0,
-      },
+    // The ids of the actually-hosted project boxes. `graph_api`'s topology
+    // includes links whose `to` project is unhosted/drift (the external-ref is
+    // reported even when it doesn't resolve), so a topology edge is drawn only
+    // when BOTH endpoints are in this set — an unhosted target must never
+    // phantom-create a node or dangle an edge. Drift is already surfaced in the
+    // stat tiles and the matrix, so dropping it from the diagram loses nothing.
+    const hosted = new Set();
+    const addNode = (data) => {
+      hosted.add(data.id);
+      elements.push({ data });
+    };
+    addNode({
+      id: `p:${hub}`,
+      label: hub,
+      role: "hub",
+      sub: "app · source of truth",
+      drift: 0,
     });
     for (const s of topology.spokes || []) {
-      elements.push({
-        data: {
-          id: `p:${s.name}`,
-          label: s.label || s.name,
-          role: "spoke",
-          sub: `${s.keyCount || 0} keys`,
-          drift: s.driftCount || 0,
-        },
+      addNode({
+        id: `p:${s.name}`,
+        label: s.label || s.name,
+        role: "spoke",
+        sub: `${s.keyCount || 0} keys`,
+        drift: s.driftCount || 0,
       });
     }
     // Edges: colour by provenance (gold authored / slate inferred). `from`/`to`
-    // are qualified node keys `project::…`; map them back to project boxes.
+    // are qualified node keys `project::…`; map them back to project boxes and
+    // keep only links whose BOTH endpoints are hosted — an O(1) Set lookup, and
+    // the guard that skips unhosted/drift targets.
     const projOf = (qualified) => String(qualified).split("::")[0];
     const seen = new Set();
     for (const link of topology.links || []) {
-      const src = projOf(link.from);
-      const dst = projOf(link.to);
-      const id = `e:${src}->${dst}`;
+      const source = `p:${projOf(link.from)}`;
+      const target = `p:${projOf(link.to)}`;
+      if (!hosted.has(source) || !hosted.has(target)) continue; // drift/unhosted
+      const id = `e:${source}->${target}`;
       if (seen.has(id)) continue; // one edge per repo pair drives the picture
       seen.add(id);
-      if (!elements.some((e) => e.data.id === `p:${src}`)) continue;
       elements.push({
         data: {
           id,
-          source: `p:${src}`,
-          target: `p:${dst}`,
+          source,
+          target,
           prov: link.provenance === "authored" ? "authored" : "inferred",
         },
       });
