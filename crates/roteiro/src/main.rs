@@ -12,6 +12,10 @@ mod config;
 // full `serve` build), so under `explorer` the router is always live.
 #[cfg(feature = "explorer")]
 mod graph_api;
+// The served workspace-explorer web app (HTML shell + hand-written ES app +
+// vendored cytoscape.js), same-origin over the `explorer` server's data API.
+#[cfg(feature = "explorer")]
+mod explorer_app;
 mod infer_links;
 mod init;
 mod overview;
@@ -364,9 +368,11 @@ enum Command {
     /// at `GET /v1/graph/workspaces`, and serves each workspace's graph both under
     /// `/v1/graph/workspaces/{ws}/…` and, for the default workspace, flat under
     /// `/v1/graph/…`. Read-only: serves whatever each repo's graph currently holds
-    /// (run `roteiro sync` to refresh). The **Ask** tab and static UI are out of
-    /// scope; Ask needs the `serve` build's `/v1/chat/completions`, which this
-    /// server deliberately does not offer. Needs `--features explorer`.
+    /// (run `roteiro sync` to refresh). It also serves the interactive
+    /// **workspace-explorer web app** at `GET /` (ADR-0010, same-origin over this
+    /// API). The **Ask** tab remains out of scope; it needs the `serve` build's
+    /// `/v1/chat/completions`, which this server deliberately does not offer. Needs
+    /// `--features explorer`.
     #[cfg(feature = "explorer")]
     Explorer {
         /// Bind address (default `[serve] addr`, else `127.0.0.1:8017`). A
@@ -3360,7 +3366,11 @@ fn run_explorer(
         );
     }
 
-    let router = graph_api::router(set.clone(), default.clone());
+    // The read-only data API plus the served web app (HTML shell, our ES app, and
+    // the vendored cytoscape.js) — same-origin, so the app fetches `/v1/graph/*`
+    // with no CORS. The UI routes live only on this llama-free explorer server; a
+    // full `serve` build keeps serving just the JSON API (no bundled UI).
+    let router = graph_api::router(set.clone(), default.clone()).merge(explorer_app::router());
 
     // A small current-thread runtime is all the axum server needs; no rto-serve,
     // no llama.cpp runtime. Blocks until shutdown.
@@ -3373,8 +3383,8 @@ fn run_explorer(
             .as_deref()
             .map_or_else(String::new, |d| format!(" (default workspace: {d})"));
         eprintln!(
-            "roteiro explorer listening on http://{socket}/v1/graph — \
-             {} workspace(s): {}{default_note}",
+            "roteiro explorer listening on http://{socket}/ (UI) — \
+             API at http://{socket}/v1/graph — {} workspace(s): {}{default_note}",
             set.names().len(),
             set.names().join(", "),
         );

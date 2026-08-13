@@ -1,0 +1,5 @@
+# Vendored client-side dependency (ADR-0010): a single prebuilt cytoscape.js UMD
+# bundle, committed and served verbatim. Mark it vendored/generated so GitHub
+# excludes it from language stats and collapses it in diffs — it is not
+# hand-maintained source and should be updated by replacing the whole file.
+crates/roteiro/src/assets/cytoscape.min.js linguist-vendored linguist-generated -diff
