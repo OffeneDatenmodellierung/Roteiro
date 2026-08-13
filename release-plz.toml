@@ -3,7 +3,12 @@
 # if the crates' release cadences diverge.
 changelog_update = true
 git_release_enable = true
-semver_check = true
+# Disabled: all crates share one [workspace.package] version (currently 1.0.0),
+# so cargo-semver-checks flagging any routine public-API change as BREAKING forces
+# the whole workspace to a spurious MAJOR bump (1.0.0 -> 2.0.0). Version bumps are
+# driven by conventional commits instead (feat -> minor, fix -> patch, feat!/BREAKING
+# -> major). Re-enable per-crate once the public APIs stabilize.
+semver_check = false
 dependencies_update = false
 
 [changelog]
