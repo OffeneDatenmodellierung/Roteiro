@@ -6,7 +6,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use rto_graph::{FactSet, Node, NodeKind, Store, Workspace, WorkspaceError};
+use rto_graph::{
+    FactSet, Node, NodeKind, ResolvedWorkspace, Store, Workspace, WorkspaceError, WorkspaceSet,
+};
 
 fn git_init(dir: &Path) {
     let status = Command::new("git")
@@ -214,6 +216,128 @@ fn a_registered_repo_without_a_graph_reports_no_graph() {
         .expect_err("no graph yet");
     assert!(matches!(err, WorkspaceError::NoGraph { .. }), "{err:?}");
     assert!(err.to_string().contains("roteiro sync"));
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn workspace_set_from_resolved_partitions_linked_and_standalone() {
+    // A linked group of two repos (one multi-repo graph), plus a standalone repo
+    // discovered under its own root (its own single-repo graph, no cross-repo
+    // links). Mirrors a config's `[[workspaces]]` + `[standalone]` after
+    // `Config::resolved_workspaces()`.
+    let base = std::env::temp_dir().join(format!("rto-wsset-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    repo_with_node(&base.join("linked").join("api"), "sym:rust:a.rs#in_api");
+    repo_with_node(&base.join("linked").join("web"), "sym:rust:b.rs#in_web");
+    repo_with_node(&base.join("solo").join("tools"), "sym:rust:c.rs#in_tools");
+
+    let resolved = vec![
+        ResolvedWorkspace {
+            name: "prod".to_owned(),
+            roots: vec![base.join("linked").to_string_lossy().into_owned()],
+            repos: Vec::new(),
+            linked: true,
+        },
+        ResolvedWorkspace {
+            name: "tools".to_owned(),
+            roots: Vec::new(),
+            repos: vec![
+                base.join("solo")
+                    .join("tools")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            linked: false,
+        },
+    ];
+    let set = WorkspaceSet::from_resolved(resolved).expect("build set");
+
+    // Both workspaces are present, with the right linked flags.
+    assert_eq!(set.names(), vec!["prod".to_owned(), "tools".to_owned()]);
+    assert_eq!(set.linked("prod"), Some(true));
+    assert_eq!(set.linked("tools"), Some(false));
+
+    // The linked workspace is a multi-repo graph (api + web); a named select routes
+    // a query to the right member.
+    let prod = set.select(Some("prod")).expect("select prod");
+    assert_eq!(prod.names(), vec!["api".to_owned(), "web".to_owned()]);
+    assert!(prod.is_multi());
+    assert!(
+        prod.with_store(Some("api"), |s| s
+            .get_node("sym:rust:a.rs#in_api")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // The standalone workspace is a one-repo graph (no cross-repo links possible):
+    // a bare select resolves to its sole project.
+    let tools = set.select(Some("tools")).expect("select tools");
+    assert!(!tools.is_multi());
+    assert_eq!(tools.names(), vec!["tools".to_owned()]);
+    assert!(
+        tools
+            .with_store(None, |s| s
+                .get_node("sym:rust:c.rs#in_tools")
+                .unwrap()
+                .is_some())
+            .unwrap()
+    );
+
+    // `containing` maps a repo's own graph.db back to the workspace holding it.
+    let api_db = base
+        .join("linked")
+        .join("api")
+        .join(".git")
+        .join("roteiro")
+        .join("graph.db");
+    let tools_db = base
+        .join("solo")
+        .join("tools")
+        .join(".git")
+        .join("roteiro")
+        .join("graph.db");
+    assert_eq!(set.containing(&api_db), Some("prod"));
+    assert_eq!(set.containing(&tools_db), Some("tools"));
+    assert_eq!(set.containing(Path::new("/nope/graph.db")), None);
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn workspace_set_from_resolved_skips_empty_groups() {
+    // A group whose root holds no repos resolves to nothing and is simply absent —
+    // it never aborts building the rest of the set.
+    let base = std::env::temp_dir().join(format!("rto-wsset-empty-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    std::fs::create_dir_all(base.join("barren")).expect("mkdir empty root");
+    repo_with_node(&base.join("real"), "sym:rust:a.rs#real");
+
+    let resolved = vec![
+        ResolvedWorkspace {
+            name: "ghost".to_owned(),
+            roots: vec![base.join("barren").to_string_lossy().into_owned()],
+            repos: Vec::new(),
+            linked: true,
+        },
+        ResolvedWorkspace {
+            name: "real".to_owned(),
+            roots: Vec::new(),
+            repos: vec![base.join("real").to_string_lossy().into_owned()],
+            linked: false,
+        },
+    ];
+    let set = WorkspaceSet::from_resolved(resolved).expect("build set");
+
+    // Only the non-empty group survives; the empty one is gone.
+    assert_eq!(set.names(), vec!["real".to_owned()]);
+    assert!(matches!(
+        set.select(Some("ghost")),
+        Err(WorkspaceError::UnknownWorkspace { .. })
+    ));
+    // Exactly one surviving workspace ⇒ it is the default (bare select works).
+    assert!(set.select(None).is_ok());
 
     std::fs::remove_dir_all(&base).ok();
 }

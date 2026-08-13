@@ -47,6 +47,29 @@ pub enum WorkspaceError {
     /// The workspace is registered but empty (no repos resolved).
     #[error("no projects registered")]
     Empty,
+    /// A selector named a workspace the [`WorkspaceSet`] does not know.
+    #[error("no workspace named `{name}` (known: {known})")]
+    UnknownWorkspace {
+        /// The requested workspace name.
+        name: String,
+        /// Comma-separated list of known workspace names.
+        known: String,
+    },
+    /// A selection omitted a name but the [`WorkspaceSet`] holds several
+    /// workspaces, so the choice is ambiguous.
+    #[error("several workspaces configured ({known}); select one with `--workspace-name`")]
+    AmbiguousWorkspace {
+        /// Comma-separated list of known workspace names.
+        known: String,
+    },
+    /// Reading a workspace root directory during repo discovery failed.
+    #[error("reading workspace root `{}`: {msg}", .root.display())]
+    Discover {
+        /// The root directory that could not be read.
+        root: PathBuf,
+        /// The underlying I/O error message.
+        msg: String,
+    },
     /// A cross-repo target was not a project-qualified key (`<project>::<key>`).
     #[error("`{key}` is not a project-qualified key (expected `<project>::<key>`)")]
     Unqualified {
@@ -212,6 +235,53 @@ impl Workspace {
             }),
             on_open: None,
         })
+    }
+
+    /// Build a workspace from explicit `(project name, graph.db path)` pairs,
+    /// **without** git discovery — used where the names and store locations are
+    /// already known ([`WorkspaceSet`] construction re-uses the CLI's discovery
+    /// upstream, and tests build synthetic registries). Names are taken verbatim
+    /// (deduplicate before calling if a collision is possible); with exactly one
+    /// pair, that project is the default.
+    #[must_use]
+    pub fn from_named_dbs<I>(dbs: I) -> Self
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
+        let projects: BTreeMap<String, Source> = dbs
+            .into_iter()
+            .map(|(n, db)| (n, Source::Path(db)))
+            .collect();
+        let default = (projects.len() == 1)
+            .then(|| projects.keys().next().cloned())
+            .flatten();
+        Self {
+            inner: Mutex::new(Inner {
+                projects,
+                default,
+                cache: HashMap::new(),
+            }),
+            on_open: None,
+        }
+    }
+
+    /// The `graph.db` paths of the workspace's lazily-opened (`Path`) projects, in
+    /// stable name order. Pre-opened (`single`) projects carry no path and are
+    /// omitted. Used by [`WorkspaceSet::containing`] to find which workspace holds
+    /// a given repo.
+    #[must_use]
+    pub fn member_dbs(&self) -> Vec<PathBuf> {
+        self.lock()
+            .map(|i| {
+                i.projects
+                    .values()
+                    .filter_map(|s| match s {
+                        Source::Path(p) => Some(p.clone()),
+                        Source::Open(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Set a first-open hook (`serve --sync-on-access`): before a project's store
@@ -498,6 +568,189 @@ fn dedupe_name(projects: &BTreeMap<String, Source>, base: String) -> String {
     }
 }
 
+/// Shallow git-repo discovery under `root`: the root itself if it is a repo, plus
+/// each immediate subdirectory that is one, in sorted order. Shallow by design — a
+/// code directory holding sibling checkouts is the common case, and a deep scan
+/// would be slow and surprising. Shared by the CLI's workspace collection and
+/// [`WorkspaceSet`] / config resolution, so the membership rule lives in one place.
+///
+/// A repo is any directory containing a `.git` entry (a directory in a normal
+/// clone, a file in worktrees and submodules), so existence — not `is_dir` — is
+/// tested.
+///
+/// # Errors
+/// [`WorkspaceError::Discover`] if `root` cannot be read.
+pub fn discover_repos_under(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
+    let is_repo = |dir: &Path| dir.join(".git").exists();
+    let mut repos = Vec::new();
+    if is_repo(root) {
+        repos.push(root.to_path_buf());
+    }
+    let entries = std::fs::read_dir(root).map_err(|e| WorkspaceError::Discover {
+        root: root.to_path_buf(),
+        msg: e.to_string(),
+    })?;
+    let mut children: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && is_repo(p))
+        .collect();
+    children.sort();
+    repos.extend(children);
+    Ok(repos)
+}
+
+/// A workspace group after config normalisation ([`crate::WorkspaceSet`] input): a
+/// name, its member `roots`/`repos` (unexpanded — discovered when the set is
+/// built), and whether its repos are cross-**linked** (served as one multi-repo
+/// graph) or **standalone** (each its own single-repo graph, no cross-repo links).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkspace {
+    /// The workspace name (the `--workspace-name` selector).
+    pub name: String,
+    /// Directories to scan for member repos (as `[workspace] roots`).
+    pub roots: Vec<String>,
+    /// Explicit member repo paths, in addition to anything under `roots`.
+    pub repos: Vec<String>,
+    /// `true` ⇒ the repos form one linked graph; `false` ⇒ a standalone singleton.
+    pub linked: bool,
+}
+
+/// One entry in a [`WorkspaceSet`]: a built [`Workspace`] plus whether its member
+/// repos are cross-linked.
+struct WorkspaceEntry {
+    /// The per-group workspace (one repo for a standalone singleton, several for a
+    /// linked group).
+    workspace: Workspace,
+    /// Whether the group's repos are cross-linked.
+    linked: bool,
+}
+
+/// An install's **many** named workspaces: linked groups (multi-repo graphs) and
+/// standalone singletons (one-repo graphs), keyed by name in stable order (ADR-0008
+/// multi-workspace). The outer layer over [`Workspace`]: it selects *which*
+/// workspace a command operates on, then hands back that `Workspace` to resolve
+/// projects within it. Built from normalised config ([`WorkspaceSet::from_resolved`])
+/// so the `serve`/`links` selection logic is shared.
+pub struct WorkspaceSet {
+    /// Workspace name → its entry, in stable (`BTreeMap`) name order.
+    entries: BTreeMap<String, WorkspaceEntry>,
+    /// The workspace used when a selection omits a name (the sole workspace, if
+    /// there is exactly one; otherwise `None` and a bare selection is ambiguous).
+    default: Option<String>,
+}
+
+impl WorkspaceSet {
+    /// Assemble a set from pre-built named workspaces — the shared core of
+    /// [`WorkspaceSet::from_resolved`] and the test constructor. With exactly one
+    /// entry, that workspace is the default (a bare selection resolves to it).
+    #[must_use]
+    pub fn from_workspaces<I>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = (String, Workspace, bool)>,
+    {
+        let entries: BTreeMap<String, WorkspaceEntry> = entries
+            .into_iter()
+            .map(|(name, workspace, linked)| (name, WorkspaceEntry { workspace, linked }))
+            .collect();
+        let default = (entries.len() == 1)
+            .then(|| entries.keys().next().cloned())
+            .flatten();
+        Self { entries, default }
+    }
+
+    /// Build a set from normalised config groups: each group's `roots`/`repos` are
+    /// discovered into member repo paths and opened as one [`Workspace`] (a linked
+    /// group ⇒ a multi-repo graph; a standalone singleton ⇒ a one-repo graph). A
+    /// group that resolves to **no** repos is skipped, so a stale root never aborts
+    /// the whole set.
+    ///
+    /// # Errors
+    /// [`WorkspaceError::Discover`] if a group's root cannot be read, or
+    /// [`WorkspaceError::Git`] if an explicit repo path is not inside a git repo.
+    pub fn from_resolved(resolved: Vec<ResolvedWorkspace>) -> Result<Self, WorkspaceError> {
+        let mut entries: Vec<(String, Workspace, bool)> = Vec::new();
+        for rw in resolved {
+            let mut paths: Vec<PathBuf> = Vec::new();
+            for root in &rw.roots {
+                paths.extend(discover_repos_under(Path::new(root))?);
+            }
+            for repo in &rw.repos {
+                paths.push(PathBuf::from(repo));
+            }
+            if paths.is_empty() {
+                // A group naming nothing (e.g. a `roots` dir with no repos) is
+                // simply absent rather than an error.
+                continue;
+            }
+            let workspace = Workspace::from_repo_paths(&paths)?;
+            entries.push((rw.name, workspace, rw.linked));
+        }
+        Ok(Self::from_workspaces(entries))
+    }
+
+    /// The configured workspace names, in stable order.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.entries.keys().cloned().collect()
+    }
+
+    /// Whether workspace `name` is linked (`Some(true)`), standalone
+    /// (`Some(false)`), or unknown (`None`).
+    #[must_use]
+    pub fn linked(&self, name: &str) -> Option<bool> {
+        self.entries.get(name).map(|e| e.linked)
+    }
+
+    /// Select a workspace by `name`, or the default when `name` is `None`.
+    ///
+    /// # Errors
+    /// [`WorkspaceError::UnknownWorkspace`] if named but absent,
+    /// [`WorkspaceError::AmbiguousWorkspace`] if omitted with several configured,
+    /// or [`WorkspaceError::Empty`] if none are configured.
+    pub fn select(&self, name: Option<&str>) -> Result<&Workspace, WorkspaceError> {
+        if let Some(n) = name {
+            return self.entries.get(n).map(|e| &e.workspace).ok_or_else(|| {
+                WorkspaceError::UnknownWorkspace {
+                    name: n.to_owned(),
+                    known: self.known(),
+                }
+            });
+        }
+        // No name given: the sole workspace, else ambiguous / empty.
+        let name = self.default.as_ref().ok_or_else(|| {
+            if self.entries.is_empty() {
+                WorkspaceError::Empty
+            } else {
+                WorkspaceError::AmbiguousWorkspace {
+                    known: self.known(),
+                }
+            }
+        })?;
+        Ok(&self.entries[name].workspace)
+    }
+
+    /// The name of the workspace whose member repos include the repo whose graph is
+    /// `cwd_repo_db` (`<repo>/.git/roteiro/graph.db`), or `None` if no workspace
+    /// contains it. Used to default `--workspace-name` to the workspace the current
+    /// directory belongs to.
+    #[must_use]
+    pub fn containing(&self, cwd_repo_db: &Path) -> Option<&str> {
+        self.entries.iter().find_map(|(name, e)| {
+            e.workspace
+                .member_dbs()
+                .iter()
+                .any(|db| db == cwd_repo_db)
+                .then_some(name.as_str())
+        })
+    }
+
+    /// Comma-separated workspace names (for error messages).
+    fn known(&self) -> String {
+        self.entries.keys().cloned().collect::<Vec<_>>().join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,5 +873,77 @@ mod tests {
         // A plain (non-external-ref) node is simply not followed.
         let plain = Node::new("file:cfg.rs", NodeKind::File, "cfg.rs");
         assert!(ws.follow_external_ref(&plain).unwrap().is_none());
+    }
+
+    #[test]
+    fn workspace_set_select_single_ambiguous_and_unknown() {
+        // One workspace ⇒ the default; a bare or named select both resolve to it.
+        let one = WorkspaceSet::from_workspaces([(
+            "only".to_owned(),
+            Workspace::single("only", store()),
+            true,
+        )]);
+        assert_eq!(one.names(), vec!["only".to_owned()]);
+        assert_eq!(one.linked("only"), Some(true));
+        assert!(one.linked("nope").is_none());
+        assert!(one.select(None).is_ok());
+        assert!(one.select(Some("only")).is_ok());
+        assert!(matches!(
+            one.select(Some("ghost")),
+            Err(WorkspaceError::UnknownWorkspace { .. })
+        ));
+
+        // Several workspaces ⇒ a bare select is ambiguous (listing the names), a
+        // named select works, and an unknown name errors.
+        let many = WorkspaceSet::from_workspaces([
+            ("api".to_owned(), Workspace::single("api", store()), true),
+            ("web".to_owned(), Workspace::single("web", store()), false),
+        ]);
+        assert_eq!(many.names(), vec!["api".to_owned(), "web".to_owned()]);
+        assert_eq!(many.linked("web"), Some(false));
+        // (`select` yields `&Workspace`, which isn't `Debug`, so match the error
+        // out rather than `unwrap_err`.)
+        let Err(err) = many.select(None) else {
+            panic!("a bare select over several workspaces must be ambiguous");
+        };
+        assert!(matches!(err, WorkspaceError::AmbiguousWorkspace { .. }));
+        assert!(err.to_string().contains("api"));
+        assert!(err.to_string().contains("web"));
+        assert!(many.select(Some("web")).is_ok());
+        assert!(matches!(
+            many.select(Some("ghost")),
+            Err(WorkspaceError::UnknownWorkspace { .. })
+        ));
+
+        // No workspaces ⇒ a bare select reports the empty set.
+        let none = WorkspaceSet::from_workspaces(std::iter::empty());
+        assert!(matches!(none.select(None), Err(WorkspaceError::Empty)));
+    }
+
+    #[test]
+    fn workspace_set_containing_finds_the_owning_workspace_by_db_path() {
+        // Build two workspaces from explicit (name, graph.db) pairs — no git needed
+        // — so `containing` can match a repo's db against each workspace's members.
+        let api_db = PathBuf::from("/ws/api/svc/.git/roteiro/graph.db");
+        let web_db = PathBuf::from("/ws/web/app/.git/roteiro/graph.db");
+        let set = WorkspaceSet::from_workspaces([
+            (
+                "api".to_owned(),
+                Workspace::from_named_dbs([("svc".to_owned(), api_db.clone())]),
+                true,
+            ),
+            (
+                "web".to_owned(),
+                Workspace::from_named_dbs([("app".to_owned(), web_db.clone())]),
+                false,
+            ),
+        ]);
+        assert_eq!(set.containing(&api_db), Some("api"));
+        assert_eq!(set.containing(&web_db), Some("web"));
+        // A db in no workspace matches nothing.
+        assert_eq!(
+            set.containing(Path::new("/elsewhere/.git/roteiro/graph.db")),
+            None
+        );
     }
 }

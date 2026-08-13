@@ -51,7 +51,18 @@ pub struct Config {
     /// Filesystem locations (the model store).
     pub paths: PathsConfig,
     /// `roteiro serve --workspace` — repos a single server can host (ADR-0008).
+    /// The legacy **single** workspace; still fully supported and, when it names
+    /// any repos, folded in as the `default` linked workspace (see
+    /// [`Config::resolved_workspaces`]).
     pub workspace: WorkspaceConfig,
+    /// `[[workspaces]]` — additional **named**, linked workspaces (each a multi-repo
+    /// graph whose cross-repo links resolve), the named form of the legacy single
+    /// `[workspace]` (ADR-0008 multi-workspace).
+    pub workspaces: Vec<NamedWorkspace>,
+    /// `[standalone]` — repos each served as their **own** single-repo graph, with
+    /// no cross-repo links. Discovered like `[workspace]` (roots scanned + explicit
+    /// repos) but partitioned one-workspace-per-repo (ADR-0008 multi-workspace).
+    pub standalone: WorkspaceConfig,
     /// `[[links]]` — authored cross-repo links to other workspace repos (ADR-0009).
     pub links: Vec<LinkDecl>,
     /// `[pins]` — how to map a deployed artifact to a hub git ref when the default
@@ -91,6 +102,31 @@ pub struct WorkspaceConfig {
     /// repo becomes a project, plus the root itself if it is one).
     pub roots: Option<Vec<String>>,
     /// Explicit repo paths to host, in addition to anything found under `roots`.
+    pub repos: Option<Vec<String>>,
+}
+
+impl WorkspaceConfig {
+    /// Whether this table names nothing to host (no roots and no repos) — used to
+    /// decide whether the legacy `[workspace]` should fold in as `default`.
+    fn is_empty(&self) -> bool {
+        self.roots.as_ref().is_none_or(Vec::is_empty)
+            && self.repos.as_ref().is_none_or(Vec::is_empty)
+    }
+}
+
+/// One `[[workspaces]]` entry: a **named** linked workspace — a set of repos served
+/// as a single multi-repo graph (their cross-repo links resolve), the named form of
+/// the legacy single `[workspace]` (ADR-0008). Reuses the `roots`/`repos` discovery
+/// rules of [`WorkspaceConfig`], plus a `name` (the `--workspace-name` selector).
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct NamedWorkspace {
+    /// The workspace name — the selector passed to `--workspace-name`.
+    pub name: String,
+    /// Directories to scan for member git repos (each immediate subdirectory that
+    /// is a repo, plus the root itself if it is one), as `[workspace] roots`.
+    pub roots: Option<Vec<String>>,
+    /// Explicit member repo paths, in addition to anything found under `roots`.
     pub repos: Option<Vec<String>>,
 }
 
@@ -270,6 +306,26 @@ impl Config {
                     .clone()
                     .or(self.workspace.repos.clone()),
             },
+            // `[[workspaces]]` overlay like `links`: the project layer wins outright
+            // when it declares any, else the user layer's survive.
+            workspaces: if over.workspaces.is_empty() {
+                self.workspaces.clone()
+            } else {
+                over.workspaces.clone()
+            },
+            // `[standalone]` merges per field (project over user), like `workspace`.
+            standalone: WorkspaceConfig {
+                roots: over
+                    .standalone
+                    .roots
+                    .clone()
+                    .or(self.standalone.roots.clone()),
+                repos: over
+                    .standalone
+                    .repos
+                    .clone()
+                    .or(self.standalone.repos.clone()),
+            },
             // Links are per-repo (a spoke declares its own); the project layer wins
             // outright when it has any, else the user layer's (rare).
             links: if over.links.is_empty() {
@@ -284,6 +340,112 @@ impl Config {
                 m
             },
         }
+    }
+
+    /// Normalise the workspace configuration into a flat list of resolved groups
+    /// (ADR-0008 multi-workspace), the input to [`rto_graph::WorkspaceSet`]:
+    ///
+    /// - the legacy `[workspace]` table, **when it names any roots/repos**, folds in
+    ///   as a linked group named `default`;
+    /// - each `[[workspaces]]` entry is a linked group under its own name;
+    /// - `[standalone]` expands — by discovering the repos under its roots plus its
+    ///   explicit repos — into one **unlinked**, single-repo group per repo, named
+    ///   after the repo directory (deduped `-2`/`-3` on collision, as the workspace
+    ///   registry does).
+    ///
+    /// Names are made unique across all three sources (a `default`/`[[workspaces]]`
+    /// name always keeps its slot; a colliding standalone repo takes a suffix).
+    ///
+    /// Fully backward-compatible: a config with only `[workspace]` yields exactly one
+    /// `default` linked group with the same membership as before; a config naming no
+    /// workspaces at all yields an empty list.
+    ///
+    /// # Errors
+    /// Propagates a discovery failure (an unreadable `[standalone]` root).
+    pub fn resolved_workspaces(&self) -> anyhow::Result<Vec<rto_graph::ResolvedWorkspace>> {
+        use std::collections::HashSet;
+
+        let mut out: Vec<rto_graph::ResolvedWorkspace> = Vec::new();
+        let mut used: HashSet<String> = HashSet::new();
+
+        // Legacy `[workspace]` → the `default` linked group (only if it names any
+        // repos), so today's single-workspace configs keep working unchanged.
+        if !self.workspace.is_empty() {
+            used.insert("default".to_owned());
+            out.push(rto_graph::ResolvedWorkspace {
+                name: "default".to_owned(),
+                roots: self.workspace.roots.clone().unwrap_or_default(),
+                repos: self.workspace.repos.clone().unwrap_or_default(),
+                linked: true,
+            });
+        }
+
+        // Each `[[workspaces]]` → a named linked group.
+        for nw in &self.workspaces {
+            let name = dedupe_workspace_name(&mut used, nw.name.clone());
+            out.push(rto_graph::ResolvedWorkspace {
+                name,
+                roots: nw.roots.clone().unwrap_or_default(),
+                repos: nw.repos.clone().unwrap_or_default(),
+                linked: true,
+            });
+        }
+
+        // `[standalone]` → one unlinked, single-repo group per discovered repo.
+        for repo in self.standalone_repo_paths()? {
+            let base = repo
+                .file_name()
+                .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+            let name = dedupe_workspace_name(&mut used, base);
+            out.push(rto_graph::ResolvedWorkspace {
+                name,
+                roots: Vec::new(),
+                repos: vec![repo.to_string_lossy().into_owned()],
+                linked: false,
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Every standalone repo: those discovered under each `[standalone] roots` entry
+    /// plus each explicit `[standalone] repos` path, order-stable and de-duplicated
+    /// by path.
+    fn standalone_repo_paths(&self) -> anyhow::Result<Vec<PathBuf>> {
+        use std::collections::HashSet;
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut out: Vec<PathBuf> = Vec::new();
+        for root in self.standalone.roots.iter().flatten() {
+            for repo in rto_graph::discover_repos_under(Path::new(root))? {
+                if seen.insert(repo.clone()) {
+                    out.push(repo);
+                }
+            }
+        }
+        for repo in self.standalone.repos.iter().flatten() {
+            let p = PathBuf::from(repo);
+            if seen.insert(p.clone()) {
+                out.push(p);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Make `base` unique against the names already handed out, appending `-2`, `-3`, …
+/// on collision (mirrors the workspace registry's `dedupe_name`). Records the
+/// chosen name in `used`.
+fn dedupe_workspace_name(used: &mut std::collections::HashSet<String>, base: String) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
     }
 }
 
@@ -357,7 +519,7 @@ fn find_project_config(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, find_project_config, load_from};
+    use super::{Config, NamedWorkspace, WorkspaceConfig, find_project_config, load_from};
 
     #[test]
     fn project_config_is_repo_root_bounded() {
@@ -446,5 +608,175 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Backward compat: a legacy `[workspace]`-only config parses, merges, and
+    /// resolves to exactly one `default` linked workspace — as before the
+    /// multi-workspace fields existed.
+    #[test]
+    fn legacy_workspace_only_resolves_to_one_default_linked_group() {
+        let cfg = Config {
+            workspace: WorkspaceConfig {
+                roots: Some(vec!["/code".to_owned()]),
+                repos: Some(vec!["/code/extra".to_owned()]),
+            },
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        let d = &resolved[0];
+        assert_eq!(d.name, "default");
+        assert!(d.linked);
+        assert_eq!(d.roots, vec!["/code".to_owned()]);
+        assert_eq!(d.repos, vec!["/code/extra".to_owned()]);
+
+        // A config naming no workspaces at all yields no groups.
+        assert!(
+            Config::default()
+                .resolved_workspaces()
+                .expect("resolve default")
+                .is_empty()
+        );
+
+        // A user-layer `[workspace]` still survives an empty project overlay, and
+        // the new fields default to empty (they don't perturb a legacy config).
+        let user: Config = toml::from_str("[workspace]\nroots = [\"/code\"]\n").expect("parse");
+        let merged = user.overlaid_with(&Config::default());
+        assert_eq!(
+            merged.workspace.roots.as_deref(),
+            Some(&["/code".to_owned()][..])
+        );
+        assert!(merged.workspaces.is_empty());
+        assert!(merged.standalone.is_empty());
+    }
+
+    /// A config with `[[workspaces]]` + `[standalone]` (and a legacy `[workspace]`)
+    /// partitions into linked named groups first, then one unlinked single-repo
+    /// group per discovered standalone repo, with the right names and flags.
+    #[test]
+    fn named_workspaces_and_standalone_partition_correctly() {
+        let base = std::env::temp_dir().join(format!("roteiro-rw-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        // Two synthetic standalone repos (a `.git` entry marks a repo) under a root.
+        for name in ["docs", "tools"] {
+            std::fs::create_dir_all(base.join("solo").join(name).join(".git")).expect("mkrepo");
+        }
+
+        let cfg = Config {
+            workspace: WorkspaceConfig {
+                roots: Some(vec!["/legacy".to_owned()]),
+                repos: None,
+            },
+            workspaces: vec![
+                NamedWorkspace {
+                    name: "api".to_owned(),
+                    roots: Some(vec!["/api".to_owned()]),
+                    repos: None,
+                },
+                NamedWorkspace {
+                    name: "web".to_owned(),
+                    roots: None,
+                    repos: Some(vec!["/web/app".to_owned()]),
+                },
+            ],
+            standalone: WorkspaceConfig {
+                roots: Some(vec![base.join("solo").to_string_lossy().into_owned()]),
+                repos: None,
+            },
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
+
+        // Legacy `[workspace]` folds in as `default` first, then the named linked
+        // groups, then the standalone singletons (discovered in sorted order).
+        assert_eq!(names, vec!["default", "api", "web", "docs", "tools"]);
+
+        let by_name = |n: &str| resolved.iter().find(|r| r.name == n).expect("group");
+        assert!(by_name("default").linked);
+        assert!(by_name("api").linked);
+        assert!(by_name("web").linked);
+
+        let docs = by_name("docs");
+        assert!(!docs.linked, "standalone repos are unlinked");
+        assert!(docs.roots.is_empty());
+        assert_eq!(docs.repos.len(), 1, "a standalone group is a singleton");
+        assert!(docs.repos[0].ends_with("docs"));
+        assert!(!by_name("tools").linked);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A standalone repo whose directory name collides with a linked workspace name
+    /// takes a `-2` suffix (dedupe like the workspace registry); the linked group
+    /// keeps its slot.
+    #[test]
+    fn standalone_names_dedupe_against_linked_names() {
+        let base = std::env::temp_dir().join(format!("roteiro-rw-dedupe-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let repo = base.join("default");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkrepo");
+
+        let cfg = Config {
+            workspace: WorkspaceConfig {
+                roots: Some(vec!["/legacy".to_owned()]),
+                repos: None,
+            },
+            standalone: WorkspaceConfig {
+                roots: None,
+                repos: Some(vec![repo.to_string_lossy().into_owned()]),
+            },
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["default", "default-2"]);
+        // The linked `default` keeps its slot; the standalone takes `default-2`.
+        assert!(
+            resolved
+                .iter()
+                .find(|r| r.name == "default")
+                .unwrap()
+                .linked
+        );
+        assert!(
+            !resolved
+                .iter()
+                .find(|r| r.name == "default-2")
+                .unwrap()
+                .linked
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The new fields parse from TOML and overlay like `links`: a project-layer
+    /// `[[workspaces]]` wins outright, while an unset `[standalone]` falls back to
+    /// the user layer.
+    #[test]
+    fn multi_workspace_fields_parse_and_overlay() {
+        let user: Config = toml::from_str(
+            "[[workspaces]]\nname = \"api\"\nroots = [\"/api\"]\n\
+             [standalone]\nrepos = [\"/solo/x\"]\n",
+        )
+        .expect("parse user");
+        assert_eq!(user.workspaces.len(), 1);
+        assert_eq!(user.workspaces[0].name, "api");
+        assert_eq!(
+            user.standalone.repos.as_deref(),
+            Some(&["/solo/x".to_owned()][..])
+        );
+
+        let project: Config =
+            toml::from_str("[[workspaces]]\nname = \"web\"\n").expect("parse project");
+        let merged = user.overlaid_with(&project);
+        // `[[workspaces]]` from the project layer wins outright.
+        assert_eq!(merged.workspaces.len(), 1);
+        assert_eq!(merged.workspaces[0].name, "web");
+        // `[standalone]` unset in the project layer ⇒ the user layer's survives.
+        assert_eq!(
+            merged.standalone.repos.as_deref(),
+            Some(&["/solo/x".to_owned()][..])
+        );
     }
 }
