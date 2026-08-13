@@ -107,6 +107,11 @@ enum Command {
         /// List all nodes of this kind instead of explaining a key.
         #[arg(long, conflicts_with = "key")]
         kind: Option<String>,
+        /// When listing `--kind config_key`, drop keys that come from build /
+        /// tooling / CI config (`Cargo.toml`, `.github/` workflows, nextest, …),
+        /// leaving only application config. Opt-in; the default lists everything.
+        #[arg(long)]
+        app_config_only: bool,
         /// Emit the result as JSON.
         #[arg(long)]
         json: bool,
@@ -225,6 +230,12 @@ enum Command {
         /// With `--matrix --html`: output file (default `roteiro-overview.html`).
         #[arg(long, value_name = "FILE", requires = "html")]
         out: Option<String>,
+        /// Exclude build / tooling / CI config (`Cargo.toml`, `.github/` workflows,
+        /// nextest, …) from cross-repo matching, so `--infer`/`--matrix` compare and
+        /// drift-check only application config — sharpening drift. Opt-in; the
+        /// default considers every config key. Applies to `--infer` and `--matrix`.
+        #[arg(long)]
+        app_config_only: bool,
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
@@ -516,7 +527,12 @@ fn main() -> anyhow::Result<()> {
             staged,
         } => run_check(ingest, json, committed, staged, debt_ignore),
         Command::Review { json, base } => run_review(ingest, json, base.as_deref()),
-        Command::Query { key, kind, json } => run_query(ingest, key, kind, json),
+        Command::Query {
+            key,
+            kind,
+            app_config_only,
+            json,
+        } => run_query(ingest, key, kind, app_config_only, json),
         Command::Search { query, limit, json } => run_search(ingest, &query, limit, json),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
@@ -532,6 +548,7 @@ fn main() -> anyhow::Result<()> {
             write,
             html,
             out,
+            app_config_only,
             json,
         } => {
             let pin = PinnedHub {
@@ -543,11 +560,26 @@ fn main() -> anyhow::Result<()> {
                 cli_roots: &workspace,
                 workspace_name: workspace_name.as_deref(),
             };
+            let opts = InferOptions {
+                hub: hub.as_deref(),
+                pin,
+                app_config_only,
+            };
             if matrix {
-                run_links_matrix(&cfg.effective, &scope, hub.as_deref(), pin, html, out, json)
+                run_links_matrix(&cfg.effective, &scope, opts, html, out, json)
             } else if infer {
-                run_links_infer(&cfg.effective, &scope, hub.as_deref(), pin, write, json)
+                run_links_infer(&cfg.effective, &scope, opts, write, json)
             } else {
+                // `--app-config-only` only filters config-key matching, which the
+                // plain authored-links report doesn't do. Reject it here rather than
+                // silently ignoring it, so the flag never looks like it took effect.
+                if app_config_only {
+                    anyhow::bail!(
+                        "`--app-config-only` applies only to `roteiro links --infer` / `--matrix` \
+                         (it filters cross-repo config-key matching); \
+                         `roteiro query --kind config_key --app-config-only` supports it too"
+                    );
+                }
                 run_links(&cfg.effective, &scope, json)
             }
         }
@@ -2217,10 +2249,21 @@ fn run_spec_context(
 /// Query the graph: explain a node's provenance-labelled neighbourhood, or list
 /// all nodes of a kind. Builds the full (derived + authored) graph first so
 /// results reflect the current source and ADRs.
+/// The source-file component of a `config_key` node key (`cfgkey:<file>#<dotted>`),
+/// or `None` for any other node key. Neither the file path nor the dotted key
+/// contains `#`, so the first `#` cleanly separates them. Used to classify a
+/// config key as app vs tooling config for `--app-config-only`.
+fn cfgkey_file(node_key: &str) -> Option<&str> {
+    node_key
+        .strip_prefix("cfgkey:")
+        .map(|rest| rest.split_once('#').map_or(rest, |(file, _)| file))
+}
+
 fn run_query(
     ingest: rto_graph::IngestConfig,
     key: Option<String>,
     kind: Option<String>,
+    app_config_only: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     use rto_graph::{NodeKind, explain, list_kind};
@@ -2257,7 +2300,17 @@ fn run_query(
             }
         }
         (None, Some(kind)) => {
-            let listing = list_kind(&store, &NodeKind::from_token(&kind))?;
+            let mut listing = list_kind(&store, &NodeKind::from_token(&kind))?;
+            // `--app-config-only`: drop config keys sourced from build/tooling/CI
+            // files, keeping only real app config. Opt-in — off by default, so the
+            // listing is unchanged unless the flag is passed. A config-key node's
+            // key is `cfgkey:<file>#<dotted>`, so classify from that file component.
+            if app_config_only {
+                listing.nodes.retain(|n| match cfgkey_file(&n.key) {
+                    Some(file) => !rto_graph::is_tooling_config_path(file),
+                    None => true,
+                });
+            }
             if json {
                 emit_json(&listing)?;
             } else {
@@ -2718,6 +2771,19 @@ fn collect_workspace_config_keys(
     Ok((by_project, project_paths, unsynced))
 }
 
+/// Drop build/tooling/CI config keys (see [`rto_graph::is_tooling_config_path`])
+/// from every project, then discard any project left with no keys — so
+/// `--app-config-only` matches and drift-checks only application config. Used by
+/// `roteiro links --infer`/`--matrix`; a no-op unless the flag is set.
+fn retain_app_config_keys(
+    by_project: &mut std::collections::BTreeMap<String, Vec<infer_links::ConfigKey>>,
+) {
+    for keys in by_project.values_mut() {
+        keys.retain(|k| !rto_graph::is_tooling_config_path(&k.file));
+    }
+    by_project.retain(|_, keys| !keys.is_empty());
+}
+
 /// A ready cross-repo inference over the workspace, or a reason there's nothing to
 /// show (an informational no-op the caller reports without failing).
 enum InferScan {
@@ -2747,6 +2813,17 @@ struct PinnedHub<'a> {
     rev: Option<&'a str>,
     auto: bool,
     ingest: rto_graph::IngestConfig,
+}
+
+/// The cross-repo inference inputs shared by `--infer` and `--matrix`: which repo
+/// is the hub, how its version is pinned, and whether to consider only app config
+/// (dropping build/tooling/CI keys). Grouped so the two entry points stay under
+/// clippy's argument-count limit and thread one value.
+#[derive(Clone, Copy)]
+struct InferOptions<'a> {
+    hub: Option<&'a str>,
+    pin: PinnedHub<'a>,
+    app_config_only: bool,
 }
 
 /// The config keys of the repo at `repo_path` **as of `rev`** (any git rev), read
@@ -2826,9 +2903,13 @@ fn config_keys_from_artifact(
 fn scan_workspace_infer(
     cfg: &config::Config,
     scope: &LinksScope<'_>,
-    hub: Option<&str>,
-    pin: PinnedHub<'_>,
+    opts: InferOptions<'_>,
 ) -> anyhow::Result<InferScan> {
+    let InferOptions {
+        hub,
+        pin,
+        app_config_only,
+    } = opts;
     // Repos in scope: the same selection as `roteiro links` (selected workspace,
     // else today's flat `[workspace]` scope, plus `--workspace` roots and the cwd).
     let paths = links_scope_paths(cfg, scope)?;
@@ -2840,6 +2921,12 @@ fn scan_workspace_infer(
     }
 
     let (mut by_project, project_paths, unsynced) = collect_workspace_config_keys(&paths)?;
+    // `--app-config-only`: drop build/tooling/CI config keys from every repo before
+    // matching, so cross-repo correspondences and drift compare only app config.
+    // Opt-in — off by default, so matching is unchanged unless the flag is passed.
+    if app_config_only {
+        retain_app_config_keys(&mut by_project);
+    }
     if by_project.len() < 2 {
         let hint = if unsynced.is_empty() {
             String::new()
@@ -2880,8 +2967,12 @@ fn scan_workspace_infer(
         let hub_path = project_paths
             .get(&hub_name)
             .ok_or_else(|| anyhow::anyhow!("no path for hub `{hub_name}`"))?;
-        let keys = config_keys_at_rev(hub_path, rev, pin.ingest)
+        let mut keys = config_keys_at_rev(hub_path, rev, pin.ingest)
             .map_err(|e| anyhow::anyhow!("resolving hub `{hub_name}` at `{rev}`: {e}"))?;
+        // Keep the pinned hub's keys consistent with the filtered spokes.
+        if app_config_only {
+            keys.retain(|k| !rto_graph::is_tooling_config_path(&k.file));
+        }
         by_project.insert(hub_name.clone(), keys);
     }
 
@@ -3005,15 +3096,14 @@ fn resolve_infer_report(
 fn run_links_infer(
     cfg: &config::Config,
     scope: &LinksScope<'_>,
-    hub: Option<&str>,
-    pin: PinnedHub<'_>,
+    opts: InferOptions<'_>,
     write: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     // Having nothing to infer is a **successful no-op** (exit 0) — `--infer` is
     // informational, so a CI script can run it opportunistically in a single repo
     // without failing — but still say why.
-    let ready = match scan_workspace_infer(cfg, scope, hub, pin)? {
+    let ready = match scan_workspace_infer(cfg, scope, opts)? {
         InferScan::Nothing(reason) => {
             if json {
                 emit_json(&serde_json::json!({ "hub": null, "spokes": [], "note": reason }))?;
@@ -3063,13 +3153,12 @@ fn run_links_infer(
 fn run_links_matrix(
     cfg: &config::Config,
     scope: &LinksScope<'_>,
-    hub: Option<&str>,
-    pin: PinnedHub<'_>,
+    opts: InferOptions<'_>,
     html: bool,
     out: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let ready = match scan_workspace_infer(cfg, scope, hub, pin)? {
+    let ready = match scan_workspace_infer(cfg, scope, opts)? {
         InferScan::Nothing(reason) => {
             if json {
                 emit_json(

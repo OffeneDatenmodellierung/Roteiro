@@ -950,3 +950,101 @@ fn matrix_renders_override_grid_and_drift_across_formats() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// `roteiro query --kind config_key --app-config-only` drops config keys sourced
+/// from build/tooling/CI files (here `Cargo.toml`) while keeping real app config
+/// (here `config/app.toml`). The DEFAULT (no flag) still lists everything — the
+/// filter is strictly opt-in.
+#[test]
+fn query_app_config_only_drops_tooling_keys() {
+    let base = std::env::temp_dir().join(format!("roteiro-appconfig-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    std::fs::create_dir_all(base.join("config")).expect("mkdir");
+
+    // A tooling manifest (Cargo.toml) alongside real app config (config/app.toml).
+    std::fs::write(
+        base.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::write(
+        base.join("config/app.toml"),
+        "[serve]\naddr = \"0.0.0.0:8080\"\n",
+    )
+    .expect("write app.toml");
+    git(&base, &["init", "-q"]);
+    git(&base, &["add", "."]);
+    git(&base, &["commit", "-q", "-m", "init"]);
+
+    let keys = |args: &[&str]| -> Vec<String> {
+        let out = roteiro(&base, args);
+        assert!(out.status.success(), "query failed: {out:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        v["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // Default: everything is listed — both the Cargo.toml and the app.toml keys.
+    let all = keys(&["query", "--kind", "config_key", "--json"]);
+    assert!(
+        all.iter().any(|k| k.starts_with("cfgkey:Cargo.toml#")),
+        "default lists tooling keys: {all:?}"
+    );
+    assert!(
+        all.iter().any(|k| k.starts_with("cfgkey:config/app.toml#")),
+        "default lists app keys: {all:?}"
+    );
+
+    // Opt-in: `--app-config-only` drops the tooling keys, keeps the app keys.
+    let app_only = keys(&[
+        "query",
+        "--kind",
+        "config_key",
+        "--app-config-only",
+        "--json",
+    ]);
+    assert!(
+        !app_only.iter().any(|k| k.starts_with("cfgkey:Cargo.toml#")),
+        "tooling keys must be dropped: {app_only:?}"
+    );
+    assert!(
+        app_only
+            .iter()
+            .any(|k| k.starts_with("cfgkey:config/app.toml#")),
+        "app keys must remain: {app_only:?}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// `--app-config-only` is only meaningful for `roteiro links --infer` / `--matrix`
+/// (it filters config-key matching). Passed to the plain authored-links report — a
+/// mode that does no such matching — it must be REJECTED with a clear error, not
+/// silently ignored.
+#[test]
+fn links_app_config_only_without_infer_or_matrix_is_rejected() {
+    let base = std::env::temp_dir().join(format!("roteiro-acoreject-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    std::fs::create_dir_all(&base).expect("mkdir");
+    std::fs::write(base.join("README.md"), "# x\n").expect("write");
+    git(&base, &["init", "-q"]);
+    git(&base, &["add", "."]);
+    git(&base, &["commit", "-q", "-m", "init"]);
+
+    let out = roteiro(&base, &["links", "--app-config-only"]);
+    assert!(
+        !out.status.success(),
+        "plain `links --app-config-only` must fail, not silently ignore the flag: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--app-config-only") && stderr.contains("--infer"),
+        "error must explain the flag applies to --infer/--matrix: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}

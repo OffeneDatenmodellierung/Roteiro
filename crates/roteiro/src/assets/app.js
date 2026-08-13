@@ -55,6 +55,8 @@
     project: null, // the project currently drilled into
     projectWs: null, // the workspace that project belongs to
     pcy: null, // the project graph's cytoscape instance
+    pGraph: null, // the last-loaded raw project graph (re-render on toggle change)
+    hideToolingConfig: false, // opt-in filter: hide build/tooling config_key nodes
     pRendered: null, // `${ws}/${project}` currently rendered (guards reloads)
     searching: false, // a find-in-repo filter is active (suppresses hover trace)
     // Cross-repo links for the drilled-into project (PR 6). Several spoke config
@@ -120,6 +122,79 @@
     const head = String(hubKey).split(".")[0];
     return head ? head.toUpperCase() : "GENERAL";
   };
+
+  // -- tooling-config classifier (mirror of rto-graph's `is_tooling_config_path`)
+  //
+  // The "hide tooling config" toggle is a CLIENT-SIDE, opt-in filter (default off,
+  // so nothing is hidden until it's checked). It classifies a `config_key` node
+  // from the file path baked into its `cfgkey:<file>#<dotted>` key, so no endpoint
+  // change is needed. Keep this in lock-step with the Rust classifier in
+  // `crates/rto-graph/src/config_keys.rs` — it lists the SAME well-known files.
+
+  // The `<file>` component of a `cfgkey:<file>#<dotted>` node key, else null.
+  // Neither the path nor the dotted key contains `#`, so the first `#` splits them.
+  function cfgkeyFile(key) {
+    const s = String(key);
+    if (!s.startsWith("cfgkey:")) return null;
+    const rest = s.slice("cfgkey:".length);
+    const hash = rest.indexOf("#");
+    return hash === -1 ? rest : rest.slice(0, hash);
+  }
+
+  // Whether a repo-relative config path is build / tooling / CI config rather than
+  // application config. Conservative: an allow-list of well-known names/dirs, so
+  // real app config is never hidden. Mirrors `rto_graph::is_tooling_config_path`.
+  const TOOLING_CONFIG_BASENAMES = new Set([
+    "cargo.toml",
+    "cargo.lock",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+    "clippy.toml",
+    "deny.toml",
+    "release-plz.toml",
+    ".gitlab-ci.yml",
+  ]);
+  function isToolingConfigPath(path) {
+    const segments = String(path).split("/").filter((s) => s && s !== ".");
+    const base = (segments[segments.length - 1] || path).toLowerCase();
+    // Directory-scoped: `.github/` (CI) and `.config/` (nextest & friends).
+    if (segments.some((s) => s === ".github" || s === ".config")) return true;
+    // `.cargo/config` or `.cargo/config.toml` — cargo's own build config.
+    if (
+      segments.length >= 2 &&
+      segments[segments.length - 2] === ".cargo" &&
+      (base === "config" || base === "config.toml")
+    ) {
+      return true;
+    }
+    return TOOLING_CONFIG_BASENAMES.has(base);
+  }
+
+  // A `config_key` node whose file classifies as tooling — the row/node hidden when
+  // the toggle is on. Any non-config node is always kept.
+  function isToolingConfigNode(node) {
+    if (!node || node.kind !== "config_key") return false;
+    const file = cfgkeyFile(node.key);
+    return file != null && isToolingConfigPath(file);
+  }
+
+  // Persisted toggle state (default OFF — show everything). localStorage is
+  // best-effort; a private-mode failure just falls back to per-session state.
+  const HIDE_TOOLING_KEY = "roteiro.hideToolingConfig";
+  function loadHideTooling() {
+    try {
+      return localStorage.getItem(HIDE_TOOLING_KEY) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+  function saveHideTooling(on) {
+    try {
+      localStorage.setItem(HIDE_TOOLING_KEY, on ? "1" : "0");
+    } catch (_) {}
+  }
 
   // -- hash routing + navigation ---------------------------------------------
 
@@ -939,11 +1014,14 @@
     $("#view-project").hidden = true;
     $("#view-workspace").hidden = false;
     document.body.classList.remove("on-project");
-    // Free the (potentially ~1,300-node) project graph when backing out.
+    // Free the (potentially ~1,300-node) project graph when backing out. Also
+    // drop the cached RAW graph (`pGraph`, kept only so the "hide tooling config"
+    // toggle can re-render without a refetch) so it can be GC'd off-view.
     if (state.pcy) {
       state.pcy.destroy();
       state.pcy = null;
     }
+    state.pGraph = null;
     state.pRendered = null;
     state.searching = false;
     setProjectLinks([]);
@@ -987,8 +1065,17 @@
     }
     host.replaceChildren();
 
-    const nodes = graph.nodes || [];
+    // Keep the raw graph so toggling "hide tooling config" can re-render without a
+    // refetch. The toggle is off by default, so the full graph is shown unless set.
+    state.pGraph = graph;
+
+    let nodes = graph.nodes || [];
     const edges = graph.edges || [];
+    // Opt-in filter: drop tooling/CI `config_key` nodes. Edges are already pruned
+    // to surviving node ids below, so a dropped node's edges vanish with it.
+    if (state.hideToolingConfig) {
+      nodes = nodes.filter((n) => !isToolingConfigNode(n));
+    }
     const ids = new Set(nodes.map((n) => n.key));
     const elements = [];
     for (const n of nodes) {
@@ -1977,6 +2064,25 @@
     $("#p-zoom-out").addEventListener("click", () => zoomBy(0.8));
     $("#p-fit").addEventListener("click", fitGraph);
     $("#p-search").addEventListener("input", (e) => onSearchInput(e.target.value));
+
+    // "Hide tooling config" toggle: opt-in, persisted, default OFF (shows all).
+    // Restore the saved state, reflect it in the checkbox, and on change re-render
+    // the current project graph from the cached raw graph (no refetch), re-applying
+    // any active find-in-repo filter so the toggle composes with search.
+    const hideToggle = $("#p-hide-tooling");
+    if (hideToggle) {
+      state.hideToolingConfig = loadHideTooling();
+      hideToggle.checked = state.hideToolingConfig;
+      hideToggle.addEventListener("change", (e) => {
+        state.hideToolingConfig = e.target.checked;
+        saveHideTooling(state.hideToolingConfig);
+        if (state.pGraph) {
+          renderProjectGraph(state.pGraph);
+          const q = $("#p-search");
+          if (q && q.value) onSearchInput(q.value);
+        }
+      });
+    }
 
     // ARIA tabs: click activates an enabled tab; arrow/Home/End keys move focus
     // between enabled tabs and activate on the move (automatic activation),
