@@ -22,12 +22,14 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
-/// The HTML shell: header, workspace switcher, stat tiles, legend, and the
-/// topology + matrix panels. References `/app.js` and `/vendor/cytoscape.min.js`.
+/// The HTML shell: the workspace view (switcher, stat tiles, legend, topology +
+/// matrix panels) and the project drill-in view (dark graph canvas + right-hand
+/// hotspots/node/ask panels). References `/app.js` and `/vendor/cytoscape.min.js`.
 const SHELL_HTML: &str = include_str!("assets/index.html");
 
-/// Our hand-written ES app: fetches `/v1/graph/*`, renders the tiles/topology/
-/// matrix, and emits drill-in navigation intents (the target view is a later PR).
+/// Our hand-written ES app: fetches `/v1/graph/*`, renders the workspace view
+/// (tiles/topology/matrix) and the hash-routed project graph view (nodes coloured
+/// by provenance, hotspots/debt/node panels), and drives drill/back navigation.
 const APP_JS: &str = include_str!("assets/app.js");
 
 /// The vendored cytoscape.js UMD bundle, committed to the repo (ADR-0010). A
@@ -131,6 +133,75 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(ct.starts_with("text/html"));
         assert!(body.contains("<!doctype html>"));
+    }
+
+    #[tokio::test]
+    async fn shell_scaffolds_the_project_drill_in_view() {
+        // The HTML shell must carry the project graph view's scaffold: the view
+        // container, the graph canvas, the provenance legend, the search box, and
+        // the right-panel tabs (incl. the disabled Ask tab).
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "id=\"view-project\"",
+            "id=\"p-graph\"",
+            "colour: provenance",
+            "find in this repo",
+            "data-tab=\"hotspots\"",
+            "data-tab=\"node\"",
+            "data-tab=\"ask\"",
+        ] {
+            assert!(body.contains(needle), "shell must contain `{needle}`");
+        }
+        // The Ask tab is present but disabled (llama is a later PR), conveyed via
+        // `aria-disabled` (not a native `disabled`, so it stays perceivable).
+        assert!(
+            body.contains("requires the model build") || body.contains("roteiro serve --models"),
+            "Ask tab must explain it needs the model build"
+        );
+        // The ARIA tab pattern must be wired: tabs point at their panels, panels
+        // back at their tabs, and the disabled tab is aria-disabled.
+        for needle in [
+            "role=\"tablist\"",
+            "aria-controls=\"p-pane-hotspots\"",
+            "aria-selected=\"true\"",
+            "aria-labelledby=\"p-tab-node\"",
+            "aria-disabled=\"true\"",
+        ] {
+            assert!(body.contains(needle), "shell must contain `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn served_assets_are_free_of_raw_control_chars() {
+        // The assets must stay reviewable/tooling-safe: no stray control bytes
+        // (e.g. a `0x01` separator once used in a cytoscape edge id).
+        for uri in ["/", "/app.js"] {
+            let (_s, _c, _cc, body) = get(uri).await;
+            assert!(
+                !body
+                    .bytes()
+                    .any(|b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r'),
+                "{uri} contains a raw control character"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn app_js_consumes_the_project_data_endpoints() {
+        // The drill-in view reads the per-project endpoints this server exposes; a
+        // rename on either side would break the wiring, so pin it here.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "/hotspots",
+            "/debt",
+            "/node/",
+            "loadProject",
+            "navigateToProject",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
     }
 
     #[tokio::test]

@@ -6,10 +6,13 @@
 //! the same inferred matches `roteiro links --infer` produces, then rendered as a
 //! self-contained HTML page (`--html`), a text table, or JSON.
 //!
-//! Pure data + rendering: the caller feeds in the already-matched inputs, so this
-//! module has no workspace/graph dependencies and is fully unit-testable.
+//! Pure data + rendering: the caller feeds in the already-matched inputs (each
+//! carrying its own [`Provenance`]), so this module has no store/workspace
+//! dependencies and is fully unit-testable.
 
 use std::collections::BTreeMap;
+
+use rto_graph::Provenance;
 
 /// One matched override fed into the matrix.
 pub struct MatchInput {
@@ -19,8 +22,13 @@ pub struct MatchInput {
     pub spoke_key: String,
     /// The spoke's value for it.
     pub spoke_value: String,
-    /// Match confidence in `0.0..=1.0`.
+    /// Match confidence in `0.0..=1.0` (meaningful only for inferred links; an
+    /// authored link carries no score, so callers pass `0.0`).
     pub confidence: f64,
+    /// How this override link was produced — [`Provenance::Authored`] (a declared
+    /// `[[links]]`) or [`Provenance::Inferred`] (a confidence-scored match). The
+    /// real per-cell provenance, carried onto the [`Cell`].
+    pub provenance: Provenance,
 }
 
 /// One spoke's contribution to the matrix.
@@ -42,6 +50,10 @@ pub struct Cell {
     pub spoke_key: String,
     /// Match confidence.
     pub confidence: f64,
+    /// How the override link was produced (authored vs inferred). The real
+    /// per-cell provenance the UI colours by (gold authored / slate inferred),
+    /// replacing the old confidence≥1.0 heuristic.
+    pub provenance: Provenance,
     /// The spoke value differs from the hub's default — a *real* override, not a
     /// redundant restatement. The signal a reader scans for.
     pub differs: bool,
@@ -108,6 +120,7 @@ pub fn build(
                 value: m.spoke_value,
                 spoke_key: m.spoke_key,
                 confidence: m.confidence,
+                provenance: m.provenance,
                 differs,
             };
             // A spoke may set the same hub key in more than one file. Keep a *real*
@@ -327,12 +340,14 @@ mod tests {
                     spoke_key: "SERVE_ADDR".to_owned(),
                     spoke_value: "0.0.0.0:8443".to_owned(), // differs → override
                     confidence: 0.9,
+                    provenance: Provenance::Inferred,
                 },
                 MatchInput {
                     hub_key: "serve.tools".to_owned(),
                     spoke_key: "SERVE_TOOLS".to_owned(),
                     spoke_value: "true".to_owned(), // same → redundant
                     confidence: 0.98,
+                    provenance: Provenance::Inferred,
                 },
             ],
             orphans: vec![("MAX_CONNECTIONS".to_owned(), "512".to_owned())],
@@ -368,12 +383,14 @@ mod tests {
             spoke_key: "serve.addr".to_owned(),
             spoke_value: "127.0.0.1:8017".to_owned(),
             confidence: 0.98,
+            provenance: Provenance::Inferred,
         };
         let over = || MatchInput {
             hub_key: "serve.addr".to_owned(),
             spoke_key: "SERVE_ADDR".to_owned(),
             spoke_value: "0.0.0.0:8443".to_owned(),
             confidence: 0.9,
+            provenance: Provenance::Inferred,
         };
         for matches in [vec![same(), over()], vec![over(), same()]] {
             let m = build(
@@ -392,6 +409,53 @@ mod tests {
             );
             assert_eq!(cell.value, "0.0.0.0:8443");
         }
+    }
+
+    #[test]
+    fn build_carries_real_per_cell_provenance() {
+        // An authored override and an inferred one, side by side: each cell must
+        // carry its own provenance verbatim — not a confidence-derived guess.
+        let hub_values = BTreeMap::from([
+            ("serve.addr".to_owned(), "127.0.0.1:8017".to_owned()),
+            ("serve.tools".to_owned(), "true".to_owned()),
+        ]);
+        let m = build(
+            "app",
+            &hub_values,
+            vec![SpokeInput {
+                name: "deploy".to_owned(),
+                matches: vec![
+                    MatchInput {
+                        hub_key: "serve.addr".to_owned(),
+                        spoke_key: "SERVE_ADDR".to_owned(),
+                        spoke_value: "0.0.0.0:8443".to_owned(),
+                        confidence: 0.0, // authored links carry no score
+                        provenance: Provenance::Authored,
+                    },
+                    MatchInput {
+                        hub_key: "serve.tools".to_owned(),
+                        spoke_key: "SERVE_TOOLS".to_owned(),
+                        spoke_value: "false".to_owned(),
+                        confidence: 0.9,
+                        provenance: Provenance::Inferred,
+                    },
+                ],
+                orphans: vec![],
+            }],
+        );
+        let addr = m.rows.iter().find(|r| r.hub_key == "serve.addr").unwrap();
+        assert_eq!(addr.cells["deploy"].provenance, Provenance::Authored);
+        let tools = m.rows.iter().find(|r| r.hub_key == "serve.tools").unwrap();
+        assert_eq!(tools.cells["deploy"].provenance, Provenance::Inferred);
+        // It serializes to the stable lowercase token the UI colours by.
+        let json = serde_json::to_value(&m).unwrap();
+        let addr_cell = &json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["hub_key"] == "serve.addr")
+            .unwrap()["cells"]["deploy"];
+        assert_eq!(addr_cell["provenance"], "authored");
     }
 
     #[test]
