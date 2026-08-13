@@ -5,9 +5,11 @@
 //! at startup so a closed stdout pipe terminates the process the Unix way; this
 //! test exercises that on `query`, whose listing goes through `println!`.
 //!
-//! Unix-only: SIGPIPE is a Unix signal, and the fix is a `#[cfg(unix)]` no-op
-//! elsewhere.
-#![cfg(unix)]
+//! SIGPIPE is a Unix signal and the fix is a `#[cfg(unix)]` no-op elsewhere, so
+//! this test is Unix-only. It is gated further to Linux + macOS because it names
+//! the SIGPIPE signal number directly (13) to assert the termination signal, and
+//! that value is only guaranteed on those targets — other Unixes may differ.
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -15,8 +17,9 @@ use std::process::{Command, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_roteiro");
 
-// SIGPIPE is signal 13 on both Linux and macOS. The `sigpipe` crate doesn't
-// re-export the constant and `libc` isn't a direct dependency, so name it here.
+// SIGPIPE is signal 13 on Linux and macOS — the platforms this test is gated to
+// (see the module-level `cfg`). The `sigpipe` crate doesn't re-export the
+// constant and `libc` isn't a direct dependency, so name it here.
 const SIGPIPE: i32 = 13;
 
 fn git(dir: &Path, args: &[&str]) {
