@@ -3482,74 +3482,82 @@ fn run_serve(
 
     // Build the full multi-workspace set from config — the same source of truth
     // `roteiro explorer` uses (`Config::resolved_workspaces()`: the legacy
-    // `[workspace]` folded to `default`, every `[[workspaces]]`, and `[standalone]`).
-    // So `serve` hosts ALL configured workspaces and runs from ANY directory, with
-    // no git cwd required. Only when nothing is configured does it fall back to the
-    // current directory's lone repo, so `serve` in a bare repo still "just works".
+    // `[workspace]` folded to `default`, every `[[workspaces]]`, and `[standalone]`),
+    // plus any explicit `--workspace <ROOT>` folded into `default`. So `serve` hosts
+    // ALL configured workspaces (and CLI roots) and runs from ANY directory, with no
+    // git cwd required.
     let resolved = cfg.resolved_workspaces()?;
-    let ServeWorkspaces { set, flat } = if resolved.is_empty() {
-        // Single-repo fallback (no config, lone repo): build the cwd repo's graph
-        // now and host it alone as the `default` workspace. The set and the model
-        // workspace share the one store handle (no re-open), exactly as before.
-        let (repo, mut store, cache) = open_graph()?;
-        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-        let name = repo
-            .workdir()
-            .and_then(std::path::Path::file_name)
-            .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
-        let flat = Arc::new(rto_graph::Workspace::single(name, store));
-        let set = Arc::new(rto_graph::WorkspaceSet::from_single(
-            "default",
-            flat.clone(),
-            flat.is_multi(),
-        ));
-        ServeWorkspaces { set, flat }
-    } else {
-        // Multi-workspace serve: host every configured workspace. `set` (built the
-        // same way `run_explorer` builds it) backs the read-only `/v1/graph/*` API
-        // and the served UI, workspace-aware. `flat` is one workspace over EVERY
-        // project across ALL configured workspaces (plus any `--workspace <ROOT>`),
-        // backing the model tool registry, the `/v1/{project}/…` routing, and the
-        // MCP router — so the served model can query any hosted project. Existing
-        // graphs are opened on demand; SIGHUP reloads the set of repos, and
-        // `--sync-on-access` (re)builds a project's graph on first touch (ADR-0008).
-        let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(resolved.clone())?);
-        // Validate `--workspace-name` once, up front: an unknown name fails fast
-        // (listing the known workspaces) rather than booting a server whose flat
-        // routes would 404. Mirrors `run_explorer`.
-        if let Some(name) = workspace_name {
-            set.select(Some(name))?;
-        }
-        let paths = resolved_repo_paths(&resolved, workspace_roots)?;
-        let mut ws = rto_graph::Workspace::from_repo_paths(&paths)?;
-        if sync_on_access {
-            ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
-                sync_project_graph(db, ingest).map_err(|e| e.to_string())
-            }));
-        }
-        let flat = Arc::new(ws);
-        eprintln!(
-            "roteiro serve: {} workspace(s) [{}] — {} project(s){} — {}",
-            set.names().len(),
-            set.names().join(", "),
-            flat.names().len(),
-            if sync_on_access {
-                ", sync-on-access"
-            } else {
-                ""
-            },
-            flat.names().join(", ")
-        );
-        install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
-        ServeWorkspaces { set, flat }
-    };
 
-    if set.names().is_empty() {
-        anyhow::bail!(
-            "no workspaces to serve — run inside a repo, or configure \
-             `[[workspaces]]` / `[standalone]` in roteiro.toml"
-        );
-    }
+    // The true single-repo fallback fires ONLY when nothing selects a workspace: no
+    // configured workspaces, no `--workspace <ROOT>`, and no `--workspace-name`. Then
+    // build the current repo's graph now and host it alone as `default` (this is the
+    // one path that still needs a git cwd — a lone repo with no config still "just
+    // works", sharing the one store handle between `set` and `flat`).
+    let ServeWorkspaces { set, flat } =
+        if resolved.is_empty() && workspace_roots.is_empty() && workspace_name.is_none() {
+            let (repo, mut store, cache) = open_graph()?;
+            build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+            let name = repo
+                .workdir()
+                .and_then(std::path::Path::file_name)
+                .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+            let flat = Arc::new(rto_graph::Workspace::single(name, store));
+            let set = Arc::new(rto_graph::WorkspaceSet::from_single(
+                "default",
+                flat.clone(),
+                flat.is_multi(),
+            ));
+            ServeWorkspaces { set, flat }
+        } else {
+            // Multi-workspace serve: host every configured workspace, plus any explicit
+            // `--workspace <ROOT>` (folded into `default`). `set` (built the same way
+            // `run_explorer` builds it) backs the read-only `/v1/graph/*` API and the
+            // served UI, workspace-aware. `flat` is one workspace over EVERY project
+            // across ALL those workspaces, backing the model tool registry, the
+            // `/v1/{project}/…` routing, and the MCP router — so the served model can
+            // query any hosted project. Existing graphs are opened on demand; SIGHUP
+            // reloads the set of repos, and `--sync-on-access` (re)builds a project's
+            // graph on first touch (ADR-0008).
+            let effective = fold_cli_roots(resolved, workspace_roots);
+            let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone())?);
+            // A friendly error when nothing resolves — an empty config, only stale roots,
+            // or a `-w` naming nothing to serve — BEFORE `from_repo_paths` would surface a
+            // raw `WorkspaceError::Empty`. Mirrors `run_explorer`'s message.
+            if set.names().is_empty() {
+                anyhow::bail!(
+                    "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, \
+                 or configure `[[workspaces]]` / `[standalone]` in roteiro.toml"
+                );
+            }
+            // Validate `--workspace-name` once, up front: an unknown name fails fast
+            // (listing the known workspaces) rather than booting a server whose flat
+            // routes would 404. Mirrors `run_explorer`.
+            if let Some(name) = workspace_name {
+                set.select(Some(name))?;
+            }
+            let paths = resolved_repo_paths(&effective, &[])?;
+            let mut ws = rto_graph::Workspace::from_repo_paths(&paths)?;
+            if sync_on_access {
+                ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
+                    sync_project_graph(db, ingest).map_err(|e| e.to_string())
+                }));
+            }
+            let flat = Arc::new(ws);
+            eprintln!(
+                "roteiro serve: {} workspace(s) [{}] — {} project(s){} — {}",
+                set.names().len(),
+                set.names().join(", "),
+                flat.names().len(),
+                if sync_on_access {
+                    ", sync-on-access"
+                } else {
+                    ""
+                },
+                flat.names().join(", ")
+            );
+            install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
+            ServeWorkspaces { set, flat }
+        };
 
     if opts.models {
         serve_models_endpoint(cfg, set, flat, workspace_name, &opts)
@@ -3612,6 +3620,35 @@ fn resolved_repo_paths(
         }
     }
     Ok(out)
+}
+
+/// Fold explicit `--workspace <ROOT>` CLI roots into the resolved workspace groups as
+/// the `default` workspace (ADR-0008): unioned into an existing `default` (the legacy
+/// `[workspace]`), else added as a new linked `default` group. So repos a user names
+/// on the command line are hosted as a first-class named workspace — surfaced by the
+/// read-only graph API AND reachable by the served model — exactly like configured
+/// workspaces, rather than being merged only into the flat model view. No roots ⇒ the
+/// groups are returned unchanged. `default` is the only name derivable from CLI roots
+/// (it never collides with a `[[workspaces]]`/`[standalone]` name, which are distinct
+/// and, for a legacy `[workspace]`, already fold to `default`).
+#[cfg(any(feature = "mcp", feature = "serve"))]
+fn fold_cli_roots(
+    mut resolved: Vec<rto_graph::ResolvedWorkspace>,
+    cli_roots: &[String],
+) -> Vec<rto_graph::ResolvedWorkspace> {
+    if cli_roots.is_empty() {
+        return resolved;
+    }
+    match resolved.iter_mut().find(|r| r.name == "default") {
+        Some(default) => default.roots.extend(cli_roots.iter().cloned()),
+        None => resolved.push(rto_graph::ResolvedWorkspace {
+            name: "default".to_owned(),
+            roots: cli_roots.to_vec(),
+            repos: Vec::new(),
+            linked: true,
+        }),
+    }
+    resolved
 }
 
 /// Repo paths a workspace `serve` hosts: everything under the CLI `--workspace`
@@ -4862,8 +4899,47 @@ mod serve_explorer_wiring {
 /// directory.
 #[cfg(all(test, any(feature = "serve", feature = "mcp")))]
 mod serve_workspace_paths_tests {
-    use super::resolved_repo_paths;
+    use super::{fold_cli_roots, resolved_repo_paths};
     use rto_graph::ResolvedWorkspace;
+
+    #[test]
+    fn cli_roots_fold_into_a_default_workspace() {
+        // With no configured groups, `--workspace <ROOT>` becomes a new linked
+        // `default` workspace — so the CLI roots are a first-class named workspace
+        // (surfaced by the graph API), not merely merged into the flat model view.
+        let folded = fold_cli_roots(Vec::new(), &["/a".to_owned(), "/b".to_owned()]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].name, "default");
+        assert!(folded[0].linked);
+        assert_eq!(folded[0].roots, vec!["/a".to_owned(), "/b".to_owned()]);
+
+        // An existing `default` (the legacy `[workspace]`) is EXTENDED, not
+        // duplicated, so CLI roots union with the configured ones.
+        let existing = vec![ResolvedWorkspace {
+            name: "default".to_owned(),
+            roots: vec!["/cfg".to_owned()],
+            repos: vec!["/cfg/extra".to_owned()],
+            linked: true,
+        }];
+        let folded = fold_cli_roots(existing, &["/cli".to_owned()]);
+        assert_eq!(folded.len(), 1, "no duplicate `default` group");
+        assert_eq!(folded[0].roots, vec!["/cfg".to_owned(), "/cli".to_owned()]);
+        assert_eq!(
+            folded[0].repos,
+            vec!["/cfg/extra".to_owned()],
+            "repos untouched"
+        );
+
+        // No CLI roots ⇒ the groups are returned unchanged (named groups survive).
+        let named = vec![ResolvedWorkspace {
+            name: "api".to_owned(),
+            roots: vec!["/api".to_owned()],
+            repos: Vec::new(),
+            linked: true,
+        }];
+        let folded = fold_cli_roots(named.clone(), &[]);
+        assert_eq!(folded, named);
+    }
 
     #[test]
     fn unions_every_group_and_cli_root_deduped_by_path() {
