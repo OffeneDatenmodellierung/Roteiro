@@ -1585,12 +1585,17 @@
 
   // Read the build's capability signal. Any failure (older/llama-free server with
   // no such route) leaves Ask disabled — the default — so this never breaks the
-  // explorer build.
+  // explorer build. Ask is enabled only when the chat endpoint is advertised AND
+  // at least one model is actually served: with no model there is nothing to send
+  // (`submitAsk` would post a request with no `model`), so we keep the disabled
+  // stub — whose guidance already points at `roteiro serve --models` — rather than
+  // letting a doomed request go out.
   async function loadCapabilities() {
     try {
       const caps = await getJson("/v1/graph/capabilities");
-      state.ask = caps && caps.ask === true;
-      state.askModels = (caps && caps.models) || [];
+      const models = (caps && caps.models) || [];
+      state.askModels = models;
+      state.ask = !!(caps && caps.ask === true && models.length > 0);
     } catch (_) {
       state.ask = false;
       state.askModels = [];
@@ -1727,6 +1732,30 @@
   // URLs (http/https/mailto), which share the `word:` shape but aren't graph keys.
   const KEY_RE = /\b([a-z][a-z0-9_]{1,24}):([A-Za-z0-9_./#:@+-]{2,})/g;
   const URL_PREFIX = /^(https?|mailto|ftp|ws|wss)$/i;
+  // End-of-sentence punctuation the regex would otherwise pull into the key
+  // (`See file:src/main.rs.` → the trailing `.`). Trimmed off before linkifying
+  // and preserved as plain text after the link.
+  const KEY_TRAIL_PUNCT = /[.,;:)\]}!?]+$/;
+
+  // One clickable, keyboard-activatable link to a cited node key. `label` is the
+  // visible text (the key itself inline, a short form in the list); `title` the
+  // hover text. Shared by the inline links and the "referenced:" list so both
+  // activate identically on click AND Enter/Space (they carry role="link").
+  function keyLink(key, label, title) {
+    return el("a", {
+      role: "link",
+      tabindex: "0",
+      text: label,
+      title: title || key,
+      onclick: () => askGoToNode(key),
+      onkeydown: (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          askGoToNode(key);
+        }
+      },
+    });
+  }
 
   // Render the answer as prose with cited node keys turned into links that select
   // the node in the current project graph (surfacing which nodes were referenced).
@@ -1739,26 +1768,20 @@
     let m;
     KEY_RE.lastIndex = 0;
     while ((m = KEY_RE.exec(text)) !== null) {
+      const raw = m[0];
       if (URL_PREFIX.test(m[1])) continue; // a URL, not a graph key
-      const key = m[0];
+      const key = raw.replace(KEY_TRAIL_PUNCT, "");
+      // Trimmed down to just a prefix (e.g. `file:...`) — not a real key; leave the
+      // whole token as plain text (don't advance `last` past it).
+      if (!key || key.endsWith(":")) continue;
       if (m.index > last) frag.append(text.slice(last, m.index));
       refs.add(key);
-      frag.append(
-        el("a", {
-          role: "link",
-          tabindex: "0",
-          text: key,
-          title: `inspect ${key}`,
-          onclick: () => askGoToNode(key),
-          onkeydown: (e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              askGoToNode(key);
-            }
-          },
-        })
-      );
-      last = m.index + key.length;
+      frag.append(keyLink(key, key, `inspect ${key}`));
+      // Preserve any trailing punctuation the match swallowed as plain text, and
+      // advance the cursor by the FULL original match length.
+      const trailing = raw.slice(key.length);
+      if (trailing) frag.append(trailing);
+      last = m.index + raw.length;
     }
     if (last < text.length) frag.append(text.slice(last));
 
@@ -1769,15 +1792,7 @@
       refs.forEach((key) => {
         if (!first) list.append(", ");
         first = false;
-        list.append(
-          el("a", {
-            role: "link",
-            tabindex: "0",
-            text: shortKey(key),
-            title: key,
-            onclick: () => askGoToNode(key),
-          })
-        );
+        list.append(keyLink(key, shortKey(key), key));
       });
       kids.push(list);
     }
