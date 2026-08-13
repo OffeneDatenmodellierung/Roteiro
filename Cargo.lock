@@ -2713,7 +2713,9 @@ name = "roteiro"
 version = "1.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "http-body-util",
  "rto-graph",
  "rto-llama",
  "rto-render",
@@ -2724,6 +2726,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
+ "tower",
  "ureq",
 ]
 

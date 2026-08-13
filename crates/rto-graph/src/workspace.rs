@@ -153,6 +153,39 @@ impl Workspace {
         }
     }
 
+    /// A workspace over several already-open stores, one per named project — the
+    /// in-memory counterpart of [`Workspace::from_repo_paths`] (which opens each
+    /// project's `graph.db` from disk lazily). Used for multi-repo serving of
+    /// pre-built stores and for tests. With exactly one project it becomes the
+    /// default (as [`Workspace::single`]); with several, a bare (no-`project`)
+    /// call is ambiguous. Not reloadable (no repo paths).
+    #[must_use]
+    pub fn from_stores<I, S>(stores: I) -> Self
+    where
+        I: IntoIterator<Item = (S, Store)>,
+        S: Into<String>,
+    {
+        let mut projects = BTreeMap::new();
+        for (name, store) in stores {
+            projects.insert(name.into(), Source::Open(Arc::new(Mutex::new(store))));
+        }
+        // Mirror `from_repo_paths`: a lone project is the default; several are
+        // ambiguous until a call names one.
+        let default = if projects.len() == 1 {
+            projects.keys().next().cloned()
+        } else {
+            None
+        };
+        Self {
+            inner: Mutex::new(Inner {
+                projects,
+                default,
+                cache: HashMap::new(),
+            }),
+            on_open: None,
+        }
+    }
+
     /// Build a workspace from repo directories: each is `git`-discovered, named
     /// after its working-tree directory (collisions get a `-2`, `-3`, … suffix),
     /// and its `graph.db` opened lazily. With exactly one repo, that repo is the
