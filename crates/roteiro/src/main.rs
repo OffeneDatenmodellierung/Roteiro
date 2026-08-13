@@ -457,24 +457,6 @@ enum ModelAction {
     },
 }
 
-/// Expand a leading `~/` (or a bare `~`) to the user's home directory; any other
-/// path is returned unchanged. Used for config paths such as `[paths]
-/// model_store`.
-fn expand_tilde(path: &str) -> std::path::PathBuf {
-    let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    if path == "~"
-        && let Some(h) = home()
-    {
-        return std::path::PathBuf::from(h);
-    }
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(h) = home()
-    {
-        return std::path::Path::new(&h).join(rest);
-    }
-    std::path::PathBuf::from(path)
-}
-
 // `main` is a one-arm-per-subcommand dispatcher; splitting the match further just
 // scatters the CLI wiring, so the line-count lint is noise here.
 #[allow(clippy::too_many_lines)]
@@ -494,7 +476,7 @@ fn main() -> anyhow::Result<()> {
     // The registry lives behind the `models` feature; on a build without it a
     // configured path is inert, so we warn rather than silently ignore it.
     if let Some(dir) = cfg.effective.paths.model_store.as_deref() {
-        let dir = expand_tilde(dir);
+        let dir = config::expand_tilde(dir);
         #[cfg(feature = "models")]
         rto_graph::set_model_store(dir);
         #[cfg(not(feature = "models"))]
@@ -3524,11 +3506,16 @@ fn collect_workspace_repo_paths(
         .iter()
         .map(String::as_str)
         .chain(ws_cfg.roots.iter().flatten().map(String::as_str));
+    // Expand a leading `~` in every root/repo (config- or CLI-sourced) so git
+    // never receives a literal `~`, matching the new multi-workspace path
+    // (`Config::resolved_workspaces`).
     for root in roots {
-        repo_paths.extend(rto_graph::discover_repos_under(std::path::Path::new(root))?);
+        repo_paths.extend(rto_graph::discover_repos_under(&config::expand_tilde(
+            root,
+        ))?);
     }
     for repo in ws_cfg.repos.iter().flatten() {
-        repo_paths.push(std::path::PathBuf::from(repo));
+        repo_paths.push(config::expand_tilde(repo));
     }
     Ok(repo_paths)
 }

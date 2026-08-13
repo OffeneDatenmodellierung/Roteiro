@@ -379,8 +379,8 @@ impl Config {
             used.insert("default".to_owned());
             out.push(rto_graph::ResolvedWorkspace {
                 name: "default".to_owned(),
-                roots: self.workspace.roots.clone().unwrap_or_default(),
-                repos: self.workspace.repos.clone().unwrap_or_default(),
+                roots: expand_tilde_all(self.workspace.roots.clone().unwrap_or_default()),
+                repos: expand_tilde_all(self.workspace.repos.clone().unwrap_or_default()),
                 linked: true,
             });
         }
@@ -397,8 +397,8 @@ impl Config {
             }
             out.push(rto_graph::ResolvedWorkspace {
                 name: nw.name.clone(),
-                roots: nw.roots.clone().unwrap_or_default(),
-                repos: nw.repos.clone().unwrap_or_default(),
+                roots: expand_tilde_all(nw.roots.clone().unwrap_or_default()),
+                repos: expand_tilde_all(nw.repos.clone().unwrap_or_default()),
                 linked: true,
             });
         }
@@ -428,20 +428,58 @@ impl Config {
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut out: Vec<PathBuf> = Vec::new();
         for root in self.standalone.roots.iter().flatten() {
-            for repo in rto_graph::discover_repos_under(Path::new(root))? {
+            for repo in rto_graph::discover_repos_under(&expand_tilde(root))? {
                 if seen.insert(repo.clone()) {
                     out.push(repo);
                 }
             }
         }
         for repo in self.standalone.repos.iter().flatten() {
-            let p = PathBuf::from(repo);
+            let p = expand_tilde(repo);
             if seen.insert(p.clone()) {
                 out.push(p);
             }
         }
         Ok(out)
     }
+}
+
+/// Expand a leading `~/` (or a bare `~`) to the user's home directory in every
+/// path string, returning owned strings. The workspace-resolution boundary
+/// ([`Config::resolved_workspaces`]): `rto_graph` receives real paths, never a
+/// literal `~` it would hand straight to git. A path without a leading `~` is
+/// unchanged. Env-var expansion (`$HOME`) is intentionally out of scope.
+fn expand_tilde_all(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .map(|p| expand_tilde(&p).to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Expand a leading `~/` (or a bare `~`) to the user's home directory; any other
+/// path is returned unchanged. The one home-relative expansion shared by every
+/// config path — the model store (`[paths] model_store`) and workspace
+/// `roots`/`repos` (new `[[workspaces]]`/`[standalone]` and legacy `[workspace]`).
+/// Env-var expansion (`$HOME`) is intentionally out of scope — only `~`.
+pub(crate) fn expand_tilde(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    expand_tilde_with(path, home.as_deref())
+}
+
+/// Core of [`expand_tilde`] with the home directory injected, so tests drive it
+/// deterministically without mutating process-global env.
+fn expand_tilde_with(path: &str, home: Option<&std::ffi::OsStr>) -> PathBuf {
+    if path == "~"
+        && let Some(h) = home
+    {
+        return PathBuf::from(h);
+    }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(h) = home
+    {
+        return Path::new(h).join(rest);
+    }
+    PathBuf::from(path)
 }
 
 /// Make `base` unique against the names already handed out, appending `-2`, `-3`, …
@@ -531,7 +569,11 @@ fn find_project_config(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, NamedWorkspace, WorkspaceConfig, find_project_config, load_from};
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        Config, NamedWorkspace, WorkspaceConfig, expand_tilde_with, find_project_config, load_from,
+    };
 
     #[test]
     fn project_config_is_repo_root_bounded() {
@@ -875,5 +917,89 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The shared `~` expansion (the seam every workspace path flows through):
+    /// bare `~` and `~/rest` map onto the injected home; anything else is verbatim.
+    #[test]
+    fn expand_tilde_handles_bare_and_prefixed_and_passes_others_through() {
+        let home = std::ffi::OsString::from("/home/alice");
+        let h = Some(home.as_os_str());
+        assert_eq!(expand_tilde_with("~", h), PathBuf::from("/home/alice"));
+        assert_eq!(
+            expand_tilde_with("~/foo/bar", h),
+            PathBuf::from("/home/alice/foo/bar")
+        );
+        // No leading `~` → unchanged (absolute and relative alike).
+        assert_eq!(
+            expand_tilde_with("/abs/path", h),
+            PathBuf::from("/abs/path")
+        );
+        assert_eq!(expand_tilde_with("rel/path", h), PathBuf::from("rel/path"));
+        // `~user` (neither `~` nor `~/`) is not home-expansion — left verbatim.
+        assert_eq!(expand_tilde_with("~bob/x", h), PathBuf::from("~bob/x"));
+        // No home available → the `~` forms are left as-is rather than panicking.
+        assert_eq!(expand_tilde_with("~/foo", None), PathBuf::from("~/foo"));
+        assert_eq!(expand_tilde_with("~", None), PathBuf::from("~"));
+    }
+
+    /// A leading `~` in every workspace path input — legacy `[workspace]`,
+    /// `[[workspaces]]`, and `[standalone]`, in both `roots` and `repos` — expands
+    /// to the user's home at the resolution boundary, so `rto_graph` (and git)
+    /// never see a literal `~`. A path without a leading `~` is passed through.
+    #[test]
+    fn resolved_workspaces_expand_leading_tilde_in_all_path_inputs() {
+        // Home, from the same source `expand_tilde` reads, so the expectation is
+        // deterministic wherever the test runs.
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("HOME (or USERPROFILE) set in the test environment");
+        let home = Path::new(&home);
+        let joined = |rest: &str| home.join(rest).to_string_lossy().into_owned();
+
+        let cfg = Config {
+            workspace: WorkspaceConfig {
+                roots: Some(vec!["~/legacy/root".to_owned()]),
+                repos: Some(vec!["~/legacy/repo".to_owned()]),
+            },
+            workspaces: vec![NamedWorkspace {
+                name: "api".to_owned(),
+                roots: Some(vec!["~/api/root".to_owned()]),
+                repos: Some(vec!["~/api/repo".to_owned()]),
+            }],
+            standalone: WorkspaceConfig {
+                roots: None,
+                // Explicit standalone repos become their own single-repo groups
+                // with no filesystem discovery, so the expanded path is directly
+                // observable. `~` roots share the identical `expand_tilde` call
+                // (covered by the pure-function test above).
+                repos: Some(vec!["~/solo/repo".to_owned(), "/abs/solo".to_owned()]),
+            },
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let by_name = |n: &str| resolved.iter().find(|r| r.name == n).expect("group");
+
+        // Legacy `[workspace]` → `default`: roots and repos expanded.
+        let d = by_name("default");
+        assert_eq!(d.roots, vec![joined("legacy/root")]);
+        assert_eq!(d.repos, vec![joined("legacy/repo")]);
+
+        // `[[workspaces]]`: roots and repos expanded.
+        let api = by_name("api");
+        assert_eq!(api.roots, vec![joined("api/root")]);
+        assert_eq!(api.repos, vec![joined("api/repo")]);
+
+        // `[standalone]` explicit repo: expanded, named after the repo dir; a
+        // non-`~` absolute path is passed through unchanged.
+        assert_eq!(by_name("repo").repos, vec![joined("solo/repo")]);
+        assert_eq!(by_name("solo").repos, vec!["/abs/solo".to_owned()]);
+
+        // No expanded path still carries a literal leading `~`.
+        for rw in &resolved {
+            for p in rw.roots.iter().chain(&rw.repos) {
+                assert!(!p.starts_with('~'), "unexpanded tilde survived: {p}");
+            }
+        }
     }
 }
