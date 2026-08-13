@@ -550,6 +550,16 @@ fn main() -> anyhow::Result<()> {
             } else if infer {
                 run_links_infer(&cfg.effective, &scope, opts, write, json)
             } else {
+                // `--app-config-only` only filters config-key matching, which the
+                // plain authored-links report doesn't do. Reject it here rather than
+                // silently ignoring it, so the flag never looks like it took effect.
+                if app_config_only {
+                    anyhow::bail!(
+                        "`--app-config-only` applies only to `roteiro links --infer` / `--matrix` \
+                         (it filters cross-repo config-key matching); \
+                         `roteiro query --kind config_key --app-config-only` supports it too"
+                    );
+                }
                 run_links(&cfg.effective, &scope, json)
             }
         }

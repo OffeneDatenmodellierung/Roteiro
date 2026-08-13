@@ -1020,3 +1020,31 @@ fn query_app_config_only_drops_tooling_keys() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// `--app-config-only` is only meaningful for `roteiro links --infer` / `--matrix`
+/// (it filters config-key matching). Passed to the plain authored-links report — a
+/// mode that does no such matching — it must be REJECTED with a clear error, not
+/// silently ignored.
+#[test]
+fn links_app_config_only_without_infer_or_matrix_is_rejected() {
+    let base = std::env::temp_dir().join(format!("roteiro-acoreject-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    std::fs::create_dir_all(&base).expect("mkdir");
+    std::fs::write(base.join("README.md"), "# x\n").expect("write");
+    git(&base, &["init", "-q"]);
+    git(&base, &["add", "."]);
+    git(&base, &["commit", "-q", "-m", "init"]);
+
+    let out = roteiro(&base, &["links", "--app-config-only"]);
+    assert!(
+        !out.status.success(),
+        "plain `links --app-config-only` must fail, not silently ignore the flag: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--app-config-only") && stderr.contains("--infer"),
+        "error must explain the flag applies to --infer/--matrix: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}

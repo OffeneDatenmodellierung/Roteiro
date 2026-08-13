@@ -963,11 +963,14 @@
     $("#view-project").hidden = true;
     $("#view-workspace").hidden = false;
     document.body.classList.remove("on-project");
-    // Free the (potentially ~1,300-node) project graph when backing out.
+    // Free the (potentially ~1,300-node) project graph when backing out. Also
+    // drop the cached RAW graph (`pGraph`, kept only so the "hide tooling config"
+    // toggle can re-render without a refetch) so it can be GC'd off-view.
     if (state.pcy) {
       state.pcy.destroy();
       state.pcy = null;
     }
+    state.pGraph = null;
     state.pRendered = null;
     state.searching = false;
     setProjectLinks([]);
