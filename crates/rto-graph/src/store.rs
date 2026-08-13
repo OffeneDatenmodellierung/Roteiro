@@ -358,6 +358,29 @@ impl Store {
         collect_nodes(&mut rows)
     }
 
+    /// Nodes of a given kind whose `name` equals `name_lower` **case-insensitively**,
+    /// ordered by key. Narrows a lookup at the SQL layer — using the `kind` index and
+    /// filtering `name` in-query — so only matching rows are decoded, never every
+    /// node of that kind. Used by the cross-repo follow bridge to fetch just the
+    /// candidate struct(s) for a config section rather than scanning all structs.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`], [`StoreError::Json`], or
+    /// [`StoreError::Corrupt`] on decode failure.
+    pub fn nodes_by_kind_named(
+        &self,
+        kind: &NodeKind,
+        name_lower: &str,
+    ) -> Result<Vec<Node>, StoreError> {
+        let sql = format!(
+            "SELECT {NODE_COLS} FROM nodes n \
+             WHERE n.kind = ?1 AND lower(n.name) = ?2 ORDER BY n.key"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([kind.as_str(), name_lower])?;
+        collect_nodes(&mut rows)
+    }
+
     /// Every `config_key` node's flattened setting (ADR-0009), read back out of
     /// the graph as [`crate::ConfigKey`]s — the graph-native source the cross-repo
     /// link matcher (`roteiro links --infer`) consumes, so it never re-parses

@@ -456,8 +456,9 @@ impl Workspace {
                 return Ok(Follow::Drift);
             };
             // Only a config-key node needs bridging; anything else the spoke points
-            // at is already a definition-level target.
-            if node.kind == crate::NodeKind::Other(crate::config_keys::KIND.to_owned()) {
+            // at is already a definition-level target. Compare against the stable
+            // token via `as_str()` — no allocation to build a throwaway `NodeKind`.
+            if node.kind.as_str() == crate::config_keys::KIND {
                 match bridge_config_key(store, &node)? {
                     Some((target, field)) => Ok(Follow::StructField {
                         node: target,
@@ -635,8 +636,18 @@ fn bridge_config_key(store: &Store, cfg_node: &Node) -> Result<Option<(Node, Str
         return Ok(None);
     }
 
-    let mut hits = store
-        .nodes_by_kind(&crate::NodeKind::Struct)?
+    // Fetch only the CANDIDATE struct(s) for this section by name, rather than
+    // loading and JSON-decoding every `struct` node in the graph on each hop
+    // (a latency spike on a large hub). `section_struct_names` yields the exact
+    // lower-cased names `struct_matches_section` would accept, so this narrows the
+    // scan without changing the bridging semantics; `struct_matches_section` is
+    // still applied below as the authoritative check.
+    let mut candidates: Vec<Node> = Vec::new();
+    for name in section_struct_names(section) {
+        candidates.extend(store.nodes_by_kind_named(&crate::NodeKind::Struct, &name)?);
+    }
+
+    let mut hits = candidates
         .into_iter()
         .filter(|s| struct_matches_section(&s.name, section))
         .filter_map(|s| struct_field_matching(&s, &leaf_norm).map(|field| (s, field)));
@@ -659,6 +670,26 @@ fn split_section_field(dotted: &str) -> Option<(&str, &str)> {
         .filter(|(section, leaf)| !section.is_empty() && !leaf.is_empty())
 }
 
+/// The section's canonical form for name-matching: normalised, separators removed
+/// (`serve` → `serve`, `serve_mode` → `servemode`). Empty when the section carries
+/// no alphanumerics.
+fn section_key(section: &str) -> String {
+    crate::config_keys::normalize(section).replace('.', "")
+}
+
+/// The lower-cased struct names a config `section` can map to — exactly the names
+/// [`struct_matches_section`] accepts: `serve` → `["serve", "serveconfig"]`. Used
+/// to fetch just the candidate struct(s) by name instead of scanning them all
+/// (kept in lock-step with [`struct_matches_section`], which remains the check).
+fn section_struct_names(section: &str) -> Vec<String> {
+    let want = section_key(section);
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let with_config = format!("{want}config");
+    vec![want, with_config]
+}
+
 /// Whether a struct `name` is the one a config `section` maps to: its lower-cased
 /// name with a trailing `config` stripped equals the section (case- and
 /// separator-insensitive). `ServeConfig`/`Serve` both match section `serve`;
@@ -666,7 +697,7 @@ fn split_section_field(dotted: &str) -> Option<(&str, &str)> {
 fn struct_matches_section(name: &str, section: &str) -> bool {
     let lname = name.to_ascii_lowercase();
     let base = lname.strip_suffix("config").unwrap_or(&lname);
-    let want = crate::config_keys::normalize(section).replace('.', "");
+    let want = section_key(section);
     !want.is_empty() && base == want
 }
 
@@ -974,6 +1005,36 @@ impl WorkspaceSet {
         Ok(self.entries[name].workspace.as_ref())
     }
 
+    /// The **name** of the workspace [`WorkspaceSet::select`] resolves for `name`:
+    /// the given name when present (and valid), else the sole/default workspace's
+    /// name. Same resolution and errors as `select`, but returns the concrete name
+    /// — so a caller (e.g. the `/follow` endpoint) can report which workspace it
+    /// actually resolved in, even on a flat route where the default was implicit.
+    ///
+    /// # Errors
+    /// As [`WorkspaceSet::select`].
+    pub fn select_name(&self, name: Option<&str>) -> Result<&str, WorkspaceError> {
+        if let Some(n) = name {
+            return self
+                .entries
+                .get_key_value(n)
+                .map(|(k, _)| k.as_str())
+                .ok_or_else(|| WorkspaceError::UnknownWorkspace {
+                    name: n.to_owned(),
+                    known: self.known(),
+                });
+        }
+        self.default.as_deref().ok_or_else(|| {
+            if self.entries.is_empty() {
+                WorkspaceError::Empty
+            } else {
+                WorkspaceError::AmbiguousWorkspace {
+                    known: self.known(),
+                }
+            }
+        })
+    }
+
     /// The name of the workspace whose member repos include the repo whose graph is
     /// `cwd_repo_db` (`<repo>/.git/roteiro/graph.db`), or `None` if no workspace
     /// contains it. Used to default `--workspace-name` to the workspace the current
@@ -1233,6 +1294,36 @@ mod tests {
             matches!(&out, Follow::Node { node } if node.name == "serve.addr"),
             "ambiguous (two matching structs) falls back, got {out:?}"
         );
+    }
+
+    #[test]
+    fn follow_narrow_lookup_ignores_unrelated_structs_with_the_same_field() {
+        use crate::model::FactSet;
+        // The name-narrowed struct lookup must return exactly what a full scan
+        // would: an unrelated struct that happens to declare `addr` is NOT the
+        // `serve` section's struct, so `serve.addr` still bridges only to
+        // `ServeConfig` — proving the narrowing preserves bridging semantics.
+        let mut s = store();
+        s.apply_factset(
+            &FactSet::new()
+                .with_node(struct_node("ServeConfig", &["addr"]))
+                .with_node(struct_node("Unrelated", &["addr"]))
+                .with_node(struct_node("Widget", &["addr", "size"]))
+                .with_node(struct_node("ModelsConfig", &["embedding"]))
+                .with_node(cfg_node("serve.addr")),
+        )
+        .unwrap();
+        let ws = Workspace::single("hub", s);
+        match ws
+            .follow_definition("hub::cfgkey:config.toml#serve.addr")
+            .unwrap()
+        {
+            Follow::StructField { node, field } => {
+                assert_eq!(node.key, "sym:rust:config.rs#ServeConfig");
+                assert_eq!(field, "addr");
+            }
+            other => panic!("expected a struct-field bridge to ServeConfig, got {other:?}"),
+        }
     }
 
     #[test]

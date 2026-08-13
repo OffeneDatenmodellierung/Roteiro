@@ -532,18 +532,17 @@ async fn follow(
         ))
     })?;
     let project = project.to_owned();
-    // The workspace name resolution ran in (the `{ws}` segment, else the flat
-    // default) — informational, for the UI's breadcrumb trail.
-    let workspace = param(&params, "ws")
-        .map(str::to_owned)
-        .or_else(|| st.default.clone());
+    // The workspace resolution actually ran in — for the UI's breadcrumb trail.
+    // Resolve the concrete NAME (not `st.default`, which is `None` on a flat route
+    // whose sole workspace is auto-selected), so a resolved hop is never `null`.
+    let workspace = st.set.select_name(param(&params, "ws"))?.to_owned();
 
     let (target, kind, field) = match ws.follow_definition(&qualified)? {
         Follow::StructField { node, field } => (Some(node), Some("struct_field"), Some(field)),
         // A resolved config_key we couldn't bridge stays a config_key; any other
         // resolved node is itself a definition target (`struct_field`).
         Follow::Node { node } => {
-            let kind = if node.kind == NodeKind::Other(config_key_kind()) {
+            let kind = if node.kind.as_str() == "config_key" {
                 "config_key"
             } else {
                 "struct_field"
@@ -562,13 +561,6 @@ async fn follow(
         "drift": drift,
     }))
     .into_response())
-}
-
-/// The `NodeKind::Other` token a config-key node carries (`config_key`) — the same
-/// token extraction emits, used to tell an unbridged config-key target apart from a
-/// definition target in [`follow`].
-fn config_key_kind() -> String {
-    "config_key".to_owned()
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/topology` → the cross-repo hub-and-spoke
@@ -1316,6 +1308,9 @@ mod tests {
         assert_eq!(body["drift"], false);
         assert_eq!(body["project"], "hub");
         assert_eq!(body["field"], "addr");
+        // Flat route with a sole workspace and no explicit default: the response
+        // still reports the concrete auto-selected workspace name, never null.
+        assert_eq!(body["workspace"], "linked");
         assert_eq!(
             body["target"]["key"],
             "sym:rust:crates/roteiro/src/config.rs#ServeConfig"

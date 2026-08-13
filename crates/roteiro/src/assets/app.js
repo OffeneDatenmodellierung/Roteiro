@@ -190,11 +190,17 @@
     goProject(ws, res.project);
   }
 
-  // A follow to a drifted / unresolved target does NOT navigate — the hub defines
-  // no such node. Surface it clearly rather than jumping to a wrong place.
+  // A follow to a drifted / unresolved target does NOT navigate — the target does
+  // not resolve in the hub. Drift means the hub key is gone (renamed/removed) OR
+  // the hub project isn't hosted/synced in this workspace (the resolver maps both
+  // to drift), so word it as "can't be resolved" rather than asserting non-existence.
   function showDrift(qualified) {
     const label = String(qualified).replace("::", " · ");
-    setPStatus(`drift: ${label} is not defined in the hub — nothing to follow.`, true);
+    setPStatus(
+      `drift: ${label} can't be resolved in the hub — the key isn't defined, ` +
+        `or the hub isn't hosted/synced. Nothing to follow.`,
+      true
+    );
   }
 
   // The trail for the current view, defaulting to a single self-crumb when the
@@ -1087,7 +1093,7 @@
       const link = (state.linksByRef.get(evt.target.id()) || [])[0];
       const label = link && !link.drift ? appKeyLabel(link) : "this key";
       const msg = link && link.drift
-        ? "drift — the hub defines no such key"
+        ? "drift — can't resolve in the hub (undefined, or hub not hosted/synced)"
         : `click to follow ${label} → into the hub`;
       showFollowTip(evt, msg);
     });
@@ -1406,7 +1412,7 @@
             class: `p-chip xrepo ${prov}`,
             type: "button",
             title: link.drift
-              ? `drift → ${link.toQualified} — the hub defines no such key`
+              ? `drift → ${link.toQualified} — can't resolve in the hub (undefined, or hub not hosted/synced)`
               : `${link.provenance} link → ${link.toQualified} · click to follow into the hub`,
             // A live link follows the hop into the hub; a drift chip explains why
             // it can't (followHop → showDrift), never jumping to a wrong node.
