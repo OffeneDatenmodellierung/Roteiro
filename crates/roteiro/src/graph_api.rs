@@ -1,45 +1,74 @@
 //! Read-only JSON HTTP API over the workspace graph (`/v1/graph/*`).
 //!
-//! The interactive workspace explorer's **data foundation** (PR 1/5): a small,
-//! side-effect-free axum router that surfaces the graph a `roteiro serve` process
-//! already holds in memory as an [`Arc<Workspace>`]. Every route is a `GET`
-//! returning JSON — no mutation, no model, no llama.cpp.
+//! The interactive workspace explorer's **data foundation**: a small,
+//! side-effect-free axum router that surfaces the graphs a server already holds
+//! in memory. Every route is a `GET` returning JSON — no mutation, no model, no
+//! llama.cpp. It runs two ways, over the *same* handlers:
 //!
-//! It mirrors [`rto_render::mcp::mcp_router`]: a `router(workspace)` builder that
-//! bakes the shared [`Workspace`] into axum state and is merged into the main app
-//! alongside `/v1` and `/mcp` (see `serve_v1_tail` in `main.rs`). It lives in the
-//! `roteiro` binary — not `rto-render` — because two routes reuse binary-local
-//! code: the override matrix reuses [`crate::overview::build`], and the cross-repo
-//! views reconstruct the persisted external-ref edges the workspace resolver
-//! walks. Keeping the API here avoids relocating that code across crate
-//! boundaries just to satisfy a router builder.
+//! - merged onto `/v1` inside a full `roteiro serve --models` process (gated on
+//!   `serve`, see `serve_v1_tail`), sharing its port and workspace; or
+//! - stood up alone by the llama-free `roteiro explorer` command (gated on
+//!   `explorer`), which binds axum directly with no C/C++ toolchain.
+//!
+//! **Multi-workspace (ADR-0008).** The router is built over a
+//! [`WorkspaceSet`] — an install's many named workspaces (linked multi-repo
+//! groups and standalone singletons) — rather than a single [`Workspace`]. The
+//! set is listed at `GET /v1/graph/workspaces`, and every graph view is served
+//! twice:
+//!
+//! - **nested** under `/v1/graph/workspaces/{ws}/…` — the canonical form. Because
+//!   project names may collide across workspaces, the workspace is an explicit
+//!   path segment, so a per-project route always resolves within one specific
+//!   workspace by construction; and
+//! - **flat** under `/v1/graph/…` — a convenience bound to the server's *default*
+//!   workspace (the sole one, or the one containing the current repo, or an
+//!   explicit `--workspace-name`), so a single-workspace / cwd-default config
+//!   keeps working with the original paths unchanged.
+//!
+//! Both forms dispatch to one set of handlers; the only difference is how the
+//! target [`Workspace`] is selected (the `{ws}` path segment vs. the default).
+//!
+//! Two routes reuse binary-local code — the override matrix reuses
+//! [`crate::overview::build`], and the cross-repo views reconstruct the persisted
+//! external-ref edges the workspace resolver walks — which is why the API lives in
+//! the `roteiro` binary rather than `rto-render`.
 //!
 //! Cross-repo semantics are read straight from the stores (so the API is fully
-//! testable over an in-memory [`Workspace`], with no config-file scan): an
-//! inferred **external-ref** edge that still resolves to its hub node is a
-//! *match*; one whose hub node is gone is *drift* — the same "orphan" the
-//! `/resolve` route reports as `{ "drift": true, "target": null }`.
+//! testable over in-memory [`Workspace`]s, with no config-file scan): an inferred
+//! **external-ref** edge that still resolves to its hub node is a *match*; one
+//! whose hub node is gone is *drift* — the same "orphan" the `/resolve` route
+//! reports as `{ "drift": true, "target": null }`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, RawPathParams, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use rto_graph::{
     EXTERNAL_REF_KIND, Edge, Node, NodeKind, Provenance, Store, StoreError, Workspace,
-    WorkspaceError, debt, explain, external_ref_target, parse_qualified,
+    WorkspaceError, WorkspaceSet, debt, explain, external_ref_target, parse_qualified,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::overview;
 
-/// The shared, read-only workspace handle every handler queries.
-type Ws = Arc<Workspace>;
+/// The router's shared state: the workspace set every handler resolves against,
+/// plus the default workspace for the flat (`/v1/graph/…`) routes.
+#[derive(Clone)]
+struct AppState {
+    /// The install's named workspaces (ADR-0008).
+    set: Arc<WorkspaceSet>,
+    /// The workspace the flat routes operate on when no `{ws}` segment is given:
+    /// an explicit `--workspace-name`, else the workspace containing the current
+    /// repo. `None` falls back to [`WorkspaceSet::select`]'s default (the sole
+    /// workspace, else an "ambiguous" error steering the caller to name one).
+    default: Option<String>,
+}
 
 /// A handler result: a JSON [`Response`], or an [`ApiError`] rendered as one.
 type ApiResult = Result<Response, ApiError>;
@@ -55,27 +84,77 @@ const DEFAULT_HOTSPOTS: usize = 20;
 /// unbounded subgraph.
 const MAX_DEPTH: usize = 5;
 
-/// Build the read-only `/v1/graph/*` router over a shared [`Workspace`].
+/// Build the read-only `/v1/graph/*` router over a [`WorkspaceSet`].
 ///
-/// Merge it into the main axum app the same way the MCP router is merged, so the
-/// explorer API, the model endpoint (`/v1`) and the MCP server share one port and
-/// one workspace.
-pub fn router(workspace: Ws) -> Router {
+/// `default` names the workspace the flat routes bind to (see [`AppState`]).
+/// Merge this into a larger app the same way the MCP router is merged, or serve
+/// it directly (the llama-free `roteiro explorer` server).
+pub fn router(set: Arc<WorkspaceSet>, default: Option<String>) -> Router {
+    let state = AppState { set, default };
     Router::new()
-        .route("/v1/graph/projects", get(projects))
-        .route("/v1/graph/topology", get(topology))
-        .route("/v1/graph/matrix", get(matrix))
-        .route("/v1/graph/resolve", get(resolve))
-        .route("/v1/graph/{project}", get(project_graph))
-        .route("/v1/graph/{project}/nodes", get(project_nodes))
-        .route("/v1/graph/{project}/node/{*key}", get(node_detail))
+        // The set itself: every workspace, its linkage, and its projects.
+        .route("/v1/graph/workspaces", get(workspaces))
+        // Flat views over the default workspace (single-workspace / cwd default).
+        .merge(graph_routes("/v1/graph"))
+        // Nested, collision-safe views: the workspace is an explicit path segment.
+        .merge(graph_routes("/v1/graph/workspaces/{ws}"))
+        .with_state(state)
+}
+
+/// The per-workspace graph views, registered under `prefix`. Used twice — once
+/// flat (`/v1/graph`) and once nested (`/v1/graph/workspaces/{ws}`) — so both
+/// forms share one set of handlers. A handler tells them apart by whether a `ws`
+/// path parameter is present (see [`select_ws`]).
+fn graph_routes(prefix: &str) -> Router<AppState> {
+    Router::new()
+        .route(&format!("{prefix}/projects"), get(projects))
+        .route(&format!("{prefix}/topology"), get(topology))
+        .route(&format!("{prefix}/matrix"), get(matrix))
+        .route(&format!("{prefix}/resolve"), get(resolve))
+        .route(&format!("{prefix}/{{project}}"), get(project_graph))
+        .route(&format!("{prefix}/{{project}}/nodes"), get(project_nodes))
         .route(
-            "/v1/graph/{project}/neighbourhood/{*key}",
+            &format!("{prefix}/{{project}}/node/{{*key}}"),
+            get(node_detail),
+        )
+        .route(
+            &format!("{prefix}/{{project}}/neighbourhood/{{*key}}"),
             get(neighbourhood),
         )
-        .route("/v1/graph/{project}/debt", get(project_debt))
-        .route("/v1/graph/{project}/hotspots", get(hotspots))
-        .with_state(workspace)
+        .route(&format!("{prefix}/{{project}}/debt"), get(project_debt))
+        .route(&format!("{prefix}/{{project}}/hotspots"), get(hotspots))
+}
+
+// ---------------------------------------------------------------------------
+// Workspace / path-parameter resolution
+// ---------------------------------------------------------------------------
+
+/// Look up a named path parameter (percent-decoded by axum), or `None`.
+fn param<'a>(params: &'a RawPathParams, name: &str) -> Option<&'a str> {
+    params.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+}
+
+/// Select the [`Workspace`] a request targets: the `{ws}` path segment for a
+/// nested route, else the flat routes' default workspace (which itself falls
+/// back to the set's sole/ambiguous default). Borrows from `st`, so it is called
+/// synchronously inside a handler before any query runs.
+fn select_ws<'a>(st: &'a AppState, params: &RawPathParams) -> Result<&'a Workspace, ApiError> {
+    match param(params, "ws") {
+        Some(name) => Ok(st.set.select(Some(name))?),
+        None => Ok(st.set.select(st.default.as_deref())?),
+    }
+}
+
+/// The `{project}` path segment, which every per-project route declares (so its
+/// absence is an internal invariant break, not a client error).
+fn require_project(params: &RawPathParams) -> Result<&str, ApiError> {
+    param(params, "project")
+        .ok_or_else(|| ApiError::Internal("missing `project` path parameter".to_owned()))
+}
+
+/// The `{*key}` catch-all segment (a node key), 404 if somehow absent.
+fn require_key(params: &RawPathParams) -> Result<&str, ApiError> {
+    param(params, "key").ok_or_else(|| ApiError::NotFound("missing node key".to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +166,7 @@ pub fn router(workspace: Ws) -> Router {
 enum ApiError {
     /// 400 — a malformed or missing query parameter.
     BadRequest(String),
-    /// 404 — an unknown project, node, or key.
+    /// 404 — an unknown workspace, project, node, or key.
     NotFound(String),
     /// 500 — an internal store or workspace failure.
     Internal(String),
@@ -107,15 +186,19 @@ impl IntoResponse for ApiError {
 impl From<WorkspaceError> for ApiError {
     fn from(e: WorkspaceError) -> Self {
         match e {
-            // The named project isn't hosted, or it has no graph yet → 404.
-            WorkspaceError::UnknownProject { .. } | WorkspaceError::NoGraph { .. } => {
-                ApiError::NotFound(e.to_string())
-            }
-            // The caller's input was malformed or under-specified → 400.
+            // A named workspace/project isn't hosted, or a project has no graph
+            // yet → 404 (the addressed resource does not exist).
+            WorkspaceError::UnknownWorkspace { .. }
+            | WorkspaceError::UnknownProject { .. }
+            | WorkspaceError::NoGraph { .. } => ApiError::NotFound(e.to_string()),
+            // The caller's input was malformed or under-specified → 400. An
+            // ambiguous workspace (several configured, none selected) tells the
+            // caller to address a nested `/v1/graph/workspaces/{ws}/…` route.
             WorkspaceError::Unqualified { .. }
             | WorkspaceError::AmbiguousProject { .. }
+            | WorkspaceError::AmbiguousWorkspace { .. }
             | WorkspaceError::Empty => ApiError::BadRequest(e.to_string()),
-            // Poisoned lock, git, store, prepare-hook failures → 500.
+            // Poisoned lock, git, store, discovery, prepare-hook failures → 500.
             _ => ApiError::Internal(e.to_string()),
         }
     }
@@ -171,9 +254,26 @@ struct ResolveQuery {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /v1/graph/projects` → the hosted project names and whether more than one
-/// is hosted (so a client knows to offer project selection).
-async fn projects(State(ws): State<Ws>) -> ApiResult {
+/// `GET /v1/graph/workspaces` → every configured workspace as
+/// `{ name, linked, projects }`. Standalone repos appear as their own
+/// `linked: false` singletons (one project each); linked groups list all their
+/// member projects. The entry point a client uses to discover the set before
+/// addressing a nested `/v1/graph/workspaces/{ws}/…` route.
+async fn workspaces(State(st): State<AppState>) -> ApiResult {
+    let mut out: Vec<Value> = Vec::new();
+    for name in st.set.names() {
+        let linked = st.set.linked(&name).unwrap_or(false);
+        let projects = st.set.select(Some(&name))?.names();
+        out.push(json!({ "name": name, "linked": linked, "projects": projects }));
+    }
+    Ok(Json(out).into_response())
+}
+
+/// `GET /v1/graph[/workspaces/{ws}]/projects` → the selected workspace's hosted
+/// project names and whether more than one is hosted (so a client knows to offer
+/// project selection).
+async fn projects(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
     Ok(Json(json!({
         "projects": ws.names(),
         "isMulti": ws.is_multi(),
@@ -181,9 +281,12 @@ async fn projects(State(ws): State<Ws>) -> ApiResult {
     .into_response())
 }
 
-/// `GET /v1/graph/{project}` → the whole graph as `{ nodes, edges, counts }`.
-async fn project_graph(State(ws): State<Ws>, Path(project): Path<String>) -> ApiResult {
-    let facts = ws.with_store(Some(&project), Store::export_factset)??;
+/// `GET /v1/graph[/workspaces/{ws}]/{project}` → the whole graph as
+/// `{ nodes, edges, counts }`.
+async fn project_graph(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let facts = ws.with_store(Some(project), Store::export_factset)??;
     let (nodes, edges) = (facts.nodes.len(), facts.edges.len());
     Ok(Json(json!({
         "nodes": facts.nodes,
@@ -193,13 +296,15 @@ async fn project_graph(State(ws): State<Ws>, Path(project): Path<String>) -> Api
     .into_response())
 }
 
-/// `GET /v1/graph/{project}/nodes?kinds=&provenance=&q=&limit=&offset=` →
-/// filtered, paged nodes plus the pre-paging `total`.
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/nodes?kinds=&provenance=&q=&limit=&offset=`
+/// → filtered, paged nodes plus the pre-paging `total`.
 async fn project_nodes(
-    State(ws): State<Ws>,
-    Path(project): Path<String>,
+    State(st): State<AppState>,
+    params: RawPathParams,
     Query(p): Query<NodesQuery>,
 ) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
     let provenance = match p.provenance.as_deref() {
         Some(s) => Some(parse_provenance(s)?),
         None => None,
@@ -214,7 +319,7 @@ async fn project_nodes(
     let offset = p.offset.unwrap_or(0);
     let limit = p.limit.unwrap_or(DEFAULT_NODE_LIMIT);
 
-    let mut nodes = ws.with_store(Some(&project), Store::all_nodes)??;
+    let mut nodes = ws.with_store(Some(project), Store::all_nodes)??;
     nodes.retain(|n| {
         kinds
             .as_ref()
@@ -235,13 +340,13 @@ async fn project_nodes(
     .into_response())
 }
 
-/// `GET /v1/graph/{project}/node/{key}` → the node plus its in/out edges
-/// (`query::explain`). 404 when the key is unknown.
-async fn node_detail(
-    State(ws): State<Ws>,
-    Path((project, key)): Path<(String, String)>,
-) -> ApiResult {
-    let explanation = ws.with_store(Some(&project), |s| explain(s, &key))??;
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/node/{key}` → the node plus its
+/// in/out edges (`query::explain`). 404 when the key is unknown.
+async fn node_detail(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let key = require_key(&params)?;
+    let explanation = ws.with_store(Some(project), |s| explain(s, key))??;
     match explanation {
         Some(e) => Ok(Json(e).into_response()),
         None => Err(ApiError::NotFound(format!(
@@ -250,15 +355,18 @@ async fn node_detail(
     }
 }
 
-/// `GET /v1/graph/{project}/neighbourhood/{key}?depth=1` → the subgraph within
-/// `depth` hops of `key`. 404 when the root key is unknown.
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/neighbourhood/{key}?depth=1` → the
+/// subgraph within `depth` hops of `key`. 404 when the root key is unknown.
 async fn neighbourhood(
-    State(ws): State<Ws>,
-    Path((project, key)): Path<(String, String)>,
+    State(st): State<AppState>,
+    params: RawPathParams,
     Query(dq): Query<DepthQuery>,
 ) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let key = require_key(&params)?;
     let depth = dq.depth.unwrap_or(1).min(MAX_DEPTH);
-    let sub = ws.with_store(Some(&project), |s| neighbourhood_subgraph(s, &key, depth))??;
+    let sub = ws.with_store(Some(project), |s| neighbourhood_subgraph(s, key, depth))??;
     match sub {
         Some((nodes, edges)) => Ok(Json(json!({
             "root": key,
@@ -274,28 +382,40 @@ async fn neighbourhood(
     }
 }
 
-/// `GET /v1/graph/{project}/debt` → the intent-debt report (`query::debt`).
-async fn project_debt(State(ws): State<Ws>, Path(project): Path<String>) -> ApiResult {
-    let report = ws.with_store(Some(&project), |s| debt(s, &[], &[]))??;
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/debt` → the intent-debt report
+/// (`query::debt`).
+async fn project_debt(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let report = ws.with_store(Some(project), |s| debt(s, &[], &[]))??;
     Ok(Json(report).into_response())
 }
 
-/// `GET /v1/graph/{project}/hotspots?limit=` → the top-`limit` nodes by total
-/// degree (in + out edges).
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/hotspots?limit=` → the top-`limit`
+/// nodes by total degree (in + out edges).
 async fn hotspots(
-    State(ws): State<Ws>,
-    Path(project): Path<String>,
+    State(st): State<AppState>,
+    params: RawPathParams,
     Query(lq): Query<LimitQuery>,
 ) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
     let limit = lq.limit.unwrap_or(DEFAULT_HOTSPOTS);
-    let ranked = ws.with_store(Some(&project), |s| compute_hotspots(s, limit))??;
+    let ranked = ws.with_store(Some(project), |s| compute_hotspots(s, limit))??;
     Ok(Json(json!({ "hotspots": ranked, "limit": limit })).into_response())
 }
 
-/// `GET /v1/graph/resolve?qualified=<project>::<key>` → the target node and a
-/// `drift` flag: `{ target: null, drift: true }` when the key is well-formed but
-/// its node is gone (a removed or renamed cross-repo target).
-async fn resolve(State(ws): State<Ws>, Query(rq): Query<ResolveQuery>) -> ApiResult {
+/// `GET /v1/graph[/workspaces/{ws}]/resolve?qualified=<project>::<key>` → the
+/// target node and a `drift` flag: `{ target: null, drift: true }` when the key
+/// is well-formed but its node is gone (a removed or renamed cross-repo target).
+/// Resolution is scoped to the selected workspace, so a `<project>` naming a
+/// project in another workspace does not leak across.
+async fn resolve(
+    State(st): State<AppState>,
+    params: RawPathParams,
+    Query(rq): Query<ResolveQuery>,
+) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
     let qualified = rq
         .qualified
         .ok_or_else(|| ApiError::BadRequest("missing `qualified` query parameter".to_owned()))?;
@@ -304,12 +424,14 @@ async fn resolve(State(ws): State<Ws>, Query(rq): Query<ResolveQuery>) -> ApiRes
     Ok(Json(json!({ "target": target, "drift": drift })).into_response())
 }
 
-/// `GET /v1/graph/topology` → the cross-repo hub-and-spoke shape: the hub project,
-/// a summary per spoke (`keyCount`, `driftCount`), and the inferred cross-repo
-/// links (`from`/`to` node keys, provenance, confidence).
-async fn topology(State(ws): State<Ws>) -> ApiResult {
+/// `GET /v1/graph[/workspaces/{ws}]/topology` → the cross-repo hub-and-spoke
+/// shape of the selected workspace: the hub project, a summary per spoke
+/// (`keyCount`, `driftCount`), and the inferred cross-repo links (`from`/`to`
+/// node keys, provenance, confidence).
+async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let hub = determine_hub(&ws, &names)?;
+    let hub = determine_hub(ws, &names)?;
 
     let mut links: Vec<Value> = Vec::new();
     let mut spokes: Vec<Value> = Vec::new();
@@ -340,7 +462,7 @@ async fn topology(State(ws): State<Ws>) -> ApiResult {
             }
             // A link whose target is gone — or whose project isn't hosted / has no
             // graph — is drift for that link, not a fatal error for the endpoint.
-            if resolve_link(&ws, node)?.is_none() {
+            if resolve_link(ws, node)?.is_none() {
                 drift_count += 1;
             }
         }
@@ -355,12 +477,14 @@ async fn topology(State(ws): State<Ws>) -> ApiResult {
     Ok(Json(json!({ "hub": hub, "spokes": spokes, "links": links })).into_response())
 }
 
-/// `GET /v1/graph/matrix` → the cross-repo config override matrix + drift
-/// ([`overview::OverrideMatrix`]), reconstructed from the persisted external-ref
-/// edges: a resolving edge is an override cell, a dangling one is drift.
-async fn matrix(State(ws): State<Ws>) -> ApiResult {
+/// `GET /v1/graph[/workspaces/{ws}]/matrix` → the cross-repo config override
+/// matrix + drift ([`overview::OverrideMatrix`]) for the selected workspace,
+/// reconstructed from the persisted external-ref edges: a resolving edge is an
+/// override cell, a dangling one is drift.
+async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let Some(hub) = determine_hub(&ws, &names)? else {
+    let Some(hub) = determine_hub(ws, &names)? else {
         // Nothing references anything — no hub, so an empty (but well-shaped) matrix.
         return Ok(Json(json!({
             "hub": Value::Null, "spokes": [], "rows": [], "drift": []
@@ -394,7 +518,7 @@ async fn matrix(State(ws): State<Ws>) -> ApiResult {
                 .get(src)
                 .cloned()
                 .unwrap_or_else(|| (src.clone(), String::new()));
-            match resolve_link(&ws, node)? {
+            match resolve_link(ws, node)? {
                 // Resolves to its hub node → a real override cell.
                 Some(hub_node) => matches.push(overview::MatchInput {
                     hub_key: hub_node.name,
@@ -613,7 +737,7 @@ mod tests {
     use rto_graph::{Edge, EdgeKind, FactSet, external_ref_key, external_ref_node};
     use tower::ServiceExt as _; // for `oneshot`
 
-    // -- synthetic in-memory workspace ------------------------------------
+    // -- synthetic in-memory workspaces -----------------------------------
 
     /// The hub project name used across the tests.
     const HUB: &str = "hub";
@@ -711,26 +835,52 @@ mod tests {
         apply(store, &facts)
     }
 
+    /// A distinct single-symbol store for the standalone singleton — its sole
+    /// project is *also* named `hub`, so it collides with the linked workspace's
+    /// `hub` and must resolve independently.
+    fn solo_store() -> Store {
+        let store = Store::open_in_memory().expect("solo store");
+        let facts = FactSet::new().with_node(Node::new("sym:only", NodeKind::Fn, "only"));
+        apply(store, &facts)
+    }
+
     fn apply(mut store: Store, facts: &FactSet) -> Store {
         store.apply_factset(facts).expect("apply factset");
         store
     }
 
-    /// A two-project workspace (hub + spoke) over pre-opened in-memory stores.
-    fn workspace() -> Ws {
-        Arc::new(Workspace::from_stores([
+    /// The linked hub+spoke workspace (the cross-repo scenario).
+    fn linked_workspace() -> Workspace {
+        Workspace::from_stores([
             (HUB.to_owned(), hub_store()),
             (SPOKE.to_owned(), spoke_store()),
-        ]))
+        ])
     }
 
-    /// A single-project workspace, for the routes that don't need cross-repo data.
-    fn single_workspace() -> Ws {
-        Arc::new(Workspace::single(HUB, hub_store()))
+    /// Wrap a single [`Workspace`] as a one-entry (linked) set — the
+    /// single-workspace default the flat routes serve.
+    fn single_set(ws: Workspace) -> WorkspaceSet {
+        WorkspaceSet::from_workspaces([("linked".to_owned(), ws, true)])
     }
 
-    async fn get(ws: Ws, uri: &str) -> (StatusCode, Value) {
-        let resp = router(ws)
+    /// A two-workspace set: the linked hub+spoke group, and a standalone
+    /// singleton `solo` (`linked:false`) whose sole project is also named `hub`
+    /// — so the two `hub` projects collide across workspaces.
+    fn multi_set() -> WorkspaceSet {
+        WorkspaceSet::from_workspaces([
+            ("linked".to_owned(), linked_workspace(), true),
+            (
+                "solo".to_owned(),
+                Workspace::single(HUB, solo_store()),
+                false,
+            ),
+        ])
+    }
+
+    /// Drive `uri` against a router built over `set` with default workspace
+    /// `default`, returning the status and parsed JSON body.
+    async fn get(set: WorkspaceSet, default: Option<&str>, uri: &str) -> (StatusCode, Value) {
+        let resp = router(Arc::new(set), default.map(str::to_owned))
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -744,24 +894,151 @@ mod tests {
         (status, json)
     }
 
-    // -- tests -------------------------------------------------------------
+    // -- multi-workspace: the set listing ---------------------------------
+
+    #[tokio::test]
+    async fn workspaces_lists_all_incl_standalone_singleton() {
+        let (status, json) = get(multi_set(), None, "/v1/graph/workspaces").await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().expect("workspaces array");
+        assert_eq!(arr.len(), 2, "both workspaces are listed");
+
+        // Stable (name) order: `linked` then `solo`.
+        assert_eq!(arr[0]["name"], "linked");
+        assert_eq!(arr[0]["linked"], true, "the hub+spoke group is linked");
+        let linked_projects: Vec<String> =
+            serde_json::from_value(arr[0]["projects"].clone()).expect("projects");
+        assert!(
+            linked_projects.contains(&HUB.to_owned())
+                && linked_projects.contains(&SPOKE.to_owned())
+        );
+
+        // A standalone repo appears as its own `linked:false` singleton.
+        assert_eq!(arr[1]["name"], "solo");
+        assert_eq!(arr[1]["linked"], false);
+        assert_eq!(arr[1]["projects"], json!([HUB]));
+    }
+
+    // -- multi-workspace: scoping + cross-workspace collisions ------------
+
+    #[tokio::test]
+    async fn nested_per_project_resolves_within_its_workspace() {
+        // Both workspaces host a project named `hub`, but with different graphs:
+        // the linked one has 4 nodes, the standalone singleton just 1. The nested
+        // route must resolve `hub` within the *named* workspace, never leak across.
+        let (status, linked_hub) = get(multi_set(), None, "/v1/graph/workspaces/linked/hub").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(linked_hub["counts"]["nodes"], 4);
+
+        let (_, solo_hub) = get(multi_set(), None, "/v1/graph/workspaces/solo/hub").await;
+        assert_eq!(
+            solo_hub["counts"]["nodes"], 1,
+            "the standalone `hub` is distinct"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_topology_is_scoped_to_the_workspace() {
+        // The linked workspace has the hub-and-spoke shape…
+        let (status, linked) = get(multi_set(), None, "/v1/graph/workspaces/linked/topology").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(linked["hub"], HUB);
+        assert_eq!(linked["spokes"].as_array().unwrap().len(), 1);
+
+        // …while the standalone singleton has no cross-repo links → no hub.
+        let (_, solo) = get(multi_set(), None, "/v1/graph/workspaces/solo/topology").await;
+        assert_eq!(solo["hub"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn nested_nodes_and_resolve_are_scoped() {
+        // Nodes: the linked `hub` has two `fn` nodes.
+        let (_, nodes) = get(
+            multi_set(),
+            None,
+            "/v1/graph/workspaces/linked/hub/nodes?kinds=fn",
+        )
+        .await;
+        assert_eq!(nodes["total"], 2);
+
+        // Resolve within `linked`: the live hub key resolves (no drift).
+        let (_, live) = get(
+            multi_set(),
+            None,
+            "/v1/graph/workspaces/linked/resolve?qualified=hub::cfgkey:config.toml%23serve.addr",
+        )
+        .await;
+        assert_eq!(live["drift"], false);
+        assert_eq!(live["target"]["name"], "serve.addr");
+
+        // The SAME qualified key resolved within `solo` drifts: solo's `hub` has
+        // no such node. Proof that resolution is workspace-scoped.
+        let (_, drift) = get(
+            multi_set(),
+            None,
+            "/v1/graph/workspaces/solo/resolve?qualified=hub::cfgkey:config.toml%23serve.addr",
+        )
+        .await;
+        assert_eq!(drift["drift"], true);
+        assert_eq!(drift["target"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn unknown_workspace_is_404() {
+        let (status, _) = get(multi_set(), None, "/v1/graph/workspaces/ghost/topology").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // -- flat routes: single-workspace / default "just works" -------------
+
+    #[tokio::test]
+    async fn flat_routes_serve_the_sole_workspace_by_default() {
+        // A one-workspace set needs no `--workspace-name`: the flat routes resolve
+        // to the sole workspace, so today's single-workspace config is unchanged.
+        let (status, json) = get(single_set(linked_workspace()), None, "/v1/graph/hub").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["counts"]["nodes"], 4);
+
+        let (_, top) = get(single_set(linked_workspace()), None, "/v1/graph/topology").await;
+        assert_eq!(top["hub"], HUB);
+    }
+
+    #[tokio::test]
+    async fn flat_route_is_ambiguous_without_a_default() {
+        // Several workspaces and no default selected: a flat route can't pick one,
+        // so it 400s (steering the caller to a nested `/workspaces/{ws}/…` route).
+        let (status, _) = get(multi_set(), None, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn flat_route_honours_the_named_default() {
+        // With `solo` as the default, a flat `/v1/graph/hub` hits solo's `hub`.
+        let (status, json) = get(multi_set(), Some("solo"), "/v1/graph/hub").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["counts"]["nodes"], 1);
+    }
+
+    // -- per-route behaviour (flat, over the sole/default workspace) ------
 
     #[tokio::test]
     async fn projects_reports_names_and_multiplicity() {
-        let (status, json) = get(workspace(), "/v1/graph/projects").await;
+        let (status, json) = get(single_set(linked_workspace()), None, "/v1/graph/projects").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["isMulti"], true);
         let names: Vec<String> =
             serde_json::from_value(json["projects"].clone()).expect("projects array");
         assert!(names.contains(&HUB.to_owned()) && names.contains(&SPOKE.to_owned()));
 
-        let (_, single) = get(single_workspace(), "/v1/graph/projects").await;
-        assert_eq!(single["isMulti"], false);
+        let single = single_set(Workspace::single(HUB, hub_store()));
+        let (_, one) = get(single, None, "/v1/graph/projects").await;
+        assert_eq!(one["isMulti"], false);
     }
 
     #[tokio::test]
     async fn project_graph_returns_nodes_edges_and_counts() {
-        let (status, json) = get(single_workspace(), "/v1/graph/hub").await;
+        let set = single_set(Workspace::single(HUB, hub_store()));
+        let (status, json) = get(set, None, "/v1/graph/hub").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["counts"]["nodes"], 4);
         assert_eq!(json["counts"]["edges"], 1);
@@ -770,20 +1047,27 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_project_is_404() {
-        let (status, _) = get(single_workspace(), "/v1/graph/nope").await;
+        let set = single_set(Workspace::single(HUB, hub_store()));
+        let (status, _) = get(set, None, "/v1/graph/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn nodes_filter_by_kind_and_page() {
         // Two `fn` nodes in the hub; filter to them, then page one at a time.
-        let (status, all) = get(single_workspace(), "/v1/graph/hub/nodes?kinds=fn").await;
+        let (status, all) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/nodes?kinds=fn",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(all["total"], 2);
         assert_eq!(all["nodes"].as_array().unwrap().len(), 2);
 
         let (_, page) = get(
-            single_workspace(),
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
             "/v1/graph/hub/nodes?kinds=fn&limit=1&offset=1",
         )
         .await;
@@ -795,32 +1079,57 @@ mod tests {
 
     #[tokio::test]
     async fn nodes_query_matches_name_substring() {
-        let (_, json) = get(single_workspace(), "/v1/graph/hub/nodes?q=help").await;
+        let (_, json) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/nodes?q=help",
+        )
+        .await;
         assert_eq!(json["total"], 1);
         assert_eq!(json["nodes"][0]["name"], "helper");
     }
 
     #[tokio::test]
     async fn nodes_bad_provenance_is_400() {
-        let (status, _) = get(single_workspace(), "/v1/graph/hub/nodes?provenance=bogus").await;
+        let (status, _) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/nodes?provenance=bogus",
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn node_detail_explains_and_404s_unknown_key() {
-        let (status, json) = get(single_workspace(), "/v1/graph/hub/node/sym:main").await;
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/node/sym:main",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["node"]["key"], "sym:main");
         // `main` calls `helper` → one outgoing edge.
         assert_eq!(json["outgoing"].as_array().unwrap().len(), 1);
 
-        let (missing, _) = get(single_workspace(), "/v1/graph/hub/node/sym:ghost").await;
+        let (missing, _) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/node/sym:ghost",
+        )
+        .await;
         assert_eq!(missing, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn neighbourhood_returns_root_and_neighbour() {
-        let (status, json) = get(single_workspace(), "/v1/graph/hub/neighbourhood/sym:main").await;
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/neighbourhood/sym:main",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["root"], "sym:main");
         let keys: Vec<String> = json["nodes"]
@@ -835,7 +1144,12 @@ mod tests {
 
     #[tokio::test]
     async fn debt_report_has_expected_shape() {
-        let (status, json) = get(single_workspace(), "/v1/graph/hub/debt").await;
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/debt",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["schema"].is_string());
         assert!(json["total"].is_number());
@@ -844,7 +1158,12 @@ mod tests {
 
     #[tokio::test]
     async fn hotspots_ranks_by_degree() {
-        let (status, json) = get(single_workspace(), "/v1/graph/hub/hotspots?limit=1").await;
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/hotspots?limit=1",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["limit"], 1);
         let top = &json["hotspots"][0];
@@ -857,7 +1176,8 @@ mod tests {
     #[tokio::test]
     async fn resolve_returns_hub_node_for_a_live_key() {
         let (status, json) = get(
-            workspace(),
+            single_set(linked_workspace()),
+            None,
             "/v1/graph/resolve?qualified=hub::cfgkey:config.toml%23serve.addr",
         )
         .await;
@@ -869,7 +1189,8 @@ mod tests {
     #[tokio::test]
     async fn resolve_reports_drift_for_an_orphan() {
         let (status, json) = get(
-            workspace(),
+            single_set(linked_workspace()),
+            None,
             "/v1/graph/resolve?qualified=hub::cfgkey:config.toml%23serve.legacy",
         )
         .await;
@@ -880,13 +1201,18 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_unqualified_key_is_400() {
-        let (status, _) = get(workspace(), "/v1/graph/resolve?qualified=notqualified").await;
+        let (status, _) = get(
+            single_set(linked_workspace()),
+            None,
+            "/v1/graph/resolve?qualified=notqualified",
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn topology_shows_hub_spokes_and_links() {
-        let (status, json) = get(workspace(), "/v1/graph/topology").await;
+        let (status, json) = get(single_set(linked_workspace()), None, "/v1/graph/topology").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["hub"], HUB);
         let spokes = json["spokes"].as_array().unwrap();
@@ -899,7 +1225,7 @@ mod tests {
 
     #[tokio::test]
     async fn matrix_pivots_overrides_and_lists_drift() {
-        let (status, json) = get(workspace(), "/v1/graph/matrix").await;
+        let (status, json) = get(single_set(linked_workspace()), None, "/v1/graph/matrix").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["hub"], HUB);
         // The live link overrides `serve.addr` → one row, flagged as differing.
@@ -917,11 +1243,11 @@ mod tests {
     async fn topology_hub_is_always_a_hosted_project() {
         // The spoke references unhosted `ghost` twice but the hosted hub only
         // once. The hub must be the hosted `hub`, never the more-linked phantom.
-        let ws = Arc::new(Workspace::from_stores([
+        let ws = Workspace::from_stores([
             (HUB.to_owned(), hub_store()),
             (SPOKE.to_owned(), spoke_linking_unhosted(2, true)),
-        ]));
-        let (status, json) = get(ws, "/v1/graph/topology").await;
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/topology").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["hub"], HUB, "hub is the hosted project, not `ghost`");
     }
@@ -931,11 +1257,11 @@ mod tests {
         // The spoke's only links point at unhosted `ghost`. Following them can't
         // resolve, but that is drift for those links — the endpoint still returns
         // 200 with the whole response built.
-        let ws = Arc::new(Workspace::from_stores([
+        let ws = Workspace::from_stores([
             (HUB.to_owned(), hub_store()),
             (SPOKE.to_owned(), spoke_linking_unhosted(2, false)),
-        ]));
-        let (status, json) = get(ws, "/v1/graph/topology").await;
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/topology").await;
         assert_eq!(status, StatusCode::OK, "an unhosted target must not 404");
         assert_eq!(json["hub"], Value::Null, "no hosted project is referenced");
         let spokes = json["spokes"].as_array().unwrap();

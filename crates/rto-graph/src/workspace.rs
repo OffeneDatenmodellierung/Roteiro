@@ -624,11 +624,14 @@ pub struct ResolvedWorkspace {
 }
 
 /// One entry in a [`WorkspaceSet`]: a built [`Workspace`] plus whether its member
-/// repos are cross-linked.
+/// repos are cross-linked. The workspace is held behind an `Arc` so an
+/// already-shared workspace (e.g. the one a `serve` process holds for its model
+/// tools and MCP router) can be wrapped into a set without re-opening its stores
+/// ([`WorkspaceSet::from_single`]).
 struct WorkspaceEntry {
     /// The per-group workspace (one repo for a standalone singleton, several for a
     /// linked group).
-    workspace: Workspace,
+    workspace: Arc<Workspace>,
     /// Whether the group's repos are cross-linked.
     linked: bool,
 }
@@ -658,12 +661,38 @@ impl WorkspaceSet {
     {
         let entries: BTreeMap<String, WorkspaceEntry> = entries
             .into_iter()
-            .map(|(name, workspace, linked)| (name, WorkspaceEntry { workspace, linked }))
+            .map(|(name, workspace, linked)| {
+                (
+                    name,
+                    WorkspaceEntry {
+                        workspace: Arc::new(workspace),
+                        linked,
+                    },
+                )
+            })
             .collect();
         let default = (entries.len() == 1)
             .then(|| entries.keys().next().cloned())
             .flatten();
         Self { entries, default }
+    }
+
+    /// Wrap an already-built [`Workspace`] (shared via `Arc`) as a one-entry set
+    /// under `name`, with `linked` recording whether that workspace is a
+    /// cross-linked multi-repo group. Used where a single `Workspace` is served as
+    /// the whole set — e.g. `roteiro serve` merges the read-only graph API over the
+    /// one workspace it already holds for its model tools and MCP router, so the
+    /// API's flat routes resolve to it as the sole (default) workspace. The store
+    /// handles are shared, never re-opened.
+    #[must_use]
+    pub fn from_single(name: impl Into<String>, workspace: Arc<Workspace>, linked: bool) -> Self {
+        let name = name.into();
+        let mut entries = BTreeMap::new();
+        entries.insert(name.clone(), WorkspaceEntry { workspace, linked });
+        Self {
+            entries,
+            default: Some(name),
+        }
     }
 
     /// Build a set from normalised config groups: each group's `roots`/`repos` are
@@ -701,7 +730,7 @@ impl WorkspaceSet {
                 entries.insert(
                     rw.name.clone(),
                     WorkspaceEntry {
-                        workspace,
+                        workspace: Arc::new(workspace),
                         linked: true,
                     },
                 );
@@ -720,7 +749,7 @@ impl WorkspaceSet {
                     entries.insert(
                         name,
                         WorkspaceEntry {
-                            workspace,
+                            workspace: Arc::new(workspace),
                             linked: false,
                         },
                     );
@@ -754,12 +783,14 @@ impl WorkspaceSet {
     /// or [`WorkspaceError::Empty`] if none are configured.
     pub fn select(&self, name: Option<&str>) -> Result<&Workspace, WorkspaceError> {
         if let Some(n) = name {
-            return self.entries.get(n).map(|e| &e.workspace).ok_or_else(|| {
-                WorkspaceError::UnknownWorkspace {
+            return self
+                .entries
+                .get(n)
+                .map(|e| e.workspace.as_ref())
+                .ok_or_else(|| WorkspaceError::UnknownWorkspace {
                     name: n.to_owned(),
                     known: self.known(),
-                }
-            });
+                });
         }
         // No name given: the sole workspace, else ambiguous / empty.
         let name = self.default.as_ref().ok_or_else(|| {
@@ -771,7 +802,7 @@ impl WorkspaceSet {
                 }
             }
         })?;
-        Ok(&self.entries[name].workspace)
+        Ok(self.entries[name].workspace.as_ref())
     }
 
     /// The name of the workspace whose member repos include the repo whose graph is
