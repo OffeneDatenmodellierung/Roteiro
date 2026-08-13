@@ -153,11 +153,38 @@ mod tests {
         ] {
             assert!(body.contains(needle), "shell must contain `{needle}`");
         }
-        // The Ask tab is present but disabled (llama is a later PR).
+        // The Ask tab is present but disabled (llama is a later PR), conveyed via
+        // `aria-disabled` (not a native `disabled`, so it stays perceivable).
         assert!(
             body.contains("requires the model build") || body.contains("roteiro serve --models"),
             "Ask tab must explain it needs the model build"
         );
+        // The ARIA tab pattern must be wired: tabs point at their panels, panels
+        // back at their tabs, and the disabled tab is aria-disabled.
+        for needle in [
+            "role=\"tablist\"",
+            "aria-controls=\"p-pane-hotspots\"",
+            "aria-selected=\"true\"",
+            "aria-labelledby=\"p-tab-node\"",
+            "aria-disabled=\"true\"",
+        ] {
+            assert!(body.contains(needle), "shell must contain `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn served_assets_are_free_of_raw_control_chars() {
+        // The assets must stay reviewable/tooling-safe: no stray control bytes
+        // (e.g. a `0x01` separator once used in a cytoscape edge id).
+        for uri in ["/", "/app.js"] {
+            let (_s, _c, _cc, body) = get(uri).await;
+            assert!(
+                !body
+                    .bytes()
+                    .any(|b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r'),
+                "{uri} contains a raw control character"
+            );
+        }
     }
 
     #[tokio::test]

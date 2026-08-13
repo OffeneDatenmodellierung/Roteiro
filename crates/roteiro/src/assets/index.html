@@ -584,9 +584,12 @@
         border-bottom-color: var(--paccent);
         font-weight: 600;
       }
-      .p-tab:disabled {
+      .p-tab[aria-disabled="true"] {
         color: #484f58;
         cursor: not-allowed;
+      }
+      .p-tab[aria-disabled="true"]:hover {
+        color: #484f58;
       }
       .p-tabpanes {
         flex: 1 1 auto;
@@ -898,17 +901,75 @@
         </section>
 
         <aside class="p-side">
-          <div class="p-tabs" role="tablist">
-            <button class="p-tab active" data-tab="hotspots" role="tab" type="button">Hotspots</button>
-            <button class="p-tab" data-tab="node" role="tab" type="button">Node</button>
-            <button class="p-tab" data-tab="ask" role="tab" type="button" disabled title="requires the model build">Ask</button>
+          <div class="p-tabs" role="tablist" aria-label="Project inspector">
+            <button
+              class="p-tab active"
+              id="p-tab-hotspots"
+              data-tab="hotspots"
+              role="tab"
+              type="button"
+              aria-controls="p-pane-hotspots"
+              aria-selected="true"
+              tabindex="0"
+            >
+              Hotspots
+            </button>
+            <button
+              class="p-tab"
+              id="p-tab-node"
+              data-tab="node"
+              role="tab"
+              type="button"
+              aria-controls="p-pane-node"
+              aria-selected="false"
+              tabindex="-1"
+            >
+              Node
+            </button>
+            <button
+              class="p-tab"
+              id="p-tab-ask"
+              data-tab="ask"
+              role="tab"
+              type="button"
+              aria-controls="p-pane-ask"
+              aria-selected="false"
+              aria-disabled="true"
+              tabindex="-1"
+              title="requires the model build"
+            >
+              Ask
+            </button>
           </div>
           <div class="p-tabpanes">
-            <div class="p-pane active" data-pane="hotspots" role="tabpanel"></div>
-            <div class="p-pane" data-pane="node" role="tabpanel">
+            <div
+              class="p-pane active"
+              id="p-pane-hotspots"
+              data-pane="hotspots"
+              role="tabpanel"
+              aria-labelledby="p-tab-hotspots"
+              tabindex="0"
+            ></div>
+            <div
+              class="p-pane"
+              id="p-pane-node"
+              data-pane="node"
+              role="tabpanel"
+              aria-labelledby="p-tab-node"
+              tabindex="0"
+              hidden
+            >
               <p class="p-muted">Click a node in the graph to inspect it.</p>
             </div>
-            <div class="p-pane p-ask-disabled" data-pane="ask" role="tabpanel">
+            <div
+              class="p-pane p-ask-disabled"
+              id="p-pane-ask"
+              data-pane="ask"
+              role="tabpanel"
+              aria-labelledby="p-tab-ask"
+              tabindex="0"
+              hidden
+            >
               <p><strong>Ask</strong> is disabled in the explorer.</p>
               <p class="p-muted">
                 The natural-language ask tab needs a local model, which the

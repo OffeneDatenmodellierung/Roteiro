@@ -88,8 +88,11 @@
 
   // Parse `location.hash` into a route. Unknown/empty hashes fall back to the
   // workspace view with no explicit workspace (the default is chosen on load).
+  // Operates on the RAW hash — the captured segments are decoded per-segment via
+  // the guarded `decode`, so a malformed `%` sequence can never throw out here
+  // and blank the UI (`decodeURI` over the whole hash could).
   function parseHash() {
-    const h = decodeURI(location.hash.replace(/^#/, ""));
+    const h = location.hash.replace(/^#/, "");
     let m = h.match(/^\/workspace\/([^/]+)\/project\/(.+?)\/?$/);
     if (m)
       return {
@@ -657,10 +660,13 @@
       });
     }
     // One edge per (src, dst, kind); never dangle an edge onto an absent node.
+    // The id joins percent-encoded endpoints with a plain `->` — encoding means
+    // no segment can contain the separator, so the id stays collision-safe while
+    // remaining fully printable.
     const seen = new Set();
     for (const e of edges) {
       if (!ids.has(e.src) || !ids.has(e.dst)) continue;
-      const id = `e:${e.src}${e.dst}${e.kind}`;
+      const id = `e:${encodeURIComponent(e.src)}->${encodeURIComponent(e.dst)}->${e.kind}`;
       if (seen.has(id)) continue;
       seen.add(id);
       elements.push({
@@ -847,13 +853,27 @@
 
   // -- node selection + tabs -------------------------------------------------
 
-  function activateTab(name) {
-    document
-      .querySelectorAll("#view-project .p-tab")
-      .forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-    document
-      .querySelectorAll("#view-project .p-pane")
-      .forEach((p) => p.classList.toggle("active", p.dataset.pane === name));
+  const tabDisabled = (b) => b.getAttribute("aria-disabled") === "true";
+
+  // Switch tabs, keeping the full ARIA state in sync: roving `tabindex` and
+  // `aria-selected` on the tabs, and `hidden`/visibility on their panels. A
+  // disabled tab (Ask) is never activated. Pass `focusTab` when the switch came
+  // from keyboard navigation so focus follows the selection.
+  function activateTab(name, focusTab) {
+    const target = document.querySelector(`#view-project .p-tab[data-tab="${name}"]`);
+    if (!target || tabDisabled(target)) return;
+    document.querySelectorAll("#view-project .p-tab").forEach((b) => {
+      const active = b.dataset.tab === name;
+      b.classList.toggle("active", active);
+      b.setAttribute("aria-selected", active ? "true" : "false");
+      b.tabIndex = active ? 0 : -1;
+      if (active && focusTab) b.focus();
+    });
+    document.querySelectorAll("#view-project .p-pane").forEach((p) => {
+      const active = p.dataset.pane === name;
+      p.classList.toggle("active", active);
+      p.hidden = !active;
+    });
   }
 
   function selectNode(key) {
@@ -1116,9 +1136,42 @@
     $("#p-zoom-out").addEventListener("click", () => zoomBy(0.8));
     $("#p-fit").addEventListener("click", fitGraph);
     $("#p-search").addEventListener("input", (e) => onSearchInput(e.target.value));
-    document.querySelectorAll("#view-project .p-tab").forEach((b) => {
-      if (b.disabled) return;
-      b.addEventListener("click", () => activateTab(b.dataset.tab));
+
+    // ARIA tabs: click activates an enabled tab; arrow/Home/End keys move focus
+    // between enabled tabs and activate on the move (automatic activation),
+    // skipping the disabled Ask tab.
+    const tablist = document.querySelector("#view-project .p-tabs");
+    const tabs = Array.from(tablist.querySelectorAll(".p-tab"));
+    tabs.forEach((b) => {
+      b.addEventListener("click", () => {
+        if (!tabDisabled(b)) activateTab(b.dataset.tab);
+      });
+    });
+    tablist.addEventListener("keydown", (e) => {
+      const enabled = tabs.filter((t) => !tabDisabled(t));
+      if (!enabled.length) return;
+      let idx = enabled.indexOf(document.activeElement);
+      if (idx < 0) idx = enabled.findIndex((t) => t.classList.contains("active"));
+      if (idx < 0) idx = 0;
+      let next;
+      switch (e.key) {
+        case "ArrowRight":
+          next = enabled[(idx + 1) % enabled.length];
+          break;
+        case "ArrowLeft":
+          next = enabled[(idx - 1 + enabled.length) % enabled.length];
+          break;
+        case "Home":
+          next = enabled[0];
+          break;
+        case "End":
+          next = enabled[enabled.length - 1];
+          break;
+        default:
+          return;
+      }
+      e.preventDefault();
+      activateTab(next.dataset.tab, true);
     });
   }
 
