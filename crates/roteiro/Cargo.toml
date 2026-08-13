@@ -20,12 +20,14 @@ rto-serve = { workspace = true, optional = true }
 rto-spec = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# `serve`/`mcp` only: a SIGHUP handler that reloads the workspace registry
-# without a restart (ADR-0008). `unsafe_code = "forbid"` rules out a raw signal
-# handler, and tokio is already in the serve/mcp tree, so use its signal support.
-# `net` pulls tokio's I/O driver, which unix signal handling requires — declared
-# here so this crate is self-contained, not reliant on another crate's features.
-tokio = { version = "1", features = ["rt", "signal", "net"], optional = true }
+# Shared by `serve`/`mcp` (a SIGHUP handler that reloads the workspace registry
+# without a restart, ADR-0008) and `explorer` (the standalone axum server binds a
+# `tokio::net::TcpListener` and runs on a small current-thread runtime).
+# `unsafe_code = "forbid"` rules out a raw signal handler, so use tokio's signal
+# support; `net` pulls tokio's I/O driver, which both the signal handling and the
+# TCP listener require. Declared here so this crate is self-contained, not reliant
+# on another crate's features. Pure Rust — no C/C++ toolchain.
+tokio = { version = "1", features = ["rt", "signal", "net", "time"], optional = true }
 # `explorer` only: the read-only `/v1/graph/*` JSON API router (axum 0.8). Pure
 # Rust — no llama.cpp, no `rto-serve` — so the explorer builds and tests without a
 # C/C++ toolchain.
@@ -48,11 +50,11 @@ http-body-util = "0.1"
 
 [features]
 mcp = ["rto-render/mcp", "dep:tokio"]
-# The interactive workspace explorer's read-only `/v1/graph/*` JSON API (PR 1/5),
-# off by default. Pure Rust: adds only axum, never `rto-serve`/llama.cpp, so it
-# builds and tests without a C/C++ toolchain. Merged onto `/v1` when combined with
-# `serve` (see `serve_v1_tail`).
-explorer = ["dep:axum"]
+# The interactive workspace explorer's read-only `/v1/graph/*` JSON API, off by
+# default. Pure Rust: adds only axum + tokio, never `rto-serve`/llama.cpp, so it
+# builds, serves (`roteiro explorer`), and tests without a C/C++ toolchain. Also
+# merged onto `/v1` when combined with `serve` (see `serve_v1_tail`).
+explorer = ["dep:axum", "dep:tokio"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]

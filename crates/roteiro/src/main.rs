@@ -7,12 +7,10 @@
 use clap::{Parser, Subcommand};
 
 mod config;
+// The read-only `/v1/graph/*` JSON API. Its runtime callers are `run_explorer`
+// (the llama-free standalone server) and `serve_v1_tail` (merged onto `/v1` in a
+// full `serve` build), so under `explorer` the router is always live.
 #[cfg(feature = "explorer")]
-// Without `serve` there is no runtime caller — the router is only merged into the
-// app in `serve_v1_tail` (gated on `serve`) and exercised by the module's tests —
-// so a `--features explorer` build without `serve` sees it as dead. That build is
-// exactly how the API is tested toolchain-free, so relax dead-code there only.
-#[cfg_attr(not(feature = "serve"), allow(dead_code))]
 mod graph_api;
 mod infer_links;
 mod init;
@@ -359,6 +357,30 @@ enum Command {
         #[arg(long, requires = "models")]
         mcp: bool,
     },
+    /// Serve the read-only graph explorer JSON API (`/v1/graph/*`) over HTTP,
+    /// **llama-free** (ADR-0008): axum only — no model, no MCP, no C/C++
+    /// toolchain. Multi-workspace aware — it builds a `WorkspaceSet` from config
+    /// (`[[workspaces]]` / `[standalone]`, else the current repo alone), lists it
+    /// at `GET /v1/graph/workspaces`, and serves each workspace's graph both under
+    /// `/v1/graph/workspaces/{ws}/…` and, for the default workspace, flat under
+    /// `/v1/graph/…`. Read-only: serves whatever each repo's graph currently holds
+    /// (run `roteiro sync` to refresh). The **Ask** tab and static UI are out of
+    /// scope; Ask needs the `serve` build's `/v1/chat/completions`, which this
+    /// server deliberately does not offer. Needs `--features explorer`.
+    #[cfg(feature = "explorer")]
+    Explorer {
+        /// Bind address (default `[serve] addr`, else `127.0.0.1:8017`). A
+        /// non-loopback address is warned about — the API has no auth, so front it
+        /// with a reverse proxy.
+        #[arg(long, value_name = "ADDR")]
+        addr: Option<String>,
+        /// The workspace the flat `/v1/graph/*` routes operate on. Default: the
+        /// sole configured workspace, else the one containing the current repo.
+        /// Nested `/v1/graph/workspaces/{ws}/…` routes always address a workspace
+        /// explicitly and ignore this.
+        #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
+        workspace_name: Option<String>,
+    },
 }
 
 /// `roteiro spec` actions (ADR-0004).
@@ -567,6 +589,11 @@ fn main() -> anyhow::Result<()> {
             &workspace,
             sync_on_access,
         ),
+        #[cfg(feature = "explorer")]
+        Command::Explorer {
+            addr,
+            workspace_name,
+        } => run_explorer(&cfg.effective, addr, workspace_name.as_deref()),
     }
 }
 
@@ -3269,6 +3296,121 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
         store.edge_count()?
     );
     Ok(())
+}
+
+/// Serve the read-only graph explorer JSON API over HTTP, **llama-free**
+/// (ADR-0008). Builds a [`rto_graph::WorkspaceSet`] from config and serves
+/// [`graph_api`]'s router directly on a small tokio runtime — axum only, no
+/// `rto-serve`, no model, no MCP, no C/C++ toolchain. No graph is (re)built here:
+/// it serves whatever each repo's store already holds (a read-only view;
+/// `roteiro sync` refreshes it). The **Ask** tab is deliberately absent — it
+/// needs the `serve` build's `/v1/chat/completions`, which this server does not
+/// offer.
+#[cfg(feature = "explorer")]
+fn run_explorer(
+    cfg: &config::Config,
+    addr: Option<String>,
+    workspace_name: Option<&str>,
+) -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    // Build the workspace set from config (ADR-0008). When no workspace is
+    // configured (the common single-repo case), fall back to hosting the current
+    // directory's repo alone, so `roteiro explorer` "just works" with no config.
+    let resolved = cfg.resolved_workspaces()?;
+    let set = if resolved.is_empty() {
+        explorer_cwd_set()?
+    } else {
+        rto_graph::WorkspaceSet::from_resolved(resolved)?
+    };
+    if set.names().is_empty() {
+        anyhow::bail!(
+            "no workspaces to serve — run inside a repo, or configure \
+             `[[workspaces]]` / `[standalone]` in roteiro.toml"
+        );
+    }
+    let set = Arc::new(set);
+
+    // The default workspace for the flat `/v1/graph/*` routes: an explicit
+    // `--workspace-name`, else the workspace containing the current repo. A lone
+    // configured workspace resolves itself, so `None` is fine there (see
+    // `WorkspaceSet::select`).
+    let default = explorer_default_workspace(&set, workspace_name);
+
+    // Address precedence: CLI flag > `[serve] addr` > default loopback.
+    let addr = addr
+        .or_else(|| cfg.serve.addr.clone())
+        .unwrap_or_else(|| "127.0.0.1:8017".to_owned());
+    let socket: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid explorer address `{addr}`: {e}"))?;
+    if !socket.ip().is_loopback() {
+        eprintln!(
+            "warning: binding a non-loopback address ({socket}) — the explorer API \
+             has no auth; front it with a reverse proxy"
+        );
+    }
+
+    let router = graph_api::router(set.clone(), default.clone());
+
+    // A small current-thread runtime is all the axum server needs; no rto-serve,
+    // no llama.cpp runtime. Blocks until shutdown.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(socket).await?;
+        let default_note = default
+            .as_deref()
+            .map_or_else(String::new, |d| format!(" (default workspace: {d})"));
+        eprintln!(
+            "roteiro explorer listening on http://{socket}/v1/graph — \
+             {} workspace(s): {}{default_note}",
+            set.names().len(),
+            set.names().join(", "),
+        );
+        axum::serve(listener, router)
+            .await
+            .map_err(anyhow::Error::from)
+    })
+}
+
+/// The single-repo fallback for `roteiro explorer`: host the current directory's
+/// repo as a lone standalone (`linked:false`) workspace, named after its
+/// working-tree directory. Its `graph.db` is opened on demand (read-only) — the
+/// explorer never builds a graph, so an unsynced repo simply reports "no graph"
+/// per project rather than being silently rebuilt.
+#[cfg(feature = "explorer")]
+fn explorer_cwd_set() -> anyhow::Result<rto_graph::WorkspaceSet> {
+    let cwd = std::env::current_dir()?;
+    let repo = rto_graph::Repo::discover(&cwd)?;
+    let workdir = repo.workdir().unwrap_or(&cwd);
+    let name = workdir
+        .file_name()
+        .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+    let ws = rto_graph::Workspace::from_repo_paths([workdir])?;
+    Ok(rto_graph::WorkspaceSet::from_workspaces([(
+        name, ws, false,
+    )]))
+}
+
+/// The default workspace the flat `/v1/graph/*` routes bind to: an explicit
+/// `--workspace-name` if given (validated per-request), else the workspace whose
+/// discovered members include the current repo's `graph.db`. `None` lets a
+/// single-workspace set resolve its sole workspace (and a multi-workspace set
+/// report "ambiguous" until a nested `/workspaces/{ws}/…` route is used).
+#[cfg(feature = "explorer")]
+fn explorer_default_workspace(
+    set: &rto_graph::WorkspaceSet,
+    workspace_name: Option<&str>,
+) -> Option<String> {
+    if let Some(name) = workspace_name {
+        return Some(name.to_owned());
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let repo = rto_graph::Repo::discover(&cwd).ok()?;
+    let db = repo.git_dir().join("roteiro").join("graph.db");
+    set.containing(&db).map(str::to_owned)
 }
 
 /// The parsed `serve` flags (from the clap `Command::Serve` arm), bundled so the
