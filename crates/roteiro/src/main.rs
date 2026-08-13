@@ -3796,6 +3796,11 @@ fn serve_v1_tail(
         ""
     };
 
+    // The served model ids, captured before the engine is moved into the router,
+    // so an explorer build can advertise them as the Ask capability (below).
+    #[cfg(feature = "explorer")]
+    let model_ids: Vec<String> = engine.models().into_iter().map(|m| m.id).collect();
+
     // Build the `/v1` model router, then merge any extra read-only/MCP surfaces
     // onto it — all sharing one port and one Workspace (ADR-0008). `/v1/graph` and
     // `/mcp` are just axum path prefixes, so the routers merge. Serving the router
@@ -3806,26 +3811,17 @@ fn serve_v1_tail(
         None => rto_serve::app(engine),
     };
 
-    // Read-only graph explorer JSON API (`/v1/graph/*`), merged exactly like the
-    // MCP router below — same Workspace, same port, no extra process. The graph
-    // API is multi-workspace-aware (ADR-0008), so wrap the one workspace this
-    // serve process holds into a single-entry `WorkspaceSet` (sharing the same
-    // store handles, not re-opening them); its flat `/v1/graph/*` routes resolve
-    // to that sole/default workspace, so serve behaviour is unchanged.
+    // With the explorer UI compiled in (`--features serve,explorer`), a full
+    // `serve --models` process is the single coherent way to run the whole
+    // explorer + Ask experience (ADR-0010): mount the read-only `/v1/graph/*` data
+    // API AND the static web app beside `/v1`, and advertise the chat endpoint the
+    // model router already exposes so the UI enables its Ask tab. The engine built
+    // above backs both `/v1/chat/completions` and the graph tools — nothing is
+    // duplicated; the pure `explorer` build never reaches here and keeps Ask off.
     #[cfg(feature = "explorer")]
-    let router = {
-        let set = rto_graph::WorkspaceSet::from_single(
-            "default",
-            workspace.clone(),
-            workspace.is_multi(),
-        );
-        router.merge(crate::graph_api::router(
-            std::sync::Arc::new(set),
-            Some("default".to_owned()),
-        ))
-    };
+    let router = mount_explorer_surfaces(router, &workspace, model_ids);
     #[cfg(feature = "explorer")]
-    let graph_note = " + /v1/graph";
+    let graph_note = " + /v1/graph + / (UI, Ask on)";
     #[cfg(not(feature = "explorer"))]
     let graph_note = "";
 
@@ -3857,6 +3853,36 @@ fn serve_v1_tail(
         Some((cert, key)) => rto_serve::serve_blocking_router_tls(router, socket, &cert, &key),
         None => rto_serve::serve_blocking_router(router, socket),
     }
+}
+
+/// Merge the explorer's read-only data API and its static web app onto a full
+/// `serve --models` router, advertising the mounted Ask (chat) endpoint. The
+/// graph API is multi-workspace-aware (ADR-0008), so wrap the one workspace this
+/// serve process holds into a single-entry `WorkspaceSet` (sharing the same store
+/// handles, not re-opening them); its flat `/v1/graph/*` routes resolve to that
+/// sole/default workspace, so serve behaviour is unchanged. `model_ids` are the
+/// served generative models, surfaced in `/v1/graph/capabilities` so the web app
+/// can name the model backing Ask. Factored out so the wiring is unit-testable
+/// with a mock engine (no llama.cpp).
+#[cfg(all(feature = "serve", feature = "explorer"))]
+fn mount_explorer_surfaces(
+    router: axum::Router,
+    workspace: &std::sync::Arc<rto_graph::Workspace>,
+    model_ids: Vec<String>,
+) -> axum::Router {
+    let set =
+        rto_graph::WorkspaceSet::from_single("default", workspace.clone(), workspace.is_multi());
+    let caps = crate::graph_api::Capabilities {
+        ask: true,
+        models: model_ids,
+    };
+    router
+        .merge(crate::graph_api::router_with_capabilities(
+            std::sync::Arc::new(set),
+            Some("default".to_owned()),
+            caps,
+        ))
+        .merge(crate::explorer_app::router())
 }
 
 /// Resolve a tool-call key against a `project`: a project-qualified key
@@ -4390,6 +4416,132 @@ mod url_tests {
         assert_eq!(
             source_blob_base("git@gitlab.com:o/r.git", "abc123"),
             Some("https://gitlab.com/o/r/-/blob/abc123".to_owned())
+        );
+    }
+}
+
+// The full explorer + Ask wiring a `serve --models` build stands up: the UI, the
+// `/v1/graph/capabilities` signal (ask:true + served models), and the graph-tools
+// chat route — all mounted by `mount_explorer_surfaces` over the one engine.
+// Gated on `serve,explorer` and driven with a mock engine (no llama.cpp, no
+// model download, no real inference — we prove the routing, not generation).
+#[cfg(all(test, feature = "serve", feature = "explorer"))]
+mod serve_explorer_wiring {
+    use super::{GraphToolRegistry, mount_explorer_surfaces};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _; // for `oneshot`
+
+    /// A stand-in [`rto_serve::Engine`] that serves one model and echoes a fixed
+    /// reply — enough to exercise the HTTP wiring without building llama.cpp.
+    struct MockEngine;
+
+    impl rto_serve::Engine for MockEngine {
+        fn models(&self) -> Vec<rto_serve::ModelInfo> {
+            vec![rto_serve::ModelInfo {
+                id: "qwen3-0.6b".to_owned(),
+            }]
+        }
+
+        fn chat_stream(
+            &self,
+            _req: &rto_serve::ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<rto_serve::CompletionStats, rto_serve::EngineError> {
+            on_token("a grounded answer");
+            Ok(rto_serve::CompletionStats {
+                prompt_tokens: 1,
+                completion_tokens: 3,
+                finish_reason: rto_serve::FinishReason::Stop,
+            })
+        }
+    }
+
+    /// The merged router exactly as `serve_v1_tail` assembles it for a
+    /// `serve,explorer` build: `/v1` model app (graph tools on) + `/v1/graph/*`
+    /// (capabilities ask:true) + the static web app.
+    fn serve_router() -> axum::Router {
+        let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(MockEngine);
+        let store = rto_graph::Store::open_in_memory().expect("in-memory store");
+        let workspace = std::sync::Arc::new(rto_graph::Workspace::single("repo", store));
+        let tools: std::sync::Arc<dyn rto_serve::ToolRegistry> =
+            std::sync::Arc::new(GraphToolRegistry::new(workspace.clone()));
+        let model_ids = engine.models().into_iter().map(|m| m.id).collect();
+        let base = rto_serve::app_with_tools(engine, tools);
+        mount_explorer_surfaces(base, &workspace, model_ids)
+    }
+
+    async fn get(uri: &str) -> (StatusCode, String, String) {
+        let resp = serve_router()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, ct, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn capabilities_report_ask_on_and_the_served_model() {
+        let (status, ct, body) = get("/v1/graph/capabilities").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.contains("application/json"), "content-type was {ct}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["ask"], true, "the serve build enables Ask");
+        assert_eq!(
+            json["models"],
+            serde_json::json!(["qwen3-0.6b"]),
+            "capabilities name the served model"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_explorer_ui_is_served_beside_the_model_endpoint() {
+        let (status, ct, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.starts_with("text/html"), "content-type was {ct}");
+        assert!(body.contains("<!doctype html>"));
+        assert!(body.contains("/app.js"), "the shell loads our app");
+    }
+
+    #[tokio::test]
+    async fn the_graph_grounded_chat_route_is_mounted() {
+        // Prove the project-scoped chat route the Ask tab posts to exists on this
+        // merged router: a well-formed request reaches the (mock) engine and gets
+        // a 200 completion — not a 404 that would mean the route is missing.
+        let body = serde_json::json!({
+            "model": "qwen3-0.6b",
+            "messages": [{ "role": "user", "content": "what is this repo?" }],
+            "stream": false,
+        });
+        let resp = serve_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repo/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the project-scoped chat route must be mounted and reachable"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["choices"][0]["message"]["content"], "a grounded answer",
+            "the mounted route returns the engine's completion"
         );
     }
 }

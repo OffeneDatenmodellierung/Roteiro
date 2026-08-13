@@ -882,6 +882,85 @@
         border-radius: 4px;
         border: 1px solid var(--pline);
       }
+      /* The enabled Ask tab (serve build): a question form over the model. */
+      .p-ask {
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+      }
+      .p-ask-form {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      .p-ask textarea {
+        width: 100%;
+        min-height: 4.5rem;
+        resize: vertical;
+        box-sizing: border-box;
+        padding: 0.5rem 0.6rem;
+        font: inherit;
+        color: var(--pfg);
+        background: var(--pbg);
+        border: 1px solid var(--pline-strong);
+        border-radius: 6px;
+      }
+      .p-ask textarea:focus {
+        outline: none;
+        border-color: var(--paccent);
+      }
+      .p-ask-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        justify-content: space-between;
+      }
+      .p-ask button.p-ask-send {
+        color: #fff;
+        background: var(--paccent);
+        border: 1px solid var(--paccent);
+        border-radius: 6px;
+        padding: 0.35rem 0.9rem;
+        font: inherit;
+        cursor: pointer;
+      }
+      .p-ask button.p-ask-send:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .p-ask-model {
+        color: var(--pmuted);
+        font-size: 0.8rem;
+      }
+      .p-ask-answer {
+        white-space: pre-wrap;
+        line-height: 1.45;
+        color: var(--pfg);
+        border-top: 1px solid var(--pline);
+        padding-top: 0.6rem;
+      }
+      .p-ask-answer a {
+        color: var(--paccent);
+        cursor: pointer;
+        text-decoration: none;
+        border-bottom: 1px dotted var(--paccent);
+      }
+      .p-ask-refs {
+        color: var(--pmuted);
+        font-size: 0.8rem;
+        margin-top: 0.5rem;
+      }
+      .p-ask-refs a {
+        color: var(--paccent);
+        cursor: pointer;
+      }
+      .p-ask code {
+        color: var(--pfg);
+        background: #0d1117;
+        padding: 0.05rem 0.3rem;
+        border-radius: 4px;
+        border: 1px solid var(--pline);
+      }
     </style>
   </head>
   <body>

@@ -58,7 +58,8 @@ use serde_json::{Value, json};
 use crate::overview;
 
 /// The router's shared state: the workspace set every handler resolves against,
-/// plus the default workspace for the flat (`/v1/graph/…`) routes.
+/// the default workspace for the flat (`/v1/graph/…`) routes, and the build-gated
+/// capabilities the web app reads at startup.
 #[derive(Clone)]
 struct AppState {
     /// The install's named workspaces (ADR-0008).
@@ -68,6 +69,41 @@ struct AppState {
     /// repo. `None` falls back to [`WorkspaceSet::select`]'s default (the sole
     /// workspace, else an "ambiguous" error steering the caller to name one).
     default: Option<String>,
+    /// What optional, build-gated surfaces this server exposes (chiefly the Ask
+    /// chat endpoint). Reported verbatim at `GET /v1/graph/capabilities`.
+    caps: Capabilities,
+}
+
+/// The optional, build-gated surfaces a running explorer server exposes, read by
+/// the web app **once at startup** (`GET /v1/graph/capabilities`) to enable or
+/// disable UI that depends on them — chiefly the **Ask** tab, which needs the
+/// `serve` build's graph-grounded chat endpoint (`/v1/chat/completions`).
+///
+/// The llama-free `roteiro explorer` build has no model engine, so it reports
+/// `ask:false` and the UI keeps the Ask tab disabled. A `serve`-backed run
+/// (`roteiro serve --models`, built with `--features serve,explorer`) mounts the
+/// chat endpoint alongside this API and reports `ask:true` plus the served model
+/// ids, so the UI enables Ask. This is the one capability signal the front end
+/// keys off — nothing about Ask is hard-coded client-side.
+#[derive(Clone, serde::Serialize)]
+pub struct Capabilities {
+    /// Whether the graph-grounded Ask (chat) endpoint is mounted on this server.
+    pub ask: bool,
+    /// The served generative model ids available to Ask (empty when `ask` is
+    /// false), so the UI can name the model and pick one to send.
+    pub models: Vec<String>,
+}
+
+impl Capabilities {
+    /// The llama-free explorer's capabilities: no chat endpoint is mounted, so
+    /// Ask is off and no models are served. This is what `router` reports.
+    #[must_use]
+    pub fn explorer_only() -> Self {
+        Self {
+            ask: false,
+            models: Vec::new(),
+        }
+    }
 }
 
 /// A handler result: a JSON [`Response`], or an [`ApiError`] rendered as one.
@@ -84,14 +120,38 @@ const DEFAULT_HOTSPOTS: usize = 20;
 /// unbounded subgraph.
 const MAX_DEPTH: usize = 5;
 
-/// Build the read-only `/v1/graph/*` router over a [`WorkspaceSet`].
+/// Build the read-only `/v1/graph/*` router over a [`WorkspaceSet`], reporting the
+/// llama-free capabilities ([`Capabilities::explorer_only`] — Ask off). This is
+/// what the standalone `roteiro explorer` server serves.
 ///
 /// `default` names the workspace the flat routes bind to (see [`AppState`]).
 /// Merge this into a larger app the same way the MCP router is merged, or serve
 /// it directly (the llama-free `roteiro explorer` server).
 pub fn router(set: Arc<WorkspaceSet>, default: Option<String>) -> Router {
-    let state = AppState { set, default };
+    build_router(set, default, Capabilities::explorer_only())
+}
+
+/// Like [`router`], but reporting explicit `caps` at `/v1/graph/capabilities` —
+/// used by a full `serve` build to advertise the mounted Ask (chat) endpoint
+/// (`ask:true` + served model ids) so the web app enables the Ask tab. Only the
+/// serve path calls it at runtime (the `graph_api` tests also exercise it), so it
+/// is dead code in the llama-free `explorer`-only binary.
+#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+pub fn router_with_capabilities(
+    set: Arc<WorkspaceSet>,
+    default: Option<String>,
+    caps: Capabilities,
+) -> Router {
+    build_router(set, default, caps)
+}
+
+/// Assemble the `/v1/graph/*` router over a fully-built [`AppState`]. Both public
+/// constructors funnel here; they differ only in the [`Capabilities`] reported.
+fn build_router(set: Arc<WorkspaceSet>, default: Option<String>, caps: Capabilities) -> Router {
+    let state = AppState { set, default, caps };
     Router::new()
+        // The build-gated feature signal the web app reads at startup.
+        .route("/v1/graph/capabilities", get(capabilities))
         // The set itself: every workspace, its linkage, and its projects.
         .route("/v1/graph/workspaces", get(workspaces))
         // Flat views over the default workspace (single-workspace / cwd default).
@@ -99,6 +159,13 @@ pub fn router(set: Arc<WorkspaceSet>, default: Option<String>) -> Router {
         // Nested, collision-safe views: the workspace is an explicit path segment.
         .merge(graph_routes("/v1/graph/workspaces/{ws}"))
         .with_state(state)
+}
+
+/// `GET /v1/graph/capabilities` — the build-gated surfaces this server exposes
+/// (see [`Capabilities`]). Static per process; the web app reads it once at
+/// startup to enable the Ask tab only when the chat endpoint is present.
+async fn capabilities(State(st): State<AppState>) -> Response {
+    Json(st.caps).into_response()
 }
 
 /// The per-workspace graph views, registered under `prefix`. Used twice — once
@@ -1200,6 +1267,44 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap()
         };
         (status, json)
+    }
+
+    // -- capability signal: what the web app enables -----------------------
+
+    #[tokio::test]
+    async fn capabilities_report_ask_off_for_the_llama_free_explorer() {
+        // The plain `router` (what `roteiro explorer` serves) has no chat
+        // endpoint, so it must advertise `ask:false` and no models — the signal
+        // that keeps the web app's Ask tab in its disabled state.
+        let (status, json) = get(multi_set(), None, "/v1/graph/capabilities").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ask"], false, "explorer build cannot Ask");
+        assert_eq!(json["models"], json!([]), "no model is served");
+    }
+
+    #[tokio::test]
+    async fn capabilities_report_ask_on_with_served_models() {
+        // A `serve` build merges this API onto its `/v1` app and reports
+        // `router_with_capabilities`, advertising the mounted chat endpoint and
+        // the served model ids so the web app enables Ask.
+        let caps = Capabilities {
+            ask: true,
+            models: vec!["qwen3-0.6b".to_owned()],
+        };
+        let resp = router_with_capabilities(Arc::new(multi_set()), None, caps)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/graph/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["ask"], true, "serve build can Ask");
+        assert_eq!(json["models"], json!(["qwen3-0.6b"]));
     }
 
     // -- multi-workspace: the set listing ---------------------------------

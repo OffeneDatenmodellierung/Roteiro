@@ -205,6 +205,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_js_wires_the_ask_tab_to_capabilities_and_chat() {
+        // The Ask tab is data-driven: the app reads `/v1/graph/capabilities` to
+        // decide whether to enable it, and — when enabled — posts to the
+        // project-scoped chat endpoint. Pin both so a rename on either side (the
+        // capability route or the chat route) is caught here.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "/v1/graph/capabilities",
+            "loadCapabilities",
+            "enableAskTab",
+            "/chat/completions",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+    }
+
+    #[tokio::test]
     async fn app_js_is_served_as_javascript() {
         let (status, ct, cache, body) = get("/app.js").await;
         assert_eq!(status, StatusCode::OK);
