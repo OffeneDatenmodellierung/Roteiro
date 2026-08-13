@@ -476,7 +476,7 @@ fn main() -> anyhow::Result<()> {
     // The registry lives behind the `models` feature; on a build without it a
     // configured path is inert, so we warn rather than silently ignore it.
     if let Some(dir) = cfg.effective.paths.model_store.as_deref() {
-        let dir = config::expand_tilde(dir);
+        let dir = config::expand_tilde(dir).into_owned();
         #[cfg(feature = "models")]
         rto_graph::set_model_store(dir);
         #[cfg(not(feature = "models"))]
@@ -3515,7 +3515,7 @@ fn collect_workspace_repo_paths(
         ))?);
     }
     for repo in ws_cfg.repos.iter().flatten() {
-        repo_paths.push(config::expand_tilde(repo));
+        repo_paths.push(config::expand_tilde(repo).into_owned());
     }
     Ok(repo_paths)
 }
