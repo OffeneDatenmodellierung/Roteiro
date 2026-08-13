@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.1.0...roteiro-v1.2.0) - 2026-08-13
+
+### Added
+
+- *(explorer)* llama-free graph server + /v1/graph/workspaces (multi-workspace)
+- *(config)* multi-workspace + standalone config and WorkspaceSet (links selector)
+- *(explorer)* read-only /v1/graph JSON API (PR 1/5 — data foundation)
+- *(models)* readable model list + Qwen3-Coder-30B-A3B registry entry
+
+### Fixed
+
+- *(explorer)* validate --workspace-name at startup; dedup graph.db path
+- *(explorer)* update serve-path graph_api call site to the new signature
+- *(config)* address PR #239 Copilot review (linked-name collisions, standalone invariant, deferred set build)
+- *(explorer)* address PR #237 review comments
+
+### Other
+
+- Potential fix for pull request finding
+
 ## [1.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.0.0...roteiro-v1.1.0) - 2026-08-13
 
 ### Added
