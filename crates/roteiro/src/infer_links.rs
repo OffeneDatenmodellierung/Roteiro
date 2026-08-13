@@ -270,6 +270,32 @@ mod tests {
     }
 
     #[test]
+    fn struct_derived_hub_keys_match_spoke_infra_keys() {
+        // The end-to-end shape of the new feature: a hub app defines config in a
+        // Rust struct, so its hub `config_key`s (here `zerobus.server_endpoint`,
+        // synthesized by extraction with no literal value) are matched by an infra
+        // repo's spoke keys — including a camelCase k8s spelling via canonicalization.
+        let hub = vec![
+            ck("zerobus.server_endpoint", ""),
+            ck("zerobus.workspace_url", ""),
+        ];
+        let spoke = vec![
+            ck("zerobus.serverEndpoint", "grpc://z:443"), // camelCase → canonical match
+            ck("zerobus.workspace_url", "https://w"),     // exact match
+        ];
+        let (m, orphans) = match_against_hub(&spoke, &hub);
+        assert!(orphans.is_empty(), "both link to struct keys: {orphans:?}");
+        assert_eq!(m.len(), 2);
+        assert_eq!(
+            m.iter()
+                .find(|k| k.spoke_key == "zerobus.serverEndpoint")
+                .unwrap()
+                .hub_key,
+            "zerobus.server_endpoint"
+        );
+    }
+
+    #[test]
     fn link_facts_builds_an_external_ref_and_inferred_edge_per_match() {
         let m = KeyMatch {
             spoke_key: "SERVE_ADDR".into(),

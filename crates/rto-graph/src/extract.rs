@@ -31,8 +31,12 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // 6 → 7 for YAML config keys + Dockerfile `image_ref` nodes (ADR-0009 derived
 // deploy-artifact extraction). Bumped 7 → 8 for struct `meta.fields` (the named
 // field list a struct declares) — the signal the config_key→struct follow bridge
-// joins on, so cached struct facts must be regenerated to carry it.
-pub(crate) const EXTRACT_VERSION: u32 = 8
+// joins on, so cached struct facts must be regenerated to carry it. Bumped 8 → 9
+// for struct `meta.field_types` / `meta.config_root` and the `config_key` nodes
+// synthesized from a `@rto:config`-marked config-root struct's declared fields
+// (see [`RustWalk::synthesize_config_keys`]), so cached facts regenerate to carry
+// these new nodes/meta.
+pub(crate) const EXTRACT_VERSION: u32 = 9
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "image-vision") {
@@ -934,6 +938,11 @@ fn rust_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> 
     for child in children {
         walk.visit(child, &[]);
     }
+    // Synthesize `config_key` nodes from any `@rto:config`-marked config-root struct
+    // (ADR-0009): a code-defined config becomes matchable dotted keys without a
+    // committed `*-example.toml` mirror. Runs after the walk so every struct in the
+    // file is available to resolve nested field types.
+    walk.synthesize_config_keys(root);
 
     // Deterministic ordering so the cached fact set is byte-stable regardless of
     // traversal incidentals.
@@ -952,6 +961,107 @@ fn rust_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> 
 struct Scope {
     seg: String,
     key: Option<String>,
+}
+
+/// One declared struct field: its name and the `type_identifier` tokens of its
+/// type (outermost first). See [`RustWalk::struct_fields`].
+struct FieldDef {
+    name: String,
+    type_idents: Vec<String>,
+}
+
+/// Single-value **transparent** wrappers whose inner type is the "real" field type
+/// for config purposes — a `zerobus: Option<ZerobusConfig>` still nests into
+/// `ZerobusConfig`. Peeled by [`core_type_name`] / [`recursion_target`].
+const TRANSPARENT_WRAPPERS: &[&str] = &[
+    "Option", "Box", "Arc", "Rc", "Cow", "RefCell", "Cell", "Mutex", "RwLock",
+];
+
+/// **Collection** wrappers: a `Vec<ItemConfig>` / `HashMap<_, _>` field serialises
+/// to an array/table keyed by *runtime* index/key, not by nested struct fields, so
+/// synthesis stops at the field itself (one leaf key) rather than inventing dotted
+/// paths under it. Detecting one anywhere in a field's type makes it a leaf.
+const COLLECTION_WRAPPERS: &[&str] = &[
+    "Vec", "VecDeque", "HashMap", "BTreeMap", "HashSet", "BTreeSet", "IndexMap",
+];
+
+/// The field's **core type name** for `meta.field_types`: the first type token that
+/// is not a [`TRANSPARENT_WRAPPERS`] wrapper (so `Option<ZerobusConfig>` →
+/// `ZerobusConfig`, `String` → `String`), or the outermost token if a wrapper is
+/// all there is. `None` for a type with no identifier (a bare reference, tuple, …).
+fn core_type_name(type_idents: &[String]) -> Option<String> {
+    type_idents
+        .iter()
+        .find(|t| !TRANSPARENT_WRAPPERS.contains(&t.as_str()))
+        .or_else(|| type_idents.first())
+        .cloned()
+}
+
+/// The struct name a field should **recurse into**, given the structs known in this
+/// file (`known`), or `None` when the field is a config leaf. A collection wrapper
+/// anywhere short-circuits to a leaf; transparent wrappers are peeled; the first
+/// remaining token nests only if it names a known struct.
+fn recursion_target<'a>(
+    type_idents: &'a [String],
+    known: &std::collections::BTreeMap<String, StructDef>,
+) -> Option<&'a str> {
+    for t in type_idents {
+        if COLLECTION_WRAPPERS.contains(&t.as_str()) {
+            return None;
+        }
+        if TRANSPARENT_WRAPPERS.contains(&t.as_str()) {
+            continue;
+        }
+        return known.contains_key(t).then_some(t.as_str());
+    }
+    None
+}
+
+/// A struct discovered in the file for config synthesis: its fields and whether it
+/// carries the `@rto:config` root marker.
+struct StructDef {
+    fields: Vec<FieldDef>,
+    is_root: bool,
+}
+
+/// Guard against a pathological or cyclic type graph producing unbounded keys.
+const MAX_CONFIG_DEPTH: usize = 16;
+
+/// Recursively expand a config struct into its dotted **leaf** keys. A field that
+/// resolves to another known struct ([`recursion_target`]) descends with the field
+/// name appended to `prefix`; every other field is a leaf recorded in `out`
+/// (first-writer wins, tagged with the originating `root` for provenance). `visited`
+/// tracks the current descent path so a cyclic type graph terminates (the cyclic
+/// field falls back to a leaf) rather than recursing forever.
+fn expand_config_keys(
+    table: &std::collections::BTreeMap<String, StructDef>,
+    struct_name: &str,
+    prefix: &str,
+    root: &str,
+    visited: &mut std::collections::BTreeSet<String>,
+    depth: usize,
+    out: &mut std::collections::BTreeMap<String, String>,
+) {
+    let Some(def) = table.get(struct_name) else {
+        return;
+    };
+    for f in &def.fields {
+        let key = if prefix.is_empty() {
+            f.name.clone()
+        } else {
+            format!("{prefix}.{}", f.name)
+        };
+        match recursion_target(&f.type_idents, table) {
+            Some(inner) if depth < MAX_CONFIG_DEPTH && !visited.contains(inner) => {
+                visited.insert(inner.to_owned());
+                expand_config_keys(table, inner, &key, root, visited, depth + 1, out);
+                visited.remove(inner);
+            }
+            _ => {
+                out.entry(key).or_insert_with(|| root.to_owned());
+            }
+        }
+    }
 }
 
 /// Accumulating state for a single Rust file walk.
@@ -1026,11 +1136,30 @@ impl RustWalk<'_> {
         // signal the config_key→struct follow bridge joins on (a dotted config key's
         // leaf, e.g. `serve.addr`'s `addr`, must be a real field of the matched
         // struct before we bridge to it). Tuple/unit structs have no named fields
-        // and add nothing; the key is omitted rather than emitted empty.
+        // and add nothing; the key is omitted rather than emitted empty. Alongside,
+        // `meta.field_types` maps each named field to its **core type name** (wrapper
+        // types like `Option`/`Box` peeled — see [`core_type_name`]) so a later,
+        // cross-file synthesizer can descend into nested config structs from the
+        // stored graph alone; `meta.config_root` marks a struct authored with the
+        // `@rto:config` signal as the root of a config tree (see
+        // [`RustWalk::synthesize_config_keys`]).
         if matches!(node.kind(), "struct_item" | "union_item") {
-            let fields = self.struct_field_names(node);
-            if !fields.is_empty() {
-                meta.insert("fields".into(), serde_json::Value::from(fields));
+            let defs = self.struct_fields(node);
+            if !defs.is_empty() {
+                let names: Vec<&str> = defs.iter().map(|f| f.name.as_str()).collect();
+                meta.insert("fields".into(), serde_json::Value::from(names));
+                let types: serde_json::Map<String, serde_json::Value> = defs
+                    .iter()
+                    .filter_map(|f| {
+                        core_type_name(&f.type_idents).map(|t| (f.name.clone(), t.into()))
+                    })
+                    .collect();
+                if !types.is_empty() {
+                    meta.insert("field_types".into(), serde_json::Value::Object(types));
+                }
+            }
+            if self.has_config_marker(node) {
+                meta.insert("config_root".into(), serde_json::Value::Bool(true));
             }
         }
 
@@ -1142,7 +1271,11 @@ impl RustWalk<'_> {
     /// `field_declaration_list`'s `field_declaration` names. Tuple structs use an
     /// ordered (positional) field list whose entries carry no `name`, so they
     /// contribute nothing; a unit struct has no field list at all.
-    fn struct_field_names(&self, node: tree_sitter::Node) -> Vec<String> {
+    /// The named fields a struct/union declares, each with its declared name and
+    /// the type-identifier tokens of its type (outermost first, e.g.
+    /// `Option<ZerobusConfig>` → `["Option", "ZerobusConfig"]`). Source order is
+    /// preserved. Tuple/unit structs contribute nothing.
+    fn struct_fields(&self, node: tree_sitter::Node) -> Vec<FieldDef> {
         let mut out = Vec::new();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -1152,12 +1285,66 @@ impl RustWalk<'_> {
                     if field.kind() == "field_declaration"
                         && let Some(name) = field.child_by_field_name("name")
                     {
-                        out.push(self.text(name).to_owned());
+                        let type_idents = field
+                            .child_by_field_name("type")
+                            .map(|t| self.type_idents(t))
+                            .unwrap_or_default();
+                        out.push(FieldDef {
+                            name: self.text(name).to_owned(),
+                            type_idents,
+                        });
                     }
                 }
             }
         }
         out
+    }
+
+    /// Every `type_identifier` token in a type subtree, outermost first — so a
+    /// generic like `Option<Vec<Inner>>` yields `["Option", "Vec", "Inner"]`. The
+    /// order lets [`core_type_name`] / [`recursion_target`] peel transparent
+    /// wrappers and stop at a collection.
+    fn type_idents(&self, ty: tree_sitter::Node) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_type_idents(ty, &mut out);
+        out
+    }
+
+    fn collect_type_idents(&self, node: tree_sitter::Node, out: &mut Vec<String>) {
+        // A named type (`ZerobusConfig`, `String`) or a primitive (`u32`, `bool`) —
+        // both are field-type tokens; primitives never name a struct, so they only
+        // ever resolve to a leaf, but they make `meta.field_types` complete.
+        if matches!(node.kind(), "type_identifier" | "primitive_type") {
+            out.push(self.text(node).to_owned());
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.collect_type_idents(child, out);
+        }
+    }
+
+    /// Whether an authored **`@rto:config`** marker immediately precedes `node` —
+    /// the explicit, opt-in signal that a struct is the root of a config tree
+    /// [`RustWalk::synthesize_config_keys`] may expand. Accepts the token in a
+    /// leading comment (`// @rto:config`, `/// @rto:config`) or attribute, scanning
+    /// past intervening attributes/comments exactly as [`doc_comment`] does; any
+    /// other node ends the run. Requiring an authored marker keeps synthesis
+    /// conservative — a struct is never guessed to be config.
+    fn has_config_marker(&self, node: tree_sitter::Node) -> bool {
+        const MARKER: &str = "@rto:config";
+        let mut prev = node.prev_sibling();
+        while let Some(n) = prev {
+            match n.kind() {
+                "line_comment" | "block_comment" | "attribute_item" => {
+                    if self.text(n).contains(MARKER) {
+                        return true;
+                    }
+                    prev = n.prev_sibling();
+                }
+                _ => break,
+            }
+        }
+        false
     }
 
     /// Recurse into the `declaration_list` / body of a definition.
@@ -1221,6 +1408,101 @@ impl RustWalk<'_> {
                 Some(qualify_callee(on_self.then_some("Self"), self.text(name)))
             }
             _ => None,
+        }
+    }
+
+    /// Synthesize `config_key` nodes from any **config-root** struct in this file —
+    /// a struct authored with the `@rto:config` marker (see [`has_config_marker`]).
+    /// Its declared fields are walked recursively, descending into nested
+    /// struct-typed fields (resolved by name against the other structs in *this
+    /// file*), and each config **leaf** becomes a `config_key` node keyed
+    /// `cfgkey:<path>#<dotted>` — so a code-defined config (`zerobus: ZerobusConfig`
+    /// with `server_endpoint: String`) yields `zerobus.server_endpoint` **without** a
+    /// committed `*-example.toml` mirror. The nodes carry `meta.source = "struct"`
+    /// (and `meta.struct = <root>`) so they stay distinguishable from file-derived
+    /// keys, while sharing the `config_key` kind so they flow through
+    /// `Store::config_keys` → `links --infer`/`--matrix`/the explorer unchanged.
+    ///
+    /// Deliberately conservative and additive: nothing is emitted unless a root is
+    /// explicitly marked. Field names are used verbatim as dotted segments; the
+    /// cross-convention matcher ([`crate::canonicalize_config_key`]) already bridges
+    /// a `snake_case` field to a `camelCase`/`kebab` infra key, so `serde`
+    /// `rename_all` conventions match without being parsed here.
+    ///
+    /// Known limits (documented, deferred): recursion resolves nested structs by
+    /// name **within this file only** (a config struct split across modules/files is
+    /// not descended — those leaves simply stay unsynthesized, as today); an explicit
+    /// `#[serde(rename = "...")]` to an unrelated spelling is not applied; and
+    /// collection-typed fields (`Vec`/`Map`) are one leaf, not indexed paths.
+    fn synthesize_config_keys(&mut self, root: tree_sitter::Node) {
+        let table = self.collect_struct_defs(root);
+        // key → the root struct name that produced it (first root wins; deterministic
+        // because `table` iterates roots by name).
+        let mut keys: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for (name, def) in &table {
+            if !def.is_root {
+                continue;
+            }
+            let mut visited = std::collections::BTreeSet::new();
+            visited.insert(name.clone());
+            expand_config_keys(&table, name, "", name, &mut visited, 0, &mut keys);
+        }
+        let file = file_key(self.path);
+        for (dotted, root_name) in keys {
+            let node_key = format!("cfgkey:{}#{dotted}", self.path);
+            let mut node = Node::new(
+                node_key.clone(),
+                NodeKind::Other(crate::config_keys::KIND.into()),
+                dotted.clone(),
+            );
+            node.path = Some(self.path.to_owned());
+            node.blob_hash = Some(self.blob_id.to_owned());
+            // No literal value in source; `source`/`struct` mark the provenance and
+            // keep these distinguishable from file-derived config keys.
+            node.meta = serde_json::json!({
+                "key": dotted,
+                "value": "",
+                "source": "struct",
+                "struct": root_name,
+            });
+            self.edges.push(Edge::derived(
+                file.clone(),
+                node_key.clone(),
+                EdgeKind::Contains,
+            ));
+            self.nodes.push(node);
+        }
+    }
+
+    /// Index every struct/union in the file by its **simple name** (first
+    /// declaration wins on a collision) for config synthesis — recording its fields,
+    /// its node key, and whether it is a `@rto:config` root.
+    fn collect_struct_defs(
+        &self,
+        root: tree_sitter::Node,
+    ) -> std::collections::BTreeMap<String, StructDef> {
+        let mut out = std::collections::BTreeMap::new();
+        self.collect_struct_defs_into(root, &mut out);
+        out
+    }
+
+    fn collect_struct_defs_into(
+        &self,
+        node: tree_sitter::Node,
+        out: &mut std::collections::BTreeMap<String, StructDef>,
+    ) {
+        if matches!(node.kind(), "struct_item" | "union_item")
+            && let Some(name) = self.field_text(node, "name")
+        {
+            out.entry(name.clone()).or_insert_with(|| StructDef {
+                fields: self.struct_fields(node),
+                is_root: self.has_config_marker(node),
+            });
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.collect_struct_defs_into(child, out);
         }
     }
 
@@ -2026,6 +2308,127 @@ mod inner {
         // Positional (tuple) and unit structs declare no named fields → no key.
         assert_eq!(fields("sym:rust:src/config.rs#Pair"), None);
         assert_eq!(fields("sym:rust:src/config.rs#Marker"), None);
+    }
+
+    #[test]
+    fn struct_records_field_types_and_config_root_marker() {
+        // Field types land in `meta.field_types` (transparent wrappers peeled), and
+        // the `@rto:config` marker sets `meta.config_root`.
+        let src = "// @rto:config\n\
+                   pub struct Config {\n\
+                   \x20   pub zerobus: ZerobusConfig,\n\
+                   \x20   pub replicas: Option<u32>,\n\
+                   }\n\
+                   pub struct ZerobusConfig {\n\
+                   \x20   pub server_endpoint: String,\n\
+                   }\n";
+        let fs = RustExtractor.extract("src/config.rs", "b", src.as_bytes());
+        let node = |key: &str| fs.nodes.iter().find(|n| n.key == key).expect("node");
+        let root = node("sym:rust:src/config.rs#Config");
+        assert_eq!(root.meta.get("config_root"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            root.meta.get("field_types"),
+            Some(&serde_json::json!({ "zerobus": "ZerobusConfig", "replicas": "u32" })),
+            "transparent wrappers peeled (Option<u32> → u32)"
+        );
+        // An unmarked struct carries no `config_root` flag.
+        assert_eq!(
+            node("sym:rust:src/config.rs#ZerobusConfig")
+                .meta
+                .get("config_root"),
+            None
+        );
+    }
+
+    #[test]
+    fn config_root_struct_synthesizes_recursive_dotted_config_keys() {
+        // A `@rto:config` root with a nested struct field yields dotted `config_key`
+        // nodes for its leaves — no committed `*-example.toml` needed. The nested
+        // field descends by name into a struct defined in the same file.
+        let src = "// @rto:config\n\
+                   pub struct Config {\n\
+                   \x20   pub zerobus: ZerobusConfig,\n\
+                   \x20   pub log_level: String,\n\
+                   }\n\
+                   pub struct ZerobusConfig {\n\
+                   \x20   pub server_endpoint: String,\n\
+                   \x20   pub workspace_url: String,\n\
+                   }\n";
+        let fs = RustExtractor.extract("src/config.rs", "b", src.as_bytes());
+        let cfg = |dotted: &str| {
+            fs.nodes
+                .iter()
+                .find(|n| n.key == format!("cfgkey:src/config.rs#{dotted}"))
+        };
+        for dotted in [
+            "zerobus.server_endpoint",
+            "zerobus.workspace_url",
+            "log_level",
+        ] {
+            let n = cfg(dotted).unwrap_or_else(|| panic!("missing {dotted}: {:?}", fs.nodes));
+            assert_eq!(n.kind, NodeKind::Other("config_key".into()));
+            assert_eq!(n.meta.get("key").and_then(|v| v.as_str()), Some(dotted));
+            // Provenance marks it struct-derived, distinguishable from file keys.
+            assert_eq!(
+                n.meta.get("source").and_then(|v| v.as_str()),
+                Some("struct")
+            );
+            assert_eq!(
+                n.meta.get("struct").and_then(|v| v.as_str()),
+                Some("Config")
+            );
+        }
+        // The nested struct's own container name is NOT a leaf (only leaves emit).
+        assert!(
+            cfg("zerobus").is_none(),
+            "intermediate section is not a leaf"
+        );
+        // A `contains` edge runs from the file node to each synthesized key.
+        assert!(fs.edges.iter().any(|e| e.src == "file:src/config.rs"
+            && e.dst == "cfgkey:src/config.rs#zerobus.server_endpoint"
+            && e.kind == EdgeKind::Contains));
+    }
+
+    #[test]
+    fn struct_without_config_marker_synthesizes_no_config_keys() {
+        // The safety property: an ordinary struct (no `@rto:config`) never produces
+        // synthetic config keys, so the feature is strictly opt-in and additive.
+        let src = "pub struct Config {\n\
+                   \x20   pub zerobus: ZerobusConfig,\n\
+                   }\n\
+                   pub struct ZerobusConfig {\n\
+                   \x20   pub server_endpoint: String,\n\
+                   }\n";
+        let fs = RustExtractor.extract("src/config.rs", "b", src.as_bytes());
+        assert!(
+            fs.nodes
+                .iter()
+                .all(|n| n.kind != NodeKind::Other("config_key".into())),
+            "no synthetic config_key nodes without the marker: {:?}",
+            fs.nodes
+        );
+    }
+
+    #[test]
+    fn config_root_recursion_terminates_on_a_type_cycle() {
+        // A self-referential config type must not loop forever: the cyclic field
+        // falls back to a leaf and synthesis terminates.
+        let src = "// @rto:config\n\
+                   pub struct Config {\n\
+                   \x20   pub addr: String,\n\
+                   \x20   pub next: Box<Config>,\n\
+                   }\n";
+        let fs = RustExtractor.extract("src/config.rs", "b", src.as_bytes());
+        let has = |dotted: &str| {
+            fs.nodes
+                .iter()
+                .any(|n| n.key == format!("cfgkey:src/config.rs#{dotted}"))
+        };
+        assert!(has("addr"));
+        // The descent path already holds `Config`, so the self-referential `next`
+        // field is a leaf rather than recursing — synthesis terminates.
+        assert!(has("next"), "cyclic field falls back to a leaf");
+        assert!(!has("next.addr"), "no unbounded expansion");
     }
 
     #[test]
