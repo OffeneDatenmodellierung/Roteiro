@@ -21,7 +21,7 @@ model matrix** (ADR-0003), a GGUF-arch-dispatching generative loader (Qwen2/Qwen
 and **streaming, checksum-verified model downloads** (so the 20 GiB tier is safe
 to pull). What each stage *deferred* is tracked in §5b; smaller non-blocking follow-ups in
 §5d. **Remaining core:** **Stage 14** (v1.0 hardening) has all its hardening items
-delivered — only the `v1.0.0` release tag is pending — while Stage 16 (commit-time
+delivered — the `v1.0.0` release has since shipped to crates.io (with `v1.1.0` following) — while Stage 16 (commit-time
 gate) and Stage 17 (CLI-first `roteiro review` + tool-agnostic AGENTS.md) are
 ✅ delivered. **Newly decided
 (post-Stage-12, via ADRs — §5c):** **Stage 18** configuration file
@@ -688,11 +688,11 @@ follow-ups noted under Stages 2/4 ("making `check` working-tree-aware pairs with
   Brand-new **untracked** files are now also overlaid by the working-tree
   `sync`/`check`/`review` via a gitignore-aware dirwalk (`Repo::untracked_files`).
 
-### Stage 14 — v1.0 hardening  → **v1.0.0** ✅ *hardening delivered (release tag pending)*
+### Stage 14 — v1.0 hardening  → **v1.0.0** ✅ *delivered and released — v1.0.0 on crates.io; v1.1.0 followed*
 **Goal:** the merged graph is the canonical source; ship stable (completes the
 [Stage 10](#stage-10--ci-canonical-artifacts--v010x-artifact-format-delivered) deferral).
-Every hardening item below is delivered in code; what remains is cutting the
-`v1.0.0` release tag (crates are still on `v0.0.x`).
+Every hardening item below is delivered in code, and the `v1.0.0` release has
+since been cut and published to crates.io (crates are now on `v1.1.0`).
 - **Language breadth — ✅ delivered (exceeds target).** Not just TS/JS and
   Python: a generic tree-sitter *tags* extractor covers **15 languages + SQL**
   (see the Stage 3 delivery note). Rust keeps its dedicated walker.
@@ -735,8 +735,7 @@ Every hardening item below is delivered in code; what remains is cutting the
   validates those links against the derived graph, failing on drift.
 - **DoD — met:** clean clone → `init` → hook fetches the CI artifact → `check`
   green, offline; docs/vault reproducible in CI; the Obsidian vault gives a useful
-  project overview; the `--json` schema is declared stable. Remaining before the
-  milestone is purely the `v1.0.0` version bump/release.
+  project overview; the `--json` schema is declared stable. The `v1.0.0` version bump/release has since shipped (crates now on `v1.1.0`).
 
 ### Stage 15 — Intent-debt tracking (TODOs, stubs, deferred work)  → **delivered** *(independent; low-risk)*
 **Goal:** deterministically detect, log, and track **intent debt** — the markers
@@ -1119,7 +1118,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ✅ prose + PDF + **image OCR/vision** ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) ingestion, semantic dedup (`roteiro duplicates`), dependency-aware context cache (`roteiro context`) |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ✅ ADR-0004; Tier 0 (`spec context`/`scaffold`) + Tier 1 (`spec draft`) — now **Qwen3** via a GGUF-arch-dispatching candle loader |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
-| v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ⛔ ships v1.0 |
+| v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ✅ shipped v1.0.0 (crates.io; v1.1.0 followed) |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
 | v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`/`[ingest]`, CLI>project>user>default |
