@@ -11,7 +11,7 @@ Every edge in the graph records **how it was produced**:
 
 | Provenance | Source | Nature |
 |---|---|---|
-| `derived` | tree-sitter AST extraction (15+ languages) | Deterministic — symbols, calls, imports |
+| `derived` | tree-sitter extraction (full symbol graph for Rust today; more languages rolling out via tree-sitter `tags`) | Deterministic — symbols, calls, imports |
 | `authored` | ADRs, blueprints, `// @rto:` annotations | Curated intent, drift-checked in CI |
 | `inferred` | Docs, PDFs, images, embeddings | Fuzzy suggestions with confidence scores |
 
