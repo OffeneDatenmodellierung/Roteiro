@@ -1407,6 +1407,7 @@ fn run_model_list() {
     // columns aligned regardless of a terminal's wide/ambiguous glyph handling.
     const MARK_INSTALLED: &str = "[installed]";
     const MARK_AVAILABLE: &str = "[available]";
+    const _: () = assert!(MARK_INSTALLED.len() == MARK_AVAILABLE.len());
 
     let host = Platform::host();
     println!(
