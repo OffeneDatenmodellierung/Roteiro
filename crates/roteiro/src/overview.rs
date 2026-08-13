@@ -18,6 +18,11 @@ use rto_graph::Provenance;
 pub struct MatchInput {
     /// The hub config key this override maps to.
     pub hub_key: String,
+    /// The source file the hub key was read from — the `<file>` component of the
+    /// hub `config_key` node's `cfgkey:<file>#<dotted>` id. Carried onto the [`Row`]
+    /// so a client (the explorer's "hide tooling config" toggle) and the CLI can
+    /// classify the row as app vs tooling config. Empty when the source is unknown.
+    pub file: String,
     /// The spoke's own key (its naming convention).
     pub spoke_key: String,
     /// The spoke's value for it.
@@ -64,6 +69,11 @@ pub struct Cell {
 pub struct Row {
     /// The hub config key.
     pub hub_key: String,
+    /// The source file the hub key was read from (the `<file>` in the hub
+    /// `config_key` node's `cfgkey:<file>#<dotted>` id) — the classifier input for
+    /// the "hide tooling config" filter (see [`MatchInput::file`]). Additive and
+    /// backward-compatible: older clients simply ignore it. Empty when unknown.
+    pub file: String,
     /// The hub's own value (the default the spokes override).
     pub hub_value: String,
     /// Overriding cell per spoke name (only spokes that override this key).
@@ -113,6 +123,7 @@ pub fn build(
             let differs = hub_value != m.spoke_value;
             let row = rows.entry(m.hub_key.clone()).or_insert_with(|| Row {
                 hub_key: m.hub_key.clone(),
+                file: m.file.clone(),
                 hub_value: hub_value.clone(),
                 cells: BTreeMap::new(),
             });
@@ -337,6 +348,7 @@ mod tests {
             matches: vec![
                 MatchInput {
                     hub_key: "serve.addr".to_owned(),
+                    file: "config.toml".to_owned(),
                     spoke_key: "SERVE_ADDR".to_owned(),
                     spoke_value: "0.0.0.0:8443".to_owned(), // differs → override
                     confidence: 0.9,
@@ -344,6 +356,7 @@ mod tests {
                 },
                 MatchInput {
                     hub_key: "serve.tools".to_owned(),
+                    file: "config.toml".to_owned(),
                     spoke_key: "SERVE_TOOLS".to_owned(),
                     spoke_value: "true".to_owned(), // same → redundant
                     confidence: 0.98,
@@ -380,6 +393,7 @@ mod tests {
         let hub_values = BTreeMap::from([("serve.addr".to_owned(), "127.0.0.1:8017".to_owned())]);
         let same = || MatchInput {
             hub_key: "serve.addr".to_owned(),
+            file: "config.toml".to_owned(),
             spoke_key: "serve.addr".to_owned(),
             spoke_value: "127.0.0.1:8017".to_owned(),
             confidence: 0.98,
@@ -387,6 +401,7 @@ mod tests {
         };
         let over = || MatchInput {
             hub_key: "serve.addr".to_owned(),
+            file: "config.toml".to_owned(),
             spoke_key: "SERVE_ADDR".to_owned(),
             spoke_value: "0.0.0.0:8443".to_owned(),
             confidence: 0.9,
@@ -427,6 +442,7 @@ mod tests {
                 matches: vec![
                     MatchInput {
                         hub_key: "serve.addr".to_owned(),
+                        file: "config.toml".to_owned(),
                         spoke_key: "SERVE_ADDR".to_owned(),
                         spoke_value: "0.0.0.0:8443".to_owned(),
                         confidence: 0.0, // authored links carry no score
@@ -434,6 +450,7 @@ mod tests {
                     },
                     MatchInput {
                         hub_key: "serve.tools".to_owned(),
+                        file: "config.toml".to_owned(),
                         spoke_key: "SERVE_TOOLS".to_owned(),
                         spoke_value: "false".to_owned(),
                         confidence: 0.9,
@@ -456,6 +473,58 @@ mod tests {
             .find(|r| r["hub_key"] == "serve.addr")
             .unwrap()["cells"]["deploy"];
         assert_eq!(addr_cell["provenance"], "authored");
+    }
+
+    #[test]
+    fn build_carries_the_hub_source_file_onto_each_row() {
+        // Each row records the file its hub key was read from, so a client (the
+        // explorer's "hide tooling config" toggle) and the CLI can classify the row
+        // as app vs tooling config. A `Cargo.toml`-sourced key rides through the
+        // build unchanged (the filter is opt-in — build never drops it) and its file
+        // serialises verbatim, ready for `is_tooling_config_path`.
+        let hub_values = BTreeMap::from([
+            ("serve.addr".to_owned(), "127.0.0.1:8017".to_owned()),
+            ("package.name".to_owned(), "roteiro".to_owned()),
+        ]);
+        let m = build(
+            "app",
+            &hub_values,
+            vec![SpokeInput {
+                name: "deploy".to_owned(),
+                matches: vec![
+                    MatchInput {
+                        hub_key: "serve.addr".to_owned(),
+                        file: "config.toml".to_owned(),
+                        spoke_key: "SERVE_ADDR".to_owned(),
+                        spoke_value: "0.0.0.0:8443".to_owned(),
+                        confidence: 0.9,
+                        provenance: Provenance::Inferred,
+                    },
+                    MatchInput {
+                        hub_key: "package.name".to_owned(),
+                        file: "Cargo.toml".to_owned(),
+                        spoke_key: "PACKAGE_NAME".to_owned(),
+                        spoke_value: "deploy".to_owned(),
+                        confidence: 0.9,
+                        provenance: Provenance::Inferred,
+                    },
+                ],
+                orphans: vec![],
+            }],
+        );
+        let app = m.rows.iter().find(|r| r.hub_key == "serve.addr").unwrap();
+        assert_eq!(app.file, "config.toml");
+        let tooling = m.rows.iter().find(|r| r.hub_key == "package.name").unwrap();
+        assert_eq!(tooling.file, "Cargo.toml");
+        // The per-row file serialises additively for the client/CLI to classify.
+        let json = serde_json::to_value(&m).unwrap();
+        let tooling_json = json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["hub_key"] == "package.name")
+            .unwrap();
+        assert_eq!(tooling_json["file"], "Cargo.toml");
     }
 
     #[test]

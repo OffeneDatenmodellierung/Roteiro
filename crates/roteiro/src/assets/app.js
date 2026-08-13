@@ -56,6 +56,7 @@
     projectWs: null, // the workspace that project belongs to
     pcy: null, // the project graph's cytoscape instance
     pGraph: null, // the last-loaded raw project graph (re-render on toggle change)
+    matrix: null, // the last-loaded override matrix (re-render on toggle change)
     hideToolingConfig: false, // opt-in filter: hide build/tooling config_key nodes
     pRendered: null, // `${ws}/${project}` currently rendered (guards reloads)
     searching: false, // a find-in-repo filter is active (suppresses hover trace)
@@ -178,6 +179,15 @@
     if (!node || node.kind !== "config_key") return false;
     const file = cfgkeyFile(node.key);
     return file != null && isToolingConfigPath(file);
+  }
+
+  // An override-MATRIX row whose hub key was read from a tooling/CI file — hidden
+  // when the toggle is on. Reuses the SAME classifier as the project-graph nodes,
+  // applied to the per-row `file` the matrix payload now carries (the hub key's
+  // source file). A row with no `file` (an older payload) is treated as app config,
+  // so nothing is hidden by mistake.
+  function isToolingConfigRow(row) {
+    return row != null && row.file != null && isToolingConfigPath(row.file);
   }
 
   // Persisted toggle state (default OFF — show everything). localStorage is
@@ -617,7 +627,15 @@
 
   function renderMatrix(matrix) {
     const host = $("#matrix");
-    const rows = matrix.rows || [];
+    // Opt-in "hide tooling config" filter: when on, drop override rows whose hub
+    // key was read from a build/tooling/CI file (Cargo.toml, .github/, …), reusing
+    // the SAME classifier the project-graph nodes use. Default off — show every row.
+    // Section grouping runs over the filtered rows below, so a section left empty by
+    // the filter never renders a header.
+    const allRows = matrix.rows || [];
+    const rows = state.hideToolingConfig
+      ? allRows.filter((r) => !isToolingConfigRow(r))
+      : allRows;
     const spokes = matrix.spokes || [];
     const drift = matrix.drift || [];
 
@@ -784,6 +802,9 @@
         getJson(wsPath(name, "topology")),
         getJson(wsPath(name, "matrix")),
       ]);
+      // Cache the matrix so the "hide tooling config" toggle can re-render it from
+      // memory (no refetch), exactly like the project graph.
+      state.matrix = matrix;
       renderTiles(topology, matrix);
       renderTopology(topology);
       renderMatrix(matrix);
@@ -2065,23 +2086,35 @@
     $("#p-fit").addEventListener("click", fitGraph);
     $("#p-search").addEventListener("input", (e) => onSearchInput(e.target.value));
 
-    // "Hide tooling config" toggle: opt-in, persisted, default OFF (shows all).
-    // Restore the saved state, reflect it in the checkbox, and on change re-render
-    // the current project graph from the cached raw graph (no refetch), re-applying
-    // any active find-in-repo filter so the toggle composes with search.
+    // "Hide tooling config" toggle: opt-in, persisted, default OFF (shows all). The
+    // same filter lives in two places — the project-graph controls (`#p-hide-tooling`)
+    // and the workspace/matrix panel (`#ws-hide-tooling`) — sharing one persisted
+    // state. Restore it, reflect it in both checkboxes, and on change re-render every
+    // affected view FROM CACHE (no refetch): the project graph (re-applying any active
+    // find-in-repo filter so the toggle composes with search) and the override matrix.
     const hideToggle = $("#p-hide-tooling");
+    const wsHideToggle = $("#ws-hide-tooling");
+    state.hideToolingConfig = loadHideTooling();
+    const applyHideTooling = (on) => {
+      state.hideToolingConfig = on;
+      saveHideTooling(on);
+      // Keep both toggles in lock-step so either view reflects the shared state.
+      if (hideToggle) hideToggle.checked = on;
+      if (wsHideToggle) wsHideToggle.checked = on;
+      if (state.pGraph) {
+        renderProjectGraph(state.pGraph);
+        const q = $("#p-search");
+        if (q && q.value) onSearchInput(q.value);
+      }
+      if (state.matrix) renderMatrix(state.matrix);
+    };
     if (hideToggle) {
-      state.hideToolingConfig = loadHideTooling();
       hideToggle.checked = state.hideToolingConfig;
-      hideToggle.addEventListener("change", (e) => {
-        state.hideToolingConfig = e.target.checked;
-        saveHideTooling(state.hideToolingConfig);
-        if (state.pGraph) {
-          renderProjectGraph(state.pGraph);
-          const q = $("#p-search");
-          if (q && q.value) onSearchInput(q.value);
-        }
-      });
+      hideToggle.addEventListener("change", (e) => applyHideTooling(e.target.checked));
+    }
+    if (wsHideToggle) {
+      wsHideToggle.checked = state.hideToolingConfig;
+      wsHideToggle.addEventListener("change", (e) => applyHideTooling(e.target.checked));
     }
 
     // ARIA tabs: click activates an enabled tab; arrow/Home/End keys move focus

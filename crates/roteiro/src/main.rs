@@ -3197,6 +3197,9 @@ fn run_links_matrix(
                     .iter()
                     .map(|m| overview::MatchInput {
                         hub_key: m.hub_key.clone(),
+                        // The hub key's source file, so the matrix row can be
+                        // classified as app vs tooling config (parity with the API).
+                        file: m.hub_file.clone(),
                         spoke_key: m.spoke_key.clone(),
                         spoke_value: vals
                             .get(&(m.spoke_file.as_str(), m.spoke_key.as_str()))

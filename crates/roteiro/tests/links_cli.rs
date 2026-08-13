@@ -951,6 +951,105 @@ fn matrix_renders_override_grid_and_drift_across_formats() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// The `--matrix` JSON carries each row's hub **source file**, and
+/// `roteiro links --matrix --app-config-only` drops a row whose hub key is sourced
+/// from a build/tooling file (`Cargo.toml`) — parity with the explorer's client-side
+/// "hide tooling config" toggle, which classifies rows by that same per-row file.
+#[test]
+fn matrix_carries_row_file_and_app_config_only_drops_tooling_rows() {
+    let base = std::env::temp_dir().join(format!("roteiro-matrix-tooling-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub defines an app-config key (config.toml#serve.addr) AND a tooling key
+    // (Cargo.toml#package.name).
+    std::fs::write(
+        app.join("config.toml"),
+        "[serve]\naddr = \"127.0.0.1:8017\"\n",
+    )
+    .expect("write");
+    std::fs::write(app.join("Cargo.toml"), "[package]\nname = \"app\"\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync failed");
+
+    // Spoke overrides both — the app key from its env, the tooling key from its own
+    // Cargo.toml — so `--app-config-only` drops the tooling override on BOTH sides
+    // (no row, no drift), leaving only the app-config override.
+    std::fs::write(deploy.join("prod.env"), "SERVE_ADDR=0.0.0.0:8443\n").expect("write");
+    std::fs::write(deploy.join("Cargo.toml"), "[package]\nname = \"deploy\"\n").expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(
+        roteiro(&deploy, &["sync"]).status.success(),
+        "deploy sync failed"
+    );
+
+    let base_s = base.to_str().unwrap();
+    let common = [
+        "links",
+        "--matrix",
+        "--hub",
+        "app",
+        "--workspace",
+        base_s,
+        "--json",
+    ];
+
+    // Default: both rows present, each carrying its hub source file.
+    let out = roteiro(&base, &common);
+    assert!(out.status.success(), "matrix --json failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let rows = v["rows"].as_array().expect("rows");
+    let addr = rows
+        .iter()
+        .find(|r| r["hub_key"] == "serve.addr")
+        .expect("serve.addr row");
+    assert_eq!(
+        addr["file"], "config.toml",
+        "app-config row carries its file"
+    );
+    let pkg = rows
+        .iter()
+        .find(|r| r["hub_key"] == "package.name")
+        .expect("package.name row shown by default");
+    assert_eq!(pkg["file"], "Cargo.toml", "tooling row carries its file");
+
+    // `--app-config-only`: the tooling-sourced row is dropped (and doesn't resurface
+    // as drift, since the spoke's override is tooling-sourced too); the app row stays.
+    let mut filtered = common.to_vec();
+    filtered.push("--app-config-only");
+    let out = roteiro(&base, &filtered);
+    assert!(
+        out.status.success(),
+        "matrix --app-config-only failed: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let rows = v["rows"].as_array().expect("rows");
+    assert!(
+        rows.iter().any(|r| r["hub_key"] == "serve.addr"),
+        "app-config row kept: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r["hub_key"] == "package.name"),
+        "tooling-sourced row dropped under --app-config-only: {rows:?}"
+    );
+    let drift = v["drift"].as_array().expect("drift");
+    assert!(
+        !drift
+            .iter()
+            .any(|d| d["key"] == "package.name" || d["key"] == "PACKAGE_NAME"),
+        "tooling override does not resurface as drift: {drift:?}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// `roteiro query --kind config_key --app-config-only` drops config keys sourced
 /// from build/tooling/CI files (here `Cargo.toml`) while keeping real app config
 /// (here `config/app.toml`). The DEFAULT (no flag) still lists everything — the

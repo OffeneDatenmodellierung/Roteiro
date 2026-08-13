@@ -760,6 +760,9 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                 // Resolves to its hub node → a real override cell, tagged with the
                 // link's real provenance (authored vs inferred).
                 Some(hub_node) => matches.push(overview::MatchInput {
+                    // The hub key's source file, so the client (the explorer's "hide
+                    // tooling config" toggle) and CLI can classify the row.
+                    file: cfgkey_file(&hub_node.key),
                     hub_key: hub_node.name,
                     spoke_key,
                     spoke_value,
@@ -900,6 +903,18 @@ fn config_by_node_key(store: &Store) -> Result<BTreeMap<String, (String, String)
         // extraction), so rebuild it from the file + dotted key.
         .map(|c| (format!("cfgkey:{}#{}", c.file, c.key), (c.key, c.value)))
         .collect())
+}
+
+/// The `<file>` component of a `cfgkey:<file>#<dotted>` config-key node key — the
+/// file its config setting was read from. Neither the path nor the dotted key
+/// contains `#`, so the first `#` splits them. Returns an empty string for a key
+/// that isn't a `cfgkey:` id (the caller treats "unknown file" as app config, so an
+/// opt-in tooling filter never hides it). Mirrors the explorer's JS `cfgkeyFile`.
+fn cfgkey_file(key: &str) -> String {
+    key.strip_prefix("cfgkey:")
+        .map(|rest| rest.split_once('#').map_or(rest, |(file, _)| file))
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Follow an external-ref to its hub node for the cross-repo views, mapping a
@@ -2182,6 +2197,72 @@ mod tests {
         let drift = json["drift"].as_array().unwrap();
         assert_eq!(drift.len(), 1);
         assert_eq!(drift[0]["key"], "EXTRA_FLAG");
+    }
+
+    #[tokio::test]
+    async fn matrix_rows_carry_the_hub_source_file_for_tooling_classification() {
+        // The explorer's "hide tooling config" toggle must be able to classify an
+        // override-matrix row as app vs tooling config — but a row is keyed by its
+        // dotted hub key alone, with no source file. This proves the payload now
+        // carries the hub key's source file per row: a hub with one app-config key
+        // (`config.toml`) and one tooling key (`Cargo.toml`), each overridden by a
+        // spoke. Both rows are present BY DEFAULT (the server never filters — the
+        // toggle is client-side), and each row's `file` classifies correctly.
+        let hub = {
+            let store = Store::open_in_memory().expect("hub store");
+            let facts = FactSet::new()
+                .with_node(cfg_node("config.toml", "serve.addr", "127.0.0.1:8017"))
+                .with_node(cfg_node("Cargo.toml", "package.name", "roteiro"));
+            apply(store, &facts)
+        };
+        let spoke = {
+            let store = Store::open_in_memory().expect("spoke store");
+            let app_target = format!("{HUB}::cfgkey:config.toml#serve.addr");
+            let tooling_target = format!("{HUB}::cfgkey:Cargo.toml#package.name");
+            let facts = FactSet::new()
+                .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+                .with_node(cfg_node("deploy.env", "PACKAGE_NAME", "deploy"))
+                .with_node(external_ref_node(&app_target))
+                .with_node(external_ref_node(&tooling_target))
+                .with_edge(Edge::inferred(
+                    "cfgkey:deploy.env#SERVE_ADDR",
+                    external_ref_key(&app_target),
+                    EdgeKind::References,
+                    0.9,
+                ))
+                .with_edge(Edge::inferred(
+                    "cfgkey:deploy.env#PACKAGE_NAME",
+                    external_ref_key(&tooling_target),
+                    EdgeKind::References,
+                    0.9,
+                ));
+            apply(store, &facts)
+        };
+        let ws = Workspace::from_stores([(HUB.to_owned(), hub), (SPOKE.to_owned(), spoke)]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/matrix").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["hub"], HUB);
+
+        let rows = json["rows"].as_array().unwrap();
+        // Both the app-config and the tooling-sourced hub key are shown by default.
+        let app_row = rows.iter().find(|r| r["hub_key"] == "serve.addr").unwrap();
+        let tooling_row = rows
+            .iter()
+            .find(|r| r["hub_key"] == "package.name")
+            .unwrap();
+
+        // Every row now carries its hub key's source file.
+        assert_eq!(app_row["file"], "config.toml");
+        assert_eq!(tooling_row["file"], "Cargo.toml");
+
+        // And that file classifies exactly as the shared tooling classifier does, so
+        // the client (and CLI) can hide the tooling row when the filter is on.
+        assert!(!rto_graph::is_tooling_config_path(
+            app_row["file"].as_str().unwrap()
+        ));
+        assert!(rto_graph::is_tooling_config_path(
+            tooling_row["file"].as_str().unwrap()
+        ));
     }
 
     #[tokio::test]
