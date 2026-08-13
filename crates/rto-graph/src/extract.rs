@@ -29,8 +29,10 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // Bumped 5 → 6 for config-key nodes (ADR-0009): config files now emit
 // `config_key` nodes, so cached extraction facts must be regenerated. Bumped
 // 6 → 7 for YAML config keys + Dockerfile `image_ref` nodes (ADR-0009 derived
-// deploy-artifact extraction).
-pub(crate) const EXTRACT_VERSION: u32 = 7
+// deploy-artifact extraction). Bumped 7 → 8 for struct `meta.fields` (the named
+// field list a struct declares) — the signal the config_key→struct follow bridge
+// joins on, so cached struct facts must be regenerated to carry it.
+pub(crate) const EXTRACT_VERSION: u32 = 8
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "image-vision") {
@@ -1020,6 +1022,17 @@ impl RustWalk<'_> {
         if let Some(doc) = self.doc_comment(node) {
             meta.insert("content".into(), serde_json::Value::from(doc));
         }
+        // A struct/union records its NAMED field identifiers in `meta.fields` — the
+        // signal the config_key→struct follow bridge joins on (a dotted config key's
+        // leaf, e.g. `serve.addr`'s `addr`, must be a real field of the matched
+        // struct before we bridge to it). Tuple/unit structs have no named fields
+        // and add nothing; the key is omitted rather than emitted empty.
+        if matches!(node.kind(), "struct_item" | "union_item") {
+            let fields = self.struct_field_names(node);
+            if !fields.is_empty() {
+                meta.insert("fields".into(), serde_json::Value::from(fields));
+            }
+        }
 
         self.nodes.push(Node {
             key: key.clone(),
@@ -1123,6 +1136,28 @@ impl RustWalk<'_> {
                 EdgeKind::Defines,
             ));
         }
+    }
+
+    /// The NAMED field identifiers a struct/union declares, in source order — its
+    /// `field_declaration_list`'s `field_declaration` names. Tuple structs use an
+    /// ordered (positional) field list whose entries carry no `name`, so they
+    /// contribute nothing; a unit struct has no field list at all.
+    fn struct_field_names(&self, node: tree_sitter::Node) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "field_declaration_list" {
+                let mut inner = child.walk();
+                for field in child.named_children(&mut inner) {
+                    if field.kind() == "field_declaration"
+                        && let Some(name) = field.child_by_field_name("name")
+                    {
+                        out.push(self.text(name).to_owned());
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Recurse into the `declaration_list` / body of a definition.
@@ -1964,6 +1999,33 @@ mod inner {
         assert!(fs.edges.iter().any(|e| e.kind == EdgeKind::Imports
             && e.src == "file:src/lib.rs"
             && e.dst == "import:rust:std::path::Path"));
+    }
+
+    #[test]
+    fn rust_extractor_records_struct_field_names() {
+        // A struct with named fields records them in `meta.fields` (the follow
+        // bridge's join signal); a tuple struct and a unit struct carry none.
+        let src = "pub struct ServeConfig {\n\
+                   \x20   pub addr: Option<String>,\n\
+                   \x20   pub tls_cert: Option<String>,\n\
+                   }\n\
+                   pub struct Pair(u8, u8);\n\
+                   pub struct Marker;\n";
+        let fs = RustExtractor.extract("src/config.rs", "b", src.as_bytes());
+        let fields = |key: &str| {
+            fs.nodes
+                .iter()
+                .find(|n| n.key == key)
+                .and_then(|n| n.meta.get("fields").cloned())
+        };
+        assert_eq!(
+            fields("sym:rust:src/config.rs#ServeConfig"),
+            Some(serde_json::json!(["addr", "tls_cert"])),
+            "named fields captured in source order"
+        );
+        // Positional (tuple) and unit structs declare no named fields → no key.
+        assert_eq!(fields("sym:rust:src/config.rs#Pair"), None);
+        assert_eq!(fields("sym:rust:src/config.rs#Marker"), None);
     }
 
     #[test]

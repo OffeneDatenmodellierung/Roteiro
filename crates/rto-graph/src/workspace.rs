@@ -421,6 +421,57 @@ impl Workspace {
         }
     }
 
+    /// Follow a **project-qualified** cross-repo target to the most specific
+    /// *definition* it names — the follow-the-link hop that turns a click on a
+    /// spoke's app-key target into a jump to the hub node that defines it.
+    ///
+    /// [`Workspace::resolve_qualified`] lands on the raw hub node a spoke points
+    /// at, which for a config override is the hub's `config_key` node (e.g.
+    /// `cfgkey:config.toml#serve.addr`), *not* the Rust struct that declares the
+    /// setting. This method adds the net-new **`config_key` → struct bridge**: when
+    /// the resolved node is a config key whose dotted path maps — with confidence —
+    /// to exactly one hub struct and one of its named fields, it returns that
+    /// struct as the jump target ([`Follow::StructField`], carrying the matched
+    /// field name). Otherwise it returns the resolved node unchanged
+    /// ([`Follow::Node`]) — a config key we could not bridge, or any non-config
+    /// target (e.g. an authored `[[links]]` that already points at a symbol). A
+    /// well-formed target whose node is gone is [`Follow::Drift`].
+    ///
+    /// The bridge is deliberately conservative (see [`bridge_config_key`]): it
+    /// fires only on a *unique* match of both an independent section→struct-name
+    /// signal and a field-presence signal, so it never jumps to a **wrong** node —
+    /// an ambiguous or unmatched key falls back to the config-key node.
+    ///
+    /// # Errors
+    /// As [`Workspace::resolve_qualified`] (a well-formed but unhosted / unsynced
+    /// target project still errors; a resolved-but-missing node is `Drift`).
+    pub fn follow_definition(&self, qualified: &str) -> Result<Follow, WorkspaceError> {
+        let (project, key) =
+            parse_qualified(qualified).ok_or_else(|| WorkspaceError::Unqualified {
+                key: qualified.to_owned(),
+            })?;
+        let key = key.to_owned();
+        self.with_store(Some(project), move |store| -> Result<Follow, StoreError> {
+            let Some(node) = store.get_node(&key)? else {
+                return Ok(Follow::Drift);
+            };
+            // Only a config-key node needs bridging; anything else the spoke points
+            // at is already a definition-level target.
+            if node.kind == crate::NodeKind::Other(crate::config_keys::KIND.to_owned()) {
+                match bridge_config_key(store, &node)? {
+                    Some((target, field)) => Ok(Follow::StructField {
+                        node: target,
+                        field,
+                    }),
+                    None => Ok(Follow::Node { node }),
+                }
+            } else {
+                Ok(Follow::Node { node })
+            }
+        })?
+        .map_err(WorkspaceError::from)
+    }
+
     /// Lock the inner state, mapping a poisoned lock to [`WorkspaceError::Poisoned`].
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, WorkspaceError> {
         self.inner.lock().map_err(|_| WorkspaceError::Poisoned)
@@ -513,6 +564,124 @@ fn keys(projects: &BTreeMap<String, Source>) -> String {
 pub fn parse_qualified(key: &str) -> Option<(&str, &str)> {
     key.split_once("::")
         .filter(|(project, bare)| !project.is_empty() && !bare.is_empty())
+}
+
+/// The outcome of [`Workspace::follow_definition`]: where a cross-repo follow-hop
+/// lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Follow {
+    /// Bridged past a `config_key` node to the hub **struct** that declares the
+    /// setting, carrying the specific named field that matched (e.g. the
+    /// `ServeConfig` struct for `serve.addr`, `field = "addr"`). The `node` is the
+    /// real struct node, so a caller can center it in the hub graph.
+    StructField {
+        /// The defining struct node (`sym:rust:<file>#<Struct>`).
+        node: Node,
+        /// The struct field the dotted key resolved to (its declared identifier).
+        field: String,
+    },
+    /// The resolved target node itself, unbridged — a `config_key` we could not map
+    /// to a struct with confidence (the safe fallback), or any non-config target a
+    /// spoke points straight at.
+    Node {
+        /// The resolved hub node.
+        node: Node,
+    },
+    /// The target is well-formed but its node is gone — cross-repo drift.
+    Drift,
+}
+
+/// Bridge a hub **`config_key`** node to the Rust **struct** that declares it, plus
+/// the specific field matched — the net-new step behind [`Workspace::follow_definition`].
+///
+/// The mapping from a dotted config key (`serve.addr`) to a defining Rust field is
+/// not recorded anywhere in the graph (the extractor models structs as nodes but
+/// not their fields as nodes, and a field's *type* is not captured), so this is a
+/// **resolve-time join** over two independent, deterministic signals — and it only
+/// bridges when they agree on exactly one struct:
+///
+/// 1. **section → struct name.** The dotted key's head segment (`serve`) must name
+///    the struct: its lower-cased name, with a trailing `Config` stripped, equals
+///    the section (`ServeConfig` → `serve`; a bare `Serve` also matches). See
+///    [`struct_matches_section`].
+/// 2. **field presence.** The struct must actually declare a field whose
+///    normalised name equals the key's leaf (`addr`, or `tls_cert` for
+///    `serve.tls_cert`) — read from the struct's `meta.fields`. See
+///    [`struct_field_matching`].
+///
+/// Requiring a **unique** `(struct, field)` hit is the correctness rule: a key that
+/// matches zero structs (no such section, or the field isn't declared) or more than
+/// one (genuinely ambiguous) returns `None`, and the caller falls back to the
+/// config-key node rather than risk jumping to a wrong definition.
+///
+/// Known limits (documented, deliberate): a single-segment key (no section, e.g.
+/// `port`) is never bridged; a key nested past one level (`serve.tls.cert` where
+/// `tls` is a sub-struct) won't match a flat field and falls back; and a struct
+/// whose name doesn't follow the `<Section>Config` convention won't be found. All
+/// three degrade to the existing config-key target — never to a wrong one.
+fn bridge_config_key(store: &Store, cfg_node: &Node) -> Result<Option<(Node, String)>, StoreError> {
+    // The dotted key: authoritative from `meta.key`, falling back to the node name
+    // (both are the dotted path in practice — see config-key extraction).
+    let dotted = cfg_node
+        .meta
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(cfg_node.name.as_str());
+    let Some((section, leaf)) = split_section_field(dotted) else {
+        return Ok(None);
+    };
+    let leaf_norm = crate::config_keys::normalize(leaf);
+    if leaf_norm.is_empty() {
+        return Ok(None);
+    }
+
+    let mut hits = store
+        .nodes_by_kind(&crate::NodeKind::Struct)?
+        .into_iter()
+        .filter(|s| struct_matches_section(&s.name, section))
+        .filter_map(|s| struct_field_matching(&s, &leaf_norm).map(|field| (s, field)));
+
+    match (hits.next(), hits.next()) {
+        // Exactly one confident match → bridge to it.
+        (Some(one), None) => Ok(Some(one)),
+        // Zero or ambiguous (>1) → fall back to the config-key node.
+        _ => Ok(None),
+    }
+}
+
+/// Split a dotted config key into `(section, leaf)` on its **first** separator:
+/// `serve.addr` → `("serve", "addr")`, `serve.tls_cert` → `("serve", "tls_cert")`.
+/// A single-segment key (`port`) has no section to identify a struct by, so it is
+/// `None` (never bridged).
+fn split_section_field(dotted: &str) -> Option<(&str, &str)> {
+    dotted
+        .split_once('.')
+        .filter(|(section, leaf)| !section.is_empty() && !leaf.is_empty())
+}
+
+/// Whether a struct `name` is the one a config `section` maps to: its lower-cased
+/// name with a trailing `config` stripped equals the section (case- and
+/// separator-insensitive). `ServeConfig`/`Serve` both match section `serve`;
+/// `ServeSettings` does not (so an unrelated struct is never bridged to).
+fn struct_matches_section(name: &str, section: &str) -> bool {
+    let lname = name.to_ascii_lowercase();
+    let base = lname.strip_suffix("config").unwrap_or(&lname);
+    let want = crate::config_keys::normalize(section).replace('.', "");
+    !want.is_empty() && base == want
+}
+
+/// The struct field whose normalised identifier equals `leaf_norm`, read from the
+/// struct node's `meta.fields` (see extraction). Returns the field's original
+/// declared name (for display), or `None` when the struct declares no such field.
+fn struct_field_matching(struct_node: &Node, leaf_norm: &str) -> Option<String> {
+    struct_node
+        .meta
+        .get("fields")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|field| crate::config_keys::normalize(field) == leaf_norm)
+        .map(ToOwned::to_owned)
 }
 
 /// Discover repos at `paths` into a `(name → Source, default)` registry: each
@@ -948,6 +1117,147 @@ mod tests {
         // A plain (non-external-ref) node is simply not followed.
         let plain = Node::new("file:cfg.rs", NodeKind::File, "cfg.rs");
         assert!(ws.follow_external_ref(&plain).unwrap().is_none());
+    }
+
+    // -- follow-the-link hop: config_key → struct bridge ------------------
+
+    /// A config-key node as extraction emits it: key `cfgkey:<file>#<dotted>`,
+    /// name the dotted key, `meta { key, value }`.
+    fn cfg_node(dotted: &str) -> crate::model::Node {
+        use crate::model::{Node, NodeKind};
+        let mut n = Node::new(
+            format!("cfgkey:config.toml#{dotted}"),
+            NodeKind::Other("config_key".to_owned()),
+            dotted,
+        );
+        n.meta = serde_json::json!({ "key": dotted, "value": "x" });
+        n
+    }
+
+    /// A struct node as extraction emits it, carrying its declared field names in
+    /// `meta.fields` (the bridge's join signal).
+    fn struct_node(name: &str, fields: &[&str]) -> crate::model::Node {
+        use crate::model::{Node, NodeKind};
+        let mut n = Node::new(format!("sym:rust:config.rs#{name}"), NodeKind::Struct, name);
+        n.meta = serde_json::json!({ "fields": fields });
+        n
+    }
+
+    /// Build a hub with a `ServeConfig`/`addr` struct field AND its `serve.addr`
+    /// config key — plus decoys — so the bridge's confidence rules are exercised.
+    fn bridge_hub() -> Workspace {
+        use crate::model::FactSet;
+        let mut s = store();
+        s.apply_factset(
+            &FactSet::new()
+                .with_node(struct_node("ServeConfig", &["addr", "tools", "tls_cert"]))
+                .with_node(struct_node("ModelsConfig", &["embedding", "generative"]))
+                .with_node(cfg_node("serve.addr"))
+                .with_node(cfg_node("serve.tls_cert"))
+                .with_node(cfg_node("serve.ghost")) // resolves, but no such field
+                .with_node(cfg_node("mystery.addr")) // no struct for section `mystery`
+                .with_node(cfg_node("port")), // single-segment: no section
+        )
+        .unwrap();
+        Workspace::single("hub", s)
+    }
+
+    #[test]
+    fn follow_bridges_config_key_to_its_defining_struct_field() {
+        let ws = bridge_hub();
+        // `serve.addr` bridges to the `ServeConfig` struct, field `addr`.
+        match ws
+            .follow_definition("hub::cfgkey:config.toml#serve.addr")
+            .unwrap()
+        {
+            Follow::StructField { node, field } => {
+                assert_eq!(node.key, "sym:rust:config.rs#ServeConfig");
+                assert_eq!(field, "addr");
+            }
+            other => panic!("expected a struct-field bridge, got {other:?}"),
+        }
+        // Separator-insensitive on the leaf: `serve.tls_cert` → field `tls_cert`.
+        match ws
+            .follow_definition("hub::cfgkey:config.toml#serve.tls_cert")
+            .unwrap()
+        {
+            Follow::StructField { node, field } => {
+                assert_eq!(node.key, "sym:rust:config.rs#ServeConfig");
+                assert_eq!(field, "tls_cert");
+            }
+            other => panic!("expected a struct-field bridge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn follow_falls_back_to_config_key_when_not_confidently_bridgeable() {
+        let ws = bridge_hub();
+        // Section matches a struct, but the struct has no such field → fall back.
+        let ghost = ws
+            .follow_definition("hub::cfgkey:config.toml#serve.ghost")
+            .unwrap();
+        assert!(
+            matches!(&ghost, Follow::Node { node } if node.name == "serve.ghost"),
+            "unmatched field falls back to the config_key node, got {ghost:?}"
+        );
+        // No struct maps to section `mystery` → fall back.
+        let mystery = ws
+            .follow_definition("hub::cfgkey:config.toml#mystery.addr")
+            .unwrap();
+        assert!(matches!(&mystery, Follow::Node { node } if node.name == "mystery.addr"));
+        // A single-segment key names no section → never bridged.
+        let port = ws
+            .follow_definition("hub::cfgkey:config.toml#port")
+            .unwrap();
+        assert!(matches!(&port, Follow::Node { node } if node.name == "port"));
+    }
+
+    #[test]
+    fn follow_does_not_bridge_on_ambiguity() {
+        use crate::model::FactSet;
+        // TWO structs both map to section `serve` and both declare `addr` — a
+        // genuinely ambiguous mapping must fall back, never guess a wrong node.
+        let mut s = store();
+        s.apply_factset(
+            &FactSet::new()
+                .with_node(struct_node("ServeConfig", &["addr"]))
+                .with_node(struct_node("Serve", &["addr"])) // also matches `serve`
+                .with_node(cfg_node("serve.addr")),
+        )
+        .unwrap();
+        let ws = Workspace::single("hub", s);
+        let out = ws
+            .follow_definition("hub::cfgkey:config.toml#serve.addr")
+            .unwrap();
+        assert!(
+            matches!(&out, Follow::Node { node } if node.name == "serve.addr"),
+            "ambiguous (two matching structs) falls back, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn follow_reports_drift_and_passes_through_non_config_targets() {
+        use crate::model::{FactSet, Node, NodeKind};
+        let mut s = store();
+        s.apply_factset(&FactSet::new().with_node(Node::new(
+            "sym:rust:a.rs#Thing",
+            NodeKind::Struct,
+            "Thing",
+        )))
+        .unwrap();
+        let ws = Workspace::single("hub", s);
+        // A well-formed target whose node is gone → drift.
+        assert_eq!(
+            ws.follow_definition("hub::cfgkey:config.toml#gone")
+                .unwrap(),
+            Follow::Drift
+        );
+        // A spoke pointing straight at a symbol (an authored link, not a config
+        // key) passes the node through unbridged.
+        match ws.follow_definition("hub::sym:rust:a.rs#Thing").unwrap() {
+            Follow::Node { node } => assert_eq!(node.key, "sym:rust:a.rs#Thing"),
+            other => panic!("expected pass-through, got {other:?}"),
+        }
     }
 
     #[test]
