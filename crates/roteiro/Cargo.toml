@@ -38,6 +38,14 @@ toml = "1.1"
 # `inference-local-models` only: consent-gated model download (rustls, no
 # platform TLS). Blocking + pure-Rust.
 ureq = { version = "3", optional = true }
+# Restore the default SIGPIPE disposition (`SIG_DFL`) at startup so the CLI dies
+# quietly on a closed stdout pipe (`roteiro query … | head`) instead of panicking
+# with a broken-pipe backtrace — the classic Rust-CLI footgun (Rust sets SIGPIPE
+# to `SIG_IGN`, so `println!` hits EPIPE and panics). We forbid `unsafe_code`
+# workspace-wide, which rules out a raw `libc::signal` call here, so we lean on
+# this tiny, contained wrapper (one `libc::signal(SIGPIPE, SIG_DFL)`, a no-op off
+# Unix). libc is already in the tree; MIT-licensed. See `main`'s first line.
+sigpipe = "0.1.3"
 
 [dev-dependencies]
 # Write a codegraph-schema SQLite fixture in the `import --from codegraph` test.

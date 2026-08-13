@@ -461,6 +461,18 @@ enum ModelAction {
 // scatters the CLI wiring, so the line-count lint is noise here.
 #[allow(clippy::too_many_lines)]
 fn main() -> anyhow::Result<()> {
+    // Restore the default SIGPIPE disposition before any output. Rust sets
+    // SIGPIPE to `SIG_IGN` at startup, so writing to a closed stdout pipe
+    // (`roteiro query … | head`) returns EPIPE and the `println!` family panics
+    // with a broken-pipe backtrace instead of the process exiting quietly like a
+    // normal Unix CLI. Resetting to `SIG_DFL` here — first line, before
+    // `Cli::parse()` (which may itself print `--help`/`--version`) and before
+    // dispatch, so every subcommand is covered — makes a closed pipe terminate
+    // the process by signal, as expected. A no-op off Unix. The long-running
+    // `serve`/`explorer` paths never write to a closing stdout pipe in normal
+    // operation, so this does not affect them. (We forbid `unsafe` workspace-wide,
+    // hence the `sigpipe` wrapper rather than a raw `libc::signal` call.)
+    sigpipe::reset();
     let cli = Cli::parse();
     // Load layered config once (project `roteiro.toml` + user `~/.roteiro/
     // config.toml`); a malformed file is a hard error for any command (ADR-0007).
