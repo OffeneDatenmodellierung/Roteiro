@@ -15,3 +15,4 @@
 | [0007](0007-configuration-file.md) | Configuration file — a single project-level TOML with layered precedence | Accepted |
 | [0008](0008-multi-repo-workspace-serve.md) | Multi-repo workspace serve — one instance, many project graphs, one model | Accepted |
 | [0009](0009-cross-repo-workspace-links.md) | Cross-repo workspace links — interlink a hub app with its deployment repos | Accepted |
+| [0010](0010-explorer-web-app-vendored-js.md) | Explorer web app — vendored client-side JS (cytoscape.js) for the served UI | Accepted |

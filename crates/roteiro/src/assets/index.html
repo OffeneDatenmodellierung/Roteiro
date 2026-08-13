@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Roteiro — workspace explorer</title>
+    <style>
+      /* Light theme, matching the maintainer-signed-off screenshots. */
+      :root {
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --fg: #1a1f2e;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --line-strong: #d1d5db;
+        --gold: #c99a2e;
+        --gold-soft: #fdf6e3;
+        --slate: #64748b;
+        --slate-soft: #f1f5f9;
+        --drift: #dc2626;
+        --drift-soft: #fef2f2;
+        --drift-line: #fca5a5;
+        --hub: #eef2ff;
+        --hub-line: #c7d2fe;
+        --accent: #4f46e5;
+        --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      code,
+      .mono {
+        font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      main {
+        max-width: 1240px;
+        margin: 0 auto;
+        padding: 1.75rem 1.25rem 4rem;
+      }
+
+      /* Header ------------------------------------------------------------ */
+      header.hero h1 {
+        font-size: 1.6rem;
+        margin: 0 0 0.35rem;
+        letter-spacing: -0.01em;
+      }
+      header.hero p.sub {
+        color: var(--muted);
+        margin: 0;
+        max-width: 68ch;
+      }
+      .ws-switch {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 1rem 0 0;
+        flex-wrap: wrap;
+      }
+      .ws-switch label {
+        color: var(--muted);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      select#workspace {
+        font: inherit;
+        padding: 0.35rem 0.6rem;
+        border: 1px solid var(--line-strong);
+        border-radius: 7px;
+        background: var(--panel);
+        color: var(--fg);
+        box-shadow: var(--shadow);
+      }
+      .ws-badge {
+        font-size: 0.72rem;
+        padding: 0.1rem 0.45rem;
+        border-radius: 999px;
+        background: var(--slate-soft);
+        color: var(--slate);
+        border: 1px solid var(--line);
+      }
+      .ws-badge.standalone {
+        background: #fff7ed;
+        color: #b45309;
+        border-color: #fed7aa;
+      }
+
+      /* Stat tiles -------------------------------------------------------- */
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 0.75rem;
+        margin: 1.25rem 0;
+      }
+      .tile {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 0.85rem 1rem;
+        box-shadow: var(--shadow);
+      }
+      .tile .num {
+        font-size: 1.7rem;
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.1;
+      }
+      .tile .lbl {
+        color: var(--muted);
+        font-size: 0.78rem;
+        margin-top: 0.15rem;
+      }
+      .tile.drift .num {
+        color: var(--drift);
+      }
+      .tile.drift {
+        border-color: var(--drift-line);
+        background: var(--drift-soft);
+      }
+
+      /* Legend ------------------------------------------------------------ */
+      .legend {
+        display: flex;
+        gap: 1.25rem;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-size: 0.82rem;
+        margin: 0 0 1rem;
+      }
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+      .swatch {
+        width: 1.5rem;
+        height: 0.28rem;
+        border-radius: 2px;
+        display: inline-block;
+      }
+      .swatch.gold {
+        background: var(--gold);
+      }
+      .swatch.slate {
+        background: var(--slate);
+      }
+      .dot {
+        width: 0.6rem;
+        height: 0.6rem;
+        border-radius: 999px;
+        background: var(--drift);
+        display: inline-block;
+      }
+
+      /* Panels ------------------------------------------------------------ */
+      section.panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        margin: 1rem 0;
+        overflow: hidden;
+      }
+      section.panel > h2 {
+        font-size: 0.95rem;
+        margin: 0;
+        padding: 0.85rem 1.1rem;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+      }
+      section.panel > h2 .hint {
+        font-weight: 400;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      /* Topology ---------------------------------------------------------- */
+      #topology {
+        width: 100%;
+        height: 460px;
+        background: linear-gradient(0deg, #fbfbfd, #ffffff);
+      }
+
+      /* Matrix ------------------------------------------------------------ */
+      .matrix-scroll {
+        overflow-x: auto;
+      }
+      table.matrix {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.82rem;
+      }
+      table.matrix th,
+      table.matrix td {
+        border: 1px solid var(--line);
+        padding: 0.4rem 0.6rem;
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+      }
+      table.matrix thead th {
+        position: sticky;
+        top: 0;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      table.matrix thead th.spoke-col {
+        cursor: pointer;
+        color: var(--accent);
+      }
+      table.matrix thead th.spoke-col:hover {
+        text-decoration: underline;
+      }
+      tr.section-head th {
+        background: var(--slate-soft);
+        color: var(--slate);
+        font-weight: 650;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        font-size: 0.7rem;
+      }
+      td.keycell code {
+        color: var(--fg);
+      }
+      td.hubval {
+        color: var(--muted);
+      }
+      td.cell.inherit {
+        color: var(--line-strong);
+        text-align: center;
+      }
+      td.cell.set {
+        background: var(--gold-soft);
+      }
+      .tag {
+        display: inline-block;
+        font-size: 0.62rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 0.02rem 0.3rem;
+        border-radius: 4px;
+        margin-left: 0.4rem;
+        vertical-align: 1px;
+      }
+      .tag.authored {
+        background: var(--gold);
+        color: #fff;
+      }
+      .tag.inferred {
+        background: var(--slate);
+        color: #fff;
+      }
+      tr.drift-row td {
+        background: var(--drift-soft);
+      }
+      tr.drift-band th {
+        background: var(--drift);
+        color: #fff;
+        font-size: 0.72rem;
+        letter-spacing: 0.04em;
+      }
+      td.drift-key code {
+        color: var(--drift);
+      }
+      .explain {
+        margin: 0;
+        padding: 0.9rem 1.1rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+      .explain.drift-box {
+        background: var(--drift-soft);
+        border-top: 1px solid var(--drift-line);
+        color: #7f1d1d;
+      }
+      .explain strong {
+        color: var(--fg);
+      }
+      .explain.drift-box strong {
+        color: var(--drift);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .empty {
+        padding: 1.5rem 1.1rem;
+        color: var(--muted);
+      }
+      #status {
+        color: var(--muted);
+        font-size: 0.82rem;
+        min-height: 1.2rem;
+      }
+      #status.err {
+        color: var(--drift);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <h1>One app, many deployments — interlinked</h1>
+        <p class="sub">
+          See who overrides what, who references config the app no longer defines,
+          and open any repo to drill in.
+        </p>
+        <div class="ws-switch">
+          <label for="workspace">Workspace</label>
+          <select id="workspace"></select>
+          <span id="ws-linkage" class="ws-badge"></span>
+        </div>
+      </header>
+
+      <div id="status">Loading workspaces…</div>
+
+      <div class="tiles" id="tiles"></div>
+
+      <div class="legend" aria-label="legend">
+        <span><i class="swatch gold"></i> gold = authored link</span>
+        <span><i class="swatch slate"></i> slate = inferred link</span>
+        <span><i class="dot"></i> red dot = drift</span>
+      </div>
+
+      <section class="panel">
+        <h2>
+          Topology
+          <span class="hint">Hover a deployment to trace it into the matrix</span>
+        </h2>
+        <div id="topology"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Config override matrix</h2>
+        <div class="matrix-scroll">
+          <div id="matrix"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/vendor/cytoscape.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

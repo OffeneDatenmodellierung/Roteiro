@@ -1269,4 +1269,100 @@ mod tests {
         assert_eq!(spokes[0]["driftCount"], 2, "both unhosted links are drift");
         assert_eq!(json["links"].as_array().unwrap().len(), 2);
     }
+
+    // -- served web app: the explorer server mounts the UI beside the API ----
+    //
+    // `roteiro explorer` merges the static web app (`explorer_app::router`) onto
+    // this data API over the *same* `WorkspaceSet`. These tests reuse the
+    // in-memory sets above to prove the app is served (200 HTML shell) alongside a
+    // working data route, for both a multi-workspace and a standalone-only config.
+
+    /// The full explorer router as `run_explorer` builds it: the data API plus the
+    /// served web app, over one workspace set.
+    fn explorer_router(set: WorkspaceSet, default: Option<&str>) -> Router {
+        router(Arc::new(set), default.map(str::to_owned)).merge(crate::explorer_app::router())
+    }
+
+    /// Fetch `uri` against a merged router, returning `(status, content-type, body)`.
+    async fn get_app(router: Router, uri: &str) -> (StatusCode, String, String) {
+        let resp = router
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, ct, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// A standalone-only set: a single `linked:false` singleton, the shape
+    /// `roteiro explorer` falls back to for a lone repo with no cross-repo config.
+    fn standalone_only_set() -> WorkspaceSet {
+        WorkspaceSet::from_workspaces([(
+            "solo".to_owned(),
+            Workspace::single(HUB, solo_store()),
+            false,
+        )])
+    }
+
+    #[tokio::test]
+    async fn app_is_served_alongside_the_api_for_a_multi_workspace() {
+        // The shell (referencing app.js + cytoscape) is served…
+        let (status, ct, body) = get_app(explorer_router(multi_set(), None), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.starts_with("text/html"), "content-type was {ct}");
+        assert!(body.contains("<!doctype html>"));
+        assert!(body.contains("/app.js") && body.contains("/vendor/cytoscape.min.js"));
+
+        // …and the data route the UI reads still works over the same set.
+        let (ws_status, ws_ct, ws_body) =
+            get_app(explorer_router(multi_set(), None), "/v1/graph/workspaces").await;
+        assert_eq!(ws_status, StatusCode::OK);
+        assert!(
+            ws_ct.contains("application/json"),
+            "content-type was {ws_ct}"
+        );
+        let arr: Value = serde_json::from_str(&ws_body).unwrap();
+        assert_eq!(arr.as_array().unwrap().len(), 2, "both workspaces listed");
+    }
+
+    #[tokio::test]
+    async fn app_and_assets_are_served_for_a_standalone_only_config() {
+        // The shell serves for a lone standalone workspace too.
+        let (status, _, body) =
+            get_app(explorer_router(standalone_only_set(), Some("solo")), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<!doctype html>"));
+
+        // The vendored graph library is a non-empty JS asset.
+        let (cy_status, cy_ct, cy_body) = get_app(
+            explorer_router(standalone_only_set(), Some("solo")),
+            "/vendor/cytoscape.min.js",
+        )
+        .await;
+        assert_eq!(cy_status, StatusCode::OK);
+        assert!(cy_ct.contains("javascript"), "content-type was {cy_ct}");
+        assert!(cy_body.len() > 100_000, "the UMD bundle is substantial");
+
+        // `/app.js` is served, and the standalone workspace lists as linked:false.
+        let (js_status, _, _) = get_app(
+            explorer_router(standalone_only_set(), Some("solo")),
+            "/app.js",
+        )
+        .await;
+        assert_eq!(js_status, StatusCode::OK);
+        let (_, _, ws_body) = get_app(
+            explorer_router(standalone_only_set(), Some("solo")),
+            "/v1/graph/workspaces",
+        )
+        .await;
+        let arr: Value = serde_json::from_str(&ws_body).unwrap();
+        assert_eq!(arr.as_array().unwrap().len(), 1);
+        assert_eq!(arr[0]["linked"], false);
+    }
 }
