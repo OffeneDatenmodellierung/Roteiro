@@ -6,10 +6,12 @@
 //! with `include_str!` — no npm, no build step, no external fetch:
 //!
 //! - `GET /` (and `/explorer`) → the HTML shell;
-//! - `GET /app.js` → our hand-written, dependency-free ES app; and
+//! - `GET /app.js` → our hand-written, dependency-free ES app;
 //! - `GET /vendor/cytoscape.min.js` → the **vendored** cytoscape.js UMD bundle
 //!   (the one client-side dependency; see ADR-0010 for why a real graph library
-//!   is warranted for the interactive topology of ~1,300 nodes).
+//!   is warranted for the interactive topology of ~1,300 nodes); and
+//! - `GET /sticker.svg` → the **vendored** Roteiro sticker logo (copied from
+//!   `website/public/sticker.svg`), shown in the workspace-selector landing.
 //!
 //! The app is served *only* by the explorer server; a full `serve` build keeps
 //! exposing just the JSON API (no bundled UI). It talks to the same origin's
@@ -36,10 +38,16 @@ const APP_JS: &str = include_str!("assets/app.js");
 /// single prebuilt file served verbatim — no npm and no build step.
 const CYTOSCAPE_JS: &str = include_str!("assets/cytoscape.min.js");
 
-/// `text/html` for the shell; both scripts are served as `text/javascript`. All
-/// three are UTF-8.
+/// The vendored Roteiro sticker logo, copied from `website/public/sticker.svg`
+/// and committed alongside the other assets so the app stays self-contained (no
+/// external fetch). Served as the logo in the workspace-selector landing header.
+const STICKER_SVG: &str = include_str!("assets/sticker.svg");
+
+/// `text/html` for the shell; both scripts are served as `text/javascript`; the
+/// sticker as `image/svg+xml`. All are UTF-8.
 const HTML: &str = "text/html; charset=utf-8";
 const JS: &str = "text/javascript; charset=utf-8";
+const SVG: &str = "image/svg+xml; charset=utf-8";
 
 /// `Cache-Control` for the assets, which change only when the binary does. The
 /// shell is the entry point, so it is cached only briefly; the scripts — chiefly
@@ -62,6 +70,12 @@ pub fn router() -> Router {
         .route(
             "/vendor/cytoscape.min.js",
             get(|| async { asset(JS, CACHE_JS, CYTOSCAPE_JS) }),
+        )
+        // The sticker logo changes only when the binary does, like the scripts, so
+        // it takes the same hour-long `Cache-Control` as the vendored bundle.
+        .route(
+            "/sticker.svg",
+            get(|| async { asset(SVG, CACHE_JS, STICKER_SVG) }),
         )
 }
 
@@ -234,6 +248,49 @@ mod tests {
         assert!(!body.is_empty());
         // It must talk to the data API it is built against.
         assert!(body.contains("/v1/graph/workspaces"));
+    }
+
+    #[tokio::test]
+    async fn sticker_is_served_as_cacheable_nonempty_svg() {
+        // The workspace-selector landing shows the vendored sticker logo. The route
+        // must return a non-empty SVG document with the right content-type and a
+        // caching `Cache-Control` consistent with the other static assets.
+        let (status, ct, cache, body) = get("/sticker.svg").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            ct.contains("image/svg+xml"),
+            "sticker must be served as SVG: {ct}"
+        );
+        assert!(
+            cache.contains("max-age=") && cache.contains("public"),
+            "sticker must send a caching Cache-Control: {cache}"
+        );
+        assert!(!body.is_empty(), "the sticker asset must be non-empty");
+        assert!(body.contains("<svg"), "it is an SVG document");
+    }
+
+    #[tokio::test]
+    async fn shell_scaffolds_the_workspace_selector_landing() {
+        // The entry point is the workspace-selector landing: the shell must carry
+        // its view container, the card grid the app fills from `/v1/graph/workspaces`,
+        // and the sticker logo (pointing at the served route).
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in ["id=\"view-select\"", "id=\"select-grid\"", "/sticker.svg"] {
+            assert!(body.contains(needle), "shell must contain `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn app_js_routes_the_selector_by_workspace_type() {
+        // The landing/routing logic is JS: the app renders the selector and routes
+        // by project count (auto-entering a lone workspace). Pin the entry hooks so
+        // a rename is caught headlessly (full visual QA needs a browser).
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in ["renderSelector", "goByType", "showSelectView"] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
     }
 
     #[tokio::test]
