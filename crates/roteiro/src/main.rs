@@ -1403,6 +1403,11 @@ fn run_model(action: ModelAction) -> anyhow::Result<()> {
 fn run_model_list() {
     use rto_graph::{ModelKind, Platform, REGISTRY, ResourceTier};
 
+    // Fixed-width, ASCII-safe status markers (same length either way) keep the
+    // columns aligned regardless of a terminal's wide/ambiguous glyph handling.
+    const MARK_INSTALLED: &str = "[installed]";
+    const MARK_AVAILABLE: &str = "[available]";
+
     let host = Platform::host();
     println!(
         "platform: {}   model store: {}",
@@ -1429,22 +1434,39 @@ fn run_model_list() {
             "Audio — speech transcription (`roteiro sync` with --features audio-transcribe)",
         ),
     ];
+    // Tier acts as a sub-heading, so it reads once per group instead of being
+    // repeated as a prefix on every row.
     let tiers = [
         (ResourceTier::Low, "low  (any laptop)"),
         (ResourceTier::Mid, "mid  (~16 GB)"),
         (ResourceTier::High, "high (workstation / 64 GB)"),
     ];
 
+    // Pad the name column to the widest registry name so metadata lines up, and
+    // indent description continuation lines to start under the name column.
+    let name_w = REGISTRY.iter().map(|s| s.name.len()).max().unwrap_or(0);
+    let desc_indent = 4 + MARK_AVAILABLE.len() + 1;
+
     for (kind, heading) in sections {
         println!("\n{heading}:");
         for (tier, tier_label) in tiers {
-            for spec in REGISTRY.iter().filter(|s| s.kind == kind && s.tier == tier) {
+            let mut specs = REGISTRY
+                .iter()
+                .filter(|s| s.kind == kind && s.tier == tier)
+                .peekable();
+            // Skip a tier with no picks in this section rather than print an
+            // empty sub-heading.
+            if specs.peek().is_none() {
+                continue;
+            }
+            println!("  {tier_label}");
+            for spec in specs {
                 let variant = spec.variant_for(host);
                 let installed = variant.is_some_and(|v| rto_graph::is_installed(spec.name, v));
                 let mark = if installed {
-                    "✓ installed"
+                    MARK_INSTALLED
                 } else {
-                    "  available"
+                    MARK_AVAILABLE
                 };
                 let dim = if spec.dim > 0 {
                     format!(", dim {}", spec.dim)
@@ -1458,12 +1480,12 @@ fn run_model_list() {
                     .map(|r| format!(", {r}"))
                     .unwrap_or_default();
                 println!(
-                    "  [{tier_label}] {mark}  {name}  ({licence}{role}{dim}, ~{size} MiB)\n      {desc}",
+                    "    {mark} {name:<name_w$}  {licence}{role}{dim}, ~{size} MiB",
                     name = spec.name,
                     licence = spec.licence,
                     size = spec.size_mib,
-                    desc = spec.description,
                 );
+                println!("{:desc_indent$}{desc}", "", desc = spec.description);
             }
         }
     }

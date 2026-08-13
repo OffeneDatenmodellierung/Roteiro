@@ -1,8 +1,10 @@
 //! End-to-end tests for `roteiro model` and `infer --model` that need no
 //! network: the registry listing, and that a non-interactive `pull` declines
-//! rather than downloading (offline-by-default). Only built with the
-//! `inference-local-models` feature.
-#![cfg(feature = "inference-local-models")]
+//! rather than downloading (offline-by-default). The `model` subcommand only
+//! needs the `models` feature (no llama.cpp engine), so the list/pull tests
+//! build under it; the `infer --model` test is gated on
+//! `inference-local-models` since that command only exists with the engine.
+#![cfg(feature = "models")]
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -48,6 +50,17 @@ fn model_list_shows_registry() {
         text.contains("available"),
         "uninstalled model marked available"
     );
+    // The status marker is the ASCII-safe, fixed-width form so columns align
+    // (no wide/ambiguous glyph); a fresh host has nothing installed.
+    assert!(
+        text.contains("[available]"),
+        "uninstalled model uses the ASCII marker: {text}"
+    );
+    // The new High-tier coder pick is listed.
+    assert!(
+        text.contains("qwen3-coder-30b-a3b"),
+        "new coder entry listed: {text}"
+    );
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -79,6 +92,7 @@ fn pull_rejects_unknown_model() {
     std::fs::remove_dir_all(&home).ok();
 }
 
+#[cfg(feature = "inference-local-models")]
 #[test]
 fn infer_with_uninstalled_model_errors() {
     // A git repo so `infer` can build a graph, but the model isn't pulled.
