@@ -7,6 +7,13 @@
 use clap::{Parser, Subcommand};
 
 mod config;
+#[cfg(feature = "explorer")]
+// Without `serve` there is no runtime caller — the router is only merged into the
+// app in `serve_v1_tail` (gated on `serve`) and exercised by the module's tests —
+// so a `--features explorer` build without `serve` sees it as dead. That build is
+// exactly how the API is tested toolchain-free, so relax dead-code there only.
+#[cfg_attr(not(feature = "serve"), allow(dead_code))]
+mod graph_api;
 mod infer_links;
 mod init;
 mod overview;
@@ -3546,19 +3553,33 @@ fn serve_v1_tail(
         ""
     };
 
-    // `--models --mcp`: mount the MCP graph server at `/mcp` on the SAME port as
-    // `/v1`, so one process (one loaded model, one Workspace) serves both surfaces
-    // (ADR-0008). Both are just axum path prefixes, so the routers merge.
+    // Build the `/v1` model router, then merge any extra read-only/MCP surfaces
+    // onto it — all sharing one port and one Workspace (ADR-0008). `/v1/graph` and
+    // `/mcp` are just axum path prefixes, so the routers merge. Serving the router
+    // directly is equivalent to `serve_blocking[_with_tools]` (they build the same
+    // app), so this path also covers the plain (`/v1`-only) case.
+    let router = match tools {
+        Some(tools) => rto_serve::app_with_tools(engine, tools),
+        None => rto_serve::app(engine),
+    };
+
+    // Read-only graph explorer JSON API (`/v1/graph/*`, explorer PR 1/5), merged
+    // exactly like the MCP router below — same Workspace, same port, no extra
+    // process.
+    #[cfg(feature = "explorer")]
+    let router = router.merge(crate::graph_api::router(workspace.clone()));
+    #[cfg(feature = "explorer")]
+    let graph_note = " + /v1/graph";
+    #[cfg(not(feature = "explorer"))]
+    let graph_note = "";
+
+    // `--models --mcp`: also mount the MCP graph server at `/mcp` on the SAME port.
     if opts.mcp {
         #[cfg(feature = "mcp")]
         {
-            let v1 = match tools {
-                Some(tools) => rto_serve::app_with_tools(engine, tools),
-                None => rto_serve::app(engine),
-            };
-            let combined = v1.merge(rto_render::mcp::mcp_router(workspace));
+            let combined = router.merge(rto_render::mcp::mcp_router(workspace));
             eprintln!(
-                "roteiro server listening on {scheme}://{socket} — /v1{tools_note} + /mcp — serving: {names}"
+                "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note} + /mcp — serving: {names}"
             );
             return match tls {
                 Some((cert, key)) => {
@@ -3574,14 +3595,11 @@ fn serve_v1_tail(
     }
 
     eprintln!(
-        "roteiro model server listening on {scheme}://{socket}/v1{tools_note} — serving: {names}"
+        "roteiro model server listening on {scheme}://{socket}/v1{tools_note}{graph_note} — serving: {names}"
     );
     match tls {
-        Some((cert, key)) => rto_serve::serve_blocking_tls(engine, tools, socket, &cert, &key),
-        None => match tools {
-            Some(tools) => rto_serve::serve_blocking_with_tools(engine, tools, socket),
-            None => rto_serve::serve_blocking(engine, socket),
-        },
+        Some((cert, key)) => rto_serve::serve_blocking_router_tls(router, socket, &cert, &key),
+        None => rto_serve::serve_blocking_router(router, socket),
     }
 }
 

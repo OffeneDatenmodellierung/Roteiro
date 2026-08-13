@@ -26,6 +26,10 @@ serde_json = { workspace = true }
 # `net` pulls tokio's I/O driver, which unix signal handling requires — declared
 # here so this crate is self-contained, not reliant on another crate's features.
 tokio = { version = "1", features = ["rt", "signal", "net"], optional = true }
+# `explorer` only: the read-only `/v1/graph/*` JSON API router (axum 0.8). Pure
+# Rust — no llama.cpp, no `rto-serve` — so the explorer builds and tests without a
+# C/C++ toolchain.
+axum = { version = "0.8", optional = true }
 # Layered project/user configuration (ADR-0007). TOML only — `serde_yaml` is
 # unmaintained. Permissive, `cargo deny`-clean.
 toml = "1.1"
@@ -36,9 +40,19 @@ ureq = { version = "3", optional = true }
 [dev-dependencies]
 # Write a codegraph-schema SQLite fixture in the `import --from codegraph` test.
 rusqlite = { workspace = true }
+# `explorer` route tests: drive the axum router in-memory (no TCP bind) with
+# `tower::ServiceExt::oneshot`, mirroring `rto-serve`'s server tests.
+tokio = { version = "1", features = ["rt", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [features]
 mcp = ["rto-render/mcp", "dep:tokio"]
+# The interactive workspace explorer's read-only `/v1/graph/*` JSON API (PR 1/5),
+# off by default. Pure Rust: adds only axum, never `rto-serve`/llama.cpp, so it
+# builds and tests without a C/C++ toolchain. Merged onto `/v1` when combined with
+# `serve` (see `serve_v1_tail`).
+explorer = ["dep:axum"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]
