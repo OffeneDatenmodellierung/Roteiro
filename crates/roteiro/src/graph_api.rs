@@ -1,9 +1,11 @@
 //! Read-only JSON HTTP API over the workspace graph (`/v1/graph/*`).
 //!
-//! The interactive workspace explorer's **data foundation**: a small,
-//! side-effect-free axum router that surfaces the graphs a server already holds
-//! in memory. Every route is a `GET` returning JSON — no mutation, no model, no
-//! llama.cpp. It runs two ways, over the *same* handlers:
+//! The interactive workspace explorer's **data foundation**: a small axum router
+//! that surfaces the graphs a server already holds in memory. Nearly every route
+//! is a `GET` returning JSON — no model, no llama.cpp. The sole exception is
+//! `POST …/links/write`, which materialises the inferred cross-repo links into the
+//! spoke stores (the same mutation `roteiro links --infer --write` performs). It
+//! runs two ways, over the *same* handlers:
 //!
 //! - merged onto `/v1` inside a full `roteiro serve --models` process (gated on
 //!   `serve`, see `serve_v1_tail`), sharing its port and workspace; or
@@ -47,10 +49,11 @@ use axum::Router;
 use axum::extract::{Query, RawPathParams, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use rto_graph::{
-    EXTERNAL_REF_KIND, Edge, Follow, Node, NodeKind, Provenance, Store, StoreError, Workspace,
-    WorkspaceError, WorkspaceSet, debt, explain, external_ref_target, parse_qualified,
+    ConfigKey, EXTERNAL_REF_KIND, Edge, Follow, LINKS_REF, Node, NodeKind, Provenance, Store,
+    StoreError, Workspace, WorkspaceError, WorkspaceSet, debt, explain, external_ref_node,
+    external_ref_target, parse_qualified,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -177,6 +180,8 @@ fn graph_routes(prefix: &str) -> Router<AppState> {
         .route(&format!("{prefix}/projects"), get(projects))
         .route(&format!("{prefix}/topology"), get(topology))
         .route(&format!("{prefix}/matrix"), get(matrix))
+        // The one deliberately-mutating route: persist the inferred cross-repo links.
+        .route(&format!("{prefix}/links/write"), post(write_links))
         .route(&format!("{prefix}/resolve"), get(resolve))
         .route(&format!("{prefix}/follow"), get(follow))
         .route(&format!("{prefix}/{{project}}"), get(project_graph))
@@ -632,12 +637,28 @@ async fn follow(
 
 /// `GET /v1/graph[/workspaces/{ws}]/topology` → the cross-repo hub-and-spoke
 /// shape of the selected workspace: the hub project, a summary per spoke
-/// (`keyCount`, `driftCount`), and the inferred cross-repo links (`from`/`to`
-/// node keys, provenance, confidence).
+/// (`keyCount`, `driftCount`), and the cross-repo links (`from`/`to` node keys,
+/// provenance, confidence).
+///
+/// The links are the **merge** of what is persisted and what is inferred **live**:
+/// every persisted `external_ref` edge (authored `[[links]]` → gold, previously
+/// `--write`-ten → slate) PLUS the correspondences [`spoke_correspondence`] infers
+/// on the fly against the hub — the same match `roteiro links --matrix/--infer`
+/// computes. So a plain `sync` (which writes each repo's own `config_key` nodes but
+/// no cross-repo edges) already populates this view, with no manual
+/// `roteiro links --infer --write` step. A spoke key that matches no hub key is
+/// live **drift** (counted in `driftCount`), exactly as the CLI's `--matrix`
+/// surfaces orphans.
 async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let hub = determine_hub(ws, &names)?;
+    let hub = effective_hub(ws, &names)?;
+    // The hub's config keys are the live-inference target (empty when there is no
+    // hub, so `spoke_correspondence` yields persisted links only).
+    let hub_keys = match &hub {
+        Some(h) => ws.with_store(Some(h), Store::config_keys)??,
+        None => Vec::new(),
+    };
 
     let mut links: Vec<Value> = Vec::new();
     let mut spokes: Vec<Value> = Vec::new();
@@ -645,12 +666,14 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
         if Some(name) == hub.as_ref() {
             continue;
         }
-        let refs = ws.with_store(Some(name), external_refs)??;
-        if refs.is_empty() {
-            continue; // Only projects that reference the hub are spokes.
+        let (refs, live_orphans) = spoke_correspondence(ws, name, hub.as_deref(), &hub_keys)?;
+        if refs.is_empty() && live_orphans.is_empty() {
+            continue; // Only projects that reference (or infer against) the hub are spokes.
         }
         let key_count = ws.with_store(Some(name), |s| s.config_keys().map(|c| c.len()))??;
-        let mut drift_count = 0usize;
+        // A spoke key that matches no hub key is drift, as are the resolving-to-nothing
+        // persisted links below.
+        let mut drift_count = live_orphans.len();
         for ExternalRef {
             src,
             node,
@@ -684,14 +707,21 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/matrix` → the cross-repo config override
-/// matrix + drift ([`overview::OverrideMatrix`]) for the selected workspace,
-/// reconstructed from the persisted external-ref edges: a resolving edge is an
-/// override cell, a dangling one is drift.
+/// matrix + drift ([`overview::OverrideMatrix`]) for the selected workspace.
+///
+/// Like [`topology`], the cells are the **merge** of the persisted external-ref
+/// edges and the correspondences inferred **live** against the hub (via
+/// [`spoke_correspondence`], the same match `roteiro links --matrix` computes): a
+/// resolving link is an override cell tagged with its real provenance, a persisted
+/// link whose hub node is gone is drift, and a spoke key that matches no hub key is
+/// live drift too. So the matrix populates straight after a plain `sync`, with no
+/// manual `roteiro links --infer --write`.
 async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let Some(hub) = determine_hub(ws, &names)? else {
-        // Nothing references anything — no hub, so an empty (but well-shaped) matrix.
+    let Some(hub) = effective_hub(ws, &names)? else {
+        // Nothing references (or can infer against) anything — no hub, so an empty
+        // (but well-shaped) matrix.
         return Ok(Json(json!({
             "hub": Value::Null, "spokes": [], "rows": [], "drift": []
         }))
@@ -699,14 +729,15 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
     };
 
     let hub_values = ws.with_store(Some(&hub), config_values)??;
+    let hub_keys = ws.with_store(Some(&hub), Store::config_keys)??;
 
     let mut spokes: Vec<overview::SpokeInput> = Vec::new();
     for name in &names {
         if name == &hub {
             continue;
         }
-        let refs = ws.with_store(Some(name), external_refs)??;
-        if refs.is_empty() {
+        let (refs, live_orphans) = spoke_correspondence(ws, name, Some(&hub), &hub_keys)?;
+        if refs.is_empty() && live_orphans.is_empty() {
             continue;
         }
         // node key → (dotted key, value) for this spoke's own config keys.
@@ -740,6 +771,8 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                 None => orphans.push((spoke_key, spoke_value)),
             }
         }
+        // A spoke key that matched no hub key at all is drift too (the CLI's orphans).
+        orphans.extend(live_orphans);
         spokes.push(overview::SpokeInput {
             name: name.clone(),
             matches,
@@ -749,6 +782,59 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
 
     let assembled = overview::build(&hub, &hub_values, spokes);
     Ok(Json(assembled).into_response())
+}
+
+/// `POST /v1/graph[/workspaces/{ws}]/links/write` → infer the workspace's cross-repo
+/// correspondences and **persist** them into each spoke's graph as durable
+/// `inferred` external-ref edges — exactly what `roteiro links --infer --write` does,
+/// reusing the same [`crate::infer_links::match_against_hub`] +
+/// [`crate::infer_links::link_facts`] + [`Store::apply_import_layer`] path. This is
+/// the one deliberately-mutating route on the otherwise read-only API; the durable
+/// edges are what the follow-the-link hop and `roteiro check` gates rely on (the live
+/// inference in [`topology`]/[`matrix`] does not persist).
+///
+/// Returns a summary — the hub, per-spoke edge counts, and the total. Idempotent:
+/// each spoke's [`LINKS_REF`] layer is re-applied authoritatively (its prior inferred
+/// edges cleared first), so re-running returns the same counts and leaves no stale
+/// edges.
+async fn write_links(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let names = ws.names();
+    let Some(hub) = effective_hub(ws, &names)? else {
+        return Ok(Json(json!({
+            "hub": Value::Null,
+            "written": 0,
+            "spokes": [],
+            "note": "no cross-repo hub — nothing to infer",
+        }))
+        .into_response());
+    };
+    let hub_keys = ws.with_store(Some(&hub), Store::config_keys)??;
+
+    let mut total = 0usize;
+    let mut per_spoke: Vec<Value> = Vec::new();
+    for name in &names {
+        if name == &hub {
+            continue;
+        }
+        let spoke_keys = ws.with_store(Some(name), Store::config_keys)??;
+        let (matches, _orphans) = crate::infer_links::match_against_hub(&spoke_keys, &hub_keys);
+        // Reuse the CLI write path: build the import layer and apply it
+        // authoritatively (clearing this ref's prior inferred edges). Applied even
+        // with zero matches, so a spoke whose matches have since disappeared has its
+        // stale inferred edges cleared — mirroring `persist_inferred_links`.
+        let facts = crate::infer_links::link_facts(&hub, &matches);
+        let applied =
+            ws.with_store_mut(Some(name), |s| s.apply_import_layer(LINKS_REF, &facts))??;
+        total += applied.edges_applied;
+        per_spoke.push(json!({
+            "name": name,
+            "matches": matches.len(),
+            "written": applied.edges_applied,
+        }));
+    }
+
+    Ok(Json(json!({ "hub": hub, "written": total, "spokes": per_spoke })).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +944,138 @@ fn determine_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, Api
         .into_iter()
         .max_by_key(|(_, count)| *count)
         .map(|(p, _)| p))
+}
+
+/// The hub the cross-repo views infer against, honouring both what is persisted and
+/// the plain-`sync` case the explorer must now handle:
+///
+/// - if any persisted external-ref points at a **hosted** project, that project is
+///   the hub ([`determine_hub`]) — the historical behaviour, so an authored/linked
+///   workspace is unchanged;
+/// - otherwise, when there are **no persisted external-ref edges at all** (a repo
+///   was synced but never `links --write`-ten), fall back to the CLI's rule — the
+///   hosted project with the most `config_key` nodes ([`config_key_count_hub`]) — so
+///   live inference has a hub to match against;
+/// - but if refs *do* exist yet only target unhosted projects, keep `None` (there is
+///   nothing hosted to hub on), preserving the drift-not-404 behaviour.
+fn effective_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, ApiError> {
+    if let Some(hub) = determine_hub(ws, names)? {
+        return Ok(Some(hub));
+    }
+    if workspace_has_external_refs(ws, names)? {
+        return Ok(None);
+    }
+    config_key_count_hub(ws, names)
+}
+
+/// Whether any hosted project in the workspace carries a persisted external-ref edge
+/// (an authored or previously-written cross-repo link). Distinguishes "nothing has
+/// been linked yet" (fall back to inference) from "links exist but dangle" (keep the
+/// historical `None` hub).
+fn workspace_has_external_refs(ws: &Workspace, names: &[String]) -> Result<bool, ApiError> {
+    for name in names {
+        if !ws.with_store(Some(name), external_refs)??.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The hosted project with the most `config_key` nodes — the CLI's default hub
+/// (`roteiro links` picks the repo with the most keys). `None` unless at least two
+/// projects have config keys (a single config-bearing repo has nothing to hub). Ties
+/// break by name, so selection is deterministic.
+fn config_key_count_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, ApiError> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for name in names {
+        let n = ws.with_store(Some(name), |s| s.config_keys().map(|c| c.len()))??;
+        if n > 0 {
+            counts.push((name.clone(), n));
+        }
+    }
+    if counts.len() < 2 {
+        return Ok(None);
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(counts.into_iter().next().map(|(name, _)| name))
+}
+
+/// A spoke's merged cross-repo links (persisted + live-inferred) paired with its
+/// **live drift** — spoke config keys that match no hub key, as `(dotted key,
+/// value)`. The return of [`spoke_correspondence`].
+type SpokeLinks = (Vec<ExternalRef>, Vec<(String, String)>);
+
+/// One spoke's cross-repo correspondences: its persisted external-ref links MERGED
+/// with the ones inferred **live** against the hub, plus the spoke keys that match
+/// no hub key (live drift). This is the single place the explorer brings the CLI's
+/// `roteiro links --matrix/--infer` behaviour into the read-only views, reusing
+/// [`crate::infer_links::match_against_hub`] verbatim.
+///
+/// **Persisted wins.** A spoke `config_key` that already carries a persisted link
+/// (authored `[[links]]` or a previous `--write`) is left exactly as stored — so
+/// authored links still render gold and nothing regresses — and is never
+/// re-inferred. Only keys with no persisted link get a live-inferred link (a
+/// synthesized [`Provenance::Inferred`] external-ref carrying the real hub target,
+/// so the existing resolve/drift path works unchanged) or, matching nothing, become
+/// live drift. Dedupe is by (source node, target), keeping the persisted entry.
+///
+/// With `hub` `None` there is nothing to infer against, so this returns the spoke's
+/// persisted links unchanged (and no live drift).
+///
+/// Cost is O(spoke keys × hub keys) per spoke via the hub-indexed matcher; fine for
+/// typical workspaces, but a very large workspace (many spokes, thousands of keys)
+/// would want the hub index built once rather than per spoke — noted for follow-up.
+fn spoke_correspondence(
+    ws: &Workspace,
+    name: &str,
+    hub: Option<&str>,
+    hub_keys: &[ConfigKey],
+) -> Result<SpokeLinks, ApiError> {
+    let mut refs = ws.with_store(Some(name), external_refs)??;
+    let Some(hub) = hub else {
+        return Ok((refs, Vec::new()));
+    };
+
+    // The spoke source-node keys already covered by a persisted link — never
+    // re-inferred, so persisted/authored links are authoritative.
+    let persisted: std::collections::HashSet<String> = refs.iter().map(|r| r.src.clone()).collect();
+
+    let spoke_keys = ws.with_store(Some(name), Store::config_keys)??;
+    let (matches, key_orphans) = crate::infer_links::match_against_hub(&spoke_keys, hub_keys);
+
+    for m in &matches {
+        let src = format!("cfgkey:{}#{}", m.spoke_file, m.spoke_key);
+        if persisted.contains(&src) {
+            continue; // a persisted link already covers this key
+        }
+        let qualified = format!("{hub}::cfgkey:{}#{}", m.hub_file, m.hub_key);
+        refs.push(ExternalRef {
+            src,
+            node: external_ref_node(&qualified),
+            provenance: Provenance::Inferred,
+            confidence: Some(m.confidence),
+        });
+    }
+
+    // Defensive dedupe by (source, target): persisted entries come first, so they
+    // win over any live-inferred duplicate (honouring "dedupe by (from, to)").
+    let mut seen = std::collections::HashSet::new();
+    refs.retain(|r| {
+        seen.insert((
+            r.src.clone(),
+            external_ref_target(&r.node).unwrap_or_default(),
+        ))
+    });
+
+    // A spoke key that matched no hub key is live drift — but only if it isn't
+    // already carried by a persisted link.
+    let orphans = key_orphans
+        .into_iter()
+        .filter(|o| !persisted.contains(&format!("cfgkey:{}#{}", o.file, o.key)))
+        .map(|o| (o.key, o.value))
+        .collect();
+
+    Ok((refs, orphans))
 }
 
 /// The subgraph within `depth` hops of `root`, as `(nodes, edges)` with the root
@@ -1219,6 +1437,58 @@ mod tests {
         apply(store, &facts)
     }
 
+    /// A hub store with three config keys and NO cross-repo edges — the plain-`sync`
+    /// state a spoke infers against live (no `links --write` has run).
+    fn infer_hub_store() -> Store {
+        let store = Store::open_in_memory().expect("hub store");
+        let facts = FactSet::new()
+            .with_node(cfg_node("config.toml", "serve.addr", "127.0.0.1:8017"))
+            .with_node(cfg_node("config.toml", "serve.tools", "true"))
+            .with_node(cfg_node("config.toml", "serve.workers", "4"));
+        apply(store, &facts)
+    }
+
+    /// A spoke store with two config keys that match the hub (`SERVE_ADDR`,
+    /// `SERVE_TOOLS`) and one that matches nothing (`EXTRA_FLAG`, an orphan) — and
+    /// NO persisted external-ref edges, so its cross-repo links exist only live.
+    fn infer_spoke_store() -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let facts = FactSet::new()
+            .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+            .with_node(cfg_node("deploy.env", "SERVE_TOOLS", "false"))
+            .with_node(cfg_node("deploy.env", "EXTRA_FLAG", "on"));
+        apply(store, &facts)
+    }
+
+    /// A hub+spoke workspace with matching config keys but NO persisted external-ref
+    /// edges — the empty-after-`sync` case the live inference must populate.
+    fn inferable_workspace() -> Workspace {
+        Workspace::from_stores([
+            (HUB.to_owned(), infer_hub_store()),
+            (SPOKE.to_owned(), infer_spoke_store()),
+        ])
+    }
+
+    /// A spoke with ONE persisted authored link (`SERVE_TOOLS` → hub `serve.tools`,
+    /// gold) whose OTHER keys only correspond LIVE (`SERVE_ADDR` → `serve.addr`),
+    /// plus an orphan (`EXTRA_FLAG`). Proves the merged view keeps the authored link
+    /// authored while adding the inferred one — persisted and live side by side.
+    fn spoke_authored_plus_inferable() -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let authored = format!("{HUB}::cfgkey:config.toml#serve.tools");
+        let facts = FactSet::new()
+            .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+            .with_node(cfg_node("deploy.env", "SERVE_TOOLS", "false"))
+            .with_node(cfg_node("deploy.env", "EXTRA_FLAG", "on"))
+            .with_node(external_ref_node(&authored))
+            .with_edge(Edge::authored(
+                "cfgkey:deploy.env#SERVE_TOOLS",
+                external_ref_key(&authored),
+                EdgeKind::References,
+            ));
+        apply(store, &facts)
+    }
+
     fn apply(mut store: Store, facts: &FactSet) -> Store {
         store.apply_factset(facts).expect("apply factset");
         store
@@ -1257,6 +1527,30 @@ mod tests {
     async fn get(set: WorkspaceSet, default: Option<&str>, uri: &str) -> (StatusCode, Value) {
         let resp = router(Arc::new(set), default.map(str::to_owned))
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, json)
+    }
+
+    /// Drive `method uri` against a prebuilt `app` (cloned per call), so several
+    /// requests hit the SAME in-memory workspace set — needed to observe a write's
+    /// effect on a later read.
+    async fn send(app: Router, method: &str, uri: &str) -> (StatusCode, Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = resp.status();
@@ -1830,6 +2124,147 @@ mod tests {
         assert_eq!(spokes.len(), 1);
         assert_eq!(spokes[0]["driftCount"], 2, "both unhosted links are drift");
         assert_eq!(json["links"].as_array().unwrap().len(), 2);
+    }
+
+    // -- LIVE cross-repo inference: populate the hub view after a plain `sync` ----
+    //
+    // The regression the user hit: `sync` writes each repo's own `config_key` nodes
+    // but no cross-repo edges, so the explorer's hub view was EMPTY until a separate
+    // `roteiro links --infer --write`. topology/matrix now infer the correspondences
+    // LIVE (the same `infer_links::match_against_hub` the CLI's `--matrix` uses),
+    // merged with any persisted links, so a plain sync + open explorer just works.
+
+    #[tokio::test]
+    async fn topology_infers_cross_repo_links_live_without_persisted_edges() {
+        // hub + spoke share matching `config_key` nodes but carry NO external-ref
+        // edges (the plain-`sync` state). topology must infer the links + drift LIVE.
+        let (status, json) = get(
+            single_set(inferable_workspace()),
+            None,
+            "/v1/graph/topology",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["hub"], HUB,
+            "the config-key-rich repo is the inferred hub"
+        );
+        let spokes = json["spokes"].as_array().unwrap();
+        assert_eq!(spokes.len(), 1);
+        assert_eq!(spokes[0]["name"], SPOKE);
+        // Two live-inferred links (SERVE_ADDR, SERVE_TOOLS); the orphan EXTRA_FLAG drifts.
+        let links = json["links"].as_array().unwrap();
+        assert_eq!(links.len(), 2, "both matching keys infer a link");
+        assert!(
+            links.iter().all(|l| l["provenance"] == "inferred"),
+            "live-inferred links read slate"
+        );
+        assert_eq!(
+            spokes[0]["driftCount"], 1,
+            "the unmatched key is live drift"
+        );
+    }
+
+    #[tokio::test]
+    async fn matrix_infers_overrides_and_drift_live_without_persisted_edges() {
+        let (status, json) = get(single_set(inferable_workspace()), None, "/v1/graph/matrix").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["hub"], HUB);
+        // serve.addr + serve.tools are overridden live → two rows.
+        let rows = json["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let addr = rows.iter().find(|r| r["hub_key"] == "serve.addr").unwrap();
+        assert_eq!(
+            addr["cells"][SPOKE]["provenance"], "inferred",
+            "a live correspondence is inferred, not authored"
+        );
+        // The unmatched spoke key surfaces as drift, exactly like the CLI's orphans.
+        let drift = json["drift"].as_array().unwrap();
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0]["key"], "EXTRA_FLAG");
+    }
+
+    #[tokio::test]
+    async fn topology_merges_persisted_authored_with_live_inferred() {
+        // A spoke with one AUTHORED persisted link and other keys that only match
+        // live: the merged topology carries both — authored stays gold, the rest
+        // infer slate — so persisted links never regress under live inference.
+        let ws = Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_authored_plus_inferable()),
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["hub"], HUB);
+        let provs: std::collections::BTreeSet<&str> = json["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l["provenance"].as_str())
+            .collect();
+        assert_eq!(
+            provs,
+            ["authored", "inferred"].into_iter().collect(),
+            "the authored link and the live-inferred one both render"
+        );
+        assert_eq!(
+            json["spokes"][0]["driftCount"], 1,
+            "the two matched keys resolve; the orphan drifts"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_links_persists_inferred_edges_and_is_idempotent() {
+        // Reuse ONE in-memory set across requests (a write must be observable by a
+        // later read), so build the router once and clone it per call.
+        let app = router(Arc::new(single_set(inferable_workspace())), None);
+
+        // Before: the spoke store holds NO external-ref nodes (nothing persisted).
+        let (_, before) = send(
+            app.clone(),
+            "GET",
+            "/v1/graph/spoke/nodes?kinds=external_ref",
+        )
+        .await;
+        assert_eq!(before["total"], 0);
+
+        // Persist: infer + write across the workspace (the CLI `--infer --write` path).
+        let (status, body) = send(app.clone(), "POST", "/v1/graph/links/write").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["hub"], HUB);
+        assert_eq!(
+            body["written"], 2,
+            "both matching keys persist an inferred edge"
+        );
+
+        // After: the external-ref placeholder nodes now exist in the spoke store.
+        let (_, after) = send(
+            app.clone(),
+            "GET",
+            "/v1/graph/spoke/nodes?kinds=external_ref",
+        )
+        .await;
+        assert_eq!(
+            after["total"], 2,
+            "one external-ref node per persisted link"
+        );
+
+        // Idempotent: re-running writes the same count and adds no new nodes.
+        let (_, again) = send(app.clone(), "POST", "/v1/graph/links/write").await;
+        assert_eq!(again["written"], body["written"]);
+        let (_, after2) = send(
+            app.clone(),
+            "GET",
+            "/v1/graph/spoke/nodes?kinds=external_ref",
+        )
+        .await;
+        assert_eq!(after2["total"], 2, "no duplicate nodes on re-write");
+
+        // The persisted links now render as inferred in the topology (matched keys
+        // resolve; the orphan still drifts).
+        let (_, top) = send(app.clone(), "GET", "/v1/graph/topology").await;
+        assert_eq!(top["links"].as_array().unwrap().len(), 2);
+        assert_eq!(top["spokes"][0]["driftCount"], 1);
     }
 
     // -- per-project cross-repo links (the spoke-graph rendering payload) ----

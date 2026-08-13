@@ -383,6 +383,25 @@ impl Workspace {
         Ok(f(&store))
     }
 
+    /// Like [`Workspace::with_store`], but hands `f` a **mutable** store so it can
+    /// persist into the graph (e.g. [`Store::apply_import_layer`]). The store lock
+    /// is held only for `f`, never across an `.await`. Backs the explorer's
+    /// `links/write` endpoint, which materialises the inferred cross-repo links into
+    /// a spoke's graph as a durable import layer.
+    ///
+    /// # Errors
+    /// As [`Workspace::with_store`].
+    pub fn with_store_mut<R>(
+        &self,
+        project: Option<&str>,
+        f: impl FnOnce(&mut Store) -> R,
+    ) -> Result<R, WorkspaceError> {
+        let name = self.resolve(project)?;
+        let handle = self.handle(&name)?;
+        let mut store = handle.lock().map_err(|_| WorkspaceError::Poisoned)?;
+        Ok(f(&mut store))
+    }
+
     /// Resolve a **project-qualified** key `"<project>::<key>"` to its node across
     /// the workspace, opening the target project on demand (ADR-0009). `Ok(None)`
     /// means the key is well-formed and the project exists but the node does not —

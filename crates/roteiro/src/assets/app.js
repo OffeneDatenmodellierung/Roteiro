@@ -692,6 +692,12 @@
       badge.textContent = ws.linked ? "linked · multi-repo" : "standalone";
       badge.className = ws.linked ? "ws-badge" : "ws-badge standalone";
     }
+    // "Persist links" only makes sense for a linked (cross-repo) workspace; a
+    // standalone repo has no hub to infer against. Clear any stale note on switch.
+    const persistBtn = $("#persist-links");
+    if (persistBtn) persistBtn.hidden = !(ws && ws.linked);
+    const persistNote = $("#persist-note");
+    if (persistNote) persistNote.textContent = "";
     renderProjectChips(ws ? ws.projects || [] : []);
     try {
       const [topology, matrix] = await Promise.all([
@@ -704,6 +710,46 @@
       setStatus("");
     } catch (err) {
       setStatus(String(err.message || err), true);
+    }
+  }
+
+  // Persist the inferred cross-repo links: POST `…/links/write` (the one mutating
+  // endpoint), then reload the workspace so the topology/matrix re-render from the
+  // now-durable edges. The hub view already shows these links LIVE; persisting makes
+  // them durable, so the follow-the-link hop and `roteiro check` gates see them too.
+  async function persistLinks() {
+    const name = state.current;
+    if (!name) return;
+    const btn = $("#persist-links");
+    const note = $("#persist-note");
+    if (btn) btn.disabled = true;
+    if (note) {
+      note.textContent = "Persisting…";
+      note.className = "ws-note";
+    }
+    try {
+      const res = await fetch(wsPath(name, "links/write"), {
+        method: "POST",
+        headers: { accept: "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((data && data.error) || `HTTP ${res.status}`);
+      }
+      const written = data.written || 0;
+      if (note) {
+        note.textContent = `Persisted ${written} inferred link${written === 1 ? "" : "s"}.`;
+        note.className = "ws-note";
+      }
+      // Re-render from the now-durable edges (they read as persisted inferred links).
+      await loadWorkspace(name);
+    } catch (err) {
+      if (note) {
+        note.textContent = `Could not persist: ${err.message || err}`;
+        note.className = "err";
+      }
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -1987,6 +2033,8 @@
       // landing cards use — so a single-repo pick jumps straight into its graph
       // rather than the empty cross-repo view. Navigates by hash so it's linkable.
       sel.addEventListener("change", () => goByType(sel.value));
+      const persistBtn = $("#persist-links");
+      if (persistBtn) persistBtn.addEventListener("click", persistLinks);
       wireProjectControls();
       // Enable the Ask tab iff this build serves the chat endpoint (serve build).
       await loadCapabilities();
