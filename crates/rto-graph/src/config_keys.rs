@@ -381,14 +381,16 @@ pub fn normalize(key: &str) -> String {
 }
 
 /// Canonicalise a dotted key for cross-**naming-convention** matching: keep the
-/// dotted structure, but collapse each segment by lowercasing and dropping `_`/`-`
-/// separators. So within a segment `serverEndpoint`, `server_endpoint`, and
+/// dotted structure, but collapse each `.`-delimited segment to its lowercased
+/// ASCII-alphanumerics only — dropping `_`, `-`, and any other punctuation within
+/// the segment. So within a segment `serverEndpoint`, `server_endpoint`, and
 /// `server-endpoint` all become `serverendpoint`, letting a Kubernetes YAML
 /// `zerobus.serverEndpoint` (`camelCase`) match an app TOML `zerobus.server_endpoint`
-/// (`snake_case`) that [`normalize`] keeps apart — `normalize` treats `_`/`-` as
-/// segment *boundaries* (`zerobus.server.endpoint`), so a compound leaf never lines
-/// up with its `camelCase` spelling. The dotted structure is preserved (segments are
-/// split on `.` only) so `a.b` and `ab` stay distinct.
+/// (`snake_case`) that [`normalize`] keeps apart — `normalize` splits on *any* run
+/// of non-ASCII-alphanumeric chars, so `_` becomes a boundary
+/// (`zerobus.server.endpoint`) and a compound leaf never lines up with its
+/// `camelCase` spelling. The dotted structure is preserved here (segments are split
+/// on `.` only) so `a.b` and `ab` stay distinct.
 #[must_use]
 pub fn canonicalize(key: &str) -> String {
     key.split('.')

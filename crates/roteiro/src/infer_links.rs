@@ -54,7 +54,8 @@ fn unambiguous<'a>(cands: &[&'a ConfigKey]) -> Option<&'a ConfigKey> {
 /// Matching runs in precedence tiers, strongest first, so an exact hit always wins
 /// over a looser one:
 /// 1. **Exact** — the full [`normalize`](rto_graph::normalize_config_key)d key
-///    (`_`/`-`/`.` all as segment boundaries), bridging `SERVE_ADDR` ↔ `serve.addr`.
+///    (split on any run of non-ASCII-alphanumeric chars — `_`, `-`, `.`, etc. — so
+///    every such run is a segment boundary), bridging `SERVE_ADDR` ↔ `serve.addr`.
 /// 2. **Canonical** — the [`canonicalize`](rto_graph::canonicalize_config_key)d key
 ///    (separators collapsed *within* a segment), bridging **naming conventions**:
 ///    a k8s YAML `zerobus.serverEndpoint` (`camelCase`) ↔ an app TOML
