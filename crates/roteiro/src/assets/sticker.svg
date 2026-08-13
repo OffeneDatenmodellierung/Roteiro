@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="60mm" viewBox="0 0 600 600" role="img" aria-label="Roteiro — roteiro.dev">
+  <title>Roteiro sticker — roteiro.dev</title>
+  <defs>
+    <clipPath id="disc"><circle cx="300" cy="300" r="300"/></clipPath>
+    <radialGradient id="sea" cx="42%" cy="38%" r="75%">
+      <stop offset="0%" stop-color="#22323f"/>
+      <stop offset="55%" stop-color="#1a2733"/>
+      <stop offset="100%" stop-color="#121c25"/>
+    </radialGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <radialGradient id="node" cx="35%" cy="30%" r="80%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="35%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g clip-path="url(#disc)">
+    <circle cx="300" cy="300" r="300" fill="url(#sea)"/>
+    <!-- graticule: faint latitude/longitude arcs for a chart feel -->
+    <g fill="none" stroke="#f7f5f0" stroke-opacity="0.06" stroke-width="1.5">
+      <circle cx="300" cy="300" r="150"/><circle cx="300" cy="300" r="210"/>
+      <line x1="0" y1="300" x2="600" y2="300"/><line x1="300" y1="0" x2="300" y2="600"/>
+    </g>
+    <!-- outer rules + compass ticks -->
+    <circle cx="300" cy="300" r="288" fill="none" stroke="#f7f5f0" stroke-width="2.5" stroke-opacity="0.5"/>
+    <circle cx="300" cy="300" r="278" fill="none" stroke="#f7f5f0" stroke-width="1" stroke-opacity="0.25"/>
+    <line x1="300.0" y1="28.0" x2="300.0" y2="44.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="323.7" y1="29.0" x2="323.1" y2="36.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="347.2" y1="32.1" x2="346.0" y2="39.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="370.4" y1="37.3" x2="368.6" y2="44.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="393.0" y1="44.4" x2="390.6" y2="51.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="415.0" y1="53.5" x2="412.0" y2="59.8" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="436.0" y1="64.4" x2="432.5" y2="70.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="456.0" y1="77.2" x2="452.0" y2="82.9" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="474.8" y1="91.6" x2="470.3" y2="97.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="492.3" y1="107.7" x2="481.0" y2="119.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="508.4" y1="125.2" x2="503.0" y2="129.7" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="522.8" y1="144.0" x2="517.1" y2="148.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="535.6" y1="164.0" x2="529.5" y2="167.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="546.5" y1="185.0" x2="540.2" y2="188.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="555.6" y1="207.0" x2="549.0" y2="209.4" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="562.7" y1="229.6" x2="556.0" y2="231.4" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="567.9" y1="252.8" x2="561.0" y2="254.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="571.0" y1="276.3" x2="564.0" y2="276.9" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="572.0" y1="300.0" x2="556.0" y2="300.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="571.0" y1="323.7" x2="564.0" y2="323.1" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="567.9" y1="347.2" x2="561.0" y2="346.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="562.7" y1="370.4" x2="556.0" y2="368.6" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="555.6" y1="393.0" x2="549.0" y2="390.6" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="546.5" y1="415.0" x2="540.2" y2="412.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="535.6" y1="436.0" x2="529.5" y2="432.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="522.8" y1="456.0" x2="517.1" y2="452.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="508.4" y1="474.8" x2="503.0" y2="470.3" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="492.3" y1="492.3" x2="481.0" y2="481.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="474.8" y1="508.4" x2="470.3" y2="503.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="456.0" y1="522.8" x2="452.0" y2="517.1" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="436.0" y1="535.6" x2="432.5" y2="529.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="415.0" y1="546.5" x2="412.0" y2="540.2" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="393.0" y1="555.6" x2="390.6" y2="549.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="370.4" y1="562.7" x2="368.6" y2="556.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="347.2" y1="567.9" x2="346.0" y2="561.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="323.7" y1="571.0" x2="323.1" y2="564.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="300.0" y1="572.0" x2="300.0" y2="556.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="276.3" y1="571.0" x2="276.9" y2="564.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="252.8" y1="567.9" x2="254.0" y2="561.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="229.6" y1="562.7" x2="231.4" y2="556.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="207.0" y1="555.6" x2="209.4" y2="549.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="185.0" y1="546.5" x2="188.0" y2="540.2" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="164.0" y1="535.6" x2="167.5" y2="529.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="144.0" y1="522.8" x2="148.0" y2="517.1" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="125.2" y1="508.4" x2="129.7" y2="503.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="107.7" y1="492.3" x2="119.0" y2="481.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="91.6" y1="474.8" x2="97.0" y2="470.3" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="77.2" y1="456.0" x2="82.9" y2="452.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="64.4" y1="436.0" x2="70.5" y2="432.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="53.5" y1="415.0" x2="59.8" y2="412.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="44.4" y1="393.0" x2="51.0" y2="390.6" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="37.3" y1="370.4" x2="44.0" y2="368.6" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="32.1" y1="347.2" x2="39.0" y2="346.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="29.0" y1="323.7" x2="36.0" y2="323.1" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="28.0" y1="300.0" x2="44.0" y2="300.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="29.0" y1="276.3" x2="36.0" y2="276.9" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="32.1" y1="252.8" x2="39.0" y2="254.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="37.3" y1="229.6" x2="44.0" y2="231.4" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="44.4" y1="207.0" x2="51.0" y2="209.4" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="53.5" y1="185.0" x2="59.8" y2="188.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="64.4" y1="164.0" x2="70.5" y2="167.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="77.2" y1="144.0" x2="82.9" y2="148.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="91.6" y1="125.2" x2="97.0" y2="129.7" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="107.7" y1="107.7" x2="119.0" y2="119.0" stroke="#f7f5f0" stroke-width="3" stroke-opacity="0.55"/>
+    <line x1="125.2" y1="91.6" x2="129.7" y2="97.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="144.0" y1="77.2" x2="148.0" y2="82.9" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="164.0" y1="64.4" x2="167.5" y2="70.5" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="185.0" y1="53.5" x2="188.0" y2="59.8" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="207.0" y1="44.4" x2="209.4" y2="51.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="229.6" y1="37.3" x2="231.4" y2="44.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="252.8" y1="32.1" x2="254.0" y2="39.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <line x1="276.3" y1="29.0" x2="276.9" y2="36.0" stroke="#f7f5f0" stroke-width="1.4" stroke-opacity="0.28"/>
+    <!-- north star mark -->
+    <path d="M300 40 L308 66 L300 60 L292 66 Z" fill="#d6b45a"/>
+
+    <!-- rhumb-line route: derived → authored → inferred, a smooth bearing -->
+    <g filter="url(#soft)">
+      <path d="M 196 388 Q 250 300 300 316 T 404 232" fill="none" stroke="#f7f5f0" stroke-width="18" stroke-linecap="round"/>
+    </g>
+    <!-- inferred continuation: dashed, model-suggested course -->
+    <path d="M 404 232 Q 436 190 470 150" fill="none" stroke="#0fb6c8" stroke-width="11" stroke-linecap="round" stroke-dasharray="1.5 20" opacity="0.9"/>
+
+    <!-- provenance waypoints -->
+    <g>
+      <circle cx="196" cy="388" r="27" fill="#0e6e8c" stroke="#f7f5f0" stroke-width="7"/><circle cx="196" cy="388" r="27" fill="url(#node)"/>
+      <circle cx="300" cy="316" r="15" fill="#1a2733" stroke="#d6b45a" stroke-width="7"/>
+      <circle cx="404" cy="232" r="23" fill="#0fb6c8" stroke="#f7f5f0" stroke-width="7" opacity="0.95"/><circle cx="404" cy="232" r="23" fill="url(#node)"/>
+    </g>
+
+    <!-- wordmark -->
+    <text x="300" y="474" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="82" font-weight="700" letter-spacing="1.5" fill="#f7f5f0">roteiro</text>
+
+    <!-- top arc: roteiro.dev -->
+    <text x="120.17" y="126.34" transform="rotate(-46.00 120.17 126.34)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">r</text>
+    <text x="150.24" y="99.82" transform="rotate(-36.80 150.24 99.82)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">o</text>
+    <text x="184.18" y="78.45" transform="rotate(-27.60 184.18 78.45)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">t</text>
+    <text x="221.09" y="62.78" transform="rotate(-18.40 221.09 62.78)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">e</text>
+    <text x="260.03" y="53.22" transform="rotate(-9.20 260.03 53.22)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">i</text>
+    <text x="300.00" y="50.00" transform="rotate(0.00 300.00 50.00)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">r</text>
+    <text x="339.97" y="53.22" transform="rotate(9.20 339.97 53.22)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">o</text>
+    <text x="378.91" y="62.78" transform="rotate(18.40 378.91 62.78)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">.</text>
+    <text x="415.82" y="78.45" transform="rotate(27.60 415.82 78.45)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">d</text>
+    <text x="449.76" y="99.82" transform="rotate(36.80 449.76 99.82)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">e</text>
+    <text x="479.83" y="126.34" transform="rotate(46.00 479.83 126.34)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="3" fill="#f7f5f0">v</text>
+    <!-- bottom arc: the three provenance layers -->
+    <text x="59.68" y="368.91" transform="rotate(74.00 59.68 368.91)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">D</text>
+    <text x="67.05" y="390.75" transform="rotate(68.71 67.05 390.75)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">E</text>
+    <text x="76.41" y="411.83" transform="rotate(63.43 76.41 411.83)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">R</text>
+    <text x="87.66" y="431.95" transform="rotate(58.14 87.66 431.95)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">I</text>
+    <text x="100.72" y="450.95" transform="rotate(52.86 100.72 450.95)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">V</text>
+    <text x="115.47" y="468.67" transform="rotate(47.57 115.47 468.67)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">E</text>
+    <text x="131.79" y="484.95" transform="rotate(42.29 131.79 484.95)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">D</text>
+    <text x="149.55" y="499.66" transform="rotate(37.00 149.55 499.66)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de"> </text>
+    <text x="168.58" y="512.67" transform="rotate(31.71 168.58 512.67)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">·</text>
+    <text x="188.73" y="523.87" transform="rotate(26.43 188.73 523.87)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de"> </text>
+    <text x="209.83" y="533.17" transform="rotate(21.14 209.83 533.17)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">A</text>
+    <text x="231.69" y="540.49" transform="rotate(15.86 231.69 540.49)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">U</text>
+    <text x="254.13" y="545.76" transform="rotate(10.57 254.13 545.76)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">T</text>
+    <text x="276.97" y="548.94" transform="rotate(5.29 276.97 548.94)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">H</text>
+    <text x="300.00" y="550.00" transform="rotate(-0.00 300.00 550.00)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">O</text>
+    <text x="323.03" y="548.94" transform="rotate(-5.29 323.03 548.94)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">R</text>
+    <text x="345.87" y="545.76" transform="rotate(-10.57 345.87 545.76)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">E</text>
+    <text x="368.31" y="540.49" transform="rotate(-15.86 368.31 540.49)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">D</text>
+    <text x="390.17" y="533.17" transform="rotate(-21.14 390.17 533.17)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de"> </text>
+    <text x="411.27" y="523.87" transform="rotate(-26.43 411.27 523.87)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">·</text>
+    <text x="431.42" y="512.67" transform="rotate(-31.71 431.42 512.67)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de"> </text>
+    <text x="450.45" y="499.66" transform="rotate(-37.00 450.45 499.66)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">I</text>
+    <text x="468.21" y="484.95" transform="rotate(-42.29 468.21 484.95)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">N</text>
+    <text x="484.53" y="468.67" transform="rotate(-47.57 484.53 468.67)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">F</text>
+    <text x="499.28" y="450.95" transform="rotate(-52.86 499.28 450.95)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">E</text>
+    <text x="512.34" y="431.95" transform="rotate(-58.14 512.34 431.95)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">R</text>
+    <text x="523.59" y="411.83" transform="rotate(-63.43 523.59 411.83)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">R</text>
+    <text x="532.95" y="390.75" transform="rotate(-68.71 532.95 390.75)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">E</text>
+    <text x="540.32" y="368.91" transform="rotate(-74.00 540.32 368.91)" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="600" letter-spacing="2" fill="#7fd4de">D</text>
+  </g>
+</svg>

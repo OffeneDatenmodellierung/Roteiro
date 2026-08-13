@@ -123,11 +123,13 @@
 
   // -- hash routing + navigation ---------------------------------------------
 
-  // Parse `location.hash` into a route. Unknown/empty hashes fall back to the
-  // workspace view with no explicit workspace (the default is chosen on load).
-  // Operates on the RAW hash — the captured segments are decoded per-segment via
-  // the guarded `decode`, so a malformed `%` sequence can never throw out here
-  // and blank the UI (`decodeURI` over the whole hash could).
+  // Parse `location.hash` into a route. An empty/unknown hash is the landing:
+  // the workspace SELECTOR, from which a choice routes by type (see `route`).
+  // The explicit `#/workspace/{ws}` (cross-repo view) and `.../project/{p}`
+  // (drill-in) forms still deep-link straight in. Operates on the RAW hash — the
+  // captured segments are decoded per-segment via the guarded `decode`, so a
+  // malformed `%` sequence can never throw out here and blank the UI (`decodeURI`
+  // over the whole hash could).
   function parseHash() {
     const h = location.hash.replace(/^#/, "");
     let m = h.match(/^\/workspace\/([^/]+)\/project\/(.+?)\/?$/);
@@ -139,7 +141,7 @@
       };
     m = h.match(/^\/workspace\/([^/]+)\/?$/);
     if (m) return { view: "workspace", ws: decode(m[1]) };
-    return { view: "workspace", ws: null };
+    return { view: "select" };
   }
 
   const decode = (s) => {
@@ -158,6 +160,29 @@
   }
   function goWorkspace(ws) {
     location.hash = ws ? `#/workspace/${encodeURIComponent(ws)}` : "#/";
+  }
+
+  // The hash a workspace routes to, BY TYPE: a real cross-repo workspace (MORE
+  // THAN ONE project) opens the cross-repo workspace view; a single/standalone
+  // repo (exactly one project) jumps STRAIGHT INTO that project's graph, skipping
+  // the empty cross-repo chrome. A projectless workspace falls back to the
+  // (empty) workspace view rather than nowhere.
+  function hashByType(ws) {
+    const projects = (ws && ws.projects) || [];
+    if (projects.length === 1) {
+      return `#/workspace/${encodeURIComponent(ws.name)}/project/${encodeURIComponent(projects[0])}`;
+    }
+    return `#/workspace/${encodeURIComponent(ws.name)}`;
+  }
+
+  // Route to a workspace by name, choosing the view by its project count (see
+  // `hashByType`). Used by the selector cards AND the header workspace switcher,
+  // so both entry points obey the same route-by-type rule. Writes the hash (a
+  // history push), so the browser back button returns to the selector.
+  function goByType(name) {
+    const ws = state.workspaces.find((w) => w.name === name);
+    if (!ws) return;
+    location.hash = hashByType(ws);
   }
 
   // Drill from the workspace view (a repo box, a matrix column header, or a
@@ -717,6 +742,52 @@
     host.replaceChildren(...kids);
   }
 
+  // -- workspace-selector landing --------------------------------------------
+
+  // Render the landing picker: one card per workspace, labelled by type — a
+  // multi-repo "hub · N repos", or a "standalone" single repo. Clicking a card
+  // routes by type (`goByType`): a hub opens the cross-repo view, a standalone
+  // drills straight into its project. This is only rendered when there is a
+  // genuine choice; a lone workspace auto-enters (see `route`).
+  function renderSelector() {
+    const grid = $("#select-grid");
+    if (!grid) return;
+    const status = $("#select-status");
+    const cards = state.workspaces.map((w) => {
+      const projects = w.projects || [];
+      const multi = projects.length > 1;
+      const badge = el("span", {
+        class: multi ? "ws-badge" : "ws-badge standalone",
+        text: multi ? `hub · ${projects.length} repos` : "standalone",
+      });
+      const kids = [
+        el("div", { class: "name", text: w.name }),
+        el("div", { class: "meta" }, badge),
+      ];
+      if (projects.length) {
+        kids.push(
+          el("div", {
+            class: "projects",
+            title: projects.join(", "),
+            text: projects.join(" · "),
+          })
+        );
+      }
+      return el(
+        "button",
+        {
+          class: "select-card",
+          type: "button",
+          title: multi ? `open ${w.name} (cross-repo)` : `open ${w.name}`,
+          onclick: () => goByType(w.name),
+        },
+        ...kids
+      );
+    });
+    grid.replaceChildren(...cards);
+    if (status) status.textContent = "";
+  }
+
   // ==========================================================================
   // Project graph view (drill-in) — PR 5
   // ==========================================================================
@@ -798,13 +869,22 @@
 
   // -- view show / hide ------------------------------------------------------
 
+  function showSelectView() {
+    $("#view-project").hidden = true;
+    $("#view-workspace").hidden = true;
+    $("#view-select").hidden = false;
+    document.body.classList.remove("on-project");
+  }
+
   function showProjectView() {
+    $("#view-select").hidden = true;
     $("#view-workspace").hidden = true;
     $("#view-project").hidden = false;
     document.body.classList.add("on-project");
   }
 
   function showWorkspaceView() {
+    $("#view-select").hidden = true;
     $("#view-project").hidden = true;
     $("#view-workspace").hidden = false;
     document.body.classList.remove("on-project");
@@ -1809,6 +1889,20 @@
 
   async function route() {
     const r = parseHash();
+    // The landing is the workspace selector — UNLESS there is only one workspace
+    // total, in which case there is nothing to choose: auto-enter it by type,
+    // replacing the empty hash so the back button doesn't bounce off the (skipped)
+    // selector. The same route-by-type rule then dispatches to the right view.
+    if (r.view === "select") {
+      if (state.workspaces.length === 1) {
+        const target = hashByType(state.workspaces[0]);
+        history.replaceState(null, "", location.pathname + location.search + target);
+        return route();
+      }
+      showSelectView();
+      renderSelector();
+      return;
+    }
     if (r.view === "project" && r.project) {
       const ws = r.ws && hasWorkspace(r.ws) ? r.ws : pickDefault(state.workspaces);
       showProjectView();
@@ -1876,7 +1970,11 @@
       const workspaces = await getJson("/v1/graph/workspaces");
       state.workspaces = workspaces;
       if (!workspaces.length) {
-        setStatus("No workspaces to show.", true);
+        const s = $("#select-status");
+        if (s) {
+          s.textContent = "No workspaces to show.";
+          s.className = "err";
+        }
         return;
       }
       const sel = $("#workspace");
@@ -1885,8 +1983,10 @@
           el("option", { value: w.name, text: `${w.name}${w.linked ? "" : " (standalone)"}` })
         )
       );
-      // Selecting a workspace navigates by hash so the choice is linkable.
-      sel.addEventListener("change", () => goWorkspace(sel.value));
+      // Switching the header workspace selector routes BY TYPE — the same rule the
+      // landing cards use — so a single-repo pick jumps straight into its graph
+      // rather than the empty cross-repo view. Navigates by hash so it's linkable.
+      sel.addEventListener("change", () => goByType(sel.value));
       wireProjectControls();
       // Enable the Ask tab iff this build serves the chat endpoint (serve build).
       await loadCapabilities();
@@ -1895,7 +1995,13 @@
       });
       await route();
     } catch (err) {
-      setStatus(`Could not load workspaces: ${err.message || err}`, true);
+      // The selector landing is what's on screen at load, so surface the failure
+      // there (its `#status` is `#select-status`).
+      const s = $("#select-status");
+      if (s) {
+        s.textContent = `Could not load workspaces: ${err.message || err}`;
+        s.className = "err";
+      }
     }
   }
 

@@ -2074,4 +2074,75 @@ mod tests {
         assert_eq!(arr.as_array().unwrap().len(), 1);
         assert_eq!(arr[0]["linked"], false);
     }
+
+    // -- selector/route-by-type: the payload shapes the landing relies on -----
+    //
+    // The workspace-selector landing routes BY PROJECT COUNT: a workspace with
+    // MORE THAN ONE project opens the cross-repo workspace view; one with exactly
+    // ONE project drills straight into that project's graph. And when there is only
+    // ONE workspace total, the selector is skipped and the app auto-enters by the
+    // same rule. These reuse the in-memory sets above to pin the three payload
+    // shapes the JS selector/routing consume (the routing itself is JS+DOM, so it
+    // needs a browser for full QA — see the PR notes).
+
+    #[tokio::test]
+    async fn workspaces_payload_carries_both_shapes_the_selector_routes_on() {
+        // The multi set holds both shapes at once: a multi-repo hub (>1 project →
+        // workspace view) and a standalone singleton (exactly 1 project → project).
+        let (status, _ct, body) =
+            get_app(explorer_router(multi_set(), None), "/v1/graph/workspaces").await;
+        assert_eq!(status, StatusCode::OK);
+        let arr: Value = serde_json::from_str(&body).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "both workspaces are offered in the selector");
+        let linked = arr.iter().find(|w| w["name"] == "linked").unwrap();
+        assert_eq!(linked["linked"], true);
+        assert!(
+            linked["projects"].as_array().unwrap().len() > 1,
+            "a hub has more than one project → routes to the cross-repo view"
+        );
+        let solo = arr.iter().find(|w| w["name"] == "solo").unwrap();
+        assert_eq!(solo["linked"], false);
+        assert_eq!(
+            solo["projects"].as_array().unwrap().len(),
+            1,
+            "a standalone repo has exactly one project → drills straight in"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_only_is_a_single_one_project_workspace_for_auto_enter() {
+        // A lone standalone workspace with exactly one project: the selector is
+        // skipped (nothing to choose) and the app auto-enters that project's graph.
+        let (status, _ct, body) = get_app(
+            explorer_router(standalone_only_set(), Some("solo")),
+            "/v1/graph/workspaces",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr: Value = serde_json::from_str(&body).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "a single workspace → auto-enter, no selector");
+        assert_eq!(arr[0]["linked"], false);
+        assert_eq!(arr[0]["projects"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn single_multi_repo_workspace_auto_enters_the_cross_repo_view() {
+        // A lone multi-repo workspace (>1 project): still no choice, so the selector
+        // is skipped — but auto-enter lands on the cross-repo view, not a project.
+        let (status, _ct, body) = get_app(
+            explorer_router(single_set(linked_workspace()), None),
+            "/v1/graph/workspaces",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr: Value = serde_json::from_str(&body).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "a single workspace → auto-enter, no selector");
+        assert!(
+            arr[0]["projects"].as_array().unwrap().len() > 1,
+            "a lone hub still routes to the cross-repo workspace view"
+        );
+    }
 }
