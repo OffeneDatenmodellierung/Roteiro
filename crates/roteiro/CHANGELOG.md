@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.2.0...roteiro-v1.3.0) - 2026-08-13
+
+### Added
+
+- *(explorer)* graph-grounded Ask tab (llama-gated) [PR 8]
+
+### Fixed
+
+- *(explorer)* address PR #251 Copilot review — Ask needs a served model, trim key punctuation, keyboard-activate ref links
+
 ## [1.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.1.0...roteiro-v1.2.0) - 2026-08-13
 
 ### Added
