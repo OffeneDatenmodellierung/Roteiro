@@ -3331,7 +3331,16 @@ fn run_explorer(
     }
     let set = Arc::new(set);
 
-    // The default workspace for the flat `/v1/graph/*` routes: an explicit
+    // Validate an explicit `--workspace-name` once, up front: an unknown name must
+    // fail fast — with the existing `UnknownWorkspace` message that lists the known
+    // workspaces — rather than booting a server whose flat `/v1/graph/*` routes
+    // would then 404 on every request. The cwd-default / single-workspace paths
+    // pass no name and are unaffected.
+    if let Some(name) = workspace_name {
+        set.select(Some(name))?;
+    }
+
+    // The default workspace for the flat `/v1/graph/*` routes: the (now-validated)
     // `--workspace-name`, else the workspace containing the current repo. A lone
     // configured workspace resolves itself, so `None` is fine there (see
     // `WorkspaceSet::select`).
@@ -3395,10 +3404,11 @@ fn explorer_cwd_set() -> anyhow::Result<rto_graph::WorkspaceSet> {
 }
 
 /// The default workspace the flat `/v1/graph/*` routes bind to: an explicit
-/// `--workspace-name` if given (validated per-request), else the workspace whose
-/// discovered members include the current repo's `graph.db`. `None` lets a
-/// single-workspace set resolve its sole workspace (and a multi-workspace set
-/// report "ambiguous" until a nested `/workspaces/{ws}/…` route is used).
+/// `--workspace-name` if given (already validated against `set` at startup, so it
+/// is passed through here), else the workspace whose discovered members include
+/// the current repo's `graph.db`. `None` lets a single-workspace set resolve its
+/// sole workspace (and a multi-workspace set report "ambiguous" until a nested
+/// `/workspaces/{ws}/…` route is used).
 #[cfg(feature = "explorer")]
 fn explorer_default_workspace(
     set: &rto_graph::WorkspaceSet,
@@ -3407,9 +3417,8 @@ fn explorer_default_workspace(
     if let Some(name) = workspace_name {
         return Some(name.to_owned());
     }
-    let cwd = std::env::current_dir().ok()?;
-    let repo = rto_graph::Repo::discover(&cwd).ok()?;
-    let db = repo.git_dir().join("roteiro").join("graph.db");
+    // Reuse the one place the on-disk `<repo>/.git/roteiro/graph.db` layout lives.
+    let db = graph_db_path(&std::env::current_dir().ok()?).ok()?;
     set.containing(&db).map(str::to_owned)
 }
 
