@@ -338,7 +338,9 @@ async fn topology(State(ws): State<Ws>) -> ApiResult {
                     "confidence": confidence,
                 }));
             }
-            if ws.follow_external_ref(node)?.is_none() {
+            // A link whose target is gone — or whose project isn't hosted / has no
+            // graph — is drift for that link, not a fatal error for the endpoint.
+            if resolve_link(&ws, node)?.is_none() {
                 drift_count += 1;
             }
         }
@@ -392,7 +394,7 @@ async fn matrix(State(ws): State<Ws>) -> ApiResult {
                 .get(src)
                 .cloned()
                 .unwrap_or_else(|| (src.clone(), String::new()));
-            match ws.follow_external_ref(node)? {
+            match resolve_link(&ws, node)? {
                 // Resolves to its hub node → a real override cell.
                 Some(hub_node) => matches.push(overview::MatchInput {
                     hub_key: hub_node.name,
@@ -400,7 +402,8 @@ async fn matrix(State(ws): State<Ws>) -> ApiResult {
                     spoke_value,
                     confidence: confidence.unwrap_or(0.0),
                 }),
-                // Hub node gone → drift (an orphan spoke key).
+                // Hub node gone, or its project isn't hosted / has no graph → drift
+                // (an orphan spoke key), not a fatal error for the endpoint.
                 None => orphans.push((spoke_key, spoke_value)),
             }
         }
@@ -472,15 +475,39 @@ fn config_by_node_key(store: &Store) -> Result<BTreeMap<String, (String, String)
         .collect())
 }
 
-/// The hub project: the one most external-ref edges across the workspace point
-/// into. `None` when nothing references anything (a single-repo or unlinked
+/// Follow an external-ref to its hub node for the cross-repo views, mapping a
+/// target that no longer resolves — the hub node is gone, or its project isn't
+/// hosted / has no graph — to **drift** (`Ok(None)`) rather than an error. A
+/// single dangling link must not fail the whole endpoint, mirroring how
+/// `/resolve` reports `{drift:true}`. Genuine internal failures (poisoned lock,
+/// store/git errors) still propagate.
+fn resolve_link(ws: &Workspace, node: &Node) -> Result<Option<Node>, ApiError> {
+    match ws.follow_external_ref(node) {
+        Ok(target) => Ok(target),
+        Err(
+            WorkspaceError::UnknownProject { .. }
+            | WorkspaceError::NoGraph { .. }
+            | WorkspaceError::Unqualified { .. }
+            | WorkspaceError::AmbiguousProject { .. }
+            | WorkspaceError::Empty,
+        ) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The hub project: the **hosted** project most external-ref edges point into.
+/// Targets naming a project not in `names` (an unhosted repo) are ignored, so the
+/// hub is always a project the workspace can actually read — never a phantom.
+/// `None` when nothing references a hosted project (a single-repo or unlinked
 /// workspace).
 fn determine_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, ApiError> {
+    let hosted: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
     let mut targets: BTreeMap<String, usize> = BTreeMap::new();
     for name in names {
         for ExternalRef { node, .. } in ws.with_store(Some(name), external_refs)?? {
             if let Some(qualified) = external_ref_target(&node)
                 && let Some((project, _)) = parse_qualified(&qualified)
+                && hosted.contains(project)
             {
                 *targets.entry(project.to_owned()).or_default() += 1;
             }
@@ -646,6 +673,41 @@ mod tests {
                 EdgeKind::References,
                 0.8,
             ));
+        apply(store, &facts)
+    }
+
+    /// Build a spoke store whose links point at project `ghost`, which no
+    /// workspace below hosts: `live` links per `to_ghost`, plus (optionally) one
+    /// link to the hosted hub's `serve.addr`.
+    fn spoke_linking_unhosted(to_ghost: usize, link_hub: bool) -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let mut facts = FactSet::new();
+
+        if link_hub {
+            let live = format!("{HUB}::cfgkey:config.toml#serve.addr");
+            facts = facts
+                .with_node(cfg_node("deploy.env", "HUB_ADDR", "0.0.0.0:8443"))
+                .with_node(external_ref_node(&live))
+                .with_edge(Edge::inferred(
+                    "cfgkey:deploy.env#HUB_ADDR",
+                    external_ref_key(&live),
+                    EdgeKind::References,
+                    0.9,
+                ));
+        }
+        for i in 0..to_ghost {
+            let spoke_key = format!("GHOST_{i}");
+            let ghost = format!("ghost::cfgkey:g.env#K{i}");
+            facts = facts
+                .with_node(cfg_node("deploy.env", &spoke_key, "x"))
+                .with_node(external_ref_node(&ghost))
+                .with_edge(Edge::inferred(
+                    format!("cfgkey:deploy.env#{spoke_key}"),
+                    external_ref_key(&ghost),
+                    EdgeKind::References,
+                    0.8,
+                ));
+        }
         apply(store, &facts)
     }
 
@@ -849,5 +911,36 @@ mod tests {
         let drift = json["drift"].as_array().unwrap();
         assert_eq!(drift.len(), 1);
         assert_eq!(drift[0]["key"], "LEGACY_ADDR");
+    }
+
+    #[tokio::test]
+    async fn topology_hub_is_always_a_hosted_project() {
+        // The spoke references unhosted `ghost` twice but the hosted hub only
+        // once. The hub must be the hosted `hub`, never the more-linked phantom.
+        let ws = Arc::new(Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_linking_unhosted(2, true)),
+        ]));
+        let (status, json) = get(ws, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["hub"], HUB, "hub is the hosted project, not `ghost`");
+    }
+
+    #[tokio::test]
+    async fn topology_unhosted_link_is_drift_not_404() {
+        // The spoke's only links point at unhosted `ghost`. Following them can't
+        // resolve, but that is drift for those links — the endpoint still returns
+        // 200 with the whole response built.
+        let ws = Arc::new(Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_linking_unhosted(2, false)),
+        ]));
+        let (status, json) = get(ws, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::OK, "an unhosted target must not 404");
+        assert_eq!(json["hub"], Value::Null, "no hosted project is referenced");
+        let spokes = json["spokes"].as_array().unwrap();
+        assert_eq!(spokes.len(), 1);
+        assert_eq!(spokes[0]["driftCount"], 2, "both unhosted links are drift");
+        assert_eq!(json["links"].as_array().unwrap().len(), 2);
     }
 }

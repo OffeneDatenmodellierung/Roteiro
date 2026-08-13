@@ -167,7 +167,11 @@ impl Workspace {
     {
         let mut projects = BTreeMap::new();
         for (name, store) in stores {
-            projects.insert(name.into(), Source::Open(Arc::new(Mutex::new(store))));
+            // Dedupe like `from_repo_paths` (`-2`, `-3`, …) so two stores sharing a
+            // base name both survive instead of the second silently overwriting the
+            // first (which would drop a project).
+            let name = dedupe_name(&projects, name.into());
+            projects.insert(name, Source::Open(Arc::new(Mutex::new(store))));
         }
         // Mirror `from_repo_paths`: a lone project is the default; several are
         // ambiguous until a call names one.
@@ -515,6 +519,17 @@ mod tests {
         // with_store hands over the store.
         let n = ws.with_store(None, |s| s.node_count().unwrap()).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn from_stores_dedupes_colliding_names() {
+        // Two stores sharing the base name `repo` must both survive: the second
+        // is suffixed `repo-2` (like `from_repo_paths`), never dropped.
+        let ws = Workspace::from_stores([("repo", store()), ("repo", store())]);
+        let mut names = ws.names();
+        names.sort();
+        assert_eq!(names, vec!["repo".to_owned(), "repo-2".to_owned()]);
+        assert!(ws.is_multi());
     }
 
     #[test]
