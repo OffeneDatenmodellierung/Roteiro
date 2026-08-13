@@ -226,7 +226,7 @@ roteiro check --committed</code></pre>
 annotations. <code>check</code> keeps them honest; <code>roteiro spec</code> helps you
 draft house-style, graph-grounded ADRs to begin with.</div>
 
-<h2 id="modes">The four ways to run it</h2>
+<h2 id="modes">The five ways to run it</h2>
 
 <h3>1 · Offline mode <span style="font-weight:normal;color:var(--sub)">— the default</span></h3>
 <p>No models, no network. Build the graph, query it, verify authored intent, and
@@ -295,6 +295,25 @@ roteiro serve
 <span class="c"># Or networked over streamable HTTP (terminate TLS at a reverse proxy)</span>
 roteiro serve --http 127.0.0.1:8080</code></pre>
 
+<h3>5 · Explorer mode <span style="font-weight:normal;color:var(--sub)">— the graph, in your browser</span></h3>
+<p>An interactive web view of the graph. Start at a workspace overview — the
+cross-repo topology, the config override matrix and drift — then click any repo
+to drop into its own node/edge graph: hotspots, intent-debt with reasons, a node
+detail panel, and a <em>follow-the-link</em> hop that jumps from a spoke's config
+key straight to the hub struct that defines it. Fully offline and model-free;
+requires <code>--features explorer</code>.</p>
+<pre><code><span class="c"># Serve the explorer UI on loopback (no model needed)</span>
+roteiro explorer                        <span class="c"># → prints the URL to open in your browser</span>
+
+<span class="c"># Pick a workspace by name, or default to the repo you're in</span>
+roteiro explorer --workspace-name payments</code></pre>
+<div class="note"><strong>Chat to your graph in the browser.</strong> Build with
+<code>--features serve,explorer</code> and run <code>roteiro serve --models</code>:
+it serves the same explorer UI <em>and</em> the model endpoint on one port, which
+enables the <strong>Ask</strong> tab — natural-language questions answered by a
+local model calling the graph's tools. <code>roteiro explorer</code> on its own
+stays model-free, with Ask disabled.</div>
+
 <h2 id="ask">Ask questions of your code</h2>
 
 <p>Two ways to interrogate the graph: <strong>structured queries</strong> that need no
@@ -302,6 +321,8 @@ model and run fully offline, and <strong>natural-language questions</strong> ans
 a local model that calls the graph's tools for you. Both read the <em>same</em>
 provenance-tagged store, so answers are grounded in your actual code and decisions
 — not the model's training data.</p>
+
+<div class="note">The natural-language path is also the <strong>Ask</strong> tab in the <a href="#modes">graph explorer</a> — same tools, same grounding, in your browser.</div>
 
 <h3>Structured — offline, no model</h3>
 <p>Precise lookups straight against the graph. Deterministic, instant, and
@@ -477,6 +498,13 @@ tools  = true                            <span class="c"># expose graph tools to
 roots = ["~/code"]                       <span class="c"># scan for repos (each becomes a project)</span>
 repos = []                               <span class="c"># …or list explicit repo paths</span>
 
+[[workspaces]]                          <span class="c"># several named workspaces (a hub + its spokes)</span>
+name  = "payments"                      <span class="c"># select with --workspace-name, or by cwd</span>
+repos = ["~/work/app", "~/work/deploy"]
+
+[standalone]                            <span class="c"># repos with no cross-repo links (each its own graph)</span>
+repos = ["~/code/dotfiles"]
+
 [[links]]                                <span class="c"># authored cross-repo link (ADR-0009)</span>
 to = "app::sym:rust:src/config.rs#ServeConfig"  <span class="c"># a &lt;project&gt;::&lt;key&gt; in another repo</span>
 from = "file:k8s/deployment.yaml"       <span class="c"># optional local anchor in this repo</span>
@@ -487,6 +515,8 @@ app = "release-{tag}"                    <span class="c"># image app:1.4 → git
 <div class="note"><strong>Interlink a hub app with its deployment repos.</strong> The
 <code>[[links]]</code> and <code>[pins]</code> tables belong to Roteiro's cross-repo
 layer — see <a href="#crossrepo">Cross-repo: a hub and its spokes</a> below.</div>
+
+<div class="note"><strong>Many workspaces, one install.</strong> A lone <code>[workspace]</code> is the default workspace; add <code>[[workspaces]]</code> for several named hub-and-spoke groups and <code>[standalone]</code> for repos that stand alone. <code>roteiro links</code>, <code>roteiro serve</code> and the <a href="#modes">explorer</a> pick one with <code>--workspace-name</code> (or the workspace containing your current directory).</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed
