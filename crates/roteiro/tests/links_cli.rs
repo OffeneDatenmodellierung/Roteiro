@@ -957,8 +957,7 @@ fn matrix_renders_override_grid_and_drift_across_formats() {
 /// filter is strictly opt-in.
 #[test]
 fn query_app_config_only_drops_tooling_keys() {
-    let base =
-        std::env::temp_dir().join(format!("roteiro-appconfig-cli-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("roteiro-appconfig-cli-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     std::fs::create_dir_all(base.join("config")).expect("mkdir");
 
@@ -1001,13 +1000,21 @@ fn query_app_config_only_drops_tooling_keys() {
     );
 
     // Opt-in: `--app-config-only` drops the tooling keys, keeps the app keys.
-    let app_only = keys(&["query", "--kind", "config_key", "--app-config-only", "--json"]);
+    let app_only = keys(&[
+        "query",
+        "--kind",
+        "config_key",
+        "--app-config-only",
+        "--json",
+    ]);
     assert!(
         !app_only.iter().any(|k| k.starts_with("cfgkey:Cargo.toml#")),
         "tooling keys must be dropped: {app_only:?}"
     );
     assert!(
-        app_only.iter().any(|k| k.starts_with("cfgkey:config/app.toml#")),
+        app_only
+            .iter()
+            .any(|k| k.starts_with("cfgkey:config/app.toml#")),
         "app keys must remain: {app_only:?}"
     );
 
