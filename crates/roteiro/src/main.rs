@@ -181,6 +181,12 @@ enum Command {
         /// config and the current repo.
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
+        /// Select a **named** workspace from config (`[[workspaces]]`/`[standalone]`)
+        /// to scope the report to. Default: the workspace containing the current
+        /// repo, else today's flat `[workspace]` scope. Any `--workspace <ROOT>` is
+        /// still unioned into the selected workspace.
+        #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
+        workspace_name: Option<String>,
         /// Infer links by matching config keys across repos, instead of verifying
         /// authored `[[links]]`. Mutually exclusive with `--matrix`.
         #[arg(long, conflicts_with = "matrix")]
@@ -487,6 +493,7 @@ fn main() -> anyhow::Result<()> {
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Links {
             workspace,
+            workspace_name,
             infer,
             matrix,
             hub,
@@ -502,20 +509,16 @@ fn main() -> anyhow::Result<()> {
                 auto: pinned,
                 ingest,
             };
+            let scope = LinksScope {
+                cli_roots: &workspace,
+                workspace_name: workspace_name.as_deref(),
+            };
             if matrix {
-                run_links_matrix(
-                    &cfg.effective,
-                    &workspace,
-                    hub.as_deref(),
-                    pin,
-                    html,
-                    out,
-                    json,
-                )
+                run_links_matrix(&cfg.effective, &scope, hub.as_deref(), pin, html, out, json)
             } else if infer {
-                run_links_infer(&cfg.effective, &workspace, hub.as_deref(), pin, write, json)
+                run_links_infer(&cfg.effective, &scope, hub.as_deref(), pin, write, json)
             } else {
-                run_links(&cfg.effective, &workspace, json)
+                run_links(&cfg.effective, &scope, json)
             }
         }
         Command::Export { out } => run_export(ingest, out),
@@ -2436,33 +2439,141 @@ fn workspace_project_names(paths: &[std::path::PathBuf]) -> Vec<(&std::path::Pat
         .collect()
 }
 
-/// Verify a workspace's authored cross-repo links (ADR-0009). For every repo in
-/// the workspace (the cwd repo plus any `--workspace`/`[workspace]` roots), read
-/// its `[[links]]` and resolve each project-qualified `to` against the other
-/// repos' graphs. A target that no longer resolves is **drift** — the cross-repo
-/// form of `roteiro check`. Exits non-zero if any link drifts.
-fn run_links(cfg: &config::Config, cli_roots: &[String], json: bool) -> anyhow::Result<()> {
+/// How a `roteiro links` invocation is scoped: the additive `--workspace <ROOT>`
+/// paths and the optional `--workspace-name` selector. Threaded through the
+/// authored-links, `--infer`, and `--matrix` reports together.
+struct LinksScope<'a> {
+    /// Repeatable `--workspace <ROOT>` roots, always unioned into the scope.
+    cli_roots: &'a [String],
+    /// `--workspace-name <NAME>`: select a configured workspace, or `None` to
+    /// default to the one containing the cwd (else today's flat `[workspace]`).
+    workspace_name: Option<&'a str>,
+}
+
+/// The current repo's working-tree directory (canonicalised), or `None` when the
+/// cwd is not inside a git repo. Used to find which configured workspace owns the
+/// cwd, at the path level — no graph is opened.
+fn cwd_repo_workdir() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let repo = rto_graph::Repo::discover(&cwd).ok()?;
+    let wd = repo.workdir()?.to_path_buf();
+    Some(wd.canonicalize().unwrap_or(wd))
+}
+
+/// The configured workspace whose **discovered member repos** include `cwd_wd`, or
+/// `None` if none do. Membership is decided purely at the path level
+/// ([`rto_graph::discover_repos_under`] + explicit repos) — no `Workspace` is built
+/// and no graph is opened — so one unrelated **misconfigured** group (an unreadable
+/// root) is skipped here rather than aborting selection.
+fn workspace_containing_cwd<'a>(
+    resolved: &'a [rto_graph::ResolvedWorkspace],
+    cwd_wd: &std::path::Path,
+) -> Option<&'a rto_graph::ResolvedWorkspace> {
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let is_cwd = |p: &std::path::Path| canon(p).as_path() == cwd_wd;
+    resolved.iter().find(|rw| {
+        // A broken root must not break selection: skip a root that won't read.
+        let in_root = rw.roots.iter().any(|root| {
+            rto_graph::discover_repos_under(std::path::Path::new(root))
+                .is_ok_and(|repos| repos.iter().any(|r| is_cwd(r)))
+        });
+        in_root
+            || rw
+                .repos
+                .iter()
+                .any(|repo| is_cwd(std::path::Path::new(repo)))
+    })
+}
+
+/// The repos `roteiro links` operates on: the selected workspace's members
+/// (`--workspace-name`, else the workspace containing the cwd, else today's flat
+/// `[workspace]` scope), unioned with any additive `--workspace <ROOT>` paths and
+/// the current repo (so links run inside a spoke resolve against its siblings).
+/// Shared by the authored-links, `--infer`, and `--matrix` reports.
+///
+/// Selection is short-circuited so the **legacy-fallback** path builds and
+/// validates nothing beyond today's `[workspace]` scope: only the *one* selected
+/// group is discovered, never the whole configured set. So a single unrelated
+/// misconfigured `[[workspaces]]` never breaks `links` in directories that should
+/// just fall back — a configured workspace is only used when explicitly named or
+/// when the cwd actually belongs to it. (For a legacy `[workspace]`-only config the
+/// fallback *is* the `default` group's scope, so behaviour is unchanged.)
+fn links_scope_paths(
+    cfg: &config::Config,
+    scope: &LinksScope<'_>,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
     use std::collections::BTreeSet;
 
-    // Repos in scope: the workspace roots/repos, plus the current repo so
-    // `roteiro links` run inside a spoke resolves against its siblings.
-    let mut paths: BTreeSet<std::path::PathBuf> =
-        collect_workspace_repo_paths(&cfg.workspace, cli_roots)?
-            .into_iter()
-            .collect();
+    let cli_roots = scope.cli_roots;
+    let resolved = cfg.resolved_workspaces()?;
+
+    // Pick the one group to scope to (by name, else cwd-containment) — WITHOUT
+    // building/validating the whole set; anything else falls back to the flat scope.
+    let chosen: Option<&rto_graph::ResolvedWorkspace> = if let Some(name) = scope.workspace_name {
+        // Explicit selection: it must name a configured workspace, else a clear
+        // error listing the known ones.
+        Some(resolved.iter().find(|r| r.name == name).ok_or_else(|| {
+            let known = resolved
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!("no workspace named `{name}` (known: {known})")
+        })?)
+    } else if resolved.is_empty() {
+        None
+    } else {
+        // Default: the workspace containing the cwd repo, else fall back (build
+        // nothing) — never eagerly select/validate an unrelated configured group.
+        cwd_repo_workdir().and_then(|wd| workspace_containing_cwd(&resolved, &wd))
+    };
+
+    let mut paths: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    match chosen {
+        Some(rw) => {
+            // Discover only the selected group's repo dirs (needed to load each
+            // repo's config downstream), unioning the additive `--workspace` roots.
+            for root in rw
+                .roots
+                .iter()
+                .map(String::as_str)
+                .chain(cli_roots.iter().map(String::as_str))
+            {
+                paths.extend(rto_graph::discover_repos_under(std::path::Path::new(root))?);
+            }
+            for repo in &rw.repos {
+                paths.insert(std::path::PathBuf::from(repo));
+            }
+        }
+        // No configured workspace selected ⇒ today's flat `[workspace]` + `--workspace`.
+        None => paths.extend(collect_workspace_repo_paths(&cfg.workspace, cli_roots)?),
+    }
+
+    // Always include the current repo so links run inside a spoke resolve against
+    // its siblings.
     if let Ok(cwd) = std::env::current_dir()
         && let Ok(repo) = rto_graph::Repo::discover(&cwd)
         && let Some(wd) = repo.workdir()
     {
         paths.insert(wd.to_path_buf());
     }
+
+    Ok(paths.into_iter().collect())
+}
+
+/// Verify a workspace's authored cross-repo links (ADR-0009). For every repo in
+/// the workspace (the cwd repo plus any `--workspace`/`[workspace]` roots), read
+/// its `[[links]]` and resolve each project-qualified `to` against the other
+/// repos' graphs. A target that no longer resolves is **drift** — the cross-repo
+/// form of `roteiro check`. Exits non-zero if any link drifts.
+fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow::Result<()> {
+    let paths = links_scope_paths(cfg, scope)?;
     if paths.is_empty() {
         anyhow::bail!(
             "no repos in scope — run inside a repo, pass `--workspace <root>`, or set \
              `[workspace]` in roteiro.toml"
         );
     }
-    let paths: Vec<std::path::PathBuf> = paths.into_iter().collect();
     let workspace = rto_graph::Workspace::from_repo_paths(&paths)?;
 
     // Collect each repo's declared links from its own config.
@@ -2677,22 +2788,13 @@ fn config_keys_from_artifact(
 /// single-repo workspace is a [`InferScan::Nothing`].
 fn scan_workspace_infer(
     cfg: &config::Config,
-    cli_roots: &[String],
+    scope: &LinksScope<'_>,
     hub: Option<&str>,
     pin: PinnedHub<'_>,
 ) -> anyhow::Result<InferScan> {
-    // Repos in scope (same set as `roteiro links`): workspace roots + the cwd repo.
-    let mut path_set: std::collections::BTreeSet<std::path::PathBuf> =
-        collect_workspace_repo_paths(&cfg.workspace, cli_roots)?
-            .into_iter()
-            .collect();
-    if let Ok(cwd) = std::env::current_dir()
-        && let Ok(repo) = rto_graph::Repo::discover(&cwd)
-        && let Some(wd) = repo.workdir()
-    {
-        path_set.insert(wd.to_path_buf());
-    }
-    let paths: Vec<std::path::PathBuf> = path_set.into_iter().collect();
+    // Repos in scope: the same selection as `roteiro links` (selected workspace,
+    // else today's flat `[workspace]` scope, plus `--workspace` roots and the cwd).
+    let paths = links_scope_paths(cfg, scope)?;
     if paths.is_empty() {
         return Ok(InferScan::Nothing(
             "no repos in scope; run inside a repo, pass `--workspace <root>`, or set `[workspace]`"
@@ -2865,7 +2967,7 @@ fn resolve_infer_report(
 /// ADR-0009 feature 2b) that survives later syncs.
 fn run_links_infer(
     cfg: &config::Config,
-    cli_roots: &[String],
+    scope: &LinksScope<'_>,
     hub: Option<&str>,
     pin: PinnedHub<'_>,
     write: bool,
@@ -2874,7 +2976,7 @@ fn run_links_infer(
     // Having nothing to infer is a **successful no-op** (exit 0) — `--infer` is
     // informational, so a CI script can run it opportunistically in a single repo
     // without failing — but still say why.
-    let ready = match scan_workspace_infer(cfg, cli_roots, hub, pin)? {
+    let ready = match scan_workspace_infer(cfg, scope, hub, pin)? {
         InferScan::Nothing(reason) => {
             if json {
                 emit_json(&serde_json::json!({ "hub": null, "spokes": [], "note": reason }))?;
@@ -2923,14 +3025,14 @@ fn run_links_infer(
 /// self-contained HTML page (`--html`, the "render web-graph" output).
 fn run_links_matrix(
     cfg: &config::Config,
-    cli_roots: &[String],
+    scope: &LinksScope<'_>,
     hub: Option<&str>,
     pin: PinnedHub<'_>,
     html: bool,
     out: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let ready = match scan_workspace_infer(cfg, cli_roots, hub, pin)? {
+    let ready = match scan_workspace_infer(cfg, scope, hub, pin)? {
         InferScan::Nothing(reason) => {
             if json {
                 emit_json(
@@ -3260,7 +3362,7 @@ fn collect_workspace_repo_paths(
         .map(String::as_str)
         .chain(ws_cfg.roots.iter().flatten().map(String::as_str));
     for root in roots {
-        repo_paths.extend(discover_repos_under(std::path::Path::new(root))?);
+        repo_paths.extend(rto_graph::discover_repos_under(std::path::Path::new(root))?);
     }
     for repo in ws_cfg.repos.iter().flatten() {
         repo_paths.push(std::path::PathBuf::from(repo));
@@ -3347,28 +3449,6 @@ fn install_workspace_reload(
     _ws_cfg: config::WorkspaceConfig,
     _cli_roots: Vec<String>,
 ) {
-}
-
-/// Git repos to host for a workspace `root`: the root itself if it is a repo,
-/// plus each immediate subdirectory that is one. Shallow by design — a code
-/// directory holding sibling checkouts is the common case, and a deep scan would
-/// be slow and surprising.
-fn discover_repos_under(root: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
-    let is_repo = |dir: &std::path::Path| dir.join(".git").exists();
-    let mut repos = Vec::new();
-    if is_repo(root) {
-        repos.push(root.to_path_buf());
-    }
-    let entries = std::fs::read_dir(root)
-        .map_err(|e| anyhow::anyhow!("reading workspace root `{}`: {e}", root.display()))?;
-    let mut children: Vec<std::path::PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && is_repo(p))
-        .collect();
-    children.sort();
-    repos.extend(children);
-    Ok(repos)
 }
 
 /// Serve the graph over the Model Context Protocol, over stdio (default) or
@@ -4140,7 +4220,7 @@ mod url_tests {
 
 #[cfg(test)]
 mod workspace_tests {
-    use super::discover_repos_under;
+    use rto_graph::discover_repos_under;
 
     #[test]
     fn discovers_the_root_and_immediate_repo_subdirs_only() {
