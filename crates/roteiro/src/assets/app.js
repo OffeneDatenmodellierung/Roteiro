@@ -53,6 +53,13 @@
     pcy: null, // the project graph's cytoscape instance
     pRendered: null, // `${ws}/${project}` currently rendered (guards reloads)
     searching: false, // a find-in-repo filter is active (suppresses hover trace)
+    // Cross-repo links for the drilled-into project (PR 6). `linkByRef` is keyed by
+    // the external-ref (app-key target) node key; `linkByFrom` by the spoke
+    // config_key node key — so both the graph styling and the node detail panel can
+    // look a link up in O(1). Empty for a non-spoke project.
+    links: [],
+    linkByRef: new Map(),
+    linkByFrom: new Map(),
   };
 
   // -- data ------------------------------------------------------------------
@@ -560,6 +567,40 @@
     inferred: "#3fb6a8",
   };
 
+  // Cross-repo link colours (PR 6): a spoke's config→app-key edges are DASHED and
+  // coloured GOLD when authored, SLATE when inferred; a link whose target the app
+  // no longer defines is DRIFT — a RED dashed edge to a `?` node.
+  const LINK_COLOR = {
+    authored: "#e0b64d", // gold
+    inferred: "#8b95a3", // slate
+    drift: "#f85149", // red
+  };
+
+  // Stash the drilled-into project's cross-repo links and index them two ways: by
+  // the app-key (external-ref) node key they point at, and by the spoke config_key
+  // node key they start from. Both the graph styling and the node detail panel
+  // read these. Empty maps for a non-spoke project (its `/links` is `[]`).
+  function setProjectLinks(links) {
+    state.links = links;
+    state.linkByRef = new Map();
+    state.linkByFrom = new Map();
+    for (const l of links) {
+      if (l.to) state.linkByRef.set(l.to, l);
+      if (l.from) state.linkByFrom.set(l.from, l);
+    }
+  }
+
+  // The screenshot label for an app-key target node: `<project>::<short key>`
+  // (e.g. `roteiro::serve.addr`), from the link's project-qualified target and the
+  // resolved hub key name (falling back to the short key when it drifts).
+  function appKeyLabel(link) {
+    const q = String(link.toQualified || "");
+    const sep = q.indexOf("::");
+    const proj = sep >= 0 ? q.slice(0, sep) : q;
+    const rest = sep >= 0 ? q.slice(sep + 2) : q;
+    return `${proj}::${link.toName || shortKey(rest)}`;
+  }
+
   const hasWorkspace = (name) => state.workspaces.some((w) => w.name === name);
 
   // Percent-encode a node key for the `/{project}/node/{*key}` catch-all route,
@@ -605,6 +646,7 @@
     }
     state.pRendered = null;
     state.searching = false;
+    setProjectLinks([]);
   }
 
   // -- graph rendering -------------------------------------------------------
@@ -650,14 +692,25 @@
     const ids = new Set(nodes.map((n) => n.key));
     const elements = [];
     for (const n of nodes) {
-      elements.push({
-        data: {
-          id: n.key,
-          label: n.name || shortKey(n.key),
-          kind: n.kind,
-          prov: n.provenance || "derived",
-        },
-      });
+      const data = {
+        id: n.key,
+        label: n.name || shortKey(n.key),
+        kind: n.kind,
+        prov: n.provenance || "derived",
+      };
+      // An external-ref node is a cross-repo APP-KEY TARGET — the hub key a spoke
+      // config key sets. Render it as a distinct outlined box labelled
+      // `<proj>::<key>`, gold/slate by the link's provenance; a target the app no
+      // longer defines is DRIFT — a red `?` node (PR 6). It stays selectable but
+      // inert (no follow-the-hop jump into the hub yet — PR 7 seam).
+      if (n.kind === "external_ref") {
+        const link = state.linkByRef.get(n.key);
+        data.role = "appkey";
+        data.drift = link && link.drift ? 1 : 0;
+        data.linkprov = link ? link.provenance : "inferred";
+        data.label = data.drift ? "?" : link ? appKeyLabel(link) : shortKey(n.name);
+      }
+      elements.push({ data });
     }
     // One edge per (src, dst, kind); never dangle an edge onto an absent node.
     // The id joins percent-encoded endpoints with a plain `->` — encoding means
@@ -669,9 +722,16 @@
       const id = `e:${encodeURIComponent(e.src)}->${encodeURIComponent(e.dst)}->${e.kind}`;
       if (seen.has(id)) continue;
       seen.add(id);
-      elements.push({
-        data: { id, source: e.src, target: e.dst, prov: e.provenance || "derived" },
-      });
+      const data = { id, source: e.src, target: e.dst, prov: e.provenance || "derived" };
+      // An edge into an app-key target is a CROSS-REPO LINK — draw it dashed and
+      // coloured by the link's provenance (gold/slate), red when it drifts.
+      const link = state.linkByRef.get(e.dst);
+      if (link) {
+        data.link = 1;
+        data.drift = link.drift ? 1 : 0;
+        data.linkprov = link.provenance;
+      }
+      elements.push({ data });
     }
 
     const count = nodes.length;
@@ -729,6 +789,72 @@
           selector: 'edge[prov = "inferred"]',
           style: { "line-color": "#3fb6a8", "target-arrow-color": "#3fb6a8" },
         },
+        // -- cross-repo links (PR 6) — placed after the generic edge/node rules so
+        //    the dashed link styling wins for the config→app-key edges/targets.
+        {
+          selector: 'node[role = "appkey"]',
+          style: {
+            shape: "round-rectangle",
+            "background-color": "#161b22",
+            "background-opacity": 0.95,
+            "border-width": 1.5,
+            "border-style": "dashed",
+            "border-color": LINK_COLOR.inferred,
+            width: "label",
+            height: "label",
+            padding: "6px",
+            label: "data(label)",
+            "font-size": 8,
+            color: "#c9d1d9",
+            "text-valign": "center",
+            "text-halign": "center",
+            "text-margin-y": 0,
+            "min-zoomed-font-size": 0,
+          },
+        },
+        {
+          selector: 'node[role = "appkey"][linkprov = "authored"]',
+          style: { "border-color": LINK_COLOR.authored },
+        },
+        {
+          selector: 'node[role = "appkey"][drift = 1]',
+          style: {
+            shape: "ellipse",
+            "border-color": LINK_COLOR.drift,
+            color: LINK_COLOR.drift,
+            "font-size": 13,
+            "font-weight": 700,
+            padding: "8px",
+          },
+        },
+        {
+          selector: "edge[link = 1]",
+          style: {
+            "curve-style": "straight",
+            "line-style": "dashed",
+            "line-color": LINK_COLOR.inferred,
+            "target-arrow-color": LINK_COLOR.inferred,
+            "target-arrow-shape": "triangle",
+            "arrow-scale": 0.7,
+            width: 1.5,
+            opacity: 0.95,
+          },
+        },
+        {
+          selector: 'edge[link = 1][linkprov = "authored"]',
+          style: {
+            "line-color": LINK_COLOR.authored,
+            "target-arrow-color": LINK_COLOR.authored,
+          },
+        },
+        {
+          selector: "edge[link = 1][drift = 1]",
+          style: {
+            "line-color": LINK_COLOR.drift,
+            "target-arrow-color": LINK_COLOR.drift,
+            width: 2,
+          },
+        },
         {
           selector: "node:selected",
           style: {
@@ -761,6 +887,11 @@
 
     state.pcy = cy;
 
+    // The cross-repo link legend (dashed gold/slate + `?` drift) is meaningful only
+    // for a spoke — show it only when this project actually has links.
+    const xlegend = $("#p-legend-xrepo");
+    if (xlegend) xlegend.hidden = state.links.length === 0;
+
     // Click a node → inspect it in the NODE tab.
     cy.on("tap", "node", (evt) => selectNode(evt.target.id()));
 
@@ -782,8 +913,45 @@
       cy.elements().removeClass("dim nb trace");
     });
 
+    // Hover an app-key target → a subtle "follow → (coming soon)" tooltip. The
+    // cross-repo follow-the-hop jump into the hub is PR 7; this is its inert seam.
+    cy.on("mouseover", 'node[role = "appkey"]', (evt) => {
+      const link = state.linkByRef.get(evt.target.id());
+      const label = link && !link.drift ? appKeyLabel(link) : "this key";
+      const msg = link && link.drift
+        ? "drift — the app defines no such key"
+        : `follow ${label} → (coming soon)`;
+      showFollowTip(evt, msg);
+    });
+    cy.on("mouseout", 'node[role = "appkey"]', hideFollowTip);
+    cy.on("pan zoom", hideFollowTip);
+
     updateCounter();
     cy.ready(() => cy.fit(undefined, 30));
+  }
+
+  // A tiny hover tooltip over the graph canvas, positioned at the cursor. Used by
+  // the app-key "follow → (coming soon)" seam; appended to the graph host (which
+  // cytoscape gives `position: relative`), so its coordinates match the render.
+  function showFollowTip(evt, text) {
+    const host = $("#p-graph");
+    if (!host) return;
+    let tip = host.querySelector(".p-tip");
+    if (!tip) {
+      tip = el("div", { class: "p-tip" });
+      host.appendChild(tip);
+    }
+    tip.textContent = text;
+    const pos = evt.renderedPosition || { x: 0, y: 0 };
+    tip.style.left = `${pos.x + 12}px`;
+    tip.style.top = `${pos.y + 12}px`;
+    tip.hidden = false;
+  }
+
+  function hideFollowTip() {
+    const host = $("#p-graph");
+    const tip = host && host.querySelector(".p-tip");
+    if (tip) tip.hidden = true;
   }
 
   function updateCounter(matchCount) {
@@ -1023,13 +1191,71 @@
     }
   }
 
+  // The cross-repo link chip(s) for a node that participates in one: a spoke
+  // config_key linking OUT to an app-key target, and/or an app-key target linked
+  // TO by a spoke key. Returns the section's children, or `null` when the node has
+  // no cross-repo link (so a plain node shows nothing extra). Chips are inert
+  // pointers within the spoke graph — the follow-the-hop jump into the hub is PR 7.
+  function crossRepoSection(nodeKey) {
+    const out = state.linkByFrom.get(nodeKey); // this config key → an app-key target
+    const inbound = state.linkByRef.get(nodeKey); // this node IS an app-key target
+    if (!out && !inbound) return null;
+
+    const chips = el("div", { class: "p-chips" });
+    if (out) {
+      const prov = out.drift ? "drift" : out.provenance;
+      chips.append(
+        el(
+          "button",
+          {
+            class: `p-chip xrepo ${prov}`,
+            type: "button",
+            title: out.drift
+              ? `drift → ${out.toQualified} — the app defines no such key`
+              : `${out.provenance} link → ${out.toQualified} · follow (coming soon)`,
+            onclick: () => selectNode(out.to),
+          },
+          out.drift ? "? drift" : appKeyLabel(out),
+          el("span", { class: "p-chip-kind", text: ` ${prov}` })
+        )
+      );
+    }
+    if (inbound) {
+      const prov = inbound.drift ? "drift" : inbound.provenance;
+      chips.append(
+        el(
+          "button",
+          {
+            class: `p-chip xrepo ${prov}`,
+            type: "button",
+            title: `${inbound.provenance} link from ${inbound.fromName}`,
+            onclick: () => selectNode(inbound.from),
+          },
+          inbound.fromName,
+          el("span", { class: "p-chip-kind", text: ` ${prov}` })
+        )
+      );
+    }
+    return [
+      el("div", { class: "p-sec-title", text: "Cross-repo link" }),
+      chips,
+      el("div", { class: "p-follow-hint", text: "follow → (coming soon)" }),
+    ];
+  }
+
   function renderNodeDetail(exp) {
     const pane = pPane("node");
     const node = exp.node || {};
     // Provenance isn't in the node summary; read it off the loaded graph node.
     const prov = graphNodeProv(node.key) || node.provenance || "derived";
+    // An app-key target node's own name is the long project-qualified target; show
+    // the compact `<proj>::<key>` label instead when we have the link.
+    const appLink = state.linkByRef.get(node.key);
+    const displayName = appLink
+      ? appKeyLabel(appLink)
+      : node.name || shortKey(node.key);
     const kids = [
-      el("div", { class: "p-node-name", text: node.name || shortKey(node.key) }),
+      el("div", { class: "p-node-name", text: displayName }),
       el(
         "div",
         { class: "p-node-meta" },
@@ -1038,6 +1264,9 @@
       ),
     ];
     if (node.path) kids.push(el("div", { class: "p-node-path", text: node.path }));
+
+    const xrepo = crossRepoSection(node.key);
+    if (xrepo) kids.push(...xrepo);
 
     // Neighbour chips — clicking one navigates to that node.
     const chipRow = (title, refs) => {
@@ -1076,6 +1305,7 @@
     state.project = project;
     state.pRendered = `${ws}/${project}`;
     state.searching = false;
+    setProjectLinks([]); // cleared until this project's `/links` returns
     const search = $("#p-search");
     if (search) search.value = "";
     $("#p-crumb-project").textContent = project;
@@ -1095,8 +1325,16 @@
     );
     setPStatus(`Loading ${project}…`);
     try {
-      const graph = await getJson(wsPath(ws, encodeURIComponent(project)));
+      // The graph and its cross-repo links load together: the links annotate which
+      // config→app-key edges are gold/slate and which targets drift, so the graph
+      // is styled in one pass. A spoke has links; a hub/plain repo gets `[]`.
+      const base = encodeURIComponent(project);
+      const [graph, linkData] = await Promise.all([
+        getJson(wsPath(ws, base)),
+        getJson(wsPath(ws, `${base}/links`)),
+      ]);
       if (state.pRendered !== `${ws}/${project}`) return; // navigated away mid-flight
+      setProjectLinks(linkData.links || []);
       renderProjectGraph(graph);
       setPStatus("");
       loadHotspots(ws, project);
