@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.3.0...roteiro-v1.3.1) - 2026-08-13
+
+### Fixed
+
+- *(config)* fast-path expand_tilde + skip tilde test with no home
+- *(config)* expand ~ in all workspace paths (roots/repos, new + legacy)
+
+### Other
+
+- Merge pull request #257 from OffeneDatenmodellierung/fix/expand-tilde-workspace-paths
+
 ## [1.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.2.0...roteiro-v1.3.0) - 2026-08-13
 
 ### Added
