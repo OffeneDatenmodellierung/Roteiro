@@ -62,6 +62,72 @@ pub fn is_config_path(path: &str) -> bool {
         || base.starts_with(".env.")
 }
 
+/// Whether a repo-relative config path is **build / tooling / CI** config rather
+/// than an application's own config — a `Cargo.toml`, a `rustfmt.toml`, a CI
+/// workflow, and so on. Used only by *opt-in* filters (`--app-config-only`, the
+/// explorer's "hide tooling config" toggle): the default everywhere is to show
+/// every config key, so this classifier never changes what is extracted or stored.
+///
+/// **Conservative by design** — it returns `true` only for a curated allow-list of
+/// well-known tooling names and directories, so real app config is never hidden by
+/// mistake. A file it doesn't recognise (e.g. `config/app.toml`, `values.yaml`,
+/// `prod.env`) is treated as app config. The list is meant to grow; add new
+/// well-known tooling files to the `match` (basename) or the directory checks.
+///
+/// Matches on the **file-path component** of a `cfgkey:<file>#<dotted>` node, so
+/// callers extract that path (see the CLI's `--app-config-only`) before calling.
+///
+/// Covered today:
+/// - Rust build/tooling: `Cargo.toml`, `Cargo.lock`, `rust-toolchain[.toml]`,
+///   `rustfmt.toml` / `.rustfmt.toml`, `clippy.toml`, `deny.toml`, `release-plz.toml`.
+/// - Cargo's own config: `.cargo/config` / `.cargo/config.toml`.
+/// - Anything under `.config/` (e.g. `.config/nextest.toml`).
+/// - Anything under `.github/` (CI workflows, `dependabot.yml`).
+/// - `.gitlab-ci.yml`.
+#[must_use]
+pub fn is_tooling_config_path(path: &str) -> bool {
+    // Path components, ignoring any leading `./` or empty segments. Repo-relative
+    // paths use `/`, matching the `cfgkey:<file>` ids these are checked against.
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    let base = segments.last().copied().unwrap_or(path);
+    let base_lower = base.to_ascii_lowercase();
+
+    // Directory-scoped: a whole directory that is tooling/CI, not app config.
+    // `.github/` — CI workflows + repo metadata. `.config/` — nextest & friends.
+    if segments.iter().any(|s| *s == ".github" || *s == ".config") {
+        return true;
+    }
+
+    // `.cargo/config` or `.cargo/config.toml` — cargo's own build config. Scoped
+    // to that exact file inside `.cargo/`, so an unrelated `.cargo/app.toml` isn't
+    // swept up.
+    if segments.len() >= 2
+        && segments[segments.len() - 2] == ".cargo"
+        && matches!(base_lower.as_str(), "config" | "config.toml")
+    {
+        return true;
+    }
+
+    // Well-known tooling files by basename, anywhere in the tree (a vendored crate
+    // carries its own `Cargo.toml`, and it's tooling there too).
+    matches!(
+        base_lower.as_str(),
+        "cargo.toml"
+            | "cargo.lock"
+            | "rust-toolchain"
+            | "rust-toolchain.toml"
+            | "rustfmt.toml"
+            | ".rustfmt.toml"
+            | "clippy.toml"
+            | "deny.toml"
+            | "release-plz.toml"
+            | ".gitlab-ci.yml"
+    )
+}
+
 /// Flatten a config file's bytes into leaf keys, dispatched by extension. An
 /// unparseable file yields nothing (a config we can't read is not an error here).
 #[must_use]
@@ -427,6 +493,48 @@ mod tests {
         // CI workflows are YAML but not app config — excluded.
         assert!(!is_config_path(".github/workflows/ci.yml"));
         assert!(!is_config_path(".github/dependabot.yml"));
+    }
+
+    #[test]
+    fn tooling_config_paths_are_flagged_conservatively() {
+        // Well-known build/tooling/CI files → tooling (hidden by the opt-in filter).
+        for p in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/rto-graph/Cargo.toml", // a workspace member's manifest, too
+            "vendor/some-crate/Cargo.toml", // a vendored crate's manifest
+            "rust-toolchain",
+            "rust-toolchain.toml",
+            "rustfmt.toml",
+            ".rustfmt.toml",
+            "clippy.toml",
+            "deny.toml",
+            "release-plz.toml",
+            ".config/nextest.toml",
+            ".cargo/config",
+            ".cargo/config.toml",
+            ".github/workflows/ci.yml",
+            ".github/dependabot.yml",
+            ".gitlab-ci.yml",
+        ] {
+            assert!(is_tooling_config_path(p), "{p} should be tooling config");
+        }
+
+        // Ordinary application config → NOT tooling (always shown; never misclassified).
+        for p in [
+            "config/app.toml",
+            "values.yaml",
+            "values.prod.yaml",
+            "prod.env",
+            ".env",
+            ".env.local",
+            "zerobus-example.toml",
+            "deploy/service.json",
+            "settings/config.toml", // a plain `config.toml`, not under `.cargo/`
+            ".cargo/app.toml",      // an unrelated file that merely lives under `.cargo/`
+        ] {
+            assert!(!is_tooling_config_path(p), "{p} should be app config");
+        }
     }
 
     #[test]

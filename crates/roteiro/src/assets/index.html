@@ -567,6 +567,20 @@
       .p-search::placeholder {
         color: var(--pmuted);
       }
+      .p-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.8rem;
+        color: var(--pmuted);
+        white-space: nowrap;
+        cursor: pointer;
+        user-select: none;
+      }
+      .p-toggle input {
+        cursor: pointer;
+        margin: 0;
+      }
       .p-counter {
         margin-left: auto;
         color: var(--pmuted);
@@ -1133,6 +1147,17 @@
               autocomplete="off"
               aria-label="find a node in this repo"
             />
+            <label
+              class="p-toggle"
+              title="Hide build/tooling/CI config keys (Cargo.toml, .github/ workflows, nextest, …). Off by default — shows everything."
+            >
+              <input
+                id="p-hide-tooling"
+                type="checkbox"
+                aria-label="hide tooling config keys"
+              />
+              <span>Hide tooling config</span>
+            </label>
             <span id="p-counter" class="p-counter"></span>
           </div>
           <div class="p-legend" aria-label="node provenance legend">
