@@ -113,6 +113,7 @@ fn graph_routes(prefix: &str) -> Router<AppState> {
         .route(&format!("{prefix}/resolve"), get(resolve))
         .route(&format!("{prefix}/{{project}}"), get(project_graph))
         .route(&format!("{prefix}/{{project}}/nodes"), get(project_nodes))
+        .route(&format!("{prefix}/{{project}}/links"), get(project_links))
         .route(
             &format!("{prefix}/{{project}}/node/{{*key}}"),
             get(node_detail),
@@ -294,6 +295,70 @@ async fn project_graph(State(st): State<AppState>, params: RawPathParams) -> Api
         "counts": { "nodes": nodes, "edges": edges },
     }))
     .into_response())
+}
+
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/links` → this project's cross-repo
+/// links, each annotated with everything the project-graph UI needs to draw a
+/// spoke's dashed config→app-key edges and its drift markers:
+///
+/// ```json
+/// { "project": "<project>",
+///   "links": [ {
+///     "from": "cfgkey:<file>#<dotted>",     // the spoke config_key node it starts at
+///     "fromName": "<dotted>",               // that key's short label (chip text)
+///     "to": "extref:<proj>::<key>",         // the external-ref placeholder node key
+///     "toQualified": "<proj>::<key>",        // the project-qualified hub target
+///     "toName": "<hub key>" | null,          // the resolved hub node's name, null on drift
+///     "provenance": "authored" | "inferred", // the edge's real provenance (gold/slate)
+///     "confidence": <f64> | null,            // inferred score; null for an authored link
+///     "drift": <bool>                        // true when the target resolves to no hub node
+///   } ] }
+/// ```
+///
+/// Drift is computed exactly like `/resolve` and the matrix — via
+/// [`Workspace::follow_external_ref`] — so a link whose qualified target does not
+/// resolve to a hub node is `drift: true` (and `toName: null`). A **non-spoke**
+/// project (no external-ref nodes) simply returns `links: []`, so the UI keeps its
+/// plain project-graph rendering for the hub and for standalone code repos.
+async fn project_links(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let refs = ws.with_store(Some(project), external_refs)??;
+    // node key → (dotted key, value), so a link's source node resolves back to the
+    // spoke's own short key for the chip label.
+    let spoke_cfg = ws.with_store(Some(project), config_by_node_key)??;
+
+    let mut links: Vec<Value> = Vec::new();
+    for ExternalRef {
+        src,
+        node,
+        provenance,
+        confidence,
+    } in &refs
+    {
+        let qualified = external_ref_target(node).unwrap_or_default();
+        let from_name = spoke_cfg
+            .get(src)
+            .map_or_else(|| src.clone(), |(key, _)| key.clone());
+        // A link whose hub node is gone — or whose project isn't hosted / has no
+        // graph — is drift for that link, not a fatal error for the endpoint
+        // (mirroring `/resolve` and `/matrix`).
+        let resolved = resolve_link(ws, node)?;
+        let drift = resolved.is_none();
+        let to_name = resolved.map(|n| n.name);
+        links.push(json!({
+            "from": src,
+            "fromName": from_name,
+            "to": node.key,
+            "toQualified": qualified,
+            "toName": to_name,
+            "provenance": provenance.as_str(),
+            "confidence": confidence,
+            "drift": drift,
+        }));
+    }
+
+    Ok(Json(json!({ "project": project, "links": links })).into_response())
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/{project}/nodes?kinds=&provenance=&q=&limit=&offset=`
@@ -840,6 +905,84 @@ mod tests {
         apply(store, &facts)
     }
 
+    /// Build a spoke store with all three link flavours the project-graph view
+    /// must render distinctly: one **inferred** live link (`SERVE_ADDR` →
+    /// `serve.addr`, slate), one **authored** live link (`SERVE_TOOLS` →
+    /// `serve.tools`, gold), and one **drift** link (`LEGACY_ADDR` → a hub key that
+    /// no longer exists, red `?`). Reuses the hub keys `hub_store` defines, so the
+    /// two live links resolve and the drift one does not.
+    fn spoke_authored_inferred_drift() -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let inferred = format!("{HUB}::cfgkey:config.toml#serve.addr");
+        let authored = format!("{HUB}::cfgkey:config.toml#serve.tools");
+        let drift = format!("{HUB}::cfgkey:config.toml#serve.legacy");
+
+        let facts = FactSet::new()
+            .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+            .with_node(cfg_node("deploy.env", "SERVE_TOOLS", "false"))
+            .with_node(cfg_node("deploy.env", "LEGACY_ADDR", "10.0.0.1:9000"))
+            .with_node(external_ref_node(&inferred))
+            .with_node(external_ref_node(&authored))
+            .with_node(external_ref_node(&drift))
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#SERVE_ADDR",
+                external_ref_key(&inferred),
+                EdgeKind::References,
+                0.9,
+            ))
+            .with_edge(Edge::authored(
+                "cfgkey:deploy.env#SERVE_TOOLS",
+                external_ref_key(&authored),
+                EdgeKind::References,
+            ))
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#LEGACY_ADDR",
+                external_ref_key(&drift),
+                EdgeKind::References,
+                0.8,
+            ));
+        apply(store, &facts)
+    }
+
+    /// Build a spoke store where **two distinct config keys point at the SAME hub
+    /// target** (`serve.addr`) — one inferred, one authored — plus one drift key.
+    /// Because both share a single external-ref placeholder node, this is the case
+    /// that a naive `to`-keyed index would collapse: the `/links` payload must still
+    /// report both links distinctly, each with its own `from`/provenance, so the UI
+    /// can style each config→app-key edge independently (per-edge, not per-target).
+    fn spoke_shared_target_and_drift() -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let shared = format!("{HUB}::cfgkey:config.toml#serve.addr");
+        let drift = format!("{HUB}::cfgkey:config.toml#serve.legacy");
+
+        let facts = FactSet::new()
+            .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+            .with_node(cfg_node("deploy.env", "PROXY_ADDR", "0.0.0.0:9443"))
+            .with_node(cfg_node("deploy.env", "LEGACY_ADDR", "10.0.0.1:9000"))
+            .with_node(external_ref_node(&shared))
+            .with_node(external_ref_node(&drift))
+            // Two edges into the one shared placeholder — distinct sources, distinct
+            // provenance (an inferred match and an authored `[[links]]`).
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#SERVE_ADDR",
+                external_ref_key(&shared),
+                EdgeKind::References,
+                0.9,
+            ))
+            .with_edge(Edge::authored(
+                "cfgkey:deploy.env#PROXY_ADDR",
+                external_ref_key(&shared),
+                EdgeKind::References,
+            ))
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#LEGACY_ADDR",
+                external_ref_key(&drift),
+                EdgeKind::References,
+                0.8,
+            ));
+        apply(store, &facts)
+    }
+
     /// Build a spoke store whose links point at project `ghost`, which no
     /// workspace below hosts: `live` links per `to_ghost`, plus (optionally) one
     /// link to the hosted hub's `serve.addr`.
@@ -1357,6 +1500,153 @@ mod tests {
         assert_eq!(spokes.len(), 1);
         assert_eq!(spokes[0]["driftCount"], 2, "both unhosted links are drift");
         assert_eq!(json["links"].as_array().unwrap().len(), 2);
+    }
+
+    // -- per-project cross-repo links (the spoke-graph rendering payload) ----
+
+    #[tokio::test]
+    async fn project_links_annotate_provenance_and_drift() {
+        // A spoke with one authored live link, one inferred live link, and one
+        // drift link. `/links` must expose each edge's real provenance and, via the
+        // workspace resolver, whether its qualified target still resolves to a hub
+        // node — the exact data the project-graph view draws as gold/slate/red.
+        let ws = Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_authored_inferred_drift()),
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/spoke/links").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["project"], SPOKE);
+
+        let links = json["links"].as_array().unwrap();
+        assert_eq!(links.len(), 3, "all three links are reported");
+        let by = |name: &str| {
+            links
+                .iter()
+                .find(|l| l["fromName"] == name)
+                .unwrap_or_else(|| panic!("no link from {name}"))
+        };
+
+        // The inferred live link: slate, resolves (no drift), carries its score and
+        // the resolved hub key's name.
+        let inferred = by("SERVE_ADDR");
+        assert_eq!(inferred["provenance"], "inferred");
+        assert_eq!(inferred["drift"], false);
+        assert_eq!(
+            inferred["toQualified"],
+            "hub::cfgkey:config.toml#serve.addr"
+        );
+        assert_eq!(inferred["toName"], "serve.addr");
+        assert_eq!(inferred["confidence"], json!(0.9));
+
+        // The authored live link: gold, resolves, and carries no confidence score
+        // (the `Edge` invariant) — proving provenance is read from the edge, not
+        // guessed from a score.
+        let authored = by("SERVE_TOOLS");
+        assert_eq!(authored["provenance"], "authored");
+        assert_eq!(authored["drift"], false);
+        assert_eq!(authored["toName"], "serve.tools");
+        assert_eq!(authored["confidence"], Value::Null);
+
+        // The drift link: its hub target is gone, so `drift:true` and `toName:null`
+        // (the app doesn't define this key → a red `?` in the UI).
+        let drift = by("LEGACY_ADDR");
+        assert_eq!(drift["drift"], true);
+        assert_eq!(drift["toName"], Value::Null);
+        assert_eq!(drift["toQualified"], "hub::cfgkey:config.toml#serve.legacy");
+    }
+
+    #[tokio::test]
+    async fn project_links_are_empty_for_a_non_spoke() {
+        // The hub itself references nothing cross-repo, so `/links` is empty — the
+        // UI keeps its plain project-graph rendering (no dashed edges, no `?`).
+        let (status, json) = get(single_set(linked_workspace()), None, "/v1/graph/hub/links").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["project"], HUB);
+        assert_eq!(json["links"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn project_links_are_scoped_to_the_named_workspace() {
+        // The spoke's inferred link resolves within `linked` (drift:false), but the
+        // same spoke graph placed under a workspace whose `hub` lacks the key would
+        // drift. Here we prove the nested route reads the spoke within its own
+        // workspace and resolves against that workspace's hub.
+        let (status, json) =
+            get(multi_set(), None, "/v1/graph/workspaces/linked/spoke/links").await;
+        assert_eq!(status, StatusCode::OK);
+        let links = json["links"].as_array().unwrap();
+        // `spoke_store` has one live (serve.addr) + one drift (serve.legacy) link.
+        assert_eq!(links.len(), 2);
+        let drift_count = links.iter().filter(|l| l["drift"] == true).count();
+        assert_eq!(drift_count, 1, "one link drifts, one resolves");
+    }
+
+    #[tokio::test]
+    async fn project_links_report_multiple_links_into_one_target_distinctly() {
+        // Two spoke config keys point at the SAME hub key `serve.addr` (one inferred,
+        // one authored), plus a drift key. They share one external-ref node, so a
+        // `to`-keyed index would collapse them — the payload must instead carry BOTH
+        // as distinct links, each with its own `from` and provenance. This is the
+        // data guarantee the per-edge JS styling and the per-node chips rely on.
+        let ws = Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_shared_target_and_drift()),
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/spoke/links").await;
+        assert_eq!(status, StatusCode::OK);
+        let links = json["links"].as_array().unwrap();
+        assert_eq!(
+            links.len(),
+            3,
+            "two links into the shared target + one drift"
+        );
+
+        // Both links into `serve.addr` survive — the shared target is not collapsed.
+        let into_addr: Vec<&Value> = links
+            .iter()
+            .filter(|l| l["toQualified"] == "hub::cfgkey:config.toml#serve.addr")
+            .collect();
+        assert_eq!(
+            into_addr.len(),
+            2,
+            "both links into the one target are reported"
+        );
+        let froms: std::collections::BTreeSet<&str> = into_addr
+            .iter()
+            .filter_map(|l| l["fromName"].as_str())
+            .collect();
+        assert_eq!(
+            froms,
+            ["PROXY_ADDR", "SERVE_ADDR"].into_iter().collect(),
+            "each link keeps its own source config key"
+        );
+        let provs: std::collections::BTreeSet<&str> = into_addr
+            .iter()
+            .filter_map(|l| l["provenance"].as_str())
+            .collect();
+        assert_eq!(
+            provs,
+            ["authored", "inferred"].into_iter().collect(),
+            "each edge into the shared target keeps its own provenance"
+        );
+        // Both share the (live) target, so neither drifts and both point at the same
+        // external-ref node key.
+        assert!(into_addr.iter().all(|l| l["drift"] == false));
+        assert!(
+            into_addr
+                .iter()
+                .all(|l| l["to"] == "extref:hub::cfgkey:config.toml#serve.addr"),
+            "both links share the one external-ref node"
+        );
+
+        // The unrelated legacy key still drifts on its own.
+        let drift = links
+            .iter()
+            .find(|l| l["fromName"] == "LEGACY_ADDR")
+            .unwrap();
+        assert_eq!(drift["drift"], true);
+        assert_eq!(drift["toName"], Value::Null);
     }
 
     // -- served web app: the explorer server mounts the UI beside the API ----

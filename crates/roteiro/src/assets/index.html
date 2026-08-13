@@ -538,6 +538,77 @@
       .p-dot.inferred {
         background: var(--pinferred);
       }
+      /* Cross-repo link legend (PR 6): dashed gold/slate swatches + a red `?`. */
+      .p-legend-xrepo {
+        display: inline-flex;
+        gap: 1rem;
+        align-items: center;
+        padding-left: 1rem;
+        margin-left: 0.25rem;
+        border-left: 1px solid var(--pline);
+      }
+      .p-dash {
+        width: 1.4rem;
+        height: 0;
+        border-top: 2px dashed var(--pmuted);
+        display: inline-block;
+      }
+      .p-dash.authored {
+        border-top-color: #e0b64d;
+      }
+      .p-dash.inferred {
+        border-top-color: #8b95a3;
+      }
+      .p-qmark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1rem;
+        height: 1rem;
+        border-radius: 999px;
+        border: 1.5px dashed #f85149;
+        color: #f85149;
+        font-size: 0.7rem;
+        font-weight: 700;
+        font-style: normal;
+        line-height: 1;
+      }
+      /* Follow-the-hop seam (PR 7): an inert cursor tooltip over the graph, and the
+         cross-repo chip styling in the node detail panel. */
+      .p-tip {
+        position: absolute;
+        z-index: 40;
+        pointer-events: none;
+        background: #161b22;
+        color: var(--pfg);
+        border: 1px solid var(--pline-strong);
+        border-radius: 6px;
+        padding: 0.2rem 0.45rem;
+        font-size: 0.72rem;
+        white-space: nowrap;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      }
+      .p-chip.xrepo {
+        border-style: dashed;
+      }
+      .p-chip.xrepo.authored {
+        border-color: #e0b64d;
+        color: #e0b64d;
+      }
+      .p-chip.xrepo.inferred {
+        border-color: #8b95a3;
+        color: #c9d1d9;
+      }
+      .p-chip.xrepo.drift {
+        border-color: #f85149;
+        color: #f85149;
+      }
+      .p-follow-hint {
+        color: var(--pmuted);
+        font-size: 0.72rem;
+        font-style: italic;
+        margin: 0.15rem 0 0.2rem;
+      }
       .p-side {
         flex: 0 0 360px;
         max-width: 360px;
@@ -896,6 +967,17 @@
             <span><i class="p-dot derived"></i> derived</span>
             <span><i class="p-dot authored"></i> authored</span>
             <span><i class="p-dot inferred"></i> inferred</span>
+            <span
+              class="p-legend-xrepo"
+              id="p-legend-xrepo"
+              aria-label="cross-repo link legend"
+              hidden
+            >
+              <span class="p-legend-label">cross-repo</span>
+              <span><i class="p-dash authored"></i> authored link</span>
+              <span><i class="p-dash inferred"></i> inferred link</span>
+              <span><i class="p-qmark">?</i> drift</span>
+            </span>
           </div>
           <div id="p-graph"></div>
         </section>
