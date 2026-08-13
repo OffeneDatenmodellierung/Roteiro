@@ -353,15 +353,20 @@ impl Config {
     ///   after the repo directory (deduped `-2`/`-3` on collision, as the workspace
     ///   registry does).
     ///
-    /// Names are made unique across all three sources (a `default`/`[[workspaces]]`
-    /// name always keeps its slot; a colliding standalone repo takes a suffix).
+    /// **Linked** workspace names (`default` and every `[[workspaces]]`) must be
+    /// **unique** — a collision is a config error, never a silent rename, because
+    /// renaming a user-named linked workspace would resolve its cross-repo links
+    /// against the wrong repos. Only the auto-generated **standalone** names (derived
+    /// from repo directory names) take a `-2`/`-3` suffix on collision, including
+    /// against a linked name.
     ///
     /// Fully backward-compatible: a config with only `[workspace]` yields exactly one
     /// `default` linked group with the same membership as before; a config naming no
     /// workspaces at all yields an empty list.
     ///
     /// # Errors
-    /// Propagates a discovery failure (an unreadable `[standalone]` root).
+    /// A duplicate **linked** workspace name, or a discovery failure (an unreadable
+    /// `[standalone]` root).
     pub fn resolved_workspaces(&self) -> anyhow::Result<Vec<rto_graph::ResolvedWorkspace>> {
         use std::collections::HashSet;
 
@@ -380,11 +385,18 @@ impl Config {
             });
         }
 
-        // Each `[[workspaces]]` → a named linked group.
+        // Each `[[workspaces]]` → a named linked group. A collision with `default`
+        // or another `[[workspaces]]` is a config error (never a silent rename).
         for nw in &self.workspaces {
-            let name = dedupe_workspace_name(&mut used, nw.name.clone());
+            if !used.insert(nw.name.clone()) {
+                anyhow::bail!(
+                    "duplicate workspace name `{}` — `[[workspaces]]` names (and the legacy \
+                     `[workspace]`, which folds in as `default`) must each be unique",
+                    nw.name
+                );
+            }
             out.push(rto_graph::ResolvedWorkspace {
-                name,
+                name: nw.name.clone(),
                 roots: nw.roots.clone().unwrap_or_default(),
                 repos: nw.repos.clone().unwrap_or_default(),
                 linked: true,
@@ -778,5 +790,90 @@ mod tests {
             merged.standalone.repos.as_deref(),
             Some(&["/solo/x".to_owned()][..])
         );
+    }
+
+    /// A **linked** workspace name collision is a config error (never a silent
+    /// rename that would resolve links against the wrong repos) — both between two
+    /// `[[workspaces]]` and between a `[[workspaces]]` and the folded-in `default`.
+    #[test]
+    fn duplicate_linked_workspace_names_are_a_config_error() {
+        // Two `[[workspaces]]` sharing a name → error.
+        let cfg = Config {
+            workspaces: vec![
+                NamedWorkspace {
+                    name: "api".to_owned(),
+                    roots: Some(vec!["/a".to_owned()]),
+                    repos: None,
+                },
+                NamedWorkspace {
+                    name: "api".to_owned(),
+                    roots: Some(vec!["/b".to_owned()]),
+                    repos: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let err = cfg
+            .resolved_workspaces()
+            .expect_err("duplicate [[workspaces]] name must error")
+            .to_string();
+        assert!(
+            err.contains("duplicate workspace name") && err.contains("api"),
+            "{err}"
+        );
+
+        // A `[[workspaces]]` named `default` collides with the legacy `[workspace]`
+        // that folds in as `default` → error.
+        let cfg = Config {
+            workspace: WorkspaceConfig {
+                roots: Some(vec!["/legacy".to_owned()]),
+                repos: None,
+            },
+            workspaces: vec![NamedWorkspace {
+                name: "default".to_owned(),
+                roots: Some(vec!["/x".to_owned()]),
+                repos: None,
+            }],
+            ..Default::default()
+        };
+        let err = cfg
+            .resolved_workspaces()
+            .expect_err("[[workspaces]] named `default` must collide with the legacy fold-in")
+            .to_string();
+        assert!(err.contains("default"), "{err}");
+    }
+
+    /// A `[standalone]` root holding several repos expands to one **single-repo**,
+    /// unlinked group per repo — never one multi-repo unlinked group.
+    #[test]
+    fn standalone_root_yields_one_single_repo_group_per_repo() {
+        let base = std::env::temp_dir().join(format!("roteiro-rw-solo-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for name in ["svc-a", "svc-b"] {
+            std::fs::create_dir_all(base.join("pool").join(name).join(".git")).expect("mkrepo");
+        }
+
+        let cfg = Config {
+            standalone: WorkspaceConfig {
+                roots: Some(vec![base.join("pool").to_string_lossy().into_owned()]),
+                repos: None,
+            },
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        assert_eq!(resolved.len(), 2, "one group per repo: {resolved:?}");
+        for rw in &resolved {
+            assert!(!rw.linked, "standalone repos are unlinked: {rw:?}");
+            assert_eq!(rw.repos.len(), 1, "each is a singleton: {rw:?}");
+            assert!(rw.roots.is_empty(), "expanded, not a roots scan: {rw:?}");
+        }
+        let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["svc-a", "svc-b"],
+            "named after repo dirs, sorted"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -2450,38 +2450,39 @@ struct LinksScope<'a> {
     workspace_name: Option<&'a str>,
 }
 
-/// Choose which configured workspace `roteiro links` should scope to: the explicit
-/// `--workspace-name` (validated, so an unknown name errors listing the known ones);
-/// else the workspace **containing** the current repo; else a sole configured
-/// workspace; else `None` — the caller then falls back to today's flat `[workspace]`
-/// scope. Several workspaces with no cwd match deliberately fall back rather than
-/// error, so a config with many `[[workspaces]]` run from an unrelated directory
-/// behaves exactly as before.
-fn choose_workspace_name(
-    set: &rto_graph::WorkspaceSet,
-    name: Option<&str>,
-) -> anyhow::Result<Option<String>> {
-    if let Some(n) = name {
-        // Validate the name; an unknown one is a `UnknownWorkspace` error.
-        set.select(Some(n))?;
-        return Ok(Some(n.to_owned()));
-    }
-    let names = set.names();
-    if names.is_empty() {
-        return Ok(None);
-    }
-    // Prefer the workspace that contains the current repo's graph.
-    if let Ok(cwd) = std::env::current_dir()
-        && let Ok(db) = graph_db_path(&cwd)
-        && let Some(found) = set.containing(&db)
-    {
-        return Ok(Some(found.to_owned()));
-    }
-    // A sole configured workspace is unambiguous; otherwise fall back.
-    if names.len() == 1 {
-        return Ok(names.into_iter().next());
-    }
-    Ok(None)
+/// The current repo's working-tree directory (canonicalised), or `None` when the
+/// cwd is not inside a git repo. Used to find which configured workspace owns the
+/// cwd, at the path level — no graph is opened.
+fn cwd_repo_workdir() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let repo = rto_graph::Repo::discover(&cwd).ok()?;
+    let wd = repo.workdir()?.to_path_buf();
+    Some(wd.canonicalize().unwrap_or(wd))
+}
+
+/// The configured workspace whose **discovered member repos** include `cwd_wd`, or
+/// `None` if none do. Membership is decided purely at the path level
+/// ([`rto_graph::discover_repos_under`] + explicit repos) — no `Workspace` is built
+/// and no graph is opened — so one unrelated **misconfigured** group (an unreadable
+/// root) is skipped here rather than aborting selection.
+fn workspace_containing_cwd<'a>(
+    resolved: &'a [rto_graph::ResolvedWorkspace],
+    cwd_wd: &std::path::Path,
+) -> Option<&'a rto_graph::ResolvedWorkspace> {
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let is_cwd = |p: &std::path::Path| canon(p).as_path() == cwd_wd;
+    resolved.iter().find(|rw| {
+        // A broken root must not break selection: skip a root that won't read.
+        let in_root = rw.roots.iter().any(|root| {
+            rto_graph::discover_repos_under(std::path::Path::new(root))
+                .is_ok_and(|repos| repos.iter().any(|r| is_cwd(r)))
+        });
+        in_root
+            || rw
+                .repos
+                .iter()
+                .any(|repo| is_cwd(std::path::Path::new(repo)))
+    })
 }
 
 /// The repos `roteiro links` operates on: the selected workspace's members
@@ -2489,6 +2490,14 @@ fn choose_workspace_name(
 /// `[workspace]` scope), unioned with any additive `--workspace <ROOT>` paths and
 /// the current repo (so links run inside a spoke resolve against its siblings).
 /// Shared by the authored-links, `--infer`, and `--matrix` reports.
+///
+/// Selection is short-circuited so the **legacy-fallback** path builds and
+/// validates nothing beyond today's `[workspace]` scope: only the *one* selected
+/// group is discovered, never the whole configured set. So a single unrelated
+/// misconfigured `[[workspaces]]` never breaks `links` in directories that should
+/// just fall back — a configured workspace is only used when explicitly named or
+/// when the cwd actually belongs to it. (For a legacy `[workspace]`-only config the
+/// fallback *is* the `default` group's scope, so behaviour is unchanged.)
 fn links_scope_paths(
     cfg: &config::Config,
     scope: &LinksScope<'_>,
@@ -2497,18 +2506,33 @@ fn links_scope_paths(
 
     let cli_roots = scope.cli_roots;
     let resolved = cfg.resolved_workspaces()?;
-    let set = rto_graph::WorkspaceSet::from_resolved(resolved.clone())?;
-    let chosen = choose_workspace_name(&set, scope.workspace_name)?;
+
+    // Pick the one group to scope to (by name, else cwd-containment) — WITHOUT
+    // building/validating the whole set; anything else falls back to the flat scope.
+    let chosen: Option<&rto_graph::ResolvedWorkspace> = if let Some(name) = scope.workspace_name {
+        // Explicit selection: it must name a configured workspace, else a clear
+        // error listing the known ones.
+        Some(resolved.iter().find(|r| r.name == name).ok_or_else(|| {
+            let known = resolved
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!("no workspace named `{name}` (known: {known})")
+        })?)
+    } else if resolved.is_empty() {
+        None
+    } else {
+        // Default: the workspace containing the cwd repo, else fall back (build
+        // nothing) — never eagerly select/validate an unrelated configured group.
+        cwd_repo_workdir().and_then(|wd| workspace_containing_cwd(&resolved, &wd))
+    };
 
     let mut paths: BTreeSet<std::path::PathBuf> = BTreeSet::new();
     match chosen {
-        Some(name) => {
-            // Re-derive the selected group's repo dirs (needed to load each repo's
-            // config downstream), unioning the additive `--workspace` roots.
-            let rw = resolved
-                .iter()
-                .find(|r| r.name == name)
-                .expect("chosen name comes from the resolved set");
+        Some(rw) => {
+            // Discover only the selected group's repo dirs (needed to load each
+            // repo's config downstream), unioning the additive `--workspace` roots.
             for root in rw
                 .roots
                 .iter()

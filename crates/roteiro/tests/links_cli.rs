@@ -746,6 +746,100 @@ fn workspace_name_selects_a_named_workspace_from_config() {
 }
 
 #[test]
+fn unrelated_misconfigured_workspace_does_not_break_legacy_fallback() {
+    // A config with a deliberately BROKEN `[[workspaces]]` root (a non-existent
+    // path). Running `links` from a repo that belongs to NO configured workspace
+    // must still work via the legacy flat `--workspace` fallback — the unrelated bad
+    // workspace is never discovered/validated in the fallback path.
+    let base = std::env::temp_dir().join(format!("roteiro-wsfallback-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let home = base.join("home");
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub with a real node.
+    std::fs::write(app.join("README.md"), "# App\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "init"]);
+    let sync = Command::new(BIN)
+        .args(["sync"])
+        .current_dir(&app)
+        .env("ROTEIRO_HOME", &home)
+        .output()
+        .expect("sync");
+    assert!(sync.status.success(), "app sync: {sync:?}");
+
+    // Spoke authored link into the hub — but the spoke belongs to NO configured
+    // workspace (the only configured one points at a non-existent root).
+    std::fs::write(
+        deploy.join("roteiro.toml"),
+        "[[links]]\nto = \"app::file:README.md\"\n",
+    )
+    .expect("write toml");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+
+    // User config names one workspace `other` over a broken (missing) root.
+    let broken = base.join("does-not-exist").join("xyz");
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "[[workspaces]]\nname = \"other\"\nroots = [\"{}\"]\n",
+            broken.display()
+        ),
+    )
+    .expect("write config");
+
+    // From the spoke repo (which matches no configured workspace), a flat
+    // `--workspace <base>` run must fall back and resolve the link — the broken
+    // `other` workspace is skipped, not fatal.
+    let base_s = base.to_str().unwrap();
+    let out = Command::new(BIN)
+        .args(["links", "--workspace", base_s, "--json"])
+        .current_dir(&deploy)
+        .env("ROTEIRO_HOME", &home)
+        .output()
+        .expect("links fallback");
+    assert!(
+        out.status.success(),
+        "legacy fallback must ignore the unrelated broken workspace: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let arr: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let arr = arr.as_array().expect("array");
+    assert!(!arr.is_empty(), "the authored link is reported: {arr:?}");
+    assert!(
+        arr.iter().all(|r| r["status"] == "ok"),
+        "every link resolves via the flat fallback (no drift from the broken workspace): {arr:?}"
+    );
+    assert!(
+        arr.iter().any(|r| r["to"] == "app::file:README.md"),
+        "the authored link resolved to the hub node: {arr:?}"
+    );
+
+    // But an unknown `--workspace-name` still errors clearly, naming the known ones.
+    let bad = Command::new(BIN)
+        .args(["links", "--workspace-name", "nope"])
+        .current_dir(&deploy)
+        .env("ROTEIRO_HOME", &home)
+        .output()
+        .expect("links bad name");
+    assert!(!bad.status.success(), "unknown --workspace-name must fail");
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        err.contains("nope") && err.contains("other"),
+        "error names the unknown and the known workspace: {err}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn incompatible_link_flag_combinations_are_rejected() {
     // clap constraints fail fast rather than silently running a surprising path.
     for args in [

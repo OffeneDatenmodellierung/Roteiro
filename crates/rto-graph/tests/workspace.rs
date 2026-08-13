@@ -341,3 +341,38 @@ fn workspace_set_from_resolved_skips_empty_groups() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn from_resolved_splits_a_standalone_group_into_single_repo_workspaces() {
+    // Even a hand-built `linked=false` group carrying SEVERAL repos must never
+    // collapse into one unlinked multi-repo graph: `from_resolved` upholds the
+    // invariant by splitting it into one single-repo workspace per member.
+    let base = std::env::temp_dir().join(format!("rto-wsset-split-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    repo_with_node(&base.join("one"), "sym:rust:a.rs#one");
+    repo_with_node(&base.join("two"), "sym:rust:b.rs#two");
+
+    let resolved = vec![ResolvedWorkspace {
+        name: "solo".to_owned(),
+        roots: Vec::new(),
+        repos: vec![
+            base.join("one").to_string_lossy().into_owned(),
+            base.join("two").to_string_lossy().into_owned(),
+        ],
+        linked: false,
+    }];
+    let set = WorkspaceSet::from_resolved(resolved).expect("build set");
+
+    // Two workspaces (the second suffixed), each a single-repo, unlinked graph —
+    // never one multi-repo unlinked workspace.
+    assert_eq!(set.names(), vec!["solo".to_owned(), "solo-2".to_owned()]);
+    assert_eq!(set.linked("solo"), Some(false));
+    assert_eq!(set.linked("solo-2"), Some(false));
+    assert!(
+        !set.select(Some("solo")).expect("solo").is_multi(),
+        "each standalone workspace holds exactly one repo"
+    );
+    assert!(!set.select(Some("solo-2")).expect("solo-2").is_multi());
+
+    std::fs::remove_dir_all(&base).ok();
+}

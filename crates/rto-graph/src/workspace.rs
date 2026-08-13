@@ -604,6 +604,12 @@ pub fn discover_repos_under(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError>
 /// name, its member `roots`/`repos` (unexpanded — discovered when the set is
 /// built), and whether its repos are cross-**linked** (served as one multi-repo
 /// graph) or **standalone** (each its own single-repo graph, no cross-repo links).
+///
+/// A `linked = false` (standalone) group denotes **exactly one** single-repo graph:
+/// the config normaliser emits one such group per discovered repo, and
+/// [`WorkspaceSet::from_resolved`] upholds the invariant by materialising a
+/// standalone group as a one-repo [`Workspace`] per member — a standalone group can
+/// never collapse several repos into one unlinked multi-repo graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWorkspace {
     /// The workspace name (the `--workspace-name` selector).
@@ -612,7 +618,8 @@ pub struct ResolvedWorkspace {
     pub roots: Vec<String>,
     /// Explicit member repo paths, in addition to anything under `roots`.
     pub repos: Vec<String>,
-    /// `true` ⇒ the repos form one linked graph; `false` ⇒ a standalone singleton.
+    /// `true` ⇒ the repos form one linked graph; `false` ⇒ **standalone**: each
+    /// member repo is its own single-repo graph (no cross-repo links).
     pub linked: bool,
 }
 
@@ -660,8 +667,14 @@ impl WorkspaceSet {
     }
 
     /// Build a set from normalised config groups: each group's `roots`/`repos` are
-    /// discovered into member repo paths and opened as one [`Workspace`] (a linked
-    /// group ⇒ a multi-repo graph; a standalone singleton ⇒ a one-repo graph). A
+    /// discovered into member repo paths and opened as [`Workspace`]s. A **linked**
+    /// group becomes one multi-repo graph. A **standalone** (`linked = false`) group
+    /// becomes one single-repo graph **per member repo** — the invariant that a
+    /// standalone workspace is exactly one repo is upheld *here*, by splitting, so a
+    /// hand-built group can never collapse several repos into one unlinked multi-repo
+    /// graph (the config normaliser already emits standalone as per-repo singletons,
+    /// so in practice each such group has exactly one repo and the split is a no-op).
+    /// On a split, the extra members take a `-2`/`-3` suffix off the group name. A
     /// group that resolves to **no** repos is skipped, so a stale root never aborts
     /// the whole set.
     ///
@@ -669,7 +682,7 @@ impl WorkspaceSet {
     /// [`WorkspaceError::Discover`] if a group's root cannot be read, or
     /// [`WorkspaceError::Git`] if an explicit repo path is not inside a git repo.
     pub fn from_resolved(resolved: Vec<ResolvedWorkspace>) -> Result<Self, WorkspaceError> {
-        let mut entries: Vec<(String, Workspace, bool)> = Vec::new();
+        let mut entries: BTreeMap<String, WorkspaceEntry> = BTreeMap::new();
         for rw in resolved {
             let mut paths: Vec<PathBuf> = Vec::new();
             for root in &rw.roots {
@@ -683,10 +696,41 @@ impl WorkspaceSet {
                 // simply absent rather than an error.
                 continue;
             }
-            let workspace = Workspace::from_repo_paths(&paths)?;
-            entries.push((rw.name, workspace, rw.linked));
+            if rw.linked {
+                let workspace = Workspace::from_repo_paths(&paths)?;
+                entries.insert(
+                    rw.name.clone(),
+                    WorkspaceEntry {
+                        workspace,
+                        linked: true,
+                    },
+                );
+            } else {
+                // Standalone: one single-repo graph per member, enforcing the
+                // `linked = false` ⇒ exactly-one-repo invariant structurally (the
+                // config normaliser already emits one repo per group, so this is a
+                // no-op split there; it only matters if a group is hand-built).
+                for (i, path) in paths.iter().enumerate() {
+                    let workspace = Workspace::from_repo_paths([path])?;
+                    let name = if i == 0 {
+                        rw.name.clone()
+                    } else {
+                        format!("{}-{}", rw.name, i + 1)
+                    };
+                    entries.insert(
+                        name,
+                        WorkspaceEntry {
+                            workspace,
+                            linked: false,
+                        },
+                    );
+                }
+            }
         }
-        Ok(Self::from_workspaces(entries))
+        let default = (entries.len() == 1)
+            .then(|| entries.keys().next().cloned())
+            .flatten();
+        Ok(Self { entries, default })
     }
 
     /// The configured workspace names, in stable order.
