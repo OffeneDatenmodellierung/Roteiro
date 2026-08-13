@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.1.0...rto-graph-v1.2.0) - 2026-08-13
+
+### Added
+
+- *(models)* readable model list + Qwen3-Coder-30B-A3B registry entry
+
 ## [1.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.0.0...rto-graph-v1.1.0) - 2026-08-13
 
 ### Added
