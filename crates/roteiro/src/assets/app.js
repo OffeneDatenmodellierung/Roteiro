@@ -1,15 +1,24 @@
-// Roteiro workspace-explorer UI (PR 4). Hand-written, dependency-free ES beyond
-// the vendored global `cytoscape` (loaded from /vendor/cytoscape.min.js). It
-// consumes ONLY the read-only data API this same server exposes:
-//   GET /v1/graph/workspaces                       — the workspace switcher
-//   GET /v1/graph/workspaces/{ws}/topology         — hub + spokes + links
-//   GET /v1/graph/workspaces/{ws}/matrix           — override matrix + drift
+// Roteiro workspace-explorer UI (PR 4 workspace view + PR 5 project drill-in).
+// Hand-written, dependency-free ES beyond the vendored global `cytoscape`
+// (loaded from /vendor/cytoscape.min.js). It consumes ONLY the read-only data
+// API this same server exposes:
+//   GET /v1/graph/workspaces                          — the workspace switcher
+//   GET /v1/graph/workspaces/{ws}/topology            — hub + spokes + links
+//   GET /v1/graph/workspaces/{ws}/matrix              — override matrix + drift
+//   GET /v1/graph/workspaces/{ws}/{project}           — a project's nodes + edges
+//   GET /v1/graph/workspaces/{ws}/{project}/hotspots  — most-called (by degree)
+//   GET /v1/graph/workspaces/{ws}/{project}/debt      — intent-debt markers
+//   GET /v1/graph/workspaces/{ws}/{project}/node/{key}— one node + its neighbours
 // The nested `/workspaces/{ws}/…` form is always used so a workspace is picked by
 // name (collision-safe), independent of the server's flat-route default.
 //
-// SCOPE: the cross-repo WORKSPACE view only. Clicking a repo box or a matrix
-// column header emits a *navigation intent* (`navigateToProject`) — the per-
-// project drill-in view is a later PR, so this is a deliberate, clean seam.
+// TWO VIEWS, hash-routed (so drill/back is linkable and the browser back button
+// works):
+//   #/  or  #/workspace/{ws}                    → the cross-repo WORKSPACE view
+//   #/workspace/{ws}/project/{project}          → the single-project GRAPH view
+// Clicking a repo box, a matrix column header, or a project chip drills in; the
+// breadcrumb "← Workspace" backs out. The cross-repo spoke-link rendering and the
+// follow-the-link hop, and the (llama-backed) Ask tab, are later PRs — clean seams.
 
 "use strict";
 
@@ -34,7 +43,17 @@
   // Preferred config-section order; anything unseen is appended alphabetically.
   const SECTION_ORDER = ["SERVE", "WORKSPACE", "MODELS", "DEBT", "PATHS"];
 
-  const state = { workspaces: [], current: null, cy: null };
+  const state = {
+    workspaces: [],
+    current: null,
+    cy: null,
+    // Project drill-in view.
+    project: null, // the project currently drilled into
+    projectWs: null, // the workspace that project belongs to
+    pcy: null, // the project graph's cytoscape instance
+    pRendered: null, // `${ws}/${project}` currently rendered (guards reloads)
+    searching: false, // a find-in-repo filter is active (suppresses hover trace)
+  };
 
   // -- data ------------------------------------------------------------------
 
@@ -54,26 +73,58 @@
     `/v1/graph/workspaces/${encodeURIComponent(ws)}/${tail}`;
 
   // A cross-repo link's provenance drives its colour (gold authored / slate
-  // inferred). Topology links carry `provenance` directly; matrix cells only
-  // carry a confidence, so a declared (confidence 1.0) link reads as authored —
-  // the seam to switch to explicit per-cell provenance when the API adds it.
+  // inferred). Both topology links and matrix cells now carry `provenance`
+  // directly from the edge (PR 5 backend fix); fall back to `inferred` only if an
+  // older payload omits it.
   const cellProvenance = (cell) =>
-    cell && cell.confidence >= 1 ? "authored" : "inferred";
+    (cell && cell.provenance) || "inferred";
 
   const sectionOf = (hubKey) => {
     const head = String(hubKey).split(".")[0];
     return head ? head.toUpperCase() : "GENERAL";
   };
 
-  // -- navigation seam (later PR) --------------------------------------------
+  // -- hash routing + navigation ---------------------------------------------
 
-  function navigateToProject(project) {
-    // Emit an intent only: update the hash route and surface it. The target
-    // per-project drill-in view lands in a later PR; this leaves the seam clean.
+  // Parse `location.hash` into a route. Unknown/empty hashes fall back to the
+  // workspace view with no explicit workspace (the default is chosen on load).
+  function parseHash() {
+    const h = decodeURI(location.hash.replace(/^#/, ""));
+    let m = h.match(/^\/workspace\/([^/]+)\/project\/(.+?)\/?$/);
+    if (m)
+      return {
+        view: "project",
+        ws: decode(m[1]),
+        project: decode(m[2]),
+      };
+    m = h.match(/^\/workspace\/([^/]+)\/?$/);
+    if (m) return { view: "workspace", ws: decode(m[1]) };
+    return { view: "workspace", ws: null };
+  }
+
+  const decode = (s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch (_) {
+      return s;
+    }
+  };
+
+  // Navigate by writing the hash — the `hashchange` handler does the loading, so
+  // in-app links and the browser back/forward buttons share one code path.
+  function goProject(ws, project) {
     if (!project) return;
-    const ws = state.current;
     location.hash = `#/workspace/${encodeURIComponent(ws)}/project/${encodeURIComponent(project)}`;
-    setStatus(`→ open ${project} (drill-in view is a later PR)`);
+  }
+  function goWorkspace(ws) {
+    location.hash = ws ? `#/workspace/${encodeURIComponent(ws)}` : "#/";
+  }
+
+  // Drill from the workspace view (a repo box, a matrix column header, or a
+  // project chip) into that project's graph view.
+  function navigateToProject(project) {
+    if (!project) return;
+    goProject(state.current, project);
   }
 
   // -- status ----------------------------------------------------------------
@@ -265,7 +316,7 @@
       n.data("label", `⚠ ${n.data("label")}`);
     });
 
-    // Click a box → emit the drill intent (target view is a later PR).
+    // Click a box → drill into that project's graph view.
     cy.on("tap", "node", (evt) => {
       const label = evt.target.data("label").replace(/^⚠ /, "");
       navigateToProject(label);
@@ -445,6 +496,7 @@
       badge.textContent = ws.linked ? "linked · multi-repo" : "standalone";
       badge.className = ws.linked ? "ws-badge" : "ws-badge standalone";
     }
+    renderProjectChips(ws ? ws.projects || [] : []);
     try {
       const [topology, matrix] = await Promise.all([
         getJson(wsPath(name, "topology")),
@@ -467,6 +519,609 @@
     return (linked || workspaces[0]).name;
   }
 
+  // Clickable chips to drill into any hosted project — the drill affordance for a
+  // standalone repo (no cross-repo boxes to click) and a shortcut in a linked one.
+  function renderProjectChips(projects) {
+    const host = $("#projects-bar");
+    if (!host) return;
+    if (!projects.length) {
+      host.replaceChildren();
+      return;
+    }
+    const kids = [el("span", { class: "plabel", text: "drill into" })];
+    for (const p of projects) {
+      kids.push(
+        el(
+          "button",
+          {
+            class: "proj-chip",
+            type: "button",
+            title: `open ${p}`,
+            onclick: () => navigateToProject(p),
+          },
+          p
+        )
+      );
+    }
+    host.replaceChildren(...kids);
+  }
+
+  // ==========================================================================
+  // Project graph view (drill-in) — PR 5
+  // ==========================================================================
+
+  // Node/edge colour by provenance (the legend's "colour: provenance").
+  const PROV_COLOR = {
+    derived: "#6ea8fe",
+    authored: "#e0b64d",
+    inferred: "#3fb6a8",
+  };
+
+  const hasWorkspace = (name) => state.workspaces.some((w) => w.name === name);
+
+  // Percent-encode a node key for the `/{project}/node/{*key}` catch-all route,
+  // preserving `/` as path separators (the wildcard matches slashes) while
+  // encoding `#` and friends — mirrors how `resolve` is called with `%23`.
+  const encodeKey = (key) => String(key).split("/").map(encodeURIComponent).join("/");
+
+  // A node's short, human label: the part after the last `#`, else after the last
+  // `/`, else the whole key. Used when a node carries no name.
+  function shortKey(key) {
+    const k = String(key);
+    const hash = k.lastIndexOf("#");
+    if (hash >= 0 && hash < k.length - 1) return k.slice(hash + 1);
+    const slash = k.lastIndexOf("/");
+    return slash >= 0 && slash < k.length - 1 ? k.slice(slash + 1) : k;
+  }
+
+  const pPane = (name) =>
+    document.querySelector(`#view-project .p-pane[data-pane="${name}"]`);
+
+  function setPStatus(msg, isErr) {
+    const s = $("#p-status");
+    s.textContent = msg || "";
+    s.className = isErr ? "p-status err" : "p-status";
+  }
+
+  // -- view show / hide ------------------------------------------------------
+
+  function showProjectView() {
+    $("#view-workspace").hidden = true;
+    $("#view-project").hidden = false;
+    document.body.classList.add("on-project");
+  }
+
+  function showWorkspaceView() {
+    $("#view-project").hidden = true;
+    $("#view-workspace").hidden = false;
+    document.body.classList.remove("on-project");
+    // Free the (potentially ~1,300-node) project graph when backing out.
+    if (state.pcy) {
+      state.pcy.destroy();
+      state.pcy = null;
+    }
+    state.pRendered = null;
+    state.searching = false;
+  }
+
+  // -- graph rendering -------------------------------------------------------
+
+  // A force layout for small graphs (readable clusters); deterministic concentric
+  // rings by degree for large ones, where cose would churn for seconds on a hub
+  // project. Never animated — a 1,300-node animation would spin forever.
+  function chooseLayout(count) {
+    if (count > 400) {
+      return {
+        name: "concentric",
+        concentric: (n) => n.degree(false),
+        levelWidth: () => 6,
+        minNodeSpacing: 6,
+        padding: 20,
+        animate: false,
+      };
+    }
+    if (count > 0) {
+      return {
+        name: "cose",
+        animate: false,
+        padding: 20,
+        nodeRepulsion: 8000,
+        idealEdgeLength: 60,
+        numIter: count > 150 ? 500 : 1000,
+        randomize: true,
+      };
+    }
+    return { name: "grid" };
+  }
+
+  function renderProjectGraph(graph) {
+    const host = $("#p-graph");
+    if (state.pcy) {
+      state.pcy.destroy();
+      state.pcy = null;
+    }
+    host.replaceChildren();
+
+    const nodes = graph.nodes || [];
+    const edges = graph.edges || [];
+    const ids = new Set(nodes.map((n) => n.key));
+    const elements = [];
+    for (const n of nodes) {
+      elements.push({
+        data: {
+          id: n.key,
+          label: n.name || shortKey(n.key),
+          kind: n.kind,
+          prov: n.provenance || "derived",
+        },
+      });
+    }
+    // One edge per (src, dst, kind); never dangle an edge onto an absent node.
+    const seen = new Set();
+    for (const e of edges) {
+      if (!ids.has(e.src) || !ids.has(e.dst)) continue;
+      const id = `e:${e.src}${e.dst}${e.kind}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      elements.push({
+        data: { id, source: e.src, target: e.dst, prov: e.provenance || "derived" },
+      });
+    }
+
+    const count = nodes.length;
+    // Above this size, labels are hidden by default (drawn only on hover/select/
+    // match) so a hub project stays legible and renders responsively.
+    const bigGraph = count > 200;
+    const edgeBase = bigGraph
+      ? {
+          width: 1,
+          "line-color": "#30363d",
+          "curve-style": "haystack",
+          "haystack-radius": 0,
+          opacity: 0.55,
+        }
+      : {
+          width: 1.2,
+          "line-color": "#30363d",
+          "curve-style": "straight",
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": "#30363d",
+          "arrow-scale": 0.7,
+          opacity: 0.85,
+        };
+
+    const cy = cytoscape({
+      container: host,
+      elements,
+      wheelSensitivity: 0.2,
+      // A zoom ceiling/floor keeps a large graph navigable rather than lost.
+      minZoom: 0.05,
+      maxZoom: 3,
+      style: [
+        {
+          selector: "node",
+          style: {
+            "background-color": (n) => PROV_COLOR[n.data("prov")] || "#8b949e",
+            width: 14,
+            height: 14,
+            "border-width": 0,
+            label: bigGraph ? "" : "data(label)",
+            "font-size": 7,
+            color: "#c9d1d9",
+            "text-valign": "bottom",
+            "text-halign": "center",
+            "text-margin-y": 2,
+            "min-zoomed-font-size": 7,
+          },
+        },
+        { selector: "edge", style: edgeBase },
+        {
+          selector: 'edge[prov = "authored"]',
+          style: { "line-color": "#e0b64d", "target-arrow-color": "#e0b64d" },
+        },
+        {
+          selector: 'edge[prov = "inferred"]',
+          style: { "line-color": "#3fb6a8", "target-arrow-color": "#3fb6a8" },
+        },
+        {
+          selector: "node:selected",
+          style: {
+            "border-width": 3,
+            "border-color": "#ffffff",
+            label: "data(label)",
+            "font-size": 9,
+            "z-index": 30,
+          },
+        },
+        { selector: "node.nb", style: { label: "data(label)", "z-index": 20 } },
+        {
+          selector: "node.match",
+          style: {
+            "border-width": 3,
+            "border-color": "#f0c000",
+            label: "data(label)",
+            "font-size": 9,
+            "z-index": 25,
+          },
+        },
+        { selector: ".dim", style: { opacity: 0.12, "text-opacity": 0 } },
+        {
+          selector: "edge.trace",
+          style: { "line-color": "#7c8cff", width: 2, opacity: 1 },
+        },
+      ],
+      layout: chooseLayout(count),
+    });
+
+    state.pcy = cy;
+
+    // Click a node → inspect it in the NODE tab.
+    cy.on("tap", "node", (evt) => selectNode(evt.target.id()));
+
+    // Hover a node → trace its neighbourhood. Computed client-side over the
+    // already-loaded graph (instant; never re-fetches), and suppressed while a
+    // find-in-repo filter is active so the two highlights don't fight.
+    cy.on("mouseover", "node", (evt) => {
+      if (state.searching) return;
+      const n = evt.target;
+      const nb = n.closedNeighborhood();
+      cy.batch(() => {
+        cy.elements().addClass("dim");
+        nb.removeClass("dim").addClass("nb");
+        n.connectedEdges().removeClass("dim").addClass("trace");
+      });
+    });
+    cy.on("mouseout", "node", () => {
+      if (state.searching) return;
+      cy.elements().removeClass("dim nb trace");
+    });
+
+    updateCounter();
+    cy.ready(() => cy.fit(undefined, 30));
+  }
+
+  function updateCounter(matchCount) {
+    const cy = state.pcy;
+    const host = $("#p-counter");
+    if (!cy) {
+      host.textContent = "";
+      return;
+    }
+    const nn = cy.nodes().length;
+    const ne = cy.edges().length;
+    let txt = `${nn} node${nn === 1 ? "" : "s"} · ${ne} edge${ne === 1 ? "" : "s"}`;
+    if (typeof matchCount === "number")
+      txt += ` · ${matchCount} match${matchCount === 1 ? "" : "es"}`;
+    host.textContent = txt;
+  }
+
+  // -- controls: zoom / fit / search -----------------------------------------
+
+  function zoomBy(factor) {
+    const cy = state.pcy;
+    if (!cy) return;
+    cy.zoom({
+      level: cy.zoom() * factor,
+      renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 },
+    });
+  }
+
+  function fitGraph() {
+    if (state.pcy) state.pcy.fit(undefined, 30);
+  }
+
+  let searchTimer = null;
+  function onSearchInput(value) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(value), 120);
+  }
+
+  // Filter the *already-loaded* graph by name/key substring — highlight matches,
+  // fade the rest. No fetch: the whole graph is in cytoscape, so this stays
+  // responsive even for a hub project (per-node detail still uses the node
+  // endpoint, so we never re-fetch the whole graph for a lookup).
+  function runSearch(raw) {
+    const cy = state.pcy;
+    if (!cy) return;
+    const q = raw.trim().toLowerCase();
+    cy.batch(() => {
+      cy.elements().removeClass("dim nb match trace");
+      if (!q) {
+        state.searching = false;
+        updateCounter();
+        return;
+      }
+      state.searching = true;
+      const matches = cy
+        .nodes()
+        .filter(
+          (n) =>
+            n.data("label").toLowerCase().includes(q) ||
+            n.id().toLowerCase().includes(q)
+        );
+      cy.elements().addClass("dim");
+      matches.removeClass("dim").addClass("match");
+      updateCounter(matches.length);
+    });
+  }
+
+  // -- node selection + tabs -------------------------------------------------
+
+  function activateTab(name) {
+    document
+      .querySelectorAll("#view-project .p-tab")
+      .forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+    document
+      .querySelectorAll("#view-project .p-pane")
+      .forEach((p) => p.classList.toggle("active", p.dataset.pane === name));
+  }
+
+  function selectNode(key) {
+    const cy = state.pcy;
+    if (cy) {
+      const n = cy.getElementById(key);
+      if (n && n.nonempty()) {
+        cy.elements().unselect();
+        n.select();
+        cy.animate({ center: { eles: n } }, { duration: 200 });
+      }
+    }
+    activateTab("node");
+    loadNodeDetail(state.projectWs, state.project, key);
+  }
+
+  const graphNodeName = (key) => {
+    const cy = state.pcy;
+    if (cy) {
+      const n = cy.getElementById(key);
+      if (n && n.nonempty()) return n.data("label");
+    }
+    return shortKey(key);
+  };
+
+  const graphNodeProv = (key) => {
+    const cy = state.pcy;
+    if (cy) {
+      const n = cy.getElementById(key);
+      if (n && n.nonempty()) return n.data("prov");
+    }
+    return null;
+  };
+
+  // -- right panel: hotspots + intent debt -----------------------------------
+
+  async function loadHotspots(ws, project) {
+    const pane = pPane("hotspots");
+    pane.replaceChildren(el("div", { class: "p-loading", text: "Loading hotspots…" }));
+    const base = encodeURIComponent(project);
+    try {
+      const [hot, debt] = await Promise.all([
+        getJson(wsPath(ws, `${base}/hotspots?limit=15`)),
+        getJson(wsPath(ws, `${base}/debt`)),
+      ]);
+      // The user may have drilled elsewhere while this was in flight.
+      if (state.project !== project || state.projectWs !== ws) return;
+      renderHotspots(hot.hotspots || [], debt || {});
+    } catch (err) {
+      pane.replaceChildren(el("div", { class: "p-err", text: String(err.message || err) }));
+    }
+  }
+
+  function renderHotspots(hotspots, debt) {
+    const pane = pPane("hotspots");
+    const kids = [];
+
+    // Most-called (ranked/sized by degree).
+    kids.push(
+      el(
+        "div",
+        { class: "p-sec-title" },
+        "Most-called ",
+        el("span", { class: "hint", text: "ranked by degree" })
+      )
+    );
+    if (!hotspots.length) {
+      kids.push(el("div", { class: "p-empty", text: "— none in this repo —" }));
+    } else {
+      const maxDeg = hotspots[0].degree || 1;
+      const list = el("ul", { class: "p-hot" });
+      hotspots.forEach((h, i) => {
+        const w = Math.max(4, Math.round((h.degree / maxDeg) * 100));
+        list.append(
+          el(
+            "li",
+            { title: h.key, onclick: () => selectNode(h.key) },
+            el("span", { class: "p-hot-rank", text: String(i + 1) }),
+            el(
+              "span",
+              { class: "p-hot-main" },
+              el("div", { class: "p-hot-name", text: h.name || shortKey(h.key) }),
+              el("div", { class: "p-hot-kind", text: h.kind || "" })
+            ),
+            el("span", { class: "p-hot-bar" }, el("i", { style: `width:${w}%` })),
+            el("span", { class: "p-hot-deg", text: String(h.degree) })
+          )
+        );
+      });
+      kids.push(list);
+    }
+
+    // Intent debt, with each marker's category/text/line expandable.
+    const items = (debt && debt.items) || [];
+    kids.push(
+      el(
+        "div",
+        { class: "p-sec-title" },
+        "Intent debt ",
+        el("span", {
+          class: "hint",
+          text: items.length ? `${debt.total} marker${debt.total === 1 ? "" : "s"}` : "",
+        })
+      )
+    );
+    if (!items.length) {
+      kids.push(el("div", { class: "p-empty", text: "— none in this repo —" }));
+    } else {
+      const wrap = el("div", { class: "p-debt" });
+      for (const it of items) {
+        const loc = [it.path, it.line]
+          .filter((x) => x != null && x !== "")
+          .join(":");
+        wrap.append(
+          el(
+            "details",
+            null,
+            el(
+              "summary",
+              null,
+              el("span", { class: "p-debt-cat", text: it.category || "note" }),
+              el("span", { class: "p-debt-loc", text: loc })
+            ),
+            el("div", { class: "p-debt-body" }, el("code", { text: it.text || "" }))
+          )
+        );
+      }
+      kids.push(wrap);
+    }
+
+    pane.replaceChildren(...kids);
+  }
+
+  // -- right panel: node detail ----------------------------------------------
+
+  async function loadNodeDetail(ws, project, key) {
+    const pane = pPane("node");
+    pane.replaceChildren(el("div", { class: "p-loading", text: "Loading node…" }));
+    try {
+      const exp = await getJson(
+        wsPath(ws, `${encodeURIComponent(project)}/node/${encodeKey(key)}`)
+      );
+      if (state.project !== project || state.projectWs !== ws) return;
+      renderNodeDetail(exp);
+    } catch (err) {
+      pane.replaceChildren(el("div", { class: "p-err", text: String(err.message || err) }));
+    }
+  }
+
+  function renderNodeDetail(exp) {
+    const pane = pPane("node");
+    const node = exp.node || {};
+    // Provenance isn't in the node summary; read it off the loaded graph node.
+    const prov = graphNodeProv(node.key) || node.provenance || "derived";
+    const kids = [
+      el("div", { class: "p-node-name", text: node.name || shortKey(node.key) }),
+      el(
+        "div",
+        { class: "p-node-meta" },
+        el("span", { class: "p-badge", text: node.kind || "node" }),
+        el("span", { class: `p-badge prov-${prov}`, text: prov })
+      ),
+    ];
+    if (node.path) kids.push(el("div", { class: "p-node-path", text: node.path }));
+
+    // Neighbour chips — clicking one navigates to that node.
+    const chipRow = (title, refs) => {
+      const chips = el("div", { class: "p-chips" });
+      if (!refs.length) {
+        chips.append(el("span", { class: "p-empty", text: "— none —" }));
+      } else {
+        for (const r of refs) {
+          chips.append(
+            el(
+              "button",
+              {
+                class: "p-chip",
+                type: "button",
+                title: `${r.kind}${r.provenance ? ` · ${r.provenance}` : ""} → ${r.node}`,
+                onclick: () => selectNode(r.node),
+              },
+              graphNodeName(r.node),
+              el("span", { class: "p-chip-kind", text: ` ${r.kind}` })
+            )
+          );
+        }
+      }
+      return [el("div", { class: "p-sec-title", text: title }), chips];
+    };
+    kids.push(...chipRow(`Outgoing (${(exp.outgoing || []).length})`, exp.outgoing || []));
+    kids.push(...chipRow(`Incoming (${(exp.incoming || []).length})`, exp.incoming || []));
+
+    pane.replaceChildren(...kids);
+  }
+
+  // -- project load ----------------------------------------------------------
+
+  async function loadProject(ws, project) {
+    state.projectWs = ws;
+    state.project = project;
+    state.pRendered = `${ws}/${project}`;
+    state.searching = false;
+    const search = $("#p-search");
+    if (search) search.value = "";
+    $("#p-crumb-project").textContent = project;
+
+    const wsEntry = state.workspaces.find((w) => w.name === ws);
+    const badge = $("#p-linkage");
+    if (wsEntry) {
+      badge.textContent = wsEntry.linked ? "linked · multi-repo" : "standalone";
+      badge.className = wsEntry.linked ? "ws-badge" : "ws-badge standalone";
+    } else {
+      badge.textContent = "";
+    }
+
+    activateTab("hotspots");
+    pPane("node").replaceChildren(
+      el("p", { class: "p-muted", text: "Click a node in the graph to inspect it." })
+    );
+    setPStatus(`Loading ${project}…`);
+    try {
+      const graph = await getJson(wsPath(ws, encodeURIComponent(project)));
+      if (state.pRendered !== `${ws}/${project}`) return; // navigated away mid-flight
+      renderProjectGraph(graph);
+      setPStatus("");
+      loadHotspots(ws, project);
+    } catch (err) {
+      setPStatus(String(err.message || err), true);
+      $("#p-graph").replaceChildren();
+      updateCounter();
+    }
+  }
+
+  // -- router ----------------------------------------------------------------
+
+  async function route() {
+    const r = parseHash();
+    if (r.view === "project" && r.project) {
+      const ws = r.ws && hasWorkspace(r.ws) ? r.ws : pickDefault(state.workspaces);
+      showProjectView();
+      if (state.pRendered !== `${ws}/${r.project}`) await loadProject(ws, r.project);
+      return;
+    }
+    showWorkspaceView();
+    const ws = r.ws && hasWorkspace(r.ws) ? r.ws : pickDefault(state.workspaces);
+    const sel = $("#workspace");
+    if (sel && sel.value !== ws) sel.value = ws;
+    if (state.current !== ws) await loadWorkspace(ws);
+  }
+
+  // One-time wiring for the project view's static controls.
+  function wireProjectControls() {
+    $("#p-back").addEventListener("click", () =>
+      goWorkspace(state.projectWs || state.current)
+    );
+    $("#p-crumb-ws").addEventListener("click", () =>
+      goWorkspace(state.projectWs || state.current)
+    );
+    $("#p-zoom-in").addEventListener("click", () => zoomBy(1.25));
+    $("#p-zoom-out").addEventListener("click", () => zoomBy(0.8));
+    $("#p-fit").addEventListener("click", fitGraph);
+    $("#p-search").addEventListener("input", (e) => onSearchInput(e.target.value));
+    document.querySelectorAll("#view-project .p-tab").forEach((b) => {
+      if (b.disabled) return;
+      b.addEventListener("click", () => activateTab(b.dataset.tab));
+    });
+  }
+
   async function init() {
     try {
       const workspaces = await getJson("/v1/graph/workspaces");
@@ -481,10 +1136,13 @@
           el("option", { value: w.name, text: `${w.name}${w.linked ? "" : " (standalone)"}` })
         )
       );
-      sel.addEventListener("change", () => loadWorkspace(sel.value));
-      const def = pickDefault(workspaces);
-      sel.value = def;
-      await loadWorkspace(def);
+      // Selecting a workspace navigates by hash so the choice is linkable.
+      sel.addEventListener("change", () => goWorkspace(sel.value));
+      wireProjectControls();
+      window.addEventListener("hashchange", () => {
+        route();
+      });
+      await route();
     } catch (err) {
       setStatus(`Could not load workspaces: ${err.message || err}`, true);
     }

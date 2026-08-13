@@ -448,15 +448,15 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
         for ExternalRef {
             src,
             node,
+            provenance,
             confidence,
-            ..
         } in &refs
         {
             if let Some(target) = external_ref_target(node) {
                 links.push(json!({
                     "from": format!("{name}::{src}"),
                     "to": target,
-                    "provenance": "inferred",
+                    "provenance": provenance.as_str(),
                     "confidence": confidence,
                 }));
             }
@@ -511,6 +511,7 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
         for ExternalRef {
             src,
             node,
+            provenance,
             confidence,
         } in &refs
         {
@@ -519,12 +520,14 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                 .cloned()
                 .unwrap_or_else(|| (src.clone(), String::new()));
             match resolve_link(ws, node)? {
-                // Resolves to its hub node → a real override cell.
+                // Resolves to its hub node → a real override cell, tagged with the
+                // link's real provenance (authored vs inferred).
                 Some(hub_node) => matches.push(overview::MatchInput {
                     hub_key: hub_node.name,
                     spoke_key,
                     spoke_value,
                     confidence: confidence.unwrap_or(0.0),
+                    provenance: *provenance,
                 }),
                 // Hub node gone, or its project isn't hosted / has no graph → drift
                 // (an orphan spoke key), not a fatal error for the endpoint.
@@ -554,21 +557,29 @@ struct ExternalRef {
     src: String,
     /// The external-ref placeholder node (carries the qualified hub target).
     node: Node,
-    /// The inferred edge's confidence.
+    /// How the cross-repo edge was produced — [`Provenance::Authored`] (a declared
+    /// `[[links]]`) or [`Provenance::Inferred`] (a confidence-scored match).
+    provenance: Provenance,
+    /// The edge's confidence; `Some` only for an inferred edge (an authored link
+    /// carries no score — see the [`Edge`] invariant).
     confidence: Option<f64>,
 }
 
-/// The inferred external-ref links persisted in `store` (ADR-0009): every
-/// external-ref placeholder node and the inferred edge that points at it.
+/// The cross-repo external-ref links persisted in `store` (ADR-0009): every
+/// external-ref placeholder node and the edge that points at it. Both
+/// [`Provenance::Authored`] (declared `[[links]]`) and [`Provenance::Inferred`]
+/// (matched) edges are collected, each carrying its real provenance — a
+/// *derived* edge never targets an external-ref placeholder, so it is excluded.
 fn external_refs(store: &Store) -> Result<Vec<ExternalRef>, StoreError> {
     let placeholders = store.nodes_by_kind(&NodeKind::Other(EXTERNAL_REF_KIND.to_owned()))?;
     let mut out = Vec::new();
     for node in placeholders {
         for edge in store.edges_to(&node.key)? {
-            if edge.provenance == Provenance::Inferred {
+            if matches!(edge.provenance, Provenance::Inferred | Provenance::Authored) {
                 out.push(ExternalRef {
                     src: edge.src,
                     node: node.clone(),
+                    provenance: edge.provenance,
                     confidence: edge.confidence,
                 });
             }
@@ -796,6 +807,35 @@ mod tests {
                 external_ref_key(&dead_target),
                 EdgeKind::References,
                 0.8,
+            ));
+        apply(store, &facts)
+    }
+
+    /// Build a spoke store with two live overrides of distinct provenance: an
+    /// **inferred** match on `serve.addr` (confidence-scored) and an **authored**
+    /// `[[links]]`-style edge on `serve.tools` (no confidence). Both resolve to a
+    /// present hub key, so both become override cells — proving the matrix carries
+    /// each cell's real provenance rather than guessing from confidence.
+    fn spoke_mixed_provenance() -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let inferred = format!("{HUB}::cfgkey:config.toml#serve.addr");
+        let authored = format!("{HUB}::cfgkey:config.toml#serve.tools");
+
+        let facts = FactSet::new()
+            .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+            .with_node(cfg_node("deploy.env", "SERVE_TOOLS", "false"))
+            .with_node(external_ref_node(&inferred))
+            .with_node(external_ref_node(&authored))
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#SERVE_ADDR",
+                external_ref_key(&inferred),
+                EdgeKind::References,
+                0.9,
+            ))
+            .with_edge(Edge::authored(
+                "cfgkey:deploy.env#SERVE_TOOLS",
+                external_ref_key(&authored),
+                EdgeKind::References,
             ));
         apply(store, &facts)
     }
@@ -1237,6 +1277,55 @@ mod tests {
         let drift = json["drift"].as_array().unwrap();
         assert_eq!(drift.len(), 1);
         assert_eq!(drift[0]["key"], "LEGACY_ADDR");
+    }
+
+    #[tokio::test]
+    async fn matrix_carries_real_per_cell_provenance() {
+        // A spoke with one inferred override and one authored override, both of
+        // live hub keys. The matrix payload must label each cell with its real
+        // provenance — `inferred` for the matched cell, `authored` for the
+        // declared one — not a confidence≥1.0 guess.
+        let ws = Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_mixed_provenance()),
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/matrix").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let rows = json["rows"].as_array().unwrap();
+        let addr = rows.iter().find(|r| r["hub_key"] == "serve.addr").unwrap();
+        assert_eq!(
+            addr["cells"][SPOKE]["provenance"], "inferred",
+            "the confidence-scored match is inferred"
+        );
+        let tools = rows.iter().find(|r| r["hub_key"] == "serve.tools").unwrap();
+        assert_eq!(
+            tools["cells"][SPOKE]["provenance"], "authored",
+            "the declared link is authored, regardless of confidence"
+        );
+        // The authored cell carries no confidence score (the `Edge` invariant),
+        // so it surfaces as the `unwrap_or(0.0)` default.
+        assert_eq!(tools["cells"][SPOKE]["confidence"], json!(0.0));
+    }
+
+    #[tokio::test]
+    async fn topology_links_report_real_provenance() {
+        // The same mixed spoke: the topology links must expose each edge's real
+        // provenance too (an authored link reads gold, an inferred one slate).
+        let ws = Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_mixed_provenance()),
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::OK);
+        let provs: Vec<&str> = json["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l["provenance"].as_str())
+            .collect();
+        assert!(provs.contains(&"authored"), "got provenances: {provs:?}");
+        assert!(provs.contains(&"inferred"), "got provenances: {provs:?}");
     }
 
     #[tokio::test]

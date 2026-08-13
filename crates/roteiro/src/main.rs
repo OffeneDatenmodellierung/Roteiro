@@ -3111,6 +3111,8 @@ fn run_links_matrix(
                             .unwrap_or("")
                             .to_owned(),
                         confidence: m.confidence,
+                        // `links --infer` matches are, by definition, inferred.
+                        provenance: rto_graph::Provenance::Inferred,
                     })
                     .collect(),
                 orphans: rep
