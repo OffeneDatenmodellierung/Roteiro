@@ -53,13 +53,20 @@
     pcy: null, // the project graph's cytoscape instance
     pRendered: null, // `${ws}/${project}` currently rendered (guards reloads)
     searching: false, // a find-in-repo filter is active (suppresses hover trace)
-    // Cross-repo links for the drilled-into project (PR 6). `linkByRef` is keyed by
-    // the external-ref (app-key target) node key; `linkByFrom` by the spoke
-    // config_key node key — so both the graph styling and the node detail panel can
-    // look a link up in O(1). Empty for a non-spoke project.
+    // Cross-repo links for the drilled-into project (PR 6). Several spoke config
+    // keys can point at the SAME app-key target (they share one external-ref node),
+    // so links are indexed three ways, none of which collapses siblings:
+    //   linkByEdge  — `${from} ${to}` (space-joined; node keys carry no spaces) →
+    //                 the single link for that config→app-key EDGE, so each edge is
+    //                 styled with ITS OWN provenance/drift.
+    //   linksByRef  — external-ref (app-key) node key → link[] pointing INTO it.
+    //   linksByFrom — spoke config_key node key → link[] going OUT of it.
+    // Both `linksBy*` are arrays so the node detail panel shows every link, and the
+    // app-key node's styling folds over all its inbound links. Empty for a non-spoke.
     links: [],
-    linkByRef: new Map(),
-    linkByFrom: new Map(),
+    linkByEdge: new Map(),
+    linksByRef: new Map(),
+    linksByFrom: new Map(),
   };
 
   // -- data ------------------------------------------------------------------
@@ -576,17 +583,25 @@
     drift: "#f85149", // red
   };
 
-  // Stash the drilled-into project's cross-repo links and index them two ways: by
-  // the app-key (external-ref) node key they point at, and by the spoke config_key
-  // node key they start from. Both the graph styling and the node detail panel
-  // read these. Empty maps for a non-spoke project (its `/links` is `[]`).
+  // Stash the drilled-into project's cross-repo links and index them per-edge (for
+  // styling) and per-node (for the detail chips) — see the `state` comment. Keyed
+  // so that multiple config keys pointing at the same app-key target never
+  // overwrite one another. Empty maps for a non-spoke project (its `/links` is `[]`).
   function setProjectLinks(links) {
     state.links = links;
-    state.linkByRef = new Map();
-    state.linkByFrom = new Map();
+    state.linkByEdge = new Map();
+    state.linksByRef = new Map();
+    state.linksByFrom = new Map();
+    const push = (map, key, val) => {
+      if (key == null) return;
+      const arr = map.get(key);
+      if (arr) arr.push(val);
+      else map.set(key, [val]);
+    };
     for (const l of links) {
-      if (l.to) state.linkByRef.set(l.to, l);
-      if (l.from) state.linkByFrom.set(l.from, l);
+      if (l.from != null && l.to != null) state.linkByEdge.set(`${l.from} ${l.to}`, l);
+      push(state.linksByRef, l.to, l);
+      push(state.linksByFrom, l.from, l);
     }
   }
 
@@ -704,11 +719,17 @@
       // longer defines is DRIFT — a red `?` node (PR 6). It stays selectable but
       // inert (no follow-the-hop jump into the hub yet — PR 7 seam).
       if (n.kind === "external_ref") {
-        const link = state.linkByRef.get(n.key);
+        // Every link into this target shares its resolution, so drift and the
+        // `<proj>::<key>` label come from any of them; the border reads authored
+        // (gold) when ANY inbound link is authored, else inferred (slate).
+        const inbound = state.linksByRef.get(n.key) || [];
+        const drift = inbound.some((l) => l.drift) ? 1 : 0;
         data.role = "appkey";
-        data.drift = link && link.drift ? 1 : 0;
-        data.linkprov = link ? link.provenance : "inferred";
-        data.label = data.drift ? "?" : link ? appKeyLabel(link) : shortKey(n.name);
+        data.drift = drift;
+        data.linkprov = inbound.some((l) => l.provenance === "authored")
+          ? "authored"
+          : "inferred";
+        data.label = drift ? "?" : inbound[0] ? appKeyLabel(inbound[0]) : shortKey(n.name);
       }
       elements.push({ data });
     }
@@ -724,8 +745,9 @@
       seen.add(id);
       const data = { id, source: e.src, target: e.dst, prov: e.provenance || "derived" };
       // An edge into an app-key target is a CROSS-REPO LINK — draw it dashed and
-      // coloured by the link's provenance (gold/slate), red when it drifts.
-      const link = state.linkByRef.get(e.dst);
+      // coloured by THIS edge's own provenance (gold/slate), red when it drifts.
+      // Keyed per-edge so a sibling edge into the same target can't recolour it.
+      const link = state.linkByEdge.get(`${e.src} ${e.dst}`);
       if (link) {
         data.link = 1;
         data.drift = link.drift ? 1 : 0;
@@ -916,7 +938,9 @@
     // Hover an app-key target → a subtle "follow → (coming soon)" tooltip. The
     // cross-repo follow-the-hop jump into the hub is PR 7; this is its inert seam.
     cy.on("mouseover", 'node[role = "appkey"]', (evt) => {
-      const link = state.linkByRef.get(evt.target.id());
+      // Any inbound link describes the target (they share it); the tooltip is the
+      // same for all edges into this app-key node.
+      const link = (state.linksByRef.get(evt.target.id()) || [])[0];
       const label = link && !link.drift ? appKeyLabel(link) : "this key";
       const msg = link && link.drift
         ? "drift — the app defines no such key"
@@ -1191,47 +1215,48 @@
     }
   }
 
-  // The cross-repo link chip(s) for a node that participates in one: a spoke
-  // config_key linking OUT to an app-key target, and/or an app-key target linked
-  // TO by a spoke key. Returns the section's children, or `null` when the node has
-  // no cross-repo link (so a plain node shows nothing extra). Chips are inert
-  // pointers within the spoke graph — the follow-the-hop jump into the hub is PR 7.
+  // The cross-repo link chips for a node that participates in one or more: a spoke
+  // config_key linking OUT to app-key target(s), and/or an app-key target linked TO
+  // by spoke key(s). ALL links are shown — a config key may set several hub keys,
+  // and a hub key may be set by several spoke keys. Returns the section's children,
+  // or `null` when the node has no cross-repo link. Chips are inert pointers within
+  // the spoke graph — the follow-the-hop jump into the hub is PR 7.
   function crossRepoSection(nodeKey) {
-    const out = state.linkByFrom.get(nodeKey); // this config key → an app-key target
-    const inbound = state.linkByRef.get(nodeKey); // this node IS an app-key target
-    if (!out && !inbound) return null;
+    const out = state.linksByFrom.get(nodeKey) || []; // this config key → app-key target(s)
+    const inbound = state.linksByRef.get(nodeKey) || []; // this node IS an app-key target
+    if (!out.length && !inbound.length) return null;
 
     const chips = el("div", { class: "p-chips" });
-    if (out) {
-      const prov = out.drift ? "drift" : out.provenance;
+    for (const link of out) {
+      const prov = link.drift ? "drift" : link.provenance;
       chips.append(
         el(
           "button",
           {
             class: `p-chip xrepo ${prov}`,
             type: "button",
-            title: out.drift
-              ? `drift → ${out.toQualified} — the app defines no such key`
-              : `${out.provenance} link → ${out.toQualified} · follow (coming soon)`,
-            onclick: () => selectNode(out.to),
+            title: link.drift
+              ? `drift → ${link.toQualified} — the app defines no such key`
+              : `${link.provenance} link → ${link.toQualified} · follow (coming soon)`,
+            onclick: () => selectNode(link.to),
           },
-          out.drift ? "? drift" : appKeyLabel(out),
+          link.drift ? "? drift" : appKeyLabel(link),
           el("span", { class: "p-chip-kind", text: ` ${prov}` })
         )
       );
     }
-    if (inbound) {
-      const prov = inbound.drift ? "drift" : inbound.provenance;
+    for (const link of inbound) {
+      const prov = link.drift ? "drift" : link.provenance;
       chips.append(
         el(
           "button",
           {
             class: `p-chip xrepo ${prov}`,
             type: "button",
-            title: `${inbound.provenance} link from ${inbound.fromName}`,
-            onclick: () => selectNode(inbound.from),
+            title: `${link.provenance} link from ${link.fromName}`,
+            onclick: () => selectNode(link.from),
           },
-          inbound.fromName,
+          link.fromName,
           el("span", { class: "p-chip-kind", text: ` ${prov}` })
         )
       );
@@ -1249,8 +1274,9 @@
     // Provenance isn't in the node summary; read it off the loaded graph node.
     const prov = graphNodeProv(node.key) || node.provenance || "derived";
     // An app-key target node's own name is the long project-qualified target; show
-    // the compact `<proj>::<key>` label instead when we have the link.
-    const appLink = state.linkByRef.get(node.key);
+    // the compact `<proj>::<key>` label instead when we have a link into it (any of
+    // its inbound links carries the same target).
+    const appLink = (state.linksByRef.get(node.key) || [])[0];
     const displayName = appLink
       ? appKeyLabel(appLink)
       : node.name || shortKey(node.key);

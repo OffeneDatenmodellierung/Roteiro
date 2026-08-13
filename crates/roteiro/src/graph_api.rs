@@ -944,6 +944,45 @@ mod tests {
         apply(store, &facts)
     }
 
+    /// Build a spoke store where **two distinct config keys point at the SAME hub
+    /// target** (`serve.addr`) — one inferred, one authored — plus one drift key.
+    /// Because both share a single external-ref placeholder node, this is the case
+    /// that a naive `to`-keyed index would collapse: the `/links` payload must still
+    /// report both links distinctly, each with its own `from`/provenance, so the UI
+    /// can style each config→app-key edge independently (per-edge, not per-target).
+    fn spoke_shared_target_and_drift() -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let shared = format!("{HUB}::cfgkey:config.toml#serve.addr");
+        let drift = format!("{HUB}::cfgkey:config.toml#serve.legacy");
+
+        let facts = FactSet::new()
+            .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+            .with_node(cfg_node("deploy.env", "PROXY_ADDR", "0.0.0.0:9443"))
+            .with_node(cfg_node("deploy.env", "LEGACY_ADDR", "10.0.0.1:9000"))
+            .with_node(external_ref_node(&shared))
+            .with_node(external_ref_node(&drift))
+            // Two edges into the one shared placeholder — distinct sources, distinct
+            // provenance (an inferred match and an authored `[[links]]`).
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#SERVE_ADDR",
+                external_ref_key(&shared),
+                EdgeKind::References,
+                0.9,
+            ))
+            .with_edge(Edge::authored(
+                "cfgkey:deploy.env#PROXY_ADDR",
+                external_ref_key(&shared),
+                EdgeKind::References,
+            ))
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#LEGACY_ADDR",
+                external_ref_key(&drift),
+                EdgeKind::References,
+                0.8,
+            ));
+        apply(store, &facts)
+    }
+
     /// Build a spoke store whose links point at project `ghost`, which no
     /// workspace below hosts: `live` links per `to_ghost`, plus (optionally) one
     /// link to the hosted hub's `serve.addr`.
@@ -1541,6 +1580,73 @@ mod tests {
         assert_eq!(links.len(), 2);
         let drift_count = links.iter().filter(|l| l["drift"] == true).count();
         assert_eq!(drift_count, 1, "one link drifts, one resolves");
+    }
+
+    #[tokio::test]
+    async fn project_links_report_multiple_links_into_one_target_distinctly() {
+        // Two spoke config keys point at the SAME hub key `serve.addr` (one inferred,
+        // one authored), plus a drift key. They share one external-ref node, so a
+        // `to`-keyed index would collapse them — the payload must instead carry BOTH
+        // as distinct links, each with its own `from` and provenance. This is the
+        // data guarantee the per-edge JS styling and the per-node chips rely on.
+        let ws = Workspace::from_stores([
+            (HUB.to_owned(), hub_store()),
+            (SPOKE.to_owned(), spoke_shared_target_and_drift()),
+        ]);
+        let (status, json) = get(single_set(ws), None, "/v1/graph/spoke/links").await;
+        assert_eq!(status, StatusCode::OK);
+        let links = json["links"].as_array().unwrap();
+        assert_eq!(
+            links.len(),
+            3,
+            "two links into the shared target + one drift"
+        );
+
+        // Both links into `serve.addr` survive — the shared target is not collapsed.
+        let into_addr: Vec<&Value> = links
+            .iter()
+            .filter(|l| l["toQualified"] == "hub::cfgkey:config.toml#serve.addr")
+            .collect();
+        assert_eq!(
+            into_addr.len(),
+            2,
+            "both links into the one target are reported"
+        );
+        let froms: std::collections::BTreeSet<&str> = into_addr
+            .iter()
+            .filter_map(|l| l["fromName"].as_str())
+            .collect();
+        assert_eq!(
+            froms,
+            ["PROXY_ADDR", "SERVE_ADDR"].into_iter().collect(),
+            "each link keeps its own source config key"
+        );
+        let provs: std::collections::BTreeSet<&str> = into_addr
+            .iter()
+            .filter_map(|l| l["provenance"].as_str())
+            .collect();
+        assert_eq!(
+            provs,
+            ["authored", "inferred"].into_iter().collect(),
+            "each edge into the shared target keeps its own provenance"
+        );
+        // Both share the (live) target, so neither drifts and both point at the same
+        // external-ref node key.
+        assert!(into_addr.iter().all(|l| l["drift"] == false));
+        assert!(
+            into_addr
+                .iter()
+                .all(|l| l["to"] == "extref:hub::cfgkey:config.toml#serve.addr"),
+            "both links share the one external-ref node"
+        );
+
+        // The unrelated legacy key still drifts on its own.
+        let drift = links
+            .iter()
+            .find(|l| l["fromName"] == "LEGACY_ADDR")
+            .unwrap();
+        assert_eq!(drift["drift"], true);
+        assert_eq!(drift["toName"], Value::Null);
     }
 
     // -- served web app: the explorer server mounts the UI beside the API ----
