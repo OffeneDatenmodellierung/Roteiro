@@ -90,6 +90,29 @@
         color: #b45309;
         border-color: #fed7aa;
       }
+      .ws-action {
+        font: inherit;
+        font-size: 0.8rem;
+        padding: 0.35rem 0.7rem;
+        border: 1px solid var(--line-strong);
+        border-radius: 7px;
+        background: var(--panel);
+        color: var(--fg);
+        cursor: pointer;
+        box-shadow: var(--shadow);
+      }
+      .ws-action:hover {
+        border-color: var(--slate);
+        color: var(--slate);
+      }
+      .ws-action:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .ws-note {
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
 
       /* Workspace-selector landing --------------------------------------- */
       .select-hero {
@@ -1084,6 +1107,15 @@
           <label for="workspace">Workspace</label>
           <select id="workspace"></select>
           <span id="ws-linkage" class="ws-badge"></span>
+          <button
+            id="persist-links"
+            class="ws-action"
+            type="button"
+            title="Infer the cross-repo links and persist them as durable edges (like `roteiro links --infer --write`). The topology above already shows them live; persisting makes the follow-the-link hop and `roteiro check` see them too."
+          >
+            Persist links
+          </button>
+          <span id="persist-note" class="ws-note" role="status"></span>
         </div>
       </header>
 

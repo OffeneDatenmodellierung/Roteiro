@@ -446,6 +446,31 @@ pub fn normalize(key: &str) -> String {
         .join(".")
 }
 
+/// Canonicalise a dotted key for cross-**naming-convention** matching: keep the
+/// dotted structure, but collapse each `.`-delimited segment to its lowercased
+/// ASCII-alphanumerics only — dropping `_`, `-`, and any other punctuation within
+/// the segment. So within a segment `serverEndpoint`, `server_endpoint`, and
+/// `server-endpoint` all become `serverendpoint`, letting a Kubernetes YAML
+/// `zerobus.serverEndpoint` (`camelCase`) match an app TOML `zerobus.server_endpoint`
+/// (`snake_case`) that [`normalize`] keeps apart — `normalize` splits on *any* run
+/// of non-ASCII-alphanumeric chars, so `_` becomes a boundary
+/// (`zerobus.server.endpoint`) and a compound leaf never lines up with its
+/// `camelCase` spelling. The dotted structure is preserved here (segments are split
+/// on `.` only) so `a.b` and `ab` stay distinct.
+#[must_use]
+pub fn canonicalize(key: &str) -> String {
+    key.split('.')
+        .map(|seg| {
+            seg.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +668,31 @@ mod tests {
     fn normalize_bridges_conventions() {
         assert_eq!(normalize("SERVE_ADDR"), "serve.addr");
         assert_eq!(normalize("serve-addr"), "serve.addr");
+    }
+
+    #[test]
+    fn canonicalize_bridges_camel_snake_kebab_within_a_segment() {
+        // The three spellings of a compound leaf collapse to one canonical form,
+        // which `normalize` (separator-as-boundary) keeps apart.
+        assert_eq!(
+            canonicalize("zerobus.serverEndpoint"),
+            "zerobus.serverendpoint"
+        );
+        assert_eq!(
+            canonicalize("zerobus.server_endpoint"),
+            "zerobus.serverendpoint"
+        );
+        assert_eq!(
+            canonicalize("zerobus.server-endpoint"),
+            "zerobus.serverendpoint"
+        );
+        assert_ne!(
+            normalize("zerobus.server_endpoint"),
+            normalize("zerobus.serverEndpoint"),
+            "normalize splits snake_case on `_`, so it cannot bridge camelCase"
+        );
+        // Dotted structure is preserved: `a.b` must not collapse into `ab`.
+        assert_ne!(canonicalize("a.b"), canonicalize("ab"));
     }
 
     #[test]
