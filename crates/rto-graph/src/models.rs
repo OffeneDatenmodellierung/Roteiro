@@ -338,6 +338,24 @@ pub const REGISTRY: &[ModelSpec] = &[
         }],
     },
     ModelSpec {
+        name: "qwen3-coder-30b-a3b",
+        kind: ModelKind::Generative,
+        role: ModelRole::Coding,
+        tier: ResourceTier::High,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Qwen3-Coder-30B-A3B-Instruct (Q4_K_M GGUF) — 30B MoE coder (3B active), for a workstation",
+        size_mib: 17697,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+                sha256: "fadc3e5f8d42bf7e894a785b05082e47daee4df26680389817e2093056f088ad",
+            }],
+        }],
+    },
+    ModelSpec {
         name: "deepseek-r1-distill-qwen-1.5b",
         kind: ModelKind::Generative,
         role: ModelRole::Reasoning,
