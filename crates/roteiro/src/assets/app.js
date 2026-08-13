@@ -82,6 +82,14 @@
     trail: [],
     pendingNav: null,
     pendingFocus: null,
+    // Ask tab (graph-grounded chat). `ask` is the capability read from
+    // `/v1/graph/capabilities` at startup — true only in a `serve` build that
+    // mounts the chat endpoint; the llama-free explorer leaves it false and the
+    // tab stays disabled. `askModels` are the served model ids; `asking` guards
+    // against overlapping in-flight questions.
+    ask: false,
+    askModels: [],
+    asking: false,
   };
 
   // -- data ------------------------------------------------------------------
@@ -1556,6 +1564,232 @@
     }
   }
 
+  // -- right panel: Ask (graph-grounded chat, serve build only) --------------
+  //
+  // The Ask tab is disabled in the llama-free `roteiro explorer` build. A full
+  // `roteiro serve --models` build (`--features serve,explorer`) mounts the chat
+  // endpoint beside this data API and advertises it at `/v1/graph/capabilities`
+  // (`ask:true` + served model ids). We read that ONE signal at startup and, when
+  // Ask is available, enable the tab and wire it to the project-scoped chat route
+  // with the graph tools on — so a local model answers in prose, calling
+  // search/explain/path/debt over the drilled-into project's graph (ADR-0006).
+
+  // The system prompt steers the served model to answer FROM the graph via its
+  // tools and to cite node keys, which we then linkify back into the graph.
+  const ASK_SYSTEM = (project) =>
+    `You are a code assistant answering questions about the "${project}" project ` +
+    `using its Roteiro knowledge graph. Prefer the provided graph tools ` +
+    `(search, explain, path, debt) over guessing: search for relevant nodes, ` +
+    `explain the keys you find, and ground every claim in them. Answer in concise ` +
+    `prose and cite the node keys you used (e.g. \`fn:foo\`, \`file:src/main.rs\`).`;
+
+  // Read the build's capability signal. Any failure (older/llama-free server with
+  // no such route) leaves Ask disabled — the default — so this never breaks the
+  // explorer build.
+  async function loadCapabilities() {
+    try {
+      const caps = await getJson("/v1/graph/capabilities");
+      state.ask = caps && caps.ask === true;
+      state.askModels = (caps && caps.models) || [];
+    } catch (_) {
+      state.ask = false;
+      state.askModels = [];
+    }
+    if (state.ask) enableAskTab();
+  }
+
+  // Flip the Ask tab from its disabled stub to a live question form. Idempotent.
+  function enableAskTab() {
+    const tab = $("#p-tab-ask");
+    if (tab) {
+      tab.removeAttribute("aria-disabled");
+      tab.title = "ask a question about this project";
+    }
+    const pane = pPane("ask");
+    if (!pane) return;
+    pane.classList.remove("p-ask-disabled");
+
+    const answer = el("div", { class: "p-ask-answer", hidden: "" });
+    const input = el("textarea", {
+      id: "p-ask-input",
+      rows: "3",
+      placeholder: "Ask about this project — e.g. “what does the serve command do?”",
+      "aria-label": "Question about this project",
+    });
+    const send = el("button", { class: "p-ask-send", type: "submit", text: "Ask" });
+    const modelNote = state.askModels.length
+      ? el("span", { class: "p-ask-model", text: `model: ${state.askModels[0]}` })
+      : el("span", { class: "p-ask-model" });
+
+    const form = el(
+      "form",
+      {
+        class: "p-ask-form",
+        onsubmit: (e) => {
+          e.preventDefault();
+          submitAsk(input.value, answer, send);
+        },
+      },
+      input,
+      el("div", { class: "p-ask-row" }, modelNote, send)
+    );
+    // Ctrl/Cmd+Enter submits from the textarea (Enter alone inserts a newline).
+    input.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        submitAsk(input.value, answer, send);
+      }
+    });
+
+    pane.replaceChildren(
+      el("div", { class: "p-ask" }, form, answer)
+    );
+  }
+
+  // Post the question to the project-scoped chat endpoint (graph tools on) and
+  // render the prose answer, linkifying any node keys the model cited.
+  async function submitAsk(raw, answer, send) {
+    const question = String(raw || "").trim();
+    if (!question) return;
+    if (state.asking) return;
+    if (!state.project) {
+      showAnswer(answer, "Drill into a project first, then ask about it.", true);
+      return;
+    }
+    state.asking = true;
+    if (send) send.disabled = true;
+    answer.hidden = false;
+    answer.className = "p-ask-answer";
+    answer.replaceChildren(el("span", { class: "p-loading", text: "Thinking…" }));
+
+    const project = state.project;
+    const body = {
+      model: state.askModels[0],
+      messages: [
+        { role: "system", content: ASK_SYSTEM(project) },
+        { role: "user", content: question },
+      ],
+      stream: false,
+    };
+    try {
+      const res = await fetch(
+        `/v1/${encodeURIComponent(project)}/chat/completions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(askError(data, res.status));
+      }
+      // The user may have drilled elsewhere while the model was thinking.
+      if (state.project !== project) return;
+      const content =
+        (data.choices &&
+          data.choices[0] &&
+          data.choices[0].message &&
+          data.choices[0].message.content) ||
+        "(the model returned an empty answer)";
+      renderAnswer(answer, content);
+    } catch (err) {
+      showAnswer(answer, String((err && err.message) || err), true);
+    } finally {
+      state.asking = false;
+      if (send) send.disabled = false;
+    }
+  }
+
+  // Extract a human message from a `/v1` error body (`{error:{message}}` from the
+  // model endpoint, or a plain `{error:"…"}`), adding the pull-a-model hint when
+  // the failure is a missing/unknown model — the guidance the serve path emits.
+  function askError(data, status) {
+    let msg = "";
+    if (data && data.error) {
+      msg = typeof data.error === "string" ? data.error : data.error.message || "";
+    }
+    msg = msg || `request failed (${status})`;
+    if (/model|not served|pull/i.test(msg)) {
+      msg += " — pull a model first: `roteiro model pull qwen3-0.6b`";
+    }
+    return msg;
+  }
+
+  function showAnswer(answer, text, isErr) {
+    answer.hidden = false;
+    answer.className = isErr ? "p-ask-answer p-err" : "p-ask-answer";
+    answer.replaceChildren(text);
+  }
+
+  // Node keys the model cites (`fn:foo`, `file:src/main.rs`, `sym:rust:…#x`) —
+  // `prefix:body`, where the body runs to the first whitespace/quote. Skips web
+  // URLs (http/https/mailto), which share the `word:` shape but aren't graph keys.
+  const KEY_RE = /\b([a-z][a-z0-9_]{1,24}):([A-Za-z0-9_./#:@+-]{2,})/g;
+  const URL_PREFIX = /^(https?|mailto|ftp|ws|wss)$/i;
+
+  // Render the answer as prose with cited node keys turned into links that select
+  // the node in the current project graph (surfacing which nodes were referenced).
+  function renderAnswer(answer, text) {
+    answer.hidden = false;
+    answer.className = "p-ask-answer";
+    const frag = document.createDocumentFragment();
+    const refs = new Set();
+    let last = 0;
+    let m;
+    KEY_RE.lastIndex = 0;
+    while ((m = KEY_RE.exec(text)) !== null) {
+      if (URL_PREFIX.test(m[1])) continue; // a URL, not a graph key
+      const key = m[0];
+      if (m.index > last) frag.append(text.slice(last, m.index));
+      refs.add(key);
+      frag.append(
+        el("a", {
+          role: "link",
+          tabindex: "0",
+          text: key,
+          title: `inspect ${key}`,
+          onclick: () => askGoToNode(key),
+          onkeydown: (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              askGoToNode(key);
+            }
+          },
+        })
+      );
+      last = m.index + key.length;
+    }
+    if (last < text.length) frag.append(text.slice(last));
+
+    const kids = [el("div", {}, frag)];
+    if (refs.size) {
+      const list = el("div", { class: "p-ask-refs" }, "referenced: ");
+      let first = true;
+      refs.forEach((key) => {
+        if (!first) list.append(", ");
+        first = false;
+        list.append(
+          el("a", {
+            role: "link",
+            tabindex: "0",
+            text: shortKey(key),
+            title: key,
+            onclick: () => askGoToNode(key),
+          })
+        );
+      });
+      kids.push(list);
+    }
+    answer.replaceChildren(...kids);
+  }
+
+  // Jump to a cited node: select it in the graph (centres + opens the Node tab if
+  // it's present), reusing the same path a graph tap takes.
+  function askGoToNode(key) {
+    selectNode(key);
+  }
+
   // -- router ----------------------------------------------------------------
 
   async function route() {
@@ -1639,6 +1873,8 @@
       // Selecting a workspace navigates by hash so the choice is linkable.
       sel.addEventListener("change", () => goWorkspace(sel.value));
       wireProjectControls();
+      // Enable the Ask tab iff this build serves the chat endpoint (serve build).
+      await loadCapabilities();
       window.addEventListener("hashchange", () => {
         route();
       });
