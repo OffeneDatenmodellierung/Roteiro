@@ -684,6 +684,9 @@
   // -- workspace switching ---------------------------------------------------
 
   async function loadWorkspace(name) {
+    // Whether this is a switch to a DIFFERENT workspace, or a same-workspace reload
+    // (as `persistLinks` triggers after a successful write). Capture before mutating.
+    const switched = state.current !== name;
     state.current = name;
     setStatus(`Loading ${name}…`);
     const ws = state.workspaces.find((w) => w.name === name);
@@ -692,6 +695,14 @@
       badge.textContent = ws.linked ? "linked · multi-repo" : "standalone";
       badge.className = ws.linked ? "ws-badge" : "ws-badge standalone";
     }
+    // "Persist links" only makes sense for a linked (cross-repo) workspace; a
+    // standalone repo has no hub to infer against. Only clear the persist note when
+    // actually switching workspaces — a same-workspace reload (post-persist) must
+    // keep the "Persisted …" success message the user just triggered.
+    const persistBtn = $("#persist-links");
+    if (persistBtn) persistBtn.hidden = !(ws && ws.linked);
+    const persistNote = $("#persist-note");
+    if (persistNote && switched) persistNote.textContent = "";
     renderProjectChips(ws ? ws.projects || [] : []);
     try {
       const [topology, matrix] = await Promise.all([
@@ -704,6 +715,46 @@
       setStatus("");
     } catch (err) {
       setStatus(String(err.message || err), true);
+    }
+  }
+
+  // Persist the inferred cross-repo links: POST `…/links/write` (the one mutating
+  // endpoint), then reload the workspace so the topology/matrix re-render from the
+  // now-durable edges. The hub view already shows these links LIVE; persisting makes
+  // them durable, so the follow-the-link hop and `roteiro check` gates see them too.
+  async function persistLinks() {
+    const name = state.current;
+    if (!name) return;
+    const btn = $("#persist-links");
+    const note = $("#persist-note");
+    if (btn) btn.disabled = true;
+    if (note) {
+      note.textContent = "Persisting…";
+      note.className = "ws-note";
+    }
+    try {
+      const res = await fetch(wsPath(name, "links/write"), {
+        method: "POST",
+        headers: { accept: "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((data && data.error) || `HTTP ${res.status}`);
+      }
+      const written = data.written || 0;
+      if (note) {
+        note.textContent = `Persisted ${written} inferred link${written === 1 ? "" : "s"}.`;
+        note.className = "ws-note";
+      }
+      // Re-render from the now-durable edges (they read as persisted inferred links).
+      await loadWorkspace(name);
+    } catch (err) {
+      if (note) {
+        note.textContent = `Could not persist: ${err.message || err}`;
+        note.className = "err";
+      }
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -1987,6 +2038,8 @@
       // landing cards use — so a single-repo pick jumps straight into its graph
       // rather than the empty cross-repo view. Navigates by hash so it's linkable.
       sel.addEventListener("change", () => goByType(sel.value));
+      const persistBtn = $("#persist-links");
+      if (persistBtn) persistBtn.addEventListener("click", persistLinks);
       wireProjectControls();
       // Enable the Ask tab iff this build serves the chat endpoint (serve build).
       await loadCapabilities();
