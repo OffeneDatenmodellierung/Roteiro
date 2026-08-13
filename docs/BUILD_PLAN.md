@@ -1117,7 +1117,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ✅ durable+validated imports, lat.md importer, codegraph oracle (`compare_codegraph`) |
 | v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ✅ prose + PDF + **image OCR/vision** ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) ingestion, semantic dedup (`roteiro duplicates`), dependency-aware context cache (`roteiro context`) |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ✅ ADR-0004; Tier 0 (`spec context`/`scaffold`) + Tier 1 (`spec draft`) — now **Qwen3** via a GGUF-arch-dispatching candle loader |
-| v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ⛔ runs just before Stage 14 (touches sync+check+init) |
+| v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ✅ delivered (runs just before Stage 14; touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ✅ shipped v1.0.0 (crates.io; v1.1.0 followed) |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
