@@ -349,6 +349,14 @@ enum Command {
         /// (the current directory's repo).
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
+        /// Select a **named** workspace from config (`[[workspaces]]`/`[standalone]`,
+        /// else the legacy `[workspace]` folded to `default`) as the default the flat
+        /// `/v1/graph/*` routes bind to. Default: the workspace containing the current
+        /// repo, else the sole configured workspace. Nested
+        /// `/v1/graph/workspaces/{ws}/…` routes address a workspace explicitly and
+        /// ignore this. An unknown name fails fast, listing the known ones.
+        #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
+        workspace_name: Option<String>,
         /// Workspace mode: (re)build each project's graph the first time it is
         /// queried, instead of serving whatever its hooks last left. Slower on
         /// first touch, but never serves a stale or missing graph (ADR-0008).
@@ -579,6 +587,7 @@ fn main() -> anyhow::Result<()> {
             tls_cert,
             tls_key,
             workspace,
+            workspace_name,
             sync_on_access,
             mcp,
         } => run_serve(
@@ -593,6 +602,7 @@ fn main() -> anyhow::Result<()> {
                 mcp,
             },
             &workspace,
+            workspace_name.as_deref(),
             sync_on_access,
         ),
         #[cfg(feature = "explorer")]
@@ -3465,50 +3475,143 @@ fn run_serve(
     cfg: &config::Config,
     opts: ServeOptions,
     workspace_roots: &[String],
+    workspace_name: Option<&str>,
     sync_on_access: bool,
 ) -> anyhow::Result<()> {
     use std::sync::Arc;
-    let repo_paths = collect_workspace_repo_paths(&cfg.workspace, workspace_roots)?;
-    let workspace: Arc<rto_graph::Workspace> = if repo_paths.is_empty() {
-        // Single-repo serve: build the cwd repo's graph now and host it alone.
+
+    // Build the full multi-workspace set from config — the same source of truth
+    // `roteiro explorer` uses (`Config::resolved_workspaces()`: the legacy
+    // `[workspace]` folded to `default`, every `[[workspaces]]`, and `[standalone]`).
+    // So `serve` hosts ALL configured workspaces and runs from ANY directory, with
+    // no git cwd required. Only when nothing is configured does it fall back to the
+    // current directory's lone repo, so `serve` in a bare repo still "just works".
+    let resolved = cfg.resolved_workspaces()?;
+    let ServeWorkspaces { set, flat } = if resolved.is_empty() {
+        // Single-repo fallback (no config, lone repo): build the cwd repo's graph
+        // now and host it alone as the `default` workspace. The set and the model
+        // workspace share the one store handle (no re-open), exactly as before.
         let (repo, mut store, cache) = open_graph()?;
         build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
         let name = repo
             .workdir()
             .and_then(std::path::Path::file_name)
             .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
-        Arc::new(rto_graph::Workspace::single(name, store))
+        let flat = Arc::new(rto_graph::Workspace::single(name, store));
+        let set = Arc::new(rto_graph::WorkspaceSet::from_single(
+            "default",
+            flat.clone(),
+            flat.is_multi(),
+        ));
+        ServeWorkspaces { set, flat }
     } else {
-        // Workspace serve: open existing graphs on demand and allow SIGHUP to
-        // reload the registry. By default no sync (each repo's hooks keep it
-        // fresh, ADR-0008); with --sync-on-access, (re)build a project's graph on
-        // first touch.
-        let mut ws = rto_graph::Workspace::from_repo_paths(&repo_paths)?;
+        // Multi-workspace serve: host every configured workspace. `set` (built the
+        // same way `run_explorer` builds it) backs the read-only `/v1/graph/*` API
+        // and the served UI, workspace-aware. `flat` is one workspace over EVERY
+        // project across ALL configured workspaces (plus any `--workspace <ROOT>`),
+        // backing the model tool registry, the `/v1/{project}/…` routing, and the
+        // MCP router — so the served model can query any hosted project. Existing
+        // graphs are opened on demand; SIGHUP reloads the set of repos, and
+        // `--sync-on-access` (re)builds a project's graph on first touch (ADR-0008).
+        let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(resolved.clone())?);
+        // Validate `--workspace-name` once, up front: an unknown name fails fast
+        // (listing the known workspaces) rather than booting a server whose flat
+        // routes would 404. Mirrors `run_explorer`.
+        if let Some(name) = workspace_name {
+            set.select(Some(name))?;
+        }
+        let paths = resolved_repo_paths(&resolved, workspace_roots)?;
+        let mut ws = rto_graph::Workspace::from_repo_paths(&paths)?;
         if sync_on_access {
             ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
                 sync_project_graph(db, ingest).map_err(|e| e.to_string())
             }));
         }
-        let ws = Arc::new(ws);
-        let names = ws.names();
+        let flat = Arc::new(ws);
         eprintln!(
-            "roteiro workspace: {} project(s){} — {}",
-            names.len(),
+            "roteiro serve: {} workspace(s) [{}] — {} project(s){} — {}",
+            set.names().len(),
+            set.names().join(", "),
+            flat.names().len(),
             if sync_on_access {
                 ", sync-on-access"
             } else {
                 ""
             },
-            names.join(", ")
+            flat.names().join(", ")
         );
-        install_workspace_reload(&ws, cfg.workspace.clone(), workspace_roots.to_vec());
-        ws
+        install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
+        ServeWorkspaces { set, flat }
     };
-    if opts.models {
-        serve_models_endpoint(cfg, workspace, &opts)
-    } else {
-        serve_mcp(workspace, opts.http)
+
+    if set.names().is_empty() {
+        anyhow::bail!(
+            "no workspaces to serve — run inside a repo, or configure \
+             `[[workspaces]]` / `[standalone]` in roteiro.toml"
+        );
     }
+
+    if opts.models {
+        serve_models_endpoint(cfg, set, flat, workspace_name, &opts)
+    } else {
+        serve_mcp(flat, opts.http)
+    }
+}
+
+/// The two workspace views a `serve` process holds. `set` is the full
+/// multi-workspace [`rto_graph::WorkspaceSet`] (ADR-0008) that backs the read-only
+/// `/v1/graph/*` API and the served explorer UI — workspace-aware, listed at
+/// `GET /v1/graph/workspaces`. `flat` is a single [`rto_graph::Workspace`] over
+/// **every** project across all those workspaces, backing the model tool registry,
+/// the `/v1/{project}/…` chat routing, and the MCP router — so the served model can
+/// query any hosted project by name. For the single-repo fallback the two share the
+/// one store handle; otherwise `flat` opens each project's store on demand.
+#[cfg(any(feature = "mcp", feature = "serve"))]
+struct ServeWorkspaces {
+    /// The full multi-workspace set (read-only graph API + UI).
+    set: std::sync::Arc<rto_graph::WorkspaceSet>,
+    /// One flattened workspace over every hosted project (model tools + MCP).
+    flat: std::sync::Arc<rto_graph::Workspace>,
+}
+
+/// The union of member repo paths across every resolved workspace group, plus any
+/// additive `--workspace <ROOT>` paths — the repo set the flattened model
+/// [`rto_graph::Workspace`] hosts (and the SIGHUP reload re-scans). Discovered the
+/// same way [`rto_graph::WorkspaceSet::from_resolved`] discovers each group's repos
+/// (roots scanned + explicit repos), deduplicated by path so a repo named in two
+/// groups is hosted once.
+#[cfg(any(feature = "mcp", feature = "serve"))]
+fn resolved_repo_paths(
+    resolved: &[rto_graph::ResolvedWorkspace],
+    cli_roots: &[String],
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut push = |p: std::path::PathBuf, out: &mut Vec<std::path::PathBuf>| {
+        // Dedupe by the canonical path where possible, so the same repo reached via
+        // two groups (or a root + an explicit repo) is hosted once.
+        let key = p.canonicalize().unwrap_or_else(|_| p.clone());
+        if seen.insert(key) {
+            out.push(p);
+        }
+    };
+    for root in cli_roots {
+        for repo in rto_graph::discover_repos_under(std::path::Path::new(root))? {
+            push(repo, &mut out);
+        }
+    }
+    for rw in resolved {
+        for root in &rw.roots {
+            for repo in rto_graph::discover_repos_under(std::path::Path::new(root))? {
+                push(repo, &mut out);
+            }
+        }
+        for repo in &rw.repos {
+            push(std::path::PathBuf::from(repo), &mut out);
+        }
+    }
+    Ok(out)
 }
 
 /// Repo paths a workspace `serve` hosts: everything under the CLI `--workspace`
@@ -3566,7 +3669,7 @@ fn sync_project_graph(
 #[cfg(all(unix, any(feature = "mcp", feature = "serve")))]
 fn install_workspace_reload(
     ws: &std::sync::Arc<rto_graph::Workspace>,
-    ws_cfg: config::WorkspaceConfig,
+    cfg: config::Config,
     cli_roots: Vec<String>,
 ) {
     let ws = ws.clone();
@@ -3590,7 +3693,13 @@ fn install_workspace_reload(
                 };
             eprintln!("send SIGHUP to reload the workspace (pick up added/removed repos)");
             while hup.recv().await.is_some() {
-                let result = collect_workspace_repo_paths(&ws_cfg, &cli_roots)
+                // Re-derive the full repo set the same way startup did: every
+                // configured workspace's members (`resolved_workspaces()`) plus the
+                // additive `--workspace <ROOT>` paths — so a SIGHUP picks up repos
+                // added/removed across ALL workspaces, not just the legacy block.
+                let result = cfg
+                    .resolved_workspaces()
+                    .and_then(|resolved| resolved_repo_paths(&resolved, &cli_roots))
                     .and_then(|paths| ws.reload_from(paths).map_err(anyhow::Error::from));
                 match result {
                     Ok(names) => eprintln!(
@@ -3609,7 +3718,7 @@ fn install_workspace_reload(
 #[cfg(all(not(unix), any(feature = "mcp", feature = "serve")))]
 fn install_workspace_reload(
     _ws: &std::sync::Arc<rto_graph::Workspace>,
-    _ws_cfg: config::WorkspaceConfig,
+    _cfg: config::Config,
     _cli_roots: Vec<String>,
 ) {
 }
@@ -3685,7 +3794,9 @@ fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
 #[cfg(feature = "serve")]
 fn serve_models_endpoint(
     cfg: &config::Config,
-    workspace: std::sync::Arc<rto_graph::Workspace>,
+    set: std::sync::Arc<rto_graph::WorkspaceSet>,
+    flat: std::sync::Arc<rto_graph::Workspace>,
+    workspace_name: Option<&str>,
     opts: &ServeOptions,
 ) -> anyhow::Result<()> {
     let (addr, tls_cert, tls_key) = (
@@ -3741,7 +3852,19 @@ fn serve_models_endpoint(
         tls_cert.or_else(|| cfg.serve.tls_cert.clone()),
         tls_key.or_else(|| cfg.serve.tls_key.clone()),
     )?;
-    serve_v1_tail(cfg, workspace, opts, engine, socket, tls, &names)
+    serve_v1_tail(
+        cfg,
+        ServeSurfaces {
+            set,
+            flat,
+            workspace_name,
+        },
+        opts,
+        engine,
+        socket,
+        tls,
+        &names,
+    )
 }
 
 /// Resolve the in-process TLS pair: both a cert and a key give HTTPS, neither
@@ -3765,28 +3888,51 @@ fn resolve_serve_tls(
     }
 }
 
+/// The workspace surfaces a `serve --models` process serves, bundled so
+/// [`serve_v1_tail`] stays within the argument-count budget: the full multi-workspace
+/// `set` (read-only `/v1/graph/*` API + UI, explorer builds) and the flattened `flat`
+/// workspace over every hosted project (model tools + MCP), plus the validated
+/// `--workspace-name` that picks the default flat-route workspace.
+#[cfg(feature = "serve")]
+struct ServeSurfaces<'a> {
+    /// The full configured workspace set (read-only graph API + served UI).
+    set: std::sync::Arc<rto_graph::WorkspaceSet>,
+    /// One flattened workspace over every hosted project (model tools + MCP).
+    flat: std::sync::Arc<rto_graph::Workspace>,
+    /// The validated `--workspace-name` the flat `/v1/graph/*` routes default to.
+    workspace_name: Option<&'a str>,
+}
+
 /// Assemble the graph tools and serve the endpoint: `/v1` alone, or — with
 /// `--mcp` — `/v1` **and** `/mcp` merged on one port (ADR-0008). Blocks until
 /// shutdown.
 #[cfg(feature = "serve")]
 fn serve_v1_tail(
     cfg: &config::Config,
-    workspace: std::sync::Arc<rto_graph::Workspace>,
+    surfaces: ServeSurfaces<'_>,
     opts: &ServeOptions,
     engine: std::sync::Arc<dyn rto_serve::Engine>,
     socket: std::net::SocketAddr,
     tls: Option<(std::path::PathBuf, std::path::PathBuf)>,
     names: &str,
 ) -> anyhow::Result<()> {
+    let ServeSurfaces {
+        set,
+        flat,
+        workspace_name,
+    } = surfaces;
+    // `set` (the full workspace set) and `workspace_name` back the read-only
+    // `/v1/graph/*` API + UI, which are only mounted in an `explorer` build; the
+    // model tools and MCP router use the flattened `flat` workspace regardless.
+    #[cfg(not(feature = "explorer"))]
+    let _ = (&set, workspace_name);
     let scheme = if tls.is_some() { "https" } else { "http" };
     // Auto-register the graph tools (ADR-0006) unless disabled, so the served
     // model can `explain`/`search`/`path`/`debt` — across every hosted project
-    // (ADR-0008), selected by a `project` argument.
+    // of every configured workspace (ADR-0008), selected by a `project` argument.
     let tools: Option<std::sync::Arc<dyn rto_serve::ToolRegistry>> =
         if cfg.serve.tools.unwrap_or(true) {
-            Some(std::sync::Arc::new(GraphToolRegistry::new(
-                workspace.clone(),
-            )))
+            Some(std::sync::Arc::new(GraphToolRegistry::new(flat.clone())))
         } else {
             None
         };
@@ -3819,7 +3965,13 @@ fn serve_v1_tail(
     // above backs both `/v1/chat/completions` and the graph tools — nothing is
     // duplicated; the pure `explorer` build never reaches here and keeps Ask off.
     #[cfg(feature = "explorer")]
-    let router = mount_explorer_surfaces(router, &workspace, model_ids);
+    let router = {
+        // The workspace the flat `/v1/graph/*` routes bind to: the validated
+        // `--workspace-name`, else the one containing the cwd, else the sole
+        // configured workspace (mirrors `run_explorer`).
+        let default = explorer_default_workspace(&set, workspace_name);
+        mount_explorer_surfaces(router, set, default, model_ids)
+    };
     #[cfg(feature = "explorer")]
     let graph_note = " + /v1/graph + / (UI, Ask on)";
     #[cfg(not(feature = "explorer"))]
@@ -3829,7 +3981,7 @@ fn serve_v1_tail(
     if opts.mcp {
         #[cfg(feature = "mcp")]
         {
-            let combined = router.merge(rto_render::mcp::mcp_router(workspace));
+            let combined = router.merge(rto_render::mcp::mcp_router(flat));
             eprintln!(
                 "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note} + /mcp — serving: {names}"
             );
@@ -3856,31 +4008,29 @@ fn serve_v1_tail(
 }
 
 /// Merge the explorer's read-only data API and its static web app onto a full
-/// `serve --models` router, advertising the mounted Ask (chat) endpoint. The
-/// graph API is multi-workspace-aware (ADR-0008), so wrap the one workspace this
-/// serve process holds into a single-entry `WorkspaceSet` (sharing the same store
-/// handles, not re-opening them); its flat `/v1/graph/*` routes resolve to that
-/// sole/default workspace, so serve behaviour is unchanged. `model_ids` are the
-/// served generative models, surfaced in `/v1/graph/capabilities` so the web app
-/// can name the model backing Ask. Factored out so the wiring is unit-testable
+/// `serve --models` router, advertising the mounted Ask (chat) endpoint. The graph
+/// API is multi-workspace-aware (ADR-0008): `set` is the FULL configured
+/// [`rto_graph::WorkspaceSet`], so `GET /v1/graph/workspaces` lists every hosted
+/// workspace and each is reachable both flat (via `default`) and under
+/// `/v1/graph/workspaces/{ws}/…`. `default` names the workspace the flat routes
+/// bind to (`--workspace-name`, else the cwd's, else the sole one). `model_ids` are
+/// the served generative models, surfaced in `/v1/graph/capabilities` so the web
+/// app can name the model backing Ask. Factored out so the wiring is unit-testable
 /// with a mock engine (no llama.cpp).
 #[cfg(all(feature = "serve", feature = "explorer"))]
 fn mount_explorer_surfaces(
     router: axum::Router,
-    workspace: &std::sync::Arc<rto_graph::Workspace>,
+    set: std::sync::Arc<rto_graph::WorkspaceSet>,
+    default: Option<String>,
     model_ids: Vec<String>,
 ) -> axum::Router {
-    let set =
-        rto_graph::WorkspaceSet::from_single("default", workspace.clone(), workspace.is_multi());
     let caps = crate::graph_api::Capabilities {
         ask: true,
         models: model_ids,
     };
     router
         .merge(crate::graph_api::router_with_capabilities(
-            std::sync::Arc::new(set),
-            Some("default".to_owned()),
-            caps,
+            set, default, caps,
         ))
         .merge(crate::explorer_app::router())
 }
@@ -4091,7 +4241,9 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
 #[cfg(all(not(feature = "serve"), feature = "mcp"))]
 fn serve_models_endpoint(
     _cfg: &config::Config,
-    _workspace: std::sync::Arc<rto_graph::Workspace>,
+    _set: std::sync::Arc<rto_graph::WorkspaceSet>,
+    _flat: std::sync::Arc<rto_graph::Workspace>,
+    _workspace_name: Option<&str>,
     _opts: &ServeOptions,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
@@ -4458,22 +4610,69 @@ mod serve_explorer_wiring {
         }
     }
 
-    /// The merged router exactly as `serve_v1_tail` assembles it for a
-    /// `serve,explorer` build: `/v1` model app (graph tools on) + `/v1/graph/*`
-    /// (capabilities ask:true) + the static web app.
-    fn serve_router() -> axum::Router {
+    /// The merged router exactly as `serve_v1_tail` assembles it — parameterised
+    /// over the `set` (the workspace-aware graph API) and `flat` (the model tool
+    /// registry over every hosted project). `/v1` model app (graph tools on) +
+    /// `/v1/graph/*` (capabilities ask:true) + the static web app.
+    fn serve_router_for(
+        set: std::sync::Arc<rto_graph::WorkspaceSet>,
+        flat: std::sync::Arc<rto_graph::Workspace>,
+        default: Option<String>,
+    ) -> axum::Router {
         let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(MockEngine);
-        let store = rto_graph::Store::open_in_memory().expect("in-memory store");
-        let workspace = std::sync::Arc::new(rto_graph::Workspace::single("repo", store));
         let tools: std::sync::Arc<dyn rto_serve::ToolRegistry> =
-            std::sync::Arc::new(GraphToolRegistry::new(workspace.clone()));
+            std::sync::Arc::new(GraphToolRegistry::new(flat));
         let model_ids = engine.models().into_iter().map(|m| m.id).collect();
         let base = rto_serve::app_with_tools(engine, tools);
-        mount_explorer_surfaces(base, &workspace, model_ids)
+        mount_explorer_surfaces(base, set, default, model_ids)
+    }
+
+    /// The legacy single-repo `serve` wiring: one `repo` workspace folded into a
+    /// one-entry `default` set (as `run_serve`'s single-repo fallback does), sharing
+    /// the one store handle.
+    fn serve_router() -> axum::Router {
+        let store = rto_graph::Store::open_in_memory().expect("in-memory store");
+        let flat = std::sync::Arc::new(rto_graph::Workspace::single("repo", store));
+        let set = std::sync::Arc::new(rto_graph::WorkspaceSet::from_single(
+            "default",
+            flat.clone(),
+            flat.is_multi(),
+        ));
+        serve_router_for(set, flat, Some("default".to_owned()))
+    }
+
+    /// A multi-workspace `serve` wiring built entirely from in-memory stores — no
+    /// git repo, no cwd, no `open_graph()`. Two configured workspaces (`api` linked,
+    /// `docs` standalone), each with its own project store; `flat` unions every
+    /// project so the model tools reach any of them. Proves `serve` hosts the full
+    /// configured set from ANY directory.
+    fn multi_serve_router() -> axum::Router {
+        let ws_api =
+            rto_graph::Workspace::single("api", rto_graph::Store::open_in_memory().expect("store"));
+        let ws_docs = rto_graph::Workspace::single(
+            "docs",
+            rto_graph::Store::open_in_memory().expect("store"),
+        );
+        let set = std::sync::Arc::new(rto_graph::WorkspaceSet::from_workspaces([
+            ("api".to_owned(), ws_api, true),
+            ("docs".to_owned(), ws_docs, false),
+        ]));
+        // The flattened model workspace over every hosted project.
+        let flat = std::sync::Arc::new(rto_graph::Workspace::from_stores([
+            ("api", rto_graph::Store::open_in_memory().expect("store")),
+            ("docs", rto_graph::Store::open_in_memory().expect("store")),
+        ]));
+        // Multi-workspace ⇒ no implicit default flat workspace (a client addresses
+        // one via `/v1/graph/workspaces/{ws}/…`).
+        serve_router_for(set, flat, None)
     }
 
     async fn get(uri: &str) -> (StatusCode, String, String) {
-        let resp = serve_router()
+        get_on(serve_router(), uri).await
+    }
+
+    async fn get_on(router: axum::Router, uri: &str) -> (StatusCode, String, String) {
+        let resp = router
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -4543,6 +4742,173 @@ mod serve_explorer_wiring {
             json["choices"][0]["message"]["content"], "a grounded answer",
             "the mounted route returns the engine's completion"
         );
+    }
+
+    // -- multi-workspace serve (no git cwd, no `open_graph()`) --------------
+
+    #[tokio::test]
+    async fn serve_hosts_all_configured_workspaces_with_no_cwd_repo() {
+        // The whole point of the change: a `serve --models` process built from
+        // `[[workspaces]]`/`[standalone]` config hosts EVERY configured workspace
+        // and lists them at `/v1/graph/workspaces` — with no repo discovered from
+        // the current directory and no `open_graph()` on the cwd (this router is
+        // assembled purely from in-memory stores).
+        let (status, ct, body) = get_on(multi_serve_router(), "/v1/graph/workspaces").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.contains("application/json"), "content-type was {ct}");
+        let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let arr = arr.as_array().expect("workspaces array");
+        assert_eq!(arr.len(), 2, "both configured workspaces are hosted");
+        // Stable (name) order: `api` (linked) then `docs` (standalone).
+        assert_eq!(arr[0]["name"], "api");
+        assert_eq!(arr[0]["linked"], true);
+        assert_eq!(arr[1]["name"], "docs");
+        assert_eq!(arr[1]["linked"], false, "a standalone repo is unlinked");
+    }
+
+    #[tokio::test]
+    async fn nested_graph_routes_reach_each_configured_workspace() {
+        // Every hosted workspace is reachable under its explicit path segment, so a
+        // multi-workspace serve is not limited to a single default workspace: each
+        // workspace's `/projects` route resolves within that named workspace.
+        for (ws, project) in [("api", "api"), ("docs", "docs")] {
+            let (status, _, body) = get_on(
+                multi_serve_router(),
+                &format!("/v1/graph/workspaces/{ws}/projects"),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "workspace `{ws}` must be reachable via its nested route"
+            );
+            assert!(
+                body.contains(project),
+                "workspace `{ws}` hosts project `{project}` (was: {body})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_model_tools_span_every_hosted_project() {
+        // The graph-grounded chat route the served model uses must resolve a
+        // project in ANY configured workspace — the flattened tool workspace unions
+        // them all. Posting to `/v1/{project}/chat/completions` for a project drawn
+        // from each workspace reaches the (mock) engine (200), not a 404.
+        for project in ["api", "docs"] {
+            let body = serde_json::json!({
+                "model": "qwen3-0.6b",
+                "messages": [{ "role": "user", "content": "what is this project?" }],
+                "stream": false,
+            });
+            let resp = multi_serve_router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/{project}/chat/completions"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "the project-scoped chat route must resolve `{project}` across the set"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_workspace_name_fails_fast_listing_the_known_ones() {
+        // `run_serve` validates `--workspace-name` up front via `set.select`: an
+        // unknown name is a fast error naming the known workspaces, never a booted
+        // server whose flat routes 404 on every request.
+        let ws_api =
+            rto_graph::Workspace::single("api", rto_graph::Store::open_in_memory().unwrap());
+        let ws_docs =
+            rto_graph::Workspace::single("docs", rto_graph::Store::open_in_memory().unwrap());
+        let set = rto_graph::WorkspaceSet::from_workspaces([
+            ("api".to_owned(), ws_api, true),
+            ("docs".to_owned(), ws_docs, false),
+        ]);
+        let err = set.select(Some("nope")).err().expect("unknown must error");
+        let msg = err.to_string();
+        assert!(msg.contains("no workspace named `nope`"), "was: {msg}");
+        assert!(msg.contains("api") && msg.contains("docs"), "was: {msg}");
+        // A valid name (and the legacy `default` single-repo fold) still resolve.
+        assert!(set.select(Some("api")).is_ok());
+    }
+
+    #[test]
+    fn legacy_single_repo_folds_to_one_default_workspace() {
+        // The single-repo fallback path: one pre-built store, wrapped as the sole
+        // `default` workspace of a one-entry set (sharing the handle), exactly as
+        // `run_serve` does when no `[[workspaces]]`/`[standalone]` is configured.
+        let flat = std::sync::Arc::new(rto_graph::Workspace::single(
+            "repo",
+            rto_graph::Store::open_in_memory().unwrap(),
+        ));
+        let set = rto_graph::WorkspaceSet::from_single("default", flat.clone(), flat.is_multi());
+        assert_eq!(set.names(), vec!["default".to_owned()]);
+        // A bare selection resolves the sole workspace, and it hosts the one repo.
+        assert_eq!(set.select(None).unwrap().names(), vec!["repo".to_owned()]);
+    }
+}
+
+/// The `serve`/`mcp` path that flattens every configured workspace's repos into the
+/// one model workspace (`resolved_repo_paths`), independent of the current
+/// directory.
+#[cfg(all(test, any(feature = "serve", feature = "mcp")))]
+mod serve_workspace_paths_tests {
+    use super::resolved_repo_paths;
+    use rto_graph::ResolvedWorkspace;
+
+    #[test]
+    fn unions_every_group_and_cli_root_deduped_by_path() {
+        // Two synthetic repos under a scanned root, plus an explicit repo — spread
+        // across a linked group and a standalone singleton, with one repo named in
+        // BOTH a group root and an explicit repo to prove de-duplication.
+        let base = std::env::temp_dir().join(format!("rto-srv-paths-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for sub in ["scan/alpha/.git", "scan/beta/.git", "solo/gamma/.git"] {
+            std::fs::create_dir_all(base.join(sub)).expect("mkrepo");
+        }
+        let scan = base.join("scan").to_string_lossy().into_owned();
+        let alpha = base.join("scan/alpha").to_string_lossy().into_owned();
+        let gamma_root = base.join("solo").to_string_lossy().into_owned();
+
+        let resolved = vec![
+            ResolvedWorkspace {
+                name: "linked".to_owned(),
+                roots: vec![scan.clone()],
+                // `alpha` is also discovered under `scan` → must appear once.
+                repos: vec![alpha.clone()],
+                linked: true,
+            },
+            ResolvedWorkspace {
+                name: "gamma".to_owned(),
+                roots: Vec::new(),
+                repos: vec![base.join("solo/gamma").to_string_lossy().into_owned()],
+                linked: false,
+            },
+        ];
+        // A `--workspace <ROOT>` that re-scans the same `solo` dir must not double it.
+        let paths = resolved_repo_paths(&resolved, &[gamma_root]).expect("union");
+
+        let mut got: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()],
+            "each repo is hosted exactly once across all groups + cli roots"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }
 
