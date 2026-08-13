@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.3.0...roteiro-v1.4.0) - 2026-08-13
+
+### Added
+
+- *(explorer)* workspace-selector landing + route-by-type + sticker logo
+
+### Other
+
+- Merge pull request #255 from OffeneDatenmodellierung/feat/explorer-selector-landing
+
 ## [1.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.2.0...roteiro-v1.3.0) - 2026-08-13
 
 ### Added
