@@ -9,6 +9,7 @@
 //   GET /v1/graph/workspaces/{ws}/{project}/hotspots  — most-called (by degree)
 //   GET /v1/graph/workspaces/{ws}/{project}/debt      — intent-debt markers
 //   GET /v1/graph/workspaces/{ws}/{project}/node/{key}— one node + its neighbours
+//   GET /v1/graph/workspaces/{ws}/follow?qualified=…  — the follow-the-link hop
 // The nested `/workspaces/{ws}/…` form is always used so a workspace is picked by
 // name (collision-safe), independent of the server's flat-route default.
 //
@@ -17,8 +18,11 @@
 //   #/  or  #/workspace/{ws}                    → the cross-repo WORKSPACE view
 //   #/workspace/{ws}/project/{project}          → the single-project GRAPH view
 // Clicking a repo box, a matrix column header, or a project chip drills in; the
-// breadcrumb "← Workspace" backs out. The cross-repo spoke-link rendering and the
-// follow-the-link hop, and the (llama-backed) Ask tab, are later PRs — clean seams.
+// breadcrumb "← Workspace" backs out. Clicking a spoke's app-key target (or its
+// node-detail cross-repo chip) FOLLOWS the link into the hub project, centring the
+// struct that defines the key and pushing a breadcrumb crumb so `←`/browser-back
+// walk out hub → spoke → Workspace (PR 7). The (llama-backed) Ask tab is a later
+// PR — a clean seam.
 
 "use strict";
 
@@ -67,6 +71,17 @@
     linkByEdge: new Map(),
     linksByRef: new Map(),
     linksByFrom: new Map(),
+    // Follow-the-link hop (PR 7). `trail` is the breadcrumb chain of project views
+    // the current one was reached THROUGH — e.g. after hopping a spoke's app-key
+    // into the hub it is `[{project: spoke}, {project: hub, focus}]`, so `▸`
+    // crumbs and the `←` back button walk out hub → spoke → Workspace. `pendingNav`
+    // carries that trail (and a node to centre) across the hash navigation a hop
+    // triggers; `pendingFocus` is the node key to centre + inspect once the target
+    // graph has rendered. All reset to a plain single-crumb trail on a fresh drill
+    // or a browser back/forward (no pending hop), so history stays consistent.
+    trail: [],
+    pendingNav: null,
+    pendingFocus: null,
   };
 
   // -- data ------------------------------------------------------------------
@@ -142,6 +157,137 @@
   function navigateToProject(project) {
     if (!project) return;
     goProject(state.current, project);
+  }
+
+  // -- follow-the-link hop (PR 7) --------------------------------------------
+
+  // Follow a spoke app-key target INTO the hub project that defines it. Called
+  // when an app-key node (or a node-detail cross-repo chip) is clicked. `refKey`
+  // is the external-ref (app-key) node's key; its inbound links carry the
+  // project-qualified hub target we ask the server to resolve+bridge.
+  async function followHop(refKey) {
+    const link = (state.linksByRef.get(refKey) || [])[0];
+    if (!link) return;
+    if (link.drift) return showDrift(link.toQualified);
+    const ws = state.projectWs;
+    setPStatus(`Following ${appKeyLabel(link)}…`);
+    let res;
+    try {
+      res = await getJson(
+        wsPath(ws, `follow?qualified=${encodeURIComponent(link.toQualified)}`)
+      );
+    } catch (err) {
+      return setPStatus(String(err.message || err), true);
+    }
+    if (!res || res.drift || !res.target) return showDrift(link.toQualified);
+    setPStatus("");
+    // Push the current view onto the trail, then hop to the target project,
+    // centring the returned node (the defining struct, or the config key) once it
+    // renders. Navigation goes through the hash so browser back/forward also walk
+    // the chain.
+    const trail = [...currentTrail(), { ws, project: res.project, focus: res.target.key }];
+    state.pendingNav = { ws, project: res.project, trail, focus: res.target.key };
+    goProject(ws, res.project);
+  }
+
+  // A follow to a drifted / unresolved target does NOT navigate — the target does
+  // not resolve in the hub. Drift means the hub key is gone (renamed/removed) OR
+  // the hub project isn't hosted/synced in this workspace (the resolver maps both
+  // to drift), so word it as "can't be resolved" rather than asserting non-existence.
+  function showDrift(qualified) {
+    const label = String(qualified).replace("::", " · ");
+    setPStatus(
+      `drift: ${label} can't be resolved in the hub — the key isn't defined, ` +
+        `or the hub isn't hosted/synced. Nothing to follow.`,
+      true
+    );
+  }
+
+  // The trail for the current view, defaulting to a single self-crumb when the
+  // view wasn't reached via an in-app hop (fresh drill, deep link, browser nav).
+  function currentTrail() {
+    if (state.trail.length) return state.trail;
+    if (state.project) return [{ ws: state.projectWs, project: state.project }];
+    return [];
+  }
+
+  // Jump back to breadcrumb crumb `i`, truncating the trail there and restoring
+  // that crumb's focused node. Used by the `▸` crumb links and the `←` button.
+  function crumbTo(i) {
+    const target = state.trail[i];
+    if (!target) return;
+    state.pendingNav = {
+      ws: target.ws,
+      project: target.project,
+      trail: state.trail.slice(0, i + 1),
+      focus: target.focus || null,
+    };
+    goProject(target.ws, target.project);
+  }
+
+  // The `←` back affordance: walk OUT one level of a follow chain (hub → spoke),
+  // else leave the project view for the workspace.
+  function crumbBack() {
+    if (state.trail.length > 1) crumbTo(state.trail.length - 2);
+    else goWorkspace(state.projectWs || state.current);
+  }
+
+  // Render the breadcrumb from `state.trail`: Roteiro · Workspace ▸ spoke ▸ hub,
+  // where every crumb but the last links back to that point and the last is the
+  // current view. Rebuilt on each project load (so the Workspace link is re-bound).
+  function renderCrumbs() {
+    const nav = document.querySelector("#view-project .p-crumbs");
+    if (!nav) return;
+    const kids = [
+      el("span", { class: "p-crumb-root", text: "Roteiro" }),
+      el("span", { class: "p-sep", text: "·" }),
+      el("button", {
+        id: "p-crumb-ws",
+        class: "p-crumb-link",
+        type: "button",
+        text: "Workspace",
+        onclick: () => goWorkspace(state.projectWs || state.current),
+      }),
+    ];
+    const trail = currentTrail();
+    trail.forEach((c, i) => {
+      kids.push(el("span", { class: "p-sep", text: "▸" }));
+      if (i === trail.length - 1) {
+        kids.push(
+          el("span", { id: "p-crumb-project", class: "p-crumb-current", text: c.project })
+        );
+      } else {
+        kids.push(
+          el("button", {
+            class: "p-crumb-link",
+            type: "button",
+            title: `back to ${c.project}`,
+            text: c.project,
+            onclick: () => crumbTo(i),
+          })
+        );
+      }
+    });
+    nav.replaceChildren(...kids);
+    // The `←` label follows the chain: one level out, or the workspace.
+    const back = $("#p-back");
+    if (back)
+      back.textContent =
+        trail.length > 1 ? `← ${trail[trail.length - 2].project}` : "← Workspace";
+  }
+
+  // Adopt `pendingNav`'s trail + focus when it matches the project being loaded,
+  // else reset to a plain single-crumb trail (a fresh drill / browser navigation).
+  function applyTrail(ws, project) {
+    const p = state.pendingNav;
+    if (p && p.ws === ws && p.project === project) {
+      state.trail = p.trail;
+      state.pendingFocus = p.focus || null;
+    } else {
+      state.trail = [{ ws, project }];
+      state.pendingFocus = null;
+    }
+    state.pendingNav = null;
   }
 
   // -- status ----------------------------------------------------------------
@@ -914,8 +1060,13 @@
     const xlegend = $("#p-legend-xrepo");
     if (xlegend) xlegend.hidden = state.links.length === 0;
 
-    // Click a node → inspect it in the NODE tab.
-    cy.on("tap", "node", (evt) => selectNode(evt.target.id()));
+    // Click a node → inspect it; click an app-key TARGET → follow the hop into the
+    // hub that defines it (PR 7) instead of merely inspecting the placeholder.
+    cy.on("tap", "node", (evt) => {
+      const t = evt.target;
+      if (t.data("role") === "appkey") followHop(t.id());
+      else selectNode(t.id());
+    });
 
     // Hover a node → trace its neighbourhood. Computed client-side over the
     // already-loaded graph (instant; never re-fetches), and suppressed while a
@@ -935,23 +1086,48 @@
       cy.elements().removeClass("dim nb trace");
     });
 
-    // Hover an app-key target → a subtle "follow → (coming soon)" tooltip. The
-    // cross-repo follow-the-hop jump into the hub is PR 7; this is its inert seam.
+    // Hover an app-key target → a "click to follow into the hub" tooltip (PR 7).
     cy.on("mouseover", 'node[role = "appkey"]', (evt) => {
       // Any inbound link describes the target (they share it); the tooltip is the
       // same for all edges into this app-key node.
       const link = (state.linksByRef.get(evt.target.id()) || [])[0];
       const label = link && !link.drift ? appKeyLabel(link) : "this key";
       const msg = link && link.drift
-        ? "drift — the app defines no such key"
-        : `follow ${label} → (coming soon)`;
+        ? "drift — can't resolve in the hub (undefined, or hub not hosted/synced)"
+        : `click to follow ${label} → into the hub`;
       showFollowTip(evt, msg);
     });
     cy.on("mouseout", 'node[role = "appkey"]', hideFollowTip);
     cy.on("pan zoom", hideFollowTip);
 
     updateCounter();
-    cy.ready(() => cy.fit(undefined, 30));
+    cy.ready(() => {
+      cy.fit(undefined, 30);
+      focusPending(cy);
+    });
+  }
+
+  // After a follow-hop renders the target graph, centre + inspect the returned
+  // node (the defining struct, or the config key on fallback). Consumed once. If
+  // the node somehow isn't in this graph, say so rather than silently doing
+  // nothing — a landed hop must always be legible.
+  function focusPending(cy) {
+    const key = state.pendingFocus;
+    if (!key) return;
+    state.pendingFocus = null;
+    const n = cy.getElementById(key);
+    if (n && n.nonempty()) {
+      cy.elements().unselect();
+      n.select();
+      cy.animate(
+        { center: { eles: n }, zoom: Math.min(1.2, cy.maxZoom()) },
+        { duration: 250 }
+      );
+      activateTab("node");
+      loadNodeDetail(state.projectWs, state.project, key);
+    } else {
+      setPStatus(`jumped to ${state.project}, but its ${shortKey(key)} node isn't in view.`);
+    }
   }
 
   // A tiny hover tooltip over the graph canvas, positioned at the cursor. Used by
@@ -1236,9 +1412,11 @@
             class: `p-chip xrepo ${prov}`,
             type: "button",
             title: link.drift
-              ? `drift → ${link.toQualified} — the app defines no such key`
-              : `${link.provenance} link → ${link.toQualified} · follow (coming soon)`,
-            onclick: () => selectNode(link.to),
+              ? `drift → ${link.toQualified} — can't resolve in the hub (undefined, or hub not hosted/synced)`
+              : `${link.provenance} link → ${link.toQualified} · click to follow into the hub`,
+            // A live link follows the hop into the hub; a drift chip explains why
+            // it can't (followHop → showDrift), never jumping to a wrong node.
+            onclick: () => followHop(link.to),
           },
           link.drift ? "? drift" : appKeyLabel(link),
           el("span", { class: "p-chip-kind", text: ` ${prov}` })
@@ -1264,7 +1442,12 @@
     return [
       el("div", { class: "p-sec-title", text: "Cross-repo link" }),
       chips,
-      el("div", { class: "p-follow-hint", text: "follow → (coming soon)" }),
+      el("div", {
+        class: "p-follow-hint",
+        text: out.length
+          ? "click a link to follow it into the hub →"
+          : "linked from a deployment spoke",
+      }),
     ];
   }
 
@@ -1334,7 +1517,9 @@
     setProjectLinks([]); // cleared until this project's `/links` returns
     const search = $("#p-search");
     if (search) search.value = "";
-    $("#p-crumb-project").textContent = project;
+    // Adopt the follow-hop trail (or a fresh single crumb) and draw the breadcrumb.
+    applyTrail(ws, project);
+    renderCrumbs();
 
     const wsEntry = state.workspaces.find((w) => w.name === ws);
     const badge = $("#p-linkage");
@@ -1390,12 +1575,10 @@
 
   // One-time wiring for the project view's static controls.
   function wireProjectControls() {
-    $("#p-back").addEventListener("click", () =>
-      goWorkspace(state.projectWs || state.current)
-    );
-    $("#p-crumb-ws").addEventListener("click", () =>
-      goWorkspace(state.projectWs || state.current)
-    );
+    // `←` walks OUT one hop of a follow chain, else back to the workspace. The
+    // Workspace crumb (`#p-crumb-ws`) is (re)bound in `renderCrumbs`, which rebuilds
+    // the breadcrumb per load, so it isn't wired here.
+    $("#p-back").addEventListener("click", crumbBack);
     $("#p-zoom-in").addEventListener("click", () => zoomBy(1.25));
     $("#p-zoom-out").addEventListener("click", () => zoomBy(0.8));
     $("#p-fit").addEventListener("click", fitGraph);

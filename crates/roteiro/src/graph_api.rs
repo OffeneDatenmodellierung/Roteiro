@@ -49,7 +49,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use rto_graph::{
-    EXTERNAL_REF_KIND, Edge, Node, NodeKind, Provenance, Store, StoreError, Workspace,
+    EXTERNAL_REF_KIND, Edge, Follow, Node, NodeKind, Provenance, Store, StoreError, Workspace,
     WorkspaceError, WorkspaceSet, debt, explain, external_ref_target, parse_qualified,
 };
 use serde::Deserialize;
@@ -111,6 +111,7 @@ fn graph_routes(prefix: &str) -> Router<AppState> {
         .route(&format!("{prefix}/topology"), get(topology))
         .route(&format!("{prefix}/matrix"), get(matrix))
         .route(&format!("{prefix}/resolve"), get(resolve))
+        .route(&format!("{prefix}/follow"), get(follow))
         .route(&format!("{prefix}/{{project}}"), get(project_graph))
         .route(&format!("{prefix}/{{project}}/nodes"), get(project_nodes))
         .route(&format!("{prefix}/{{project}}/links"), get(project_links))
@@ -489,6 +490,79 @@ async fn resolve(
     Ok(Json(json!({ "target": target, "drift": drift })).into_response())
 }
 
+/// `GET /v1/graph[/workspaces/{ws}]/follow?qualified=<project>::<key>` → the
+/// **follow-the-link hop**: where a click on a spoke's app-key target should jump.
+///
+/// Unlike `/resolve` (which lands on the raw hub node — for a config override, the
+/// hub's `config_key` node), this follows the net-new `config_key → struct` bridge
+/// so the jump lands on the Rust **struct** that *defines* the setting whenever
+/// that mapping is unambiguous (see [`Workspace::follow_definition`]). The reply
+/// discriminates what was returned:
+///
+/// ```json
+/// { "target": Node | null,
+///   "kind": "struct_field" | "config_key" | null, // what `target` is; null on drift
+///   "field": "<struct field>" | null,             // the bridged field, when struct_field
+///   "workspace": "<ws name>" | null,               // the workspace resolution ran in
+///   "project": "<hub project>",                    // the target project (to navigate to)
+///   "drift": bool }                                // true when the target no longer resolves
+/// ```
+///
+/// - `struct_field` — bridged to the defining struct (`field` names the matched
+///   field), OR a target the spoke points straight at that is already a definition.
+/// - `config_key` — resolved, but the `config_key` could not be bridged to a struct
+///   with confidence (the safe fallback: the raw hub key).
+/// - `drift: true` (target/kind null) — the qualified target's node is gone.
+///
+/// Resolution is scoped to the selected workspace, exactly like `/resolve`.
+async fn follow(
+    State(st): State<AppState>,
+    params: RawPathParams,
+    Query(rq): Query<ResolveQuery>,
+) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let qualified = rq
+        .qualified
+        .ok_or_else(|| ApiError::BadRequest("missing `qualified` query parameter".to_owned()))?;
+    // The hub project the hop navigates into (the workspace scopes resolution; this
+    // is the target project the UI drills to).
+    let (project, _) = parse_qualified(&qualified).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "`{qualified}` is not a project-qualified `<proj>::<key>`"
+        ))
+    })?;
+    let project = project.to_owned();
+    // The workspace resolution actually ran in — for the UI's breadcrumb trail.
+    // Resolve the concrete NAME (not `st.default`, which is `None` on a flat route
+    // whose sole workspace is auto-selected), so a resolved hop is never `null`.
+    let workspace = st.set.select_name(param(&params, "ws"))?.to_owned();
+
+    let (target, kind, field) = match ws.follow_definition(&qualified)? {
+        Follow::StructField { node, field } => (Some(node), Some("struct_field"), Some(field)),
+        // A resolved config_key we couldn't bridge stays a config_key; any other
+        // resolved node is itself a definition target (`struct_field`).
+        Follow::Node { node } => {
+            let kind = if node.kind.as_str() == "config_key" {
+                "config_key"
+            } else {
+                "struct_field"
+            };
+            (Some(node), Some(kind), None)
+        }
+        Follow::Drift => (None, None, None),
+    };
+    let drift = target.is_none();
+    Ok(Json(json!({
+        "target": target,
+        "kind": kind,
+        "field": field,
+        "workspace": workspace,
+        "project": project,
+        "drift": drift,
+    }))
+    .into_response())
+}
+
 /// `GET /v1/graph[/workspaces/{ws}]/topology` → the cross-repo hub-and-spoke
 /// shape of the selected workspace: the hub project, a summary per spoke
 /// (`keyCount`, `driftCount`), and the inferred cross-repo links (`from`/`to`
@@ -833,6 +907,57 @@ mod tests {
         node
     }
 
+    /// A struct node as extraction emits it: key `sym:rust:<file>#<Name>`, kind
+    /// `struct`, declared field names in `meta.fields` (the follow bridge's signal).
+    fn struct_node(name: &str, fields: &[&str]) -> Node {
+        let mut node = Node::new(
+            format!("sym:rust:crates/roteiro/src/config.rs#{name}"),
+            NodeKind::Struct,
+            name.to_owned(),
+        );
+        node.path = Some("crates/roteiro/src/config.rs".to_owned());
+        node.meta = json!({ "fields": fields });
+        node
+    }
+
+    /// Build a hub with the config struct AND its config keys, so the follow
+    /// endpoint's `config_key → struct` bridge can be exercised end to end: the
+    /// `ServeConfig` struct declares `addr` (so `serve.addr` bridges) but not
+    /// `tools` (so `serve.tools` resolves yet falls back to its config-key node).
+    fn bridge_hub_store() -> Store {
+        let store = Store::open_in_memory().expect("hub store");
+        let facts = FactSet::new()
+            .with_node(struct_node("ServeConfig", &["addr"]))
+            .with_node(cfg_node("config.toml", "serve.addr", "127.0.0.1:8017"))
+            .with_node(cfg_node("config.toml", "serve.tools", "true"));
+        apply(store, &facts)
+    }
+
+    /// A spoke whose inferred link points at the hub's bridgeable `serve.addr` key
+    /// — the follow-the-link scenario end to end.
+    fn bridge_spoke_store() -> Store {
+        let store = Store::open_in_memory().expect("spoke store");
+        let target = format!("{HUB}::cfgkey:config.toml#serve.addr");
+        let facts = FactSet::new()
+            .with_node(cfg_node("deploy.env", "SERVE_ADDR", "0.0.0.0:8443"))
+            .with_node(external_ref_node(&target))
+            .with_edge(Edge::inferred(
+                "cfgkey:deploy.env#SERVE_ADDR",
+                external_ref_key(&target),
+                EdgeKind::References,
+                0.9,
+            ));
+        apply(store, &facts)
+    }
+
+    /// The linked hub+spoke workspace used by the follow-endpoint tests.
+    fn bridge_workspace() -> Workspace {
+        Workspace::from_stores([
+            (HUB.to_owned(), bridge_hub_store()),
+            (SPOKE.to_owned(), bridge_spoke_store()),
+        ])
+    }
+
     /// Build the hub store: two plain symbols (one calls the other) and two
     /// config keys the spoke can override.
     fn hub_store() -> Store {
@@ -1164,6 +1289,106 @@ mod tests {
         .await;
         assert_eq!(drift["drift"], true);
         assert_eq!(drift["target"], Value::Null);
+    }
+
+    // -- follow-the-link hop: config_key → struct bridge ------------------
+
+    #[tokio::test]
+    async fn follow_bridges_a_config_key_to_its_defining_struct_field() {
+        // The core proof: `serve.addr` follows past the config_key to the
+        // `ServeConfig` struct, tagged `struct_field` with the matched field.
+        let (status, body) = get(
+            single_set(bridge_workspace()),
+            None,
+            "/v1/graph/follow?qualified=hub::cfgkey:config.toml%23serve.addr",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["kind"], "struct_field");
+        assert_eq!(body["drift"], false);
+        assert_eq!(body["project"], "hub");
+        assert_eq!(body["field"], "addr");
+        // Flat route with a sole workspace and no explicit default: the response
+        // still reports the concrete auto-selected workspace name, never null.
+        assert_eq!(body["workspace"], "linked");
+        assert_eq!(
+            body["target"]["key"],
+            "sym:rust:crates/roteiro/src/config.rs#ServeConfig"
+        );
+        assert_eq!(body["target"]["kind"], "struct");
+    }
+
+    #[tokio::test]
+    async fn follow_falls_back_to_the_config_key_when_unbridgeable() {
+        // `serve.tools` resolves, but `ServeConfig` declares no `tools` field, so
+        // the hop falls back to the config_key node — never a wrong struct.
+        let (status, body) = get(
+            single_set(bridge_workspace()),
+            None,
+            "/v1/graph/follow?qualified=hub::cfgkey:config.toml%23serve.tools",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["kind"], "config_key");
+        assert_eq!(body["drift"], false);
+        assert_eq!(body["field"], Value::Null);
+        assert_eq!(body["target"]["key"], "cfgkey:config.toml#serve.tools");
+        assert_eq!(body["target"]["kind"], "config_key");
+    }
+
+    #[tokio::test]
+    async fn follow_reports_drift_for_an_orphan_target() {
+        // A well-formed target whose node is gone → drift, no navigation target.
+        let (status, body) = get(
+            single_set(bridge_workspace()),
+            None,
+            "/v1/graph/follow?qualified=hub::cfgkey:config.toml%23serve.legacy",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["drift"], true);
+        assert_eq!(body["target"], Value::Null);
+        assert_eq!(body["kind"], Value::Null);
+        assert_eq!(body["project"], "hub");
+    }
+
+    #[tokio::test]
+    async fn follow_requires_a_qualified_key() {
+        let (status, _) = get(single_set(bridge_workspace()), None, "/v1/graph/follow").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get(
+            single_set(bridge_workspace()),
+            None,
+            "/v1/graph/follow?qualified=notqualified",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn follow_is_scoped_to_the_selected_workspace() {
+        // The nested route resolves within the named workspace. The same key
+        // followed in `solo` (whose `hub` lacks the struct AND the key) drifts.
+        let (status, linked) = get(
+            multi_set(),
+            None,
+            "/v1/graph/workspaces/linked/follow?qualified=hub::cfgkey:config.toml%23serve.addr",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // `linked`'s hub_store has the config key but no struct → config_key fallback.
+        assert_eq!(linked["kind"], "config_key");
+        assert_eq!(linked["drift"], false);
+        assert_eq!(linked["workspace"], "linked");
+
+        let (_, solo) = get(
+            multi_set(),
+            None,
+            "/v1/graph/workspaces/solo/follow?qualified=hub::cfgkey:config.toml%23serve.addr",
+        )
+        .await;
+        assert_eq!(solo["drift"], true);
+        assert_eq!(solo["target"], Value::Null);
     }
 
     #[tokio::test]
