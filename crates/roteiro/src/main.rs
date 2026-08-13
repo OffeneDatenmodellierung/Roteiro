@@ -3785,11 +3785,24 @@ fn serve_v1_tail(
         None => rto_serve::app(engine),
     };
 
-    // Read-only graph explorer JSON API (`/v1/graph/*`, explorer PR 1/5), merged
-    // exactly like the MCP router below — same Workspace, same port, no extra
-    // process.
+    // Read-only graph explorer JSON API (`/v1/graph/*`), merged exactly like the
+    // MCP router below — same Workspace, same port, no extra process. The graph
+    // API is multi-workspace-aware (ADR-0008), so wrap the one workspace this
+    // serve process holds into a single-entry `WorkspaceSet` (sharing the same
+    // store handles, not re-opening them); its flat `/v1/graph/*` routes resolve
+    // to that sole/default workspace, so serve behaviour is unchanged.
     #[cfg(feature = "explorer")]
-    let router = router.merge(crate::graph_api::router(workspace.clone()));
+    let router = {
+        let set = rto_graph::WorkspaceSet::from_single(
+            "default",
+            workspace.clone(),
+            workspace.is_multi(),
+        );
+        router.merge(crate::graph_api::router(
+            std::sync::Arc::new(set),
+            Some("default".to_owned()),
+        ))
+    };
     #[cfg(feature = "explorer")]
     let graph_note = " + /v1/graph";
     #[cfg(not(feature = "explorer"))]
