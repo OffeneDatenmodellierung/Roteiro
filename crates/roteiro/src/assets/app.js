@@ -684,6 +684,9 @@
   // -- workspace switching ---------------------------------------------------
 
   async function loadWorkspace(name) {
+    // Whether this is a switch to a DIFFERENT workspace, or a same-workspace reload
+    // (as `persistLinks` triggers after a successful write). Capture before mutating.
+    const switched = state.current !== name;
     state.current = name;
     setStatus(`Loading ${name}…`);
     const ws = state.workspaces.find((w) => w.name === name);
@@ -693,11 +696,13 @@
       badge.className = ws.linked ? "ws-badge" : "ws-badge standalone";
     }
     // "Persist links" only makes sense for a linked (cross-repo) workspace; a
-    // standalone repo has no hub to infer against. Clear any stale note on switch.
+    // standalone repo has no hub to infer against. Only clear the persist note when
+    // actually switching workspaces — a same-workspace reload (post-persist) must
+    // keep the "Persisted …" success message the user just triggered.
     const persistBtn = $("#persist-links");
     if (persistBtn) persistBtn.hidden = !(ws && ws.linked);
     const persistNote = $("#persist-note");
-    if (persistNote) persistNote.textContent = "";
+    if (persistNote && switched) persistNote.textContent = "";
     renderProjectChips(ws ? ws.projects || [] : []);
     try {
       const [topology, matrix] = await Promise.all([
