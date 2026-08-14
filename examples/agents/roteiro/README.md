@@ -61,37 +61,63 @@ This exposes `http://127.0.0.1:8017/v1` (OpenAI-compatible). Keep it running.
 
 ---
 
-## One-time Gateway credential (`omni setup`) — **supported path**
+## Model endpoint — inline in `config.yaml` (no `omni setup` needed)
 
-The agent uses the `openai-agents` harness pointed at the local `/v1` endpoint
-through an Omnigent **Gateway** credential. Configure it once:
+The agent's model endpoint is wired **inline** in `config.yaml`'s `executor`
+block — there is **no `omni setup` step for it**. (`omni setup` lists native
+coding-agent harnesses; there is no `openai-agents` entry and no top-level
+"Gateway" prompt — the custom-base-URL option only exists nested inside another
+harness's "Add a provider" submenu, which this preset does not use.)
 
-```sh
-omni setup            # standard model/credential picker (per-harness providers)
+```yaml
+executor:
+  type: omnigent
+  config:
+    harness: openai-agents
+    use_responses: false          # REQUIRED — see below
+  model: qwen3-8b                  # plain served id, NO provider prefix
+  auth:
+    type: api_key
+    api_key: sk-local             # any non-empty value; roteiro serve ignores it
+    base_url: http://127.0.0.1:8017/v1
 ```
 
-When configuring the provider for the `openai-agents` / OpenAI-compatible
-harness, enter:
+* **`auth: {type: api_key, api_key, base_url}`** is the supported inline form for
+  a custom OpenAI-compatible endpoint. **[confirmed]** the schema parses it
+  (`omnigent/spec/parser.py`) and it is documented in the installed package as
+  the "custom OpenAI-compatible endpoint" example (`omnigent/spec/types.py`
+  `ApiKeyAuth.base_url`); it is honored end-to-end to
+  `AsyncOpenAI(base_url=…, api_key=…)` (`runtime/workflow.py` →
+  `inner/openai_agents_sdk_executor.py`).
+* **`config.use_responses: false` is REQUIRED.** The `openai-agents` harness
+  defaults to the OpenAI **Responses API** (`/v1/responses`) for non-`gpt`
+  models, but `roteiro serve` only routes `/v1/chat/completions` (+ `/v1/models`,
+  `/v1/embeddings`) — with the default, **every turn 404s**. This setting forces
+  the Chat Completions endpoint. **[confirmed]** (`crates/rto-serve/src/server.rs`
+  routes; `runtime/workflow.py` → `OpenAIProvider(use_responses=False)`).
+* **`model: qwen3-8b`** is sent **verbatim** as the OpenAI model id (no provider
+  prefix) and must appear in `GET http://127.0.0.1:8017/v1/models`. Avoid a
+  `databricks-`/`databricks/` prefix — that string triggers Databricks routing.
+  **[confirmed]** the model is passed raw (`inner/openai_agents_sdk_executor.py`).
 
-* **Base URL:** `http://127.0.0.1:8017/v1`
-* **Key:** any non-empty value (the local `roteiro serve` ignores it).
+### Alternative: environment variables (instead of the inline `auth:` block)
 
-> **[confirmed]** `omni setup` is the standard model/credential flow (per
-> `omni setup --help`). The docs state it "asks for a base URL and a key" for
-> OpenAI-compatible gateways.
->
-> **[needs-confirmation] Inline `auth:` block.** The docs only give a verbatim
-> inline-`auth:` example for **Databricks**
-> (`executor.auth: {type: databricks, profile: ...}`). No verbatim inline
-> `auth:` shape for a generic OpenAI-compatible gateway (base_url + key) is
-> documented, and it could not be verified here. **Use the `omni setup` path
-> above** — it is the supported one. Do not hand-write an `auth:` gateway block
-> unless you have confirmed its shape for your Omnigent version.
+If you'd rather not hardcode the URL in `config.yaml`, delete the `auth:` block
+and export the endpoint into `omni run`'s environment (keep `model` and
+`use_responses: false` in the spec):
 
-Why the model is pinned: the `openai-agents` harness treats an *unpinned* model
-as a Databricks model and can silently fall back to ambient Databricks
-credentials. Pinning `model: qwen3-8b` avoids that. **[confirmed]** from the
-shipped `debby/agents/gpt` example comment in the installed package.
+```sh
+export OPENAI_BASE_URL="http://127.0.0.1:8017/v1"
+export OPENAI_API_KEY="sk-local"     # optional; a placeholder is used if unset
+```
+
+**[confirmed]** the executor falls back to `OPENAI_BASE_URL`/`OPENAI_API_KEY`
+(`inner/openai_agents_sdk_executor.py`).
+
+Why the model is pinned: an *unpinned* model is treated as a Databricks model and
+can silently fall back to ambient Databricks credentials. Pinning
+`model: qwen3-8b` avoids that. **[confirmed]** from the shipped `debby/agents/gpt`
+example comment in the installed package.
 
 ---
 
@@ -167,9 +193,8 @@ and both policies attach, `validate()` is clean, and each policy resolves to a
 live `FunctionPolicy` (including the custom handler off `PYTHONPATH`).
 
 **[needs-confirmation]** a *full* interactive `omni run` session end-to-end — it
-requires the live `roteiro serve --models` backend + a configured Gateway
-credential + a pulled `qwen3-8b`, which were not all available in the
-verification environment.
+requires the live `roteiro serve --models` backend + a pulled `qwen3-8b`, which
+were not all available in the verification environment.
 
 ### Which repo does the graph answer about?
 
@@ -283,13 +308,13 @@ resolve and enforce. The mapping is: docs `handler:` → `function.path`, docs
 * **Playwright MCP**: `npx @playwright/mcp@latest` (npm `@playwright/mcp`, bin `playwright-mcp`; verified via `npm view`).
 * **GitHub MCP**: canonical package is **`@modelcontextprotocol/server-github`**. The task's shorthand `server-github` is an **unrelated npm security-hold placeholder** (`server-github@0.0.1-security`), so the canonical name is used here.
 * **Roteiro MCP**: the stdio MCP graph server is **`roteiro mcp`** (ADR-0002; STDIO by default, `--http ADDR` for networked). `roteiro serve` is the separate HTTP model endpoint and does **not** speak MCP over stdio. Verified against `crates/roteiro/src/main.rs` (`Command::Mcp`) and `crates/roteiro/tests/mcp_cli.rs` (`mcp_answers_initialize_and_tools_call` drives `roteiro mcp` over stdio). Graph tools: `search` / `explain` / `path` / `debt`. With no `--workspace`/`-w`, `roteiro mcp` serves the current directory's repo.
-* `roteiro serve --models` default bind `127.0.0.1:8017`, OpenAI-compatible `/v1`.
+* `roteiro serve --models` default bind `127.0.0.1:8017`, OpenAI-compatible `/v1` — routes `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` only (**no `/v1/responses`**), so `use_responses: false` is required for the openai-agents harness.
+* Inline `auth: {type: api_key, api_key, base_url}` parses (`spec/parser.py`) and is honored to `AsyncOpenAI(base_url=…)`; `OPENAI_BASE_URL`/`OPENAI_API_KEY` env fallback also works (`inner/openai_agents_sdk_executor.py`).
 * `policy_modules` is a **server-config** key (not agent config); local `omni run` resolves the handler by import (`PYTHONPATH`).
 
 **Needs-confirmation** (not verifiable in this environment):
 
-* Inline gateway `auth:` block shape for a generic OpenAI-compatible endpoint — **use `omni setup`** (only Databricks `auth:` is documented verbatim).
-* A full interactive `omni run` session (needs the live model backend + Gateway credential + pulled `qwen3-8b`).
+* A full interactive `omni run` session (needs the live model backend + pulled `qwen3-8b`).
 * The exact tool names the *running* GitHub MCP server advertises — the allowlists use the standard `@modelcontextprotocol/server-github` tool set; adjust if your server differs.
 * Whether Omnigent namespaces MCP tool names with the server prefix at call time — the gate tolerates both (exact and `server<sep>tool` suffix matching).
 * The exact server-config file location for `policy_modules`, and the session-level opt-in gesture.
