@@ -1,6 +1,7 @@
-//! End-to-end test for `roteiro serve`: drive the real binary over an MCP
-//! stdio session and confirm it answers a `tools/call` against a fixture graph.
-//! Only built when the `mcp` feature is enabled.
+//! End-to-end test for `roteiro mcp`: drive the real binary over an MCP stdio
+//! session and confirm it answers a `tools/call` against a fixture graph. (The
+//! MCP graph server moved from bare `roteiro serve` to `roteiro mcp`; `serve` is
+//! now the network HTTP server.) Only built when the `mcp` feature is enabled.
 #![cfg(feature = "mcp")]
 
 use std::io::Write;
@@ -29,7 +30,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 #[test]
-fn serve_answers_initialize_and_tools_call() {
+fn mcp_answers_initialize_and_tools_call() {
     let dir = std::env::temp_dir().join(format!("roteiro-mcp-cli-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(dir.join("src")).expect("mkdir");
@@ -43,13 +44,13 @@ fn serve_answers_initialize_and_tools_call() {
     git(&dir, &["commit", "-q", "-m", "init"]);
 
     let mut child = Command::new(BIN)
-        .arg("serve")
+        .arg("mcp")
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn serve");
+        .expect("spawn mcp");
 
     let session = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":\

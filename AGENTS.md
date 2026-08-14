@@ -20,9 +20,10 @@ orienting:
 - `roteiro path <a> <b>` · `roteiro debt` — connections and outstanding
   intent-debt.
 
-For natural-language "what/why" questions, `roteiro serve --models` exposes the
-same `search` (plus an OpenAI-compatible `/v1` endpoint); MCP agents get
-`search`/`explain`/`path`/`debt` directly. The deeper operational guide (node
+For natural-language "what/why" questions, `roteiro serve` (the network HTTP
+server) exposes the same `search` plus an OpenAI-compatible `/v1` endpoint and the
+web UI; MCP agents run `roteiro mcp` and get `search`/`explain`/`path`/`debt`
+directly. The deeper operational guide (node
 keys, when to use each tool, the plan/review flows) is the installable skill at
 [`.agents/skills/roteiro/SKILL.md`](.agents/skills/roteiro/SKILL.md) — also
 mirrored to `.github/skills/roteiro/` for the Copilot reviewer.
@@ -85,8 +86,8 @@ ADRs, blast radius) rather than reading the diff in isolation.
 
 `roteiro review` is the **CLI-first, tool-agnostic** review surface — it needs no
 server and works in any agent or CI. Roteiro *also* ships an MCP server
-(`roteiro serve --features mcp`) exposing `explain`/`path`/`debt`/`search`, which
-a **local** agent (Claude Code, editors) can query during a review.
+(`roteiro mcp`, built `--features mcp`) exposing `explain`/`path`/`debt`/`search`,
+which a **local** agent (Claude Code, editors) can query during a review.
 
 Wiring the **hosted** GitHub Copilot reviewer to Roteiro's MCP is **unverified**:
 GitHub's docs confirm MCP servers are configurable in a repo's Copilot settings,

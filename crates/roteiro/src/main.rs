@@ -327,30 +327,26 @@ enum Command {
         #[command(subcommand)]
         action: ModelAction,
     },
-    /// Start a server: the MCP graph server (`--features mcp`) or the local
-    /// OpenAI-compatible model endpoint (`--models`, `--features serve`).
-    #[cfg(any(feature = "mcp", feature = "serve"))]
+    /// Start the network HTTP server: the OpenAI-compatible `/v1` model endpoint
+    /// (+ graph tools + Ask) when built `--features serve` with a model installed,
+    /// always alongside the read-only `/v1/graph/*` API and the `/` web UI (ADR-0006,
+    /// ADR-0008, ADR-0010). Binds `[serve] addr` (default `127.0.0.1:8017`). A build
+    /// without the model feature (or with none installed) degrades gracefully to the
+    /// llama-free graph API + UI (Ask disabled) instead of failing. For the STDIO /
+    /// networked MCP graph server, use `roteiro mcp`.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
     Serve {
-        /// Serve the OpenAI-compatible `/v1` endpoint over installed models
-        /// (ADR-0006), instead of the MCP graph server. Needs `--features serve`.
-        #[arg(long)]
-        models: bool,
-        /// MCP server: serve networked over streamable HTTP at ADDR (e.g.
-        /// `127.0.0.1:8080`) instead of stdio. Terminate TLS at a reverse proxy.
-        /// For the MCP-only server; with `--models`, use `--mcp` (+ `--addr`).
-        #[arg(long, value_name = "ADDR", conflicts_with = "models")]
-        http: Option<String>,
-        /// Model server (`--models`): bind ADDR (default `127.0.0.1:8017`). A
-        /// non-loopback address is warned about (no auth — front with a proxy).
+        /// Bind ADDR (default `[serve] addr`, else `127.0.0.1:8017`). A non-loopback
+        /// address is warned about (no auth — front it with a reverse proxy).
         #[arg(long, value_name = "ADDR")]
         addr: Option<String>,
-        /// Model server (`--models`): terminate TLS in-process using this PEM
-        /// certificate-chain file (paired with `--tls-key`). Overrides
-        /// `[serve] tls_cert`. Set both `--tls-cert` and `--tls-key` for HTTPS,
-        /// or neither for plain HTTP; setting only one is an error.
+        /// Terminate TLS in-process using this PEM certificate-chain file (paired
+        /// with `--tls-key`). Overrides `[serve] tls_cert`. Set both `--tls-cert`
+        /// and `--tls-key` for HTTPS, or neither for plain HTTP; setting only one
+        /// is an error.
         #[arg(long, value_name = "FILE")]
         tls_cert: Option<String>,
-        /// Model server (`--models`): the PEM private-key file for `--tls-cert`.
+        /// The PEM private-key file for `--tls-cert`.
         #[arg(long, value_name = "FILE")]
         tls_key: Option<String>,
         /// Workspace mode (ADR-0008): host every git repo under ROOT
@@ -373,12 +369,48 @@ enum Command {
         /// first touch, but never serves a stale or missing graph (ADR-0008).
         #[arg(long)]
         sync_on_access: bool,
-        /// With `--models`: also mount the MCP graph server at `/mcp` on the
-        /// **same port**, so one process serves both `/v1` and `/mcp` over one
-        /// Workspace (needs `--features serve,mcp`). Only meaningful with
-        /// `--models` — the plain `serve` already is the MCP server.
-        #[arg(long, requires = "models")]
+        /// Also mount the MCP graph server at `/mcp` on the **same port**, so one
+        /// process serves both `/v1` and `/mcp` over one Workspace (needs
+        /// `--features serve,mcp`).
+        #[arg(long)]
         mcp: bool,
+        /// Deprecated: `--models` is now the default for `serve` — drop the flag.
+        /// Kept so existing scripts keep working; prints a one-line notice.
+        #[arg(long, hide = true)]
+        models: bool,
+        /// Deprecated: use `roteiro mcp --http ADDR`. Kept as an alias that still
+        /// starts the networked MCP server; prints a one-line notice.
+        #[arg(
+            long,
+            value_name = "ADDR",
+            hide = true,
+            conflicts_with_all = ["models", "addr", "tls_cert", "tls_key", "mcp"]
+        )]
+        http: Option<String>,
+    },
+    /// Start the MCP graph server (ADR-0002): STDIO by default, or networked over
+    /// streamable HTTP with `--http ADDR`. Exposes the `explain`/`search`/`path`/
+    /// `debt` graph tools to MCP clients. This is the graph server — for the
+    /// OpenAI-compatible model endpoint + web UI, use `roteiro serve`.
+    #[cfg(any(feature = "mcp", feature = "serve"))]
+    Mcp {
+        /// Serve networked over streamable HTTP at ADDR (e.g. `127.0.0.1:8080`)
+        /// instead of STDIO. Terminate TLS at a reverse proxy.
+        #[arg(long, value_name = "ADDR")]
+        http: Option<String>,
+        /// Workspace mode (ADR-0008): host every git repo under ROOT (repeatable),
+        /// selected per call by `project`. Combined with `[workspace]` config.
+        /// Omit for single-repo serving (the current directory's repo).
+        #[arg(long, value_name = "ROOT")]
+        workspace: Vec<String>,
+        /// Select a **named** workspace from config as the default the flat tools
+        /// operate on (see `serve --workspace-name`). An unknown name fails fast.
+        #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
+        workspace_name: Option<String>,
+        /// Workspace mode: (re)build each project's graph the first time it is
+        /// queried, instead of serving whatever its hooks last left (ADR-0008).
+        #[arg(long)]
+        sync_on_access: bool,
     },
     /// Serve the read-only graph explorer JSON API (`/v1/graph/*`) over HTTP,
     /// **llama-free** (ADR-0008): axum only — no model, no MCP, no C/C++
@@ -605,7 +637,7 @@ fn main() -> anyhow::Result<()> {
         } => run_duplicates(&cfg.effective, ingest, min_similarity, limit, json),
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
-        #[cfg(any(feature = "mcp", feature = "serve"))]
+        #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
         Command::Serve {
             models,
             http,
@@ -619,7 +651,7 @@ fn main() -> anyhow::Result<()> {
         } => run_serve(
             ingest,
             &cfg.effective,
-            ServeOptions {
+            &ServeOptions {
                 models,
                 http,
                 addr,
@@ -627,6 +659,20 @@ fn main() -> anyhow::Result<()> {
                 tls_key,
                 mcp,
             },
+            &workspace,
+            workspace_name.as_deref(),
+            sync_on_access,
+        ),
+        #[cfg(any(feature = "mcp", feature = "serve"))]
+        Command::Mcp {
+            http,
+            workspace,
+            workspace_name,
+            sync_on_access,
+        } => run_mcp(
+            ingest,
+            &cfg.effective,
+            http,
             &workspace,
             workspace_name.as_deref(),
             sync_on_access,
@@ -3449,25 +3495,43 @@ fn run_explorer(
     // configured workspace resolves itself, so `None` is fine there (see
     // `WorkspaceSet::select`).
     let default = explorer_default_workspace(&set, workspace_name);
+    serve_graph_ui(cfg, "explorer", set, default, addr)
+}
 
+/// Bind and run the llama-free graph server: the read-only `/v1/graph/*` JSON API
+/// merged with the static workspace-explorer web app, on a small current-thread
+/// tokio runtime — axum only, no `rto-serve`, no model, no MCP (ADR-0008,
+/// ADR-0010). Shared by `roteiro explorer` and the llama-free degrade path of
+/// `roteiro serve` (a build without the `serve` feature, or with no model
+/// installed). `cmd` names the calling command for the startup line. Blocks until
+/// shutdown.
+#[cfg(feature = "explorer")]
+fn serve_graph_ui(
+    cfg: &config::Config,
+    cmd: &'static str,
+    set: std::sync::Arc<rto_graph::WorkspaceSet>,
+    default: Option<String>,
+    addr: Option<String>,
+) -> anyhow::Result<()> {
     // Address precedence: CLI flag > `[serve] addr` > default loopback.
     let addr = addr
         .or_else(|| cfg.serve.addr.clone())
         .unwrap_or_else(|| "127.0.0.1:8017".to_owned());
     let socket: std::net::SocketAddr = addr
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid explorer address `{addr}`: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("invalid {cmd} address `{addr}`: {e}"))?;
     if !socket.ip().is_loopback() {
         eprintln!(
-            "warning: binding a non-loopback address ({socket}) — the explorer API \
+            "warning: binding a non-loopback address ({socket}) — the graph API \
              has no auth; front it with a reverse proxy"
         );
     }
 
     // The read-only data API plus the served web app (HTML shell, our ES app, and
     // the vendored cytoscape.js) — same-origin, so the app fetches `/v1/graph/*`
-    // with no CORS. The UI routes live only on this llama-free explorer server; a
-    // full `serve` build keeps serving just the JSON API (no bundled UI).
+    // with no CORS. The Ask tab stays off: this llama-free server has no
+    // `/v1/chat/completions`. A full `serve --models` build mounts these same
+    // surfaces beside `/v1` (with Ask on) via `mount_explorer_surfaces` instead.
     let router = graph_api::router(set.clone(), default.clone()).merge(explorer_app::router());
 
     // A small current-thread runtime is all the axum server needs; no rto-serve,
@@ -3481,7 +3545,7 @@ fn run_explorer(
             .as_deref()
             .map_or_else(String::new, |d| format!(" (default workspace: {d})"));
         eprintln!(
-            "roteiro explorer listening on http://{socket}/ (UI) — \
+            "roteiro {cmd} listening on http://{socket}/ (UI) — \
              API at http://{socket}/v1/graph — {} workspace(s): {}{default_note}",
             set.names().len(),
             set.names().join(", "),
@@ -3532,7 +3596,7 @@ fn explorer_default_workspace(
 
 /// The parsed `serve` flags (from the clap `Command::Serve` arm), bundled so the
 /// dispatch stays a single struct rather than a long argument list.
-#[cfg(any(feature = "mcp", feature = "serve"))]
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 // Several fields (addr/TLS/mcp) are only read on the `serve` path; in an
 // mcp-only build the model endpoint is a stub, so they are legitimately unused.
 #[cfg_attr(not(feature = "serve"), allow(dead_code))]
@@ -3551,27 +3615,238 @@ struct ServeOptions {
     mcp: bool,
 }
 
-/// Dispatch `roteiro serve`: the OpenAI-compatible model endpoint (`--models`,
-/// ADR-0006) or the MCP graph server — optionally **both on one port** (`--models
-/// --mcp`, ADR-0008). Each backend is feature-gated; a build lacking the relevant
-/// feature reports how to enable it.
+/// The server a `serve`/`mcp` invocation resolves to, factored out of the
+/// feature-gated `run_*` functions so the command→backend mapping is unit-testable
+/// without binding a socket (see the `cli_routing` tests). `roteiro serve` (no
+/// `--http`) is the network HTTP server; `roteiro mcp` is STDIO or, with `--http`,
+/// networked MCP; the deprecated `serve --http` also maps to networked MCP.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+// `McpStdio` is only ever produced by `route_mcp`, which exists solely in a
+// build carrying the `mcp`/`serve` MCP backend; a pure-`explorer` build never
+// constructs it. Silence dead-code there rather than duplicating the enum.
+#[cfg_attr(not(any(feature = "mcp", feature = "serve")), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum ServerRoute {
+    /// The network HTTP server: `/v1` (+ Ask) when a model backend is available,
+    /// else the llama-free graph API + web UI. `roteiro serve` with no `--http`.
+    Network,
+    /// The MCP graph server over STDIO. `roteiro mcp` with no `--http`.
+    McpStdio,
+    /// The MCP graph server over streamable HTTP at ADDR. `roteiro mcp --http`, or
+    /// the deprecated `roteiro serve --http`.
+    McpHttp(String),
+}
+
+/// `roteiro serve` routing: `--http ADDR` (deprecated) → networked MCP, else the
+/// network HTTP server. The single source of truth the dispatcher and the routing
+/// tests share.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn route_serve(http: Option<String>) -> ServerRoute {
+    match http {
+        Some(addr) => ServerRoute::McpHttp(addr),
+        None => ServerRoute::Network,
+    }
+}
+
+/// `roteiro mcp` routing: `--http ADDR` → networked MCP, else STDIO.
 #[cfg(any(feature = "mcp", feature = "serve"))]
+fn route_mcp(http: Option<String>) -> ServerRoute {
+    match http {
+        Some(addr) => ServerRoute::McpHttp(addr),
+        None => ServerRoute::McpStdio,
+    }
+}
+
+/// The one-line stderr deprecation notice (if any) for a `roteiro serve`
+/// invocation, so the old-flag → new-command guidance is unit-testable. `None`
+/// means the invocation uses the current, non-deprecated surface. `--http` wins
+/// over `--models` because it also changes the backend (→ MCP), not just the flag.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn serve_deprecation_notice(models: bool, http: Option<&str>) -> Option<String> {
+    if let Some(addr) = http {
+        Some(format!(
+            "note: `roteiro serve --http <ADDR>` is deprecated; use `roteiro mcp --http {addr}`"
+        ))
+    } else if models {
+        Some(
+            "note: `roteiro serve --models` is now the default — the `--models` flag is redundant"
+                .to_owned(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Dispatch `roteiro serve`: the **network HTTP server** (ADR-0006/0008/0010). By
+/// default the OpenAI-compatible `/v1` model endpoint plus the read-only
+/// `/v1/graph/*` API and the `/` web UI; a build without the `serve` feature (or
+/// with no model installed) degrades to the llama-free graph API + UI (Ask off)
+/// rather than failing. The deprecated `--http`/`--models` flags still work, each
+/// with a one-line stderr notice, so existing scripts keep running.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn run_serve(
     ingest: rto_graph::IngestConfig,
     cfg: &config::Config,
-    opts: ServeOptions,
+    opts: &ServeOptions,
     workspace_roots: &[String],
     workspace_name: Option<&str>,
     sync_on_access: bool,
 ) -> anyhow::Result<()> {
+    if let Some(notice) = serve_deprecation_notice(opts.models, opts.http.as_deref()) {
+        eprintln!("{notice}");
+    }
+    match route_serve(opts.http.clone()) {
+        ServerRoute::Network => {
+            let ws = build_serve_workspaces(
+                ingest,
+                cfg,
+                "serve",
+                workspace_roots,
+                workspace_name,
+                sync_on_access,
+            )?;
+            run_serve_network(cfg, ws, workspace_name, opts)
+        }
+        // Deprecated `serve --http ADDR` → the networked MCP server (now `roteiro
+        // mcp --http`). Kept so existing MCP-over-HTTP scripts don't break.
+        ServerRoute::McpHttp(addr) => {
+            #[cfg(any(feature = "mcp", feature = "serve"))]
+            {
+                let ws = build_serve_workspaces(
+                    ingest,
+                    cfg,
+                    "mcp",
+                    workspace_roots,
+                    workspace_name,
+                    sync_on_access,
+                )?;
+                serve_mcp(ws.flat, Some(addr))
+            }
+            #[cfg(not(any(feature = "mcp", feature = "serve")))]
+            {
+                let _ = (ingest, workspace_roots, sync_on_access);
+                anyhow::bail!(
+                    "`roteiro serve --http {addr}` (MCP over HTTP) needs the `mcp` feature — \
+                     this build has only the llama-free graph server; rebuild with `--features mcp`"
+                )
+            }
+        }
+        // `route_serve` never yields STDIO — `serve` is always the network server.
+        ServerRoute::McpStdio => unreachable!("`roteiro serve` never routes to STDIO MCP"),
+    }
+}
+
+/// Dispatch `roteiro mcp`: the **MCP graph server** — STDIO by default, or
+/// networked over streamable HTTP with `--http ADDR` (ADR-0002). Builds the same
+/// workspace views as `serve` and serves the MCP router over the flattened
+/// workspace (`explain`/`search`/`path`/`debt`, per-call `project` selection).
+#[cfg(any(feature = "mcp", feature = "serve"))]
+fn run_mcp(
+    ingest: rto_graph::IngestConfig,
+    cfg: &config::Config,
+    http: Option<String>,
+    workspace_roots: &[String],
+    workspace_name: Option<&str>,
+    sync_on_access: bool,
+) -> anyhow::Result<()> {
+    let ws = build_serve_workspaces(
+        ingest,
+        cfg,
+        "mcp",
+        workspace_roots,
+        workspace_name,
+        sync_on_access,
+    )?;
+    match route_mcp(http) {
+        ServerRoute::McpStdio => serve_mcp(ws.flat, None),
+        ServerRoute::McpHttp(addr) => serve_mcp(ws.flat, Some(addr)),
+        // `route_mcp` only yields the two MCP transports.
+        ServerRoute::Network => unreachable!("`roteiro mcp` never routes to the network server"),
+    }
+}
+
+/// Serve the network HTTP server for `roteiro serve`. Prefers the full model
+/// endpoint (`/v1` + graph tools + Ask + UI) when built `--features serve` with a
+/// model installed; otherwise degrades to the llama-free graph API + web UI, never
+/// hard-failing when a UI can be served. A build that can serve neither reports how
+/// to enable one.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+// Which `return` is the tail expression depends on which server backends are
+// compiled in (the `serve`/`explorer`/neither blocks below are mutually exclusive
+// by `cfg`), so an early `return` that is redundant under one feature set is load-
+// bearing under another. Keep them explicit rather than restructuring per-cfg.
+#[allow(clippy::needless_return)]
+fn run_serve_network(
+    cfg: &config::Config,
+    ws: ServeWorkspaces,
+    workspace_name: Option<&str>,
+    opts: &ServeOptions,
+) -> anyhow::Result<()> {
+    let ServeWorkspaces { set, flat } = ws;
+
+    // The full model server: `/v1` (+ graph tools + Ask + UI). Only when a model is
+    // actually installed — otherwise fall through to the llama-free UI below.
+    #[cfg(feature = "serve")]
+    {
+        if !served_models(cfg).is_empty() {
+            return serve_models_endpoint(cfg, set, flat, workspace_name, opts);
+        }
+    }
+
+    // Degrade: the llama-free `/v1/graph/*` API + web UI (Ask off) — today's
+    // `explorer` behaviour, so a non-`serve` build (or a `serve` build with no
+    // model) still serves something useful instead of erroring (point 3).
+    #[cfg(feature = "explorer")]
+    {
+        if opts.mcp {
+            eprintln!(
+                "note: `--mcp` is ignored here — there is no `/v1` model server to mount `/mcp` \
+                 beside (no model / no `serve` feature); run `roteiro mcp` for the MCP server"
+            );
+        }
+        let default = explorer_default_workspace(&set, workspace_name);
+        let _ = &flat; // the llama-free UI uses `set`; `flat` backs the model tools only.
+        return serve_graph_ui(cfg, "serve", set, default, opts.addr.clone());
+    }
+
+    #[cfg(not(feature = "explorer"))]
+    {
+        let _ = (cfg, &set, &flat, workspace_name, opts);
+        #[cfg(feature = "serve")]
+        anyhow::bail!(
+            "no installed GGUF models to serve — pull one \
+             (`roteiro model pull qwen3-0.6b`; see `roteiro model list`), or rebuild with \
+             `--features explorer` for the llama-free graph API + web UI"
+        );
+        #[cfg(not(feature = "serve"))]
+        anyhow::bail!(
+            "this build has no network server — for the MCP graph server use `roteiro mcp`; \
+             rebuild with `--features serve` (model endpoint) or `--features explorer` (graph UI)"
+        );
+    }
+}
+
+/// Build the two workspace views a `serve`/`mcp` process holds — `set` (the full
+/// multi-workspace [`rto_graph::WorkspaceSet`] backing the read-only `/v1/graph/*`
+/// API + UI) and `flat` (one workspace over every hosted project, backing the model
+/// tools + MCP router) — from config plus any `--workspace <ROOT>` roots (ADR-0008).
+/// Shared by [`run_serve`] and [`run_mcp`]. `cmd` names the caller for the startup
+/// line. A lone repo with no workspace config builds its graph now and hosts it
+/// alone as `default` (the one path still needing a git cwd).
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn build_serve_workspaces(
+    ingest: rto_graph::IngestConfig,
+    cfg: &config::Config,
+    cmd: &str,
+    workspace_roots: &[String],
+    workspace_name: Option<&str>,
+    sync_on_access: bool,
+) -> anyhow::Result<ServeWorkspaces> {
     use std::sync::Arc;
 
-    // Build the full multi-workspace set from config — the same source of truth
-    // `roteiro explorer` uses (`Config::resolved_workspaces()`: the legacy
-    // `[workspace]` folded to `default`, every `[[workspaces]]`, and `[standalone]`),
-    // plus any explicit `--workspace <ROOT>` folded into `default`. So `serve` hosts
-    // ALL configured workspaces (and CLI roots) and runs from ANY directory, with no
-    // git cwd required.
+    // The same source of truth `roteiro explorer` uses (`Config::resolved_workspaces()`:
+    // the legacy `[workspace]` folded to `default`, every `[[workspaces]]`, and
+    // `[standalone]`), plus any explicit `--workspace <ROOT>` folded into `default`.
     let resolved = cfg.resolved_workspaces()?;
 
     // The true single-repo fallback fires ONLY when nothing selects a workspace: no
@@ -3579,77 +3854,67 @@ fn run_serve(
     // build the current repo's graph now and host it alone as `default` (this is the
     // one path that still needs a git cwd — a lone repo with no config still "just
     // works", sharing the one store handle between `set` and `flat`).
-    let ServeWorkspaces { set, flat } =
-        if resolved.is_empty() && workspace_roots.is_empty() && workspace_name.is_none() {
-            let (repo, mut store, cache) = open_graph()?;
-            build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-            let name = repo
-                .workdir()
-                .and_then(std::path::Path::file_name)
-                .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
-            let flat = Arc::new(rto_graph::Workspace::single(name, store));
-            let set = Arc::new(rto_graph::WorkspaceSet::from_single(
-                "default",
-                flat.clone(),
-                flat.is_multi(),
-            ));
-            ServeWorkspaces { set, flat }
-        } else {
-            // Multi-workspace serve: host every configured workspace, plus any explicit
-            // `--workspace <ROOT>` (folded into `default`). `set` (built the same way
-            // `run_explorer` builds it) backs the read-only `/v1/graph/*` API and the
-            // served UI, workspace-aware. `flat` is one workspace over EVERY project
-            // across ALL those workspaces, backing the model tool registry, the
-            // `/v1/{project}/…` routing, and the MCP router — so the served model can
-            // query any hosted project. Existing graphs are opened on demand; SIGHUP
-            // reloads the set of repos, and `--sync-on-access` (re)builds a project's
-            // graph on first touch (ADR-0008).
-            let effective = fold_cli_roots(resolved, workspace_roots);
-            let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone())?);
-            // A friendly error when nothing resolves — an empty config, only stale roots,
-            // or a `-w` naming nothing to serve — BEFORE `from_repo_paths` would surface a
-            // raw `WorkspaceError::Empty`. Mirrors `run_explorer`'s message.
-            if set.names().is_empty() {
-                anyhow::bail!(
-                    "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, \
-                 or configure `[[workspaces]]` / `[standalone]` in roteiro.toml"
-                );
-            }
-            // Validate `--workspace-name` once, up front: an unknown name fails fast
-            // (listing the known workspaces) rather than booting a server whose flat
-            // routes would 404. Mirrors `run_explorer`.
-            if let Some(name) = workspace_name {
-                set.select(Some(name))?;
-            }
-            let paths = resolved_repo_paths(&effective, &[])?;
-            let mut ws = rto_graph::Workspace::from_repo_paths(&paths)?;
-            if sync_on_access {
-                ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
-                    sync_project_graph(db, ingest).map_err(|e| e.to_string())
-                }));
-            }
-            let flat = Arc::new(ws);
-            eprintln!(
-                "roteiro serve: {} workspace(s) [{}] — {} project(s){} — {}",
-                set.names().len(),
-                set.names().join(", "),
-                flat.names().len(),
-                if sync_on_access {
-                    ", sync-on-access"
-                } else {
-                    ""
-                },
-                flat.names().join(", ")
-            );
-            install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
-            ServeWorkspaces { set, flat }
-        };
-
-    if opts.models {
-        serve_models_endpoint(cfg, set, flat, workspace_name, &opts)
-    } else {
-        serve_mcp(flat, opts.http)
+    if resolved.is_empty() && workspace_roots.is_empty() && workspace_name.is_none() {
+        let (repo, mut store, cache) = open_graph()?;
+        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+        let name = repo
+            .workdir()
+            .and_then(std::path::Path::file_name)
+            .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
+        let flat = Arc::new(rto_graph::Workspace::single(name, store));
+        let set = Arc::new(rto_graph::WorkspaceSet::from_single(
+            "default",
+            flat.clone(),
+            flat.is_multi(),
+        ));
+        return Ok(ServeWorkspaces { set, flat });
     }
+
+    // Multi-workspace serve: host every configured workspace, plus any explicit
+    // `--workspace <ROOT>` (folded into `default`). `set` backs the read-only
+    // `/v1/graph/*` API and the served UI, workspace-aware. `flat` is one workspace
+    // over EVERY project across ALL those workspaces, backing the model tool registry,
+    // the `/v1/{project}/…` routing, and the MCP router. Existing graphs are opened on
+    // demand; SIGHUP reloads the set of repos, and `--sync-on-access` (re)builds a
+    // project's graph on first touch (ADR-0008).
+    let effective = fold_cli_roots(resolved, workspace_roots);
+    let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone())?);
+    // A friendly error when nothing resolves — an empty config, only stale roots, or a
+    // `-w` naming nothing to serve — BEFORE `from_repo_paths` would surface a raw
+    // `WorkspaceError::Empty`. Mirrors `run_explorer`'s message.
+    if set.names().is_empty() {
+        anyhow::bail!(
+            "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, \
+             or configure `[[workspaces]]` / `[standalone]` in roteiro.toml"
+        );
+    }
+    // Validate `--workspace-name` once, up front: an unknown name fails fast (listing
+    // the known workspaces) rather than booting a server whose flat routes would 404.
+    if let Some(name) = workspace_name {
+        set.select(Some(name))?;
+    }
+    let paths = resolved_repo_paths(&effective, &[])?;
+    let mut ws = rto_graph::Workspace::from_repo_paths(&paths)?;
+    if sync_on_access {
+        ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
+            sync_project_graph(db, ingest).map_err(|e| e.to_string())
+        }));
+    }
+    let flat = Arc::new(ws);
+    eprintln!(
+        "roteiro {cmd}: {} workspace(s) [{}] — {} project(s){} — {}",
+        set.names().len(),
+        set.names().join(", "),
+        flat.names().len(),
+        if sync_on_access {
+            ", sync-on-access"
+        } else {
+            ""
+        },
+        flat.names().join(", ")
+    );
+    install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
+    Ok(ServeWorkspaces { set, flat })
 }
 
 /// The two workspace views a `serve` process holds. `set` is the full
@@ -3660,7 +3925,7 @@ fn run_serve(
 /// the `/v1/{project}/…` chat routing, and the MCP router — so the served model can
 /// query any hosted project by name. For the single-repo fallback the two share the
 /// one store handle; otherwise `flat` opens each project's store on demand.
-#[cfg(any(feature = "mcp", feature = "serve"))]
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 struct ServeWorkspaces {
     /// The full multi-workspace set (read-only graph API + UI).
     set: std::sync::Arc<rto_graph::WorkspaceSet>,
@@ -3674,7 +3939,7 @@ struct ServeWorkspaces {
 /// same way [`rto_graph::WorkspaceSet::from_resolved`] discovers each group's repos
 /// (roots scanned + explicit repos), deduplicated by path so a repo named in two
 /// groups is hosted once.
-#[cfg(any(feature = "mcp", feature = "serve"))]
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn resolved_repo_paths(
     resolved: &[rto_graph::ResolvedWorkspace],
     cli_roots: &[String],
@@ -3717,7 +3982,7 @@ fn resolved_repo_paths(
 /// groups are returned unchanged. `default` is the only name derivable from CLI roots
 /// (it never collides with a `[[workspaces]]`/`[standalone]` name, which are distinct
 /// and, for a legacy `[workspace]`, already fold to `default`).
-#[cfg(any(feature = "mcp", feature = "serve"))]
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn fold_cli_roots(
     mut resolved: Vec<rto_graph::ResolvedWorkspace>,
     cli_roots: &[String],
@@ -3767,7 +4032,7 @@ fn collect_workspace_repo_paths(
 /// `serve --sync-on-access` hook: (re)build the graph for the repo whose store
 /// is `graph_db` (`<repo>/.git/roteiro/graph.db`), before it is first served.
 /// Rebuilds from the committed tree, matching how the freshness hooks sync.
-#[cfg(any(feature = "mcp", feature = "serve"))]
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn sync_project_graph(
     graph_db: &std::path::Path,
     ingest: rto_graph::IngestConfig,
@@ -3794,7 +4059,7 @@ fn sync_project_graph(
 /// independent of the serve runtime; reload is thread-safe (the `Workspace`
 /// serialises its own state). Best-effort: if SIGHUP cannot be registered, the
 /// server still runs, just without live reload.
-#[cfg(all(unix, any(feature = "mcp", feature = "serve")))]
+#[cfg(all(unix, any(feature = "mcp", feature = "serve", feature = "explorer")))]
 fn install_workspace_reload(
     ws: &std::sync::Arc<rto_graph::Workspace>,
     cfg: config::Config,
@@ -3843,7 +4108,10 @@ fn install_workspace_reload(
 }
 
 /// On non-Unix, SIGHUP reload is unavailable; the server runs without it.
-#[cfg(all(not(unix), any(feature = "mcp", feature = "serve")))]
+#[cfg(all(
+    not(unix),
+    any(feature = "mcp", feature = "serve", feature = "explorer")
+))]
 fn install_workspace_reload(
     _ws: &std::sync::Arc<rto_graph::Workspace>,
     _cfg: config::Config,
@@ -4365,21 +4633,6 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
     }
 }
 
-/// The model endpoint is unavailable without the `serve` feature.
-#[cfg(all(not(feature = "serve"), feature = "mcp"))]
-fn serve_models_endpoint(
-    _cfg: &config::Config,
-    _set: std::sync::Arc<rto_graph::WorkspaceSet>,
-    _flat: std::sync::Arc<rto_graph::Workspace>,
-    _workspace_name: Option<&str>,
-    _opts: &ServeOptions,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`serve --models` needs the `serve` feature (build with `--features serve`, \
-         which pulls the llama.cpp engine)"
-    )
-}
-
 /// Render a build-output of the graph: the docs site or an Obsidian vault.
 fn run_render(
     ingest: rto_graph::IngestConfig,
@@ -4696,6 +4949,125 @@ mod url_tests {
         assert_eq!(
             source_blob_base("git@gitlab.com:o/r.git", "abc123"),
             Some("https://gitlab.com/o/r/-/blob/abc123".to_owned())
+        );
+    }
+}
+
+// Command → backend routing for `roteiro serve` / `roteiro mcp`: prove that the
+// new default `serve` is the network server, `mcp` is the STDIO/HTTP MCP server,
+// and each deprecated alias still parses, routes to the right backend, and carries
+// its one-line deprecation notice. Pure parsing/dispatch — no socket is bound.
+#[cfg(all(test, feature = "mcp", feature = "explorer"))]
+mod cli_routing {
+    use super::{Cli, Command, ServerRoute, route_mcp, route_serve, serve_deprecation_notice};
+    use clap::Parser as _;
+
+    fn parse<const N: usize>(args: [&str; N]) -> Command {
+        Cli::try_parse_from(args).expect("parse").command
+    }
+
+    #[test]
+    fn bare_serve_routes_to_the_network_server() {
+        let Command::Serve {
+            http, models, mcp, ..
+        } = parse(["roteiro", "serve"])
+        else {
+            panic!("expected Serve");
+        };
+        assert_eq!(http, None);
+        assert!(!models);
+        assert!(!mcp);
+        assert_eq!(route_serve(http), ServerRoute::Network);
+        assert_eq!(serve_deprecation_notice(models, None), None);
+    }
+
+    #[test]
+    fn mcp_routes_to_stdio_by_default() {
+        let Command::Mcp { http, .. } = parse(["roteiro", "mcp"]) else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(http, None);
+        assert_eq!(route_mcp(http), ServerRoute::McpStdio);
+    }
+
+    #[test]
+    fn mcp_http_routes_to_networked_mcp() {
+        let Command::Mcp { http, .. } = parse(["roteiro", "mcp", "--http", "127.0.0.1:8080"])
+        else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(
+            route_mcp(http),
+            ServerRoute::McpHttp("127.0.0.1:8080".to_owned())
+        );
+    }
+
+    #[test]
+    fn mcp_carries_the_workspace_options() {
+        let Command::Mcp {
+            workspace,
+            workspace_name,
+            sync_on_access,
+            ..
+        } = parse([
+            "roteiro",
+            "mcp",
+            "-w",
+            "api",
+            "--workspace",
+            "/repos",
+            "--sync-on-access",
+        ])
+        else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(workspace, vec!["/repos".to_owned()]);
+        assert_eq!(workspace_name.as_deref(), Some("api"));
+        assert!(sync_on_access);
+    }
+
+    // Deprecated `serve --models`: still parses, still routes to the network server
+    // (now the default), and emits the "redundant" notice.
+    #[test]
+    fn deprecated_serve_models_is_the_default_with_a_notice() {
+        let Command::Serve { http, models, .. } = parse(["roteiro", "serve", "--models"]) else {
+            panic!("expected Serve");
+        };
+        assert!(models);
+        assert_eq!(route_serve(http.clone()), ServerRoute::Network);
+        let notice = serve_deprecation_notice(models, http.as_deref()).expect("notice");
+        assert!(
+            notice.contains("--models") && notice.contains("default"),
+            "unexpected notice: {notice}"
+        );
+    }
+
+    // Deprecated `serve --http ADDR`: still parses, routes to networked MCP, and
+    // points at `roteiro mcp --http`.
+    #[test]
+    fn deprecated_serve_http_routes_to_mcp_with_a_notice() {
+        let Command::Serve { http, models, .. } =
+            parse(["roteiro", "serve", "--http", "127.0.0.1:9"])
+        else {
+            panic!("expected Serve");
+        };
+        assert_eq!(
+            route_serve(http.clone()),
+            ServerRoute::McpHttp("127.0.0.1:9".to_owned())
+        );
+        let notice = serve_deprecation_notice(models, http.as_deref()).expect("notice");
+        assert!(
+            notice.contains("roteiro mcp --http"),
+            "unexpected notice: {notice}"
+        );
+    }
+
+    // The deprecated MCP path (`--http`) and the network server (`--models`) are
+    // mutually exclusive, so an ambiguous mix is rejected at parse time.
+    #[test]
+    fn serve_http_conflicts_with_models() {
+        assert!(
+            Cli::try_parse_from(["roteiro", "serve", "--http", "127.0.0.1:9", "--models"]).is_err()
         );
     }
 }

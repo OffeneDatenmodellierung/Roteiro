@@ -61,7 +61,7 @@ The project now wants networked MCP serving (multiple clients, remote access). H
 
 ## Consequences
 
-- `roteiro serve` gains a transport choice (stdio default; `--http <addr>` for networked serving). The `mcp` feature now implies an async runtime.
+- `roteiro serve` gains a transport choice (stdio default; `--http <addr>` for networked serving). The `mcp` feature now implies an async runtime. *(Update, v1.5: the MCP graph server moved to its own `roteiro mcp` command — stdio by default, `--http <addr>` for networked MCP — because bare `roteiro serve` is now the network HTTP model/graph server. `roteiro serve --http <addr>` stays a deprecated alias that still starts the MCP server.)*
 - The offline-by-default guarantee is preserved for the **default** build and for local stdio use; networked HTTP is an explicit opt-in.
 - `cargo deny` / `cargo audit` now cover the rmcp tree whenever the `mcp` feature is built in CI.
 

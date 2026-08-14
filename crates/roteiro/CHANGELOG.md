@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(mcp)* `roteiro mcp` — the MCP graph server as a first-class command: STDIO by
+  default, `--http ADDR` for networked MCP, carrying the `--workspace`/`-w`/
+  `--sync-on-access` options.
+
+### Changed
+
+- *(serve)* **`roteiro serve` is now the network HTTP server** (previously the
+  stdio MCP server). Bare `roteiro serve` binds `[serve] addr` (default
+  `127.0.0.1:8017`) and serves the OpenAI-compatible `/v1` endpoint (+ graph tools
+  + Ask) when built `--features serve` with a model installed, always alongside the
+  read-only `/v1/graph/*` API and the `/` web UI; a build without the model feature
+  (or with no model installed) degrades to the llama-free graph API + UI instead of
+  failing. **Migration:** point MCP-client configs at `roteiro mcp` instead of
+  `roteiro serve`. The old spellings still work as **deprecated aliases**, each
+  printing a one-line stderr notice: `serve --models` (now the default — flag is
+  redundant) and `serve --http ADDR` (→ `mcp --http ADDR`). No flags were removed;
+  nothing hard-breaks.
+
 ## [1.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.3.0...roteiro-v1.4.0) - 2026-08-14
 
 ### Added
