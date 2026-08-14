@@ -80,15 +80,26 @@ pub struct Row {
     pub cells: BTreeMap<String, Cell>,
 }
 
-/// A spoke key with no hub counterpart — the drift candidate.
+/// One spoke's setting of an orphan (drift) key — the per-deploy column of a
+/// [`Drift`] row, mirroring the override [`Cell`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DriftCell {
+    /// The spoke's value for the orphan key.
+    pub value: String,
+}
+
+/// A config key set by one or more spokes but with no hub counterpart — the drift
+/// candidate. Grouped to exactly **one entry per distinct key** (mirroring [`Row`]):
+/// every spoke that sets the key contributes a [`DriftCell`], so two deploys that
+/// set the same key — even to different values — share a single row, each value
+/// carried in its own deploy column rather than emitting a duplicate row per deploy.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Drift {
-    /// The spoke project.
-    pub spoke: String,
     /// The orphan key.
     pub key: String,
-    /// Its value.
-    pub value: String,
+    /// Each spoke that sets this key, keyed by spoke name (only spokes that set it
+    /// appear — mirrors [`Row::cells`]).
+    pub cells: BTreeMap<String, DriftCell>,
 }
 
 /// The assembled cross-repo override matrix.
@@ -100,7 +111,8 @@ pub struct OverrideMatrix {
     pub spokes: Vec<String>,
     /// One row per overridden hub key, sorted by key.
     pub rows: Vec<Row>,
-    /// Orphan spoke keys (drift), sorted by `(spoke, key)`.
+    /// Orphan drift keys, one row per distinct key (sorted by key), each carrying
+    /// a per-spoke cell for every deploy that sets it.
     pub drift: Vec<Drift>,
 }
 
@@ -115,7 +127,10 @@ pub fn build(
 ) -> OverrideMatrix {
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut drift: Vec<Drift> = Vec::new();
+    // Drift grouped by distinct key — one row per key (mirroring `rows`), with a
+    // per-spoke cell for each deploy that sets it, instead of one row per
+    // (spoke, key) occurrence (which duplicated a key set by N deploys into N rows).
+    let mut drift: BTreeMap<String, Drift> = BTreeMap::new();
     // Hub keys whose matches disagreed on a source file. A `Row` is keyed by the
     // dotted `hub_key` alone, but the same dotted key can exist in more than one hub
     // file (a `config_key` node is keyed by `cfgkey:<file>#<dotted>`). If two matches
@@ -169,20 +184,34 @@ pub fn build(
             columns.insert(spoke.name.clone());
         }
         for (key, value) in spoke.orphans {
-            drift.push(Drift {
-                spoke: spoke.name.clone(),
-                key,
-                value,
+            let row = drift.entry(key.clone()).or_insert_with(|| Drift {
+                key: key.clone(),
+                cells: BTreeMap::new(),
             });
+            // One cell per spoke for this key. If the same spoke reports the key
+            // more than once (e.g. from two files), keep the first non-empty value
+            // rather than letting an empty restatement blank a real one out.
+            match row.cells.entry(spoke.name.clone()) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(DriftCell { value });
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    if o.get().value.is_empty() && !value.is_empty() {
+                        o.insert(DriftCell { value });
+                    }
+                }
+            }
+            // A deploy that only drifts (no override match) still needs a column so
+            // its drift value has somewhere to render — mirror the override cells.
+            columns.insert(spoke.name.clone());
         }
     }
-    drift.sort_by(|a, b| (&a.spoke, &a.key).cmp(&(&b.spoke, &b.key)));
 
     OverrideMatrix {
         hub: hub.to_owned(),
         spokes: columns.into_iter().collect(),
         rows: rows.into_values().collect(),
-        drift,
+        drift: drift.into_values().collect(),
     }
 }
 
@@ -219,7 +248,10 @@ pub fn render_text(m: &OverrideMatrix) -> String {
     if !m.drift.is_empty() {
         let _ = writeln!(out, "\n  drift — {} orphan key(s):", m.drift.len());
         for d in &m.drift {
-            let _ = writeln!(out, "    {}: {} = {}", d.spoke, d.key, d.value);
+            let _ = writeln!(out, "\n    {}", d.key);
+            for (spoke, cell) in &d.cells {
+                let _ = writeln!(out, "      {spoke}: {}", cell.value);
+            }
         }
     }
     out
@@ -268,22 +300,34 @@ pub fn render_html(m: &OverrideMatrix) -> String {
     let drift = if m.drift.is_empty() {
         String::new()
     } else {
+        // One row per distinct drift key, with a column per spoke that sets it —
+        // mirroring the override matrix above rather than one row per (spoke, key).
+        let mut dhead = String::from("<th scope=\"col\">key</th>");
+        for s in &m.spokes {
+            let _ = write!(dhead, "<th scope=\"col\">{}</th>", esc(s));
+        }
         let mut rows = String::new();
         for d in &m.drift {
-            let _ = write!(
-                rows,
-                "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td></tr>",
-                esc(&d.spoke),
-                esc(&d.key),
-                esc(&d.value)
-            );
+            let _ = write!(rows, "<tr><td><code>{}</code></td>", esc(&d.key));
+            for spoke in &m.spokes {
+                match d.cells.get(spoke) {
+                    Some(cell) => {
+                        let _ = write!(
+                            rows,
+                            "<td class=\"cell over\"><code>{}</code></td>",
+                            esc(&cell.value)
+                        );
+                    }
+                    None => rows.push_str("<td class=\"cell none\">·</td>"),
+                }
+            }
+            rows.push_str("</tr>");
         }
         format!(
             "<h2>Drift — {} orphan key(s)</h2>\
              <p class=\"muted\">Spoke keys with no hub counterpart: the app doesn't \
              define these, so a rename or removal in the hub can't warn you.</p>\
-             <table class=\"drift\"><thead><tr><th scope=\"col\">spoke</th>\
-             <th scope=\"col\">key</th><th scope=\"col\">value</th></tr></thead>\
+             <table class=\"drift\"><thead><tr>{dhead}</tr></thead>\
              <tbody>{rows}</tbody></table>",
             m.drift.len()
         )
@@ -643,5 +687,99 @@ mod tests {
         assert!(t.contains("≠ deploy: 0.0.0.0:8443"));
         assert!(t.contains("= deploy: true"));
         assert!(t.contains("drift") && t.contains("MAX_CONNECTIONS"));
+    }
+
+    #[test]
+    fn a_drift_key_set_by_multiple_spokes_is_one_row_with_a_cell_per_deploy() {
+        // Two deploy repos both set `dq.mode` (absent from the hub) — to *different*
+        // values — and one also sets a second orphan `component`. Drift must collapse
+        // to exactly one row per distinct key (not one per (deploy, key) occurrence),
+        // each deploy's value carried in its own column, and distinct keys stay
+        // distinct rows. This is the bug: the drift band duplicated a key set by N
+        // deploys into N rows.
+        let hub_values = BTreeMap::new();
+        let m = build(
+            "app",
+            &hub_values,
+            vec![
+                SpokeInput {
+                    name: "deploy-a".to_owned(),
+                    matches: vec![],
+                    orphans: vec![
+                        ("dq.mode".to_owned(), "strict".to_owned()),
+                        ("component".to_owned(), "ingest".to_owned()),
+                    ],
+                },
+                SpokeInput {
+                    name: "deploy-b".to_owned(),
+                    matches: vec![],
+                    orphans: vec![("dq.mode".to_owned(), "lax".to_owned())],
+                },
+            ],
+        );
+        // `dq.mode` is set by two deploys → ONE row, not two.
+        assert_eq!(
+            m.drift.iter().filter(|d| d.key == "dq.mode").count(),
+            1,
+            "a drift key set by 2 deploys must collapse to a single row"
+        );
+        // Exactly two distinct drift rows overall: `component` and `dq.mode`
+        // (sorted by key, since `drift` is assembled from a BTreeMap).
+        assert_eq!(m.drift.len(), 2);
+        assert_eq!(m.drift[0].key, "component");
+        assert_eq!(m.drift[1].key, "dq.mode");
+        // Both deploys' differing values populate their own columns — no info lost.
+        let mode = m.drift.iter().find(|d| d.key == "dq.mode").unwrap();
+        assert_eq!(mode.cells.len(), 2);
+        assert_eq!(mode.cells["deploy-a"].value, "strict");
+        assert_eq!(mode.cells["deploy-b"].value, "lax");
+        // The single-deploy key stays its own row with just that deploy's column.
+        let comp = m.drift.iter().find(|d| d.key == "component").unwrap();
+        assert_eq!(comp.cells.len(), 1);
+        assert_eq!(comp.cells["deploy-a"].value, "ingest");
+        // Every drifting deploy is a matrix column, so its drift value has a place
+        // to render even when the deploy overrides no hub key.
+        assert!(m.spokes.contains(&"deploy-a".to_owned()));
+        assert!(m.spokes.contains(&"deploy-b".to_owned()));
+
+        // The dedup survives serialization the UI consumes: one object per key with
+        // a per-spoke `cells` map, exactly mirroring the override rows.
+        let json = serde_json::to_value(&m).unwrap();
+        let drift = json["drift"].as_array().unwrap();
+        assert_eq!(drift.len(), 2);
+        assert_eq!(drift[1]["key"], "dq.mode");
+        assert_eq!(drift[1]["cells"]["deploy-a"]["value"], "strict");
+        assert_eq!(drift[1]["cells"]["deploy-b"]["value"], "lax");
+    }
+
+    #[test]
+    fn a_repeated_orphan_key_within_one_spoke_collapses_to_one_cell() {
+        // A single deploy lists the same orphan key twice (e.g. read from two files),
+        // once blank and once with a value. It must stay one row / one cell, keeping
+        // the real value rather than a blank restatement — order-independent.
+        let hub_values = BTreeMap::new();
+        for orphans in [
+            vec![
+                ("component".to_owned(), String::new()),
+                ("component".to_owned(), "ingest".to_owned()),
+            ],
+            vec![
+                ("component".to_owned(), "ingest".to_owned()),
+                ("component".to_owned(), String::new()),
+            ],
+        ] {
+            let m = build(
+                "app",
+                &hub_values,
+                vec![SpokeInput {
+                    name: "deploy".to_owned(),
+                    matches: vec![],
+                    orphans,
+                }],
+            );
+            assert_eq!(m.drift.len(), 1);
+            assert_eq!(m.drift[0].cells.len(), 1, "one deploy → one cell");
+            assert_eq!(m.drift[0].cells["deploy"].value, "ingest");
+        }
     }
 }

@@ -433,7 +433,7 @@
       { num: appKeys, lbl: "app config keys" },
       { num: links, lbl: "cross-repo links" },
       { num: overridden, lbl: "keys overridden" },
-      { num: drift, lbl: "drift references", drift: true },
+      { num: drift, lbl: "drift keys", drift: true },
     ];
     const host = $("#tiles");
     host.replaceChildren(
@@ -729,10 +729,14 @@
           el("td", { class: "drift-key" }, el("code", { text: d.key })),
           el("td", { class: "hubval", text: "—" }),
         ];
+        // One row per distinct drift key: fill each deploy column from the key's
+        // per-spoke cells (a key set by 2+ deploys shows each value in its own
+        // column), mirroring the override rows above.
         for (const s of spokes) {
-          if (s === d.spoke) {
+          const c = (d.cells || {})[s];
+          if (c) {
             cells.push(
-              el("td", { class: "cell set" }, el("code", { text: d.value || "" }))
+              el("td", { class: "cell set" }, el("code", { text: c.value || "" }))
             );
           } else {
             cells.push(el("td", { class: "cell inherit", text: "·" }));
@@ -753,8 +757,8 @@
         el("div", {
           class: "explain drift-box",
           html:
-            `<strong>Cross-repo drift — ${drift.length} reference` +
-            `${drift.length === 1 ? "" : "s"} to config the app doesn't define.</strong> ` +
+            `<strong>Cross-repo drift — ${drift.length} key` +
+            `${drift.length === 1 ? "" : "s"} the app doesn't define.</strong> ` +
             "A deployment sets these keys, but the app schema has no matching key — a " +
             "rename or removal in the app can't warn the deploy, so they silently drift.",
         })
