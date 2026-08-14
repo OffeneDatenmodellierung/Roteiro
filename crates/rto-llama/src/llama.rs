@@ -529,6 +529,19 @@ fn fallback_template_name(arch: Option<&str>) -> &'static str {
     }
 }
 
+/// Whether a GGUF `general.architecture` names an **encoder-only** model — the
+/// BERT embedding family (`bert`, `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2`,
+/// `distilbert`, `roberta`, …). Such models have no decoder: routing them through
+/// the chat/generation path makes llama.cpp take its encoder route, which aborts
+/// the process with `GGML_ASSERT(n_ubatch >= n_tokens)`. The chat path rejects
+/// them up front instead (see [`Engine::chat_stream`]). Match is
+/// case-insensitive and substring-based on `bert`, which covers every BERT
+/// derivative naming while never matching a generative family (`qwen2`/`qwen3`,
+/// `llama`, `gemma`, `phi3`, …).
+fn is_encoder_only_arch(arch: &str) -> bool {
+    arch.to_ascii_lowercase().contains("bert")
+}
+
 /// The shared sampling loop: from `start_pos`, sample → emit → decode until an
 /// end-of-generation token or `max_tokens`. Returns `(completion_tokens, reason)`.
 fn run_generation(
@@ -621,10 +634,35 @@ impl Engine for LlamaEngine {
         // release the lock so generation on a *different* model can run
         // concurrently (see the module-level "Concurrency" note).
         let (model, gen_lock) = self.resolve(&req.model, &path)?;
-        // Serialise decode on this model instance.
+
+        // Serialise *all* interactions with this model instance (llama.cpp is not
+        // assumed thread-safe): acquire the per-model generation lock BEFORE any
+        // `LlamaModel` FFI call — including the metadata read in the guard below —
+        // so a concurrent request on the same model can never touch the handle
+        // unserialised. The lock is per-model, so a *different* model still decodes
+        // concurrently; nothing below re-locks it (`chat_text`/`chat_media` borrow
+        // the already-locked model).
         let _gen = gen_lock
             .lock()
             .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
+
+        // Defensive guard (ADR-0006), run under `_gen`: an *encoder-only* embedding
+        // model (a BERT-arch `bge-*`, say) cannot generate. Driving one through the
+        // decode path makes llama.cpp take its encoder route, which aborts the
+        // **whole process** with `GGML_ASSERT(n_ubatch >= n_tokens)` — a single
+        // mis-addressed chat request would kill the server for everyone. Detect it
+        // from the GGUF architecture and reject it as a typed client error *before*
+        // any decode. The serving layer already keeps such models out of the Ask
+        // model pool; this backstops a direct `POST /v1/chat/completions`.
+        if let Ok(arch) = model.meta_val_str("general.architecture")
+            && is_encoder_only_arch(&arch)
+        {
+            return Err(EngineError::InvalidRequest(format!(
+                "model `{}` is an embedding model (encoder-only architecture `{arch}`) \
+                 and cannot generate chat completions — use `/v1/embeddings` instead",
+                req.model,
+            )));
+        }
 
         match (modality, mmproj.as_deref()) {
             (None, _) => self.chat_text(&model, req, on_token),
@@ -710,8 +748,34 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 mod tests {
     use super::{
         ChatTemplateError, EngineError, LlamaChatTemplate, fallback_template_name,
-        install_native_log_bridge, lru_evict_count, resolve_chat_template_from,
+        install_native_log_bridge, is_encoder_only_arch, lru_evict_count,
+        resolve_chat_template_from,
     };
+
+    #[test]
+    fn encoder_only_arch_is_detected() {
+        // BERT-family embedding architectures (what `bge-*` GGUFs report) are
+        // encoder-only and must be flagged so the chat path rejects them before the
+        // decode call that would abort the process with a GGML_ASSERT.
+        for arch in [
+            "bert",
+            "BERT",
+            "nomic-bert",
+            "nomic-bert-moe",
+            "jina-bert-v2",
+            "distilbert",
+            "roberta",
+        ] {
+            assert!(is_encoder_only_arch(arch), "{arch} should be encoder-only");
+        }
+        // Generative families this engine actually serves for chat are not flagged.
+        for arch in ["qwen2", "qwen3", "llama", "gemma3", "phi3", "moondream2"] {
+            assert!(
+                !is_encoder_only_arch(arch),
+                "{arch} is generative, not encoder-only"
+            );
+        }
+    }
 
     /// Installing the native-log → tracing bridge is safe to call repeatedly (the
     /// `Once` guard makes every call after the first a no-op) and never panics —
