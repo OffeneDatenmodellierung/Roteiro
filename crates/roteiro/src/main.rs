@@ -4730,9 +4730,11 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 name: "search".to_owned(),
                 description: "Search graph nodes by text — names, keys, paths, and captured \
                               content (doc comments, README/ADR/blueprint prose). Returns the \
-                              top matches with keys; curated ADRs/blueprints and READMEs rank \
-                              first, so this is the entry point for \"what is X / why\" questions. \
-                              Then call `explain` on a returned key for detail."
+                              top matches with keys and, for content-bearing nodes, a short \
+                              `snippet` of the node's actual content to ground your answer; \
+                              curated ADRs/blueprints and READMEs rank first, so this is the \
+                              entry point for \"what is X / why\" questions. Read the `snippet`, \
+                              and call `explain` on a returned key for the full content."
                     .to_owned(),
                 parameters: json!({
                     "type": "object",

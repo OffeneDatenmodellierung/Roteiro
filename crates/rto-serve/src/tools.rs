@@ -141,11 +141,18 @@ fn truncate(s: &str) -> String {
 /// protocol. Kept model-agnostic: any instruction-following model can comply.
 fn tool_system_prompt(tools: &[ToolDef]) -> String {
     let mut out = String::from(
-        "You can call tools to query this codebase's knowledge graph. When a tool \
-         would help, reply with ONLY a tool call on its own, in exactly this form:\n\
+        "You answer questions about this codebase using ONLY its Roteiro knowledge \
+         graph, reached through the tools below. When a tool would help, reply with \
+         ONLY a tool call on its own, in exactly this form:\n\
          <tool_call>{\"name\": \"<tool>\", \"arguments\": { ... }}</tool_call>\n\
-         After you receive a <tool_response>, use it to answer. If no tool is \
-         needed, just answer directly. Available tools:\n",
+         After you receive a <tool_response>, use it to answer. Ground every claim \
+         in what the tools return: use `search` to find relevant nodes, then read \
+         each hit's `snippet` or call `explain` on its key to read the node's \
+         actual content BEFORE describing it — never guess from a node's name \
+         alone. Cite the node keys you used (e.g. `file:README.md`, `fn:foo`). If \
+         the tools do not contain the answer, say you could not find it rather than \
+         making one up. If no tool is needed, just answer directly. Available \
+         tools:\n",
     );
     for t in tools {
         let params = serde_json::to_string(&t.parameters).unwrap_or_else(|_| "{}".to_owned());
@@ -218,6 +225,41 @@ mod tests {
         let prompt = tool_system_prompt(&tools);
         assert!(prompt.contains("<tool_call>"));
         assert!(prompt.contains("search: find nodes"));
+    }
+
+    #[test]
+    fn system_prompt_forces_grounding() {
+        // Pin the grounding levers so a weak model cannot drift back to answering
+        // from a node's name alone (the hallucination this prompt guards against):
+        // answer only from tool output, read content (snippet/explain) before
+        // describing, cite the keys used, and refuse rather than fabricate.
+        let tools = vec![ToolDef {
+            name: "search".to_owned(),
+            description: "find nodes".to_owned(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let prompt = tool_system_prompt(&tools);
+        let lower = prompt.to_lowercase();
+        // Pin the *grounding* "only" (answer from the graph), not the "reply with
+        // ONLY a tool call" formatting rule that also contains the bare word — so
+        // this fails if the grounding instruction itself regresses.
+        assert!(
+            prompt.contains("using ONLY its Roteiro knowledge graph"),
+            "answer only from tool output"
+        );
+        assert!(
+            prompt.contains("snippet") && prompt.contains("explain"),
+            "read the returned content before describing a node"
+        );
+        assert!(
+            lower.contains("before describing"),
+            "read content BEFORE describing the node"
+        );
+        assert!(lower.contains("cite"), "cite the node keys used");
+        assert!(
+            lower.contains("could not find"),
+            "refuse rather than fabricate when the answer is absent"
+        );
     }
 
     /// An engine scripted to emit a tool call first, then a final answer, so the

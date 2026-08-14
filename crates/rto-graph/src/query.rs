@@ -327,6 +327,68 @@ pub struct SearchHit {
     /// The matching node.
     #[serde(flatten)]
     pub node: NodeSummary,
+    /// A short, whitespace-collapsed excerpt of the node's captured
+    /// `meta.content` (see [`content_snippet`]), so a model that never calls
+    /// [`explain`] still has real grounding text. `None` for pure symbol/config
+    /// nodes with no content — the summary (name/kind/path) is the grounding then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+/// Max **chars** of a search-hit content snippet, counting the trailing ellipsis
+/// when truncated (so the total length never exceeds this). Bounded so many hits
+/// cannot bloat the tool response or blow the served model's context window.
+const SNIPPET_MAX: usize = 300;
+
+/// Build a bounded, whitespace-collapsed snippet from a node's captured
+/// `meta.content`, or `None` when the node has no textual content (pure symbol/
+/// config nodes). Runs of whitespace collapse to single spaces, and the result is
+/// at most [`SNIPPET_MAX`] chars *including* a trailing `…` when the content was
+/// truncated, so a search hit carries grounding text even when the model never
+/// calls [`explain`].
+///
+/// Processes `content` **lazily**: it collapses whitespace on the fly and stops
+/// after ~`SNIPPET_MAX` chars, so a large content-bearing node never materialises
+/// more than the bound regardless of how big its content is.
+fn content_snippet(meta: &serde_json::Value) -> Option<String> {
+    let content = meta.get("content").and_then(|v| v.as_str())?;
+
+    // Collect at most SNIPPET_MAX + 1 collapsed chars: the one extra char only
+    // tells us whether the content overflowed the bound (→ needs an ellipsis);
+    // we never buffer more than that, however large `content` is.
+    let mut collapsed: Vec<char> = Vec::with_capacity(SNIPPET_MAX + 1);
+    let mut pending_space = false;
+    for ch in content.chars() {
+        if ch.is_whitespace() {
+            // A run of whitespace becomes a single separator, but only once a
+            // real char has been emitted (this also drops any leading whitespace).
+            pending_space = !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+            if collapsed.len() > SNIPPET_MAX {
+                break;
+            }
+        }
+        collapsed.push(ch);
+        if collapsed.len() > SNIPPET_MAX {
+            break;
+        }
+    }
+
+    if collapsed.is_empty() {
+        return None;
+    }
+    // Overflowed the bound: truncate to SNIPPET_MAX - 1 chars and append the
+    // ellipsis, so the total length (ellipsis included) is exactly SNIPPET_MAX.
+    if collapsed.len() > SNIPPET_MAX {
+        let snippet: String = collapsed[..SNIPPET_MAX - 1].iter().collect();
+        Some(format!("{snippet}…"))
+    } else {
+        Some(collapsed.into_iter().collect())
+    }
 }
 
 /// Deterministically search nodes for `query`, ranked by relevance, returning at
@@ -409,6 +471,7 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
         }
         hits.push(SearchHit {
             score: u32::try_from(relevance.max(0)).unwrap_or(0),
+            snippet: content_snippet(&node.meta),
             node: NodeSummary::from_node(&node),
         });
     }
@@ -560,7 +623,7 @@ fn placeholder_hop() -> PathHop {
 
 #[cfg(test)]
 mod tests {
-    use super::{SCHEMA, explain, glob_match, list_kind, path, search};
+    use super::{SCHEMA, SNIPPET_MAX, explain, glob_match, list_kind, path, search};
     use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
     fn seeded() -> Store {
@@ -663,6 +726,59 @@ mod tests {
             by_content.first().map(|h| h.node.key.as_str()),
             Some("adr:0001"),
             "content search matches the ADR by its captured text"
+        );
+    }
+
+    #[test]
+    fn search_hit_carries_a_bounded_content_snippet() {
+        use crate::Provenance;
+        let mut store = Store::open_in_memory().expect("store");
+        // A content-bearing node whose content is longer than the cap and has
+        // messy whitespace to collapse.
+        let long = "word ".repeat(200);
+        let mut adr =
+            Node::new("adr:0001", NodeKind::Adr, "Overview").with_provenance(Provenance::Authored);
+        adr.meta = serde_json::json!({ "content": format!("Roteiro   is\n\na graph. {long}") });
+        // A pure symbol node with no captured content.
+        let sym = Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main");
+        store
+            .apply_factset(&FactSet::new().with_node(adr).with_node(sym))
+            .expect("apply");
+
+        let hits = search(&store, "roteiro", 10).expect("search");
+        let adr_hit = hits
+            .iter()
+            .find(|h| h.node.key == "adr:0001")
+            .expect("adr hit");
+        let snippet = adr_hit
+            .snippet
+            .as_deref()
+            .expect("a content-bearing node yields a snippet");
+        // Whitespace is collapsed to single spaces (no runs, no newlines)…
+        assert!(snippet.starts_with("Roteiro is a graph."), "got: {snippet}");
+        assert!(!snippet.contains("  "));
+        assert!(!snippet.contains('\n'));
+        // …and the snippet is bounded to SNIPPET_MAX chars *including* the ellipsis.
+        assert!(
+            snippet.chars().count() <= SNIPPET_MAX,
+            "snippet is bounded: {} chars",
+            snippet.chars().count()
+        );
+        assert!(
+            snippet.ends_with('…'),
+            "over-long content is truncated with an ellipsis"
+        );
+
+        // A node without content falls back cleanly: no snippet, so the summary
+        // (name/kind/path) is the grounding.
+        let hits = search(&store, "main", 10).expect("search");
+        let sym_hit = hits
+            .iter()
+            .find(|h| h.node.key == "sym:rust:a.rs#main")
+            .expect("sym hit");
+        assert!(
+            sym_hit.snippet.is_none(),
+            "a node with no content has no snippet"
         );
     }
 
