@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.7.0...roteiro-v1.8.0) - 2026-08-14
+
+### Added
+
+- *(explorer)* move workspace Ask panel under the drill-into row
+- *(explorer)* model dropdown + openable cited nodes in Ask panels
+
+### Fixed
+
+- *(explorer)* preserve the Ask model pick across idempotent re-renders
+
 ## [1.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.6.0...roteiro-v1.7.0) - 2026-08-14
 
 ### Added
