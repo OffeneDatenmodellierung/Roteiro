@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.4.0...roteiro-v1.5.0) - 2026-08-14
+
+### Added
+
+- *(cli)* make `serve` the network HTTP server; add `roteiro mcp`
+
+### Fixed
+
+- *(cli)* address PR #268 review comments
+
 ### Added
 
 - *(mcp)* `roteiro mcp` — the MCP graph server as a first-class command: STDIO by
