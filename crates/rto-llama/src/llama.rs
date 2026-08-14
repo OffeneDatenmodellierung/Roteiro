@@ -635,10 +635,21 @@ impl Engine for LlamaEngine {
         // concurrently (see the module-level "Concurrency" note).
         let (model, gen_lock) = self.resolve(&req.model, &path)?;
 
-        // Defensive guard (ADR-0006): an *encoder-only* embedding model (a
-        // BERT-arch `bge-*`, say) cannot generate. Driving one through the decode
-        // path makes llama.cpp take its encoder route, which aborts the **whole
-        // process** with `GGML_ASSERT(n_ubatch >= n_tokens)` — a single
+        // Serialise *all* interactions with this model instance (llama.cpp is not
+        // assumed thread-safe): acquire the per-model generation lock BEFORE any
+        // `LlamaModel` FFI call — including the metadata read in the guard below —
+        // so a concurrent request on the same model can never touch the handle
+        // unserialised. The lock is per-model, so a *different* model still decodes
+        // concurrently; nothing below re-locks it (`chat_text`/`chat_media` borrow
+        // the already-locked model).
+        let _gen = gen_lock
+            .lock()
+            .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
+
+        // Defensive guard (ADR-0006), run under `_gen`: an *encoder-only* embedding
+        // model (a BERT-arch `bge-*`, say) cannot generate. Driving one through the
+        // decode path makes llama.cpp take its encoder route, which aborts the
+        // **whole process** with `GGML_ASSERT(n_ubatch >= n_tokens)` — a single
         // mis-addressed chat request would kill the server for everyone. Detect it
         // from the GGUF architecture and reject it as a typed client error *before*
         // any decode. The serving layer already keeps such models out of the Ask
@@ -652,11 +663,6 @@ impl Engine for LlamaEngine {
                 req.model,
             )));
         }
-
-        // Serialise decode on this model instance.
-        let _gen = gen_lock
-            .lock()
-            .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
         match (modality, mmproj.as_deref()) {
             (None, _) => self.chat_text(&model, req, on_token),
