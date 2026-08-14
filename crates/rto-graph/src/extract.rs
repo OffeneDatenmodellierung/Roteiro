@@ -1267,14 +1267,12 @@ impl RustWalk<'_> {
         }
     }
 
-    /// The NAMED field identifiers a struct/union declares, in source order — its
-    /// `field_declaration_list`'s `field_declaration` names. Tuple structs use an
-    /// ordered (positional) field list whose entries carry no `name`, so they
-    /// contribute nothing; a unit struct has no field list at all.
-    /// The named fields a struct/union declares, each with its declared name and
-    /// the type-identifier tokens of its type (outermost first, e.g.
-    /// `Option<ZerobusConfig>` → `["Option", "ZerobusConfig"]`). Source order is
-    /// preserved. Tuple/unit structs contribute nothing.
+    /// The NAMED fields a struct/union declares, in source order — each an entry of
+    /// its `field_declaration_list` carrying the declared field name plus the
+    /// type-identifier tokens of its type (outermost first, e.g.
+    /// `Option<ZerobusConfig>` → `["Option", "ZerobusConfig"]`). A tuple struct's
+    /// positional fields carry no `name`, and a unit struct has no field list, so
+    /// both contribute nothing.
     fn struct_fields(&self, node: tree_sitter::Node) -> Vec<FieldDef> {
         let mut out = Vec::new();
         let mut cursor = node.walk();
@@ -1323,13 +1321,16 @@ impl RustWalk<'_> {
         }
     }
 
-    /// Whether an authored **`@rto:config`** marker immediately precedes `node` —
-    /// the explicit, opt-in signal that a struct is the root of a config tree
-    /// [`RustWalk::synthesize_config_keys`] may expand. Accepts the token in a
-    /// leading comment (`// @rto:config`, `/// @rto:config`) or attribute, scanning
-    /// past intervening attributes/comments exactly as [`doc_comment`] does; any
-    /// other node ends the run. Requiring an authored marker keeps synthesis
-    /// conservative — a struct is never guessed to be config.
+    /// Whether an authored **`@rto:config`** marker precedes `node` — the explicit,
+    /// opt-in signal that a struct is the root of a config tree
+    /// [`RustWalk::synthesize_config_keys`] may expand. Scans the immediately
+    /// preceding run of comments (`//`, `///`, `//!`, or `/* … */` block comments)
+    /// and attributes, returning `true` as soon as any of them contains the marker
+    /// token; the first node that is not a comment or attribute ends the run. Unlike
+    /// [`doc_comment`] this does not require the comments to be *doc* comments and
+    /// does not stop at a plain `//` comment — a bare `// @rto:config` line is
+    /// accepted. Requiring an authored marker keeps synthesis conservative — a
+    /// struct is never guessed to be config.
     fn has_config_marker(&self, node: tree_sitter::Node) -> bool {
         const MARKER: &str = "@rto:config";
         let mut prev = node.prev_sibling();
@@ -1458,11 +1459,14 @@ impl RustWalk<'_> {
             );
             node.path = Some(self.path.to_owned());
             node.blob_hash = Some(self.blob_id.to_owned());
-            // No literal value in source; `source`/`struct` mark the provenance and
-            // keep these distinguishable from file-derived config keys.
+            // A struct field declares no literal value, so `meta.value` is OMITTED
+            // (not `""`): the store reader surfaces this as `value_known = false` so
+            // value-agreement matching treats the value as *unknown*, never as an
+            // empty string that could false-match a spoke's genuine empty value.
+            // `source`/`struct` mark the provenance and keep these distinguishable
+            // from file-derived config keys.
             node.meta = serde_json::json!({
                 "key": dotted,
-                "value": "",
                 "source": "struct",
                 "struct": root_name,
             });

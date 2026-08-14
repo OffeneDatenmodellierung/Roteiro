@@ -395,12 +395,18 @@ impl Store {
         let mut out = Vec::with_capacity(nodes.len());
         for n in &nodes {
             let key = n.meta.get("key").and_then(serde_json::Value::as_str);
+            // A `config_key` node carries a `value` in `meta` when it has a real
+            // setting (file-derived keys always do, even an empty string). A
+            // struct-derived key (`meta.source = "struct"`) omits it — its value is
+            // *unknown*, not empty — so record that absence explicitly rather than
+            // defaulting it to `""`, which would false-match in value agreement.
             let value = n.meta.get("value").and_then(serde_json::Value::as_str);
             if let (Some(key), Some(file)) = (key, n.path.as_deref()) {
                 out.push(crate::ConfigKey {
                     file: file.to_owned(),
                     key: key.to_owned(),
                     value: value.unwrap_or_default().to_owned(),
+                    value_known: value.is_some(),
                 });
             }
         }

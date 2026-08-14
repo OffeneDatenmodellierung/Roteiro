@@ -99,11 +99,16 @@ pub fn match_against_hub(
         hub_file: h.file.clone(),
         confidence,
     };
+    // Values agree only when *both* sides carry a real value (a struct-derived hub
+    // key has `value_known = false` and no literal value, so it must never earn a
+    // value-agreement bump against a spoke's genuine — possibly empty — value).
+    let values_agree =
+        |h: &ConfigKey, s: &ConfigKey| h.value_known && s.value_known && h.value == s.value;
     for s in spoke {
         let n = normalize(&s.key);
         if let Some(h) = by_full.get(&n) {
             // Tier 1 — exact full-path name match; value agreement nudges up.
-            matches.push(hit(s, h, if h.value == s.value { 0.98 } else { 0.9 }));
+            matches.push(hit(s, h, if values_agree(h, s) { 0.98 } else { 0.9 }));
         } else if let Some(h) = by_canon
             .get(&canonicalize(&s.key))
             .and_then(|c| unambiguous(c))
@@ -111,7 +116,7 @@ pub fn match_against_hub(
             // Tier 2 — same key across a naming-convention gap (camel/snake/kebab),
             // only when the hub side is unambiguous. Still an inferred link, scored
             // just under the exact tier.
-            matches.push(hit(s, h, if h.value == s.value { 0.95 } else { 0.85 }));
+            matches.push(hit(s, h, if values_agree(h, s) { 0.95 } else { 0.85 }));
         } else if let Some([h]) = by_leaf.get(last_token(&n)).map(Vec::as_slice) {
             // Tier 3 — same leaf name under a different path — a weaker, still-useful
             // hint, but only when it's *unambiguous* (exactly one hub key that leaf).
@@ -159,6 +164,19 @@ mod tests {
             file: "f".into(),
             key: key.into(),
             value: value.into(),
+            value_known: true,
+        }
+    }
+
+    /// A struct-derived key: a real dotted key with **no** literal value (as
+    /// [`rto_graph::Store::config_keys`] reconstructs one whose node omits
+    /// `meta.value`).
+    fn ck_struct(key: &str) -> ConfigKey {
+        ConfigKey {
+            file: "app/config.rs".into(),
+            key: key.into(),
+            value: String::new(),
+            value_known: false,
         }
     }
 
@@ -276,8 +294,8 @@ mod tests {
         // synthesized by extraction with no literal value) are matched by an infra
         // repo's spoke keys — including a camelCase k8s spelling via canonicalization.
         let hub = vec![
-            ck("zerobus.server_endpoint", ""),
-            ck("zerobus.workspace_url", ""),
+            ck_struct("zerobus.server_endpoint"),
+            ck_struct("zerobus.workspace_url"),
         ];
         let spoke = vec![
             ck("zerobus.serverEndpoint", "grpc://z:443"), // camelCase → canonical match
@@ -292,6 +310,34 @@ mod tests {
                 .unwrap()
                 .hub_key,
             "zerobus.server_endpoint"
+        );
+    }
+
+    #[test]
+    fn struct_derived_key_gets_no_false_value_agreement_bump() {
+        // A struct-derived hub key carries no literal value. Matching a spoke key
+        // that happens to have an EMPTY value must NOT be read as value agreement:
+        // the confidence stays at the name-only tier (0.9), not the value-agreeing
+        // tier (0.98). Guards against `"" == ""` false agreement.
+        let hub = vec![ck_struct("serve.addr")];
+        let spoke_empty = vec![ck("serve.addr", "")]; // genuine empty spoke value
+        let (m, orphans) = match_against_hub(&spoke_empty, &hub);
+        assert!(orphans.is_empty());
+        assert_eq!(m.len(), 1);
+        assert!(
+            (m[0].confidence - 0.9).abs() < f64::EPSILON,
+            "name-only tier, no value-agreement bump: {:?}",
+            m[0]
+        );
+
+        // Sanity: two file keys with equal (empty) values DO agree — the reader
+        // defaults real empty strings as before, so this behaviour is unchanged.
+        let hub_file = vec![ck("serve.addr", "")];
+        let (m2, _) = match_against_hub(&spoke_empty, &hub_file);
+        assert!(
+            (m2[0].confidence - 0.98).abs() < f64::EPSILON,
+            "real empty values still agree: {:?}",
+            m2[0]
         );
     }
 
