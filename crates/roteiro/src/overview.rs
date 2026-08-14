@@ -84,8 +84,16 @@ pub struct Row {
 /// [`Drift`] row, mirroring the override [`Cell`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DriftCell {
-    /// The spoke's value for the orphan key.
+    /// The spoke's value for the orphan key. When [`DriftCell::conflict`] is set,
+    /// this is a deterministic, sorted `" | "`-join of every distinct value the
+    /// deploy gave the key, so nothing is dropped.
     pub value: String,
+    /// The same deploy set this drift key to two or more *different* non-empty
+    /// values (e.g. from two files in that repo). Rather than an order-dependent
+    /// silent overwrite, [`build`] surfaces the collision: `value` carries all the
+    /// distinct values joined and the renderers flag the cell. `false` for the
+    /// common single-value cell.
+    pub conflict: bool,
 }
 
 /// A config key set by one or more spokes but with no hub counterpart — the drift
@@ -107,7 +115,9 @@ pub struct Drift {
 pub struct OverrideMatrix {
     /// The hub project (source of truth).
     pub hub: String,
-    /// Spoke column order (only spokes that override at least one hub key).
+    /// Spoke column order — every deploy that either overrides at least one hub key
+    /// *or* only drifts (sets a key with no hub counterpart), so a drift-only
+    /// deploy still gets a column for its drift value. Sorted by name.
     pub spokes: Vec<String>,
     /// One row per overridden hub key, sorted by key.
     pub rows: Vec<Row>,
@@ -125,12 +135,18 @@ pub fn build(
     hub_values: &BTreeMap<String, String>,
     spokes: Vec<SpokeInput>,
 ) -> OverrideMatrix {
+    // Per deploy, the distinct non-empty values it gave a drift key (sorted, so the
+    // cell renders deterministically — one value, or a flagged conflict).
+    type DriftValues = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Drift grouped by distinct key — one row per key (mirroring `rows`), with a
     // per-spoke cell for each deploy that sets it, instead of one row per
     // (spoke, key) occurrence (which duplicated a key set by N deploys into N rows).
-    let mut drift: BTreeMap<String, Drift> = BTreeMap::new();
+    // The accumulated values become one value or a flagged conflict, never an
+    // order-dependent overwrite.
+    let mut drift: BTreeMap<String, DriftValues> = BTreeMap::new();
     // Hub keys whose matches disagreed on a source file. A `Row` is keyed by the
     // dotted `hub_key` alone, but the same dotted key can exist in more than one hub
     // file (a `config_key` node is keyed by `cfgkey:<file>#<dotted>`). If two matches
@@ -184,22 +200,17 @@ pub fn build(
             columns.insert(spoke.name.clone());
         }
         for (key, value) in spoke.orphans {
-            let row = drift.entry(key.clone()).or_insert_with(|| Drift {
-                key: key.clone(),
-                cells: BTreeMap::new(),
-            });
-            // One cell per spoke for this key. If the same spoke reports the key
-            // more than once (e.g. from two files), keep the first non-empty value
-            // rather than letting an empty restatement blank a real one out.
-            match row.cells.entry(spoke.name.clone()) {
-                std::collections::btree_map::Entry::Vacant(v) => {
-                    v.insert(DriftCell { value });
-                }
-                std::collections::btree_map::Entry::Occupied(mut o) => {
-                    if o.get().value.is_empty() && !value.is_empty() {
-                        o.insert(DriftCell { value });
-                    }
-                }
+            // Record that this deploy set the key (so its column renders even for an
+            // empty value) and accumulate its distinct non-empty values; the cell is
+            // resolved once, below, so a re-stated blank never blanks a real value
+            // and two differing values become a deterministic conflict, not a drop.
+            let vals = drift
+                .entry(key)
+                .or_default()
+                .entry(spoke.name.clone())
+                .or_default();
+            if !value.is_empty() {
+                vals.insert(value);
             }
             // A deploy that only drifts (no override match) still needs a column so
             // its drift value has somewhere to render — mirror the override cells.
@@ -207,11 +218,36 @@ pub fn build(
         }
     }
 
+    let drift = drift
+        .into_iter()
+        .map(|(key, spokes)| Drift {
+            cells: spokes
+                .into_iter()
+                .map(|(spoke, values)| (spoke, drift_cell(values)))
+                .collect(),
+            key,
+        })
+        .collect();
+
     OverrideMatrix {
         hub: hub.to_owned(),
         spokes: columns.into_iter().collect(),
         rows: rows.into_values().collect(),
-        drift: drift.into_values().collect(),
+        drift,
+    }
+}
+
+/// Collapse a deploy's distinct non-empty values for one drift key into a single
+/// cell. Empty when the deploy only ever restated a blank value, the lone value
+/// when it is consistent, or a deterministic sorted `" | "`-join flagged as a
+/// `conflict` when the deploy set the key to two or more *different* non-empty
+/// values (e.g. from two files) — surfaced, never silently dropped or made
+/// iteration-order dependent (the input `BTreeSet` is already sorted).
+fn drift_cell(values: std::collections::BTreeSet<String>) -> DriftCell {
+    let conflict = values.len() > 1;
+    DriftCell {
+        value: values.into_iter().collect::<Vec<_>>().join(" | "),
+        conflict,
     }
 }
 
@@ -250,7 +286,8 @@ pub fn render_text(m: &OverrideMatrix) -> String {
         for d in &m.drift {
             let _ = writeln!(out, "\n    {}", d.key);
             for (spoke, cell) in &d.cells {
-                let _ = writeln!(out, "      {spoke}: {}", cell.value);
+                let flag = if cell.conflict { "  (conflict)" } else { "" };
+                let _ = writeln!(out, "      {spoke}: {}{flag}", cell.value);
             }
         }
     }
@@ -311,6 +348,15 @@ pub fn render_html(m: &OverrideMatrix) -> String {
             let _ = write!(rows, "<tr><td><code>{}</code></td>", esc(&d.key));
             for spoke in &m.spokes {
                 match d.cells.get(spoke) {
+                    Some(cell) if cell.conflict => {
+                        let _ = write!(
+                            rows,
+                            "<td class=\"cell over conflict\" \
+                             title=\"conflict: this deploy sets the key to multiple values\">\
+                             <code>{}</code></td>",
+                            esc(&cell.value)
+                        );
+                    }
                     Some(cell) => {
                         let _ = write!(
                             rows,
@@ -385,7 +431,8 @@ font-variant-numeric:tabular-nums}\
 vertical-align:-1px;border:1px solid var(--line)}\
 .swatch.over{background:var(--over)}.swatch.same{background:var(--same)}\
 .swatch.none{background:var(--bg)}\
-table.drift td:first-child{white-space:nowrap;color:var(--muted)}";
+table.drift td:first-child{white-space:nowrap;color:var(--muted)}\
+td.conflict{outline:2px solid var(--over-fg);outline-offset:-2px;font-weight:600}";
 
 /// Escape text for HTML body or attribute content (both quote styles), so the
 /// helper stays safe if reused inside single-quoted attributes.
@@ -779,7 +826,65 @@ mod tests {
             );
             assert_eq!(m.drift.len(), 1);
             assert_eq!(m.drift[0].cells.len(), 1, "one deploy → one cell");
-            assert_eq!(m.drift[0].cells["deploy"].value, "ingest");
+            let cell = &m.drift[0].cells["deploy"];
+            assert_eq!(cell.value, "ingest");
+            assert!(!cell.conflict, "a blank restatement is not a conflict");
         }
+    }
+
+    #[test]
+    fn a_spoke_setting_one_drift_key_two_ways_is_a_deterministic_conflict_cell() {
+        // A single deploy sets the same orphan key to two DIFFERENT non-empty values
+        // (e.g. two files in that repo disagree). Rather than an order-dependent
+        // silent overwrite that drops one value, the cell must be a deterministic
+        // conflict carrying BOTH values — identical regardless of orphan order.
+        let hub_values = BTreeMap::new();
+        for orphans in [
+            vec![
+                ("dq.mode".to_owned(), "strict".to_owned()),
+                ("dq.mode".to_owned(), "lax".to_owned()),
+            ],
+            vec![
+                ("dq.mode".to_owned(), "lax".to_owned()),
+                ("dq.mode".to_owned(), "strict".to_owned()),
+            ],
+        ] {
+            let m = build(
+                "app",
+                &hub_values,
+                vec![SpokeInput {
+                    name: "deploy".to_owned(),
+                    matches: vec![],
+                    orphans,
+                }],
+            );
+            assert_eq!(m.drift.len(), 1);
+            let cell = &m.drift[0].cells["deploy"];
+            assert!(cell.conflict, "two differing non-empty values → a conflict");
+            // Deterministic sorted join — no value dropped, order-independent.
+            assert_eq!(cell.value, "lax | strict");
+            // The flag serialises for the explorer to render the conflict.
+            let json = serde_json::to_value(&m).unwrap();
+            assert_eq!(json["drift"][0]["cells"]["deploy"]["conflict"], true);
+            assert_eq!(json["drift"][0]["cells"]["deploy"]["value"], "lax | strict");
+        }
+
+        // A consistent restatement of the SAME value is not a conflict — the common
+        // single-value cell is unchanged.
+        let m = build(
+            "app",
+            &hub_values,
+            vec![SpokeInput {
+                name: "deploy".to_owned(),
+                matches: vec![],
+                orphans: vec![
+                    ("dq.mode".to_owned(), "strict".to_owned()),
+                    ("dq.mode".to_owned(), "strict".to_owned()),
+                ],
+            }],
+        );
+        let cell = &m.drift[0].cells["deploy"];
+        assert!(!cell.conflict);
+        assert_eq!(cell.value, "strict");
     }
 }

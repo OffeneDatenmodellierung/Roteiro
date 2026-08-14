@@ -735,8 +735,19 @@
         for (const s of spokes) {
           const c = (d.cells || {})[s];
           if (c) {
+            // `c.conflict` (from the data layer) means this deploy set the key to
+            // 2+ differing values — `c.value` carries them joined; flag the cell.
             cells.push(
-              el("td", { class: "cell set" }, el("code", { text: c.value || "" }))
+              el(
+                "td",
+                {
+                  class: c.conflict ? "cell set conflict" : "cell set",
+                  title: c.conflict
+                    ? "conflict — this deploy sets the key to multiple values"
+                    : null,
+                },
+                el("code", { text: c.value || "" })
+              )
             );
           } else {
             cells.push(el("td", { class: "cell inherit", text: "·" }));
