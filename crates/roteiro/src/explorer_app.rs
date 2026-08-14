@@ -284,6 +284,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_js_ask_panels_render_a_model_dropdown_gated_on_multi_model() {
+        // Both Ask panels swap their static `model: <name>` label for a `<select>`
+        // model chooser WHEN more than one chat-capable model is served — populated
+        // from the capabilities `models` list, default-selected to the served
+        // default (`askModels[0]`, generative-first). With exactly one model it must
+        // stay a static label (no pointless 1-option dropdown), and the PICKED model
+        // (`askModel`/`wsAskModel`) — not a hardcoded index — is what each submit
+        // sends. Pin the gating + wiring so a regression is caught headlessly.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            // the shared control, and its single-model static-label branch (the gate)
+            "function askModelControl",
+            "models.length === 1",
+            // multi-model → a <select> populated from the capabilities model list,
+            // default-selected to the generative-first pick
+            "p-ask-model-select",
+            "o.selected = true",
+            // both panels seed their pick from the served default and update it live
+            "state.askModel = state.askModels[0]",
+            "state.wsAskModel = state.askModels[0]",
+            // the PICKED model is what goes on the wire (project + workspace Ask)
+            "model: state.askModel || state.askModels[0]",
+            "model: state.wsAskModel || state.askModels[0]",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn app_js_cited_node_click_opens_the_node_detail_with_content() {
+        // Clicking a cited node must NAVIGATE TO and OPEN it: the project Ask selects
+        // the node (which activates the Node tab + loads its detail); the workspace
+        // Ask drills into the cited key's PROJECT and then — via `focusPending` —
+        // opens the node's detail even when the graph view doesn't plot that node
+        // (e.g. a `file:` citation). The Node detail renders the node's captured
+        // `meta.content` (a file/doc's text) so a cited node can be read in place.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            // project Ask: a citation click selects → opens the Node tab + detail
+            "function askGoToNode",
+            // workspace Ask: drill into the cited key's project, then open the node
+            "function focusPending",
+            // `focusPending` always opens the node detail (not gated on it being plotted)
+            "// whether or not the graph happens to plot it.",
+            "activateTab(\"node\")",
+            "loadNodeDetail(state.projectWs, state.project, key)",
+            // Node detail surfaces the node's captured content (file/doc text)
+            "exp.meta.content",
+            "p-node-content",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_styles_the_node_content_and_model_dropdown() {
+        // The two new UX surfaces need their styles shipped in the shell: the Node
+        // detail's captured-content block and the Ask model `<select>`. Pin the class
+        // hooks so the CSS isn't dropped in a refactor.
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [".p-node-content", "select.p-ask-model-select"] {
+            assert!(body.contains(needle), "shell CSS must define `{needle}`");
+        }
+    }
+
+    #[tokio::test]
     async fn shell_scaffolds_the_workspace_ask_panel_gated_hidden() {
         // The workspace (overview) view carries a graph-grounded Ask panel beside the
         // topology/matrix. It must ship HIDDEN — the llama-free explorer reports

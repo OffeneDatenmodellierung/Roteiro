@@ -958,6 +958,25 @@
         word-break: break-all;
         margin: 0.35rem 0 0.2rem;
       }
+      .p-node-content {
+        max-height: 340px;
+        overflow: auto;
+        margin: 0.35rem 0 0.5rem;
+        padding: 0.5rem 0.6rem;
+        background: #0d1117;
+        border: 1px solid var(--pline);
+        border-radius: 6px;
+        font-size: 0.75rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .p-node-content code {
+        color: var(--pfg);
+        background: none;
+        border: none;
+        padding: 0;
+      }
       .p-chips {
         display: flex;
         flex-wrap: wrap;
@@ -1052,6 +1071,21 @@
       .p-ask-model {
         color: var(--pmuted);
         font-size: 0.8rem;
+      }
+      select.p-ask-model-select {
+        font: inherit;
+        font-size: 0.8rem;
+        color: var(--pfg);
+        background: #0d1117;
+        border: 1px solid var(--pline-strong);
+        border-radius: 6px;
+        padding: 0.25rem 0.4rem;
+        cursor: pointer;
+        max-width: 60%;
+      }
+      select.p-ask-model-select:focus {
+        outline: none;
+        border-color: var(--paccent);
       }
       .p-ask-answer {
         white-space: pre-wrap;
