@@ -3530,7 +3530,7 @@ fn serve_graph_ui(
     // The read-only data API plus the served web app (HTML shell, our ES app, and
     // the vendored cytoscape.js) — same-origin, so the app fetches `/v1/graph/*`
     // with no CORS. The Ask tab stays off: this llama-free server has no
-    // `/v1/chat/completions`. A full `serve --models` build mounts these same
+    // `/v1/chat/completions`. A `roteiro serve` build with a model installed mounts these same
     // surfaces beside `/v1` (with Ask on) via `mount_explorer_surfaces` instead.
     let router = graph_api::router(set.clone(), default.clone()).merge(explorer_app::router());
 
@@ -4284,7 +4284,7 @@ fn resolve_serve_tls(
     }
 }
 
-/// The workspace surfaces a `serve --models` process serves, bundled so
+/// The workspace surfaces a `roteiro serve` model-server process serves, bundled so
 /// [`serve_v1_tail`] stays within the argument-count budget: the full multi-workspace
 /// `set` (read-only `/v1/graph/*` API + UI, explorer builds) and the flattened `flat`
 /// workspace over every hosted project (model tools + MCP), plus the validated
@@ -4353,8 +4353,8 @@ fn serve_v1_tail(
         None => rto_serve::app(engine),
     };
 
-    // With the explorer UI compiled in (`--features serve,explorer`), a full
-    // `serve --models` process is the single coherent way to run the whole
+    // With the explorer UI compiled in (`--features serve,explorer`), a
+    // `roteiro serve` process with a model installed is the single coherent way to run the whole
     // explorer + Ask experience (ADR-0010): mount the read-only `/v1/graph/*` data
     // API AND the static web app beside `/v1`, and advertise the chat endpoint the
     // model router already exposes so the UI enables its Ask tab. The engine built
@@ -4390,7 +4390,7 @@ fn serve_v1_tail(
         }
         #[cfg(not(feature = "mcp"))]
         anyhow::bail!(
-            "`serve --models --mcp` needs the `mcp` feature (build with `--features serve,mcp`)"
+            "`roteiro serve --mcp` needs the `mcp` feature (build with `--features serve,mcp`)"
         );
     }
 
@@ -4403,8 +4403,8 @@ fn serve_v1_tail(
     }
 }
 
-/// Merge the explorer's read-only data API and its static web app onto a full
-/// `serve --models` router, advertising the mounted Ask (chat) endpoint. The graph
+/// Merge the explorer's read-only data API and its static web app onto a
+/// `roteiro serve` model-server router, advertising the mounted Ask (chat) endpoint. The graph
 /// API is multi-workspace-aware (ADR-0008): `set` is the FULL configured
 /// [`rto_graph::WorkspaceSet`], so `GET /v1/graph/workspaces` lists every hosted
 /// workspace and each is reachable both flat (via `default`) and under
@@ -4957,9 +4957,16 @@ mod url_tests {
 // new default `serve` is the network server, `mcp` is the STDIO/HTTP MCP server,
 // and each deprecated alias still parses, routes to the right backend, and carries
 // its one-line deprecation notice. Pure parsing/dispatch — no socket is bound.
-#[cfg(all(test, feature = "mcp", feature = "explorer"))]
+// Gated on ANY server backend so the routing is exercised in every valid combo —
+// `serve`-only and `mcp`-only builds route commands too, not just `serve,explorer`.
+// The `serve`-surface items exist under any of the three features; the MCP-specific
+// items (`route_mcp`, the `Command::Mcp` variant) need `mcp`/`serve`, so the tests
+// that touch them carry a narrower `#[cfg]` of their own.
+#[cfg(all(test, any(feature = "serve", feature = "mcp", feature = "explorer")))]
 mod cli_routing {
-    use super::{Cli, Command, ServerRoute, route_mcp, route_serve, serve_deprecation_notice};
+    #[cfg(any(feature = "mcp", feature = "serve"))]
+    use super::route_mcp;
+    use super::{Cli, Command, ServerRoute, route_serve, serve_deprecation_notice};
     use clap::Parser as _;
 
     fn parse<const N: usize>(args: [&str; N]) -> Command {
@@ -4981,6 +4988,9 @@ mod cli_routing {
         assert_eq!(serve_deprecation_notice(models, None), None);
     }
 
+    // `route_mcp` and the `Command::Mcp` variant exist only with the `mcp`/`serve`
+    // MCP backend; a pure-`explorer` build has no `mcp` command to route.
+    #[cfg(any(feature = "mcp", feature = "serve"))]
     #[test]
     fn mcp_routes_to_stdio_by_default() {
         let Command::Mcp { http, .. } = parse(["roteiro", "mcp"]) else {
@@ -4990,6 +5000,7 @@ mod cli_routing {
         assert_eq!(route_mcp(http), ServerRoute::McpStdio);
     }
 
+    #[cfg(any(feature = "mcp", feature = "serve"))]
     #[test]
     fn mcp_http_routes_to_networked_mcp() {
         let Command::Mcp { http, .. } = parse(["roteiro", "mcp", "--http", "127.0.0.1:8080"])
@@ -5002,6 +5013,7 @@ mod cli_routing {
         );
     }
 
+    #[cfg(any(feature = "mcp", feature = "serve"))]
     #[test]
     fn mcp_carries_the_workspace_options() {
         let Command::Mcp {
@@ -5072,7 +5084,7 @@ mod cli_routing {
     }
 }
 
-// The full explorer + Ask wiring a `serve --models` build stands up: the UI, the
+// The full explorer + Ask wiring a `roteiro serve` build with a model installed stands up: the UI, the
 // `/v1/graph/capabilities` signal (ask:true + served models), and the graph-tools
 // chat route — all mounted by `mount_explorer_surfaces` over the one engine.
 // Gated on `serve,explorer` and driven with a mock engine (no llama.cpp, no
@@ -5248,7 +5260,7 @@ mod serve_explorer_wiring {
 
     #[tokio::test]
     async fn serve_hosts_all_configured_workspaces_with_no_cwd_repo() {
-        // The whole point of the change: a `serve --models` process built from
+        // The whole point of the change: a `roteiro serve` model-server process built from
         // `[[workspaces]]`/`[standalone]` config hosts EVERY configured workspace
         // and lists them at `/v1/graph/workspaces` — with no repo discovered from
         // the current directory and no `open_graph()` on the cwd (this router is
