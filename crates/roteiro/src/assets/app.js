@@ -1988,7 +1988,19 @@
   // Node keys the model cites (`fn:foo`, `file:src/main.rs`, `sym:rust:…#x`) —
   // `prefix:body`, where the body runs to the first whitespace/quote. Skips web
   // URLs (http/https/mailto), which share the `word:` shape but aren't graph keys.
+  // Group 1 is the key prefix (the URL-checkable segment); there is no project.
   const KEY_RE = /\b([a-z][a-z0-9_]{1,24}):([A-Za-z0-9_./#:@+-]{2,})/g;
+  // The WORKSPACE Ask cites PROJECT-QUALIFIED keys, `<project>::<prefix>:<body>`
+  // (e.g. `gam::fn:foo`, `stream-sync::sym:rust:src/main.rs#run`). A project
+  // segment is a repo/dir name, so — unlike a key prefix — it may contain `-`/`.`;
+  // an unqualified `prefix:body` still matches (the optional group is empty), so
+  // this regex is a strict superset of `KEY_RE`. The explicit project group is why
+  // the workspace linkifier can't lean on `KEY_RE`'s body swallowing the `::` — a
+  // hyphenated project (`stream-sync::…`) would otherwise be mis-split at `sync`.
+  // Group 1 = project (or undefined), group 2 = key prefix (the URL-checkable
+  // segment), group 3 = body. The whole match (`m[0]`) is the full key token.
+  const WS_KEY_RE =
+    /\b(?:([A-Za-z0-9_.-]+)::)?([a-z][a-z0-9_]{1,24}):([A-Za-z0-9_./#:@+-]{2,})/g;
   const URL_PREFIX = /^(https?|mailto|ftp|ws|wss)$/i;
   // End-of-sentence punctuation the regex would otherwise pull into the key
   // (`See file:src/main.rs.` → the trailing `.`). Trimmed off before linkifying
@@ -2021,17 +2033,23 @@
   // Render the answer as prose with cited node keys turned into links. `onActivate`
   // is the per-key action: the project Ask selects the node in the current graph
   // (default), the workspace Ask hops to the key's project (see `submitWorkspaceAsk`).
-  function renderAnswer(answer, text, onActivate) {
+  // `keyRe`/`prefixGroup` select the citation grammar: the project Ask uses the
+  // unqualified `KEY_RE` (prefix in group 1); the workspace Ask passes `WS_KEY_RE`
+  // (project in group 1, prefix in group 2) so a `<project>::<key>` citation is
+  // linkified as ONE token and routed — with its project — to `onActivate`.
+  function renderAnswer(answer, text, onActivate, keyRe, prefixGroup) {
     answer.hidden = false;
     answer.className = "p-ask-answer";
+    const re = keyRe || KEY_RE;
+    const pg = prefixGroup || 1;
     const frag = document.createDocumentFragment();
     const refs = new Set();
     let last = 0;
     let m;
-    KEY_RE.lastIndex = 0;
-    while ((m = KEY_RE.exec(text)) !== null) {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
       const raw = m[0];
-      if (URL_PREFIX.test(m[1])) continue; // a URL, not a graph key
+      if (URL_PREFIX.test(m[pg])) continue; // a URL, not a graph key
       const key = raw.replace(KEY_TRAIL_PUNCT, "");
       // Trimmed down to just a prefix (e.g. `file:...`) — not a real key; leave the
       // whole token as plain text (don't advance `last` past it).
@@ -2182,7 +2200,7 @@
           data.choices[0].message &&
           data.choices[0].message.content) ||
         "(the model returned an empty answer)";
-      renderAnswer(answer, content, wsAskGoToProject);
+      renderAnswer(answer, content, wsAskGoToProject, WS_KEY_RE, 2);
     } catch (err) {
       showAnswer(answer, String((err && err.message) || err), true);
     } finally {
@@ -2192,12 +2210,23 @@
   }
 
   // A cited key in a workspace answer belongs to some project, so a click drills
-  // into that project (there is no single workspace graph to select within). A
-  // project-qualified key (`<project>::<key>`) names its project directly; a bare
-  // key can't be placed, so it stays inert text-styled but does nothing.
+  // into that project AT the cited node (there is no single workspace graph to
+  // select within). A project-qualified key (`<project>::<key>`) names its project
+  // directly; we pre-seed `pendingNav` (the same focus-a-node-on-load hop the
+  // cross-repo bridge uses) so the target project's graph opens centred on the
+  // node, then navigate. A bare, unqualified key can't be placed in a project, so
+  // it does nothing.
   function wsAskGoToProject(key) {
     const q = parseQualifiedKey(key);
-    if (q) navigateToProject(q.project);
+    if (!q) return;
+    const ws = state.current;
+    state.pendingNav = {
+      ws,
+      project: q.project,
+      trail: [{ ws, project: q.project }],
+      focus: q.key,
+    };
+    goProject(ws, q.project);
   }
 
   // Split a `<project>::<key>` citation into its parts (mirrors the server-side
