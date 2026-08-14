@@ -43,9 +43,9 @@ prompt: |
 # (and `omni setup` has no top-level Gateway option for the openai-agents harness).
 #
 # `config.use_responses: false` is REQUIRED: the openai-agents harness defaults to
-# the OpenAI Responses API (/v1/responses), but `roteiro serve` only exposes
-# /v1/chat/completions (+ /v1/models, /v1/embeddings) — without this every turn
-# 404s. `model: qwen3-8b` is the plain served id (NO provider prefix) and must
+# the OpenAI Responses API (/v1/responses), which `roteiro serve` does NOT route
+# (it serves /v1/chat/completions for chat, plus /v1/models, /v1/embeddings, and
+# the /v1/graph/* API) — without this every turn 404s. `model: qwen3-8b` is the plain served id (NO provider prefix) and must
 # appear in `GET http://127.0.0.1:8017/v1/models`.
 executor:
   type: omnigent

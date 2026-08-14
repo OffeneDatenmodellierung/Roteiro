@@ -91,8 +91,9 @@ executor:
   `inner/openai_agents_sdk_executor.py`).
 * **`config.use_responses: false` is REQUIRED.** The `openai-agents` harness
   defaults to the OpenAI **Responses API** (`/v1/responses`) for non-`gpt`
-  models, but `roteiro serve` only routes `/v1/chat/completions` (+ `/v1/models`,
-  `/v1/embeddings`) — with the default, **every turn 404s**. This setting forces
+  models, but `roteiro serve` does **not** route `/v1/responses` (it serves
+  `/v1/chat/completions` for chat, plus `/v1/models`, `/v1/embeddings`, and the
+  `/v1/graph/*` API) — with the default, **every turn 404s**. This setting forces
   the Chat Completions endpoint. **[confirmed]** (`crates/rto-serve/src/server.rs`
   routes; `runtime/workflow.py` → `OpenAIProvider(use_responses=False)`).
 * **`model: qwen3-8b`** is sent **verbatim** as the OpenAI model id (no provider
@@ -308,7 +309,7 @@ resolve and enforce. The mapping is: docs `handler:` → `function.path`, docs
 * **Playwright MCP**: `npx @playwright/mcp@latest` (npm `@playwright/mcp`, bin `playwright-mcp`; verified via `npm view`).
 * **GitHub MCP**: canonical package is **`@modelcontextprotocol/server-github`**. The task's shorthand `server-github` is an **unrelated npm security-hold placeholder** (`server-github@0.0.1-security`), so the canonical name is used here.
 * **Roteiro MCP**: the stdio MCP graph server is **`roteiro mcp`** (ADR-0002; STDIO by default, `--http ADDR` for networked). `roteiro serve` is the separate HTTP model endpoint and does **not** speak MCP over stdio. Verified against `crates/roteiro/src/main.rs` (`Command::Mcp`) and `crates/roteiro/tests/mcp_cli.rs` (`mcp_answers_initialize_and_tools_call` drives `roteiro mcp` over stdio). Graph tools: `search` / `explain` / `path` / `debt`. With no `--workspace`/`-w`, `roteiro mcp` serves the current directory's repo.
-* `roteiro serve --models` default bind `127.0.0.1:8017`, OpenAI-compatible `/v1` — routes `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` only (**no `/v1/responses`**), so `use_responses: false` is required for the openai-agents harness.
+* `roteiro serve --models` default bind `127.0.0.1:8017`, OpenAI-compatible `/v1` — serves `/v1/chat/completions`, `/v1/models`, `/v1/embeddings`, and the `/v1/graph/*` API, but **not `/v1/responses`**, so `use_responses: false` is required for the openai-agents harness.
 * Inline `auth: {type: api_key, api_key, base_url}` parses (`spec/parser.py`) and is honored to `AsyncOpenAI(base_url=…)`; `OPENAI_BASE_URL`/`OPENAI_API_KEY` env fallback also works (`inner/openai_agents_sdk_executor.py`).
 * `policy_modules` is a **server-config** key (not agent config); local `omni run` resolves the handler by import (`PYTHONPATH`).
 
