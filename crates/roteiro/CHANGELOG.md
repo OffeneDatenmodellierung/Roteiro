@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.5.0...roteiro-v1.5.1) - 2026-08-14
+
+### Fixed
+
+- *(explorer)* surface drift-cell value conflicts deterministically
+- *(explorer)* dedup drift matrix to one row per config key
+
 ## [1.5.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.4.0...roteiro-v1.5.0) - 2026-08-14
 
 ### Added

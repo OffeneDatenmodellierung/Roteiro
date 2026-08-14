@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.5.0...rto-llama-v1.5.1) - 2026-08-14
+
+### Fixed
+
+- *(serve)* address PR #272 review — lazy arch read + accurate lookup-error message
+- *(serve)* fall back to a default chat template when a GGUF embeds none
+
 ## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v0.0.19...rto-llama-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
