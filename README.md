@@ -36,6 +36,34 @@ config), and [ADR-0001](docs/adr/0001-build-roteiro-unified-codebase-knowledge-g
 plus [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) for the design and roadmap.
 Contribution + review standards live in [`AGENTS.md`](AGENTS.md).
 
+## Logging
+
+By default Roteiro logs human-readable text to **stdout**, unchanged. You can
+*additionally* stream logs to a **rotating file** in an OpenTelemetry-shaped JSON
+format (groundwork for a future OTLP collector — see
+[ADR-0011](docs/adr/0011-structured-file-logging-otel-groundwork.md)):
+
+```sh
+roteiro --log <cmd>                                  # file at $ROTEIRO_HOME/logs/roteiro.log
+roteiro --log-file /var/log/roteiro.log <cmd>        # explicit path (enables it)
+roteiro --log-rotation hourly --log-format otel <cmd>
+```
+
+Or set it once in `roteiro.toml` (or `~/.roteiro/config.toml`):
+
+```toml
+[telemetry]
+file = "~/.roteiro/logs/roteiro.log"   # unset ⇒ file logging OFF (stdout only)
+rotation = "daily"                     # daily | hourly | minutely | never
+format = "otel"                        # otel | json (alias) | text
+```
+
+Each flag also has an env var (`ROTEIRO_LOG_FILE`, `ROTEIRO_LOG_ROTATION`,
+`ROTEIRO_LOG_FORMAT`); `ROTEIRO_LOG` sets level filter directives (e.g. `debug`).
+Precedence is flag > env > project > user > default. Writes are non-blocking, so
+logging to disk never stalls a command. The OTLP network exporter and metrics are
+deferred; see the ADR for the field mapping and the seam.
+
 ## Workspace
 
 - `crates/rto-graph` — SQLite store, provenance model, content-addressed cache, extraction, sync, query, inference

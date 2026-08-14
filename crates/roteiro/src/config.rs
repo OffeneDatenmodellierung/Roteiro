@@ -51,6 +51,9 @@ pub struct Config {
     pub debt: DebtConfig,
     /// Filesystem locations (the model store).
     pub paths: PathsConfig,
+    /// `[telemetry]` — opt-in structured file logging (ADR-0011). Unset ⇒ stdout
+    /// only, unchanged.
+    pub telemetry: TelemetryConfig,
     /// `roteiro serve --workspace` — repos a single server can host (ADR-0008).
     /// The legacy **single** workspace; still fully supported and, when it names
     /// any repos, folded in as the `default` linked workspace (see
@@ -91,6 +94,49 @@ pub struct PathsConfig {
     /// The model store directory (default `~/.roteiro/models`, or
     /// `$ROTEIRO_HOME/models`). A leading `~/` is expanded to the home directory.
     pub model_store: Option<String>,
+}
+
+/// `[telemetry]` — opt-in structured file logging, the groundwork for a future
+/// OpenTelemetry exporter (ADR-0011). Every field is optional; with the whole
+/// table absent, Roteiro logs exactly as it does today — human-readable text on
+/// stdout, nothing written to disk. Setting `file` (or the `--log-file` flag /
+/// `ROTEIRO_LOG_FILE` env var, or the `--log` flag for the default path) turns on
+/// a **second**, structured sink to a rotating file, leaving stdout untouched.
+///
+/// The name is `telemetry`, not `log`, deliberately: this table is the seam for
+/// the deferred OTLP logs **and** metrics/traces exporter (ADR-0011), so it
+/// should read as "observability config", not "the log file". Precedence is the
+/// usual CLI flag / env var > project > user > built-in default (ADR-0007).
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Path to the rotating log file. **Unset ⇒ file logging is off** (stdout
+    /// only). A leading `~/` is expanded to the home directory; a relative path is
+    /// resolved under `$ROTEIRO_HOME` (else `~/.roteiro`). When file logging is
+    /// enabled without an explicit path (the `--log` flag), the default is
+    /// `$ROTEIRO_HOME/logs/roteiro.log`.
+    pub file: Option<String>,
+    /// Rotation cadence for the file appender: `daily` (default), `hourly`,
+    /// `minutely`, or `never` (a single, unrotated file). Time-based only —
+    /// size-based rotation is out of scope for `tracing-appender` and deferred to
+    /// the OTLP step (ADR-0011).
+    pub rotation: Option<String>,
+    /// On-disk record format: `otel` (default) / `json` — one
+    /// OpenTelemetry-shaped JSON object per line (see [`crate::telemetry`] for the
+    /// field mapping) — or `text`, the same human-readable format stdout uses.
+    pub format: Option<String>,
+}
+
+impl TelemetryConfig {
+    /// Overlay `over` on top of `self` per field (the project layer over the user
+    /// layer), taking `over`'s value wherever set.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            file: over.file.clone().or_else(|| self.file.clone()),
+            rotation: over.rotation.clone().or_else(|| self.rotation.clone()),
+            format: over.format.clone().or_else(|| self.format.clone()),
+        }
+    }
 }
 
 /// `[workspace]` — the repos one `roteiro serve` can host (ADR-0008). Naturally a
@@ -295,6 +341,7 @@ impl Config {
                     .clone()
                     .or(self.paths.model_store.clone()),
             },
+            telemetry: self.telemetry.overlaid_with(&over.telemetry),
             workspace: WorkspaceConfig {
                 roots: over
                     .workspace
@@ -545,14 +592,29 @@ fn read_config(path: Option<&Path>) -> anyhow::Result<Config> {
     toml::from_str(&text).map_err(|e| anyhow::anyhow!("parsing config {}: {e}", path.display()))
 }
 
+/// Roteiro's home directory: `$ROTEIRO_HOME` when set, else `~/.roteiro`. The one
+/// place the model store, the user config, and the default log path
+/// ([`default_log_path`]) resolve their base, so they always agree. Returns
+/// `None` only when neither `ROTEIRO_HOME` nor a home directory is discoverable.
+pub(crate) fn roteiro_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("ROTEIRO_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".roteiro"))
+}
+
+/// The default rotating-log path used when file logging is enabled without an
+/// explicit path (`roteiro --log`): `$ROTEIRO_HOME/logs/roteiro.log`, else
+/// `~/.roteiro/logs/roteiro.log`.
+pub(crate) fn default_log_path() -> Option<PathBuf> {
+    Some(roteiro_home()?.join("logs").join("roteiro.log"))
+}
+
 /// The user config path: `$ROTEIRO_HOME/config.toml`, else `~/.roteiro/config.toml`
 /// (mirrors the model store's home resolution).
 fn user_config_path() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("ROTEIRO_HOME") {
-        return Some(PathBuf::from(home).join("config.toml"));
-    }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".roteiro").join("config.toml"))
+    Some(roteiro_home()?.join("config.toml"))
 }
 
 /// Find the project `roteiro.toml` at the **repository root** — the nearest
@@ -671,6 +733,36 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `[telemetry]` block parses, and overlays per field (project over user)
+    /// like the other tables: an unset field falls back to the user layer.
+    #[test]
+    fn telemetry_block_parses_and_overlays_per_field() {
+        // Absent table ⇒ all fields None (file logging off by default).
+        let none: Config = toml::from_str("[infer]\ntop_k = 1\n").expect("parse");
+        assert_eq!(none.telemetry, super::TelemetryConfig::default());
+
+        let user: Config = toml::from_str(
+            "[telemetry]\nfile = \"~/.roteiro/logs/roteiro.log\"\nrotation = \"daily\"\nformat = \"otel\"\n",
+        )
+        .expect("parse user");
+        assert_eq!(
+            user.telemetry.file.as_deref(),
+            Some("~/.roteiro/logs/roteiro.log")
+        );
+        assert_eq!(user.telemetry.rotation.as_deref(), Some("daily"));
+
+        // Project overrides only `rotation`; user's `file`/`format` survive.
+        let project: Config =
+            toml::from_str("[telemetry]\nrotation = \"hourly\"\n").expect("parse project");
+        let merged = user.overlaid_with(&project);
+        assert_eq!(merged.telemetry.rotation.as_deref(), Some("hourly"));
+        assert_eq!(
+            merged.telemetry.file.as_deref(),
+            Some("~/.roteiro/logs/roteiro.log")
+        );
+        assert_eq!(merged.telemetry.format.as_deref(), Some("otel"));
     }
 
     /// Backward compat: a legacy `[workspace]`-only config parses, merges, and

@@ -35,6 +35,16 @@ axum = { version = "0.8", optional = true }
 # Layered project/user configuration (ADR-0007). TOML only — `serde_yaml` is
 # unmaintained. Permissive, `cargo deny`-clean.
 toml = "1.1"
+# Structured logging/telemetry groundwork (ADR-0011). `tracing` is the event
+# facade; `tracing-subscriber` builds the layered subscriber (the human-text
+# stdout layer, unchanged and default, plus the opt-in structured file layer);
+# `tracing-appender` provides the time-based rolling file appender and the
+# non-blocking writer (whose worker guard is held for the process lifetime so a
+# slow disk can never stall the app). No OTLP/network exporter yet — the file
+# layer emits OpenTelemetry-shaped JSON lines a future collector can ingest.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+tracing-appender = "0.2"
 # `inference-local-models` only: consent-gated model download (rustls, no
 # platform TLS). Blocking + pure-Rust.
 ureq = { version = "3", optional = true }

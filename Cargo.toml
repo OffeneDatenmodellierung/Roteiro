@@ -25,7 +25,7 @@ rto-spec = { path = "crates/rto-spec", version = "1.5.0" }
 rto-render = { path = "crates/rto-render", version = "1.5.0" }
 rto-serve = { path = "crates/rto-serve", version = "1.5.0" }
 anyhow = "1.0"
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 # Pinned to 0.39 (not the latest 0.40.x): libsqlite3-sys's build script from
 # 0.38.0 onward uses the std `cfg_select!` macro, stabilized in Rust 1.95 —
 # newer than our 1.94 MSRV, which breaks the `bundled` feature's build.rs on

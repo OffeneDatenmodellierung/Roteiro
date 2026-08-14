@@ -21,6 +21,10 @@ mod init;
 mod overview;
 mod pins;
 mod review;
+// Structured logging / telemetry init (ADR-0011): the single place the tracing
+// subscriber is built — the unchanged human-text stdout layer plus an opt-in
+// rotating, OTEL-shaped JSON file layer.
+mod telemetry;
 
 #[derive(Parser)]
 #[command(
@@ -38,6 +42,61 @@ mod review;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    #[command(flatten)]
+    log: LogArgs,
+}
+
+/// Global telemetry flags (ADR-0011), available on every subcommand. They enable
+/// and configure an **optional** rotating log **file** in an OpenTelemetry-shaped
+/// JSON format; stdout logging is unchanged and always on. Each also reads an env
+/// var (the flag wins), and all override `[telemetry]` in config.
+// `struct_field_names`: the `log_*` prefix is intentional — these are the global
+// `--log*` flags, and the shared prefix reads clearly at the (single) use site.
+#[derive(clap::Args, Debug)]
+#[allow(clippy::struct_field_names)]
+struct LogArgs {
+    /// Also write logs to this rotating FILE (OTEL-shaped JSON), in addition to
+    /// stdout. Unset ⇒ file logging is off. Overrides `[telemetry] file`.
+    #[arg(
+        long = "log-file",
+        global = true,
+        value_name = "PATH",
+        env = "ROTEIRO_LOG_FILE"
+    )]
+    log_file: Option<String>,
+    /// Enable file logging at the default path (`$ROTEIRO_HOME/logs/roteiro.log`)
+    /// when `--log-file` is not given.
+    #[arg(long = "log", global = true)]
+    log_enable: bool,
+    /// Rotation cadence for the log file: daily (default) | hourly | minutely |
+    /// never. Overrides `[telemetry] rotation`.
+    #[arg(
+        long = "log-rotation",
+        global = true,
+        value_name = "CADENCE",
+        env = "ROTEIRO_LOG_ROTATION"
+    )]
+    log_rotation: Option<String>,
+    /// Log file format: otel (default) | json | text. Overrides `[telemetry] format`.
+    #[arg(
+        long = "log-format",
+        global = true,
+        value_name = "FORMAT",
+        env = "ROTEIRO_LOG_FORMAT"
+    )]
+    log_format: Option<String>,
+}
+
+impl LogArgs {
+    /// Fold the global flags into the [`telemetry::Overrides`] the init seam takes.
+    fn overrides(&self) -> telemetry::Overrides {
+        telemetry::Overrides {
+            file: self.log_file.clone(),
+            enable_default: self.log_enable,
+            rotation: self.log_rotation.clone(),
+            format: self.log_format.clone(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -529,6 +588,11 @@ fn main() -> anyhow::Result<()> {
     // config.toml`); a malformed file is a hard error for any command (ADR-0007).
     let cwd = std::env::current_dir()?;
     let cfg = config::load(&cwd)?;
+    // Initialise logging once, here — the single subscriber-build seam (ADR-0011).
+    // Stdout logging is unchanged; a rotating OTEL-JSON file sink is added only when
+    // `[telemetry] file` / `--log-file` / `--log` enables it. The returned guard
+    // flushes the non-blocking file writer on exit, so it is held for all of `main`.
+    let _log_guard = telemetry::init(&cli.log.overrides(), &cfg.effective.telemetry)?;
     // Resolve the ingestion toggles once; every command that (re)builds the graph
     // extracts with the same set so they share one cache, never thrashing it.
     let ingest = cfg.effective.ingest.resolve();
@@ -815,8 +879,33 @@ fn print_config_sections(loaded: &config::Loaded) {
         e.serve.tools,
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
     );
-
+    print_telemetry_section(e, p, u);
     print_workspace_section(e, p, u);
+}
+
+/// Print the `[telemetry]` config section (ADR-0011), with each value's
+/// provenance. Split out of [`print_config_sections`] to keep it under the line
+/// budget.
+fn print_telemetry_section(e: &config::Config, p: &config::Config, u: &config::Config) {
+    println!("[telemetry]");
+    println!(
+        "  file     = {:?}  ({})",
+        e.telemetry.file,
+        provenance(p.telemetry.file.is_some(), u.telemetry.file.is_some())
+    );
+    println!(
+        "  rotation = {:?}  ({})",
+        e.telemetry.rotation,
+        provenance(
+            p.telemetry.rotation.is_some(),
+            u.telemetry.rotation.is_some()
+        )
+    );
+    println!(
+        "  format   = {:?}  ({})",
+        e.telemetry.format,
+        provenance(p.telemetry.format.is_some(), u.telemetry.format.is_some())
+    );
 }
 
 /// Print the `[workspace]` and `[[links]]` config sections (ADR-0008/0009), with
