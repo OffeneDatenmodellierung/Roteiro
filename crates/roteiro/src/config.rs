@@ -518,8 +518,21 @@ pub(crate) fn expand_tilde(path: &str) -> Cow<'_, Path> {
     if path != "~" && !path.starts_with("~/") {
         return Cow::Borrowed(Path::new(path));
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    Cow::Owned(expand_tilde_with(path, home.as_deref()))
+    let home = home_dir();
+    Cow::Owned(expand_tilde_with(
+        path,
+        home.as_deref().map(std::path::Path::as_os_str),
+    ))
+}
+
+/// The user's home directory: `$HOME`, else `$USERPROFILE` (Windows). The one home
+/// lookup shared across the codebase — [`expand_tilde`]'s `~` expansion and
+/// [`roteiro_home`]'s `~/.roteiro` fallback both resolve home through it. Returns
+/// `None` when neither is set. Env-var expansion beyond `~` is out of scope.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// Core of [`expand_tilde`] with the home directory injected, so tests drive it
@@ -600,8 +613,7 @@ pub(crate) fn roteiro_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("ROTEIRO_HOME") {
         return Some(PathBuf::from(home));
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".roteiro"))
+    Some(home_dir()?.join(".roteiro"))
 }
 
 /// The default rotating-log path used when file logging is enabled without an

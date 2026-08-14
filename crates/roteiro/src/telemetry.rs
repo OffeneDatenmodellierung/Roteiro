@@ -194,15 +194,51 @@ fn resolve(overrides: &Overrides, cfg: &TelemetryConfig) -> anyhow::Result<Setti
     })
 }
 
-/// Expand a leading `~/` and anchor a relative path under `$ROTEIRO_HOME`
-/// (else `~/.roteiro`), so a bare `roteiro.log` lands beside the config rather
-/// than in an arbitrary cwd. An absolute path is used verbatim.
+/// Resolve a configured log path: expand a leading `~/`, and anchor a relative
+/// path under `$ROTEIRO_HOME` (else `~/.roteiro`), so a bare `roteiro.log` lands
+/// beside the config rather than in an arbitrary cwd. An absolute path is used
+/// verbatim. See [`resolve_path_with`] for the (env-free, testable) core.
 fn resolve_path(raw: &str) -> PathBuf {
-    let expanded = config::expand_tilde(raw).into_owned();
-    if expanded.is_absolute() {
-        return expanded;
+    resolve_path_with(
+        raw,
+        config::home_dir().as_deref(),
+        config::roteiro_home().as_deref(),
+    )
+}
+
+/// The env-free core of [`resolve_path`], with the home dir and Roteiro home
+/// injected so it can be unit-tested deterministically.
+///
+/// A leading `~`/`~/` expands against `home`. Crucially, when the home dir is
+/// **unavailable** (`home` is `None`, e.g. no `HOME`/`USERPROFILE`), the remainder
+/// is anchored under `roteiro_home` (i.e. `$ROTEIRO_HOME`) instead of leaving a
+/// literal `~` — which would otherwise make the file logger create `./~/…` under
+/// the cwd. A genuinely relative path is likewise anchored under `roteiro_home`.
+/// Only when neither home is resolvable does a relative remainder stay relative,
+/// but it never keeps a literal `~` segment.
+fn resolve_path_with(
+    raw: &str,
+    home: Option<&std::path::Path>,
+    roteiro_home: Option<&std::path::Path>,
+) -> PathBuf {
+    if raw == "~" || raw.starts_with("~/") {
+        let rest = raw.strip_prefix("~/").unwrap_or("");
+        if let Some(h) = home {
+            return if rest.is_empty() {
+                h.to_path_buf()
+            } else {
+                h.join(rest)
+            };
+        }
+        // No home dir: fall back to `$ROTEIRO_HOME`; if that is missing too, keep
+        // the de-tilded remainder relative (never a literal `~`).
+        return roteiro_home.map_or_else(|| PathBuf::from(rest), |rh| rh.join(rest));
     }
-    config::roteiro_home().map_or(expanded.clone(), |home| home.join(&expanded))
+    let p = PathBuf::from(raw);
+    if p.is_absolute() {
+        return p;
+    }
+    roteiro_home.map_or(p.clone(), |rh| rh.join(&p))
 }
 
 /// Build the subscriber and install it as the global default (ADR-0011). The
@@ -216,10 +252,15 @@ fn resolve_path(raw: &str) -> PathBuf {
 pub fn init(overrides: &Overrides, cfg: &TelemetryConfig) -> anyhow::Result<Guard> {
     let settings = resolve(overrides, cfg)?;
 
-    // Stdout: the existing human text format, kept default. Its filter defaults to
-    // `warn` (env `ROTEIRO_LOG`) so ordinary runs print nothing new — stdout stays
-    // exactly as it is today, since the app emits no tracing events yet.
-    let stdout = fmt::layer().with_filter(env_filter(Level::WARN)).boxed();
+    // Stdout: the existing human text format, kept default. The writer is set
+    // explicitly to `stdout` (rather than relying on the fmt layer's default) so
+    // this layer's destination matches its name and the docs, and can't drift.
+    // Its filter defaults to `warn` (env `ROTEIRO_LOG`) so ordinary runs print
+    // nothing new — stdout stays exactly as it is today.
+    let stdout = fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_filter(env_filter(Level::WARN))
+        .boxed();
     let mut layers: Vec<BoxLayer> = vec![stdout];
 
     let mut guard = None;
@@ -434,9 +475,50 @@ impl tracing::field::Visit for JsonVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Format, Overrides, Rotation, file_layer, resolve};
+    use super::{Format, Overrides, Rotation, file_layer, resolve, resolve_path_with};
     use crate::config::TelemetryConfig;
+    use std::path::{Path, PathBuf};
     use tracing_subscriber::layer::SubscriberExt as _;
+
+    /// Path resolution, including the no-HOME fallback: a `~/…` path resolves under
+    /// the home dir when it's available, but under `$ROTEIRO_HOME` when the home dir
+    /// can't be resolved — never as a literal `~` segment under the cwd (which would
+    /// make the file logger write `./~/…`). Relative paths anchor under Roteiro home.
+    #[test]
+    fn resolve_path_expands_tilde_and_falls_back_to_roteiro_home() {
+        let home = Path::new("/home/u");
+        let rh = Path::new("/iso/.roteiro");
+
+        // `~/…` with a home dir available → under home.
+        assert_eq!(
+            resolve_path_with("~/.roteiro/logs/roteiro.log", Some(home), Some(rh)),
+            PathBuf::from("/home/u/.roteiro/logs/roteiro.log")
+        );
+        // Bare `~` → the home dir itself.
+        assert_eq!(resolve_path_with("~", Some(home), Some(rh)), home);
+
+        // No HOME/USERPROFILE, but ROTEIRO_HOME set → anchor under it, NOT `./~/…`.
+        let got = resolve_path_with("~/logs/roteiro.log", None, Some(rh));
+        assert_eq!(got, PathBuf::from("/iso/.roteiro/logs/roteiro.log"));
+        assert!(
+            !got.components().any(|c| c.as_os_str() == "~"),
+            "no literal ~ segment survives: {got:?}"
+        );
+
+        // Neither home resolvable → relative remainder, still no literal `~`.
+        let got = resolve_path_with("~/logs/x.log", None, None);
+        assert_eq!(got, PathBuf::from("logs/x.log"));
+
+        // A relative path anchors under Roteiro home; an absolute path is verbatim.
+        assert_eq!(
+            resolve_path_with("roteiro.log", Some(home), Some(rh)),
+            PathBuf::from("/iso/.roteiro/roteiro.log")
+        );
+        assert_eq!(
+            resolve_path_with("/var/log/roteiro.log", Some(home), Some(rh)),
+            PathBuf::from("/var/log/roteiro.log")
+        );
+    }
 
     /// `resolve` honours precedence: overrides beat config, and defaults fill the
     /// rest; an unset path with no `--log` means file logging is disabled.
