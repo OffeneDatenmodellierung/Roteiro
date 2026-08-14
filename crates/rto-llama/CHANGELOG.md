@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.5.0...rto-llama-v1.6.0) - 2026-08-14
+
+### Added
+
+- *(telemetry)* route native llama.cpp + ggml logs through tracing
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/file-logging-rotation
+
 ## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v0.0.19...rto-llama-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.

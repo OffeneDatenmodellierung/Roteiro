@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.5.0...roteiro-v1.6.0) - 2026-08-14
+
+### Added
+
+- *(telemetry)* route native llama.cpp + ggml logs through tracing
+- *(telemetry)* opt-in rotating OTEL-JSON file logging (ADR-0011)
+
+### Fixed
+
+- *(telemetry)* address PR #274 Copilot review
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/file-logging-rotation
+
 ## [1.5.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.4.0...roteiro-v1.5.0) - 2026-08-14
 
 ### Added
