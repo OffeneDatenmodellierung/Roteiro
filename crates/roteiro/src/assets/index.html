@@ -274,6 +274,13 @@
         color: var(--muted);
         font-size: 0.8rem;
       }
+      /* The matrix's "hide tooling config" toggle sits at the far right of the
+         panel header, its label unbolded so only the section title reads as one. */
+      section.panel > h2 .ws-hide-tooling {
+        margin-left: auto;
+        font-weight: 400;
+        align-self: center;
+      }
 
       /* Topology ---------------------------------------------------------- */
       #topology {
@@ -1140,7 +1147,20 @@
       </section>
 
       <section class="panel">
-        <h2>Config override matrix</h2>
+        <h2>
+          Config override matrix
+          <label
+            class="p-toggle ws-hide-tooling"
+            title="Hide build/tooling/CI config keys (Cargo.toml, .github/ workflows, nextest, …). Off by default — shows everything."
+          >
+            <input
+              id="ws-hide-tooling"
+              type="checkbox"
+              aria-label="hide tooling config keys"
+            />
+            <span>Hide tooling config</span>
+          </label>
+        </h2>
         <div class="matrix-scroll">
           <div id="matrix"></div>
         </div>

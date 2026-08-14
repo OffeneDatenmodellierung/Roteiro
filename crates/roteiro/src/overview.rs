@@ -18,6 +18,11 @@ use rto_graph::Provenance;
 pub struct MatchInput {
     /// The hub config key this override maps to.
     pub hub_key: String,
+    /// The source file the hub key was read from — the `<file>` component of the
+    /// hub `config_key` node's `cfgkey:<file>#<dotted>` id. Carried onto the [`Row`]
+    /// so a client (the explorer's "hide tooling config" toggle) and the CLI can
+    /// classify the row as app vs tooling config. Empty when the source is unknown.
+    pub file: String,
     /// The spoke's own key (its naming convention).
     pub spoke_key: String,
     /// The spoke's value for it.
@@ -64,6 +69,11 @@ pub struct Cell {
 pub struct Row {
     /// The hub config key.
     pub hub_key: String,
+    /// The source file the hub key was read from (the `<file>` in the hub
+    /// `config_key` node's `cfgkey:<file>#<dotted>` id) — the classifier input for
+    /// the "hide tooling config" filter (see [`MatchInput::file`]). Additive and
+    /// backward-compatible: older clients simply ignore it. Empty when unknown.
+    pub file: String,
     /// The hub's own value (the default the spokes override).
     pub hub_value: String,
     /// Overriding cell per spoke name (only spokes that override this key).
@@ -106,6 +116,14 @@ pub fn build(
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut drift: Vec<Drift> = Vec::new();
+    // Hub keys whose matches disagreed on a source file. A `Row` is keyed by the
+    // dotted `hub_key` alone, but the same dotted key can exist in more than one hub
+    // file (a `config_key` node is keyed by `cfgkey:<file>#<dotted>`). If two matches
+    // resolve the same `hub_key` to *different* non-empty files, the row's file is
+    // ambiguous — record that so it can never be re-adopted from a later match, and
+    // leave `row.file` empty (so the opt-in tooling filter treats it as app config
+    // rather than hiding it on an arbitrary file).
+    let mut ambiguous_file: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for spoke in spokes {
         for m in spoke.matches {
@@ -113,9 +131,21 @@ pub fn build(
             let differs = hub_value != m.spoke_value;
             let row = rows.entry(m.hub_key.clone()).or_insert_with(|| Row {
                 hub_key: m.hub_key.clone(),
+                file: String::new(),
                 hub_value: hub_value.clone(),
                 cells: BTreeMap::new(),
             });
+            // Reconcile the row's source file across all matches for this hub key:
+            // adopt the first non-empty file, but clear it (permanently, via
+            // `ambiguous_file`) the moment a later match reports a different one.
+            if !m.file.is_empty() && !ambiguous_file.contains(&m.hub_key) {
+                if row.file.is_empty() {
+                    row.file.clone_from(&m.file);
+                } else if row.file != m.file {
+                    row.file.clear();
+                    ambiguous_file.insert(m.hub_key.clone());
+                }
+            }
             let cell = Cell {
                 value: m.spoke_value,
                 spoke_key: m.spoke_key,
@@ -337,6 +367,7 @@ mod tests {
             matches: vec![
                 MatchInput {
                     hub_key: "serve.addr".to_owned(),
+                    file: "config.toml".to_owned(),
                     spoke_key: "SERVE_ADDR".to_owned(),
                     spoke_value: "0.0.0.0:8443".to_owned(), // differs → override
                     confidence: 0.9,
@@ -344,6 +375,7 @@ mod tests {
                 },
                 MatchInput {
                     hub_key: "serve.tools".to_owned(),
+                    file: "config.toml".to_owned(),
                     spoke_key: "SERVE_TOOLS".to_owned(),
                     spoke_value: "true".to_owned(), // same → redundant
                     confidence: 0.98,
@@ -380,6 +412,7 @@ mod tests {
         let hub_values = BTreeMap::from([("serve.addr".to_owned(), "127.0.0.1:8017".to_owned())]);
         let same = || MatchInput {
             hub_key: "serve.addr".to_owned(),
+            file: "config.toml".to_owned(),
             spoke_key: "serve.addr".to_owned(),
             spoke_value: "127.0.0.1:8017".to_owned(),
             confidence: 0.98,
@@ -387,6 +420,7 @@ mod tests {
         };
         let over = || MatchInput {
             hub_key: "serve.addr".to_owned(),
+            file: "config.toml".to_owned(),
             spoke_key: "SERVE_ADDR".to_owned(),
             spoke_value: "0.0.0.0:8443".to_owned(),
             confidence: 0.9,
@@ -427,6 +461,7 @@ mod tests {
                 matches: vec![
                     MatchInput {
                         hub_key: "serve.addr".to_owned(),
+                        file: "config.toml".to_owned(),
                         spoke_key: "SERVE_ADDR".to_owned(),
                         spoke_value: "0.0.0.0:8443".to_owned(),
                         confidence: 0.0, // authored links carry no score
@@ -434,6 +469,7 @@ mod tests {
                     },
                     MatchInput {
                         hub_key: "serve.tools".to_owned(),
+                        file: "config.toml".to_owned(),
                         spoke_key: "SERVE_TOOLS".to_owned(),
                         spoke_value: "false".to_owned(),
                         confidence: 0.9,
@@ -456,6 +492,127 @@ mod tests {
             .find(|r| r["hub_key"] == "serve.addr")
             .unwrap()["cells"]["deploy"];
         assert_eq!(addr_cell["provenance"], "authored");
+    }
+
+    #[test]
+    fn build_carries_the_hub_source_file_onto_each_row() {
+        // Each row records the file its hub key was read from, so a client (the
+        // explorer's "hide tooling config" toggle) and the CLI can classify the row
+        // as app vs tooling config. A `Cargo.toml`-sourced key rides through the
+        // build unchanged (the filter is opt-in — build never drops it) and its file
+        // serialises verbatim, ready for `is_tooling_config_path`.
+        let hub_values = BTreeMap::from([
+            ("serve.addr".to_owned(), "127.0.0.1:8017".to_owned()),
+            ("package.name".to_owned(), "roteiro".to_owned()),
+        ]);
+        let m = build(
+            "app",
+            &hub_values,
+            vec![SpokeInput {
+                name: "deploy".to_owned(),
+                matches: vec![
+                    MatchInput {
+                        hub_key: "serve.addr".to_owned(),
+                        file: "config.toml".to_owned(),
+                        spoke_key: "SERVE_ADDR".to_owned(),
+                        spoke_value: "0.0.0.0:8443".to_owned(),
+                        confidence: 0.9,
+                        provenance: Provenance::Inferred,
+                    },
+                    MatchInput {
+                        hub_key: "package.name".to_owned(),
+                        file: "Cargo.toml".to_owned(),
+                        spoke_key: "PACKAGE_NAME".to_owned(),
+                        spoke_value: "deploy".to_owned(),
+                        confidence: 0.9,
+                        provenance: Provenance::Inferred,
+                    },
+                ],
+                orphans: vec![],
+            }],
+        );
+        let app = m.rows.iter().find(|r| r.hub_key == "serve.addr").unwrap();
+        assert_eq!(app.file, "config.toml");
+        let tooling = m.rows.iter().find(|r| r.hub_key == "package.name").unwrap();
+        assert_eq!(tooling.file, "Cargo.toml");
+        // The per-row file serialises additively for the client/CLI to classify.
+        let json = serde_json::to_value(&m).unwrap();
+        let tooling_json = json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["hub_key"] == "package.name")
+            .unwrap();
+        assert_eq!(tooling_json["file"], "Cargo.toml");
+    }
+
+    #[test]
+    fn a_hub_key_from_two_different_files_yields_an_ambiguous_empty_row_file() {
+        // A `Row` is keyed by the dotted `hub_key` alone, but the same dotted key can
+        // live in more than one hub file. If matches disagree on the source file, the
+        // row's file is ambiguous: `build` must clear it (not keep an arbitrary
+        // first-seen file), so the opt-in tooling filter treats the row as app config
+        // and never hides it on a guess. Order-independent, and a re-stated file must
+        // not resurrect the cleared value.
+        let hub_values = BTreeMap::from([("shared.key".to_owned(), "v".to_owned())]);
+        let m = |file: &str, spoke_key: &str| MatchInput {
+            hub_key: "shared.key".to_owned(),
+            file: file.to_owned(),
+            spoke_key: spoke_key.to_owned(),
+            spoke_value: "x".to_owned(),
+            confidence: 0.9,
+            provenance: Provenance::Inferred,
+        };
+        // Two spokes resolve the same hub key to different files; a third repeats the
+        // first file — the row must stay ambiguous (empty) regardless.
+        for matches in [
+            vec![
+                m("config.toml", "A"),
+                m("Cargo.toml", "B"),
+                m("config.toml", "C"),
+            ],
+            vec![m("Cargo.toml", "B"), m("config.toml", "A")],
+        ] {
+            let spokes = matches
+                .into_iter()
+                .enumerate()
+                .map(|(i, mat)| SpokeInput {
+                    name: format!("spoke{i}"),
+                    matches: vec![mat],
+                    orphans: vec![],
+                })
+                .collect();
+            let built = build("app", &hub_values, spokes);
+            let row = built
+                .rows
+                .iter()
+                .find(|r| r.hub_key == "shared.key")
+                .unwrap();
+            assert_eq!(
+                row.file, "",
+                "conflicting hub-key files must leave the row file empty (unclassifiable), not an arbitrary pick"
+            );
+        }
+
+        // Sanity: a hub key seen in ONE consistent file keeps that file — ambiguity
+        // only clears on a genuine conflict, so tooling rows still classify.
+        let consistent = build(
+            "app",
+            &hub_values,
+            vec![
+                SpokeInput {
+                    name: "a".to_owned(),
+                    matches: vec![m("Cargo.toml", "A")],
+                    orphans: vec![],
+                },
+                SpokeInput {
+                    name: "b".to_owned(),
+                    matches: vec![m("Cargo.toml", "B")],
+                    orphans: vec![],
+                },
+            ],
+        );
+        assert_eq!(consistent.rows[0].file, "Cargo.toml");
     }
 
     #[test]
