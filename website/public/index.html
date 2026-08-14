@@ -272,28 +272,44 @@ roteiro duplicates --min-similarity 0.9
 roteiro spec scaffold "rate limiting" --kind adr
 roteiro spec draft draft-adr.md         <span class="c"># fills placeholder sections</span></code></pre>
 
-<h3>3 · Serving mode <span style="font-weight:normal;color:var(--sub)">— a local OpenAI-compatible endpoint</span></h3>
-<p>Serve your installed generative/embedding models over an OpenAI-compatible
-<code>/v1</code> API on loopback — reuse the same GGUFs from your editor or scripts.
-Requires <code>--features serve</code>.</p>
-<pre><code><span class="c"># Loopback by default (127.0.0.1:8017); front a public bind with a proxy</span>
-roteiro serve --models
+<h3>3 · Serving mode <span style="font-weight:normal;color:var(--sub)">— the network HTTP server</span></h3>
+<p><code>roteiro serve</code> is the networked server: an OpenAI-compatible
+<code>/v1</code> API over your installed models, the read-only <code>/v1/graph</code>
+API and the <a href="#modes">explorer</a> web UI — all on one loopback port. Built with
+<code>--features serve</code> and a model installed, it also enables the <strong>Ask</strong>
+tab; without the model feature (or none installed) it degrades gracefully to the
+model-free graph API + UI. Binds <code>[serve] addr</code> (default
+<code>127.0.0.1:8017</code>); set <code>[serve] tls_cert</code>/<code>tls_key</code> for
+in-process HTTPS.</p>
+<pre><code><span class="c"># Network server on 127.0.0.1:8017 — /v1 + /v1/graph + the web UI</span>
+roteiro serve                            <span class="c"># → prints the URL to open</span>
 
-<span class="c"># Then call it like any OpenAI endpoint</span>
+<span class="c"># Call /v1 on that default bind like any OpenAI endpoint</span>
 curl http://127.0.0.1:8017/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"hello"}]}'</code></pre>
+  -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"hello"}]}'
+
+<span class="c"># Or override the bind address/port and terminate TLS in-process (then use https://…)</span>
+roteiro serve --addr 0.0.0.0:8443 --tls-cert fullchain.pem --tls-key privkey.pem</code></pre>
+<div class="note"><strong>No auth on <code>/v1</code>.</strong> A non-loopback bind like
+<code>0.0.0.0:8443</code> is warned about — use in-process TLS
+(<code>[serve] tls_cert</code>/<code>tls_key</code>) or a reverse proxy. In-process TLS is a
+<code>serve</code> feature; <code>roteiro explorer</code> serves plain HTTP only.</div>
 
 <h3>4 · MCP mode <span style="font-weight:normal;color:var(--sub)">— the graph, for AI agents</span></h3>
 <p>Expose the knowledge graph to an MCP-capable agent (Claude, editors, custom
 tooling). Agents get typed tools to query nodes, fetch a node's context bundle,
 find paths and list debt — grounded in the <em>same</em> graph humans review.
 Requires <code>--features mcp</code>.</p>
-<pre><code><span class="c"># Default: MCP over stdio (for a local agent to spawn)</span>
-roteiro serve
+<pre><code><span class="c"># Default: the MCP graph server over stdio (for a local agent to spawn)</span>
+roteiro mcp
 
 <span class="c"># Or networked over streamable HTTP (terminate TLS at a reverse proxy)</span>
-roteiro serve --http 127.0.0.1:8080</code></pre>
+roteiro mcp --http 127.0.0.1:8080</code></pre>
+<div class="note"><strong>Renamed in v1.5.</strong> The MCP graph server moved from
+<code>roteiro serve</code> to <code>roteiro mcp</code>; bare <code>roteiro serve</code> is now
+the <a href="#modes">network HTTP server</a>. The old <code>serve --http</code> and
+<code>serve --models</code> spellings still work as deprecated aliases (with a notice).</div>
 
 <h3>5 · Explorer mode <span style="font-weight:normal;color:var(--sub)">— the graph, in your browser</span></h3>
 <p>An interactive web view of the graph. Start at a workspace overview — the
@@ -308,7 +324,7 @@ roteiro explorer                        <span class="c"># → prints the URL to 
 <span class="c"># Pick a workspace by name, or default to the repo you're in</span>
 roteiro explorer --workspace-name payments</code></pre>
 <div class="note"><strong>Chat to your graph in the browser.</strong> Build with
-<code>--features serve,explorer</code> and run <code>roteiro serve --models</code>:
+<code>--features serve,explorer</code> and run <code>roteiro serve</code>:
 it serves the same explorer UI <em>and</em> the model endpoint on one port, which
 enables the <strong>Ask</strong> tab — natural-language questions answered by a
 local model calling the graph's tools. <code>roteiro explorer</code> on its own
@@ -352,8 +368,8 @@ ask in plain English. The server runs an agent loop that calls the graph's
 <code>search</code>, <code>context</code> and <code>path</code> tools and answers from what it
 finds — so <em>“what should this project be used for?”</em> is answered from your ADRs
 and blueprints, not guessed. Requires <code>--features serve</code>.</p>
-<pre><code><span class="c"># Start the endpoint (loopback; pick another port with --addr if 8017 is taken)</span>
-roteiro serve --models
+<pre><code><span class="c"># Start the network server (loopback; pick another port with --addr if 8017 is taken)</span>
+roteiro serve
 
 <span class="c"># Ask it like any OpenAI chat endpoint — grounded in your graph</span>
 curl -s http://127.0.0.1:8017/v1/chat/completions \
@@ -376,7 +392,7 @@ memory and hallucinate. Set it once in <code>roteiro.toml</code> under
 <code>[models] generative = "qwen3-8b"</code>, or name it per request as above.</div>
 
 <div class="note"><strong>Already using an AI agent?</strong> Skip curl entirely — run
-<code>roteiro serve</code> (MCP mode) and your agent gets the same <code>search</code> /
+<code>roteiro mcp</code> and your agent gets the same <code>search</code> /
 <code>context</code> / <code>path</code> / <code>debt</code> tools natively, grounded in the same
 graph. See <a href="#modes">MCP mode</a> above. <code>roteiro init</code> also drops an
 <strong>agent skill</strong> at <code>.agents/skills/roteiro/SKILL.md</code> (the portable,
@@ -489,10 +505,12 @@ top_k          = 5                       <span class="c"># max suggestions per n
 min_similarity = 0.9                     <span class="c"># floor for a near-duplicate pair</span>
 limit          = 50                      <span class="c"># max pairs reported</span>
 
-[serve]                                  <span class="c"># the local OpenAI-compatible endpoint</span>
-addr   = "127.0.0.1:8017"               <span class="c"># bind address (loopback by default)</span>
-models = ["qwen3-0.6b"]                 <span class="c"># which installed models to expose</span>
+[serve]                                  <span class="c"># the network server (roteiro serve): /v1 + graph API + UI</span>
+addr   = "127.0.0.1:8017"               <span class="c"># bind address/port (CLI --addr overrides)</span>
+models = ["qwen3-0.6b"]                 <span class="c"># which installed models to expose (default: all)</span>
 tools  = true                            <span class="c"># expose graph tools to the model</span>
+tls_cert = "/etc/roteiro/tls/fullchain.pem"  <span class="c"># in-process HTTPS (with tls_key); omit both for plain HTTP</span>
+tls_key  = "/etc/roteiro/tls/privkey.pem"    <span class="c"># PEM private key paired with tls_cert</span>
 
 [workspace]                              <span class="c"># host many repos from one server (ADR-0008)</span>
 roots = ["~/code"]                       <span class="c"># scan for repos (each becomes a project)</span>
@@ -516,7 +534,7 @@ app = "release-{tag}"                    <span class="c"># image app:1.4 → git
 <code>[[links]]</code> and <code>[pins]</code> tables belong to Roteiro's cross-repo
 layer — see <a href="#crossrepo">Cross-repo: a hub and its spokes</a> below.</div>
 
-<div class="note"><strong>Many workspaces, one install.</strong> A lone <code>[workspace]</code> is the default workspace; add <code>[[workspaces]]</code> for several named hub-and-spoke groups and <code>[standalone]</code> for repos that stand alone. <code>roteiro links</code>, <code>roteiro serve</code> and the <a href="#modes">explorer</a> pick one with <code>--workspace-name</code> (or the workspace containing your current directory).</div>
+<div class="note"><strong>Many workspaces, one install.</strong> A lone <code>[workspace]</code> is the default workspace; add <code>[[workspaces]]</code> for several named hub-and-spoke groups and <code>[standalone]</code> for repos that stand alone. <code>roteiro links</code>, <code>roteiro serve</code>, <code>roteiro mcp</code> and the <a href="#modes">explorer</a> pick one with <code>--workspace-name</code> (or the workspace containing your current directory).</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed
