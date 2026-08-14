@@ -29,11 +29,17 @@ use crate::types::{
 /// output is returned regardless (ADR-0006 server-side execute-and-loop).
 const MAX_TOOL_ROUNDS: usize = 4;
 
-/// Shared handler state: the inference engine and, optionally, the graph tools
-/// the served model may call.
+/// Shared handler state: the inference engine, optionally the graph tools the
+/// served model may call, and — for a multi-workspace serve (ADR-0008) — a
+/// per-workspace tool registry each confined to one workspace's projects, keyed
+/// by workspace name and addressed via `/v1/workspaces/{ws}/chat/completions`.
 struct AppState {
     engine: Arc<dyn Engine>,
     tools: Option<Arc<dyn ToolRegistry>>,
+    /// Workspace name → a registry scoped to just that workspace's projects. Empty
+    /// unless the caller built one ([`app_with_workspace_tools`]); the unscoped and
+    /// `/v1/{project}/…` routes never consult it, so the default paths are untouched.
+    workspaces: std::collections::HashMap<String, Arc<dyn ToolRegistry>>,
 }
 type Shared = Arc<AppState>;
 
@@ -42,6 +48,7 @@ pub fn app(engine: Arc<dyn Engine>) -> Router {
     router(Arc::new(AppState {
         engine,
         tools: None,
+        workspaces: std::collections::HashMap::new(),
     }))
 }
 
@@ -51,6 +58,30 @@ pub fn app_with_tools(engine: Arc<dyn Engine>, tools: Arc<dyn ToolRegistry>) -> 
     router(Arc::new(AppState {
         engine,
         tools: Some(tools),
+        workspaces: std::collections::HashMap::new(),
+    }))
+}
+
+/// Build the `/v1` router over `engine` with a default `tools` registry AND a set
+/// of per-**workspace** registries, each confined to one workspace's projects
+/// (ADR-0008). The unscoped `/v1/chat/completions` and `/v1/{project}/…` routes
+/// behave exactly as with [`app_with_tools`] (they use `tools`); the added
+/// `/v1/workspaces/{ws}/chat/completions` route runs its tool loop over the
+/// registry for `{ws}` alone, so a workspace-level Ask can never see or answer
+/// about a project outside the selected workspace.
+// The map is moved straight into `AppState` (which fixes the default hasher), and
+// every caller builds it with the std default, so generalising over `BuildHasher`
+// would add a type parameter for no benefit.
+#[allow(clippy::implicit_hasher)]
+pub fn app_with_workspace_tools(
+    engine: Arc<dyn Engine>,
+    tools: Arc<dyn ToolRegistry>,
+    workspaces: std::collections::HashMap<String, Arc<dyn ToolRegistry>>,
+) -> Router {
+    router(Arc::new(AppState {
+        engine,
+        tools: Some(tools),
+        workspaces,
     }))
 }
 
@@ -73,6 +104,14 @@ fn router(state: Shared) -> Router {
             post(chat_completions_scoped),
         )
         .route("/v1/{project}/embeddings", post(embeddings_scoped))
+        // Workspace-scoped chat (ADR-0008): the served model's tool calls are
+        // confined to `{ws}`'s projects, so a workspace-level Ask cannot reach a
+        // project in another workspace. A 5-segment path, distinct from the
+        // 4-segment `/v1/{project}/chat/completions`, so the two never collide.
+        .route(
+            "/v1/workspaces/{ws}/chat/completions",
+            post(chat_completions_workspace_scoped),
+        )
         .with_state(state)
 }
 
@@ -263,13 +302,26 @@ async fn list_models_scoped(
     list_models(State(state)).await
 }
 
+/// Which tool registry a chat request runs against, and how its tool calls are
+/// scoped. Keeps the default paths (`Default`/`Project`) using `state.tools`
+/// exactly as before; `Workspace` swaps in a registry already confined to one
+/// workspace's projects (ADR-0008).
+enum ChatScope {
+    /// Unscoped `/v1/chat/completions`: the server's default registry, no pin.
+    Default,
+    /// `/v1/{project}/…`: the default registry, tool calls pre-bound to `project`.
+    Project(String),
+    /// `/v1/workspaces/{ws}/…`: a registry confined to one workspace's projects.
+    Workspace(Arc<dyn ToolRegistry>),
+}
+
 /// `POST /v1/chat/completions` — a full JSON completion, or an SSE stream of
 /// `chat.completion.chunk` events when `stream: true`.
 async fn chat_completions(
     State(state): State<Shared>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> Response {
-    run_chat(state, body, None).await
+    run_chat(state, body, ChatScope::Default).await
 }
 
 /// `POST /v1/{project}/chat/completions` — as [`chat_completions`], but the
@@ -279,12 +331,31 @@ async fn chat_completions_scoped(
     axum::extract::Path(project): axum::extract::Path<String>,
     Json(body): Json<ChatCompletionRequest>,
 ) -> Response {
-    run_chat(state, body, Some(project)).await
+    run_chat(state, body, ChatScope::Project(project)).await
+}
+
+/// `POST /v1/workspaces/{ws}/chat/completions` — as [`chat_completions`], but the
+/// served model's tools are confined to workspace `{ws}`'s projects (ADR-0008),
+/// so a workspace-level Ask never sees a project in another workspace. An unknown
+/// workspace is a 404 (the addressed scope does not exist).
+async fn chat_completions_workspace_scoped(
+    State(state): State<Shared>,
+    axum::extract::Path(ws): axum::extract::Path<String>,
+    Json(body): Json<ChatCompletionRequest>,
+) -> Response {
+    let Some(tools) = state.workspaces.get(&ws).cloned() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("unknown workspace `{ws}`"),
+            "invalid_request_error",
+        );
+    };
+    run_chat(state, body, ChatScope::Workspace(tools)).await
 }
 
 /// Shared chat entry point: validate, then dispatch to the streaming or JSON
-/// path, carrying an optional project scope for the tool loop.
-async fn run_chat(state: Shared, body: ChatCompletionRequest, project: Option<String>) -> Response {
+/// path, carrying the tool scope for the tool loop.
+async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) -> Response {
     let stream = body.stream == Some(true);
     let req = match body.into_engine_request() {
         Ok(req) => req,
@@ -300,19 +371,18 @@ async fn run_chat(state: Shared, body: ChatCompletionRequest, project: Option<St
         );
     }
     if stream {
-        stream_chat(state, req, project)
+        stream_chat(state, req, scope)
     } else {
-        chat_json(state, req, project).await
+        chat_json(state, req, scope).await
     }
 }
 
 /// Non-streaming path: run one blocking completion on a worker thread and return
 /// a single JSON body. With tools registered, the model may call them first.
-async fn chat_json(state: Shared, req: ChatRequest, project: Option<String>) -> Response {
+async fn chat_json(state: Shared, req: ChatRequest, scope: ChatScope) -> Response {
     let model = req.model.clone();
     // Inference blocks (llama.cpp decode loop); keep it off the async runtime.
-    let result =
-        tokio::task::spawn_blocking(move || complete(&state, &req, project.as_deref())).await;
+    let result = tokio::task::spawn_blocking(move || complete(&state, &req, &scope)).await;
 
     match result {
         Ok(Ok(completion)) => Json(build_response(&model, &completion)).into_response(),
@@ -346,26 +416,45 @@ async fn chat_json(state: Shared, req: ChatRequest, project: Option<String>) -> 
 }
 
 /// Run a completion honouring registered tools: the agentic tool loop
-/// (ADR-0006) when tools are present, otherwise a plain generation. When
-/// `project` is set (a `/v1/{project}/…` request), the tool calls are scoped to
-/// it (ADR-0008). Blocking.
+/// (ADR-0006) when tools are present, otherwise a plain generation. The `scope`
+/// picks the registry and how its calls are bound (ADR-0008): the default
+/// registry (optionally project-pinned) or a per-workspace registry. Blocking.
 fn complete(
     state: &AppState,
     req: &ChatRequest,
-    project: Option<&str>,
+    scope: &ChatScope,
 ) -> Result<Completion, EngineError> {
+    // A workspace-scoped request runs over its own (already-confined) registry;
+    // the default and project-scoped requests share the server's `tools`.
+    if let ChatScope::Workspace(tools) = scope {
+        if tools.tools().is_empty() {
+            return state.engine.chat(req);
+        }
+        return chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS);
+    }
     let Some(tools) = &state.tools else {
         return state.engine.chat(req);
     };
-    match project {
-        Some(project) => {
+    match scope {
+        ChatScope::Project(project) => {
             let scoped = ScopedTools {
                 inner: tools.as_ref(),
-                project: project.to_owned(),
+                project: project.clone(),
             };
             chat_with_tools(state.engine.as_ref(), &scoped, req, MAX_TOOL_ROUNDS)
         }
-        None => chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS),
+        // `Default` (and, unreachable here, `Workspace`) use the plain registry.
+        _ => chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS),
+    }
+}
+
+/// Whether the registry a `scope` resolves to advertises any tools — the
+/// streaming path uses this to choose token-incremental generation (no tools)
+/// versus the resolve-then-emit tool loop.
+fn scope_has_tools(state: &AppState, scope: &ChatScope) -> bool {
+    match scope {
+        ChatScope::Workspace(tools) => !tools.tools().is_empty(),
+        _ => state.tools.as_ref().is_some_and(|t| !t.tools().is_empty()),
     }
 }
 
@@ -472,7 +561,7 @@ enum StreamMsg {
 /// Streaming path: run generation on a blocking worker that feeds token deltas
 /// over a channel, and surface them as OpenAI `chat.completion.chunk` SSE events
 /// terminated by `data: [DONE]`.
-fn stream_chat(state: Shared, req: ChatRequest, project: Option<String>) -> Response {
+fn stream_chat(state: Shared, req: ChatRequest, scope: ChatScope) -> Response {
     let id = format!("chatcmpl-{}", next_id());
     let created = unix_seconds();
     let model = req.model.clone();
@@ -482,15 +571,16 @@ fn stream_chat(state: Shared, req: ChatRequest, project: Option<String>) -> Resp
         // A dropped receiver (client disconnected) just makes sends fail — the
         // generation loop then runs to completion harmlessly.
         let _ = tx.send(StreamMsg::Role);
-        // Only take the (non-incremental) tool path when the registry actually
-        // advertises tools — an empty registry falls back to `engine.chat` in
-        // `complete`, so match that here and keep token-by-token streaming.
-        let use_tools = state.tools.as_ref().is_some_and(|t| !t.tools().is_empty());
+        // Only take the (non-incremental) tool path when the scope's registry
+        // actually advertises tools — an empty registry falls back to
+        // `engine.chat` in `complete`, so match that here and keep token-by-token
+        // streaming.
+        let use_tools = scope_has_tools(&state, &scope);
         if use_tools {
             // The tool loop runs multiple generations, so it is resolved fully
             // and then the final answer is emitted as one delta (tool-mode
             // streaming is not token-incremental).
-            match complete(&state, &req, project.as_deref()) {
+            match complete(&state, &req, &scope) {
                 Ok(completion) => {
                     let _ = tx.send(StreamMsg::Delta(completion.content));
                     let _ = tx.send(StreamMsg::Done(completion.finish_reason));
@@ -804,6 +894,189 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_json(resp).await["data"].as_array().unwrap().len(), 0);
+    }
+
+    /// A registry whose sole tool reports which workspace it belongs to, so the
+    /// model's tool result — fed back and echoed as the answer — is DIFFERENT per
+    /// workspace. That is what lets the workspace-routing test prove the request ran
+    /// over the RIGHT per-workspace registry, not merely that a route exists.
+    struct Tagged(&'static str);
+    impl crate::tools::ToolRegistry for Tagged {
+        fn tools(&self) -> Vec<crate::tools::ToolDef> {
+            vec![crate::tools::ToolDef {
+                name: "who".to_owned(),
+                description: "which workspace am I?".to_owned(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]
+        }
+        fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+            Ok(self.0.to_owned())
+        }
+        fn projects(&self) -> Vec<String> {
+            vec![self.0.to_owned()]
+        }
+    }
+
+    /// A registry that advertises no tools — the flat/default registry in the
+    /// workspace-routing test, so the unscoped path never shadows the scoped one.
+    struct NoTools;
+    impl crate::tools::ToolRegistry for NoTools {
+        fn tools(&self) -> Vec<crate::tools::ToolDef> {
+            Vec::new()
+        }
+        fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    /// A deterministic engine that actually drives the tool loop: on the first turn
+    /// it calls `who`; once it sees the `<tool_response>` fed back, it echoes that
+    /// payload as the final answer. So the completion carries whatever the dispatched
+    /// registry's `who` returned — the workspace's own tag.
+    struct ToolEchoEngine;
+    impl Engine for ToolEchoEngine {
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo {
+                id: "echo".to_owned(),
+            }]
+        }
+        fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            if req.model != "echo" {
+                return Err(EngineError::UnknownModel(req.model.clone()));
+            }
+            let last = req.messages.last().map_or("", |m| m.content.as_str());
+            let out = match last
+                .strip_prefix("<tool_response>")
+                .and_then(|s| s.strip_suffix("</tool_response>"))
+            {
+                // The tool result came back → answer with exactly its payload.
+                Some(payload) => payload.to_owned(),
+                // No result yet → request the identity tool.
+                None => "<tool_call>{\"name\":\"who\",\"arguments\":{}}</tool_call>".to_owned(),
+            };
+            on_token(&out);
+            Ok(CompletionStats {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    /// The status + answer content a workspace-scoped chat route returns for `ws`,
+    /// given the `ToolEchoEngine` tool loop (the answer echoes that workspace's tag).
+    async fn ask_workspace(app: &axum::Router, ws: &str) -> (StatusCode, String) {
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": "which workspace is this?"}],
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/workspaces/{ws}/chat/completions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let content = body_json(resp).await["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        (status, content)
+    }
+
+    #[tokio::test]
+    async fn workspace_scoped_route_dispatches_to_its_own_registry_and_404s_when_unknown() {
+        use super::{MAX_TOOL_ROUNDS, app_with_workspace_tools};
+        use crate::engine::Message;
+        use crate::tools::{ToolRegistry, chat_with_tools};
+
+        // Sanity-check the engine/registry pair in isolation (no HTTP): the tool loop
+        // over each per-workspace registry yields that workspace's own tag.
+        let req = ChatRequest {
+            model: "echo".to_owned(),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: "which workspace is this?".to_owned(),
+            }],
+            images: vec![],
+            audio: vec![],
+            temperature: 0.0,
+            max_tokens: 64,
+        };
+        assert_eq!(
+            chat_with_tools(&ToolEchoEngine, &Tagged("api"), &req, MAX_TOOL_ROUNDS)
+                .unwrap()
+                .content,
+            "api"
+        );
+        assert_eq!(
+            chat_with_tools(&ToolEchoEngine, &Tagged("docs"), &req, MAX_TOOL_ROUNDS)
+                .unwrap()
+                .content,
+            "docs"
+        );
+
+        let mut workspaces: std::collections::HashMap<String, std::sync::Arc<dyn ToolRegistry>> =
+            std::collections::HashMap::new();
+        workspaces.insert("api".to_owned(), std::sync::Arc::new(Tagged("api")));
+        workspaces.insert("docs".to_owned(), std::sync::Arc::new(Tagged("docs")));
+        let app = app_with_workspace_tools(
+            std::sync::Arc::new(ToolEchoEngine),
+            std::sync::Arc::new(NoTools),
+            workspaces,
+        );
+
+        // Each workspace resolves to ITS OWN registry: `api` reports `api`, `docs`
+        // reports `docs`. Different outputs from the same request prove the handler
+        // dispatched to the correct per-workspace registry (not just that a route
+        // exists — a 200-only check couldn't tell the two apart).
+        let (status_api, content_api) = ask_workspace(&app, "api").await;
+        assert_eq!(status_api, StatusCode::OK);
+        assert_eq!(
+            content_api, "api",
+            "the `api` route must use the `api` registry"
+        );
+
+        let (status_docs, content_docs) = ask_workspace(&app, "docs").await;
+        assert_eq!(status_docs, StatusCode::OK);
+        assert_eq!(
+            content_docs, "docs",
+            "the `docs` route must use the `docs` registry"
+        );
+        assert_ne!(
+            content_api, content_docs,
+            "the two workspaces must yield different, workspace-specific results"
+        );
+
+        // An unknown workspace is a 404, never answered from another registry.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workspaces/nope/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "echo",
+                            "messages": [{"role": "user", "content": "hi"}],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

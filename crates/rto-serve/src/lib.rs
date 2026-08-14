@@ -23,7 +23,8 @@ pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
 pub use server::{
-    app, app_with_tools, serve_blocking, serve_blocking_router, serve_blocking_with_tools,
+    app, app_with_tools, app_with_workspace_tools, serve_blocking, serve_blocking_router,
+    serve_blocking_with_tools,
 };
 #[cfg(feature = "tls")]
 pub use server::{serve_blocking_router_tls, serve_blocking_tls};
