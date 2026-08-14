@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A throwaway config home for a spawned `roteiro` child, so the process can
 /// never discover the developer's real `~/.roteiro/config.toml`.
@@ -21,11 +22,16 @@ pub struct IsolatedHome {
 }
 
 impl IsolatedHome {
-    /// Create a fresh, empty config home tagged with `label` and the current PID
-    /// (so parallel test binaries don't collide on the same path).
+    /// Create a fresh, empty config home tagged with `label`, the current PID,
+    /// and a process-wide monotonic counter. The PID keeps parallel test
+    /// *binaries* from colliding; the counter keeps concurrent tests *within* a
+    /// binary unique even when they pass the same `label` — otherwise a shared
+    /// deterministic path would let two instances race-delete each other's dir.
     pub fn new(label: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("roteiro-{label}-home-{}", std::process::id()));
+            std::env::temp_dir().join(format!("roteiro-{label}-home-{}-{seq}", std::process::id()));
         std::fs::remove_dir_all(&path).ok();
         std::fs::create_dir_all(&path).expect("mkdir isolated config home");
         Self { path }
