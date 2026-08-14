@@ -88,10 +88,15 @@
     // Ask tab (graph-grounded chat). `ask` is the capability read from
     // `/v1/graph/capabilities` at startup — true only in a `serve` build that
     // mounts the chat endpoint; the llama-free explorer leaves it false and the
-    // tab stays disabled. `askModels` are the served model ids; `asking` guards
-    // against overlapping in-flight questions.
+    // tab stays disabled. `askModels` are the served chat-capable model ids
+    // (generative-first, so `askModels[0]` is the default); `asking` guards
+    // against overlapping in-flight questions. `askModel`/`wsAskModel` are the
+    // model the user has PICKED for the next question in each panel — the model
+    // dropdown updates them (default `askModels[0]`), and each `submit*` sends it.
     ask: false,
     askModels: [],
+    askModel: null,
+    wsAskModel: null,
     asking: false,
     wsAsking: false, // in-flight guard for the workspace-level Ask (see `submitWorkspaceAsk`)
   };
@@ -1386,11 +1391,17 @@
         { center: { eles: n }, zoom: Math.min(1.2, cy.maxZoom()) },
         { duration: 250 }
       );
-      activateTab("node");
-      loadNodeDetail(state.projectWs, state.project, key);
     } else {
-      setPStatus(`jumped to ${state.project}, but its ${shortKey(key)} node isn't in view.`);
+      // The node isn't drawn in this graph view (e.g. a cited `file:` node the
+      // layout doesn't plot) — we can't centre on it, but its detail (record +
+      // captured content) is still fetchable, so OPEN it in the Node tab rather
+      // than dead-ending on a "not in view" message.
+      setPStatus(`opened ${shortKey(key)} — it isn't plotted in the graph view.`);
     }
+    // Always open the cited node's detail: a citation click must land on the node,
+    // whether or not the graph happens to plot it.
+    activateTab("node");
+    loadNodeDetail(state.projectWs, state.project, key);
   }
 
   // A tiny hover tooltip over the graph canvas, positioned at the cursor. Used by
@@ -1740,6 +1751,24 @@
     const xrepo = crossRepoSection(node.key);
     if (xrepo) kids.push(...xrepo);
 
+    // A file/doc node captures its text in `meta.content` (README/ADR/blueprint
+    // prose, doc comments). Surfacing it here lets a cited node be READ in place —
+    // and it is the very same content the Ask agent's `explain` tool returns, so
+    // the user can see (or supply) the grounding the model should have used before
+    // summarising. Rendered as escaped text in a scrollable block (never HTML).
+    const content =
+      exp.meta &&
+      typeof exp.meta.content === "string" &&
+      exp.meta.content.trim()
+        ? exp.meta.content
+        : null;
+    if (content) {
+      kids.push(el("div", { class: "p-sec-title", text: "Content" }));
+      kids.push(
+        el("pre", { class: "p-node-content" }, el("code", { text: content }))
+      );
+    }
+
     // Neighbour chips — clicking one navigates to that node.
     const chipRow = (title, refs) => {
       const chips = el("div", { class: "p-chips" });
@@ -1861,6 +1890,49 @@
     }
   }
 
+  // Resolve which model a panel should pre-select: PRESERVE a prior pick when it is
+  // still in the served chat-capable list (so an idempotent re-enable/re-render does
+  // NOT silently discard the user's dropdown choice), else fall back to the served
+  // default (`askModels[0]`, generative-first). Returns `null` when nothing is
+  // served. `current` is the panel's remembered pick (`askModel`/`wsAskModel`).
+  function resolveAskModel(current) {
+    if (current && state.askModels.includes(current)) return current;
+    return state.askModels[0] || null;
+  }
+
+  // The model control for an Ask panel. When MORE THAN ONE chat-capable model is
+  // served, this is a `<select>` so the user can switch model per question — the
+  // option matching `selected` is pre-selected so the dropdown mirrors `state`
+  // across re-renders (falling back to the served default only when `selected` is
+  // absent/no-longer-served). `onPick` fires with the chosen id on every change so
+  // the caller can record it and send it with the next question. With exactly ONE
+  // model there is nothing to choose, so we keep the plain static `model: <name>`
+  // label (no 1-option dropdown); with none, an empty span (the tab is disabled in
+  // that case anyway).
+  function askModelControl(selected, onPick) {
+    const models = state.askModels;
+    if (!models.length) return el("span", { class: "p-ask-model" });
+    if (models.length === 1) {
+      return el("span", { class: "p-ask-model", text: `model: ${models[0]}` });
+    }
+    const current = models.includes(selected) ? selected : models[0];
+    const options = models.map((m) => {
+      const o = el("option", { value: m, text: m });
+      if (m === current) o.selected = true; // mirror `state`; default is `models[0]`
+      return o;
+    });
+    return el(
+      "select",
+      {
+        class: "p-ask-model p-ask-model-select",
+        "aria-label": "Model for this question",
+        title: "model to answer this question",
+        onchange: (e) => onPick(e.target.value),
+      },
+      ...options
+    );
+  }
+
   // Flip the Ask tab from its disabled stub to a live question form. Idempotent.
   function enableAskTab() {
     const tab = $("#p-tab-ask");
@@ -1880,9 +1952,12 @@
       "aria-label": "Question about this project",
     });
     const send = el("button", { class: "p-ask-send", type: "submit", text: "Ask" });
-    const modelNote = state.askModels.length
-      ? el("span", { class: "p-ask-model", text: `model: ${state.askModels[0]}` })
-      : el("span", { class: "p-ask-model" });
+    // Preserve a still-served prior pick across re-enable; else default to the
+    // served default. The dropdown (multi-model) updates it and mirrors it.
+    state.askModel = resolveAskModel(state.askModel);
+    const modelNote = askModelControl(state.askModel, (m) => {
+      state.askModel = m;
+    });
 
     const form = el(
       "form",
@@ -1927,7 +2002,7 @@
 
     const project = state.project;
     const body = {
-      model: state.askModels[0],
+      model: state.askModel || state.askModels[0],
       messages: [
         { role: "system", content: ASK_SYSTEM(project) },
         { role: "user", content: question },
@@ -2128,9 +2203,12 @@
       "aria-label": "Question about this workspace",
     });
     const send = el("button", { class: "p-ask-send", type: "submit", text: "Ask" });
-    const modelNote = state.askModels.length
-      ? el("span", { class: "p-ask-model", text: `model: ${state.askModels[0]}` })
-      : el("span", { class: "p-ask-model" });
+    // Preserve a still-served prior pick across re-enable; else default to the
+    // served default. The dropdown (multi-model) updates it and mirrors it.
+    state.wsAskModel = resolveAskModel(state.wsAskModel);
+    const modelNote = askModelControl(state.wsAskModel, (m) => {
+      state.wsAskModel = m;
+    });
 
     const form = el(
       "form",
@@ -2175,7 +2253,7 @@
     const ws = state.workspaces.find((w) => w.name === workspace);
     const projects = (ws && ws.projects) || [];
     const body = {
-      model: state.askModels[0],
+      model: state.wsAskModel || state.askModels[0],
       messages: [
         { role: "system", content: WS_ASK_SYSTEM(workspace, projects) },
         { role: "user", content: question },

@@ -958,6 +958,25 @@
         word-break: break-all;
         margin: 0.35rem 0 0.2rem;
       }
+      .p-node-content {
+        max-height: 340px;
+        overflow: auto;
+        margin: 0.35rem 0 0.5rem;
+        padding: 0.5rem 0.6rem;
+        background: #0d1117;
+        border: 1px solid var(--pline);
+        border-radius: 6px;
+        font-size: 0.75rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .p-node-content code {
+        color: var(--pfg);
+        background: none;
+        border: none;
+        padding: 0;
+      }
       .p-chips {
         display: flex;
         flex-wrap: wrap;
@@ -1052,6 +1071,24 @@
       .p-ask-model {
         color: var(--pmuted);
         font-size: 0.8rem;
+      }
+      select.p-ask-model-select {
+        font: inherit;
+        font-size: 0.8rem;
+        color: var(--pfg);
+        /* Theme-aware like the Ask textarea (`--pbg`): dark on the project view,
+           the light panel colour on the workspace view — never a hardcoded dark
+           swatch that would read as dark-on-dark under the light workspace theme. */
+        background: var(--pbg);
+        border: 1px solid var(--pline-strong);
+        border-radius: 6px;
+        padding: 0.25rem 0.4rem;
+        cursor: pointer;
+        max-width: 60%;
+      }
+      select.p-ask-model-select:focus {
+        outline: none;
+        border-color: var(--paccent);
       }
       .p-ask-answer {
         white-space: pre-wrap;
@@ -1154,6 +1191,28 @@
 
       <div class="projects-bar" id="projects-bar"></div>
 
+      <!--
+        Workspace-level Ask (graph-grounded chat across every project in this
+        workspace). Sits DIRECTLY UNDER the `drill into` project-chip row and ABOVE
+        the Topology / config-override-matrix panels — the panel a visitor reaches
+        for right after choosing where to drill. Hidden by default and revealed only
+        when the server advertises the chat endpoint at `/v1/graph/capabilities`
+        (`ask:true` + a served model) — the SAME capability signal that gates the
+        project Ask tab. The llama-free `roteiro explorer` build reports `ask:false`,
+        so this panel never appears there, matching the disabled project Ask tab.
+        `app.js#enableWorkspaceAsk` unhides it and injects the question form;
+        `submitWorkspaceAsk` posts to the unscoped `/v1/chat/completions` (no project
+        pin) whose graph tools carry a `project` argument plus `list_projects`, so the
+        model can answer about — and across — every hosted project (ADR-0008).
+      -->
+      <section class="panel" id="ws-ask-panel" hidden>
+        <h2>
+          Ask
+          <span class="hint">Ask about this workspace and any of its projects</span>
+        </h2>
+        <div id="ws-ask-body"></div>
+      </section>
+
       <div class="legend" aria-label="legend">
         <span><i class="swatch gold"></i> gold = authored link</span>
         <span><i class="swatch slate"></i> slate = inferred link</span>
@@ -1186,26 +1245,6 @@
         <div class="matrix-scroll">
           <div id="matrix"></div>
         </div>
-      </section>
-
-      <!--
-        Workspace-level Ask (graph-grounded chat across every project in this
-        workspace). Hidden by default and revealed only when the server advertises
-        the chat endpoint at `/v1/graph/capabilities` (`ask:true` + a served model)
-        — the SAME capability signal that gates the project Ask tab. The llama-free
-        `roteiro explorer` build reports `ask:false`, so this panel never appears
-        there, matching the disabled project Ask tab. `app.js#enableWorkspaceAsk`
-        unhides it and injects the question form; `submitWorkspaceAsk` posts to the
-        unscoped `/v1/chat/completions` (no project pin) whose graph tools carry a
-        `project` argument plus `list_projects`, so the model can answer about — and
-        across — every hosted project (ADR-0008).
-      -->
-      <section class="panel" id="ws-ask-panel" hidden>
-        <h2>
-          Ask
-          <span class="hint">Ask about this workspace and any of its projects</span>
-        </h2>
-        <div id="ws-ask-body"></div>
       </section>
     </main>
     </div>
