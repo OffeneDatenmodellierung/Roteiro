@@ -5421,6 +5421,43 @@ mod serve_explorer_wiring {
         }
     }
 
+    #[tokio::test]
+    async fn the_unscoped_chat_route_backs_the_workspace_ask() {
+        // The WORKSPACE-level Ask posts to the UNSCOPED `/v1/chat/completions` (no
+        // `/v1/{project}/…` pin) so its graph tools span every hosted project — the
+        // model selects one via `list_projects` + the per-tool `project` argument
+        // (ADR-0008). Prove that unscoped route is mounted on the multi-workspace
+        // router and reaches the (mock) engine (200, a completion), so the panel's
+        // request has an endpoint to hit without any new backend wiring.
+        let body = serde_json::json!({
+            "model": "qwen3-0.6b",
+            "messages": [{ "role": "user", "content": "tell me about the docs repo" }],
+            "stream": false,
+        });
+        let resp = multi_serve_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the unscoped chat route the workspace Ask uses must be mounted"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["choices"][0]["message"]["content"], "a grounded answer",
+            "the unscoped route returns the engine's completion"
+        );
+    }
+
     #[test]
     fn unknown_workspace_name_fails_fast_listing_the_known_ones() {
         // `run_serve` validates `--workspace-name` up front via `set.select`: an

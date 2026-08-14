@@ -237,6 +237,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_js_wires_the_workspace_ask_to_capabilities_and_chat() {
+        // The WORKSPACE-level Ask is data-driven off the SAME capability signal as
+        // the project Ask (`loadCapabilities` enables both), but — answering across
+        // ALL hosted projects — it posts to the UNSCOPED `/v1/chat/completions` (no
+        // `/v1/{project}/…` pin) and steers the model to range over projects via
+        // `list_projects` + the per-tool `project` argument (ADR-0008). Pin the
+        // wiring so a rename on either side is caught.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "loadCapabilities",
+            "enableWorkspaceAsk",
+            "submitWorkspaceAsk",
+            "\"/v1/chat/completions\"",
+            "list_projects",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_scaffolds_the_workspace_ask_panel_gated_hidden() {
+        // The workspace (overview) view carries a graph-grounded Ask panel beside the
+        // topology/matrix. It must ship HIDDEN — the llama-free explorer reports
+        // `ask:false`, so the panel only appears once `/v1/graph/capabilities`
+        // enables Ask (the same gate as the project Ask tab), matching that tab's
+        // disabled-in-explorer behaviour.
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in ["id=\"ws-ask-panel\"", "id=\"ws-ask-body\""] {
+            assert!(body.contains(needle), "shell must contain `{needle}`");
+        }
+        assert!(
+            body.contains("id=\"ws-ask-panel\" hidden"),
+            "the workspace Ask panel must ship hidden, gated on capabilities"
+        );
+    }
+
+    #[tokio::test]
     async fn app_js_is_served_as_javascript() {
         let (status, ct, cache, body) = get("/app.js").await;
         assert_eq!(status, StatusCode::OK);

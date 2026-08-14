@@ -1082,6 +1082,23 @@
         border-radius: 4px;
         border: 1px solid var(--pline);
       }
+      /* The workspace-level Ask panel reuses the project Ask's `.p-ask*` markup and
+         classes, but lives on the light workspace view — so it remaps the project
+         `--p*` colour vars (defined on `#view-project`) to the workspace theme, and
+         softens the two dark code backdrops those classes bake in. Same form, same
+         behaviour; only the palette differs. */
+      #ws-ask-panel {
+        --pbg: var(--panel);
+        --pfg: var(--fg);
+        --pmuted: var(--muted);
+        --pline: var(--line);
+        --pline-strong: var(--line-strong);
+        --paccent: var(--accent);
+      }
+      #ws-ask-panel .p-ask-answer code,
+      #ws-ask-panel .p-ask code {
+        background: var(--slate-soft);
+      }
     </style>
   </head>
   <body>
@@ -1169,6 +1186,26 @@
         <div class="matrix-scroll">
           <div id="matrix"></div>
         </div>
+      </section>
+
+      <!--
+        Workspace-level Ask (graph-grounded chat across every project in this
+        workspace). Hidden by default and revealed only when the server advertises
+        the chat endpoint at `/v1/graph/capabilities` (`ask:true` + a served model)
+        — the SAME capability signal that gates the project Ask tab. The llama-free
+        `roteiro explorer` build reports `ask:false`, so this panel never appears
+        there, matching the disabled project Ask tab. `app.js#enableWorkspaceAsk`
+        unhides it and injects the question form; `submitWorkspaceAsk` posts to the
+        unscoped `/v1/chat/completions` (no project pin) whose graph tools carry a
+        `project` argument plus `list_projects`, so the model can answer about — and
+        across — every hosted project (ADR-0008).
+      -->
+      <section class="panel" id="ws-ask-panel" hidden>
+        <h2>
+          Ask
+          <span class="hint">Ask about this workspace and any of its projects</span>
+        </h2>
+        <div id="ws-ask-body"></div>
       </section>
     </main>
     </div>
