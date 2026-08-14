@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.8.0...rto-serve-v1.9.0) - 2026-08-14
+
+### Added
+
+- *(ask)* ground answers with search snippets + stricter grounding prompt
+- *(serve)* scope the workspace Ask to the selected workspace
+
+### Fixed
+
+- *(ask)* address PR #285 Copilot review comments
+- *(serve)* clippy --all-targets clean in the workspace-routing test
+- *(serve)* prove per-workspace routing + correct app.js header comment
+
 ## [1.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.6.0...rto-serve-v1.7.0) - 2026-08-14
 
 ### Fixed
