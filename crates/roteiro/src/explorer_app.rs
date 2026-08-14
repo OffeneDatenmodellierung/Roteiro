@@ -354,11 +354,10 @@ mod tests {
 
     #[tokio::test]
     async fn shell_scaffolds_the_workspace_ask_panel_gated_hidden() {
-        // The workspace (overview) view carries a graph-grounded Ask panel beside the
-        // topology/matrix. It must ship HIDDEN — the llama-free explorer reports
-        // `ask:false`, so the panel only appears once `/v1/graph/capabilities`
-        // enables Ask (the same gate as the project Ask tab), matching that tab's
-        // disabled-in-explorer behaviour.
+        // The workspace (overview) view carries a graph-grounded Ask panel. It must
+        // ship HIDDEN — the llama-free explorer reports `ask:false`, so the panel only
+        // appears once `/v1/graph/capabilities` enables Ask (the same gate as the
+        // project Ask tab), matching that tab's disabled-in-explorer behaviour.
         let (status, _ct, _cache, body) = get("/").await;
         assert_eq!(status, StatusCode::OK);
         for needle in ["id=\"ws-ask-panel\"", "id=\"ws-ask-body\""] {
@@ -367,6 +366,33 @@ mod tests {
         assert!(
             body.contains("id=\"ws-ask-panel\" hidden"),
             "the workspace Ask panel must ship hidden, gated on capabilities"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_places_the_workspace_ask_panel_under_the_drill_into_row() {
+        // Placement (pinned): the workspace Ask panel renders DIRECTLY UNDER the
+        // `drill into` project-chip row (`#projects-bar`) and ABOVE the Topology and
+        // config-override-matrix panels — the panel a visitor reaches for right after
+        // choosing where to drill. Assert the source order in the served shell so a
+        // reflow that moves it back below the matrix (or above the chips) is caught.
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("shell must contain `{needle}`"))
+        };
+        let drill = at("id=\"projects-bar\"");
+        let ask = at("id=\"ws-ask-panel\"");
+        let topology = at("id=\"topology\"");
+        let matrix = at("id=\"matrix\"");
+        assert!(
+            drill < ask,
+            "the workspace Ask panel must sit AFTER the `drill into` row"
+        );
+        assert!(
+            ask < topology && ask < matrix,
+            "the workspace Ask panel must sit ABOVE the Topology and matrix panels"
         );
     }
 
