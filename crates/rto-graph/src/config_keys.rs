@@ -30,8 +30,20 @@ pub struct ConfigKey {
     /// Dotted key path (e.g. `serve.addr`), verbatim from the source.
     pub key: String,
     /// The scalar (or compact list/object) value, as a string. String scalars are
-    /// **unquoted** so the same setting compares across TOML / JSON / `.env`.
+    /// **unquoted** so the same setting compares across TOML / JSON / `.env`. When
+    /// [`value_known`](Self::value_known) is `false` this is a placeholder (empty)
+    /// and carries no meaning — see that field.
     pub value: String,
+    /// Whether [`value`](Self::value) is a **real** setting read from a source, as
+    /// opposed to *absent*. File-derived keys always carry a value (even a genuine
+    /// empty string), so this is `true`; a **struct-derived** key
+    /// (`meta.source = "struct"`) has no literal value in code, so it is `false` and
+    /// `value` is an empty placeholder. Value-agreement matching
+    /// (`roteiro links --infer`) must gate on this so an *unknown* value never
+    /// false-matches a spoke's genuine empty string. Not serialized — an internal
+    /// matching detail, not part of the reported config-key shape.
+    #[serde(skip)]
+    pub value_known: bool,
 }
 
 /// The lowercased file extension, if any (`config.TOML` → `toml`).
@@ -160,6 +172,9 @@ fn push(out: &mut Vec<ConfigKey>, file: &str, key: &str, value: String) {
             file: file.to_owned(),
             key: key.to_owned(),
             value,
+            // A flattened file key always has a real value (an empty string is a
+            // genuine empty setting, not an unknown one).
+            value_known: true,
         });
     }
 }
