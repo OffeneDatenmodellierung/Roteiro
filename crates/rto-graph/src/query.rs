@@ -327,6 +327,38 @@ pub struct SearchHit {
     /// The matching node.
     #[serde(flatten)]
     pub node: NodeSummary,
+    /// A short, whitespace-collapsed excerpt of the node's captured
+    /// `meta.content` (see [`content_snippet`]), so a model that never calls
+    /// [`explain`] still has real grounding text. `None` for pure symbol/config
+    /// nodes with no content — the summary (name/kind/path) is the grounding then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+/// Max **chars** of a search-hit content snippet. Bounded so many hits cannot
+/// bloat the tool response or blow the served model's context window.
+const SNIPPET_MAX: usize = 300;
+
+/// Build a bounded, whitespace-collapsed snippet from a node's captured
+/// `meta.content`, or `None` when the node has no textual content (pure symbol/
+/// config nodes). Runs of whitespace collapse to single spaces and the text is
+/// truncated to [`SNIPPET_MAX`] chars (on a char boundary, since we take whole
+/// `char`s) with an ellipsis, so a search hit carries grounding text even when
+/// the model never calls [`explain`].
+fn content_snippet(meta: &serde_json::Value) -> Option<String> {
+    let content = meta.get("content").and_then(|v| v.as_str())?;
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut chars = collapsed.chars();
+    let snippet: String = chars.by_ref().take(SNIPPET_MAX).collect();
+    // If any char remains past the cap, the content was truncated — mark it.
+    Some(if chars.next().is_some() {
+        format!("{snippet}…")
+    } else {
+        snippet
+    })
 }
 
 /// Deterministically search nodes for `query`, ranked by relevance, returning at
@@ -409,6 +441,7 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
         }
         hits.push(SearchHit {
             score: u32::try_from(relevance.max(0)).unwrap_or(0),
+            snippet: content_snippet(&node.meta),
             node: NodeSummary::from_node(&node),
         });
     }
@@ -663,6 +696,59 @@ mod tests {
             by_content.first().map(|h| h.node.key.as_str()),
             Some("adr:0001"),
             "content search matches the ADR by its captured text"
+        );
+    }
+
+    #[test]
+    fn search_hit_carries_a_bounded_content_snippet() {
+        use crate::Provenance;
+        let mut store = Store::open_in_memory().expect("store");
+        // A content-bearing node whose content is longer than the cap and has
+        // messy whitespace to collapse.
+        let long = "word ".repeat(200);
+        let mut adr =
+            Node::new("adr:0001", NodeKind::Adr, "Overview").with_provenance(Provenance::Authored);
+        adr.meta = serde_json::json!({ "content": format!("Roteiro   is\n\na graph. {long}") });
+        // A pure symbol node with no captured content.
+        let sym = Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main");
+        store
+            .apply_factset(&FactSet::new().with_node(adr).with_node(sym))
+            .expect("apply");
+
+        let hits = search(&store, "roteiro", 10).expect("search");
+        let adr_hit = hits
+            .iter()
+            .find(|h| h.node.key == "adr:0001")
+            .expect("adr hit");
+        let snippet = adr_hit
+            .snippet
+            .as_deref()
+            .expect("a content-bearing node yields a snippet");
+        // Whitespace is collapsed to single spaces (no runs, no newlines)…
+        assert!(snippet.starts_with("Roteiro is a graph."), "got: {snippet}");
+        assert!(!snippet.contains("  "));
+        assert!(!snippet.contains('\n'));
+        // …and the snippet is bounded (SNIPPET_MAX chars plus a one-char ellipsis).
+        assert!(
+            snippet.chars().count() <= 301,
+            "snippet is bounded: {} chars",
+            snippet.chars().count()
+        );
+        assert!(
+            snippet.ends_with('…'),
+            "over-long content is truncated with an ellipsis"
+        );
+
+        // A node without content falls back cleanly: no snippet, so the summary
+        // (name/kind/path) is the grounding.
+        let hits = search(&store, "main", 10).expect("search");
+        let sym_hit = hits
+            .iter()
+            .find(|h| h.node.key == "sym:rust:a.rs#main")
+            .expect("sym hit");
+        assert!(
+            sym_hit.snippet.is_none(),
+            "a node with no content has no snippet"
         );
     }
 

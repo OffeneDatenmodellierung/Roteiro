@@ -1862,10 +1862,13 @@
   // tools and to cite node keys, which we then linkify back into the graph.
   const ASK_SYSTEM = (project) =>
     `You are a code assistant answering questions about the "${project}" project ` +
-    `using its Roteiro knowledge graph. Prefer the provided graph tools ` +
-    `(search, explain, path, debt) over guessing: search for relevant nodes, ` +
-    `explain the keys you find, and ground every claim in them. Answer in concise ` +
-    `prose and cite the node keys you used (e.g. \`fn:foo\`, \`file:src/main.rs\`).`;
+    `using ONLY its Roteiro knowledge graph, via the provided graph tools ` +
+    `(search, explain, path, debt). Do not guess: search for relevant nodes, then ` +
+    `read each hit's \`snippet\` or \`explain\` its key to read the node's actual ` +
+    `content BEFORE describing it — never answer from a node's name alone. Ground ` +
+    `every claim in what the tools return; if they do not contain the answer, say ` +
+    `you could not find it rather than making one up. Answer in concise prose and ` +
+    `cite the node keys you used (e.g. \`fn:foo\`, \`file:src/main.rs\`).`;
 
   // Read the build's capability signal. Any failure (older/llama-free server with
   // no such route) leaves Ask disabled — the default — so this never breaks the
@@ -2183,8 +2186,11 @@
     `over guessing: call \`list_projects\` to see the hosted projects, then pass a ` +
     `\`project\` argument to \`search\`/\`explain\`/\`path\`/\`debt\` to query a specific ` +
     `one (e.g. \`search(project: "gam", query: "…")\`). To compare across projects, ` +
-    `query each in turn. Ground every claim in the graph and answer in concise prose, ` +
-    `citing the node keys you used PROJECT-QUALIFIED (e.g. \`gam::fn:foo\`, ` +
+    `query each in turn. Do not guess: read each hit's \`snippet\` or \`explain\` its ` +
+    `key to read the node's actual content BEFORE describing it, and if the tools do ` +
+    `not contain the answer, say you could not find it rather than making one up. ` +
+    `Ground every claim in the graph and answer in concise prose, citing the node ` +
+    `keys you used PROJECT-QUALIFIED (e.g. \`gam::fn:foo\`, ` +
     `\`roteiro::file:src/main.rs\`) so each citation names its project.`;
 
   // Reveal the workspace Ask panel (hidden by default) and inject its question
