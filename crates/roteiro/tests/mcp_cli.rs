@@ -8,6 +8,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+mod common;
+use common::IsolatedHome;
+
 const BIN: &str = env!("CARGO_BIN_EXE_roteiro");
 
 fn git(dir: &Path, args: &[&str]) {
@@ -43,14 +46,19 @@ fn mcp_answers_initialize_and_tools_call() {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-q", "-m", "init"]);
 
-    let mut child = Command::new(BIN)
+    // Isolated config home so the child never discovers the developer's real
+    // `~/.roteiro/config.toml` (which would flip it into workspace mode).
+    let home = IsolatedHome::new("mcp-cli");
+
+    let mut command = Command::new(BIN);
+    command
         .arg("mcp")
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn mcp");
+        .stderr(Stdio::null());
+    home.apply(&mut command);
+    let mut child = command.spawn().expect("spawn mcp");
 
     let session = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":\
@@ -96,4 +104,5 @@ fn mcp_answers_initialize_and_tools_call() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+    // `home` (IsolatedHome) removes its temp dir on drop.
 }

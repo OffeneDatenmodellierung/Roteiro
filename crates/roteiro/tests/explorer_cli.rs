@@ -7,6 +7,9 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+use common::IsolatedHome;
+
 const BIN: &str = env!("CARGO_BIN_EXE_roteiro");
 
 fn git(dir: &Path, args: &[&str]) {
@@ -38,11 +41,15 @@ fn explorer_rejects_unknown_workspace_name_at_startup() {
     // `doesnotexist` is unknown.
     git(&base, &["init"]);
 
-    let out = Command::new(BIN)
+    // Isolated config home so the "no workspace config" fallback this test
+    // relies on holds regardless of the developer's real `~/.roteiro`.
+    let home = IsolatedHome::new("explorer-cli");
+    let mut command = Command::new(BIN);
+    command
         .args(["explorer", "--workspace-name", "doesnotexist"])
-        .current_dir(&base)
-        .output()
-        .expect("run roteiro explorer");
+        .current_dir(&base);
+    home.apply(&mut command);
+    let out = command.output().expect("run roteiro explorer");
 
     // It must fail fast (never reaching the bind), naming the unknown workspace
     // and the known one(s) — the existing `WorkspaceError::UnknownWorkspace`.
