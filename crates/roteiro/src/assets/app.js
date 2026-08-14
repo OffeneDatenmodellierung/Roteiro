@@ -93,6 +93,7 @@
     ask: false,
     askModels: [],
     asking: false,
+    wsAsking: false, // in-flight guard for the workspace-level Ask (see `submitWorkspaceAsk`)
   };
 
   // -- data ------------------------------------------------------------------
@@ -1854,7 +1855,10 @@
       state.ask = false;
       state.askModels = [];
     }
-    if (state.ask) enableAskTab();
+    if (state.ask) {
+      enableAskTab();
+      enableWorkspaceAsk();
+    }
   }
 
   // Flip the Ask tab from its disabled stub to a live question form. Idempotent.
@@ -1984,7 +1988,19 @@
   // Node keys the model cites (`fn:foo`, `file:src/main.rs`, `sym:rust:…#x`) —
   // `prefix:body`, where the body runs to the first whitespace/quote. Skips web
   // URLs (http/https/mailto), which share the `word:` shape but aren't graph keys.
+  // Group 1 is the key prefix (the URL-checkable segment); there is no project.
   const KEY_RE = /\b([a-z][a-z0-9_]{1,24}):([A-Za-z0-9_./#:@+-]{2,})/g;
+  // The WORKSPACE Ask cites PROJECT-QUALIFIED keys, `<project>::<prefix>:<body>`
+  // (e.g. `gam::fn:foo`, `stream-sync::sym:rust:src/main.rs#run`). A project
+  // segment is a repo/dir name, so — unlike a key prefix — it may contain `-`/`.`;
+  // an unqualified `prefix:body` still matches (the optional group is empty), so
+  // this regex is a strict superset of `KEY_RE`. The explicit project group is why
+  // the workspace linkifier can't lean on `KEY_RE`'s body swallowing the `::` — a
+  // hyphenated project (`stream-sync::…`) would otherwise be mis-split at `sync`.
+  // Group 1 = project (or undefined), group 2 = key prefix (the URL-checkable
+  // segment), group 3 = body. The whole match (`m[0]`) is the full key token.
+  const WS_KEY_RE =
+    /\b(?:([A-Za-z0-9_.-]+)::)?([a-z][a-z0-9_]{1,24}):([A-Za-z0-9_./#:@+-]{2,})/g;
   const URL_PREFIX = /^(https?|mailto|ftp|ws|wss)$/i;
   // End-of-sentence punctuation the regex would otherwise pull into the key
   // (`See file:src/main.rs.` → the trailing `.`). Trimmed off before linkifying
@@ -1993,44 +2009,54 @@
 
   // One clickable, keyboard-activatable link to a cited node key. `label` is the
   // visible text (the key itself inline, a short form in the list); `title` the
-  // hover text. Shared by the inline links and the "referenced:" list so both
+  // hover text; `onActivate` the action (defaults to selecting the node in the
+  // current project graph — the workspace Ask overrides it to hop to the cited
+  // key's project). Shared by the inline links and the "referenced:" list so both
   // activate identically on click AND Enter/Space (they carry role="link").
-  function keyLink(key, label, title) {
+  function keyLink(key, label, title, onActivate) {
+    const activate = onActivate || askGoToNode;
     return el("a", {
       role: "link",
       tabindex: "0",
       text: label,
       title: title || key,
-      onclick: () => askGoToNode(key),
+      onclick: () => activate(key),
       onkeydown: (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          askGoToNode(key);
+          activate(key);
         }
       },
     });
   }
 
-  // Render the answer as prose with cited node keys turned into links that select
-  // the node in the current project graph (surfacing which nodes were referenced).
-  function renderAnswer(answer, text) {
+  // Render the answer as prose with cited node keys turned into links. `onActivate`
+  // is the per-key action: the project Ask selects the node in the current graph
+  // (default), the workspace Ask hops to the key's project (see `submitWorkspaceAsk`).
+  // `keyRe`/`prefixGroup` select the citation grammar: the project Ask uses the
+  // unqualified `KEY_RE` (prefix in group 1); the workspace Ask passes `WS_KEY_RE`
+  // (project in group 1, prefix in group 2) so a `<project>::<key>` citation is
+  // linkified as ONE token and routed — with its project — to `onActivate`.
+  function renderAnswer(answer, text, onActivate, keyRe, prefixGroup) {
     answer.hidden = false;
     answer.className = "p-ask-answer";
+    const re = keyRe || KEY_RE;
+    const pg = prefixGroup || 1;
     const frag = document.createDocumentFragment();
     const refs = new Set();
     let last = 0;
     let m;
-    KEY_RE.lastIndex = 0;
-    while ((m = KEY_RE.exec(text)) !== null) {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
       const raw = m[0];
-      if (URL_PREFIX.test(m[1])) continue; // a URL, not a graph key
+      if (URL_PREFIX.test(m[pg])) continue; // a URL, not a graph key
       const key = raw.replace(KEY_TRAIL_PUNCT, "");
       // Trimmed down to just a prefix (e.g. `file:...`) — not a real key; leave the
       // whole token as plain text (don't advance `last` past it).
       if (!key || key.endsWith(":")) continue;
       if (m.index > last) frag.append(text.slice(last, m.index));
       refs.add(key);
-      frag.append(keyLink(key, key, `inspect ${key}`));
+      frag.append(keyLink(key, key, `inspect ${key}`, onActivate));
       // Preserve any trailing punctuation the match swallowed as plain text, and
       // advance the cursor by the FULL original match length.
       const trailing = raw.slice(key.length);
@@ -2046,7 +2072,7 @@
       refs.forEach((key) => {
         if (!first) list.append(", ");
         first = false;
-        list.append(keyLink(key, shortKey(key), key));
+        list.append(keyLink(key, shortKey(key), key, onActivate));
       });
       kids.push(list);
     }
@@ -2057,6 +2083,158 @@
   // it's present), reusing the same path a graph tap takes.
   function askGoToNode(key) {
     selectNode(key);
+  }
+
+  // -- workspace panel: Ask across every project (serve build only) ----------
+  //
+  // The WORKSPACE Ask answers about the whole workspace and ALL its projects at
+  // once, so — unlike the project Ask, which pins one project via `/v1/{project}/…`
+  // — it posts to the UNSCOPED `/v1/chat/completions`. That endpoint's graph tools
+  // already carry a `project` argument and a `list_projects` tool (ADR-0008), so
+  // one model can `list_projects` and then `search`/`explain`/`path`/`debt` with
+  // `project: "<name>"` across every hosted project. No project pin, no new backend
+  // route — the same tested chat + tools path, driven cross-project. Gated on the
+  // very same `/v1/graph/capabilities` signal as the project Ask tab.
+
+  // Steer the model to range over the workspace's projects via `list_projects` +
+  // the per-tool `project` argument, and to cite keys PROJECT-QUALIFIED
+  // (`<project>::<key>`) so a citation can be traced back to its project.
+  const WS_ASK_SYSTEM = (workspace, projects) =>
+    `You are a code assistant answering questions about the "${workspace}" workspace ` +
+    `and every project it hosts` +
+    (projects.length ? ` (${projects.join(", ")})` : "") +
+    `, each with its own Roteiro knowledge graph. Prefer the provided graph tools ` +
+    `over guessing: call \`list_projects\` to see the hosted projects, then pass a ` +
+    `\`project\` argument to \`search\`/\`explain\`/\`path\`/\`debt\` to query a specific ` +
+    `one (e.g. \`search(project: "gam", query: "…")\`). To compare across projects, ` +
+    `query each in turn. Ground every claim in the graph and answer in concise prose, ` +
+    `citing the node keys you used PROJECT-QUALIFIED (e.g. \`gam::fn:foo\`, ` +
+    `\`roteiro::file:src/main.rs\`) so each citation names its project.`;
+
+  // Reveal the workspace Ask panel (hidden by default) and inject its question
+  // form. Idempotent — `loadCapabilities` calls it once when Ask is available.
+  function enableWorkspaceAsk() {
+    const panel = $("#ws-ask-panel");
+    const body = $("#ws-ask-body");
+    if (!panel || !body) return;
+    panel.hidden = false;
+
+    const answer = el("div", { class: "p-ask-answer", hidden: "" });
+    const input = el("textarea", {
+      id: "ws-ask-input",
+      rows: "3",
+      placeholder:
+        "Ask about this workspace — e.g. “tell me about the gam repo” or “which projects define a serve command?”",
+      "aria-label": "Question about this workspace",
+    });
+    const send = el("button", { class: "p-ask-send", type: "submit", text: "Ask" });
+    const modelNote = state.askModels.length
+      ? el("span", { class: "p-ask-model", text: `model: ${state.askModels[0]}` })
+      : el("span", { class: "p-ask-model" });
+
+    const form = el(
+      "form",
+      {
+        class: "p-ask-form",
+        onsubmit: (e) => {
+          e.preventDefault();
+          submitWorkspaceAsk(input.value, answer, send);
+        },
+      },
+      input,
+      el("div", { class: "p-ask-row" }, modelNote, send)
+    );
+    input.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        submitWorkspaceAsk(input.value, answer, send);
+      }
+    });
+
+    body.replaceChildren(el("div", { class: "p-ask" }, form, answer));
+  }
+
+  // Post the question to the unscoped chat endpoint (graph tools span every hosted
+  // project) and render the prose answer, linkifying project-qualified node keys
+  // into a hop to that project.
+  async function submitWorkspaceAsk(raw, answer, send) {
+    const question = String(raw || "").trim();
+    if (!question) return;
+    if (state.wsAsking) return;
+    const workspace = state.current;
+    if (!workspace) {
+      showAnswer(answer, "Pick a workspace first, then ask about it.", true);
+      return;
+    }
+    state.wsAsking = true;
+    if (send) send.disabled = true;
+    answer.hidden = false;
+    answer.className = "p-ask-answer";
+    answer.replaceChildren(el("span", { class: "p-loading", text: "Thinking…" }));
+
+    const ws = state.workspaces.find((w) => w.name === workspace);
+    const projects = (ws && ws.projects) || [];
+    const body = {
+      model: state.askModels[0],
+      messages: [
+        { role: "system", content: WS_ASK_SYSTEM(workspace, projects) },
+        { role: "user", content: question },
+      ],
+      stream: false,
+    };
+    try {
+      const res = await fetch("/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(askError(data, res.status));
+      }
+      // The user may have switched workspaces while the model was thinking.
+      if (state.current !== workspace) return;
+      const content =
+        (data.choices &&
+          data.choices[0] &&
+          data.choices[0].message &&
+          data.choices[0].message.content) ||
+        "(the model returned an empty answer)";
+      renderAnswer(answer, content, wsAskGoToProject, WS_KEY_RE, 2);
+    } catch (err) {
+      showAnswer(answer, String((err && err.message) || err), true);
+    } finally {
+      state.wsAsking = false;
+      if (send) send.disabled = false;
+    }
+  }
+
+  // A cited key in a workspace answer belongs to some project, so a click drills
+  // into that project AT the cited node (there is no single workspace graph to
+  // select within). A project-qualified key (`<project>::<key>`) names its project
+  // directly; we pre-seed `pendingNav` (the same focus-a-node-on-load hop the
+  // cross-repo bridge uses) so the target project's graph opens centred on the
+  // node, then navigate. A bare, unqualified key can't be placed in a project, so
+  // it does nothing.
+  function wsAskGoToProject(key) {
+    const q = parseQualifiedKey(key);
+    if (!q) return;
+    const ws = state.current;
+    state.pendingNav = {
+      ws,
+      project: q.project,
+      trail: [{ ws, project: q.project }],
+      focus: q.key,
+    };
+    goProject(ws, q.project);
+  }
+
+  // Split a `<project>::<key>` citation into its parts (mirrors the server-side
+  // `parse_qualified`); `null` for a bare, unqualified key.
+  function parseQualifiedKey(key) {
+    const i = String(key).indexOf("::");
+    if (i <= 0) return null;
+    return { project: key.slice(0, i), key: key.slice(i + 2) };
   }
 
   // -- router ----------------------------------------------------------------

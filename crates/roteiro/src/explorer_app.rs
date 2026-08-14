@@ -237,6 +237,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_js_wires_the_workspace_ask_to_capabilities_and_chat() {
+        // The WORKSPACE-level Ask is data-driven off the SAME capability signal as
+        // the project Ask (`loadCapabilities` enables both), but — answering across
+        // ALL hosted projects — it posts to the UNSCOPED `/v1/chat/completions` (no
+        // `/v1/{project}/…` pin) and steers the model to range over projects via
+        // `list_projects` + the per-tool `project` argument (ADR-0008). Pin the
+        // wiring so a rename on either side is caught.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "loadCapabilities",
+            "enableWorkspaceAsk",
+            "submitWorkspaceAsk",
+            "\"/v1/chat/completions\"",
+            "list_projects",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn app_js_workspace_ask_linkifies_project_qualified_citations() {
+        // A workspace Ask answer cites PROJECT-QUALIFIED node keys (`<project>::<key>`,
+        // and a project/dir name may contain `-`/`.`, e.g. `stream-sync::sym:rust:…`).
+        // The linkifier must recognise the whole qualified token — not mis-split a
+        // hyphenated project at an inner `:` — and route the click, WITH its project,
+        // into that project's graph. Pin the wiring: a dedicated `WS_KEY_RE` whose
+        // optional project segment spans `-`/`.` before the `::` separator, driven
+        // through `renderAnswer` with the project group, and a `wsAskGoToProject`
+        // that parses the qualifier and drills in.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "WS_KEY_RE",
+            // the optional `<project>::` qualifier, project segment allowing `-`/`.`
+            "(?:([A-Za-z0-9_.-]+)::)?",
+            // the workspace Ask renders with the qualified grammar (project in group 1,
+            // prefix in group 2 → pass group 2 as the URL-checkable prefix)
+            "renderAnswer(answer, content, wsAskGoToProject, WS_KEY_RE, 2)",
+            "function wsAskGoToProject",
+            "function parseQualifiedKey",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_scaffolds_the_workspace_ask_panel_gated_hidden() {
+        // The workspace (overview) view carries a graph-grounded Ask panel beside the
+        // topology/matrix. It must ship HIDDEN — the llama-free explorer reports
+        // `ask:false`, so the panel only appears once `/v1/graph/capabilities`
+        // enables Ask (the same gate as the project Ask tab), matching that tab's
+        // disabled-in-explorer behaviour.
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in ["id=\"ws-ask-panel\"", "id=\"ws-ask-body\""] {
+            assert!(body.contains(needle), "shell must contain `{needle}`");
+        }
+        assert!(
+            body.contains("id=\"ws-ask-panel\" hidden"),
+            "the workspace Ask panel must ship hidden, gated on capabilities"
+        );
+    }
+
+    #[tokio::test]
     async fn app_js_is_served_as_javascript() {
         let (status, ct, cache, body) = get("/app.js").await;
         assert_eq!(status, StatusCode::OK);
