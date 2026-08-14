@@ -146,6 +146,40 @@ path. **Size-based rotation is intentionally out of scope** — `tracing-appende
 does not offer it — and is noted as a candidate for the OTLP step. Old-file
 pruning/retention is likewise deferred.
 
+### Native llama.cpp / ggml log routing
+
+The dominant source of stdout/stderr noise today is **not** Rust code — it is the
+**native C logging** from llama.cpp + ggml. Loading a model floods the terminal
+with hundreds of `llama_model_loader:` / `create_tensor:` / `print_info:` /
+`ggml_metal_*` lines emitted straight from the C library, bypassing the `tracing`
+subscriber entirely.
+
+We tame this by calling `llama_cpp_2::send_logs_to_tracing(LogOptions::default())`
+**once**, at engine construction in `crates/rto-llama/src/llama.rs`
+(`install_native_log_bridge`, feature-gated on `llama`). It installs both the
+`llama_log_set` and `ggml_log_set` callbacks, so every native line becomes a
+`tracing` event on the `llama.cpp` / `ggml` target at its mapped level (ggml
+`DEBUG`/`INFO`/`WARN`/`ERROR` → tracing `DEBUG`/`INFO`/`WARN`/`ERROR`). It is then
+gated by exactly the same subscriber as everything else:
+
+- **plain `roteiro serve`** (stdout filter `warn`): the verbose model-loader
+  `INFO` wall is **suppressed**; only genuine native warnings/errors surface;
+- **file logging on** (`--log`, file filter `info`): the wall is **captured** in
+  the rotating OTEL file at its proper level, off the terminal;
+- **`ROTEIRO_LOG=debug`** (or `info`): the wall is **surfaced** on stdout too.
+
+Ordering matters two ways, both handled: the subscriber is installed in
+`roteiro`'s `main` before any engine is built, and the bridge is installed
+**before** `LlamaBackend::init()` — the backend's device probe (e.g. ggml-metal's
+`ggml_metal_device_init` block) logs *during* init, so a later install would let
+that first batch escape to stderr. A hand-rolled `llama_log_set` callback was
+rejected: it needs `unsafe`, which is `forbid`den workspace-wide, whereas
+`send_logs_to_tracing` is a safe wrapper (and also handles llama.cpp's `CONT`
+continuation-line buffering and per-submodule targets for us).
+
+The bridge lives entirely behind the `llama` feature, so non-llama builds are
+unaffected.
+
 ### The deferred-OTLP seam
 
 `telemetry::init` is the *only* place layers are assembled, so the future exporter
@@ -164,19 +198,25 @@ Metrics (an OTEL `MeterProvider`) attach at the same seam.
   dependency or any change to interactive stdout output.
 - The non-blocking guard means logging to disk can never stall a command.
 - The OTLP exporter + metrics become an additive change at one seam.
+- The native llama.cpp/ggml log wall — the biggest source of stdout noise — is
+  routed through `tracing`, so it obeys the log-level filter (quiet by default,
+  opt-in at `debug`) and lands in the OTEL file when file logging is on.
 
 **Negative / costs**
 
 - Three new (well-maintained, `cargo deny`-clean) dependencies: `tracing`,
   `tracing-subscriber`, `tracing-appender`.
-- Existing `println!`/`eprintln!` diagnostics are **not** yet routed through
-  `tracing`, so the file captures only events emitted via the `tracing` macros
-  (currently the startup breadcrumb). Migrating call sites to `tracing` is
-  follow-up work, deliberately out of this ADR's scope.
+- Roteiro's own Rust-side `println!`/`eprintln!` diagnostics are **not** yet
+  routed through `tracing` (the native llama.cpp/ggml logs now are). So the file
+  captures the startup breadcrumb + native engine logs, but not yet the CLI's own
+  `eprintln!` warnings. Migrating those Rust call sites to `tracing` is follow-up
+  work, deliberately out of this ADR's scope.
 - No retention/size cap yet; operators choosing `never` own the file's growth.
 
 ## Status
 
 Accepted — implemented in `crates/roteiro/src/telemetry.rs` with the `[telemetry]`
-config table in `crates/roteiro/src/config.rs`. The OTLP exporter, metrics, and
-`println!`→`tracing` migration are tracked as follow-up.
+config table in `crates/roteiro/src/config.rs`, and the native llama.cpp/ggml
+log bridge in `crates/roteiro/../rto-llama/src/llama.rs` (feature `llama`). The
+OTLP exporter, metrics, and the Rust-side `println!`/`eprintln!`→`tracing`
+migration are tracked as follow-up.

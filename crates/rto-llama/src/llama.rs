@@ -37,11 +37,40 @@ use llama_cpp_2::mtmd::{
     MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker,
 };
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
 use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo};
 
 /// Default context window when the caller does not set one.
 const DEFAULT_N_CTX: u32 = 4096;
+
+/// Ensures the native-log → `tracing` bridge is installed exactly once.
+static NATIVE_LOG_BRIDGE: std::sync::Once = std::sync::Once::new();
+
+/// Route llama.cpp + ggml's native C logging through `tracing` instead of letting
+/// it write straight to stdout/stderr (ADR-0011). This is what tames the wall of
+/// `llama_model_loader:` / `create_tensor:` / `print_info:` / `ggml_*` lines a
+/// model load emits: `send_logs_to_tracing` installs both the `llama_log_set` and
+/// `ggml_log_set` callbacks, so each native line becomes a `tracing` event on the
+/// `llama.cpp` / `ggml` target at its mapped level (ggml DEBUG/INFO/WARN/ERROR →
+/// tracing DEBUG/INFO/WARN/ERROR). It then obeys whatever subscriber Roteiro
+/// installed: quiet on stdout by default (that layer filters at `warn`), captured
+/// in the rotating file when file logging is on (that layer filters at `info`),
+/// and fully surfaced with `ROTEIRO_LOG=debug`.
+///
+/// Called at engine construction, after the subscriber is already installed (in
+/// `roteiro`'s `main`), so no native line escapes ahead of the bridge. Idempotent
+/// via [`std::sync::Once`]; the underlying setter is a documented no-op after the
+/// first call, but the `Once` avoids re-running the FFI setters per engine. Uses
+/// only the safe `llama-cpp-2` wrapper — a hand-rolled callback would need
+/// `unsafe`, which is `forbid`den workspace-wide.
+fn install_native_log_bridge() {
+    NATIVE_LOG_BRIDGE.call_once(|| {
+        // `LogOptions::default()` forwards logs to tracing (rather than suppressing
+        // them); the level filtering is the subscriber's job, not the bridge's.
+        send_logs_to_tracing(LogOptions::default());
+    });
+}
 
 /// One installed model this engine may serve: its public name and GGUF path,
 /// plus the multimodal projector for vision models.
@@ -129,6 +158,13 @@ impl LlamaEngine {
         n_ctx: u32,
         budget_bytes: u64,
     ) -> anyhow::Result<Self> {
+        // Redirect llama.cpp + ggml's native logs through `tracing` *before*
+        // `LlamaBackend::init()` — the backend's device probe (e.g. ggml-metal's
+        // `ggml_metal_device_init` block) logs during init, so installing the
+        // callback afterwards would let that first batch escape to stderr. The log
+        // setters are global C functions that need no initialised backend, so
+        // setting them first is safe and captures everything the model loads emit.
+        install_native_log_bridge();
         let backend = LlamaBackend::init()?;
         Ok(Self {
             backend,
@@ -605,7 +641,21 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::lru_evict_count;
+    use super::{install_native_log_bridge, lru_evict_count};
+
+    /// Installing the native-log → tracing bridge is safe to call repeatedly (the
+    /// `Once` guard makes every call after the first a no-op) and never panics —
+    /// so constructing several engines in one process can't double-install or
+    /// crash. No model load required; this only exercises the FFI log setter.
+    #[test]
+    fn native_log_bridge_install_is_idempotent() {
+        install_native_log_bridge();
+        install_native_log_bridge();
+        assert!(
+            super::NATIVE_LOG_BRIDGE.is_completed(),
+            "the bridge is installed exactly once"
+        );
+    }
 
     #[test]
     fn budget_zero_keeps_a_single_model() {

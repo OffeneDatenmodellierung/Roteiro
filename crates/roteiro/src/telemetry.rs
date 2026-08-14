@@ -539,4 +539,79 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// A layer that just counts the events it sees, for asserting whether a filter
+    /// let an event through.
+    #[derive(Clone, Default)]
+    struct CountingLayer(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountingLayer {
+        fn on_event(
+            &self,
+            _event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Count the native-target events of `level` that survive a filter with the
+    /// given default level. Emits on the `llama.cpp` target — exactly what the
+    /// `send_logs_to_tracing` bridge tags llama.cpp/ggml lines with — under a
+    /// scoped subscriber, so it never touches the process-global default.
+    fn native_events_passing(default: tracing::Level, event_level: tracing::Level) -> usize {
+        use tracing_subscriber::Layer as _;
+        let counter = CountingLayer::default();
+        // Build the filter from the default level only (no env), so the assertion
+        // is deterministic regardless of any `ROTEIRO_LOG` in the environment.
+        let filter = tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(default.into())
+            .parse_lossy("");
+        let subscriber = tracing_subscriber::registry().with(counter.clone().with_filter(filter));
+        tracing::subscriber::with_default(subscriber, || match event_level {
+            tracing::Level::INFO => {
+                tracing::info!(target: "llama.cpp", "llama_model_loader: loaded meta data");
+            }
+            tracing::Level::WARN => tracing::warn!(target: "ggml", "ggml warning"),
+            _ => tracing::debug!(target: "llama.cpp", "create_tensor: loading"),
+        });
+        counter.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The native llama.cpp/ggml logs (routed via `send_logs_to_tracing`) are
+    /// gated exactly like any other event: the noisy model-loader **INFO** wall is
+    /// suppressed at the stdout default (`warn`) but captured at the file default
+    /// (`info`), while native **WARN**/**ERROR** always surface — even on stdout.
+    /// This is the whole point of the bridge, tested without loading a model.
+    #[test]
+    fn native_logs_are_level_gated_like_any_event() {
+        use tracing::Level;
+        // The INFO model-loader wall: off at the stdout default, on at the file default.
+        assert_eq!(
+            native_events_passing(Level::WARN, Level::INFO),
+            0,
+            "native INFO wall is quiet on stdout by default (warn filter)"
+        );
+        assert_eq!(
+            native_events_passing(Level::INFO, Level::INFO),
+            1,
+            "native INFO wall is captured when the level is info (file default / --log)"
+        );
+        // Opt-in: at debug, even the DEBUG native lines surface.
+        assert_eq!(
+            native_events_passing(Level::DEBUG, Level::DEBUG),
+            1,
+            "native DEBUG lines surface at ROTEIRO_LOG=debug"
+        );
+        assert_eq!(
+            native_events_passing(Level::WARN, Level::DEBUG),
+            0,
+            "native DEBUG lines stay hidden by default"
+        );
+        // Native warnings/errors are never swallowed, even at the quiet stdout default.
+        assert_eq!(
+            native_events_passing(Level::WARN, Level::WARN),
+            1,
+            "native WARN/ERROR always surface"
+        );
+    }
 }
