@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.6.0...rto-llama-v1.7.0) - 2026-08-14
+
+### Fixed
+
+- *(serve)* acquire per-model gen_lock before the encoder-only guard
+- *(serve)* never run chat on an embedding model (server hard-crash)
+
 ## [1.6.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.5.0...rto-llama-v1.6.0) - 2026-08-14
 
 ### Added
