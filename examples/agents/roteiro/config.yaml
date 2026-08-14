@@ -37,14 +37,26 @@ prompt: |
   and which capability must be opted in — do not try to route around the gate.
 
 # Harness + model (Decision 1). The openai-agents harness talks to an
-# OpenAI-compatible endpoint; the pinned model `qwen3-8b` is served locally by
-# `roteiro serve --models` at http://127.0.0.1:8017/v1 and reached through an
-# Omnigent Gateway credential configured with `omni setup` (see README).
+# OpenAI-compatible endpoint. The pinned model `qwen3-8b` is served locally by
+# `roteiro serve --models` at http://127.0.0.1:8017/v1 and reached via the inline
+# `auth:` block below — no `omni setup` step is needed for the model endpoint
+# (and `omni setup` has no top-level Gateway option for the openai-agents harness).
+#
+# `config.use_responses: false` is REQUIRED: the openai-agents harness defaults to
+# the OpenAI Responses API (/v1/responses), which `roteiro serve` does NOT route
+# (it serves /v1/chat/completions for chat, plus /v1/models, /v1/embeddings, and
+# the /v1/graph/* API) — without this every turn 404s. `model: qwen3-8b` is the plain served id (NO provider prefix) and must
+# appear in `GET http://127.0.0.1:8017/v1/models`.
 executor:
   type: omnigent
   config:
     harness: openai-agents
+    use_responses: false
   model: qwen3-8b
+  auth:
+    type: api_key
+    api_key: sk-local
+    base_url: http://127.0.0.1:8017/v1
 
 # Three MCP servers, declared explicitly (no bundled shortcuts). Each carries a
 # tight per-server `tools:` allowlist; omit the key and a server would expose
