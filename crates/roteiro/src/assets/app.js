@@ -1890,22 +1890,35 @@
     }
   }
 
+  // Resolve which model a panel should pre-select: PRESERVE a prior pick when it is
+  // still in the served chat-capable list (so an idempotent re-enable/re-render does
+  // NOT silently discard the user's dropdown choice), else fall back to the served
+  // default (`askModels[0]`, generative-first). Returns `null` when nothing is
+  // served. `current` is the panel's remembered pick (`askModel`/`wsAskModel`).
+  function resolveAskModel(current) {
+    if (current && state.askModels.includes(current)) return current;
+    return state.askModels[0] || null;
+  }
+
   // The model control for an Ask panel. When MORE THAN ONE chat-capable model is
-  // served, this is a `<select>` so the user can switch model per question —
-  // default-selected to the served default (`askModels[0]`, generative-first);
-  // `onPick` fires with the chosen id on every change so the caller can record it
-  // and send it with the next question. With exactly ONE model there is nothing to
-  // choose, so we keep the plain static `model: <name>` label (no 1-option
-  // dropdown); with none, an empty span (the tab is disabled in that case anyway).
-  function askModelControl(onPick) {
+  // served, this is a `<select>` so the user can switch model per question — the
+  // option matching `selected` is pre-selected so the dropdown mirrors `state`
+  // across re-renders (falling back to the served default only when `selected` is
+  // absent/no-longer-served). `onPick` fires with the chosen id on every change so
+  // the caller can record it and send it with the next question. With exactly ONE
+  // model there is nothing to choose, so we keep the plain static `model: <name>`
+  // label (no 1-option dropdown); with none, an empty span (the tab is disabled in
+  // that case anyway).
+  function askModelControl(selected, onPick) {
     const models = state.askModels;
     if (!models.length) return el("span", { class: "p-ask-model" });
     if (models.length === 1) {
       return el("span", { class: "p-ask-model", text: `model: ${models[0]}` });
     }
+    const current = models.includes(selected) ? selected : models[0];
     const options = models.map((m) => {
       const o = el("option", { value: m, text: m });
-      if (m === models[0]) o.selected = true; // default = the generative-first pick
+      if (m === current) o.selected = true; // mirror `state`; default is `models[0]`
       return o;
     });
     return el(
@@ -1939,9 +1952,10 @@
       "aria-label": "Question about this project",
     });
     const send = el("button", { class: "p-ask-send", type: "submit", text: "Ask" });
-    // Default the pick to the served default; the dropdown (multi-model) updates it.
-    state.askModel = state.askModels[0] || null;
-    const modelNote = askModelControl((m) => {
+    // Preserve a still-served prior pick across re-enable; else default to the
+    // served default. The dropdown (multi-model) updates it and mirrors it.
+    state.askModel = resolveAskModel(state.askModel);
+    const modelNote = askModelControl(state.askModel, (m) => {
       state.askModel = m;
     });
 
@@ -2189,9 +2203,10 @@
       "aria-label": "Question about this workspace",
     });
     const send = el("button", { class: "p-ask-send", type: "submit", text: "Ask" });
-    // Default the pick to the served default; the dropdown (multi-model) updates it.
-    state.wsAskModel = state.askModels[0] || null;
-    const modelNote = askModelControl((m) => {
+    // Preserve a still-served prior pick across re-enable; else default to the
+    // served default. The dropdown (multi-model) updates it and mirrors it.
+    state.wsAskModel = resolveAskModel(state.wsAskModel);
+    const modelNote = askModelControl(state.wsAskModel, (m) => {
       state.wsAskModel = m;
     });
 

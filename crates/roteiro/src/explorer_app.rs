@@ -299,15 +299,42 @@ mod tests {
             "function askModelControl",
             "models.length === 1",
             // multi-model → a <select> populated from the capabilities model list,
-            // default-selected to the generative-first pick
+            // with the option matching the current pick pre-selected
             "p-ask-model-select",
             "o.selected = true",
-            // both panels seed their pick from the served default and update it live
-            "state.askModel = state.askModels[0]",
-            "state.wsAskModel = state.askModels[0]",
+            // both panels resolve their pick (preserve-or-default) and update it live
+            "state.askModel = resolveAskModel(state.askModel)",
+            "state.wsAskModel = resolveAskModel(state.wsAskModel)",
             // the PICKED model is what goes on the wire (project + workspace Ask)
             "model: state.askModel || state.askModels[0]",
             "model: state.wsAskModel || state.askModels[0]",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn app_js_ask_model_pick_survives_re_render_and_falls_back_when_unserved() {
+        // `enableAskTab`/`enableWorkspaceAsk` are idempotent — re-running them must NOT
+        // silently discard the user's dropdown choice. The pick is routed through
+        // `resolveAskModel`, which PRESERVES a remembered model when it is still in the
+        // served `askModels` list and only falls back to the default (`askModels[0]`)
+        // when it is unset or no longer served; the `<select>` then pre-selects the
+        // option matching that resolved pick, so `state` and the dropdown stay in sync
+        // across re-renders. Pin that contract (both panels) headlessly.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "function resolveAskModel",
+            // preserve iff still served, else fall back to the generative-first default
+            "if (current && state.askModels.includes(current)) return current;",
+            "return state.askModels[0] || null;",
+            // both panels resolve (not blindly reset) their remembered pick
+            "state.askModel = resolveAskModel(state.askModel)",
+            "state.wsAskModel = resolveAskModel(state.wsAskModel)",
+            // the rendered <select> mirrors the resolved pick (fallback when unserved)
+            "const current = models.includes(selected) ? selected : models[0];",
+            "if (m === current) o.selected = true;",
         ] {
             assert!(body.contains(needle), "app.js must reference `{needle}`");
         }
