@@ -2160,7 +2160,7 @@
     selectNode(key);
   }
 
-  // -- workspace panel: Ask across every project (serve build only) ----------
+  // -- workspace panel: Ask across the selected workspace (serve build only) --
   //
   // The WORKSPACE Ask answers about the SELECTED workspace and all ITS projects at
   // once. Unlike the project Ask (which pins one project via `/v1/{project}/…`), it

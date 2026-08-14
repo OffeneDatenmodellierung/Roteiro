@@ -898,17 +898,20 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_scoped_route_dispatches_to_its_own_registry_and_404s_when_unknown() {
-        use super::app_with_workspace_tools;
-        use crate::tools::{ToolDef, ToolRegistry};
+        use super::{MAX_TOOL_ROUNDS, app_with_workspace_tools};
+        use crate::engine::Message;
+        use crate::tools::{ToolDef, ToolRegistry, chat_with_tools};
 
-        // A registry whose sole tool reports which workspace it belongs to, so a
-        // completion proves the request ran over the RIGHT per-workspace registry.
+        // A registry whose sole tool reports which workspace it belongs to, so the
+        // model's tool result — fed back and echoed as the answer — is DIFFERENT per
+        // workspace. This is what makes the assertions below prove the request ran
+        // over the RIGHT per-workspace registry, not merely that a route exists.
         struct Tagged(&'static str);
         impl ToolRegistry for Tagged {
             fn tools(&self) -> Vec<ToolDef> {
                 vec![ToolDef {
                     name: "who".to_owned(),
-                    description: "who".to_owned(),
+                    description: "which workspace am I?".to_owned(),
                     parameters: serde_json::json!({"type": "object"}),
                 }]
             }
@@ -919,6 +922,74 @@ mod tests {
                 vec![self.0.to_owned()]
             }
         }
+
+        // A deterministic engine that actually drives the tool loop: on the first
+        // turn it calls `who`; once it sees the `<tool_response>` fed back, it echoes
+        // that payload as the final answer. So the completion carries whatever the
+        // dispatched registry's `who` returned — the workspace's own tag.
+        struct ToolEchoEngine;
+        impl Engine for ToolEchoEngine {
+            fn models(&self) -> Vec<ModelInfo> {
+                vec![ModelInfo {
+                    id: "echo".to_owned(),
+                }]
+            }
+            fn chat_stream(
+                &self,
+                req: &ChatRequest,
+                on_token: &mut dyn FnMut(&str),
+            ) -> Result<CompletionStats, EngineError> {
+                if req.model != "echo" {
+                    return Err(EngineError::UnknownModel(req.model.clone()));
+                }
+                let last = req
+                    .messages
+                    .last()
+                    .map(|m| m.content.as_str())
+                    .unwrap_or("");
+                let out = match last
+                    .strip_prefix("<tool_response>")
+                    .and_then(|s| s.strip_suffix("</tool_response>"))
+                {
+                    // The tool result came back → answer with exactly its payload.
+                    Some(payload) => payload.to_owned(),
+                    // No result yet → request the identity tool.
+                    None => "<tool_call>{\"name\":\"who\",\"arguments\":{}}</tool_call>".to_owned(),
+                };
+                on_token(&out);
+                Ok(CompletionStats {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                })
+            }
+        }
+
+        // Sanity-check the engine/registry pair in isolation (no HTTP): the tool loop
+        // over each per-workspace registry yields that workspace's own tag.
+        let req = ChatRequest {
+            model: "echo".to_owned(),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: "which workspace is this?".to_owned(),
+            }],
+            images: vec![],
+            audio: vec![],
+            temperature: 0.0,
+            max_tokens: 64,
+        };
+        assert_eq!(
+            chat_with_tools(&ToolEchoEngine, &Tagged("api"), &req, MAX_TOOL_ROUNDS)
+                .unwrap()
+                .content,
+            "api"
+        );
+        assert_eq!(
+            chat_with_tools(&ToolEchoEngine, &Tagged("docs"), &req, MAX_TOOL_ROUNDS)
+                .unwrap()
+                .content,
+            "docs"
+        );
 
         let mut workspaces: std::collections::HashMap<String, std::sync::Arc<dyn ToolRegistry>> =
             std::collections::HashMap::new();
@@ -935,29 +1006,58 @@ mod tests {
             }
         }
         let app = app_with_workspace_tools(
-            std::sync::Arc::new(MockEngine),
+            std::sync::Arc::new(ToolEchoEngine),
             std::sync::Arc::new(NoTools),
             workspaces,
         );
 
-        // A known workspace resolves (200) — the route is mounted and dispatches.
-        let body = serde_json::json!({
-            "model": "echo",
-            "messages": [{"role": "user", "content": "hi"}],
-        });
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/workspaces/api/chat/completions")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        // The content each workspace-scoped route returns, given the tool loop above.
+        async fn ask(app: &axum::Router, ws: &str) -> (StatusCode, String) {
+            let body = serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "which workspace is this?"}],
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/workspaces/{ws}/chat/completions"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let content = body_json(resp).await["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            (status, content)
+        }
+
+        // Each workspace resolves to ITS OWN registry: `api` reports `api`, `docs`
+        // reports `docs`. Different outputs from the same request prove the handler
+        // dispatched to the correct per-workspace registry (not just that a route
+        // exists — the earlier 200-only check couldn't tell the two apart).
+        let (status_api, content_api) = ask(&app, "api").await;
+        assert_eq!(status_api, StatusCode::OK);
+        assert_eq!(
+            content_api, "api",
+            "the `api` route must use the `api` registry"
+        );
+
+        let (status_docs, content_docs) = ask(&app, "docs").await;
+        assert_eq!(status_docs, StatusCode::OK);
+        assert_eq!(
+            content_docs, "docs",
+            "the `docs` route must use the `docs` registry"
+        );
+        assert_ne!(
+            content_api, content_docs,
+            "the two workspaces must yield different, workspace-specific results"
+        );
 
         // An unknown workspace is a 404, never answered from another registry.
         let resp = app
@@ -966,7 +1066,13 @@ mod tests {
                     .method("POST")
                     .uri("/v1/workspaces/nope/chat/completions")
                     .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "echo",
+                            "messages": [{"role": "user", "content": "hi"}],
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
