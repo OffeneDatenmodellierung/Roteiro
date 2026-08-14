@@ -275,8 +275,8 @@ roteiro spec draft draft-adr.md         <span class="c"># fills placeholder sect
 <h3>3 · Serving mode <span style="font-weight:normal;color:var(--sub)">— the network HTTP server</span></h3>
 <p><code>roteiro serve</code> is the networked server: an OpenAI-compatible
 <code>/v1</code> API over your installed models, the read-only <code>/v1/graph</code>
-API and the <a href="#modes">explorer</a> web UI — all on one loopback port. Built
-<code>--features serve</code> with a model installed it also enables the <strong>Ask</strong>
+API and the <a href="#modes">explorer</a> web UI — all on one loopback port. Built with
+<code>--features serve</code> and a model installed, it also enables the <strong>Ask</strong>
 tab; without the model feature (or none installed) it degrades gracefully to the
 model-free graph API + UI. Binds <code>[serve] addr</code> (default
 <code>127.0.0.1:8017</code>); set <code>[serve] tls_cert</code>/<code>tls_key</code> for
@@ -284,13 +284,13 @@ in-process HTTPS.</p>
 <pre><code><span class="c"># Network server on 127.0.0.1:8017 — /v1 + /v1/graph + the web UI</span>
 roteiro serve                            <span class="c"># → prints the URL to open</span>
 
-<span class="c"># Override bind address/port or enable TLS on the command line…</span>
-roteiro serve --addr 0.0.0.0:8443 --tls-cert fullchain.pem --tls-key privkey.pem
-
-<span class="c"># …then call /v1 like any OpenAI endpoint</span>
+<span class="c"># Call /v1 on that default bind like any OpenAI endpoint</span>
 curl http://127.0.0.1:8017/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"hello"}]}'</code></pre>
+  -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"hello"}]}'
+
+<span class="c"># Or override the bind address/port and terminate TLS in-process (then use https://…)</span>
+roteiro serve --addr 0.0.0.0:8443 --tls-cert fullchain.pem --tls-key privkey.pem</code></pre>
 <div class="note"><strong>No auth on <code>/v1</code>.</strong> A non-loopback bind like
 <code>0.0.0.0:8443</code> is warned about — use in-process TLS
 (<code>[serve] tls_cert</code>/<code>tls_key</code>) or a reverse proxy. In-process TLS is a
