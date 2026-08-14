@@ -27,12 +27,13 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use llama_cpp_2::ChatTemplateError;
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::mtmd::{
     MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker,
 };
@@ -229,9 +230,7 @@ impl LlamaEngine {
             .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| EngineError::Inference(format!("chat message: {e}")))?;
-        let template = model
-            .chat_template(None)
-            .map_err(|e| EngineError::Inference(format!("no chat template: {e}")))?;
+        let template = resolve_chat_template(model)?;
         let prompt = model
             .apply_chat_template(&template, &messages, true)
             .map_err(|e| EngineError::Inference(format!("apply chat template: {e}")))?;
@@ -418,12 +417,80 @@ fn media_prompt(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| EngineError::Inference(format!("chat message: {e}")))?;
 
-    let template = model
-        .chat_template(None)
-        .map_err(|e| EngineError::Inference(format!("no chat template: {e}")))?;
+    let template = resolve_chat_template(model)?;
     model
         .apply_chat_template(&template, &messages, true)
         .map_err(|e| EngineError::Inference(format!("apply chat template: {e}")))
+}
+
+/// Resolve a usable chat template for `model`, preferring the one embedded in
+/// the GGUF (`tokenizer.chat_template`) and falling back to a sensible default
+/// when the model embeds none.
+///
+/// Some served generative GGUFs (e.g. `moondream2`) carry no embedded chat
+/// template. llama.cpp's [`LlamaModel::chat_template`] surfaces that as
+/// [`ChatTemplateError::MissingTemplate`] (a null pointer from the C API);
+/// applying the chat path directly to that would fail the whole request with
+/// `no chat template`. Instead we synthesise a template from a built-in
+/// llama.cpp identifier — the model's family template when its architecture is
+/// recognised, otherwise `ChatML`, a widely compatible default — so the request
+/// still produces a valid formatted prompt. Behaviour is unchanged for models
+/// that *do* embed a template: theirs is returned verbatim. Only a genuinely
+/// unusable lookup (a non-missing error, or a fallback name that cannot be
+/// turned into a C string) surfaces as a typed [`EngineError`].
+fn resolve_chat_template(model: &LlamaModel) -> Result<LlamaChatTemplate, EngineError> {
+    // The architecture read is deferred into a closure so the happy path (an
+    // embedded template) never touches model metadata — it is only consulted on
+    // the missing-template fallback.
+    resolve_chat_template_from(model.chat_template(None), || {
+        model.meta_val_str("general.architecture").ok()
+    })
+}
+
+/// The pure decision behind [`resolve_chat_template`], split out from the
+/// [`LlamaModel`] lookup so it can be exercised without loading a GGUF: given
+/// the embedded-template lookup result and a lazy architecture provider, pick
+/// the template to use. An embedded template is returned unchanged — `arch` is
+/// never invoked in that case; a missing one falls back to a built-in identifier
+/// (see [`fallback_template_name`], the only path that reads the architecture);
+/// any other lookup failure becomes a typed [`EngineError`].
+fn resolve_chat_template_from(
+    embedded: Result<LlamaChatTemplate, ChatTemplateError>,
+    arch: impl FnOnce() -> Option<String>,
+) -> Result<LlamaChatTemplate, EngineError> {
+    match embedded {
+        Ok(template) => Ok(template),
+        Err(ChatTemplateError::MissingTemplate) => {
+            let arch = arch();
+            let name = fallback_template_name(arch.as_deref());
+            LlamaChatTemplate::new(name).map_err(|e| {
+                EngineError::Inference(format!("build fallback chat template `{name}`: {e}"))
+            })
+        }
+        // Not an absent template (that is handled by the fallback above) but a
+        // genuine failure to read the embedded one — surface it as such.
+        Err(e) => Err(EngineError::Inference(format!(
+            "chat template lookup failed: {e}"
+        ))),
+    }
+}
+
+/// Built-in llama.cpp chat-template identifier to use for a model that embeds
+/// none, chosen from its GGUF architecture (`general.architecture`). Recognised
+/// families map to their known format; everything else (including an unknown or
+/// absent architecture) uses `ChatML`, a widely compatible default. Each returned
+/// name is a llama.cpp built-in template identifier that
+/// [`LlamaModel::apply_chat_template`] expands into a real prompt.
+fn fallback_template_name(arch: Option<&str>) -> &'static str {
+    match arch {
+        Some("gemma" | "gemma2" | "gemma3") => "gemma",
+        Some("phi3") => "phi3",
+        // Everything else falls back to ChatML — the neutral default, and the
+        // actual format used by the Qwen family (`qwen2`/`qwen3`), which makes up
+        // most of this engine's install set. Also covers unknown or absent
+        // architectures (e.g. `moondream2`, which records none).
+        _ => "chatml",
+    }
 }
 
 /// The shared sampling loop: from `start_pos`, sample → emit → decode until an
@@ -605,7 +672,10 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::lru_evict_count;
+    use super::{
+        ChatTemplateError, EngineError, LlamaChatTemplate, fallback_template_name, lru_evict_count,
+        resolve_chat_template_from,
+    };
 
     #[test]
     fn budget_zero_keeps_a_single_model() {
@@ -632,5 +702,59 @@ mod tests {
         assert_eq!(lru_evict_count(&[500], 10), 0);
         // With an older small model present, only the old one is evicted.
         assert_eq!(lru_evict_count(&[100, 500], 10), 1);
+    }
+
+    #[test]
+    fn embedded_template_is_used_unchanged() {
+        // When the GGUF embeds a chat template, resolution returns it verbatim —
+        // no fallback, byte-for-byte identical (behaviour for qwen*/deepseek/etc.
+        // is unaffected). The architecture provider must not be consulted on this
+        // happy path, so wire it to panic if it ever is.
+        let embedded = "<|im_start|>{{ messages }}<|im_end|>";
+        let resolved =
+            resolve_chat_template_from(Ok(LlamaChatTemplate::new(embedded).unwrap()), || {
+                panic!("architecture must not be read when a template is embedded")
+            })
+            .expect("embedded template resolves");
+        assert_eq!(resolved.to_str().unwrap(), embedded);
+    }
+
+    #[test]
+    fn missing_template_falls_back_to_a_valid_builtin() {
+        // A model with no embedded template (e.g. moondream2, no architecture)
+        // must still yield a usable template instead of the old null-pointer
+        // error. The fallback is a llama.cpp built-in identifier, not an empty
+        // or null string, so apply_chat_template can expand it into a prompt.
+        let resolved = resolve_chat_template_from(Err(ChatTemplateError::MissingTemplate), || None)
+            .expect("missing template falls back");
+        assert_eq!(resolved.to_str().unwrap(), "chatml");
+
+        // A recognised family maps to its own known format.
+        let gemma = resolve_chat_template_from(Err(ChatTemplateError::MissingTemplate), || {
+            Some("gemma2".to_owned())
+        })
+        .expect("family fallback resolves");
+        assert_eq!(gemma.to_str().unwrap(), "gemma");
+    }
+
+    #[test]
+    fn family_detection_maps_arch_to_known_or_chatml() {
+        // Qwen chat models use ChatML; unknown/absent architectures also default
+        // to ChatML — a widely compatible neutral format.
+        assert_eq!(fallback_template_name(Some("qwen3")), "chatml");
+        assert_eq!(fallback_template_name(Some("qwen2")), "chatml");
+        assert_eq!(fallback_template_name(Some("gemma3")), "gemma");
+        assert_eq!(fallback_template_name(Some("phi3")), "phi3");
+        assert_eq!(fallback_template_name(Some("some-unknown-arch")), "chatml");
+        assert_eq!(fallback_template_name(None), "chatml");
+    }
+
+    #[test]
+    fn non_missing_lookup_error_surfaces_as_typed_error() {
+        // A genuine lookup failure (not "missing") is not silently masked by the
+        // fallback — it becomes a typed inference error, never a crash.
+        let nul = std::ffi::CString::new(vec![b'a', 0, b'b']).unwrap_err();
+        let err = resolve_chat_template_from(Err(ChatTemplateError::NullError(nul)), || None);
+        assert!(matches!(err, Err(EngineError::Inference(_))));
     }
 }
