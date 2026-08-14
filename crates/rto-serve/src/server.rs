@@ -896,74 +896,109 @@ mod tests {
         assert_eq!(body_json(resp).await["data"].as_array().unwrap().len(), 0);
     }
 
+    /// A registry whose sole tool reports which workspace it belongs to, so the
+    /// model's tool result — fed back and echoed as the answer — is DIFFERENT per
+    /// workspace. That is what lets the workspace-routing test prove the request ran
+    /// over the RIGHT per-workspace registry, not merely that a route exists.
+    struct Tagged(&'static str);
+    impl crate::tools::ToolRegistry for Tagged {
+        fn tools(&self) -> Vec<crate::tools::ToolDef> {
+            vec![crate::tools::ToolDef {
+                name: "who".to_owned(),
+                description: "which workspace am I?".to_owned(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]
+        }
+        fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+            Ok(self.0.to_owned())
+        }
+        fn projects(&self) -> Vec<String> {
+            vec![self.0.to_owned()]
+        }
+    }
+
+    /// A registry that advertises no tools — the flat/default registry in the
+    /// workspace-routing test, so the unscoped path never shadows the scoped one.
+    struct NoTools;
+    impl crate::tools::ToolRegistry for NoTools {
+        fn tools(&self) -> Vec<crate::tools::ToolDef> {
+            Vec::new()
+        }
+        fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    /// A deterministic engine that actually drives the tool loop: on the first turn
+    /// it calls `who`; once it sees the `<tool_response>` fed back, it echoes that
+    /// payload as the final answer. So the completion carries whatever the dispatched
+    /// registry's `who` returned — the workspace's own tag.
+    struct ToolEchoEngine;
+    impl Engine for ToolEchoEngine {
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo {
+                id: "echo".to_owned(),
+            }]
+        }
+        fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            if req.model != "echo" {
+                return Err(EngineError::UnknownModel(req.model.clone()));
+            }
+            let last = req.messages.last().map_or("", |m| m.content.as_str());
+            let out = match last
+                .strip_prefix("<tool_response>")
+                .and_then(|s| s.strip_suffix("</tool_response>"))
+            {
+                // The tool result came back → answer with exactly its payload.
+                Some(payload) => payload.to_owned(),
+                // No result yet → request the identity tool.
+                None => "<tool_call>{\"name\":\"who\",\"arguments\":{}}</tool_call>".to_owned(),
+            };
+            on_token(&out);
+            Ok(CompletionStats {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    /// The status + answer content a workspace-scoped chat route returns for `ws`,
+    /// given the `ToolEchoEngine` tool loop (the answer echoes that workspace's tag).
+    async fn ask_workspace(app: &axum::Router, ws: &str) -> (StatusCode, String) {
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": "which workspace is this?"}],
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/workspaces/{ws}/chat/completions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let content = body_json(resp).await["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        (status, content)
+    }
+
     #[tokio::test]
     async fn workspace_scoped_route_dispatches_to_its_own_registry_and_404s_when_unknown() {
         use super::{MAX_TOOL_ROUNDS, app_with_workspace_tools};
         use crate::engine::Message;
-        use crate::tools::{ToolDef, ToolRegistry, chat_with_tools};
-
-        // A registry whose sole tool reports which workspace it belongs to, so the
-        // model's tool result — fed back and echoed as the answer — is DIFFERENT per
-        // workspace. This is what makes the assertions below prove the request ran
-        // over the RIGHT per-workspace registry, not merely that a route exists.
-        struct Tagged(&'static str);
-        impl ToolRegistry for Tagged {
-            fn tools(&self) -> Vec<ToolDef> {
-                vec![ToolDef {
-                    name: "who".to_owned(),
-                    description: "which workspace am I?".to_owned(),
-                    parameters: serde_json::json!({"type": "object"}),
-                }]
-            }
-            fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
-                Ok(self.0.to_owned())
-            }
-            fn projects(&self) -> Vec<String> {
-                vec![self.0.to_owned()]
-            }
-        }
-
-        // A deterministic engine that actually drives the tool loop: on the first
-        // turn it calls `who`; once it sees the `<tool_response>` fed back, it echoes
-        // that payload as the final answer. So the completion carries whatever the
-        // dispatched registry's `who` returned — the workspace's own tag.
-        struct ToolEchoEngine;
-        impl Engine for ToolEchoEngine {
-            fn models(&self) -> Vec<ModelInfo> {
-                vec![ModelInfo {
-                    id: "echo".to_owned(),
-                }]
-            }
-            fn chat_stream(
-                &self,
-                req: &ChatRequest,
-                on_token: &mut dyn FnMut(&str),
-            ) -> Result<CompletionStats, EngineError> {
-                if req.model != "echo" {
-                    return Err(EngineError::UnknownModel(req.model.clone()));
-                }
-                let last = req
-                    .messages
-                    .last()
-                    .map(|m| m.content.as_str())
-                    .unwrap_or("");
-                let out = match last
-                    .strip_prefix("<tool_response>")
-                    .and_then(|s| s.strip_suffix("</tool_response>"))
-                {
-                    // The tool result came back → answer with exactly its payload.
-                    Some(payload) => payload.to_owned(),
-                    // No result yet → request the identity tool.
-                    None => "<tool_call>{\"name\":\"who\",\"arguments\":{}}</tool_call>".to_owned(),
-                };
-                on_token(&out);
-                Ok(CompletionStats {
-                    prompt_tokens: 1,
-                    completion_tokens: 1,
-                    finish_reason: FinishReason::Stop,
-                })
-            }
-        }
+        use crate::tools::{ToolRegistry, chat_with_tools};
 
         // Sanity-check the engine/registry pair in isolation (no HTTP): the tool loop
         // over each per-workspace registry yields that workspace's own tag.
@@ -995,60 +1030,24 @@ mod tests {
             std::collections::HashMap::new();
         workspaces.insert("api".to_owned(), std::sync::Arc::new(Tagged("api")));
         workspaces.insert("docs".to_owned(), std::sync::Arc::new(Tagged("docs")));
-        // A flat registry with NO tools, so the unscoped path never shadows the test.
-        struct NoTools;
-        impl ToolRegistry for NoTools {
-            fn tools(&self) -> Vec<ToolDef> {
-                Vec::new()
-            }
-            fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
-                Ok(String::new())
-            }
-        }
         let app = app_with_workspace_tools(
             std::sync::Arc::new(ToolEchoEngine),
             std::sync::Arc::new(NoTools),
             workspaces,
         );
 
-        // The content each workspace-scoped route returns, given the tool loop above.
-        async fn ask(app: &axum::Router, ws: &str) -> (StatusCode, String) {
-            let body = serde_json::json!({
-                "model": "echo",
-                "messages": [{"role": "user", "content": "which workspace is this?"}],
-            });
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!("/v1/workspaces/{ws}/chat/completions"))
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let status = resp.status();
-            let content = body_json(resp).await["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            (status, content)
-        }
-
         // Each workspace resolves to ITS OWN registry: `api` reports `api`, `docs`
         // reports `docs`. Different outputs from the same request prove the handler
         // dispatched to the correct per-workspace registry (not just that a route
-        // exists — the earlier 200-only check couldn't tell the two apart).
-        let (status_api, content_api) = ask(&app, "api").await;
+        // exists — a 200-only check couldn't tell the two apart).
+        let (status_api, content_api) = ask_workspace(&app, "api").await;
         assert_eq!(status_api, StatusCode::OK);
         assert_eq!(
             content_api, "api",
             "the `api` route must use the `api` registry"
         );
 
-        let (status_docs, content_docs) = ask(&app, "docs").await;
+        let (status_docs, content_docs) = ask_workspace(&app, "docs").await;
         assert_eq!(status_docs, StatusCode::OK);
         assert_eq!(
             content_docs, "docs",
