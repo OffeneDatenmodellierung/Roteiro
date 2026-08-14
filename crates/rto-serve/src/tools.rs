@@ -240,7 +240,13 @@ mod tests {
         }];
         let prompt = tool_system_prompt(&tools);
         let lower = prompt.to_lowercase();
-        assert!(prompt.contains("ONLY"), "answer only from tool output");
+        // Pin the *grounding* "only" (answer from the graph), not the "reply with
+        // ONLY a tool call" formatting rule that also contains the bare word — so
+        // this fails if the grounding instruction itself regresses.
+        assert!(
+            prompt.contains("using ONLY its Roteiro knowledge graph"),
+            "answer only from tool output"
+        );
         assert!(
             prompt.contains("snippet") && prompt.contains("explain"),
             "read the returned content before describing a node"

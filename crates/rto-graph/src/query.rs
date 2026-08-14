@@ -335,30 +335,60 @@ pub struct SearchHit {
     pub snippet: Option<String>,
 }
 
-/// Max **chars** of a search-hit content snippet. Bounded so many hits cannot
-/// bloat the tool response or blow the served model's context window.
+/// Max **chars** of a search-hit content snippet, counting the trailing ellipsis
+/// when truncated (so the total length never exceeds this). Bounded so many hits
+/// cannot bloat the tool response or blow the served model's context window.
 const SNIPPET_MAX: usize = 300;
 
 /// Build a bounded, whitespace-collapsed snippet from a node's captured
 /// `meta.content`, or `None` when the node has no textual content (pure symbol/
-/// config nodes). Runs of whitespace collapse to single spaces and the text is
-/// truncated to [`SNIPPET_MAX`] chars (on a char boundary, since we take whole
-/// `char`s) with an ellipsis, so a search hit carries grounding text even when
-/// the model never calls [`explain`].
+/// config nodes). Runs of whitespace collapse to single spaces, and the result is
+/// at most [`SNIPPET_MAX`] chars *including* a trailing `…` when the content was
+/// truncated, so a search hit carries grounding text even when the model never
+/// calls [`explain`].
+///
+/// Processes `content` **lazily**: it collapses whitespace on the fly and stops
+/// after ~`SNIPPET_MAX` chars, so a large content-bearing node never materialises
+/// more than the bound regardless of how big its content is.
 fn content_snippet(meta: &serde_json::Value) -> Option<String> {
     let content = meta.get("content").and_then(|v| v.as_str())?;
-    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Collect at most SNIPPET_MAX + 1 collapsed chars: the one extra char only
+    // tells us whether the content overflowed the bound (→ needs an ellipsis);
+    // we never buffer more than that, however large `content` is.
+    let mut collapsed: Vec<char> = Vec::with_capacity(SNIPPET_MAX + 1);
+    let mut pending_space = false;
+    for ch in content.chars() {
+        if ch.is_whitespace() {
+            // A run of whitespace becomes a single separator, but only once a
+            // real char has been emitted (this also drops any leading whitespace).
+            pending_space = !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+            if collapsed.len() > SNIPPET_MAX {
+                break;
+            }
+        }
+        collapsed.push(ch);
+        if collapsed.len() > SNIPPET_MAX {
+            break;
+        }
+    }
+
     if collapsed.is_empty() {
         return None;
     }
-    let mut chars = collapsed.chars();
-    let snippet: String = chars.by_ref().take(SNIPPET_MAX).collect();
-    // If any char remains past the cap, the content was truncated — mark it.
-    Some(if chars.next().is_some() {
-        format!("{snippet}…")
+    // Overflowed the bound: truncate to SNIPPET_MAX - 1 chars and append the
+    // ellipsis, so the total length (ellipsis included) is exactly SNIPPET_MAX.
+    if collapsed.len() > SNIPPET_MAX {
+        let snippet: String = collapsed[..SNIPPET_MAX - 1].iter().collect();
+        Some(format!("{snippet}…"))
     } else {
-        snippet
-    })
+        Some(collapsed.into_iter().collect())
+    }
 }
 
 /// Deterministically search nodes for `query`, ranked by relevance, returning at
@@ -593,7 +623,7 @@ fn placeholder_hop() -> PathHop {
 
 #[cfg(test)]
 mod tests {
-    use super::{SCHEMA, explain, glob_match, list_kind, path, search};
+    use super::{SCHEMA, SNIPPET_MAX, explain, glob_match, list_kind, path, search};
     use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
     fn seeded() -> Store {
@@ -728,9 +758,9 @@ mod tests {
         assert!(snippet.starts_with("Roteiro is a graph."), "got: {snippet}");
         assert!(!snippet.contains("  "));
         assert!(!snippet.contains('\n'));
-        // …and the snippet is bounded (SNIPPET_MAX chars plus a one-char ellipsis).
+        // …and the snippet is bounded to SNIPPET_MAX chars *including* the ellipsis.
         assert!(
-            snippet.chars().count() <= 301,
+            snippet.chars().count() <= SNIPPET_MAX,
             "snippet is bounded: {} chars",
             snippet.chars().count()
         );
