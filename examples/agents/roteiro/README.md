@@ -46,7 +46,7 @@ Two enforcement layers combine:
 |---|---|
 | **`omni` CLI** | Omnigent installed and on `PATH`. **[confirmed]** present as `omnigent 0.10.0.dev0`. |
 | **`roteiro serve --models`** running with `qwen3-8b` pulled | Serves the OpenAI-compatible `/v1` endpoint at `http://127.0.0.1:8017` (default bind `127.0.0.1:8017`). This is the model backend for the agent. **[confirmed]** the default address and `/v1` endpoint from `crates/roteiro/src/main.rs`. The exposed model name must match what your `roteiro serve --models` advertises; the preset assumes it is `qwen3-8b`. |
-| **`roteiro` on `PATH`** (for the graph MCP server) | The agent launches `roteiro serve` (stdio) from the repo you want served. |
+| **`roteiro` on `PATH`** (for the graph MCP server) | The agent launches **`roteiro mcp`** (stdio MCP graph server, ADR-0002). With no `--workspace`/`-w` it serves the **current directory's repo**, so run `omni run` from the repo you want answered (or scope it — see [Which repo does the graph answer about?](#which-repo-does-the-graph-answer-about)). Note: this is **`roteiro mcp`**, not `roteiro serve` — `roteiro serve` is the HTTP model endpoint above and does not speak MCP over stdio. |
 | **Node / `npx`** | For the GitHub and Playwright MCP servers. |
 | **A GitHub token** | `GITHUB_PERSONAL_ACCESS_TOKEN` (see below). |
 
@@ -171,6 +171,21 @@ requires the live `roteiro serve --models` backend + a configured Gateway
 credential + a pulled `qwen3-8b`, which were not all available in the
 verification environment.
 
+### Which repo does the graph answer about?
+
+The `roteiro` MCP server runs `roteiro mcp` with no `--workspace`, so it serves
+**the repo of the current working directory** (`omni run` spawns the MCP
+subprocess in its own cwd). Two ways to point it at the code you want answered:
+
+* **Run from that repo.** `cd` into the target repo and launch the agent by
+  absolute path, e.g. `omni run /path/to/roteiro/examples/agents/roteiro/`. The
+  `roteiro mcp` subprocess then serves the target repo. (It must have a Roteiro
+  graph — run `roteiro sync` there first if needed.)
+* **Scope a workspace.** To serve one or many repos regardless of cwd, add
+  `--workspace <ROOT>` (repeatable) or `-w <name>` to the `roteiro` server args
+  in `config.yaml`, e.g. `args: [mcp, --workspace, /path/to/repo]`. See
+  `roteiro mcp --help` (ADR-0008 workspace mode).
+
 ---
 
 ## Opting in to more capabilities
@@ -267,7 +282,7 @@ resolve and enforce. The mapping is: docs `handler:` → `function.path`, docs
 * Builtin `omnigent.policies.builtins.github.github_policy` handler + params (`read_all`, `allow_destructive`, `deny_force_push`, `deny_tag_push`).
 * **Playwright MCP**: `npx @playwright/mcp@latest` (npm `@playwright/mcp`, bin `playwright-mcp`; verified via `npm view`).
 * **GitHub MCP**: canonical package is **`@modelcontextprotocol/server-github`**. The task's shorthand `server-github` is an **unrelated npm security-hold placeholder** (`server-github@0.0.1-security`), so the canonical name is used here.
-* **Roteiro MCP**: launched via **`roteiro serve`** (stdio is the default transport). There is **no `roteiro mcp` subcommand**; verified against `crates/roteiro/src/main.rs` and `crates/roteiro/tests/mcp_cli.rs`. Graph tools: `search` / `explain` / `path` / `debt`.
+* **Roteiro MCP**: the stdio MCP graph server is **`roteiro mcp`** (ADR-0002; STDIO by default, `--http ADDR` for networked). `roteiro serve` is the separate HTTP model endpoint and does **not** speak MCP over stdio. Verified against `crates/roteiro/src/main.rs` (`Command::Mcp`) and `crates/roteiro/tests/mcp_cli.rs` (`mcp_answers_initialize_and_tools_call` drives `roteiro mcp` over stdio). Graph tools: `search` / `explain` / `path` / `debt`. With no `--workspace`/`-w`, `roteiro mcp` serves the current directory's repo.
 * `roteiro serve --models` default bind `127.0.0.1:8017`, OpenAI-compatible `/v1`.
 * `policy_modules` is a **server-config** key (not agent config); local `omni run` resolves the handler by import (`PYTHONPATH`).
 

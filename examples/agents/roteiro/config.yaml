@@ -52,16 +52,19 @@ executor:
 tools:
   # (a) Roteiro's own graph server, over local stdio.
   #
-  # NOTE: the Roteiro CLI exposes its MCP graph server via `roteiro serve`
-  # (stdio is the DEFAULT transport — `--http ADDR` switches to streamable
-  # HTTP). There is no `roteiro mcp` subcommand; verified against
-  # crates/roteiro/src/main.rs and crates/roteiro/tests/mcp_cli.rs, which drives
-  # `roteiro serve` over an MCP stdio session. Run from the repo you want served
-  # (or configure a workspace); see README.
+  # NOTE: the stdio MCP graph server is `roteiro mcp` (ADR-0002) — STDIO by
+  # default (`--http ADDR` switches to networked streamable HTTP). It exposes
+  # the search/explain/path/debt graph tools. With no `--workspace`/`-w` it
+  # serves the CURRENT directory's repo, so launch `omni run` from (or scope the
+  # workspace to) the repo you want answered — see README. Do NOT use
+  # `roteiro serve`: that is the network HTTP model endpoint (binds :8017) and
+  # does not speak MCP over stdio. Verified against crates/roteiro/src/main.rs
+  # (Command::Mcp) and crates/roteiro/tests/mcp_cli.rs
+  # (mcp_answers_initialize_and_tools_call drives `roteiro mcp` over stdio).
   roteiro:
     type: mcp
     command: roteiro
-    args: [serve]
+    args: [mcp]
     # Read-only graph tools (all reads). Opted in via the policy `allow` below.
     tools: [search, explain, path, debt]
 
