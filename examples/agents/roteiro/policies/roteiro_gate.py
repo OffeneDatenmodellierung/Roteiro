@@ -11,18 +11,31 @@ Grounded in the installed Omnigent policy contract
 (``omnigent.policies.schema``, omnigent 0.10.0.dev0):
 
 * A policy callable receives the event as a **dict** and returns a response
-  **dict** or ``None`` to abstain. Verbatim from ``schema.py``::
+  **dict** or ``None`` to abstain. This gate reads the tool name from
+  ``event["target"]`` (the authoritative field — see below)::
 
       def my_policy(event: PolicyEvent) -> PolicyResponse | None:
           if event["type"] != "tool_call":
               return None  # abstain
-          tool = event["data"].get("tool", "")
+          tool = event["target"]  # authoritative tool name (not event["data"]["tool"])
           ...
           return {"result": "ALLOW"}
 
-* ``PolicyEvent`` (a ``TypedDict``) for a tool call:
-  ``type == "tool_call"``, ``target`` is the tool name, and
-  ``data`` is ``{"name": "<tool-name>", "arguments": {...}}``.
+* ``PolicyEvent`` for a tool call, as the runtime actually builds it
+  (verified against omnigent 0.10.0.dev0 — ``runner/policy.py`` constructs
+  ``EvaluationContext(phase=TOOL_CALL, content={"name": tool_name,
+  "arguments": arguments}, tool_name=tool_name)`` and
+  ``policies/function.py::_build_event`` maps it to
+  ``"target": ctx.tool_name`` / ``"data": ctx.content``)::
+
+      {"type": "tool_call",
+       "target": "<tool-name>",                             # authoritative
+       "data": {"name": "<tool-name>", "arguments": {...}}}  # data["name"] mirrors it
+
+  There is **no** ``data["tool"]`` key. ``target`` is authoritative because the
+  caller resolves it and the engine never introspects ``data`` for the name
+  (``policies/types.py::EvaluationContext``); ``data["name"]`` is a mirror we
+  use only as a defensive fallback.
 * ``PolicyResponse`` result is one of ``"ALLOW"``, ``"DENY"``, ``"ASK"``
   (case-insensitive); ``None`` is treated as abstain (== ALLOW).
 * The factory form is registered via a module-level ``POLICY_REGISTRY`` list of
@@ -45,19 +58,27 @@ ALLOW = "ALLOW"
 DENY = "DENY"
 ASK = "ASK"
 
-# Separators an Omnigent/MCP runtime may use to namespace a tool under its
-# server (e.g. ``github.create_issue``, ``github__create_issue``,
-# ``github_create_issue``). We match a configured bare tool name against either
-# the exact call name or any of these prefixed forms so the gate is robust to
-# whichever naming the harness surfaces.
-_PREFIX_SEPARATORS = ("__", ".", "-", "_", "/", ":")
+# Delimiters an Omnigent/MCP runtime may use to namespace a tool under its
+# server, e.g. ``github.create_issue`` or ``github__create_issue``. ONLY ``.``
+# and ``__`` are treated as namespace delimiters: ``_`` and ``-`` occur INSIDE
+# real tool names (``search_repositories``, ``create_pull_request``,
+# ``browser_click``), so treating them as separators would over-broaden matches
+# — unsafe for an access gate.
+_PREFIX_SEPARATORS = ("__", ".")
 
 
 def _tool_name(event: dict[str, Any]) -> str:
     """Return the tool name from a ``tool_call`` event, or ``""``.
 
-    Prefers ``event["target"]`` (the schema's documented tool-name slot) and
-    falls back to ``event["data"]["name"]``.
+    Reads the AUTHORITATIVE field the Omnigent runtime populates:
+    ``event["target"]`` (== ``EvaluationContext.tool_name``, the caller-resolved
+    tool name; the engine never introspects ``data`` for the name). Falls back
+    to ``event["data"]["name"]`` — the runtime sets ``data`` to
+    ``{"name": <tool>, "arguments": {...}}`` on a tool call, so this is the same
+    value. Verified against omnigent 0.10.0.dev0:
+    ``policies/function.py`` ``_build_event`` (``"target": ctx.tool_name``,
+    ``"data": ctx.content``) and ``runner/policy.py`` (``content={"name":
+    tool_name, "arguments": arguments}, tool_name=tool_name``).
     """
     target = event.get("target")
     if isinstance(target, str) and target:
@@ -71,17 +92,22 @@ def _tool_name(event: dict[str, Any]) -> str:
 
 
 def _matches(call_name: str, configured: set[str]) -> bool:
-    """True if *call_name* is (or is a server-prefixed form of) a configured name.
+    """True if *call_name* matches a configured name exactly, or after stripping
+    a single leading ``server<sep>`` namespace.
 
-    Matches an exact name, or a ``<prefix><sep><configured>`` form for any of
-    the known separators — so ``create_issue`` in the set also matches a call
-    surfaced as ``github.create_issue`` / ``github__create_issue`` / etc.
+    Exact full-name match is the primary path. Otherwise strip exactly ONE
+    leading ``server<sep>`` prefix (the FIRST delimiter occurrence, so an
+    internal ``_``/``.`` in the tool name can't be abused) and compare the
+    remaining suffix exactly — e.g. ``github.create_pull_request`` opts in
+    ``create_pull_request``, but ``create_pull_request`` never leaks in for a
+    configured ``pull_request``.
     """
     if call_name in configured:
         return True
     for sep in _PREFIX_SEPARATORS:
-        idx = call_name.rfind(sep)
-        if idx != -1 and call_name[idx + len(sep):] in configured:
+        idx = call_name.find(sep)
+        # idx > 0 ⇒ a non-empty server prefix precedes the delimiter.
+        if idx > 0 and call_name[idx + len(sep):] in configured:
             return True
     return False
 

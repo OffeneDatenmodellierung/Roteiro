@@ -20,9 +20,12 @@ import roteiro_gate as gate  # noqa: E402
 
 
 def _tool_call(name: str, **arguments: object) -> dict[str, object]:
-    """Build a ``tool_call`` PolicyEvent as omnigent.policies.schema documents:
-    ``type == "tool_call"``, ``target`` is the tool name, ``data`` is
-    ``{"name": ..., "arguments": {...}}``.
+    """Build a ``tool_call`` event in the EXACT shape the Omnigent runtime
+    produces, so these tests validate the real contract, not a self-consistent
+    fiction. Verified against omnigent 0.10.0.dev0: ``runner/policy.py`` builds
+    ``EvaluationContext(phase=TOOL_CALL, content={"name": tool_name,
+    "arguments": arguments}, tool_name=tool_name)`` and
+    ``policies/function.py::_build_event`` maps it to ``"target"`` / ``"data"``.
     """
     return {
         "type": "tool_call",
@@ -31,8 +34,10 @@ def _tool_call(name: str, **arguments: object) -> dict[str, object]:
     }
 
 
-# The allow/ask sets mirror the Roteiro preset's config.yaml factory_params:
-# roteiro + GitHub reads are opted in; GitHub writes ASK.
+# A deliberate MINIMAL SUBSET of the preset's config.yaml allow/ask sets — just
+# enough to unit-test the three gate outcomes (roteiro + a couple of GitHub
+# reads opted in; a few GitHub writes ASK). The shipped preset opts in more
+# GitHub read tools; this subset is not meant to mirror it exactly.
 ALLOW = ["search", "explain", "path", "debt", "get_file_contents", "list_commits"]
 ASK = ["create_or_update_file", "create_pull_request", "merge_pull_request"]
 
@@ -66,11 +71,28 @@ def test_ask_precedes_allow_even_if_opted_in():
 
 
 def test_server_prefixed_names_match():
-    # Bare configured names match harness-namespaced call names.
+    # Bare configured names match a single leading server namespace (`.`/`__`).
     g = _gate()
     assert g(_tool_call("roteiro.search"))["result"] == "ALLOW"
     assert g(_tool_call("github__create_pull_request"))["result"] == "ASK"
     assert g(_tool_call("playwright.browser_click"))["result"] == "DENY"
+
+
+def test_internal_separators_are_not_namespace_delimiters():
+    # `_` and `-` inside a tool name must NOT be treated as server delimiters,
+    # and only the FIRST leading `.`/`__` prefix is stripped — so a configured
+    # suffix of a real tool name can't be abused into opting the tool in.
+    g = gate.deny_unless_opted_in(allow=["pull_request", "request", "click"], ask=[])
+    # None of these opted-in suffixes may leak these real tools in:
+    assert g(_tool_call("create_pull_request"))["result"] == "DENY"
+    assert g(_tool_call("browser_click"))["result"] == "DENY"
+    assert g(_tool_call("get-pull-request"))["result"] == "DENY"
+    # A genuine single leading namespace is still stripped exactly once:
+    g2 = gate.deny_unless_opted_in(allow=["create_pull_request"], ask=[])
+    assert g2(_tool_call("github.create_pull_request"))["result"] == "ALLOW"
+    assert g2(_tool_call("create_pull_request"))["result"] == "ALLOW"
+    # But a mismatched suffix after stripping one namespace stays denied.
+    assert g2(_tool_call("github.merge_pull_request"))["result"] == "DENY"
 
 
 def test_non_tool_events_abstain():

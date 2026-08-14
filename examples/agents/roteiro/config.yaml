@@ -106,7 +106,9 @@ tools:
   playwright:
     type: mcp
     command: npx
-    args: ["@playwright/mcp@latest"]
+    # `-y` so npx never prompts to install, which would hang a non-interactive
+    # `omni run` (matches the github server above).
+    args: ["-y", "@playwright/mcp@latest"]
     tools:
       - browser_navigate
       - browser_snapshot
