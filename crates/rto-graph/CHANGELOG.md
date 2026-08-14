@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.3.0...rto-graph-v1.4.0) - 2026-08-14
+
+### Added
+
+- *(config)* derive config keys from typed Rust config structs
+- *(links)* match config keys across camelCase/snake_case/kebab conventions
+
+### Fixed
+
+- *(config)* address PR #266 review — explicit value-absence + doc fixes
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/app-config-only-filter
+- Merge pull request #262 from OffeneDatenmodellierung/feat/links-canonical-key-match
+- *(links)* accurately describe normalize/canonicalize splitting
+
 ## [1.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.1.0...rto-graph-v1.2.0) - 2026-08-13
 
 ### Added

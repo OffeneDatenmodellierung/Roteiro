@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.3.0...roteiro-v1.4.0) - 2026-08-14
+
+### Added
+
+- *(config)* derive config keys from typed Rust config structs
+- *(explorer)* workspace-selector landing + route-by-type + sticker logo
+
+### Fixed
+
+- *(config)* address PR #266 review — explicit value-absence + doc fixes
+- *(cli)* exit cleanly on closed stdout pipe (SIGPIPE), no broken-pipe panic
+
+### Other
+
+- Merge pull request #266 from OffeneDatenmodellierung/feat/config-keys-from-rust-structs
+- Merge remote-tracking branch 'origin/main' into feat/app-config-only-filter
+- Merge pull request #262 from OffeneDatenmodellierung/feat/links-canonical-key-match
+- Merge pull request #261 from OffeneDatenmodellierung/feat/serve-all-workspaces
+- Merge pull request #260 from OffeneDatenmodellierung/feat/explorer-infer-links-live
+- Merge pull request #259 from OffeneDatenmodellierung/fix/cli-sigpipe-broken-pipe
+- *(cli)* gate broken-pipe test to linux+macos for hardcoded SIGPIPE=13
+- Merge pull request #255 from OffeneDatenmodellierung/feat/explorer-selector-landing
+
 ## [1.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.2.0...roteiro-v1.3.0) - 2026-08-13
 
 ### Added
