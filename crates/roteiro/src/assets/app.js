@@ -2162,13 +2162,14 @@
 
   // -- workspace panel: Ask across every project (serve build only) ----------
   //
-  // The WORKSPACE Ask answers about the whole workspace and ALL its projects at
-  // once, so — unlike the project Ask, which pins one project via `/v1/{project}/…`
-  // — it posts to the UNSCOPED `/v1/chat/completions`. That endpoint's graph tools
-  // already carry a `project` argument and a `list_projects` tool (ADR-0008), so
-  // one model can `list_projects` and then `search`/`explain`/`path`/`debt` with
-  // `project: "<name>"` across every hosted project. No project pin, no new backend
-  // route — the same tested chat + tools path, driven cross-project. Gated on the
+  // The WORKSPACE Ask answers about the SELECTED workspace and all ITS projects at
+  // once. Unlike the project Ask (which pins one project via `/v1/{project}/…`), it
+  // posts to the workspace-scoped `/v1/workspaces/{ws}/chat/completions`: that
+  // endpoint's graph tools are confined to the named workspace's projects (ADR-0008),
+  // so `list_projects` returns only that workspace's projects and a `project`
+  // argument naming one outside it is refused — a multi-workspace install can never
+  // leak another workspace's projects into the answer. The model still ranges over
+  // the workspace via `list_projects` + the per-tool `project` argument. Gated on the
   // very same `/v1/graph/capabilities` signal as the project Ask tab.
 
   // Steer the model to range over the workspace's projects via `list_projects` +
@@ -2232,9 +2233,9 @@
     body.replaceChildren(el("div", { class: "p-ask" }, form, answer));
   }
 
-  // Post the question to the unscoped chat endpoint (graph tools span every hosted
-  // project) and render the prose answer, linkifying project-qualified node keys
-  // into a hop to that project.
+  // Post the question to the SELECTED workspace's scoped chat endpoint (graph tools
+  // confined to that workspace's projects) and render the prose answer, linkifying
+  // project-qualified node keys into a hop to that project.
   async function submitWorkspaceAsk(raw, answer, send) {
     const question = String(raw || "").trim();
     if (!question) return;
@@ -2261,11 +2262,14 @@
       stream: false,
     };
     try {
-      const res = await fetch("/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify(body),
-      });
+      const res = await fetch(
+        `/v1/workspaces/${encodeURIComponent(workspace)}/chat/completions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(askError(data, res.status));

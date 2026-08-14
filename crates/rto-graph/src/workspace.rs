@@ -987,6 +987,21 @@ impl WorkspaceSet {
         self.entries.keys().cloned().collect()
     }
 
+    /// Each configured workspace as a `(name, shared handle)` pair, in stable name
+    /// order. The `Arc<Workspace>` is the very handle the set holds, so a caller can
+    /// build a **per-workspace** view — e.g. a tool registry confined to one
+    /// workspace's projects — over the same lazily-opened stores, never re-opening
+    /// them. Used by `serve` to scope the workspace-level Ask to the selected
+    /// workspace (ADR-0008), mirroring how [`WorkspaceSet::select`] scopes the
+    /// read-only `/v1/graph/workspaces/{ws}/…` routes.
+    #[must_use]
+    pub fn workspace_handles(&self) -> Vec<(String, Arc<Workspace>)> {
+        self.entries
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.workspace.clone()))
+            .collect()
+    }
+
     /// Whether workspace `name` is linked (`Some(true)`), standalone
     /// (`Some(false)`), or unknown (`None`).
     #[must_use]

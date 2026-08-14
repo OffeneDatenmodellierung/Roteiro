@@ -239,18 +239,20 @@ mod tests {
     #[tokio::test]
     async fn app_js_wires_the_workspace_ask_to_capabilities_and_chat() {
         // The WORKSPACE-level Ask is data-driven off the SAME capability signal as
-        // the project Ask (`loadCapabilities` enables both), but — answering across
-        // ALL hosted projects — it posts to the UNSCOPED `/v1/chat/completions` (no
-        // `/v1/{project}/…` pin) and steers the model to range over projects via
-        // `list_projects` + the per-tool `project` argument (ADR-0008). Pin the
-        // wiring so a rename on either side is caught.
+        // the project Ask (`loadCapabilities` enables both), but — answering about the
+        // SELECTED workspace and its projects — it posts to the workspace-scoped
+        // `/v1/workspaces/{ws}/chat/completions` (built from the selected workspace
+        // name), whose tools are confined to that workspace (ADR-0008); the model
+        // still ranges over the workspace via `list_projects` + the per-tool `project`
+        // argument. Pin the wiring so a rename on either side is caught.
         let (status, _ct, _cache, body) = get("/app.js").await;
         assert_eq!(status, StatusCode::OK);
         for needle in [
             "loadCapabilities",
             "enableWorkspaceAsk",
             "submitWorkspaceAsk",
-            "\"/v1/chat/completions\"",
+            // the workspace-scoped chat route, built from the selected workspace name
+            "`/v1/workspaces/${encodeURIComponent(workspace)}/chat/completions`",
             "list_projects",
         ] {
             assert!(body.contains(needle), "app.js must reference `{needle}`");

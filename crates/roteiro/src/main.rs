@@ -4481,6 +4481,15 @@ struct ServeSurfaces<'a> {
     workspace_name: Option<&'a str>,
 }
 
+/// A served tool registry behind a trait object, shared into the router.
+#[cfg(feature = "serve")]
+type SharedToolRegistry = std::sync::Arc<dyn rto_serve::ToolRegistry>;
+
+/// Per-workspace tool registries, keyed by workspace name — each confined to that
+/// workspace's projects, backing `/v1/workspaces/{ws}/chat/completions` (ADR-0008).
+#[cfg(feature = "serve")]
+type WorkspaceToolRegistries = std::collections::HashMap<String, SharedToolRegistry>;
+
 /// Assemble the graph tools and serve the endpoint: `/v1` alone, or — with
 /// `--mcp` — `/v1` **and** `/mcp` merged on one port (ADR-0008). Blocks until
 /// shutdown.
@@ -4500,19 +4509,37 @@ fn serve_v1_tail(
         workspace_name,
     } = surfaces;
     // `set` (the full workspace set) and `workspace_name` back the read-only
-    // `/v1/graph/*` API + UI, which are only mounted in an `explorer` build; the
-    // model tools and MCP router use the flattened `flat` workspace regardless.
+    // `/v1/graph/*` API + UI, only mounted in an `explorer` build. `set` is also read
+    // here to build the per-workspace registries — but only when tools are enabled —
+    // so keep the non-explorer discard to cover the tools-disabled case; the model
+    // tools and MCP router use the flattened `flat` workspace regardless.
     #[cfg(not(feature = "explorer"))]
     let _ = (&set, workspace_name);
     let scheme = if tls.is_some() { "https" } else { "http" };
-    // Auto-register the graph tools (ADR-0006) unless disabled, so the served
-    // model can `explain`/`search`/`path`/`debt` — across every hosted project
-    // of every configured workspace (ADR-0008), selected by a `project` argument.
-    let tools: Option<std::sync::Arc<dyn rto_serve::ToolRegistry>> =
+    // Auto-register the graph tools (ADR-0006) unless disabled, so the served model
+    // can `explain`/`search`/`path`/`debt`. Two registries share the one on/off
+    // switch (ADR-0008): `tools` is the flattened view over EVERY hosted project of
+    // every workspace (backing the unscoped `/v1/chat/completions`, `/v1/{project}/…`
+    // and MCP), while `workspace_tools` holds one registry per configured workspace,
+    // each confined to that workspace's OWN projects, over the same store handles the
+    // set already holds. The per-workspace registries back
+    // `/v1/workspaces/{ws}/chat/completions`, so a workspace-level Ask cannot see or
+    // answer about a project outside the selected workspace.
+    let (tools, workspace_tools): (Option<SharedToolRegistry>, WorkspaceToolRegistries) =
         if cfg.serve.tools.unwrap_or(true) {
-            Some(std::sync::Arc::new(GraphToolRegistry::new(flat.clone())))
+            let flat_tools: SharedToolRegistry =
+                std::sync::Arc::new(GraphToolRegistry::new(flat.clone()));
+            let per_ws: WorkspaceToolRegistries = set
+                .workspace_handles()
+                .into_iter()
+                .map(|(name, ws)| {
+                    let reg: SharedToolRegistry = std::sync::Arc::new(GraphToolRegistry::new(ws));
+                    (name, reg)
+                })
+                .collect();
+            (Some(flat_tools), per_ws)
         } else {
-            None
+            (None, WorkspaceToolRegistries::new())
         };
     let tools_note = if tools.is_some() {
         " (graph tools on)"
@@ -4536,7 +4563,7 @@ fn serve_v1_tail(
     // directly is equivalent to `serve_blocking[_with_tools]` (they build the same
     // app), so this path also covers the plain (`/v1`-only) case.
     let router = match tools {
-        Some(tools) => rto_serve::app_with_tools(engine, tools),
+        Some(tools) => rto_serve::app_with_workspace_tools(engine, tools, workspace_tools),
         None => rto_serve::app(engine),
     };
 
@@ -5271,6 +5298,119 @@ mod cli_routing {
     }
 }
 
+// Per-workspace graph-tool registries (ADR-0008): each configured workspace gets
+// a `GraphToolRegistry` confined to its OWN projects, built from
+// `WorkspaceSet::workspace_handles`. These back the workspace-scoped Ask, so a
+// workspace-level question can never see or answer about a project outside the
+// selected workspace. Serve-gated (the registry is), driven purely from in-memory
+// stores — no engine, no HTTP, no llama.cpp.
+#[cfg(all(test, feature = "serve"))]
+mod workspace_scoped_tools {
+    use super::GraphToolRegistry;
+
+    /// A two-workspace set — `api` (project `api`) and `docs` (project `docs`) —
+    /// built from in-memory stores, plus the flattened workspace over BOTH, exactly
+    /// as `serve` holds them. Returns `(set, flat)`.
+    fn two_workspace_set() -> (
+        std::sync::Arc<rto_graph::WorkspaceSet>,
+        std::sync::Arc<rto_graph::Workspace>,
+    ) {
+        let ws_api =
+            rto_graph::Workspace::single("api", rto_graph::Store::open_in_memory().expect("store"));
+        let ws_docs = rto_graph::Workspace::single(
+            "docs",
+            rto_graph::Store::open_in_memory().expect("store"),
+        );
+        let set = std::sync::Arc::new(rto_graph::WorkspaceSet::from_workspaces([
+            ("api".to_owned(), ws_api, true),
+            ("docs".to_owned(), ws_docs, false),
+        ]));
+        let flat = std::sync::Arc::new(rto_graph::Workspace::from_stores([
+            ("api", rto_graph::Store::open_in_memory().expect("store")),
+            ("docs", rto_graph::Store::open_in_memory().expect("store")),
+        ]));
+        (set, flat)
+    }
+
+    /// The `GraphToolRegistry` for one named workspace of the set (as `serve_v1_tail`
+    /// builds them via `WorkspaceSet::workspace_handles`).
+    fn registry_for(set: &rto_graph::WorkspaceSet, ws: &str) -> GraphToolRegistry {
+        let handle = set
+            .workspace_handles()
+            .into_iter()
+            .find(|(name, _)| name == ws)
+            .map(|(_, h)| h)
+            .expect("workspace present");
+        GraphToolRegistry::new(handle)
+    }
+
+    #[test]
+    fn list_projects_returns_only_the_selected_workspaces_projects() {
+        use rto_serve::ToolRegistry as _;
+        let (set, flat) = two_workspace_set();
+
+        // The per-workspace registry lists ONLY its own project.
+        let api = registry_for(&set, "api");
+        let out = api.call("list_projects", &serde_json::json!({})).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            json["projects"],
+            serde_json::json!(["api"]),
+            "the `api` workspace Ask must list only `api`"
+        );
+        assert_eq!(api.projects(), vec!["api".to_owned()]);
+
+        let docs = registry_for(&set, "docs");
+        let out = docs.call("list_projects", &serde_json::json!({})).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["projects"], serde_json::json!(["docs"]));
+
+        // Contrast: the flattened registry (unscoped route) still spans both, so the
+        // narrowing is real, not an artefact of the fixture.
+        let flat = GraphToolRegistry::new(flat);
+        let out = flat.call("list_projects", &serde_json::json!({})).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["projects"], serde_json::json!(["api", "docs"]));
+    }
+
+    #[test]
+    fn a_tool_call_for_an_out_of_workspace_project_is_refused() {
+        use rto_serve::ToolRegistry as _;
+        let (set, _flat) = two_workspace_set();
+        let api = registry_for(&set, "api");
+
+        // Naming `docs` (another workspace's project) from the `api` workspace Ask is
+        // an error, not a silent answer from `docs`'s graph.
+        let err = api
+            .call(
+                "explain",
+                &serde_json::json!({ "key": "fn:x", "project": "docs" }),
+            )
+            .expect_err("out-of-workspace project must be refused");
+        assert!(
+            err.contains("no project named `docs`"),
+            "the refusal names the unknown project (was: {err})"
+        );
+
+        // A project-qualified key into another workspace's project is refused too.
+        let err = api
+            .call("explain", &serde_json::json!({ "key": "docs::fn:x" }))
+            .expect_err("qualified out-of-workspace key must be refused");
+        assert!(err.contains("no project named `docs`"), "was: {err}");
+
+        // The in-workspace project resolves (empty store ⇒ the node is absent, but
+        // that is a normal in-scope answer, not a scoping refusal).
+        let ok = api.call(
+            "explain",
+            &serde_json::json!({ "key": "fn:x", "project": "api" }),
+        );
+        assert!(
+            ok.is_ok(),
+            "the workspace's own project must still resolve: {ok:?}"
+        );
+    }
+}
+
 // The full explorer + Ask wiring a `roteiro serve` build with a model installed stands up: the UI, the
 // `/v1/graph/capabilities` signal (ask:true + served models), and the graph-tools
 // chat route — all mounted by `mount_explorer_surfaces` over the one engine.
@@ -5321,8 +5461,22 @@ mod serve_explorer_wiring {
         let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(MockEngine);
         let tools: std::sync::Arc<dyn rto_serve::ToolRegistry> =
             std::sync::Arc::new(GraphToolRegistry::new(flat));
+        // Mirror `serve_v1_tail`: one flattened registry over every project, plus a
+        // per-workspace registry confined to each configured workspace's projects.
+        let workspace_tools: std::collections::HashMap<
+            String,
+            std::sync::Arc<dyn rto_serve::ToolRegistry>,
+        > = set
+            .workspace_handles()
+            .into_iter()
+            .map(|(name, ws)| {
+                let reg: std::sync::Arc<dyn rto_serve::ToolRegistry> =
+                    std::sync::Arc::new(GraphToolRegistry::new(ws));
+                (name, reg)
+            })
+            .collect();
         let model_ids = engine.models().into_iter().map(|m| m.id).collect();
-        let base = rto_serve::app_with_tools(engine, tools);
+        let base = rto_serve::app_with_workspace_tools(engine, tools, workspace_tools);
         mount_explorer_surfaces(base, set, default, model_ids)
     }
 
@@ -5577,13 +5731,13 @@ mod serve_explorer_wiring {
     }
 
     #[tokio::test]
-    async fn the_unscoped_chat_route_backs_the_workspace_ask() {
-        // The WORKSPACE-level Ask posts to the UNSCOPED `/v1/chat/completions` (no
-        // `/v1/{project}/…` pin) so its graph tools span every hosted project — the
-        // model selects one via `list_projects` + the per-tool `project` argument
-        // (ADR-0008). Prove that unscoped route is mounted on the multi-workspace
-        // router and reaches the (mock) engine (200, a completion), so the panel's
-        // request has an endpoint to hit without any new backend wiring.
+    async fn the_unscoped_chat_route_is_preserved() {
+        // The UNSCOPED `/v1/chat/completions` (the default, tested path used by MCP
+        // and generic OpenAI clients) is untouched by the workspace-scoping change:
+        // it stays mounted, its tools still span every hosted project, and it reaches
+        // the (mock) engine (200, a completion). The workspace-level Ask no longer
+        // uses it — it posts to the scoped route below — but the default semantics
+        // must not change.
         let body = serde_json::json!({
             "model": "qwen3-0.6b",
             "messages": [{ "role": "user", "content": "tell me about the docs repo" }],
@@ -5603,13 +5757,110 @@ mod serve_explorer_wiring {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "the unscoped chat route the workspace Ask uses must be mounted"
+            "the unscoped chat route must stay mounted"
         );
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             json["choices"][0]["message"]["content"], "a grounded answer",
             "the unscoped route returns the engine's completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_workspace_scoped_chat_route_reaches_each_configured_workspace() {
+        // The WORKSPACE-level Ask posts to `/v1/workspaces/{ws}/chat/completions`
+        // (ADR-0008): each configured workspace has its own registry, confined to
+        // that workspace's projects. Prove every workspace's scoped route is mounted
+        // and reaches the (mock) engine (200, a completion), so the panel has a
+        // per-workspace endpoint to hit.
+        for ws in ["api", "docs"] {
+            let body = serde_json::json!({
+                "model": "qwen3-0.6b",
+                "messages": [{ "role": "user", "content": "what does this workspace do?" }],
+                "stream": false,
+            });
+            let resp = multi_serve_router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/workspaces/{ws}/chat/completions"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "the workspace-scoped chat route must resolve `{ws}`"
+            );
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json["choices"][0]["message"]["content"], "a grounded answer",
+                "the scoped route returns the engine's completion"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_workspace_scoped_chat_route_is_a_404() {
+        // A workspace-scoped Ask naming a workspace the server does not host is a 404
+        // (the addressed scope does not exist) — never silently answered from another
+        // workspace's registry.
+        let body = serde_json::json!({
+            "model": "qwen3-0.6b",
+            "messages": [{ "role": "user", "content": "anything" }],
+            "stream": false,
+        });
+        let resp = multi_serve_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workspaces/does-not-exist/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "an unknown workspace must 404, not resolve against another workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_single_workspace_scoped_chat_route_matches_the_default() {
+        // A single-repo serve folds its one workspace into a `default` set entry
+        // (sharing the flat store handle), so `/v1/workspaces/default/chat/completions`
+        // is mounted and behaves like the unscoped route — the single-workspace path
+        // is unchanged, just also addressable by name.
+        let resp = serve_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workspaces/default/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "model": "qwen3-0.6b",
+                            "messages": [{ "role": "user", "content": "what is this repo?" }],
+                            "stream": false,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the single workspace must be addressable by its `default` name"
         );
     }
 
