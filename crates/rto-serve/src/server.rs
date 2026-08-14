@@ -1155,6 +1155,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embedding_model_chat_is_a_clean_error_not_a_crash() {
+        // The engine's chat guard rejects an encoder-only embedding model with a
+        // typed `InvalidRequest` *before* the decode path that would abort the
+        // process (GGML_ASSERT). The server must surface that as a 400 — a single
+        // bad request never kills the server for everyone.
+        struct EmbeddingEngine;
+        impl Engine for EmbeddingEngine {
+            fn models(&self) -> Vec<ModelInfo> {
+                // The model IS served (for `/v1/embeddings`), so the up-front
+                // existence check passes and the request reaches the guard.
+                vec![ModelInfo {
+                    id: "bge-small-en-v1.5-gguf".to_owned(),
+                }]
+            }
+            fn chat_stream(
+                &self,
+                req: &ChatRequest,
+                _on_token: &mut dyn FnMut(&str),
+            ) -> Result<CompletionStats, EngineError> {
+                Err(EngineError::InvalidRequest(format!(
+                    "model `{}` is an embedding model and cannot generate chat completions",
+                    req.model,
+                )))
+            }
+        }
+
+        let body = serde_json::json!({
+            "model": "bge-small-en-v1.5-gguf",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let resp = app(std::sync::Arc::new(EmbeddingEngine))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["type"], "invalid_request_error");
+    }
+
+    #[tokio::test]
     async fn unknown_model_is_404() {
         let resp = test_app()
             .oneshot(chat_request("nope", "hi"))

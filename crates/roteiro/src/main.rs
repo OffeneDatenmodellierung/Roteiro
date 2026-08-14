@@ -4276,6 +4276,99 @@ fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
         .collect()
 }
 
+/// The served model ids eligible to back **chat / Ask**, in preference order.
+///
+/// Embedding models (BERT encoders like `bge-*`) are **excluded**: they cannot
+/// generate, and routing one through `/v1/chat/completions` aborts llama.cpp's
+/// decode path with a `GGML_ASSERT` (see [`rto_serve::llama`]'s chat guard). The
+/// remaining chat-capable models (generative + vision) are returned with the
+/// **default first** — the Ask UI sends `models[0]` — resolved as: the configured
+/// `[models] generative` model when it is served and generative, else the first
+/// served generative model, else the first chat-capable model. Never an embedding
+/// model. `served_ids` is the engine's served set (registry names), so every id
+/// resolves in the registry.
+///
+/// Gated on `explorer` too: the Ask model pool only exists when the explorer UI
+/// (and its `/v1/graph/capabilities` route) is compiled in.
+#[cfg(all(feature = "serve", feature = "explorer"))]
+fn chat_capable_model_ids(cfg: &config::Config, served_ids: &[String]) -> Vec<String> {
+    use rto_graph::{ModelKind, find_model};
+    let is_generative = |id: &str| find_model(id).is_some_and(|s| s.kind == ModelKind::Generative);
+    // Drop embedding-only models; keep generative + vision (both can chat).
+    let mut ids: Vec<String> = served_ids
+        .iter()
+        .filter(|id| !find_model(id).is_some_and(|s| s.kind == ModelKind::Embedding))
+        .cloned()
+        .collect();
+    // Pick the default and rotate it to the front, preserving the order of the
+    // rest (a stable, predictable capabilities list).
+    let default_pos = cfg
+        .models
+        .generative
+        .as_deref()
+        .and_then(|g| ids.iter().position(|id| id == g && is_generative(id)))
+        .or_else(|| ids.iter().position(|id| is_generative(id)));
+    if let Some(pos) = default_pos {
+        ids[..=pos].rotate_right(1);
+    }
+    ids
+}
+
+#[cfg(all(test, feature = "serve", feature = "explorer"))]
+mod chat_model_selection {
+    use super::{chat_capable_model_ids, config};
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn embedding_models_are_excluded_and_a_generative_is_default() {
+        // The bug's exact served order: bge (embedding) FIRST, then generatives.
+        // The Ask pool must drop bge and lead with a generative, so `models[0]`
+        // (what the UI sends) can never be the crashing embedding model.
+        let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
+        let out = chat_capable_model_ids(&config::Config::default(), &served);
+        assert_eq!(out, ids(&["qwen3-0.6b", "qwen3-8b"]));
+        assert!(!out.iter().any(|m| m.contains("bge")), "no embedding model");
+    }
+
+    #[test]
+    fn configured_generative_is_preferred_as_the_default() {
+        // `[models] generative` wins the default slot when served and generative.
+        let mut cfg = config::Config::default();
+        cfg.models.generative = Some("qwen3-8b".to_owned());
+        let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
+        let out = chat_capable_model_ids(&cfg, &served);
+        assert_eq!(out, ids(&["qwen3-8b", "qwen3-0.6b"]));
+    }
+
+    #[test]
+    fn vision_models_stay_in_the_pool_but_a_generative_leads() {
+        // Vision models can chat, so they remain — but a generative is the default.
+        let served = ids(&["bge-small-en-v1.5-gguf", "smolvlm-500m-gguf", "qwen3-0.6b"]);
+        let out = chat_capable_model_ids(&config::Config::default(), &served);
+        assert_eq!(out, ids(&["qwen3-0.6b", "smolvlm-500m-gguf"]));
+    }
+
+    #[test]
+    fn with_no_generative_a_vision_model_leads_never_an_embedding() {
+        // Only an embedding + a vision model served: the embedding is dropped and
+        // the (chat-capable) vision model becomes the default — never the encoder.
+        let served = ids(&["bge-small-en-v1.5-gguf", "smolvlm-500m-gguf"]);
+        let out = chat_capable_model_ids(&config::Config::default(), &served);
+        assert_eq!(out, ids(&["smolvlm-500m-gguf"]));
+    }
+
+    #[test]
+    fn an_embedding_only_serve_offers_no_chat_model() {
+        // Nothing chat-capable ⇒ empty pool ⇒ the UI keeps Ask disabled (no request
+        // with an embedding model is ever sent).
+        let served = ids(&["bge-small-en-v1.5-gguf"]);
+        assert!(chat_capable_model_ids(&config::Config::default(), &served).is_empty());
+    }
+}
+
 #[cfg(feature = "serve")]
 fn serve_models_endpoint(
     cfg: &config::Config,
@@ -4427,10 +4520,15 @@ fn serve_v1_tail(
         ""
     };
 
-    // The served model ids, captured before the engine is moved into the router,
-    // so an explorer build can advertise them as the Ask capability (below).
+    // The chat-capable served model ids, captured before the engine is moved into
+    // the router, so an explorer build can advertise them as the Ask capability
+    // (below). Embedding models are filtered out and the default is placed first —
+    // the Ask UI must never send an embedding model to `/v1/chat/completions`.
     #[cfg(feature = "explorer")]
-    let model_ids: Vec<String> = engine.models().into_iter().map(|m| m.id).collect();
+    let model_ids: Vec<String> = {
+        let served_ids: Vec<String> = engine.models().into_iter().map(|m| m.id).collect();
+        chat_capable_model_ids(cfg, &served_ids)
+    };
 
     // Build the `/v1` model router, then merge any extra read-only/MCP surfaces
     // onto it — all sharing one port and one Workspace (ADR-0008). `/v1/graph` and
@@ -5299,6 +5397,63 @@ mod serve_explorer_wiring {
             json["models"],
             serde_json::json!(["qwen3-0.6b"]),
             "capabilities name the served model"
+        );
+    }
+
+    /// An engine serving an embedding model FIRST, then a generative one — the
+    /// exact shape that triggered the crash (`bge` leads the served list).
+    struct EmbeddingAndGenerativeEngine;
+
+    impl rto_serve::Engine for EmbeddingAndGenerativeEngine {
+        fn models(&self) -> Vec<rto_serve::ModelInfo> {
+            ["bge-small-en-v1.5-gguf", "qwen3-0.6b"]
+                .into_iter()
+                .map(|id| rto_serve::ModelInfo { id: id.to_owned() })
+                .collect()
+        }
+        fn chat_stream(
+            &self,
+            _req: &rto_serve::ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<rto_serve::CompletionStats, rto_serve::EngineError> {
+            on_token("ok");
+            Ok(rto_serve::CompletionStats {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                finish_reason: rto_serve::FinishReason::Stop,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn capabilities_omit_the_embedding_model_from_ask() {
+        // End-to-end: the served set leads with `bge`, but the Ask capability the
+        // web app reads must list ONLY the generative model — so `models[0]` (what
+        // the UI POSTs) can never be the process-aborting embedding model.
+        let store = rto_graph::Store::open_in_memory().expect("in-memory store");
+        let flat = std::sync::Arc::new(rto_graph::Workspace::single("repo", store));
+        let set = std::sync::Arc::new(rto_graph::WorkspaceSet::from_single(
+            "default",
+            flat.clone(),
+            flat.is_multi(),
+        ));
+        let engine: std::sync::Arc<dyn rto_serve::Engine> =
+            std::sync::Arc::new(EmbeddingAndGenerativeEngine);
+        let tools: std::sync::Arc<dyn rto_serve::ToolRegistry> =
+            std::sync::Arc::new(GraphToolRegistry::new(flat));
+        let served_ids: Vec<String> = engine.models().into_iter().map(|m| m.id).collect();
+        let model_ids =
+            super::chat_capable_model_ids(&super::config::Config::default(), &served_ids);
+        let base = rto_serve::app_with_tools(engine, tools);
+        let router = mount_explorer_surfaces(base, set, Some("default".to_owned()), model_ids);
+
+        let (status, _ct, body) = get_on(router, "/v1/graph/capabilities").await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json["models"],
+            serde_json::json!(["qwen3-0.6b"]),
+            "the embedding model must be excluded from the Ask pool"
         );
     }
 
