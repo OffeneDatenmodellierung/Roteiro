@@ -1,0 +1,187 @@
+# Roteiro — an Omnigent custom agent that answers "what / why" about a codebase
+# from Roteiro's provenance-tagged knowledge graph, and (opt-in) reads GitHub
+# and drives a browser.
+#
+#   omni run ./examples/agents/roteiro/
+#
+# Everything is off by default: per-MCP-server `tools:` allowlists narrow WHICH
+# tools exist, and the custom `deny_unless_opted_in` policy blocks every tool
+# unless its name is opted into the gate's `allow` set (GitHub writes ASK).
+# See README.md for prerequisites, the Gateway credential step, and how to
+# register the custom policy module + opt in to more capabilities.
+
+spec_version: 1
+name: roteiro
+description: >-
+  A graph-grounded code-understanding agent. Answers questions about a
+  repository from Roteiro's knowledge graph (search / explain / path / debt),
+  with opt-in GitHub reads and browser automation. Off-by-default: tools are
+  denied unless explicitly opted in, and GitHub writes require approval.
+
+prompt: |
+  You are Roteiro, a code-understanding agent grounded in a provenance-tagged
+  knowledge graph of the target repository.
+
+  Ground every answer in the graph — do not answer from memory. Your workflow:
+    1. `search "<text>"` to find relevant node keys (curated ADRs / blueprints
+       rank first), then `explain` a returned key to read a node and its
+       provenance-labelled edges (derived | authored | inferred).
+    2. Use `path <a> <b>` to show how two symbols connect, and `debt` to list
+       outstanding intent-debt.
+    3. Cite the node keys you relied on. When an edge is `inferred`, say so and
+       report its confidence; never present an inferred guess as a hard fact.
+
+  Tooling is strict and opt-in. Most tools are denied unless the operator has
+  opted them in; GitHub is read-only unless a write is explicitly approved. If a
+  tool call is denied or parked for approval, explain what you were trying to do
+  and which capability must be opted in — do not try to route around the gate.
+
+# Harness + model (Decision 1). The openai-agents harness talks to an
+# OpenAI-compatible endpoint; the pinned model `qwen3-8b` is served locally by
+# `roteiro serve --models` at http://127.0.0.1:8017/v1 and reached through an
+# Omnigent Gateway credential configured with `omni setup` (see README).
+executor:
+  type: omnigent
+  config:
+    harness: openai-agents
+  model: qwen3-8b
+
+# Three MCP servers, declared explicitly (no bundled shortcuts). Each carries a
+# tight per-server `tools:` allowlist; omit the key and a server would expose
+# ALL its tools, which is exactly what we avoid here.
+tools:
+  # (a) Roteiro's own graph server, over local stdio.
+  #
+  # NOTE: the stdio MCP graph server is `roteiro mcp` (ADR-0002) — STDIO by
+  # default (`--http ADDR` switches to networked streamable HTTP). It exposes
+  # the search/explain/path/debt graph tools. With no `--workspace`/`-w` it
+  # serves the CURRENT directory's repo, so launch `omni run` from (or scope the
+  # workspace to) the repo you want answered — see README. Do NOT use
+  # `roteiro serve`: that is the network HTTP model endpoint (binds :8017) and
+  # does not speak MCP over stdio. Verified against crates/roteiro/src/main.rs
+  # (Command::Mcp) and crates/roteiro/tests/mcp_cli.rs
+  # (mcp_answers_initialize_and_tools_call drives `roteiro mcp` over stdio).
+  roteiro:
+    type: mcp
+    command: roteiro
+    args: [mcp]
+    # Read-only graph tools (all reads). Opted in via the policy `allow` below.
+    tools: [search, explain, path, debt]
+
+  # (b) GitHub MCP server over stdio. Reads are exposed here (and opted in via
+  # the policy); write tools are deliberately NOT in this allowlist, so they are
+  # not even surfaced by default. Canonical package is
+  # `@modelcontextprotocol/server-github` (the task's `server-github` shorthand
+  # resolves to an unrelated npm security-hold placeholder — see README).
+  github:
+    type: mcp
+    command: npx
+    args: [-y, "@modelcontextprotocol/server-github"]
+    env:
+      # `@modelcontextprotocol/server-github` reads GITHUB_PERSONAL_ACCESS_TOKEN.
+      # Omnigent expands ${VAR} at parse time and ERRORS if it is unset, so
+      # export exactly one and mirror it (README shows the one-liner):
+      #   export GITHUB_PERSONAL_ACCESS_TOKEN="$GITHUB_TOKEN"
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
+    # Read tools only. Names must match the server's advertised tools.
+    tools:
+      - search_repositories
+      - get_file_contents
+      - search_code
+      - search_issues
+      - list_commits
+      - list_issues
+      - get_issue
+      - get_issue_comments
+      - list_pull_requests
+      - get_pull_request
+      - get_pull_request_files
+      - get_pull_request_comments
+      - get_pull_request_reviews
+
+  # (c) Playwright MCP over stdio. VERIFIED: `npx @playwright/mcp@latest`
+  # (npm package @playwright/mcp, bin `playwright-mcp`). Declared but NOT opted
+  # into the policy `allow` set, so every browser tool is DENIED until an
+  # operator opts it in — the demonstrable opt-in path (see README).
+  playwright:
+    type: mcp
+    command: npx
+    # `-y` so npx never prompts to install, which would hang a non-interactive
+    # `omni run` (matches the github server above).
+    args: ["-y", "@playwright/mcp@latest"]
+    tools:
+      - browser_navigate
+      - browser_snapshot
+      - browser_click
+      - browser_type
+      - browser_take_screenshot
+      - browser_wait_for
+
+# Policies (Decisions 2 & 3), under `guardrails.policies`. Order matters: the
+# first policy to return a decision wins; `None` (abstain) passes to the next.
+#
+# FORM NOTE (verified, see README "Config form" section): a directory bundle
+# with a `config.yaml` is parsed by Omnigent's agent-plane parser, which reads
+# policies from `guardrails.policies` with `function: {path, arguments}`
+# (`arguments` are the factory kwargs). The public docs' single-file form
+# (top-level `policies:` + `handler:` + `factory_params:`) is honored only by
+# the single-file "omnigent YAML" adapter; placed in a directory `config.yaml`
+# it is SILENTLY DROPPED (empirically verified against omnigent 0.10.0.dev0).
+guardrails:
+  # Keep a parked GitHub-write ASK alive while a human steps away (seconds).
+  ask_timeout: 86400
+  policies:
+    # Builtin GitHub guard (defense in depth): reads allowed, irreversible
+    # deletes denied, force-push and tag-push denied. Non-GitHub tool calls
+    # abstain and fall through to the deny-by-default gate below.
+    github_guard:
+      type: function
+      function:
+        path: omnigent.policies.builtins.github.github_policy
+        arguments:
+          read_all: true
+          allow_destructive: false
+          deny_force_push: true
+          deny_tag_push: true
+
+    # Custom deny-unless-opted-in gate. `path` resolves the importable module
+    # `roteiro_gate` (put the policies/ dir on PYTHONPATH — see README);
+    # `arguments` are passed as factory kwargs. Everything is denied unless
+    # opted into `allow`; GitHub write tools return ASK.
+    deny_unless_opted_in:
+      type: function
+      function:
+        path: roteiro_gate.deny_unless_opted_in
+        arguments:
+          # Opted-in reads: Roteiro graph tools + GitHub reads.
+          allow:
+            - search
+            - explain
+            - path
+            - debt
+            - search_repositories
+            - get_file_contents
+            - search_code
+            - search_issues
+            - list_commits
+            - list_issues
+            - get_issue
+            - get_issue_comments
+            - list_pull_requests
+            - get_pull_request
+            - get_pull_request_files
+            - get_pull_request_comments
+            - get_pull_request_reviews
+          # GitHub writes: allowed only with approval (ASK, not a hard deny).
+          ask:
+            - create_or_update_file
+            - push_files
+            - create_issue
+            - update_issue
+            - add_issue_comment
+            - create_pull_request
+            - create_pull_request_review
+            - merge_pull_request
+            - create_branch
+            - fork_repository
+            - update_pull_request_branch
