@@ -198,6 +198,65 @@ CREATE UNIQUE INDEX idx_findings_run_key ON findings(run_id, key);
 CREATE INDEX idx_findings_run_severity ON findings(run_id, severity);
 ";
 
+/// Migration 9: the generated-media-content artifact store (ADR-0015).
+///
+/// An ASR transcript or a VLM description is **generated**, not decoded: asked to
+/// transcribe digital silence a model returns fluent invented prose, and the same
+/// blob under a different model, quantisation or sampling yields different
+/// "facts". That is not a deterministic pure function of `(path, blob id, bytes)`,
+/// so it is not a `derived` fact and must not be stored as one — it gets its own
+/// table here and never touches `nodes`/`edges`, exactly as analyzer findings do
+/// in migration 8. OCR stays on the derived path: it decodes text that is
+/// actually present, so it has no row here and `kind` has no token for it.
+///
+/// **Keyed by `(blob_id, producer)`**, and that UNIQUE index is the whole design:
+/// the producer column is a rendered identity over the model, its digest, its
+/// quantisation, the projector digest, the prompt and the sampling parameters, so
+/// re-describing a blob with a better model inserts a **new row beside the old
+/// one** rather than overwriting it. You can compare the two, and you can drop
+/// one producer's output wholesale without touching the graph.
+///
+/// The identity components are stored as columns rather than folded only into
+/// `producer`, because a record must be legible — and distrustable — on its own:
+/// `media status` reports which model said what, and a row whose evidence lived
+/// only inside an opaque token could not answer that.
+///
+/// `produced_at` is written by `SQLite`, as `imports.imported_at` and
+/// `analysis_runs.ingested_at` already are. Unlike those two it *is* read, but
+/// only for display; no ordering or policy depends on a clock.
+///
+/// Records are **not** touched by `rebuild` (which deletes only `edges` and
+/// `nodes`), following the `imports` precedent: they are expensive to reproduce —
+/// a 715 MB projector load per blob, issue #301 — and are not derivable from
+/// source alone.
+const M0009_MEDIA_CONTENT: &str = "
+CREATE TABLE media_content (
+    id            INTEGER PRIMARY KEY,
+    blob_id       TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('audio','vision')),
+    producer      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    model_digest  TEXT NOT NULL,
+    quantisation  TEXT NOT NULL,
+    mmproj_digest TEXT NOT NULL,
+    prompt        TEXT NOT NULL,
+    temperature   REAL NOT NULL,
+    max_tokens    INTEGER NOT NULL,
+    tool_version  TEXT NOT NULL,
+    generation    INTEGER NOT NULL,
+    produced_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    text          TEXT NOT NULL,
+    confidence    REAL,
+    -- A confidence signal, when a runtime exposes one, is a probability. It is
+    -- **not** the score an `inferred` edge carries and must never be read as one.
+    CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0))
+);
+CREATE UNIQUE INDEX idx_media_content_blob_producer ON media_content(blob_id, producer);
+CREATE INDEX idx_media_content_producer ON media_content(producer);
+CREATE INDEX idx_media_content_kind ON media_content(kind);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -231,6 +290,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 8,
         sql: M0008_FINDINGS,
+    },
+    Migration {
+        version: 9,
+        sql: M0009_MEDIA_CONTENT,
     },
 ];
 
@@ -312,7 +375,7 @@ mod tests {
             );",
         )
         .expect("bootstrap");
-        for m in MIGRATIONS.iter().take_while(|m| m.version < 8) {
+        for m in MIGRATIONS.iter().take_while(|m| m.version < 9) {
             conn.execute_batch(m.sql).expect("legacy migration");
             conn.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
@@ -328,15 +391,102 @@ mod tests {
 
         apply(&mut conn).expect("upgrade");
 
-        assert_eq!(recorded_versions(&conn).last().copied(), Some(8));
+        assert_eq!(recorded_versions(&conn).last().copied(), Some(9));
         let nodes: i64 = conn
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
             .expect("count");
         assert_eq!(nodes, 1, "an upgrade must not disturb existing rows");
-        let findings: i64 = conn
-            .query_row("SELECT COUNT(*) FROM findings", [], |r| r.get(0))
-            .expect("count");
-        assert_eq!(findings, 0, "the new tables start empty");
+        for table in ["findings", "media_content"] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .expect("count");
+            assert_eq!(rows, 0, "{table} starts empty");
+        }
+    }
+
+    /// ADR-0015 adds an artifact store, **not** a provenance class. The three
+    /// tokens `nodes`/`edges` accept are a published contract, and migration 9
+    /// must leave them exactly as migration 1 and 6 defined them — so the check
+    /// is that the constraints still bite, on a store at the latest version.
+    #[test]
+    fn the_media_migration_leaves_the_provenance_vocabulary_alone() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+
+        // The three legitimate node provenances still insert…
+        for provenance in ["derived", "authored", "inferred"] {
+            conn.execute(
+                "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
+                [provenance, provenance],
+            )
+            .unwrap_or_else(|e| panic!("{provenance} must remain a valid node provenance: {e}"));
+        }
+        // …and nothing else does, on either table. A `generated` provenance is
+        // precisely the thing this ADR declined to add.
+        for rejected in ["generated", "media", ""] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
+                    [&format!("bad-{rejected}"), rejected],
+                )
+                .is_err(),
+                "{rejected:?} must not be an accepted node provenance"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO edges (src, dst, kind, provenance) VALUES (1, 1, 'calls', ?1)",
+                    [rejected],
+                )
+                .is_err(),
+                "{rejected:?} must not be an accepted edge provenance"
+            );
+        }
+
+        // And the media table has no provenance column to borrow one from.
+        let columns: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('media_content')")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("collect")
+        };
+        assert!(
+            !columns.iter().any(|c| c == "provenance"),
+            "generated content must not carry a provenance class: {columns:?}"
+        );
+    }
+
+    /// `(blob, producer)` is the identity, and the schema — not just the Rust —
+    /// enforces it: the same blob described by a *different* producer is a second
+    /// row, while the same producer twice is refused outright.
+    #[test]
+    fn media_content_is_unique_per_blob_and_producer() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let insert = |producer: &str, kind: &str| {
+            conn.execute(
+                "INSERT INTO media_content (
+                     blob_id, path, kind, producer, model, model_digest, quantisation,
+                     mmproj_digest, prompt, temperature, max_tokens, tool_version, generation, text
+                 ) VALUES ('blob1', 'a.wav', ?2, ?1, 'm', 'd', 'Q4', 'p', 'say', 0.0, 8, '1.0', 1, 't')",
+                [producer, kind],
+            )
+        };
+        assert!(insert("media:audio:m:1", "audio").is_ok());
+        assert!(
+            insert("media:audio:m:1", "audio").is_err(),
+            "the same producer must not describe one blob twice"
+        );
+        assert!(
+            insert("media:audio:m:2", "audio").is_ok(),
+            "a different producer is a new record, not a mutation"
+        );
+        assert!(
+            insert("media:vision:m:3", "ocr").is_err(),
+            "`ocr` is not a generative modality and has no token"
+        );
     }
 
     /// The `analysis_runs` CHECK constraints are the last line of defence for the
@@ -370,6 +520,7 @@ mod tests {
             "imports",
             "analysis_runs",
             "findings",
+            "media_content",
             "schema_migrations",
         ] {
             let count: i64 = conn

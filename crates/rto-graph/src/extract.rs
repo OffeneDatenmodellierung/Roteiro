@@ -19,13 +19,17 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
 /// blob — the version is folded into the cache key. See [`crate::sync`].
 ///
-/// The `pdf-text`, `image-ocr`, `image-vision`, and `audio-transcribe` features
-/// change what PDFs/images/audio extract to, so each occupies a distinct version
-/// namespace: a feature build and a default build never serve each other stale
-/// (content-bearing vs content-free) facts from a shared cache. (Image/audio
-/// output also depends on *which* models are installed; that runtime state is
-/// folded into the cache key separately — see [`media_env_tag`] and
-/// [`crate::sync`].)
+/// The `pdf-text` and `image-ocr` features change what PDFs and images extract
+/// to, so each occupies a distinct version namespace: a feature build and a
+/// default build never serve each other stale (content-bearing vs content-free)
+/// facts from a shared cache. (OCR output also depends on *which* models are
+/// installed; that runtime state is folded into the cache key separately — see
+/// [`media_env_tag`] and [`crate::sync`].)
+///
+/// `image-vision` and `audio-transcribe` deliberately have **no namespace here
+/// any more**: since ADR-0015 they change nothing about extraction output, so
+/// they must not perturb a cache key. What they produce is generated content,
+/// which lives in [`crate::media`].
 // Bumped 5 → 6 for config-key nodes (ADR-0009): config files now emit
 // `config_key` nodes, so cached extraction facts must be regenerated. Bumped
 // 6 → 7 for YAML config keys + Dockerfile `image_ref` nodes (ADR-0009 derived
@@ -35,20 +39,14 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // for struct `meta.field_types` / `meta.config_root` and the `config_key` nodes
 // synthesized from a `@rto:config`-marked config-root struct's declared fields
 // (see [`RustWalk::synthesize_config_keys`]), so cached facts regenerate to carry
-// these new nodes/meta.
-pub(crate) const EXTRACT_VERSION: u32 = 9
+// these new nodes/meta. Bumped 9 → 10 for ADR-0015: ASR transcripts and VLM
+// descriptions are no longer written into `meta.content` at all, so every cached
+// fact set that carries one must be regenerated without it. The `image-vision`
+// (+400) and `audio-transcribe` (+800) namespaces are dropped in the same change,
+// because those features no longer affect extraction output.
+pub(crate) const EXTRACT_VERSION: u32 = 10
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
-    + if cfg!(feature = "image-ocr") { 200 } else { 0 }
-    + if cfg!(feature = "image-vision") {
-        400
-    } else {
-        0
-    }
-    + if cfg!(feature = "audio-transcribe") {
-        800
-    } else {
-        0
-    };
+    + if cfg!(feature = "image-ocr") { 200 } else { 0 };
 
 /// Max characters of embeddable content (markdown body / doc-comment / PDF text)
 /// captured into a node's `meta.content`, to keep the store small while giving
@@ -60,26 +58,11 @@ const MAX_CONTENT: usize = 1500;
 #[cfg(feature = "pdf-text")]
 const MAX_PDF_BYTES: usize = 20 * 1024 * 1024;
 
-/// Images larger than this (compressed bytes) are not processed (OCR/VLM).
-#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
-const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
-
 /// Images with more pixels than this are not processed — OCR/VLM time scales with
 /// pixel count, and this also guards against decompression bombs (the dimension is
 /// read from the header before the pixels are decoded).
 #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
 const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
-
-/// When OCR yields fewer than this many words, the image is treated as
-/// text-sparse (a diagram/photo rather than a text screenshot), so the vision
-/// model is run to describe it (only when `image-vision` is also enabled).
-#[cfg(feature = "image-vision")]
-const MIN_OCR_WORDS: usize = 8;
-
-/// Audio files larger than this (compressed bytes) are not transcribed — decode
-/// + inference time scales with duration, so cap the work a single clip imposes.
-#[cfg(feature = "audio-transcribe")]
-const MAX_AUDIO_BYTES: usize = 50 * 1024 * 1024;
 
 /// Turns one source blob into the nodes and edges derived from it.
 pub trait Extractor {
@@ -90,8 +73,8 @@ pub trait Extractor {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet;
 
     /// Runtime inputs — beyond `(path, bytes)` — that change extraction output
-    /// and so must be folded into the sync cache key: the installed media-model
-    /// identity (OCR + vision + audio) and any [`IngestConfig`] toggles. The
+    /// and so must be folded into the sync cache key: the installed OCR-model
+    /// identity and any [`IngestConfig`] toggles that gate *extraction*. The
     /// default is the media-model tag alone; [`Registry`] additionally folds in
     /// its ingestion config so toggling content off re-extracts affected blobs
     /// instead of serving stale, content-bearing facts.
@@ -100,12 +83,23 @@ pub trait Extractor {
     }
 }
 
-/// Runtime ingestion toggles (ADR-0007 `[ingest]`): which blob content is
-/// extracted for embedding. Every toggle defaults to **on**, and a toggle only
-/// gates content *within a build that supports it* — turning `pdf` on cannot
-/// extract PDF text in a binary built without the `pdf-text` feature, but
-/// turning it off suppresses that content in a binary that has it.
-// Four independent content toggles: a flat bool-per-class struct is the clearest
+/// Runtime ingestion toggles (ADR-0007 `[ingest]`). Every toggle defaults to
+/// **on**, and a toggle only gates content *within a build that supports it* —
+/// turning `pdf` on cannot extract PDF text in a binary built without the
+/// `pdf-text` feature, but turning it off suppresses that content in a binary
+/// that has it.
+///
+/// The five toggles split into two groups, and the split is the ADR-0015
+/// boundary:
+///
+/// - `prose`, `pdf` and `ocr` gate **extraction**: what is decoded from the bytes
+///   into `meta.content` as a `derived` fact. They contribute to the extraction
+///   cache key, because turning one off changes what extraction produces.
+/// - `vision` and `audio` gate **generation**: whether `roteiro media build` may
+///   invoke a model at all. They no longer touch extraction, so they contribute
+///   nothing to the cache key — a repository that sets `audio = false` gets
+///   exactly the derived facts it would get with it on.
+// Five independent content toggles: a flat bool-per-class struct is the clearest
 // representation (a state enum or bitflags would obscure, not clarify).
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,9 +110,12 @@ pub struct IngestConfig {
     pub pdf: bool,
     /// OCR literal text from images (needs the `image-ocr` feature).
     pub ocr: bool,
-    /// Describe images with a vision model (needs the `image-vision` feature).
+    /// Allow `roteiro media build` to describe images with a vision model (needs
+    /// the `image-vision` feature). Since ADR-0015 this gates *generation*, not
+    /// extraction: a description is never written to `meta.content`.
     pub vision: bool,
-    /// Transcribe spoken-word audio (needs the `audio-transcribe` feature).
+    /// Allow `roteiro media build` to transcribe spoken-word audio (needs the
+    /// `audio-transcribe` feature). Gates *generation*, as `vision` does.
     pub audio: bool,
 }
 
@@ -135,16 +132,27 @@ impl Default for IngestConfig {
 }
 
 impl IngestConfig {
-    /// A cache-key contribution that is **`0` when every toggle is on** (the
-    /// default), so the common case leaves existing cache keys untouched. Each
-    /// disabled toggle sets a distinct bit, so turning content off changes the
-    /// key and re-extracts affected blobs.
+    /// A cache-key contribution that is **`0` when every extraction toggle is
+    /// on** (the default), so the common case leaves existing cache keys
+    /// untouched. Each disabled toggle sets a distinct bit, so turning content
+    /// off changes the key and re-extracts affected blobs.
+    ///
+    /// Only the *extraction* toggles appear. `vision` and `audio` gate
+    /// generation, which no consumer of this key can observe (ADR-0015), and
+    /// folding them in would force a full re-extraction for a setting that
+    /// changes no derived fact.
     fn disabled_bits(self) -> u64 {
-        u64::from(!self.prose)
-            | (u64::from(!self.pdf) << 1)
-            | (u64::from(!self.ocr) << 2)
-            | (u64::from(!self.vision) << 3)
-            | (u64::from(!self.audio) << 4)
+        u64::from(!self.prose) | (u64::from(!self.pdf) << 1) | (u64::from(!self.ocr) << 2)
+    }
+
+    /// Whether this configuration permits `roteiro media build` to run `kind`.
+    /// An operator can disable generation outright without touching the graph.
+    #[must_use]
+    pub fn generates(self, kind: crate::media::MediaKind) -> bool {
+        match kind {
+            crate::media::MediaKind::Audio => self.audio,
+            crate::media::MediaKind::Vision => self.vision,
+        }
     }
 }
 
@@ -229,7 +237,11 @@ fn extract_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) 
 
 /// Lowercase file extension of `path`, if any. Lowercasing makes extension
 /// dispatch case-insensitive, so `Guide.PDF` and `README.MD` are recognised.
-fn extension(path: &str) -> Option<String> {
+///
+/// Shared with [`crate::media`], so the paths `media build` considers and the
+/// paths extraction classifies are decided by one function rather than two that
+/// can drift.
+pub(crate) fn extension(path: &str) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or(path);
     name.rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
@@ -260,13 +272,20 @@ fn file_node(
     // filename: prose files decode as UTF-8; PDFs go through `pdf_content` (only
     // when the `pdf-text` feature is on, otherwise it is a no-op). Each class is
     // gated by its `ingest` toggle so a project can suppress it without a rebuild.
+    //
+    // Every branch here **decodes text that exists in the bytes** — that is the
+    // whole membership rule (ADR-0015). Prose and PDF text are parses; OCR is
+    // discriminative, and its errors are misreadings correctable against the
+    // image. An ASR transcript and a VLM description are neither: they are
+    // generated, they invent fluent text where there is nothing to read, and they
+    // are therefore not `derived` facts. They are produced by `roteiro media
+    // build` into [`crate::media`] instead, and nothing on this path may
+    // reintroduce them.
     let content = if ingest.prose && is_prose(path) {
         cap_content(&String::from_utf8_lossy(bytes))
     } else if let Some(text) = ingest.pdf.then(|| pdf_content(path, bytes)).flatten() {
         cap_content(&text)
     } else if let Some(text) = image_content(path, bytes, ingest) {
-        cap_content(&text)
-    } else if let Some(text) = audio_content(path, bytes, ingest) {
         cap_content(&text)
     } else {
         String::new()
@@ -483,172 +502,46 @@ fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Embeddable content for an image blob, composing OCR text and an optional
-/// vision-model description (see [`ocr_content`]/[`vlm_content`]), or `None` when
-/// `path` is not an image, the image is too large, no image model is installed,
-/// or nothing is produced.
+/// Embeddable content for an image blob: the literal text OCR reads out of it,
+/// or `None` when `path` is not an image, the image is too large, the `ocr`
+/// toggle is off, the `image-ocr` feature is off, no OCR model is installed, or
+/// nothing is recognised.
 ///
-/// Both extractors read the *installed* image models — that runtime dependency is
-/// reflected in the cache key via [`media_env_tag`], so installing/upgrading a
-/// model re-extracts affected images instead of serving stale (content-free)
-/// facts.
-#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
+/// **OCR only.** The vision model used to compose a description into this string
+/// when OCR came back sparse; since ADR-0015 it does not, because a description
+/// is generated rather than decoded. OCR stays because it is discriminative: it
+/// reads text that is *actually present*, and its errors are misreadings a human
+/// can correct against the image. The VLM now runs from `roteiro media build`
+/// into [`crate::media`], where its output is labelled and opt-in.
+///
+/// This reads the *installed* OCR models — that runtime dependency is reflected
+/// in the cache key via [`media_env_tag`], so installing/upgrading a model
+/// re-extracts affected images instead of serving stale (content-free) facts.
+#[cfg(feature = "image-ocr")]
 fn image_content(path: &str, bytes: &[u8], ingest: IngestConfig) -> Option<String> {
-    if !is_image(path) || bytes.len() > MAX_IMAGE_BYTES {
+    if !ingest.ocr || !crate::media::is_image(path) || bytes.len() > crate::media::MAX_IMAGE_BYTES {
         return None;
     }
-    // OCR reads literal text (cheap, accurate); the vision model *describes* the
-    // image (slow). Smart composition (ADR-0005): always OCR; run the VLM only
-    // when OCR text is sparse — a diagram/photo rather than a text screenshot —
-    // and store both when both fire. Each stage is additionally gated by its
-    // `ingest` toggle so a project can disable OCR and/or vision at runtime.
-    let ocr = if ingest.ocr { ocr_content(bytes) } else { None };
-    let sparse = ocr
-        .as_deref()
-        .is_none_or(|t| t.split_whitespace().count() < min_ocr_words());
-    let vision = if ingest.vision && sparse {
-        vlm_content(bytes)
-    } else {
-        None
-    };
-    match (ocr, vision) {
-        (Some(o), Some(v)) => Some(format!("{o}\n\n{v}")),
-        (Some(o), None) => Some(o),
-        (None, Some(v)) => Some(v),
-        (None, None) => None,
-    }
+    ocr_content(bytes)
 }
 
-/// No-op when neither image feature is on: images become plain file nodes.
-#[cfg(not(any(feature = "image-ocr", feature = "image-vision")))]
+/// No-op without `image-ocr`: images become plain file nodes. An `image-vision`
+/// build lands here too — since ADR-0015 the vision model contributes nothing to
+/// extraction.
+#[cfg(not(feature = "image-ocr"))]
 fn image_content(_path: &str, _bytes: &[u8], _ingest: IngestConfig) -> Option<String> {
     None
-}
-
-/// The word count below which OCR output is "sparse" enough to invoke the VLM.
-/// `usize::MAX` when `image-vision` is off, so the VLM is never triggered.
-#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
-fn min_ocr_words() -> usize {
-    #[cfg(feature = "image-vision")]
-    {
-        MIN_OCR_WORDS
-    }
-    #[cfg(not(feature = "image-vision"))]
-    {
-        usize::MAX
-    }
-}
-
-/// Whether `path` is an image OCR/vision can read.
-#[cfg(any(feature = "image-ocr", feature = "image-vision"))]
-fn is_image(path: &str) -> bool {
-    matches!(extension(path).as_deref(), Some("png" | "jpg" | "jpeg"))
-}
-
-/// Embeddable content for an audio blob: a transcript of its spoken words, or
-/// `None` when `path` is not audio, the clip is too large, the `audio` toggle is
-/// off, the `audio-transcribe` feature is off, or no model is installed.
-///
-/// Like the image extractors, this reads the *installed* audio model — that
-/// runtime dependency is reflected in the cache key via [`media_env_tag`], so
-/// installing/upgrading the model re-transcribes affected clips instead of serving
-/// stale (content-free) facts.
-#[cfg(feature = "audio-transcribe")]
-fn audio_content(path: &str, bytes: &[u8], ingest: IngestConfig) -> Option<String> {
-    if !ingest.audio || !is_audio(path) || bytes.len() > MAX_AUDIO_BYTES {
-        return None;
-    }
-    asr_content(bytes)
-}
-
-/// No-op when the `audio-transcribe` feature is off: audio files become plain
-/// file nodes.
-#[cfg(not(feature = "audio-transcribe"))]
-fn audio_content(_path: &str, _bytes: &[u8], _ingest: IngestConfig) -> Option<String> {
-    None
-}
-
-/// Whether `path` is an audio file the projector's miniaudio decoder can read
-/// (WAV/MP3/FLAC — the formats llama.cpp bundles support for).
-#[cfg(feature = "audio-transcribe")]
-fn is_audio(path: &str) -> bool {
-    matches!(extension(path).as_deref(), Some("wav" | "mp3" | "flac"))
-}
-
-/// Transcribe spoken-word audio with the GGUF audio model (`ASR_MODEL`) through
-/// the shared llama.cpp engine (`rto-llama`) — the raw file bytes are decoded and
-/// resampled by llama.cpp's bundled miniaudio, so no separate audio-decoding crate
-/// is needed. `None` when the model is not installed or generation yields nothing.
-#[cfg(feature = "audio-transcribe")]
-fn asr_content(bytes: &[u8]) -> Option<String> {
-    use rto_llama::Engine as _;
-
-    let engine = asr_engine()?;
-    let completion = engine
-        .chat(&rto_llama::ChatRequest {
-            model: ASR_MODEL.to_owned(),
-            messages: vec![rto_llama::Message {
-                role: "user".to_owned(),
-                content: "Transcribe this audio recording. Output only the spoken words, verbatim."
-                    .to_owned(),
-            }],
-            images: Vec::new(),
-            audio: vec![bytes.to_vec()],
-            temperature: 0.0,
-            max_tokens: 512,
-        })
-        .ok()?;
-    let text = completion.content.trim();
-    (!text.is_empty()).then(|| text.to_owned())
-}
-
-/// The GGUF audio model backing `audio-transcribe`.
-#[cfg(feature = "audio-transcribe")]
-const ASR_MODEL: &str = "voxtral-mini-3b";
-
-/// The process-wide audio engine's slot; see [`asr_engine`].
-#[cfg(feature = "audio-transcribe")]
-static ASR_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
-    rto_llama::EngineSlot::new();
-
-/// The process-wide audio engine, built lazily from the installed `ASR_MODEL`
-/// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed —
-/// transcription is then inert (run `roteiro model pull voxtral-mini-3b`).
-///
-/// Lives in an [`EngineSlot`](rto_llama::EngineSlot) rather than a
-/// `static OnceLock` so [`release_media_engines`] can destroy it *before* the
-/// process exits — a `static` engine is never dropped, which aborts the process
-/// on Metal (issue #291).
-///
-/// It shares the process's one llama.cpp backend with [`vlm_engine`]
-/// (`rto_llama::backend`), so which of the two modalities a run happens to touch
-/// first no longer decides whether the other works at all (issue #296).
-#[cfg(feature = "audio-transcribe")]
-fn asr_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
-    ASR_ENGINE.get_or_init(|| {
-        let dir = crate::models::model_dir(ASR_MODEL);
-        let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
-        if !gguf.exists() || !mmproj.exists() {
-            return None;
-        }
-        rto_llama::llama::LlamaEngine::new(
-            vec![rto_llama::llama::Served {
-                name: ASR_MODEL.to_owned(),
-                path: gguf,
-                mmproj: Some(mmproj),
-            }],
-            0,
-        )
-        .ok()
-    })
 }
 
 /// Whether the image's pixel dimensions (read from its header, without decoding
 /// the pixels — so a decompression bomb is rejected cheaply) are within
 /// [`MAX_IMAGE_PIXELS`]. `false` if the header cannot be parsed or the limit is
 /// exceeded.
+///
+/// Shared with the vision producer in [`crate::media::producers`], which applies
+/// the same guard before loading the projector.
 #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
-fn image_dimensions_ok(bytes: &[u8]) -> bool {
+pub(crate) fn image_dimensions_ok(bytes: &[u8]) -> bool {
     let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
     else {
         return false;
@@ -679,15 +572,6 @@ fn ocr_content(bytes: &[u8]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-// Only the `any(image-ocr, image-vision)` version of `image_content` calls this,
-// so the no-op stub is needed only when that caller is compiled with image-ocr
-// off — i.e. image-vision on. Without this narrower gate it would be dead code in
-// an audio-only (no image feature) build.
-#[cfg(all(feature = "image-vision", not(feature = "image-ocr")))]
-fn ocr_content(_bytes: &[u8]) -> Option<String> {
-    None
-}
-
 /// Run detection + recognition over an image's bytes, returning its text.
 /// Fallible steps collapse to `None` (a bad image yields no content).
 #[cfg(feature = "image-ocr")]
@@ -711,78 +595,6 @@ fn run_ocr(
     let source = ImageSource::from_bytes(img.as_raw(), img.dimensions()).ok()?;
     let input = engine.prepare_input(source).ok()?;
     engine.get_text(&input).ok()
-}
-
-/// Describe an image with the GGUF vision-language model (`smolvlm-500m-gguf`)
-/// through the shared llama.cpp engine (`rto-llama`, ADR-0003 v1.2) — no candle.
-/// Returns `None` when `image-vision` is off, the model is not installed, the
-/// image is too large, or generation yields nothing. The engine (model +
-/// `mmproj`) is loaded once per process and reused across images (a fresh
-/// context per call keeps KV cache from carrying over).
-#[cfg(feature = "image-vision")]
-fn vlm_content(bytes: &[u8]) -> Option<String> {
-    use rto_llama::Engine as _;
-
-    if !image_dimensions_ok(bytes) {
-        return None;
-    }
-    let engine = vlm_engine()?;
-    let completion = engine
-        .chat(&rto_llama::ChatRequest {
-            model: VLM_MODEL.to_owned(),
-            messages: vec![rto_llama::Message {
-                role: "user".to_owned(),
-                content: "Describe this image in one or two sentences.".to_owned(),
-            }],
-            images: vec![bytes.to_vec()],
-            audio: Vec::new(),
-            temperature: 0.0,
-            max_tokens: 128,
-        })
-        .ok()?;
-    let text = completion.content.trim();
-    (!text.is_empty()).then(|| text.to_owned())
-}
-
-/// The GGUF vision-language model backing `image-vision`.
-#[cfg(feature = "image-vision")]
-const VLM_MODEL: &str = "smolvlm-500m-gguf";
-
-/// The process-wide vision engine's slot; see [`vlm_engine`].
-#[cfg(feature = "image-vision")]
-static VLM_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
-    rto_llama::EngineSlot::new();
-
-/// The process-wide vision engine, built lazily from the installed
-/// `smolvlm-500m-gguf` (`model.gguf` + `mmproj.gguf`). `None` when the model is
-/// not installed — vision is then inert (run `roteiro model pull smolvlm-500m-gguf`).
-///
-/// Lives in an [`EngineSlot`](rto_llama::EngineSlot) rather than a
-/// `static OnceLock` so [`release_media_engines`] can destroy it *before* the
-/// process exits — a `static` engine is never dropped, which aborts the process
-/// on Metal (issue #291).
-///
-/// It shares the process's one llama.cpp backend with the audio engine
-/// (`rto_llama::backend`), so a run that touches both modalities gets two working
-/// engines rather than one working and one silently inert (issue #296).
-#[cfg(feature = "image-vision")]
-fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
-    VLM_ENGINE.get_or_init(|| {
-        let dir = crate::models::model_dir(VLM_MODEL);
-        let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
-        if !gguf.exists() || !mmproj.exists() {
-            return None;
-        }
-        rto_llama::llama::LlamaEngine::new(
-            vec![rto_llama::llama::Served {
-                name: VLM_MODEL.to_owned(),
-                path: gguf,
-                mmproj: Some(mmproj),
-            }],
-            0,
-        )
-        .ok()
-    })
 }
 
 /// Destroy the process-wide media engines (vision, ASR) that extraction loaded
@@ -843,25 +655,19 @@ fn release_llama_backend() -> bool {
 }
 
 /// Release the vision engine, or nothing in a build without `image-vision`.
-#[cfg(feature = "image-vision")]
+///
+/// The engine itself moved to [`crate::media::producers`] along with the
+/// generation it serves (ADR-0015). The *release* stays here, because this is the
+/// entry point `roteiro`'s `main` holds for the whole process, and splitting it
+/// would make the exit ordering (#291, #296) something two modules had to agree
+/// on rather than something one function states.
 fn release_vlm_engine() -> bool {
-    VLM_ENGINE.release()
-}
-
-#[cfg(not(feature = "image-vision"))]
-fn release_vlm_engine() -> bool {
-    false
+    crate::media::producers::release_vlm_engine()
 }
 
 /// Release the ASR engine, or nothing in a build without `audio-transcribe`.
-#[cfg(feature = "audio-transcribe")]
 fn release_asr_engine() -> bool {
-    ASR_ENGINE.release()
-}
-
-#[cfg(not(feature = "audio-transcribe"))]
-fn release_asr_engine() -> bool {
-    false
+    crate::media::producers::release_asr_engine()
 }
 
 /// Ties the lifetime of the process-wide media engines — and, after them, the
@@ -905,46 +711,31 @@ fn vlm_content(_bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// A cache-key component reflecting the media extractors' runtime environment:
-/// `0` when no media feature is on or no models are installed, else a hash of the
-/// installed OCR/vision/audio model identities. Folded into the sync cache key so
-/// installing/upgrading a model re-extracts affected images/audio instead of
-/// serving stale facts (media output is not a pure function of the blob alone).
-/// See [`crate::sync`].
+/// A cache-key component reflecting the **extraction** models' runtime
+/// environment: `0` when no extraction model feature is on or no model is
+/// installed, else a hash of the installed OCR model identity. Folded into the
+/// sync cache key so installing/upgrading a model re-extracts affected images
+/// instead of serving stale facts (OCR output is not a pure function of the blob
+/// alone). See [`crate::sync`].
 ///
-/// The audio fold is `#[cfg]`-gated on `audio-transcribe`, so an image-only build
-/// produces exactly the same tag it did before audio existed — no cache churn.
-#[cfg(any(
-    feature = "image-ocr",
-    feature = "image-vision",
-    feature = "audio-transcribe"
-))]
+/// Only OCR is folded in. The vision and audio models used to be, because they
+/// wrote into `meta.content`; since ADR-0015 they do not, so their presence
+/// changes no derived fact and must not perturb a cache key. A machine that
+/// installs Voxtral no longer re-extracts its whole tree.
+#[cfg(feature = "image-ocr")]
 pub(crate) fn media_env_tag() -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut any = false;
-    #[cfg(feature = "image-ocr")]
-    {
-        any |= fold_installed_model(&mut hash, "ocrs-text");
+    if fold_installed_model(&mut hash, "ocrs-text") {
+        hash | 1
+    } else {
+        0
     }
-    #[cfg(feature = "image-vision")]
-    {
-        any |= fold_installed_model(&mut hash, "smolvlm-500m-gguf");
-    }
-    #[cfg(feature = "audio-transcribe")]
-    {
-        any |= fold_installed_model(&mut hash, "voxtral-mini-3b");
-    }
-    if any { hash | 1 } else { 0 }
 }
 
 /// If model `name` is fully installed, fold its host-variant checksums into
 /// `hash` and return `true`. Only the host-selected variant is hashed, so an
 /// unrelated platform variant does not perturb this host's tag.
-#[cfg(any(
-    feature = "image-ocr",
-    feature = "image-vision",
-    feature = "audio-transcribe"
-))]
+#[cfg(feature = "image-ocr")]
 fn fold_installed_model(hash: &mut u64, name: &str) -> bool {
     let Some(variant) = crate::models::find(name)
         .and_then(|spec| spec.variant_for(crate::models::Platform::host()))
@@ -964,12 +755,8 @@ fn fold_installed_model(hash: &mut u64, name: &str) -> bool {
     true
 }
 
-/// `0` whenever no media feature is compiled in.
-#[cfg(not(any(
-    feature = "image-ocr",
-    feature = "image-vision",
-    feature = "audio-transcribe"
-)))]
+/// `0` whenever no extraction-model feature is compiled in.
+#[cfg(not(feature = "image-ocr"))]
 pub(crate) fn media_env_tag() -> u64 {
     0
 }
@@ -2671,17 +2458,20 @@ mod inner {
     #[cfg(any(feature = "image-ocr", feature = "image-vision"))]
     #[test]
     fn image_content_guards_before_touching_models() {
-        // Case-insensitive image detection.
-        assert!(super::is_image("shot.PNG"));
-        assert!(super::is_image("b.jpeg"));
-        assert!(super::is_image("c.jpg"));
-        assert!(!super::is_image("d.gif"));
+        // Case-insensitive image detection. The classifier and the byte cap moved
+        // to `crate::media` with ADR-0015, so `media build` and extraction decide
+        // what counts as an image with one function rather than two that drift.
+        use crate::media::{MAX_IMAGE_BYTES, is_image};
+        assert!(is_image("shot.PNG"));
+        assert!(is_image("b.jpeg"));
+        assert!(is_image("c.jpg"));
+        assert!(!is_image("d.gif"));
         // A non-image path returns None without ever looking for models.
         assert!(
             super::image_content("notes.txt", b"hello", super::IngestConfig::default()).is_none()
         );
         // An oversized image is rejected by the size guard, before model lookup.
-        let big = vec![0u8; super::MAX_IMAGE_BYTES + 1];
+        let big = vec![0u8; MAX_IMAGE_BYTES + 1];
         assert!(super::image_content("shot.png", &big, super::IngestConfig::default()).is_none());
     }
 
@@ -2992,17 +2782,83 @@ mod inner {
             ..IngestConfig::default()
         })
         .env_tag();
-        let no_audio = Registry::new(IngestConfig {
-            audio: false,
+        let no_ocr = Registry::new(IngestConfig {
+            ocr: false,
             ..IngestConfig::default()
         })
         .env_tag();
         assert_ne!(no_prose, all_on);
         assert_ne!(no_pdf, all_on);
-        assert_ne!(no_audio, all_on);
+        assert_ne!(no_ocr, all_on);
         assert_ne!(no_prose, no_pdf);
-        assert_ne!(no_audio, no_prose);
-        assert_ne!(no_audio, no_pdf);
+        assert_ne!(no_ocr, no_prose);
+        assert_ne!(no_ocr, no_pdf);
+    }
+
+    /// The generation toggles must **not** move the extraction cache key.
+    ///
+    /// Before ADR-0015 they did, and correctly so: `audio = false` changed what
+    /// went into `meta.content`. It no longer changes any derived fact, so
+    /// folding it in would force every user of `[ingest] audio = false` — this
+    /// repository among them — into a full, pointless re-extraction. This test is
+    /// the difference between that being a decision and being an oversight.
+    #[test]
+    fn generation_toggles_do_not_move_the_extraction_cache_key() {
+        use super::IngestConfig;
+
+        let all_on = Registry::default().env_tag();
+        for (label, cfg) in [
+            (
+                "audio",
+                IngestConfig {
+                    audio: false,
+                    ..IngestConfig::default()
+                },
+            ),
+            (
+                "vision",
+                IngestConfig {
+                    vision: false,
+                    ..IngestConfig::default()
+                },
+            ),
+            (
+                "both",
+                IngestConfig {
+                    audio: false,
+                    vision: false,
+                    ..IngestConfig::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                Registry::new(cfg).env_tag(),
+                all_on,
+                "`{label}` gates generation, not extraction, so it must not move the cache key",
+            );
+        }
+    }
+
+    /// The two groups of toggle, stated as behaviour: `generates` answers for the
+    /// generation pair and nothing else consults them.
+    #[test]
+    fn generation_toggles_gate_media_build() {
+        use super::IngestConfig;
+        use crate::media::MediaKind;
+
+        let all_on = IngestConfig::default();
+        assert!(all_on.generates(MediaKind::Audio));
+        assert!(all_on.generates(MediaKind::Vision));
+
+        let no_audio = IngestConfig {
+            audio: false,
+            ..IngestConfig::default()
+        };
+        assert!(!no_audio.generates(MediaKind::Audio));
+        assert!(
+            no_audio.generates(MediaKind::Vision),
+            "each modality is gated independently"
+        );
     }
 }
 
@@ -3058,9 +2914,12 @@ fn serialise_media_engine_test() -> std::sync::MutexGuard<'static, ()> {
 /// covered without any model or GPU in `rto_llama::slot`'s unit tests.
 #[cfg(all(test, feature = "image-vision"))]
 mod vision_engine_teardown {
-    use super::{
-        VLM_MODEL, release_media_engines, serialise_media_engine_test, tiny_png, vlm_content,
-    };
+    // The engines and the generation they serve moved to `crate::media::producers`
+    // with ADR-0015; the *release* stayed in `extract`, which is what `main` holds
+    // for the process. So this test imports from both, and that split is the thing
+    // it is guarding.
+    use super::{release_media_engines, serialise_media_engine_test, tiny_png};
+    use crate::media::producers::{VLM_MODEL, vlm_content};
 
     #[test]
     fn describing_an_image_leaves_a_releasable_engine() {
@@ -3117,9 +2976,9 @@ mod vision_engine_teardown {
 ///    #291.
 #[cfg(all(test, feature = "image-vision", feature = "audio-transcribe"))]
 mod two_modality_teardown {
-    use super::{
-        ASR_MODEL, VLM_MODEL, asr_content, asr_engine, release_media_engines,
-        serialise_media_engine_test, tiny_png, vlm_content, vlm_engine,
+    use super::{release_media_engines, serialise_media_engine_test, tiny_png};
+    use crate::media::producers::{
+        ASR_MODEL, VLM_MODEL, asr_content, asr_engine, vlm_content, vlm_engine,
     };
 
     /// Half a second of 16-bit mono 16 kHz PCM in a WAV container: the committed
@@ -3254,9 +3113,8 @@ mod two_modality_teardown {
 #[cfg(all(test, feature = "image-vision", feature = "audio-transcribe"))]
 mod projector_binding {
     use super::two_modality_teardown::TINY_WAV;
-    use super::{
-        ASR_MODEL, VLM_MODEL, release_media_engines, serialise_media_engine_test, tiny_png,
-    };
+    use super::{release_media_engines, serialise_media_engine_test, tiny_png};
+    use crate::media::producers::{ASR_MODEL, VLM_MODEL};
     use rto_llama::llama::{LlamaEngine, Served};
     use rto_llama::{ChatRequest, Engine, Message};
 
