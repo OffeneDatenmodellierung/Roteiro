@@ -135,7 +135,14 @@ impl Adapter for CargoAudit {
             // Rules are not a thing for cargo-audit; the advisory database is.
             rules_digest: None,
             image_digest: None,
-            advisory_db: output.database.and_then(advisory_db),
+            // The report's own account of the database wins where it has one;
+            // otherwise the caller's provisioning record stands in. `cargo audit`
+            // reports nothing here whenever `--db` was passed, so in practice the
+            // fallback is what carries the staleness evidence.
+            advisory_db: output
+                .database
+                .and_then(advisory_db)
+                .or_else(|| ctx.advisory_db.clone()),
             source: ctx.source.clone(),
             findings,
         })
@@ -348,6 +355,7 @@ mod tests {
             exit_status: 1,
             source,
             rules_digest: None,
+            advisory_db: None,
             snippets: &crate::snippet::NoSnippets,
         }
     }
@@ -439,6 +447,48 @@ mod tests {
             .normalize(native.as_bytes(), &ctx(&SOURCE_WITH_LOCK))
             .expect("parse");
         assert!(report.advisory_db.is_none());
+    }
+
+    /// `cargo audit` reports `last-commit: null` whenever it is pointed at a
+    /// database with `--db` rather than resolving one itself — which is every
+    /// pinned, reproducible, offline run. Without the caller's provisioning
+    /// record standing in, the *pinned* configuration would be the one with no
+    /// staleness evidence, which is exactly backwards.
+    #[test]
+    fn falls_back_to_the_callers_pinned_database_when_the_report_names_none() {
+        let native = r#"{"database":{"advisory-count":1216,"last-commit":null,
+            "last-updated":null},"vulnerabilities":{"list":[]},"warnings":{}}"#;
+        let mut ctx = ctx(&SOURCE_WITH_LOCK);
+        ctx.advisory_db = Some(rto_graph::AdvisoryDb {
+            digest: "ec5f7ef066dd".to_owned(),
+            published_at: Some("2026-08-12T10:42:29Z".to_owned()),
+        });
+        let report = CargoAudit
+            .normalize(native.as_bytes(), &ctx)
+            .expect("parse");
+        let db = report
+            .advisory_db
+            .expect("the pinned database must stand in");
+        assert_eq!(db.digest, "ec5f7ef066dd");
+        assert_eq!(db.published_at.as_deref(), Some("2026-08-12T10:42:29Z"));
+    }
+
+    /// It is a fallback, not an override: when the tool does report a database,
+    /// the tool's own account is the evidence.
+    #[test]
+    fn the_reports_own_database_wins_over_the_callers() {
+        let mut ctx = ctx(&SOURCE_WITH_LOCK);
+        ctx.advisory_db = Some(rto_graph::AdvisoryDb {
+            digest: "from-the-cache".to_owned(),
+            published_at: None,
+        });
+        let report = CargoAudit
+            .normalize(NATIVE.as_bytes(), &ctx)
+            .expect("parse");
+        assert_eq!(
+            report.advisory_db.expect("db").digest,
+            "9f1e5c0a2b7d4e6f8a0c1b3d5e7f9a1c3e5d7f90"
+        );
     }
 
     #[test]

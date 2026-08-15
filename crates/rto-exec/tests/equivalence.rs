@@ -42,6 +42,7 @@ fn both_paths(
         exit_status: 1,
         source,
         rules_digest: Some("deadbeef".to_owned()),
+        advisory_db: None,
         snippets,
     };
 
@@ -108,6 +109,7 @@ fn the_two_paths_agree_on_findings_and_disagree_on_isolation() {
         exit_status: 1,
         source: &SourceIdentity::default(),
         rules_digest: Some("deadbeef".to_owned()),
+        advisory_db: None,
         snippets: &snippets,
     };
     let report = normalize_native("semgrep", &native, &ctx).expect("normalise");
@@ -150,6 +152,7 @@ fn the_report_digest_is_a_function_of_the_bytes_alone() {
         exit_status: 1,
         source: &SourceIdentity::default(),
         rules_digest: None,
+        advisory_db: None,
         snippets: &snippets,
     };
     let wire = serde_json::to_vec(&normalize_native("semgrep", &native, &ctx).expect("normalise"))

@@ -306,6 +306,7 @@ mod tests {
             exit_status: 1,
             source: &SOURCE,
             rules_digest: Some("cafe1234".to_owned()),
+            advisory_db: None,
             // The unit tests here exercise the *parsing*; the snippet component
             // is covered by `tests/equivalence.rs`, which reads a real tree.
             snippets: &crate::snippet::NoSnippets,

@@ -65,6 +65,14 @@ pub struct NativeContext<'a> {
     pub source: &'a SourceIdentity,
     /// Digest of the rule set the analyzer ran with, where one applies.
     pub rules_digest: Option<String>,
+    /// The pinned advisory database the caller provisioned, where one applies.
+    ///
+    /// A fallback, not an override: an adapter prefers what the analyzer's own
+    /// report says about the database it consulted, and uses this only when the
+    /// report says nothing. `cargo audit` says nothing whenever it is pointed at
+    /// a database with `--db`, which is every pinned run — so without this, the
+    /// reproducible configuration would be the one with no staleness evidence.
+    pub advisory_db: Option<rto_graph::AdvisoryDb>,
     /// Where to read the source a finding points at, for identity recipes that
     /// include a snippet hash.
     ///
@@ -87,6 +95,7 @@ impl std::fmt::Debug for NativeContext<'_> {
             .field("exit_status", &self.exit_status)
             .field("source", self.source)
             .field("rules_digest", &self.rules_digest)
+            .field("advisory_db", &self.advisory_db)
             .finish_non_exhaustive()
     }
 }
@@ -281,6 +290,7 @@ mod tests {
             exit_status: 0,
             source: &SOURCE,
             rules_digest: None,
+            advisory_db: None,
             snippets: &crate::snippet::NoSnippets,
         }
     }

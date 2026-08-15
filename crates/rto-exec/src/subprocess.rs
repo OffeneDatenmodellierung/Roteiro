@@ -130,6 +130,9 @@ pub enum SubprocessError {
 pub struct SubprocessRunner {
     adapter: &'static dyn Adapter,
     assets: Vec<(&'static str, PathBuf)>,
+    /// Kept so the run reads its evidence from the *same* cache the assets were
+    /// resolved from — a test cache and the user's cache must never mix.
+    assets_root: PathBuf,
     allow_unsandboxed: bool,
 }
 
@@ -165,6 +168,7 @@ impl SubprocessRunner {
         Ok(Self {
             adapter,
             assets: assets::resolve(assets_root, analyzer)?,
+            assets_root: assets_root.to_path_buf(),
             allow_unsandboxed,
         })
     }
@@ -227,7 +231,8 @@ impl AnalyzerRunner for SubprocessRunner {
             analyzer_version: analyzer_version(&invocation, &request.worktree.path),
             exit_status: output.status,
             source: &request.source,
-            rules_digest: self.rules_digest(&assets::asset_root()),
+            rules_digest: self.rules_digest(&self.assets_root),
+            advisory_db: assets::advisory_db_evidence(&self.assets_root, &request.analyzer),
             snippets: &snippets,
         };
 

@@ -102,7 +102,7 @@ pub enum ExecError {
     /// The analyzer binary could not be executed, or exited with a status that
     /// does not carry a usable report.
     #[cfg(feature = "exec-subprocess")]
-    #[error("{0}")]
+    #[error(transparent)]
     Subprocess(#[from] crate::subprocess::SubprocessError),
     /// Provisioning an asset failed.
     #[cfg(feature = "exec-subprocess")]

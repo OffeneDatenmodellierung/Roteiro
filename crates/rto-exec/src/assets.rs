@@ -180,6 +180,22 @@ pub struct InstalledAsset {
     /// How many files the digest covers, for a directory asset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<usize>,
+    /// When the asset's contents were published, RFC 3339 UTC — for an advisory
+    /// database that is a git checkout, its `HEAD` commit time.
+    ///
+    /// This is **not** `fetched_at`. Fetching an eight-month-old database today
+    /// does not make it current, and the difference between the two is exactly
+    /// what a *possibly stale* label is about.
+    ///
+    /// It is recorded here because the analyzer will not report it: `cargo audit`
+    /// returns `last-commit: null` and `last-updated: null` whenever it is
+    /// pointed at a database with `--db` instead of resolving one itself —
+    /// verified against cargo-audit 0.22.2, at both a shallow clone and its own
+    /// managed checkout. Pinning the database is what makes a run reproducible,
+    /// so the pinned configuration must not be the one that loses the staleness
+    /// evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
 }
 
 /// An asset's state, as `roteiro security status` reports it.
@@ -334,6 +350,7 @@ pub fn provision(root: &Path, spec: &AssetSpec) -> Result<InstalledAsset, AssetE
             (digest, Some(count))
         }
     };
+    let published_at = published_at(&target);
 
     let record = InstalledAsset {
         id: spec.id.to_owned(),
@@ -341,6 +358,7 @@ pub fn provision(root: &Path, spec: &AssetSpec) -> Result<InstalledAsset, AssetE
         digest,
         fetched_at: rfc3339_utc(std::time::SystemTime::now()),
         files,
+        published_at,
     };
     let json = serde_json::to_vec_pretty(&record)?;
     write_atomically(&record_path(root, spec), &json)?;
@@ -389,6 +407,41 @@ pub fn status(root: &Path, analyzer: Option<&str>) -> Vec<AssetStatus> {
             }
         })
         .collect()
+}
+
+/// When the contents at `dir` were published, if that can be established.
+///
+/// A git checkout's `HEAD` commit time is the publication date. Anything that is
+/// not a git checkout has no such date, and `None` is reported rather than
+/// invented — a made-up publication date would make a stale database look fresh,
+/// which is the one failure mode this whole field exists to prevent.
+fn published_at(dir: &Path) -> Option<String> {
+    let repo = rto_graph::Repo::discover(dir).ok()?;
+    // `discover` walks upwards, so a directory that is merely *inside* a
+    // repository would otherwise be dated by that repository's HEAD.
+    if repo.workdir()? != dir {
+        return None;
+    }
+    let seconds = repo.head_commit_time().ok()?;
+    Some(rfc3339_utc(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::try_from(seconds).ok()?),
+    ))
+}
+
+/// The advisory-database evidence recorded for `analyzer` at provisioning time.
+///
+/// Supplied to a run so its results carry a database identity and publication
+/// date even though the analyzer itself reports neither.
+#[must_use]
+pub fn advisory_db_evidence(root: &Path, analyzer: &str) -> Option<rto_graph::AdvisoryDb> {
+    let spec = assets_for(analyzer)
+        .into_iter()
+        .find(|s| s.kind == AssetKind::AdvisoryDb)?;
+    let record = installed(root, spec)?;
+    Some(rto_graph::AdvisoryDb {
+        digest: record.digest,
+        published_at: record.published_at,
+    })
 }
 
 /// Digest of what is on disk right now, or `None` if it is not there.

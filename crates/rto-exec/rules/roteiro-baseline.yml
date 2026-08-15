@@ -149,13 +149,23 @@ rules:
       category: security
       cwe: "CWE-78: OS Command Injection"
       confidence: HIGH
-    patterns:
-      - pattern-either:
-          - pattern: require("child_process").exec(...)
+    # The receiver has to be established as `child_process`. A bare `$X.exec(...)`
+    # also matches `regex.exec(text)`, which is not a process at all — verified
+    # against this repository, where the broad form produced exactly that false
+    # positive.
+    pattern-either:
+      - pattern: require("child_process").exec(...)
+      - pattern: child_process.exec(...)
+      - patterns:
           - pattern: $CP.exec(...)
-      # `execFile` takes an argument array and never reaches a shell, so it is
-      # the fix this rule is asking for, not another instance of the problem.
-      - pattern-not: $CP.execFile(...)
+          - pattern-inside: |
+              $CP = require("child_process")
+              ...
+      - patterns:
+          - pattern: $F(...)
+          - pattern-inside: |
+              import { exec as $F } from "child_process"
+              ...
 
   - id: roteiro.js.eval-call
     languages: [javascript, typescript]
