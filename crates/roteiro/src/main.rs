@@ -615,15 +615,44 @@ enum SpecAction {
 #[cfg(feature = "models")]
 #[derive(Subcommand)]
 enum ModelAction {
-    /// List registry models and which are installed for this platform.
+    /// List registry models, which are installed for this platform, and how much
+    /// disk each installed one occupies.
     List,
     /// Download a model into `~/.roteiro/models` (asks before fetching).
+    ///
+    /// An interrupted download is **resumed** on the next run: the partial file
+    /// is kept and continued with an HTTP range request. A partial that cannot
+    /// be shown to still match the remote — different checksum, size or URL — is
+    /// discarded and refetched rather than trusted.
     Pull {
         /// Registry model name (see `roteiro model list`).
         name: String,
         /// Skip the confirmation prompt and download immediately.
         #[arg(long)]
         yes: bool,
+    },
+    /// Remove an installed model's files from the store, reporting what was
+    /// freed.
+    ///
+    /// Deletes the model's whole directory, including any `.partial` left by an
+    /// abandoned pull. The registry entry is untouched, so `model pull` can
+    /// fetch it again.
+    ///
+    /// **This cannot tell whether a running `roteiro serve` is using the model.**
+    /// Roteiro keeps no lock or pid file over the store, so there is nothing to
+    /// check. On Unix a server that already has the file open keeps working from
+    /// its open handle until it restarts; on Windows the removal fails while the
+    /// file is held. Stop the server first if you are unsure.
+    #[command(visible_alias = "remove")]
+    Rm {
+        /// Registry model name (see `roteiro model list`).
+        name: String,
+        /// Skip the confirmation prompt and remove immediately.
+        #[arg(long)]
+        yes: bool,
+        /// Emit the removal report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1937,7 +1966,8 @@ impl rto_graph::Embedder for LlamaEmbedder {
     }
 }
 
-/// Manage pluggable local embedding models: list the registry or pull a model.
+/// Manage pluggable local embedding models: list the registry, pull a model, or
+/// remove one to reclaim its disk.
 #[cfg(feature = "models")]
 fn run_model(action: ModelAction) -> anyhow::Result<()> {
     match action {
@@ -1946,7 +1976,87 @@ fn run_model(action: ModelAction) -> anyhow::Result<()> {
             Ok(())
         }
         ModelAction::Pull { name, yes } => run_model_pull(&name, yes),
+        ModelAction::Rm { name, yes, json } => run_model_rm(&name, yes, json),
     }
+}
+
+/// The `--json` shape of `roteiro model rm`.
+#[cfg(feature = "models")]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct ModelRmReport {
+    /// The model removed.
+    model: String,
+    /// The directory that was removed.
+    dir: String,
+    /// The files removed, sorted.
+    files: Vec<String>,
+    /// Bytes reclaimed.
+    freed_bytes: u64,
+    /// The same figure for humans (e.g. `17.3 GiB`).
+    freed: String,
+}
+
+/// Remove an installed model's files, reporting what was freed.
+///
+/// Refuses — non-zero, with the command that would install it — when the model
+/// is not on disk, rather than reporting a cheerful zero-byte success.
+#[cfg(feature = "models")]
+fn run_model_rm(name: &str, yes: bool, json: bool) -> anyhow::Result<()> {
+    use rto_graph::{find_model, installed_size, model_dir, remove_model};
+    use std::io::Write as _;
+
+    // An unknown name and an uninstalled model are different mistakes and get
+    // different advice.
+    if find_model(name).is_none() {
+        anyhow::bail!("unknown model `{name}` (see `roteiro model list`)");
+    }
+    let dir = model_dir(name);
+    let size = installed_size(name);
+    if !dir.exists() || size == 0 {
+        anyhow::bail!(
+            "`{name}` is not installed — nothing to remove (install it with `roteiro model pull {name}`)"
+        );
+    }
+
+    if !yes {
+        eprintln!(
+            "roteiro would remove `{name}` from {}, freeing {}",
+            dir.display(),
+            human_bytes(size)
+        );
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            anyhow::bail!("removal declined (non-interactive; re-run with `--yes`)");
+        }
+        eprint!("Remove now? [y/N] ");
+        std::io::stderr().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+            anyhow::bail!("removal declined");
+        }
+    }
+
+    let removed = remove_model(name)
+        .map_err(|e| anyhow::anyhow!("removing `{name}` from {}: {e}", dir.display()))?;
+    if json {
+        emit_json(&ModelRmReport {
+            model: name.to_owned(),
+            dir: removed.dir.display().to_string(),
+            files: removed.files.clone(),
+            freed_bytes: removed.bytes,
+            freed: human_bytes(removed.bytes),
+        })?;
+    } else {
+        println!(
+            "removed `{name}` from {} — freed {} ({} file(s))",
+            removed.dir.display(),
+            human_bytes(removed.bytes),
+            removed.files.len()
+        );
+        println!("re-install it with `roteiro model pull {name}`");
+    }
+    Ok(())
 }
 
 /// Print the registry, marking which models are installed for this host.
@@ -2020,6 +2130,18 @@ fn run_model_list() {
                 } else {
                     MARK_AVAILABLE
                 };
+                // For an installed model report what it actually occupies (which
+                // is what `model rm` would reclaim), not the registry's estimate
+                // of the download. They differ: the store may also hold a
+                // `.partial` from an abandoned pull.
+                let on_disk = if installed {
+                    format!(
+                        ", {} on disk",
+                        human_bytes(rto_graph::installed_size(spec.name))
+                    )
+                } else {
+                    String::new()
+                };
                 let dim = if spec.dim > 0 {
                     format!(", dim {}", spec.dim)
                 } else {
@@ -2032,7 +2154,7 @@ fn run_model_list() {
                     .map(|r| format!(", {r}"))
                     .unwrap_or_default();
                 println!(
-                    "    {mark} {name:<name_w$}  {licence}{role}{dim}, ~{size} MiB",
+                    "    {mark} {name:<name_w$}  {licence}{role}{dim}, ~{size} MiB{on_disk}",
                     name = spec.name,
                     licence = spec.licence,
                     size = spec.size_mib,
@@ -2189,7 +2311,7 @@ fn report_download_event(event: rto_graph::DownloadEvent) {
     use rto_graph::DownloadEvent as E;
     match event {
         E::DiscardedPartial { bytes, reason } => {
-            eprintln!("  discarding the {} partial: {reason}", human_bytes(bytes))
+            eprintln!("  discarding the {} partial: {reason}", human_bytes(bytes));
         }
         E::Resuming { offset, total } => match total {
             Some(t) => eprintln!(
@@ -2203,19 +2325,24 @@ fn report_download_event(event: rto_graph::DownloadEvent) {
         E::AlreadyComplete { bytes } => {
             eprintln!("  {} already downloaded — verifying", human_bytes(bytes));
         }
-        E::RangeUnsupported { discarded, detail } => eprintln!(
-            "  the server will not resume ({detail}); restarting from zero and \
-             discarding {}",
-            human_bytes(discarded)
-        ),
-        E::KeptPartial { bytes } => eprintln!(
-            "  transfer failed; keeping {} for a later `roteiro model pull` to resume from",
-            human_bytes(bytes)
-        ),
-        E::PoisonedPartial { bytes } => eprintln!(
-            "  checksum failed; discarding all {} — those bytes cannot be resumed from",
-            human_bytes(bytes)
-        ),
+        E::RangeUnsupported { discarded, detail } => {
+            eprintln!(
+                "  the server will not resume ({detail}); restarting from zero and discarding {}",
+                human_bytes(discarded)
+            );
+        }
+        E::KeptPartial { bytes } => {
+            eprintln!(
+                "  transfer failed; keeping {} for a later `roteiro model pull` to resume from",
+                human_bytes(bytes)
+            );
+        }
+        E::PoisonedPartial { bytes } => {
+            eprintln!(
+                "  checksum failed; discarding all {} — those bytes cannot be resumed from",
+                human_bytes(bytes)
+            );
+        }
     }
 }
 
