@@ -54,6 +54,9 @@ Resolves issue #300.
 - **Utility is preserved deliberately, not accidentally.** `roteiro media build`
   produces it, `media status` reports it, and search/context can include it behind
   an explicit opt-in that always labels it as generated.
+- **A deterministic pre-generation gate** refuses obviously-empty inputs (silence,
+  blank images) *before* a model is invoked — adopted as a complement, not as the
+  fix.
 - The graph keeps rebuilding identically from source; `export_factset` stays a pure
   function of the tree.
 - **`EXTRACT_VERSION` bumps once** — this genuinely changes extraction output.
@@ -95,6 +98,21 @@ cheap path.
 *(OCR's determinism does depend on pinned model files and a pinned runtime; the
 media env tag already participates in the extraction cache key. If OCR ever gains
 sampling, it crosses the line and moves too.)*
+
+### No migration is required
+
+Generated media content is **not yet relied on by any consumer** — the capability
+exists but nothing depends on the transcripts or descriptions currently sitting in
+graphs. So this is a clean cutover, not a data migration:
+
+- `EXTRACT_VERSION` bumps once; every user re-extracts, and the generated text
+  simply stops being written into `nodes.meta.content`;
+- nothing is copied into the new store as part of the upgrade — records are
+  produced on demand by `roteiro media build`;
+- no back-compat shim, no dual-read period, no deprecation window.
+
+Had this shipped a year later, that would not have been true. Doing it now is
+substantially cheaper than doing it after something depends on it.
 
 ## Decision makers
 
@@ -145,6 +163,38 @@ deliberate requirement of the decision, not an afterthought:
 The existing `[ingest] audio` / `vision` toggles keep their meaning as *"may this
 run generate content at all"*, so an operator can disable generation outright.
 
+### The pre-generation gate (adopted)
+
+Before any model is invoked, a **cheap, deterministic** check refuses inputs that
+obviously contain nothing to read:
+
+- **Audio** — peak/RMS amplitude below a threshold across the clip, i.e. digital or
+  near-digital silence.
+- **Images** — near-uniform content (pixel variance/entropy below a threshold), i.e.
+  blank or flat-colour images.
+
+Three properties make it worth having:
+
+1. **It runs before the model loads**, so a repo full of silent or blank assets
+   avoids the projector load entirely (see #301) — a correctness improvement that is
+   also the cheapest performance win available here.
+2. **The refusal is recorded, not silent.** A skipped blob gets a `media_content`
+   record stating *why* it was skipped and the measured value, so `media status` can
+   show "skipped: below silence threshold (rms=0.0)" rather than leaving an
+   indistinguishable hole. An operator can tell "not generated" from "generated
+   nothing".
+3. **It is deterministic**, so it belongs on the extraction side of the line and
+   costs nothing in reproducibility.
+
+Thresholds are configurable with **conservative defaults**: the gate exists to catch
+the unambiguous cases, and a false skip is worse than a false pass now that
+generated output is clearly labelled anyway. `--force` overrides it.
+
+**What it explicitly does not do:** a model asked to transcribe *quiet speech*, a
+noisy room tone, or a subtly-textured image will still confabulate. The gate raises
+the floor; only the artifact store fixes the label. It is adopted because it is
+cheap and helps, not because it addresses the defect in #300.
+
 ### What this fixes for the operator
 
 Today's failure is silent: fabricated prose enters the graph, ranks in search, and
@@ -158,7 +208,7 @@ for something extracted from the source.
 |---|---|
 | Leave as `derived` | **Rejected** — the label is factually false and breaks the project's headline promise. |
 | Move to `inferred` with a confidence | **Rejected, narrowly** — `inferred` today means *similarity edges between existing nodes*, not *content attached to a node*; widening it dilutes a second vocabulary, and ASR/VLM do not naturally emit a calibrated confidence. |
-| Silence/blank gate only | **Rejected as a fix, adopted as a complement** — it reduces garbage in, but a model confabulating on *quiet speech* still fabricates; it narrows the failure without correcting the label. Worth doing anyway. |
+| Silence/blank gate only | **Rejected as *the* fix, adopted as a complement (see below)** — it reduces garbage in, but a model confabulating on *quiet speech* still fabricates; it narrows the failure without correcting the label. |
 | Mark and demote in place | **Rejected** — keeps the false label and relies on every consumer honouring the mark. |
 | **Separate artifact store + explicit rebuild/search paths (chosen)** | Keeps the graph a pure function of source, keeps the content available, and makes its provenance legible. |
 
@@ -181,8 +231,9 @@ for something extracted from the source.
   ship *with* the move, not after it.
 - One `EXTRACT_VERSION` bump: extraction output genuinely changes, so every user
   re-extracts once. Batch it with any other extraction-affecting change.
-- Existing graphs contain generated text under `derived`; it is dropped on
-  re-extraction and regenerated on demand into the new store.
+- The gate adds two tunable thresholds — a small ongoing calibration surface, and a
+  false skip is a silently missing description (mitigated by recording the skip and
+  its measured value).
 - A third artifact store to maintain, and a third retrieval surface to keep coherent
   with the other two.
 

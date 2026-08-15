@@ -352,15 +352,30 @@ without losing the ability to search it. Resolves #300.
   every hit is visibly marked as generated, ranked in its own channel, and never
   given the `authored` boost. The explorer UI surfaces generated content on a media
   node with its producer and a per-blob rebuild action.
+- **Pre-generation gate (in scope):** a cheap, deterministic refusal of inputs with
+  nothing to read — peak/RMS below threshold for audio, near-uniform pixel
+  variance/entropy for images — evaluated **before the model loads**, so a repo of
+  silent or blank assets skips the projector load entirely (a free win against
+  #301). The skip is **recorded, not silent**: a `media_content` record states the
+  reason and the measured value, so `media status` distinguishes *not generated*
+  from *generated nothing*. Conservative, configurable thresholds; `--force`
+  overrides. It raises the floor — quiet speech and subtly-textured images still
+  confabulate — so it complements the store rather than substituting for it.
 - **`EXTRACT_VERSION` bumps here** — extraction output genuinely changes. This is the
   one bump referenced in §5; batch it with Stage 26's extraction-touching lenses if
   they land together, so users re-extract once rather than twice.
-- **Complementary, tracked separately:** a silence/blank gate before generation, and
-  the projector cache (#301).
-- **DoD:** a silent clip cannot put prose into default `search` results; generated
-  text is attributable to a named producer everywhere it surfaces; `media build`
-  restores full searchability in one command; `export_factset` is byte-identical
-  across a `media build`; dropping a producer's records leaves the graph untouched.
+- **No migration.** Generated media content is not yet relied on by any consumer, so
+  this is a clean cutover: the bump stops the text being written into
+  `nodes.meta.content`, nothing is copied into the new store, and records are
+  produced on demand by `media build`. No shim, no dual-read, no deprecation window
+  — which is only true because it is being done now.
+- **Complementary, tracked separately:** the projector cache (#301).
+- **DoD:** a silent clip cannot put prose into default `search` results; a silent
+  clip is refused *before* the model loads and the refusal is visible in `media
+  status` with its measured value; generated text is attributable to a named
+  producer everywhere it surfaces; `media build` restores full searchability in one
+  command; `export_factset` is byte-identical across a `media build`; dropping a
+  producer's records leaves the graph untouched.
 
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
 
