@@ -20,6 +20,9 @@ mod context;
 // deterministic release that keeps a Metal build from aborting at exit (#291).
 mod engine_slot;
 mod extract;
+// Analyzer findings (ADR-0012): a *separate* artifact store, deliberately not a
+// provenance class and deliberately not in `nodes`/`edges`.
+mod findings;
 mod git;
 #[cfg(feature = "inference")]
 mod infer;
@@ -48,6 +51,12 @@ pub use context::{
 pub use extract::{
     Extractor, FileNodeExtractor, IngestConfig, MediaEngineGuard, Registry, RustExtractor,
     release_media_engines,
+};
+pub use findings::{
+    AdvisoryDb, AnalysisRun, CommandPolicy, EnvironmentPolicy, FINDING_KEY_PREFIX, Finding,
+    FindingKey, FindingsApplied, FindingsError, FindingsLayer, Isolation, MAX_ANALYZER_ID,
+    MAX_IDENTITY_PART, NetworkPolicy, RunnerKind, SECURITY_LAYER_PREFIX, Severity, SourceIdentity,
+    WorktreeAccess, WorktreeId, analyzer_id_error, is_valid_analyzer_id, layer_key,
 };
 pub use git::{BlobRef, ChangeStatus, ChangedFile, GitError, Repo, Submodule};
 #[cfg(feature = "inference")]

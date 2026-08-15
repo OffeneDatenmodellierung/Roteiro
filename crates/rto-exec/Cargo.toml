@@ -1,0 +1,26 @@
+[package]
+name = "rto-exec"
+description = "Analyzer execution contract for Roteiro: one normalized findings result whether ingested from a CI report or produced by a future sandboxed run"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+rto-graph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Digest of the raw report, which is part of an `AnalysisRun`'s evidence chain:
+# it ties the stored findings to the exact bytes they were derived from. Already
+# in the workspace tree (rto-graph's `models` feature uses the same 0.11 pin), so
+# this adds an edge to the dependency graph, not a new crate to the lockfile.
+# Pure Rust, MIT OR Apache-2.0, on the `cargo deny` allow-list.
+sha2 = "0.11"
+
+[lints]
+workspace = true

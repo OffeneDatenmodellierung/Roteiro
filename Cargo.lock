@@ -2758,6 +2758,7 @@ dependencies = [
  "axum",
  "clap",
  "http-body-util",
+ "rto-exec",
  "rto-graph",
  "rto-llama",
  "rto-render",
@@ -2891,6 +2892,17 @@ checksum = "9574ddebf5671bc08ceb76e2e1638fadc57fdeff318634eab2c29e9a803cff64"
 dependencies = [
  "rten-base",
  "rten-simd",
+]
+
+[[package]]
+name = "rto-exec"
+version = "1.9.0"
+dependencies = [
+ "rto-graph",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
 ]
 
 [[package]]
