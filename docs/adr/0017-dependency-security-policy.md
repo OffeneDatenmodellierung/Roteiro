@@ -141,6 +141,12 @@ advisories are published — starting with llama.cpp inside `llama-cpp-sys-2`. A
 vendored component with no advisory-watch story is an untracked risk regardless of
 how healthy `cargo audit` looks.
 
+The register is [[docs/VENDORED_DEPENDENCIES.md]]. Measured against RustSec when it
+was written, the gap is not theoretical: llama.cpp has **13 published advisories
+upstream and none in RustSec**, including a critical unauthenticated RCE and
+repeated heap overflows in GGUF tensor parsing — the exact surface Roteiro exposes
+whenever a local model is loaded.
+
 ### 5. Advisory exceptions carry their reasoning
 
 The existing practice in `deny.toml` — an ignored advisory explains *why*, *how the
