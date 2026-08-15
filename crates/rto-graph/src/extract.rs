@@ -606,31 +606,37 @@ fn asr_content(bytes: &[u8]) -> Option<String> {
 #[cfg(feature = "audio-transcribe")]
 const ASR_MODEL: &str = "voxtral-mini-3b";
 
+/// The process-wide audio engine's slot; see [`asr_engine`].
+#[cfg(feature = "audio-transcribe")]
+static ASR_ENGINE: crate::engine_slot::EngineSlot<rto_llama::llama::LlamaEngine> =
+    crate::engine_slot::EngineSlot::new();
+
 /// The process-wide audio engine, built lazily from the installed `ASR_MODEL`
 /// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed —
 /// transcription is then inert (run `roteiro model pull voxtral-mini-3b`).
+///
+/// Lives in an [`EngineSlot`](crate::engine_slot::EngineSlot) rather than a
+/// `static OnceLock` so [`release_media_engines`] can destroy it *before* the
+/// process exits — a `static` engine is never dropped, which aborts the process
+/// on Metal (issue #291).
 #[cfg(feature = "audio-transcribe")]
-fn asr_engine() -> Option<&'static rto_llama::llama::LlamaEngine> {
-    use std::sync::OnceLock;
-    static ENGINE: OnceLock<Option<rto_llama::llama::LlamaEngine>> = OnceLock::new();
-    ENGINE
-        .get_or_init(|| {
-            let dir = crate::models::model_dir(ASR_MODEL);
-            let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
-            if !gguf.exists() || !mmproj.exists() {
-                return None;
-            }
-            rto_llama::llama::LlamaEngine::new(
-                vec![rto_llama::llama::Served {
-                    name: ASR_MODEL.to_owned(),
-                    path: gguf,
-                    mmproj: Some(mmproj),
-                }],
-                0,
-            )
-            .ok()
-        })
-        .as_ref()
+fn asr_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
+    ASR_ENGINE.get_or_init(|| {
+        let dir = crate::models::model_dir(ASR_MODEL);
+        let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
+        if !gguf.exists() || !mmproj.exists() {
+            return None;
+        }
+        rto_llama::llama::LlamaEngine::new(
+            vec![rto_llama::llama::Served {
+                name: ASR_MODEL.to_owned(),
+                path: gguf,
+                mmproj: Some(mmproj),
+            }],
+            0,
+        )
+        .ok()
+    })
 }
 
 /// Whether the image's pixel dimensions (read from its header, without decoding
@@ -738,31 +744,122 @@ fn vlm_content(bytes: &[u8]) -> Option<String> {
 #[cfg(feature = "image-vision")]
 const VLM_MODEL: &str = "smolvlm-500m-gguf";
 
+/// The process-wide vision engine's slot; see [`vlm_engine`].
+#[cfg(feature = "image-vision")]
+static VLM_ENGINE: crate::engine_slot::EngineSlot<rto_llama::llama::LlamaEngine> =
+    crate::engine_slot::EngineSlot::new();
+
 /// The process-wide vision engine, built lazily from the installed
 /// `smolvlm-500m-gguf` (`model.gguf` + `mmproj.gguf`). `None` when the model is
 /// not installed — vision is then inert (run `roteiro model pull smolvlm-500m-gguf`).
+///
+/// Lives in an [`EngineSlot`](crate::engine_slot::EngineSlot) rather than a
+/// `static OnceLock` so [`release_media_engines`] can destroy it *before* the
+/// process exits — a `static` engine is never dropped, which aborts the process
+/// on Metal (issue #291).
 #[cfg(feature = "image-vision")]
-fn vlm_engine() -> Option<&'static rto_llama::llama::LlamaEngine> {
-    use std::sync::OnceLock;
-    static ENGINE: OnceLock<Option<rto_llama::llama::LlamaEngine>> = OnceLock::new();
-    ENGINE
-        .get_or_init(|| {
-            let dir = crate::models::model_dir(VLM_MODEL);
-            let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
-            if !gguf.exists() || !mmproj.exists() {
-                return None;
-            }
-            rto_llama::llama::LlamaEngine::new(
-                vec![rto_llama::llama::Served {
-                    name: VLM_MODEL.to_owned(),
-                    path: gguf,
-                    mmproj: Some(mmproj),
-                }],
-                0,
-            )
-            .ok()
-        })
-        .as_ref()
+fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
+    VLM_ENGINE.get_or_init(|| {
+        let dir = crate::models::model_dir(VLM_MODEL);
+        let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
+        if !gguf.exists() || !mmproj.exists() {
+            return None;
+        }
+        rto_llama::llama::LlamaEngine::new(
+            vec![rto_llama::llama::Served {
+                name: VLM_MODEL.to_owned(),
+                path: gguf,
+                mmproj: Some(mmproj),
+            }],
+            0,
+        )
+        .ok()
+    })
+}
+
+/// Destroy the process-wide media engines (vision, ASR) that extraction loaded,
+/// returning whether anything was released.
+///
+/// Extraction loads each GGUF engine once and reuses it for the whole run
+/// (`vlm_engine` / `asr_engine`). Those engines own native llama.cpp/ggml state:
+/// on the Metal backend their GPU buffers stay registered in ggml-metal's device
+/// residency set until the engine is dropped, and if that has not happened by the
+/// time libc's C++ finalizers destroy ggml-metal's global device vector at
+/// `exit()`, `ggml_metal_rsets_free` asserts the set is empty and `abort()`s —
+/// a successful run exits 134 instead of 0 (issue #291).
+///
+/// So the engines are released **explicitly**, at a deterministic point that is
+/// still inside `main`. The `roteiro` binary does this through
+/// [`MediaEngineGuard`]; a library embedder that runs extraction should call this
+/// before its process exits. Idempotent, cheap, and a no-op when no engine was
+/// ever built (or when this build has no media features), so it is safe on every
+/// exit path.
+///
+/// Not a shutdown signal: an engine still borrowed by an in-flight extraction
+/// stays alive until that caller is done. Call it once the work is finished.
+// The return value is a fact about what happened, not a status to handle: exit
+// paths bind it to `_released` and move on, tests assert on it.
+#[must_use]
+pub fn release_media_engines() -> bool {
+    // Both are released; neither short-circuits the other.
+    let vision = release_vlm_engine();
+    let audio = release_asr_engine();
+    vision || audio
+}
+
+/// Release the vision engine, or nothing in a build without `image-vision`.
+#[cfg(feature = "image-vision")]
+fn release_vlm_engine() -> bool {
+    VLM_ENGINE.release()
+}
+
+#[cfg(not(feature = "image-vision"))]
+fn release_vlm_engine() -> bool {
+    false
+}
+
+/// Release the ASR engine, or nothing in a build without `audio-transcribe`.
+#[cfg(feature = "audio-transcribe")]
+fn release_asr_engine() -> bool {
+    ASR_ENGINE.release()
+}
+
+#[cfg(not(feature = "audio-transcribe"))]
+fn release_asr_engine() -> bool {
+    false
+}
+
+/// Ties the lifetime of the process-wide media engines to a scope: dropping the
+/// guard runs [`release_media_engines`].
+///
+/// Held for the whole of `roteiro`'s `main`, so the engines are destroyed while
+/// Rust is still running destructors — before the C++ finalizers that would
+/// otherwise abort the process (issue #291) — on the normal path, on an early
+/// `?` error, and on an unwinding panic alike.
+///
+/// `std::process::exit` skips destructors, so any path that exits that way must
+/// call [`release_media_engines`] itself first.
+#[derive(Debug)]
+pub struct MediaEngineGuard {
+    // A private field keeps the guard un-constructible except through `hold`,
+    // so it cannot be created (and dropped) by accident mid-run.
+    _private: (),
+}
+
+impl MediaEngineGuard {
+    /// Take ownership of the process-wide media engines for this scope.
+    #[must_use]
+    pub const fn hold() -> Self {
+        Self { _private: () }
+    }
+}
+
+impl Drop for MediaEngineGuard {
+    fn drop(&mut self) {
+        // Whether anything was resident is of no consequence here — the point is
+        // that nothing is, from now on.
+        let _released = release_media_engines();
+    }
 }
 
 // Mirror of the `ocr_content` stub: needed only when the image path is compiled
@@ -2870,5 +2967,68 @@ mod inner {
         assert_ne!(no_prose, no_pdf);
         assert_ne!(no_audio, no_prose);
         assert_ne!(no_audio, no_pdf);
+    }
+}
+
+/// Teardown cover for the real vision engine (issue #291), on a host that has
+/// the model installed.
+///
+/// Compiled only under `image-vision` and **self-skipping** when
+/// `smolvlm-500m-gguf` is not in the model store, so CI — Ubuntu, no GPU, no
+/// models — compiles it and prints a skip rather than failing. On a machine that
+/// *does* have the model there are two assertions:
+///
+/// 1. the explicit one below: after a real description, the cached engine is
+///    released, exactly once;
+/// 2. an implicit one that is the whole point of the fix — the **test binary's
+///    own exit status**. This test loads a llama.cpp engine on the process's
+///    default backend; if the engine were parked in a never-dropped `static`
+///    again, this binary would abort in ggml-metal's exit-time teardown
+///    (SIGABRT) after every test had "passed", exactly as `roteiro sync` did.
+///
+/// The mechanism itself — release-once, idempotent, safe when uninitialised — is
+/// covered without any model or GPU in [`crate::engine_slot`]'s unit tests.
+#[cfg(all(test, feature = "image-vision"))]
+mod vision_engine_teardown {
+    use super::{VLM_MODEL, release_media_engines, vlm_content};
+
+    /// A tiny in-memory PNG, so the test needs no fixture file on disk.
+    fn tiny_png() -> Vec<u8> {
+        let img = image::RgbImage::from_fn(32, 32, |x, y| {
+            // A visible diagonal, so the model has *something* to describe.
+            if x == y {
+                image::Rgb([0, 0, 0])
+            } else {
+                image::Rgb([255, 255, 255])
+            }
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode png");
+        png.into_inner()
+    }
+
+    #[test]
+    fn describing_an_image_leaves_a_releasable_engine() {
+        let dir = crate::models::model_dir(VLM_MODEL);
+        if !dir.join("model.gguf").exists() || !dir.join("mmproj.gguf").exists() {
+            eprintln!("SKIP: `{VLM_MODEL}` not installed (run `roteiro model pull {VLM_MODEL}`)");
+            return;
+        }
+
+        // The production path: this is what a `sync` does for every image blob.
+        // Whether the model finds words for a 32×32 diagonal is not the subject —
+        // that it loaded, and can now be torn down, is.
+        let _description = vlm_content(&tiny_png());
+
+        assert!(
+            release_media_engines(),
+            "the engine `vlm_content` cached must be released, not leaked to exit"
+        );
+        assert!(
+            !release_media_engines(),
+            "releasing again must be a no-op, so every exit path can call it"
+        );
     }
 }
