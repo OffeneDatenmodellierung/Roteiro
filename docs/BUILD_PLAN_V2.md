@@ -134,7 +134,7 @@ stores; nothing in Track B blocks Track A.
 
 ---
 
-### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** ✅ *delivered*
+### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** · effort **S** ✅ *delivered*
 
 **Goal:** land the whole value of the findings design with **no analyzer and no
 sandbox** — the seam, the schema, and a working ingest path. This is the stage that
