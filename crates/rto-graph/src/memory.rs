@@ -62,6 +62,50 @@
 //! deliberate departure from the house pruning rule, and it is the main reason
 //! memory cannot live in the graph.
 //!
+//! # The anchor is the scope test
+//!
+//! The store is shared across branches, worktrees and clones, so the obvious
+//! question is whether a lesson learned on a feature branch is valid on `main`.
+//! The rule (ADR-0013 §*Scope*) is:
+//!
+//! > A lesson learned on a feature branch is valid on `main` **only if the
+//! > relevant association is merged to `main` in the same format** — if not, then
+//! > no.
+//!
+//! And that is not new machinery: it is [`AnchorState`], which this module
+//! already computes. Validity is **not a property of the branch that wrote the
+//! record**. It is whether the anchor resolves in the tree being looked at:
+//!
+//! - anchor resolves with a matching blob ⇒ the association is here *in the same
+//!   format* ⇒ the record applies, whichever branch wrote it;
+//! - drifted, vanished or unmeasurable ⇒ not merged, or merged in a different
+//!   form ⇒ it does not apply *to this tree*. Kept and marked, never pruned.
+//!
+//! "Is this valid on `main`?" is answered by resolving the anchor against
+//! `main`'s graph, and the identical mechanism answers it on any branch, worktree
+//! or clone, with **no branch bookkeeping at all**. [`AnchorState::applies`] is
+//! that predicate; note that it consults neither the scope, nor `created_at`, nor
+//! the record's position in the sequence.
+//!
+//! **"In the same format" means the blob matches**, deliberately strictly: even a
+//! pure reformat breaks the association. That fails toward *marked drifted*
+//! rather than silently applying a lesson to code that has moved on, which is the
+//! error worth avoiding.
+//!
+//! A record with **no anchor at all** is a general lesson about the repository
+//! ("CI is Ubuntu-only") and is repo-wide: it applies everywhere, because it
+//! never claimed to be about a particular piece of code. That is a different
+//! thing from an anchor that failed to resolve, and the two are separate
+//! [`AnchorState`] values with opposite answers so they can never be confused.
+//!
+//! ## What `scope` is, and is not
+//!
+//! `scope` is a **coarse namespace** — which repo or project a record belongs to,
+//! in a multi-repo workspace. It is **not a branch label**, and nothing keys off
+//! it beyond an exact-match filter: no isolation, no inheritance, no merging.
+//! Branch applicability is the anchor's job, above, and giving `scope` a second
+//! job would create two answers to one question.
+//!
 //! # Supersession, recorded and not guessed
 //!
 //! New knowledge overruling old is expressed **explicitly**, by pointing the old
@@ -107,12 +151,16 @@ pub const MEMORY_SCHEMA: &str = "roteiro.memory/v1";
 
 /// The scope recorded when a caller names none.
 ///
-/// **Deliberately minimal.** `scope` is a *recorded value* at this stage, not a
-/// policy: the store is shared across branches and worktrees, and whether a
-/// lesson learned on a feature branch is valid on `main` is a question ADR-0013
-/// leaves open and this module does not silently answer. Every record therefore
-/// lands in one scope unless a caller asks otherwise, and `list` filters on it by
-/// exact match — nothing here isolates, inherits or merges scopes.
+/// `scope` is a **coarse namespace** — which repo or project a record belongs to
+/// in a multi-repo workspace (ADR-0008) — and it is **explicitly not a branch
+/// label**. Nothing keys off it beyond an exact-match filter in
+/// [`MemoryFilter::scope`]: no isolation, no inheritance, no merging.
+///
+/// Whether a record applies to the tree in front of you is decided by its
+/// **anchor**, not its scope — see [`AnchorState::applies`] and the module docs.
+/// Giving `scope` that second job would create two answers to one question, and
+/// the branch-shaped one would be wrong: a lesson does not become false because
+/// the branch that learned it was deleted.
 pub const DEFAULT_MEMORY_SCOPE: &str = "repo";
 
 /// Longest permitted memory body, in bytes. Generous, because a body is prose —
@@ -244,25 +292,52 @@ impl std::str::FromStr for MemoryKind {
 /// wrong in between — which is the same reason ADR-0013 keeps decay out of the
 /// table. None of these states deletes anything: see the module docs for why a
 /// record about vanished code is kept and marked rather than pruned.
+///
+/// **This is also the scope test.** [`AnchorState::applies`] is what decides
+/// whether a record applies to the tree in front of you — see the module docs.
+/// The two "no useful anchor" situations are deliberately *separate* states with
+/// opposite answers, because conflating them is the mistake that would make the
+/// rule meaningless:
+///
+/// - [`AnchorState::Unanchored`] — **nothing was ever anchored**. A general
+///   lesson about the repository, which applies everywhere.
+/// - [`AnchorState::Vanished`] / [`AnchorState::Drifted`] /
+///   [`AnchorState::Unverifiable`] — **an anchor was recorded and did not
+///   resolve here**. The association is not present in this tree in the same
+///   form, so the record does not apply to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AnchorState {
-    /// No anchor was recorded — a general lesson, tied to nothing in particular.
+    /// **No anchor was ever recorded** — a general lesson about the repository
+    /// ("CI is Ubuntu-only"), tied to nothing in particular and therefore true
+    /// wherever the repository is. Applies.
+    ///
+    /// Not to be confused with an anchor that failed to resolve: this record
+    /// never claimed to be about a specific piece of code, so there is nothing
+    /// for a tree to disagree with.
     Unanchored,
     /// The anchored node is present and carries the blob captured at write time:
-    /// the code this record is about has not changed.
+    /// the association is in this tree **in the same format**. Applies.
     Valid,
     /// The anchored node is present but carries a **different** blob: the code
     /// changed underneath the record. It may still be right; it is no longer
-    /// evidence about what is there now.
+    /// evidence about what is there now, and it does not apply to this tree.
     Drifted,
     /// The anchored node is **gone** from the graph. The most interesting state,
-    /// and the one the authored layer would have pruned.
+    /// and the one the authored layer would have pruned. Does not apply here —
+    /// and is kept anyway, because a lesson about deleted code is often the most
+    /// valuable one.
     Vanished,
     /// The anchored node is present, but no blob was captured (or the node
-    /// carries none), so drift cannot be detected either way. Reported honestly
-    /// rather than folded into [`AnchorState::Valid`], which would claim a check
-    /// that never happened.
+    /// carries none), so *the blob cannot be compared either way*. Reported
+    /// honestly rather than folded into [`AnchorState::Valid`], which would claim
+    /// a check that never happened.
+    ///
+    /// **Does not apply**, by the same strictness that makes [`AnchorState::
+    /// Drifted`] not apply: the rule is that the association is present *in the
+    /// same format*, and an unmeasurable blob cannot demonstrate that. Failing
+    /// toward *marked* is the whole point — the alternative silently applies a
+    /// lesson to code nobody checked.
     Unverifiable,
 }
 
@@ -279,10 +354,33 @@ impl AnchorState {
         }
     }
 
+    /// **Whether this record applies to the tree it was just resolved against.**
+    ///
+    /// The whole scope rule, in one predicate: a record applies when it is
+    /// anchored to nothing (a general lesson) or when its anchor resolves here
+    /// with the same blob. Everything else — vanished, drifted, unmeasurable —
+    /// means the association is not present in this tree in the same format, so
+    /// the record does not apply *here*. It is still stored, still listed, and
+    /// still applies wherever its anchor does resolve.
+    ///
+    /// Note what this predicate does **not** consult: the branch the record was
+    /// written on, its `created_at`, its scope, or its position in the sequence.
+    /// None of those is available to it, which is the point — applicability is a
+    /// question about the tree, asked fresh every read.
+    #[must_use]
+    pub fn applies(self) -> bool {
+        matches!(self, Self::Unanchored | Self::Valid)
+    }
+
     /// Whether the anchored code has moved out from under this record — the
     /// evidence-first signal ADR-0013 depreciates on. **Never a delete
     /// condition**; a stale record is kept, marked, and (in a later stage) ranked
     /// lower.
+    ///
+    /// Narrower than the negation of [`AnchorState::applies`]: staleness means
+    /// *the code moved*, which [`AnchorState::Unverifiable`] does not claim —
+    /// nothing was measured there. A record can fail to apply without anything
+    /// having gone stale.
     #[must_use]
     pub fn is_stale(self) -> bool {
         matches!(self, Self::Drifted | Self::Vanished)
@@ -318,8 +416,8 @@ pub struct MemoryRecord {
     /// The monotonic generation and identity. `AUTOINCREMENT`, so an id is never
     /// reused after a [`crate::Store::forget_memory`].
     pub id: i64,
-    /// The recorded scope. See [`DEFAULT_MEMORY_SCOPE`] for why this carries no
-    /// isolation semantics yet.
+    /// The recorded namespace — which repo or project this belongs to. **Not a
+    /// branch label**; see [`DEFAULT_MEMORY_SCOPE`].
     pub scope: String,
     /// What kind of knowledge this is.
     pub kind: MemoryKind,
@@ -329,6 +427,15 @@ pub struct MemoryRecord {
     /// What that anchor is worth against the **current** graph. Computed on read;
     /// no column holds it.
     pub anchor_state: AnchorState,
+    /// **Whether this record applies to the tree it was just read against** —
+    /// [`AnchorState::applies`] for the state above, surfaced as its own field so
+    /// a programmatic consumer gets the scope rule without having to re-implement
+    /// it from the state token.
+    ///
+    /// Like `anchor_state`, computed on every read and stored in no column. A
+    /// `false` here is never a reason to delete anything: the record still applies
+    /// wherever its anchor does resolve.
+    pub applies: bool,
     /// The prose. Unredacted by construction — see the module docs on privacy.
     pub body: String,
     /// The writer's own confidence, when it offered one. **Not** the score an
@@ -702,6 +809,9 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> 
         kind,
         anchor,
         anchor_state,
+        // Derived from the state, in one place, rather than recomputed by every
+        // consumer — the scope rule has exactly one implementation.
+        applies: anchor_state.applies(),
         body: row.get(6)?,
         confidence: row.get(7)?,
         tree: row.get(8)?,

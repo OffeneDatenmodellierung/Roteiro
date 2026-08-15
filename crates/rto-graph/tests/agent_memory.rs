@@ -424,6 +424,177 @@ fn a_record_whose_anchor_vanished_is_kept_and_marked_not_pruned() {
     assert_eq!(store.memory_counts().expect("counts"), (1, 0));
 }
 
+// --- The scope rule: the anchor decides applicability -------------------------
+
+/// **Anchor resolution — and nothing else — decides where a record applies.**
+///
+/// The rule is: *a lesson learned on a feature branch is valid on `main` only if
+/// the relevant association is merged to `main` in the same format*. This is the
+/// test that the implementation really is that, and not a branch label wearing a
+/// disguise.
+///
+/// **One row, unchanged, read against two trees.** Nothing about the record moves
+/// between the two reads — same id, same body, same captured anchor, same
+/// `created_at`, same scope, same insertion order. Only the tree changes, and the
+/// verdict flips with it. So the verdict cannot be a property of the record, of
+/// when it was written, or of where; it can only be a property of the tree it was
+/// resolved against, which is exactly the claim.
+///
+/// The tree it is *not* applicable to is reached by changing the anchored blob and
+/// nothing else — the "merged in a different format" case, which the rule says is
+/// not merged at all.
+#[test]
+fn applicability_is_decided_by_the_anchor_and_by_nothing_about_the_record() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+    let id = store
+        .record_memory(&MemoryWrite {
+            anchor: Some("sym:rust:src/migrate.rs#run"),
+            ..lesson(LESSON)
+        })
+        .expect("write");
+
+    // Tree A — the association is present, in the same format.
+    let in_tree_a = store.memory_record(id).expect("get").expect("present");
+    assert!(
+        in_tree_a.applies,
+        "the anchor resolves here with the same blob"
+    );
+    assert_eq!(in_tree_a.anchor_state, AnchorState::Valid);
+
+    // Tree B — the same node, recompiled to a different blob. "Merged in a
+    // different format" is not merged, and the rule is deliberately this strict:
+    // even a pure reformat breaks the association, so the failure is toward
+    // *marked*, never toward silently applying a lesson to code that has moved.
+    seed_graph_with_changed_blob(&mut store);
+    let in_tree_b = store.memory_record(id).expect("get").expect("present");
+    assert!(
+        !in_tree_b.applies,
+        "the association is not in this tree in the same format",
+    );
+    assert_eq!(in_tree_b.anchor_state, AnchorState::Drifted);
+
+    // Everything the record itself carries is identical across the two reads.
+    // This is the load-bearing half: it is what proves the flip came from the
+    // tree and not from anything about the record — not its age, not its scope,
+    // not its position in the sequence.
+    assert_eq!(in_tree_a.id, in_tree_b.id);
+    assert_eq!(in_tree_a.body, in_tree_b.body);
+    assert_eq!(in_tree_a.scope, in_tree_b.scope);
+    assert_eq!(in_tree_a.created_at, in_tree_b.created_at);
+    assert_eq!(
+        in_tree_a.anchor, in_tree_b.anchor,
+        "the captured evidence is untouched"
+    );
+    assert_eq!(in_tree_a.superseded_by, in_tree_b.superseded_by);
+
+    // And it is still stored, still live, still listed. Not applying to a tree is
+    // not a reason to lose it: put the old blob back and it applies again, which
+    // is the "merged to main" direction of the same rule.
+    assert_eq!(store.memory_counts().expect("counts"), (1, 0));
+    assert_eq!(live(&store).len(), 1);
+    seed_graph(&mut store);
+    assert!(
+        store
+            .memory_record(id)
+            .expect("get")
+            .expect("present")
+            .applies,
+        "the record applies again as soon as the association is back in this form",
+    );
+}
+
+/// **A record with no anchor is repo-wide; a record whose anchor failed to
+/// resolve is not.** Two states that both lack a usable anchor, with *opposite*
+/// answers — conflating them is the mistake that would make the scope rule
+/// meaningless, so they are separate values and this is the test that keeps them
+/// apart.
+#[test]
+fn no_anchor_applies_everywhere_and_is_never_confused_with_a_failed_one() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+
+    let general = store
+        .record_memory(&lesson("CI is Ubuntu-only; do not assume a macOS runner."))
+        .expect("write");
+    let ghost = store
+        .record_memory(&MemoryWrite {
+            anchor: Some("sym:rust:src/gone.rs#removed"),
+            ..lesson("This function was deleted on purpose.")
+        })
+        .expect("write");
+
+    let general_record = store.memory_record(general).expect("get").expect("present");
+    let ghost_record = store.memory_record(ghost).expect("get").expect("present");
+
+    assert_eq!(general_record.anchor_state, AnchorState::Unanchored);
+    assert!(
+        general_record.applies,
+        "a general lesson never claimed to be about particular code, so no tree \
+         can disagree with it",
+    );
+    assert!(general_record.anchor.is_none());
+
+    assert_eq!(ghost_record.anchor_state, AnchorState::Vanished);
+    assert!(
+        !ghost_record.applies,
+        "an anchor that failed to resolve is the opposite case and must not be \
+         rounded up to repo-wide",
+    );
+    assert!(
+        ghost_record.anchor.is_some(),
+        "the failed anchor is still on record"
+    );
+
+    // The states are distinct in the serialised contract too, so a consumer
+    // reading only JSON cannot merge them either.
+    let json = serde_json::to_value(&general_record).expect("json");
+    assert_eq!(json["anchor_state"], "unanchored");
+    assert_eq!(json["applies"], true);
+    assert!(json.get("anchor").is_none(), "no anchor key at all");
+    let json = serde_json::to_value(&ghost_record).expect("json");
+    assert_eq!(json["anchor_state"], "vanished");
+    assert_eq!(json["applies"], false);
+    assert_eq!(json["anchor"]["key"], "sym:rust:src/gone.rs#removed");
+
+    // A general lesson survives the tree being replaced wholesale — there is no
+    // tree it can fail against.
+    store
+        .rebuild(&FactSet::new(), Some("treeempty"))
+        .expect("rebuild");
+    assert!(
+        store
+            .memory_record(general)
+            .expect("get")
+            .expect("present")
+            .applies,
+        "a repo-wide lesson applies even to an empty tree",
+    );
+}
+
+/// The applicability verdict per state, said once and directly, so the rule is
+/// pinned independently of any record or store.
+#[test]
+fn the_applicability_rule_is_exactly_unanchored_or_valid() {
+    for state in [AnchorState::Unanchored, AnchorState::Valid] {
+        assert!(state.applies(), "{state} must apply");
+    }
+    for state in [
+        AnchorState::Drifted,
+        AnchorState::Vanished,
+        // Fails closed: "the same format" cannot be demonstrated when the blob
+        // cannot be compared, and silently applying beats being marked only if
+        // you would rather be wrong quietly.
+        AnchorState::Unverifiable,
+    ] {
+        assert!(!state.applies(), "{state} must not apply");
+    }
+    // Staleness is narrower than not-applying: `Unverifiable` makes no claim that
+    // the code moved, because nothing was measured.
+    assert!(!AnchorState::Unverifiable.is_stale());
+    assert!(AnchorState::Drifted.is_stale() && AnchorState::Vanished.is_stale());
+}
+
 /// A node present but carrying no blob hash cannot be checked for drift, and says
 /// so. Rounding this up to `Valid` would claim a comparison that never happened —
 /// the same species of lie as reporting an ungenerated media record as empty text.
@@ -447,6 +618,15 @@ fn an_anchor_with_no_blob_is_unverifiable_rather_than_valid() {
         !record.anchor_state.is_stale(),
         "unverifiable is not drift: nothing was measured either way",
     );
+    // …and it does not apply, because "present in the same format" cannot be
+    // shown when the blob cannot be compared. Distinct from a *repo-wide* record,
+    // which does apply: this one anchored to something and the check came back
+    // inconclusive, which is not the same as never having anchored at all.
+    assert!(
+        !record.applies,
+        "an unmeasurable anchor cannot establish that the association is here",
+    );
+    assert!(record.anchor.is_some());
 }
 
 // --- Supersession -------------------------------------------------------------
@@ -598,37 +778,54 @@ fn ordering_is_a_monotonic_generation_that_never_reuses_an_id() {
 
 // --- Filtering, scope and the listing contract --------------------------------
 
-/// Scope is a **recorded value** with minimal semantics: an exact-match filter
-/// and nothing else. Nothing here isolates a branch's memory from `main`'s, and
-/// nothing merges them — the policy question ADR-0013 leaves open is left open,
-/// visibly, rather than settled by an implementation detail.
+/// **`scope` is a namespace, and it decides nothing about applicability.**
+///
+/// It names which repo or project a record belongs to in a multi-repo workspace,
+/// and it is matched exactly — no isolation, no inheritance, no merging. The
+/// question it does *not* answer is whether a record applies to the tree in front
+/// of you: that is the anchor's job (see
+/// `applicability_is_decided_by_the_anchor_and_by_nothing_about_the_record`), and
+/// this test pins the negative half, so nobody later repurposes the column as a
+/// branch label and gets two answers to one question.
 #[test]
-fn scope_and_kind_are_recorded_and_filter_by_exact_match() {
+fn scope_is_a_namespace_and_never_decides_applicability() {
     let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
     store
         .record_memory(&lesson("a repo-wide lesson"))
         .expect("write");
-    store
+    // A scope that *looks* exactly like a branch name, anchored to code that is
+    // present in this tree. If scope were a branch label this record would be
+    // out of scope here; it is not, because scope is not that.
+    let branchy = store
         .record_memory(&MemoryWrite {
-            scope: "feat/stage23",
+            scope: "feat/some-other-branch",
             kind: MemoryKind::Decision,
-            ..lesson("a decision taken on a branch")
+            anchor: Some("sym:rust:src/migrate.rs#run"),
+            ..lesson("a decision taken on a branch, about code that is here")
         })
         .expect("write");
+    assert!(
+        store
+            .memory_record(branchy)
+            .expect("get")
+            .expect("present")
+            .applies,
+        "a branch-shaped scope must not stop a resolving anchor from applying",
+    );
 
     let scoped = store
         .memory_records(&MemoryFilter {
-            scope: Some("feat/stage23"),
+            scope: Some("feat/some-other-branch"),
             ..MemoryFilter::default()
         })
         .expect("records");
     assert_eq!(scoped.len(), 1);
-    assert_eq!(scoped[0].scope, "feat/stage23");
+    assert_eq!(scoped[0].scope, "feat/some-other-branch");
     assert_eq!(scoped[0].kind, MemoryKind::Decision);
 
-    // A branch scope does not hide the record from an unfiltered listing: sharing
-    // repo-wide is the current behaviour, and it is deliberate that this is
-    // asserted rather than assumed.
+    // And the scope does not hide it from an unfiltered listing either: the store
+    // is shared, and sharing is the point.
     assert_eq!(live(&store).len(), 2);
     assert_eq!(
         store
@@ -694,6 +891,10 @@ fn a_listing_reports_the_counts_that_make_an_empty_result_legible() {
     let newest = &json["records"][0];
     assert_eq!(newest["kind"], "lesson");
     assert_eq!(newest["anchor_state"], "valid");
+    assert_eq!(
+        newest["applies"], true,
+        "the scope rule is in the JSON, so a consumer need not re-derive it",
+    );
     assert_eq!(newest["anchor"]["key"], "sym:rust:src/migrate.rs#run");
     assert_eq!(newest["anchor"]["blob"], "blob-migrate-v1");
     assert_eq!(newest["superseded_by"], serde_json::Value::Null);

@@ -373,6 +373,15 @@ CREATE INDEX idx_media_content_kind ON media_content(kind);
 /// departure from the authored layer's prune rule: a lesson about deleted code is
 /// often the most valuable one there is.
 ///
+/// **The anchor is also the scope test** (ADR-0013 §*Scope*). A record applies to
+/// the tree in front of you when its anchor resolves there with the same blob —
+/// which is what "the association is merged in the same format" means — or when
+/// it has no anchor at all, a general lesson that applies everywhere. Anything
+/// else does not apply *here* and is kept, marked. Hence `scope` is a namespace
+/// and not a branch label: applicability is a question about the tree, not about
+/// the branch a record was written on, so no branch bookkeeping exists anywhere in
+/// this schema.
+///
 /// Two constraints exist to make half-states unrepresentable, in the spirit of
 /// migration 10's outcome CHECK:
 ///
@@ -385,6 +394,11 @@ CREATE INDEX idx_media_content_kind ON media_content(kind);
 const M0011_AGENT_MEMORY: &str = "
 CREATE TABLE agent_memory (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- A coarse NAMESPACE — which repo or project a record belongs to in a
+    -- multi-repo workspace. **Not a branch label, and never to be repurposed as
+    -- one.** Whether a record applies to the tree in front of you is decided by
+    -- resolving its anchor below, not by where it was written: see ADR-0013
+    -- §Scope. Nothing keys off this column but an exact-match filter.
     scope         TEXT NOT NULL,
     kind          TEXT NOT NULL
                   CHECK (kind IN ('lesson','attempt','decision','pattern','outcome')),

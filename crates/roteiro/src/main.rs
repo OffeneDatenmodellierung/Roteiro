@@ -723,6 +723,12 @@ enum MemoryAction {
     /// thing it was about is gone**. A key naming no node is accepted, not
     /// refused: a lesson about deleted code is often the most valuable one.
     ///
+    /// **The anchor is also what decides where the record applies.** It applies
+    /// to any tree where the anchor resolves with the same blob — whichever
+    /// branch you wrote it on — and to no tree where it does not. Leave
+    /// `--anchor` off for a general lesson about the repository ("CI is
+    /// Ubuntu-only"), which applies everywhere.
+    ///
     /// `--supersedes` records, explicitly, that this overrules an earlier record.
     /// The earlier one drops out of `memory list` immediately — regardless of age,
     /// because the test is a recorded pointer and not a clock — and stays readable
@@ -737,10 +743,10 @@ enum MemoryAction {
         /// | pattern | outcome.
         #[arg(long, value_name = "KIND", default_value = rto_graph::MemoryKind::Lesson.as_str())]
         kind: rto_graph::MemoryKind,
-        /// The scope to record it under. **A recorded label, not a policy**:
-        /// whether a lesson learned on a branch applies on `main` is undecided,
-        /// so nothing isolates or inherits by scope — `memory list --scope` just
-        /// matches it exactly.
+        /// A coarse **namespace** — which repo or project this belongs to in a
+        /// multi-repo workspace. **Not a branch label.** Where a record applies
+        /// is decided by its `--anchor`, not by where it was written, so nothing
+        /// isolates or inherits by scope: `memory list --scope` matches exactly.
         #[arg(long, value_name = "SCOPE", default_value = rto_graph::DEFAULT_MEMORY_SCOPE)]
         scope: String,
         /// Node key to anchor the record to (as printed by `roteiro search`).
@@ -760,12 +766,19 @@ enum MemoryAction {
     /// List what is remembered, newest first.
     ///
     /// Live records only by default: anything explicitly superseded is gone from
-    /// this listing the moment its successor is written. Each record is shown with
-    /// its **anchor state** against the current graph — `valid`, `drifted`,
-    /// `vanished`, `unverifiable` or `unanchored` — computed on every read and
-    /// stored nowhere. A drifted or vanished record is marked, never dropped.
+    /// this listing the moment its successor is written.
+    ///
+    /// Every row says whether it **applies to this tree**, and why. A record
+    /// applies when its anchor resolves here with the same blob (the association
+    /// is present in the same format), or when it has no anchor at all — a
+    /// general lesson about the repository, which applies everywhere. A record
+    /// whose anchor is `drifted`, `vanished` or `unverifiable` does not apply
+    /// *here*: it is shown, marked, and still applies wherever its anchor does
+    /// resolve. Nothing is ever dropped, and all of this is computed on every read
+    /// and stored nowhere.
     List {
-        /// Only this scope, matched exactly.
+        /// Only this namespace, matched exactly. Not a branch filter — see
+        /// `memory add --help`.
         #[arg(long, value_name = "SCOPE")]
         scope: Option<String>,
         /// Only this kind: lesson | attempt | decision | pattern | outcome.
@@ -3180,14 +3193,20 @@ fn run_memory_add(
         return Ok(());
     }
     println!("recorded memory #{id} — {} in scope `{scope}`", record.kind);
-    if let Some(anchor) = &record.anchor {
-        println!("  anchor  {} ({})", anchor.key, record.anchor_state);
-        if record.anchor_state.is_stale() {
-            // Said at write time, not only at read time: anchoring to something
-            // that has already moved is legitimate, but the operator should know
-            // that is what they just did.
-            println!("          the anchor is already stale — the record is kept and marked");
-        }
+    println!("  {}", applicability(&record));
+    if record.anchor.is_none() {
+        // The no-anchor case is a *choice* with consequences, and the consequence
+        // is the good one, so say it rather than leaving a blank where the anchor
+        // line would be.
+        println!("          a general lesson: it applies in every tree, on every branch");
+    } else if !record.applies {
+        // Said at write time, not only at read time: anchoring to something that
+        // has already moved is legitimate — that is how you record a lesson about
+        // deleted code — but the operator should know that is what they just did.
+        println!(
+            "          the anchor does not resolve in this tree, so the record is \
+             kept and marked rather than applied here"
+        );
     }
     if let Some(target) = supersedes {
         println!("  supersedes #{target}, which leaves `memory list` from now on");
@@ -3235,24 +3254,34 @@ fn run_memory_list(
         }
         return Ok(());
     }
+    let mut inapplicable = 0_usize;
     for record in &listing.records {
-        let anchor = record.anchor.as_ref().map_or_else(
-            || record.anchor_state.as_str().to_owned(),
-            |a| format!("{} ({})", a.key, record.anchor_state),
-        );
+        if !record.applies {
+            inapplicable += 1;
+        }
         // `as_str`, not the `Display` impls: those write straight to the
         // formatter, so a width given here would be silently ignored and the
         // columns would not line up.
         println!(
-            "#{:<4} {:<8} scope={:<12} {anchor}",
+            "#{:<4} {:<8} scope={:<12} {}",
             record.id,
             record.kind.as_str(),
             record.scope,
+            applicability(record),
         );
         println!("      {}", first_line(&record.body, 96));
         if let Some(by) = record.superseded_by {
             println!("      superseded by #{by}");
         }
+    }
+    // Say once, at the end, that the marked rows are not being withheld — they
+    // are stored, they are shown, and they apply somewhere else.
+    if inapplicable > 0 {
+        println!(
+            "{inapplicable} record(s) do not apply to this tree — their anchors do not \
+             resolve here in the same form. Kept and shown, never pruned; they apply \
+             wherever those anchors do resolve."
+        );
     }
     // Name the hidden rows only when there are some: an invitation to pass
     // `--include-superseded` on a store where nothing has ever been superseded
@@ -3303,6 +3332,33 @@ fn run_memory_forget(id: i64, json: bool) -> anyhow::Result<()> {
 /// `is`/`are`, for a count.
 fn plural_is(n: usize) -> &'static str {
     if n == 1 { "is" } else { "are" }
+}
+
+/// How one record relates to the tree it was just resolved against: whether it
+/// applies, and on what evidence.
+///
+/// The two cases that both lack a usable anchor are rendered **differently and
+/// unmistakably**, because they have opposite answers and conflating them would
+/// make the rule meaningless:
+///
+/// - *no anchor was ever recorded* — a general lesson about the repository, which
+///   applies everywhere: `applies — repo-wide (no anchor)`;
+/// - *an anchor was recorded and did not resolve here* — the association is not
+///   in this tree in the same form: `does not apply here — vanished: <key>`.
+fn applicability(record: &rto_graph::MemoryRecord) -> String {
+    let verdict = if record.applies {
+        "applies"
+    } else {
+        "does not apply here"
+    };
+    match &record.anchor {
+        // Anchored: name the state and the key, so the reason is checkable rather
+        // than a verdict the operator has to take on trust.
+        Some(anchor) => format!("{verdict} — {}: {}", record.anchor_state, anchor.key),
+        // Never anchored. Said in words rather than as the bare token
+        // `unanchored`, which reads like a failure and is the opposite.
+        None => format!("{verdict} — repo-wide (no anchor)"),
+    }
 }
 
 /// The first line of `body`, truncated to `max` characters, so a multi-line
@@ -6438,7 +6494,7 @@ mod media_cli {
 // rebuild survival — is tested where it lives, in `rto-graph`.
 #[cfg(test)]
 mod memory_cli {
-    use super::{Cli, Command, MemoryAction, first_line, plural_is};
+    use super::{Cli, Command, MemoryAction, applicability, first_line, plural_is};
     use clap::Parser as _;
 
     fn parse<const N: usize>(args: [&str; N]) -> Command {
@@ -6639,6 +6695,70 @@ mod memory_cli {
     fn restored_records_are_pluralised() {
         assert_eq!(plural_is(1), "is");
         assert_eq!(plural_is(2), "are");
+    }
+
+    /// Build a record with a given anchor state, to check how a listing renders
+    /// it. Only the fields `applicability` reads matter here.
+    fn record(anchor: Option<&str>, state: rto_graph::AnchorState) -> rto_graph::MemoryRecord {
+        rto_graph::MemoryRecord {
+            id: 1,
+            scope: rto_graph::DEFAULT_MEMORY_SCOPE.to_owned(),
+            kind: rto_graph::MemoryKind::Lesson,
+            anchor: anchor.map(|key| rto_graph::MemoryAnchor {
+                key: key.to_owned(),
+                blob: Some("blob1".to_owned()),
+                path: None,
+            }),
+            anchor_state: state,
+            applies: state.applies(),
+            body: "a body".to_owned(),
+            confidence: None,
+            tree: None,
+            created_at: "2026-08-15 12:00:00".to_owned(),
+            superseded_by: None,
+            superseded_at: None,
+        }
+    }
+
+    /// **The two no-usable-anchor cases must not read alike.** A record that never
+    /// anchored is repo-wide and applies; a record whose anchor failed to resolve
+    /// does not apply here. They are opposite answers, so a listing that rendered
+    /// them the same way would hide the whole scope rule behind a shrug.
+    #[test]
+    fn a_record_with_no_anchor_reads_differently_from_one_that_failed_to_resolve() {
+        use rto_graph::AnchorState;
+
+        let none = applicability(&record(None, AnchorState::Unanchored));
+        assert_eq!(none, "applies — repo-wide (no anchor)");
+        assert!(
+            !none.contains("unanchored"),
+            "the bare token reads like a failure and this is the opposite: {none}",
+        );
+
+        let vanished = applicability(&record(
+            Some("sym:rust:src/gone.rs#dead"),
+            AnchorState::Vanished,
+        ));
+        assert_eq!(
+            vanished,
+            "does not apply here — vanished: sym:rust:src/gone.rs#dead"
+        );
+        assert_ne!(none, vanished, "opposite answers must not render alike");
+
+        // The reason is always named alongside the verdict, so an operator can
+        // check it rather than take it on trust.
+        for (state, token) in [
+            (AnchorState::Valid, "applies — valid"),
+            (AnchorState::Drifted, "does not apply here — drifted"),
+            (
+                AnchorState::Unverifiable,
+                "does not apply here — unverifiable",
+            ),
+        ] {
+            let line = applicability(&record(Some("sym:rust:a.rs#f"), state));
+            assert!(line.starts_with(token), "{state}: {line}");
+            assert!(line.ends_with("sym:rust:a.rs#f"), "{state}: {line}");
+        }
     }
 }
 
