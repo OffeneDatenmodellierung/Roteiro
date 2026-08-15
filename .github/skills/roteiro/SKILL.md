@@ -115,9 +115,8 @@ did not know existed.
 roteiro search evict      # → lru_evict_count, ModelCache, budget_evicts_oldest_until_it_fits
 ```
 
-That exact query once refuted an audit which had concluded, from
-`grep evict|ttl|prune|capacity|max_`, that “no eviction idiom exists anywhere”.
-
+That exact query once refuted an audit which had concluded, after grepping for the
+pattern `evict|ttl|prune|capacity|max_`, that “no eviction idiom exists anywhere”.
 Before writing *“there is no X”*, *“X does not exist yet”* or *“this would be the
 first X”*:
 
