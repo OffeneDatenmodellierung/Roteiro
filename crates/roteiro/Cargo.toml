@@ -13,6 +13,12 @@ authors.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+# The analyzer contract and the ingest path behind it (`roteiro security …`).
+# Optional so the seam has a name that Stages 22/24 can hang their
+# `exec-subprocess` / `exec-boxlite` backends off — but enabled by default,
+# because ingest is the zero-install path (ADR-0014) and pulls no third-party
+# dependency the workspace does not already have.
+rto-exec = { workspace = true, optional = true }
 rto-graph = { workspace = true }
 rto-llama = { workspace = true, optional = true }
 rto-render = { workspace = true }
@@ -67,6 +73,15 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
 [features]
+# Ingest is available in a stock install — ADR-0014 lists it as "always, no
+# feature" — so `execution` is on by default. It stays a *named* feature because
+# the subprocess and sandboxed backends land behind subfeatures of it, and so
+# `--no-default-features` still yields a binary with no analyzer surface at all.
+default = ["execution"]
+# The `AnalyzerRunner` seam and `roteiro security ingest|list` (ADR-0012,
+# ADR-0014). Adds no third-party dependency: `rto-exec` is a workspace crate over
+# serde plus the SHA-256 implementation already in the tree.
+execution = ["dep:rto-exec"]
 mcp = ["rto-render/mcp", "dep:tokio"]
 # The interactive workspace explorer's read-only `/v1/graph/*` JSON API, off by
 # default. Pure Rust: adds only axum + tokio, never `rto-serve`/llama.cpp, so it

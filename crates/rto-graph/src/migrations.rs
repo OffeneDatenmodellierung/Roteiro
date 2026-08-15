@@ -129,6 +129,75 @@ const M0007_SYNC_ENV: &str = "
 ALTER TABLE sync_state ADD COLUMN env TEXT;
 ";
 
+/// Migration 8: the analyzer-findings artifact store (ADR-0012).
+///
+/// Analyzer output (`cargo-audit`, `semgrep`, successors) is asserted by an
+/// external tool at a point in time, against rules and an advisory database that
+/// change independently of the source tree. That is a *fourth* production model,
+/// not one of the graph's three provenance classes, so it gets its own tables and
+/// never touches `nodes`/`edges` — which keeps `export_factset` (and the published
+/// `GraphArtifact`) a pure function of the tree, and keeps findings off the
+/// `authored` relevance boost in `search`.
+///
+/// An **analysis run** records the execution plus everything needed to reproduce
+/// or distrust it. `layer` is `security:<analyzer>:<worktree-id>` and is UNIQUE:
+/// exactly one run is live per layer, and a re-ingest replaces it wholesale, so a
+/// finding that has been fixed disappears rather than lingering. The UNIQUE index
+/// is also the entry point for "list live findings for this worktree/analyzer";
+/// `idx_analysis_runs_analyzer` serves the same question across worktrees.
+///
+/// `ingested_at` is written for humans and **never read** — matching how
+/// `imports.imported_at` already behaves; no ordering or policy depends on a clock.
+///
+/// A **finding** belongs to a run and carries a stable identity key so the same
+/// issue is recognisable across runs. The analyzer id lives on the run, not
+/// repeated on every finding row. `ON DELETE CASCADE` is defence in depth only —
+/// `Store::replace_findings_layer` deletes the owned rows explicitly, because the
+/// established import path deletes edges but *not* obsolete owned nodes and that
+/// gap must not be inherited here.
+const M0008_FINDINGS: &str = "
+CREATE TABLE analysis_runs (
+    id                       INTEGER PRIMARY KEY,
+    layer                    TEXT NOT NULL UNIQUE,
+    analyzer                 TEXT NOT NULL,
+    analyzer_version         TEXT NOT NULL,
+    runner                   TEXT NOT NULL CHECK (runner IN ('ingested','subprocess','sandboxed')),
+    isolation                TEXT NOT NULL CHECK (isolation IN ('ingested','microvm','none')),
+    image_digest             TEXT,
+    rules_digest             TEXT,
+    advisory_db_digest       TEXT,
+    advisory_db_published_at TEXT,
+    command_policy           TEXT NOT NULL,
+    source_commit            TEXT,
+    source_tree              TEXT,
+    source_lockfile_blob     TEXT,
+    started_at               TEXT NOT NULL,
+    ended_at                 TEXT NOT NULL,
+    exit_status              INTEGER NOT NULL,
+    report_digest            TEXT NOT NULL,
+    ingested_at              TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_analysis_runs_analyzer ON analysis_runs(analyzer);
+CREATE TABLE findings (
+    id         INTEGER PRIMARY KEY,
+    run_id     INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    rule       TEXT NOT NULL,
+    severity   TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    path       TEXT,
+    span_start INTEGER,
+    span_end   INTEGER,
+    meta       TEXT NOT NULL DEFAULT 'null',
+    -- A span is present as a pair or not at all, and never runs backwards.
+    CHECK ((span_start IS NULL) = (span_end IS NULL)),
+    CHECK (span_start IS NULL OR span_end >= span_start)
+);
+CREATE UNIQUE INDEX idx_findings_run_key ON findings(run_id, key);
+CREATE INDEX idx_findings_run_severity ON findings(run_id, severity);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -158,6 +227,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 7,
         sql: M0007_SYNC_ENV,
+    },
+    Migration {
+        version: 8,
+        sql: M0008_FINDINGS,
     },
 ];
 
@@ -196,7 +269,7 @@ pub(crate) fn apply(conn: &mut Connection) -> rusqlite::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, latest_version};
+    use super::{MIGRATIONS, apply, latest_version};
     use rusqlite::Connection;
 
     fn recorded_versions(conn: &Connection) -> Vec<u32> {
@@ -225,11 +298,80 @@ mod tests {
         );
     }
 
+    /// An existing store must gain the findings tables without disturbing what it
+    /// already holds. Migration discipline is append-only, so this is the shape
+    /// every future migration has to satisfy too: apply the previously shipped
+    /// set, put data in, apply the rest, and find the data untouched.
+    #[test]
+    fn a_later_migration_is_additive_on_a_populated_store() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version    INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .expect("bootstrap");
+        for m in MIGRATIONS.iter().take_while(|m| m.version < 8) {
+            conn.execute_batch(m.sql).expect("legacy migration");
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [m.version],
+            )
+            .expect("record");
+        }
+        conn.execute(
+            "INSERT INTO nodes (key, kind, name) VALUES ('sym:rust:a.rs#main', 'fn', 'main')",
+            [],
+        )
+        .expect("seed node");
+
+        apply(&mut conn).expect("upgrade");
+
+        assert_eq!(recorded_versions(&conn).last().copied(), Some(8));
+        let nodes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(nodes, 1, "an upgrade must not disturb existing rows");
+        let findings: i64 = conn
+            .query_row("SELECT COUNT(*) FROM findings", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(findings, 0, "the new tables start empty");
+    }
+
+    /// The `analysis_runs` CHECK constraints are the last line of defence for the
+    /// stored vocabulary: a runner kind or isolation label outside the known set
+    /// is a corrupt write, not a new feature.
+    #[test]
+    fn findings_schema_rejects_unknown_runner_and_isolation_tokens() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let insert = |runner: &str, isolation: &str| {
+            conn.execute(
+                "INSERT INTO analysis_runs (
+                     layer, analyzer, analyzer_version, runner, isolation, command_policy,
+                     started_at, ended_at, exit_status, report_digest
+                 ) VALUES ('security:a:b', 'a', '1', ?1, ?2, '{}', 's', 'e', 0, 'd')",
+                [runner, isolation],
+            )
+        };
+        assert!(insert("ingested", "ingested").is_ok());
+        assert!(insert("teleported", "ingested").is_err());
+        assert!(insert("ingested", "airgapped").is_err());
+    }
+
     #[test]
     fn apply_creates_core_tables() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
-        for table in ["nodes", "edges", "imports", "schema_migrations"] {
+        for table in [
+            "nodes",
+            "edges",
+            "imports",
+            "analysis_runs",
+            "findings",
+            "schema_migrations",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
