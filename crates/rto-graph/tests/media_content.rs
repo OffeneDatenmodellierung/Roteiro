@@ -738,3 +738,121 @@ fn status_reports_producers_candidates_and_coverage() {
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].blob_id, "blob-silence");
 }
+
+/// The generation counter is **strictly monotonic per blob, including across a
+/// `--force` rebuild**.
+///
+/// This is a regression test for a real defect found in review. `record` used to
+/// delete the row `--force` was replacing and only *then* count the blob's
+/// records, so a forced rebuild of a blob with a single producer wrote
+/// `generation = 1` for ever — the field could not tell a first description from
+/// a fifth, which is the one question it exists to answer. Nothing covered it,
+/// which is why it slipped through.
+///
+/// The counter is read before the delete now, and from `MAX(generation)` rather
+/// than `COUNT(*)`, so deletion cannot hand a later write a number already used.
+#[test]
+fn a_forced_rebuild_advances_the_generation_it_replaces() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+    let producer = StubProducer::new(voxtral(), CONFABULATION);
+    let forced = MediaBuildOptions {
+        force: true,
+        ..audio_only()
+    };
+
+    run_build(&mut store, &silence(), &producer, audio_only());
+    let generation_of = |store: &Store| {
+        let records = store
+            .media_records(&MediaFilter::default())
+            .expect("records");
+        assert_eq!(records.len(), 1, "one producer describes one blob once");
+        records[0].generation
+    };
+    let first = generation_of(&store);
+    assert_eq!(first, 1, "the first description is generation 1");
+
+    // The single-producer case the bug lived in: replacing the only record must
+    // still advance, not restart.
+    run_build(&mut store, &silence(), &producer, forced);
+    let second = generation_of(&store);
+    assert!(
+        second > first,
+        "a forced rebuild must advance the generation it replaced: {first} → {second}",
+    );
+
+    // And it keeps advancing, rather than oscillating between two values.
+    run_build(&mut store, &silence(), &producer, forced);
+    let third = generation_of(&store);
+    assert!(
+        third > second,
+        "the counter must be monotonic across repeated forced rebuilds: {second} → {third}",
+    );
+}
+
+/// What `media clear` does to the counter, pinned deliberately.
+///
+/// The counter is derived from a blob's **surviving** records, so clearing them
+/// resets it. That is the accepted limit, recorded here so it cannot change by
+/// accident in either direction: making it survive deletion would mean a second
+/// table holding a per-blob high-water mark that nothing ever clears, kept even
+/// for blobs that have left the tree — unbounded growth to make a display field
+/// in `media status` remember discarded history.
+///
+/// What still holds after a clear is the property that actually matters: the
+/// counter never collides with a record that is *live*.
+#[test]
+fn clearing_records_resets_the_generation_but_never_collides_with_a_live_one() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+    let old = StubProducer::new(voxtral(), CONFABULATION);
+    let new = StubProducer::new(successor(), "Four seconds of near-silence, no speech.");
+
+    run_build(&mut store, &silence(), &old, audio_only());
+    run_build(&mut store, &silence(), &new, audio_only());
+
+    // Clearing only *one* producer must not let the next write collide with the
+    // record that is still there — this is the case a `COUNT(*)` would get wrong.
+    store
+        .clear_media_content(Some(successor().id().as_str()))
+        .expect("clear one");
+    let surviving = store
+        .media_records(&MediaFilter::default())
+        .expect("records")[0]
+        .generation;
+    let third = StubProducer::new(
+        Producer {
+            model_digest: "0badcafe".to_owned(),
+            ..voxtral()
+        },
+        "Silence.",
+    );
+    run_build(&mut store, &silence(), &third, audio_only());
+    let live: Vec<u32> = store
+        .media_records(&MediaFilter::default())
+        .expect("records")
+        .iter()
+        .map(|r| r.generation)
+        .collect();
+    assert_eq!(live.len(), 2);
+    assert!(
+        live[0] != live[1],
+        "two live records of one blob must never share a generation: {live:?}",
+    );
+    assert!(
+        live.iter().any(|g| *g > surviving),
+        "the new record must sit above the one that survived: {live:?}",
+    );
+
+    // Clearing everything does reset it, and that is the documented behaviour.
+    store.clear_media_content(None).expect("clear all");
+    run_build(&mut store, &silence(), &third, audio_only());
+    assert_eq!(
+        store
+            .media_records(&MediaFilter::default())
+            .expect("records")[0]
+            .generation,
+        1,
+        "with no surviving records the counter starts again, as documented",
+    );
+}

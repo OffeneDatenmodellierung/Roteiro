@@ -178,6 +178,42 @@ impl MediaKind {
             Self::Vision => MAX_IMAGE_BYTES,
         }
     }
+
+    /// The cargo feature that compiles this modality's generator in.
+    ///
+    /// Unconditional, so a build *without* the feature can still name it — which
+    /// is the point: telling an operator which flag they lack is only useful from
+    /// the binary that lacks it.
+    #[must_use]
+    pub fn feature(self) -> &'static str {
+        match self {
+            Self::Audio => "audio-transcribe",
+            Self::Vision => "image-vision",
+        }
+    }
+
+    /// Registry name of the model this modality generates with — the argument to
+    /// `roteiro model pull`. Unconditional for the same reason as
+    /// [`MediaKind::feature`].
+    #[must_use]
+    pub fn model(self) -> &'static str {
+        match self {
+            Self::Audio => "voxtral-mini-3b",
+            Self::Vision => "smolvlm-500m-gguf",
+        }
+    }
+
+    /// Whether *this binary* was compiled with this modality's generator.
+    ///
+    /// Separates the two reasons a modality can be unavailable, which call for
+    /// very different instructions: a rebuild, or a download.
+    #[must_use]
+    pub fn compiled_in(self) -> bool {
+        match self {
+            Self::Audio => cfg!(feature = "audio-transcribe"),
+            Self::Vision => cfg!(feature = "image-vision"),
+        }
+    }
 }
 
 impl std::fmt::Display for MediaKind {
@@ -399,9 +435,17 @@ pub struct MediaRecord {
     /// Version of the tool that wrote the record. Recorded, never part of the
     /// identity — see [`Producer`].
     pub tool_version: String,
-    /// How many records this blob had (across all producers) when this one was
-    /// written, counting from 1. Lets `media status` show that a blob has been
-    /// re-described rather than merely described.
+    /// Which description of this blob this is, counting from 1 across **all**
+    /// producers. Lets `media status` show that a blob has been re-described
+    /// rather than merely described.
+    ///
+    /// **Strictly increasing per blob while records accumulate**, including
+    /// across a `--force` rebuild: each write takes one more than the highest
+    /// generation currently on record for that blob.
+    ///
+    /// It is derived from the blob's surviving records, so `media clear` does
+    /// reset it — completely, if every record for that blob is discarded. See
+    /// [`record`] for why that limit is accepted rather than engineered around.
     pub generation: u32,
     /// When the record was written, as `SQLite`'s `datetime('now')`. Written for
     /// humans and for `media status`; no ordering or policy depends on it.
@@ -790,6 +834,40 @@ pub(crate) fn record(conn: &Connection, write: &MediaWrite<'_>) -> Result<bool, 
             |r| r.get(0),
         )
         .optional()?;
+    // The generation counter is per *blob*, not per producer: it answers "has
+    // this blob been described before, by anyone?".
+    //
+    // Read **before** the `--force` delete below, and from `MAX(generation)`
+    // rather than `COUNT(*)`. Both details are load-bearing, and getting either
+    // wrong makes the counter silently non-monotonic:
+    //
+    // * *Before the delete*, because a forced rebuild removes the row it is
+    //   about to replace. Counting afterwards made `--force` on a blob with one
+    //   producer write `generation = 1` for ever, so the field could not
+    //   distinguish a first description from a fifth.
+    // * *`MAX`, not `COUNT`*, because rows are deletable — `media clear
+    //   --producer X` removes some of a blob's records — and a count would then
+    //   hand a later write a number it had already used, putting two different
+    //   descriptions at the same generation.
+    //
+    // The counter is therefore derived from the blob's **surviving** records. It
+    // rises for as long as records accumulate — which is the property that was
+    // broken — and it falls back when they are discarded, so `media clear` does
+    // reset it, completely if every record for that blob goes.
+    //
+    // That is a deliberate limit, not an oversight. Making the counter survive
+    // deletion means persisting a per-blob high-water mark that nothing ever
+    // clears: a second table, maintained on every write, kept for blobs that have
+    // since left the tree — real complexity, and an unbounded one, for a field
+    // that exists so `media status` can say "described twice". Deriving it from
+    // the rows keeps it honest about what is actually stored, which is the more
+    // defensible thing for a display counter to be.
+    let previous: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(generation), 0) FROM media_content WHERE blob_id = ?1",
+        [write.blob_id],
+        |r| r.get(0),
+    )?;
+
     match (existing, write.replace) {
         // Already described by this exact producer, and not forced: leave it.
         // This is what makes a second `media build` free.
@@ -799,14 +877,7 @@ pub(crate) fn record(conn: &Connection, write: &MediaWrite<'_>) -> Result<bool, 
         }
         (None, _) => {}
     }
-    // The generation counter is per *blob*, not per producer: it answers "has
-    // this blob been described before, by anyone?".
-    let prior: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media_content WHERE blob_id = ?1",
-        [write.blob_id],
-        |r| r.get(0),
-    )?;
-    let generation = u32::try_from(prior + 1).unwrap_or(u32::MAX);
+    let generation = u32::try_from(previous + 1).unwrap_or(u32::MAX);
     conn.execute(
         "INSERT INTO media_content (
              blob_id, path, kind, producer, model, model_digest, quantisation, mmproj_digest,

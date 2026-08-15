@@ -2842,23 +2842,37 @@ fn run_media_status(json: bool) -> anyhow::Result<()> {
             candidate.kind, candidate.blobs, candidate.described
         );
     }
-    if status.available_producers.is_empty() {
-        // The distinction that was missing before ADR-0015: nothing stored
-        // because nothing *can* be generated here.
+    for producer in &status.available_producers {
+        let state = if producer.current {
+            "current"
+        } else {
+            "would write new records"
+        };
         println!(
-            "this build can generate nothing (rebuild with `--features audio-transcribe` \
-             and/or `--features image-vision`, then `roteiro model pull …`)"
+            "  available  {}  {} ({state})",
+            producer.producer_id, producer.model
         );
-    } else {
-        for producer in &status.available_producers {
-            let state = if producer.current {
-                "current"
-            } else {
-                "would write new records"
-            };
+    }
+    // The distinction that was missing before ADR-0015: nothing stored because
+    // nothing *can* be generated here. Reported per modality, and — the part that
+    // matters — separating the two reasons it can be unavailable. They call for
+    // completely different actions, and telling someone to recompile when all
+    // they need is a download costs them an afternoon.
+    for kind in [rto_graph::MediaKind::Audio, rto_graph::MediaKind::Vision] {
+        if status.available_producers.iter().any(|p| p.kind == kind) {
+            continue;
+        }
+        if kind.compiled_in() {
             println!(
-                "  available  {}  {} ({state})",
-                producer.producer_id, producer.model
+                "  unavailable  {kind}: the model is not installed — run `roteiro model pull {}`",
+                kind.model(),
+            );
+        } else {
+            println!(
+                "  unavailable  {kind}: this build has no {kind} generator — rebuild with \
+                 `--features {}`, then `roteiro model pull {}`",
+                kind.feature(),
+                kind.model(),
             );
         }
     }
