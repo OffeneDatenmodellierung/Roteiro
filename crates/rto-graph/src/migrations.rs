@@ -332,6 +332,105 @@ CREATE INDEX idx_media_content_producer ON media_content(producer);
 CREATE INDEX idx_media_content_kind ON media_content(kind);
 ";
 
+/// Migration 11: the episodic agent-memory artifact store (ADR-0013).
+///
+/// What a session *learned* — a lesson, an approach that failed, a decision, a
+/// recurring failure pattern, a task outcome — has **no generating function**.
+/// It cannot be re-derived from `(path, blob id, bytes)` at any price, so it is
+/// not a `derived` fact; it was not written into a reviewed file, so it is not
+/// `authored` either. It gets its own table here and never touches
+/// `nodes`/`edges`, exactly as analyzer findings (migration 8) and generated
+/// media content (migration 9) do. `EXTRACT_VERSION` is unchanged: memory is not
+/// extraction output.
+///
+/// This is the **episodic** tier only — durable and never auto-evicted, modelling
+/// what `imports` models. `rebuild` deletes only `edges` and `nodes`, so these
+/// rows survive a code-changing sync by construction and are removed only by an
+/// explicit `roteiro memory forget`. The bounded, evictable cache tier the ADR
+/// pairs with it is a separate table in a later migration, deliberately split so
+/// eviction policy can change without touching durable memory.
+///
+/// **`id` is the ordering key, and `AUTOINCREMENT` is load-bearing.** A plain
+/// `INTEGER PRIMARY KEY` is the rowid, and `SQLite` reuses the largest deleted
+/// rowid — so forgetting the newest record would hand its number to the next
+/// write, making the "monotonic generation" non-monotone *and* silently
+/// re-pointing any `superseded_by` that referenced it at an unrelated record.
+/// `AUTOINCREMENT` never reuses an id, at the cost of one `sqlite_sequence` row.
+///
+/// **No column here is ranked on wall-clock.** `created_at` is written for humans
+/// and never read, exactly as `imports.imported_at` behaves — the store is
+/// per-repo and shared across worktrees and branches, so concurrent checkouts
+/// produce non-monotone times, and `datetime('now')` ties on intra-second writes.
+/// `superseded_at` is the same kind of value: display, never policy. The logical
+/// fact of supersession is `superseded_by`, which is an id, which is a generation.
+///
+/// **The anchor is `(anchor_key, anchor_blob)`, never a span.** A span is byte
+/// offsets and shifts on any edit above it; a node key plus the blob hash captured
+/// when the record was written is stable, and is what lets a read say *the anchor
+/// vanished* (no such node) apart from *the code changed underneath* (a different
+/// blob). Anchor state is **computed on read and never stored**, and a record
+/// whose anchor drifted is kept and marked — never pruned. That is a deliberate
+/// departure from the authored layer's prune rule: a lesson about deleted code is
+/// often the most valuable one there is.
+///
+/// **The anchor is also the scope test** (ADR-0013 §*Scope*). A record applies to
+/// the tree in front of you when its anchor resolves there with the same blob —
+/// which is what "the association is merged in the same format" means — or when
+/// it has no anchor at all, a general lesson that applies everywhere. Anything
+/// else does not apply *here* and is kept, marked. Hence `scope` is a namespace
+/// and not a branch label: applicability is a question about the tree, not about
+/// the branch a record was written on, so no branch bookkeeping exists anywhere in
+/// this schema.
+///
+/// Two constraints exist to make half-states unrepresentable, in the spirit of
+/// migration 10's outcome CHECK:
+///
+/// * `superseded_by` and `superseded_at` stand or fall **together**. A row with a
+///   timestamp and no successor would be a record dropped from live listing with
+///   no auditable reason — supersession inferred rather than recorded, which is
+///   the one thing ADR-0013 rules out.
+/// * `anchor_blob`/`anchor_path` require an `anchor_key`. A blob hash with no node
+///   key names nothing and can never be checked for drift.
+const M0011_AGENT_MEMORY: &str = "
+CREATE TABLE agent_memory (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- A coarse NAMESPACE — which repo or project a record belongs to in a
+    -- multi-repo workspace. **Not a branch label, and never to be repurposed as
+    -- one.** Whether a record applies to the tree in front of you is decided by
+    -- resolving its anchor below, not by where it was written: see ADR-0013
+    -- §Scope. Nothing keys off this column but an exact-match filter.
+    scope         TEXT NOT NULL,
+    kind          TEXT NOT NULL
+                  CHECK (kind IN ('lesson','attempt','decision','pattern','outcome')),
+    anchor_key    TEXT,
+    anchor_blob   TEXT,
+    anchor_path   TEXT,
+    body          TEXT NOT NULL,
+    confidence    REAL,
+    tree          TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    superseded_by INTEGER REFERENCES agent_memory(id),
+    superseded_at TEXT,
+    -- A scope and a body that are present but empty are corrupt writes, not
+    -- minimal ones: an empty memory records nothing and can never be recalled.
+    CHECK (scope <> ''),
+    CHECK (body <> ''),
+    -- A self-reported confidence, when a caller offers one, is a probability. It
+    -- is **not** the score an `inferred` edge carries and must never be read as
+    -- one: no memory record is a graph fact.
+    CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
+    -- Anchor evidence without an anchor key names nothing.
+    CHECK (anchor_blob IS NULL OR anchor_key IS NOT NULL),
+    CHECK (anchor_path IS NULL OR anchor_key IS NOT NULL),
+    -- Supersession is recorded, never inferred: the successor and the moment
+    -- stand or fall together, and nothing supersedes itself.
+    CHECK ((superseded_by IS NULL) = (superseded_at IS NULL)),
+    CHECK (superseded_by IS NULL OR superseded_by <> id)
+);
+CREATE INDEX idx_mem_anchor ON agent_memory(anchor_key);
+CREATE INDEX idx_mem_live ON agent_memory(scope, superseded_by, id DESC);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -373,6 +472,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 10,
         sql: M0010_MEDIA_GATE,
+    },
+    Migration {
+        version: 11,
+        sql: M0011_AGENT_MEMORY,
     },
 ];
 
@@ -440,10 +543,15 @@ mod tests {
         );
     }
 
-    /// An existing store must gain the findings tables without disturbing what it
-    /// already holds. Migration discipline is append-only, so this is the shape
-    /// every future migration has to satisfy too: apply the previously shipped
-    /// set, put data in, apply the rest, and find the data untouched.
+    /// An existing store must gain the newest migration's tables without
+    /// disturbing what it already holds. Migration discipline is append-only, so
+    /// this is the shape every future migration has to satisfy: apply the
+    /// previously shipped set, put data in, apply the rest, and find the data
+    /// untouched.
+    ///
+    /// Written against [`latest_version`] rather than a hard-coded number, so the
+    /// next migration is covered by this test the moment it is appended instead of
+    /// leaving the newest one — the only untested one — unchecked.
     #[test]
     fn a_later_migration_is_additive_on_a_populated_store() {
         let mut conn = Connection::open_in_memory().expect("open");
@@ -454,7 +562,10 @@ mod tests {
             );",
         )
         .expect("bootstrap");
-        for m in MIGRATIONS.iter().take_while(|m| m.version < 10) {
+        for m in MIGRATIONS
+            .iter()
+            .take_while(|m| m.version < latest_version())
+        {
             conn.execute_batch(m.sql).expect("legacy migration");
             conn.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
@@ -470,12 +581,15 @@ mod tests {
 
         apply(&mut conn).expect("upgrade");
 
-        assert_eq!(recorded_versions(&conn).last().copied(), Some(10));
+        assert_eq!(
+            recorded_versions(&conn).last().copied(),
+            Some(latest_version())
+        );
         let nodes: i64 = conn
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
             .expect("count");
         assert_eq!(nodes, 1, "an upgrade must not disturb existing rows");
-        for table in ["findings", "media_content"] {
+        for table in ["findings", "media_content", "agent_memory"] {
             let rows: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
                 .expect("count");
@@ -705,6 +819,194 @@ mod tests {
         assert!(insert("ingested", "airgapped").is_err());
     }
 
+    /// Insert one `agent_memory` row with the given columns, returning whether
+    /// `SQLite` accepted it.
+    fn insert_memory(conn: &Connection, scope: &str, kind: &str, body: &str) -> bool {
+        conn.execute(
+            "INSERT INTO agent_memory (scope, kind, body) VALUES (?1, ?2, ?3)",
+            [scope, kind, body],
+        )
+        .is_ok()
+    }
+
+    /// **The stored vocabulary has to bite.** A memory `kind` outside the five
+    /// ADR-0013 names is a corrupt write, not a new feature — the same rule the
+    /// `analysis_runs` runner/isolation tokens live under. An empty scope or body
+    /// is likewise refused: a memory that records nothing can never be recalled,
+    /// and storing it would only make `memory list` lie about how much is there.
+    #[test]
+    fn agent_memory_constrains_its_vocabulary_scope_and_body() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+
+        for kind in ["lesson", "attempt", "decision", "pattern", "outcome"] {
+            assert!(
+                insert_memory(&conn, "repo", kind, "a body"),
+                "`{kind}` must remain a valid memory kind",
+            );
+        }
+        for kind in ["note", "Lesson", "lessons", "derived", ""] {
+            assert!(
+                !insert_memory(&conn, "repo", kind, "a body"),
+                "{kind:?} must not be an accepted memory kind",
+            );
+        }
+        assert!(!insert_memory(&conn, "", "lesson", "a body"), "empty scope");
+        assert!(!insert_memory(&conn, "repo", "lesson", ""), "empty body");
+
+        // A self-reported confidence is a probability, and is not the score an
+        // `inferred` edge carries.
+        let with_confidence = |c: f64| {
+            conn.execute(
+                "INSERT INTO agent_memory (scope, kind, body, confidence)
+                 VALUES ('repo', 'lesson', 'b', ?1)",
+                [c],
+            )
+            .is_ok()
+        };
+        assert!(with_confidence(0.0) && with_confidence(1.0));
+        assert!(!with_confidence(-0.1) && !with_confidence(1.1));
+    }
+
+    /// **Supersession is recorded, never inferred** — so the successor and the
+    /// moment it happened stand or fall together, and nothing supersedes itself.
+    /// A row with a `superseded_at` and no `superseded_by` would be a record
+    /// dropped out of live listing with no auditable reason, which is exactly the
+    /// state ADR-0013 exists to rule out.
+    #[test]
+    fn agent_memory_supersession_columns_stand_or_fall_together() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        assert!(insert_memory(&conn, "repo", "lesson", "the old finding"));
+        assert!(insert_memory(&conn, "repo", "lesson", "the new finding"));
+
+        let update = |by: Option<i64>, at: Option<&str>| {
+            conn.execute(
+                "UPDATE agent_memory SET superseded_by = ?1, superseded_at = ?2 WHERE id = 1",
+                rusqlite::params![by, at],
+            )
+            .is_ok()
+        };
+        assert!(!update(Some(2), None), "a successor with no moment");
+        assert!(
+            !update(None, Some("2026-01-01")),
+            "a moment with no successor"
+        );
+        assert!(!update(Some(1), Some("2026-01-01")), "self-supersession");
+        assert!(
+            update(Some(2), Some("2026-01-01")),
+            "the one legitimate shape"
+        );
+        assert!(
+            update(None, None),
+            "and clearing it again is legitimate too"
+        );
+    }
+
+    /// Anchor evidence with no anchor key names nothing and can never be checked
+    /// for drift, so the schema refuses it outright.
+    #[test]
+    fn agent_memory_refuses_anchor_evidence_without_a_key() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let insert = |key: Option<&str>, blob: Option<&str>, path: Option<&str>| {
+            conn.execute(
+                "INSERT INTO agent_memory (scope, kind, body, anchor_key, anchor_blob, anchor_path)
+                 VALUES ('repo', 'lesson', 'b', ?1, ?2, ?3)",
+                rusqlite::params![key, blob, path],
+            )
+            .is_ok()
+        };
+        assert!(
+            insert(None, None, None),
+            "an unanchored memory is legitimate"
+        );
+        assert!(insert(Some("sym:rust:a.rs#f"), Some("blob1"), Some("a.rs")));
+        assert!(!insert(None, Some("blob1"), None), "a blob naming no node");
+        assert!(!insert(None, None, Some("a.rs")), "a path naming no node");
+    }
+
+    /// **`AUTOINCREMENT` is not decoration.** `id` is the monotonic generation
+    /// ADR-0013 ranks on instead of a clock, and a plain `INTEGER PRIMARY KEY`
+    /// would reuse the largest deleted rowid — so forgetting the newest record
+    /// would hand its number straight to the next write. That breaks monotonicity
+    /// *and* silently re-points any surviving `superseded_by` at an unrelated
+    /// record. This is the test that would fail if the keyword were ever dropped.
+    #[test]
+    fn agent_memory_ids_are_never_reused_after_a_delete() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        assert!(insert_memory(&conn, "repo", "lesson", "first"));
+        assert!(insert_memory(&conn, "repo", "lesson", "second"));
+        conn.execute("DELETE FROM agent_memory WHERE id = 2", [])
+            .expect("delete the newest");
+        assert!(insert_memory(&conn, "repo", "lesson", "third"));
+
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM agent_memory WHERE body = 'third'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(id, 3, "a forgotten id must never be handed out again");
+    }
+
+    /// ADR-0013 adds an artifact store, **not** a provenance class. Memory has no
+    /// source blob and was not written into a reviewed file, so it is neither
+    /// `derived` nor `authored` — and the way to keep that true is for the table
+    /// to have no provenance column to borrow one from, while the three tokens
+    /// `nodes`/`edges` accept stay exactly as migrations 1 and 6 defined them.
+    #[test]
+    fn the_memory_migration_leaves_the_provenance_vocabulary_alone() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+
+        for provenance in ["derived", "authored", "inferred"] {
+            conn.execute(
+                "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
+                [provenance, provenance],
+            )
+            .unwrap_or_else(|e| panic!("{provenance} must remain a valid node provenance: {e}"));
+        }
+        for rejected in ["memory", "episodic", "remembered", ""] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
+                    [&format!("bad-{rejected}"), rejected],
+                )
+                .is_err(),
+                "{rejected:?} must not be an accepted node provenance"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO edges (src, dst, kind, provenance) VALUES (1, 1, 'calls', ?1)",
+                    [rejected],
+                )
+                .is_err(),
+                "{rejected:?} must not be an accepted edge provenance"
+            );
+        }
+
+        let columns: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('agent_memory')")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("collect")
+        };
+        assert!(
+            !columns.iter().any(|c| c == "provenance"),
+            "a memory record must not carry a provenance class: {columns:?}"
+        );
+        assert!(
+            !columns.iter().any(|c| c.starts_with("span")),
+            "a span is byte offsets, not an anchor: {columns:?}"
+        );
+    }
+
     #[test]
     fn apply_creates_core_tables() {
         let mut conn = Connection::open_in_memory().expect("open");
@@ -716,6 +1018,7 @@ mod tests {
             "analysis_runs",
             "findings",
             "media_content",
+            "agent_memory",
             "schema_migrations",
         ] {
             let count: i64 = conn

@@ -216,6 +216,27 @@ enum Command {
         #[command(subcommand)]
         action: MediaAction,
     },
+    /// Episodic agent memory: record what a session learned, list it, forget it
+    /// (ADR-0013).
+    ///
+    /// A lesson, a failed approach, a decision — knowledge with **no generating
+    /// function**, which no amount of re-extraction brings back — so it is not a
+    /// `derived` fact, and it was not deliberately written into a reviewed file,
+    /// so it is not `authored` either. It lives in a **separate artifact store**
+    /// and never borrows the graph's trust: nothing here writes a node or an
+    /// edge, `roteiro export` is unaffected by every one of these commands, and
+    /// memory does not enter `search` at all.
+    ///
+    /// **Memory is unredacted by construction.** Extraction redacts
+    /// secret-looking config values before persisting them, because the graph is
+    /// exportable; this store records prose you wrote, which has no such
+    /// chokepoint and can contain pasted tokens, stack traces or customer names.
+    /// It lives in `.git/roteiro/`, so it is never committed and never pushed,
+    /// and `memory forget` is the way to take something back.
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// Fetch a node's cached context bundle (its provenance-labelled
     /// neighbourhood), or refresh all cached contexts that have gone stale.
     Context {
@@ -685,6 +706,117 @@ enum MediaAction {
     },
 }
 
+/// `roteiro memory` actions.
+///
+/// Ungated, like [`MediaAction`] and for the same reason: the store is `SQLite`
+/// and serde, it needs no model and no feature, and a lesson an agent learned
+/// must be recordable from whatever build is to hand.
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Record one thing this session learned.
+    ///
+    /// The body is prose. Pass `-` to read it from stdin, which is how you record
+    /// something with newlines in it — a stack trace, a diff, a write-up.
+    ///
+    /// `--anchor` ties the record to a node key, capturing that node's blob hash
+    /// so a later read can tell **the code changed underneath this** from **the
+    /// thing it was about is gone**. A key naming no node is accepted, not
+    /// refused: a lesson about deleted code is often the most valuable one.
+    ///
+    /// **The anchor is also what decides where the record applies.** It applies
+    /// to any tree where the anchor resolves with the same blob — whichever
+    /// branch you wrote it on — and to no tree where it does not. Leave
+    /// `--anchor` off for a general lesson about the repository ("CI is
+    /// Ubuntu-only"), which applies everywhere.
+    ///
+    /// `--supersedes` records, explicitly, that this overrules an earlier record.
+    /// The earlier one drops out of `memory list` immediately — regardless of age,
+    /// because the test is a recorded pointer and not a clock — and stays readable
+    /// under `--include-superseded`.
+    ///
+    /// Nothing here touches the graph, and the body is stored **verbatim and
+    /// unredacted**: see `roteiro memory --help`.
+    Add {
+        /// The prose to record. `-` reads it from stdin.
+        body: String,
+        /// What kind of knowledge this is: lesson (default) | attempt | decision
+        /// | pattern | outcome.
+        #[arg(long, value_name = "KIND", default_value = rto_graph::MemoryKind::Lesson.as_str())]
+        kind: rto_graph::MemoryKind,
+        /// A coarse **namespace** — which repo or project this belongs to in a
+        /// multi-repo workspace. **Not a branch label.** Where a record applies
+        /// is decided by its `--anchor`, not by where it was written, so nothing
+        /// isolates or inherits by scope: `memory list --scope` matches exactly.
+        #[arg(long, value_name = "SCOPE", default_value = rto_graph::DEFAULT_MEMORY_SCOPE)]
+        scope: String,
+        /// Node key to anchor the record to (as printed by `roteiro search`).
+        #[arg(long, value_name = "KEY")]
+        anchor: Option<String>,
+        /// Your own confidence in it, in `[0.0, 1.0]`. **Not** the score an
+        /// `inferred` edge carries, and never read as one.
+        #[arg(long, value_name = "FLOAT")]
+        confidence: Option<f64>,
+        /// The id of a record this one overrules.
+        #[arg(long, value_name = "ID")]
+        supersedes: Option<i64>,
+        /// Emit the stored record as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List what is remembered, newest first.
+    ///
+    /// Live records only by default: anything explicitly superseded is gone from
+    /// this listing the moment its successor is written.
+    ///
+    /// Every row says whether it **applies to this tree**, and why. A record
+    /// applies when its anchor resolves here with the same blob (the association
+    /// is present in the same format), or when it has no anchor at all — a
+    /// general lesson about the repository, which applies everywhere. A record
+    /// whose anchor is `drifted`, `vanished` or `unverifiable` does not apply
+    /// *here*: it is shown, marked, and still applies wherever its anchor does
+    /// resolve. Nothing is ever dropped, and all of this is computed on every read
+    /// and stored nowhere.
+    List {
+        /// Only this namespace, matched exactly. Not a branch filter — see
+        /// `memory add --help`.
+        #[arg(long, value_name = "SCOPE")]
+        scope: Option<String>,
+        /// Only this kind: lesson | attempt | decision | pattern | outcome.
+        #[arg(long, value_name = "KIND")]
+        kind: Option<rto_graph::MemoryKind>,
+        /// Only records anchored to this node key.
+        #[arg(long, value_name = "KEY")]
+        anchor: Option<String>,
+        /// Also show records that have been superseded — the audit view of the
+        /// chain, which supersession keeps rather than deletes.
+        #[arg(long)]
+        include_superseded: bool,
+        /// At most this many records (the newest ones).
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: usize,
+        /// Emit the listing as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete one record. **The only way anything leaves this store.**
+    ///
+    /// Episodic memory is unbounded and never auto-evicted — no sweep, no TTL, no
+    /// capacity bound — so this command is the whole reclamation story, and the
+    /// whole privacy story: a record that captured a token or a customer name goes
+    /// by asking.
+    ///
+    /// If the record had superseded another, that other one becomes **live
+    /// again** and is named in the output: leaving it hidden would be supersession
+    /// by a record that no longer exists.
+    Forget {
+        /// The record id, as printed by `memory list`.
+        id: i64,
+        /// Emit the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// `roteiro security` actions.
 #[cfg(feature = "execution")]
 #[derive(Subcommand)]
@@ -882,6 +1014,7 @@ fn main() -> anyhow::Result<()> {
             json,
         } => run_search(ingest, &query, limit, include_generated, json),
         Command::Media { action } => run_media(ingest, gate, action),
+        Command::Memory { action } => run_memory(action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
@@ -2674,6 +2807,7 @@ fn run_query(
                 if let Some(path) = &ex.node.path {
                     println!("  path: {path}");
                 }
+                print_audio_stream(&ex);
                 if !ex.outgoing.is_empty() {
                     println!("  outgoing:");
                     for e in &ex.outgoing {
@@ -2714,6 +2848,49 @@ fn run_query(
         }
     }
     Ok(())
+}
+
+/// Print an `audio_stream` node's stream line, and nothing at all for any other
+/// node (ADR-0016).
+///
+/// The line is the node's own rendered `meta.content` — the same string
+/// [`rto_graph::search`] matches on — so the human surface and the search index
+/// cannot drift apart, and there is no second place to remember to qualify a
+/// duration. That matters here specifically: an MP3's duration is often an
+/// **estimate**, and ADR-0016 requires every surface that shows one to say so.
+/// It does, because `AudioDuration`'s rendering carries the marker with the
+/// number rather than beside it.
+///
+/// Deliberately narrow: it fires on the node kind, not on "any node with
+/// content", so ADRs and READMEs keep printing exactly as they did.
+fn print_audio_stream(ex: &rto_graph::Explanation) {
+    for line in audio_stream_lines(ex) {
+        println!("{line}");
+    }
+}
+
+/// The lines [`print_audio_stream`] emits — empty for any node that is not an
+/// `audio_stream`. Split out from the printing so the gate is testable without
+/// capturing stdout.
+fn audio_stream_lines(ex: &rto_graph::Explanation) -> Vec<String> {
+    if ex.node.kind != "audio_stream" {
+        return Vec::new();
+    }
+    let Some(content) = ex.meta.get("content").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .enumerate()
+        // The first line is the stream shape; any that follow are tags.
+        .map(|(i, line)| {
+            if i == 0 {
+                format!("  stream: {line}")
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect()
 }
 
 /// Search the graph by text and print ranked hits (highest score first). A
@@ -3020,6 +3197,274 @@ fn run_media_clear(producer: Option<&str>, json: bool) -> anyhow::Result<()> {
         println!("the graph is unchanged");
     }
     Ok(())
+}
+
+/// Dispatch a `roteiro memory` action (ADR-0013).
+///
+/// The graph is deliberately **not** built or re-synced by any of these: what a
+/// session learned is not derived from the tree, so recording it neither needs a
+/// fresh graph nor may alter one. `add` reads `nodes` to capture an anchor's
+/// evidence and `list` reads it to check that evidence, and that is the whole of
+/// the interaction — `nodes`/`edges` are never written, which is what keeps
+/// `roteiro export` byte-identical across every command here.
+fn run_memory(action: MemoryAction) -> anyhow::Result<()> {
+    match action {
+        MemoryAction::Add {
+            body,
+            kind,
+            scope,
+            anchor,
+            confidence,
+            supersedes,
+            json,
+        } => run_memory_add(
+            &body,
+            kind,
+            &scope,
+            anchor.as_deref(),
+            confidence,
+            supersedes,
+            json,
+        ),
+        MemoryAction::List {
+            scope,
+            kind,
+            anchor,
+            include_superseded,
+            limit,
+            json,
+        } => run_memory_list(
+            scope.as_deref(),
+            kind,
+            anchor.as_deref(),
+            include_superseded,
+            limit,
+            json,
+        ),
+        MemoryAction::Forget { id, json } => run_memory_forget(id, json),
+    }
+}
+
+/// Record one memory. `body` of `-` reads the prose from stdin, so something with
+/// newlines in it — a stack trace, a diff — does not have to be quoted onto one
+/// command line.
+#[allow(clippy::fn_params_excessive_bools)]
+fn run_memory_add(
+    body: &str,
+    kind: rto_graph::MemoryKind,
+    scope: &str,
+    anchor: Option<&str>,
+    confidence: Option<f64>,
+    supersedes: Option<i64>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let body = if body == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        buf
+    } else {
+        body.to_owned()
+    };
+
+    let (_repo, mut store, _cache) = open_graph()?;
+    let id = store.record_memory(&rto_graph::MemoryWrite {
+        scope,
+        kind,
+        anchor,
+        body: &body,
+        confidence,
+        supersedes,
+    })?;
+    // Read the record back rather than echoing the request: what is printed is
+    // what was stored, including the anchor evidence captured from the graph and
+    // the anchor state that evidence yields right now.
+    let record = store
+        .memory_record(id)?
+        .ok_or_else(|| anyhow::anyhow!("memory record {id} vanished immediately after writing"))?;
+
+    if json {
+        emit_json(&record)?;
+        return Ok(());
+    }
+    println!("recorded memory #{id} — {} in scope `{scope}`", record.kind);
+    println!("  {}", applicability(&record));
+    if record.anchor.is_none() {
+        // The no-anchor case is a *choice* with consequences, and the consequence
+        // is the good one, so say it rather than leaving a blank where the anchor
+        // line would be.
+        println!("          a general lesson: it applies in every tree, on every branch");
+    } else if !record.applies {
+        // Said at write time, not only at read time: anchoring to something that
+        // has already moved is legitimate — that is how you record a lesson about
+        // deleted code — but the operator should know that is what they just did.
+        println!(
+            "          the anchor does not resolve in this tree, so the record is \
+             kept and marked rather than applied here"
+        );
+    }
+    if let Some(target) = supersedes {
+        println!("  supersedes #{target}, which leaves `memory list` from now on");
+    }
+    // The one property of this store an operator must not have to look up.
+    println!(
+        "stored verbatim in .git/roteiro/ — never committed, never pushed, and never \
+         redacted; `roteiro memory forget {id}` takes it back"
+    );
+    Ok(())
+}
+
+/// List what is remembered, newest generation first.
+fn run_memory_list(
+    scope: Option<&str>,
+    kind: Option<rto_graph::MemoryKind>,
+    anchor: Option<&str>,
+    include_superseded: bool,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let (_repo, store, _cache) = open_graph()?;
+    let listing = store.memory_listing(&rto_graph::MemoryFilter {
+        scope,
+        kind,
+        anchor_key: anchor,
+        include_superseded,
+        limit: Some(limit),
+    })?;
+
+    if json {
+        emit_json(&listing)?;
+        return Ok(());
+    }
+    if listing.records.is_empty() {
+        // The counts make an empty result legible: nothing matched is a very
+        // different report from nothing is stored.
+        if listing.live == 0 && listing.superseded == 0 {
+            println!("nothing remembered yet (`roteiro memory add \"<what you learned>\"`)");
+        } else {
+            println!(
+                "no memory record matched; {} live and {} superseded record(s) are stored",
+                listing.live, listing.superseded
+            );
+        }
+        return Ok(());
+    }
+    let mut inapplicable = 0_usize;
+    for record in &listing.records {
+        if !record.applies {
+            inapplicable += 1;
+        }
+        // `as_str`, not the `Display` impls: those write straight to the
+        // formatter, so a width given here would be silently ignored and the
+        // columns would not line up.
+        println!(
+            "#{:<4} {:<8} scope={:<12} {}",
+            record.id,
+            record.kind.as_str(),
+            record.scope,
+            applicability(record),
+        );
+        println!("      {}", first_line(&record.body, 96));
+        if let Some(by) = record.superseded_by {
+            println!("      superseded by #{by}");
+        }
+    }
+    // Say once, at the end, that the marked rows are not being withheld — they
+    // are stored, they are shown, and they apply somewhere else.
+    if inapplicable > 0 {
+        println!(
+            "{inapplicable} record(s) do not apply to this tree — their anchors do not \
+             resolve here in the same form. Kept and shown, never pruned; they apply \
+             wherever those anchors do resolve."
+        );
+    }
+    // Name the hidden rows only when there are some: an invitation to pass
+    // `--include-superseded` on a store where nothing has ever been superseded
+    // reads as though something is being withheld.
+    let hidden = if include_superseded || listing.superseded == 0 {
+        ""
+    } else {
+        " (hidden — pass --include-superseded)"
+    };
+    println!(
+        "{} shown; {} live, {} superseded{hidden}",
+        listing.records.len(),
+        listing.live,
+        listing.superseded,
+    );
+    Ok(())
+}
+
+/// Delete one record — the only path by which anything leaves this store.
+fn run_memory_forget(id: i64, json: bool) -> anyhow::Result<()> {
+    let (_repo, mut store, _cache) = open_graph()?;
+    let Some(forgotten) = store.forget_memory(id)? else {
+        anyhow::bail!("no memory record with id {id} (`roteiro memory list` shows what is stored)");
+    };
+    if json {
+        emit_json(&forgotten)?;
+        return Ok(());
+    }
+    println!("forgot memory #{id}");
+    if !forgotten.restored.is_empty() {
+        // Never silent: these records were hidden on the authority of the one
+        // just deleted, and that authority is now gone.
+        let ids = forgotten
+            .restored
+            .iter()
+            .map(|r| format!("#{r}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "it had superseded {ids}, which {} live again",
+            plural_is(forgotten.restored.len())
+        );
+    }
+    println!("the graph is unchanged");
+    Ok(())
+}
+
+/// `is`/`are`, for a count.
+fn plural_is(n: usize) -> &'static str {
+    if n == 1 { "is" } else { "are" }
+}
+
+/// How one record relates to the tree it was just resolved against: whether it
+/// applies, and on what evidence.
+///
+/// The two cases that both lack a usable anchor are rendered **differently and
+/// unmistakably**, because they have opposite answers and conflating them would
+/// make the rule meaningless:
+///
+/// - *no anchor was ever recorded* — a general lesson about the repository, which
+///   applies everywhere: `applies — repo-wide (no anchor)`;
+/// - *an anchor was recorded and did not resolve here* — the association is not
+///   in this tree in the same form: `does not apply here — vanished: <key>`.
+fn applicability(record: &rto_graph::MemoryRecord) -> String {
+    let verdict = if record.applies {
+        "applies"
+    } else {
+        "does not apply here"
+    };
+    match &record.anchor {
+        // Anchored: name the state and the key, so the reason is checkable rather
+        // than a verdict the operator has to take on trust.
+        Some(anchor) => format!("{verdict} — {}: {}", record.anchor_state, anchor.key),
+        // Never anchored. Said in words rather than as the bare token
+        // `unanchored`, which reads like a failure and is the opposite.
+        None => format!("{verdict} — repo-wide (no anchor)"),
+    }
+}
+
+/// The first line of `body`, truncated to `max` characters, so a multi-line
+/// memory occupies one row of a listing. Truncation is marked, never silent.
+fn first_line(body: &str, max: usize) -> String {
+    let line = body.lines().next().unwrap_or("").trim();
+    let multi = body.lines().nth(1).is_some();
+    if line.chars().count() <= max && !multi {
+        return line.to_owned();
+    }
+    let head: String = line.chars().take(max).collect();
+    format!("{head}…")
 }
 
 /// Fetch a node's cached context bundle, or (`--refresh`) reconcile all cached
@@ -6665,6 +7110,283 @@ mod media_cli {
     }
 }
 
+// The `roteiro memory` surface: argument shapes, the defaults, and the one-line
+// rendering a listing uses. Ungated, exactly as [`MemoryAction`] is — the store
+// is `SQLite` and serde, so these shapes hold in every build and on every
+// platform, with no model and no network.
+//
+// The behaviour they wrap — anchoring and drift, supersession, artifact purity,
+// rebuild survival — is tested where it lives, in `rto-graph`.
+#[cfg(test)]
+mod memory_cli {
+    use super::{Cli, Command, MemoryAction, applicability, first_line, plural_is};
+    use clap::Parser as _;
+
+    fn parse<const N: usize>(args: [&str; N]) -> Command {
+        Cli::try_parse_from(args).expect("parse").command
+    }
+
+    fn action<const N: usize>(args: [&str; N]) -> MemoryAction {
+        let Command::Memory { action } = parse(args) else {
+            panic!("expected Memory");
+        };
+        action
+    }
+
+    /// The defaults are the whole ergonomics of `memory add`: a body, and
+    /// nothing else to think about.
+    #[test]
+    fn add_needs_only_a_body_and_defaults_the_rest() {
+        let MemoryAction::Add {
+            body,
+            kind,
+            scope,
+            anchor,
+            confidence,
+            supersedes,
+            json,
+        } = action(["roteiro", "memory", "add", "what I learned"])
+        else {
+            panic!("expected Add");
+        };
+        assert_eq!(body, "what I learned");
+        assert_eq!(kind, rto_graph::MemoryKind::Lesson);
+        assert_eq!(scope, rto_graph::DEFAULT_MEMORY_SCOPE);
+        assert_eq!(anchor, None);
+        assert_eq!(confidence, None);
+        assert_eq!(supersedes, None);
+        assert!(!json);
+
+        // A body is required: `memory add` with nothing to record is a mistake,
+        // not an empty record.
+        assert!(Cli::try_parse_from(["roteiro", "memory", "add"]).is_err());
+    }
+
+    #[test]
+    fn add_accepts_every_flag() {
+        let MemoryAction::Add {
+            body,
+            kind,
+            scope,
+            anchor,
+            confidence,
+            supersedes,
+            json,
+        } = action([
+            "roteiro",
+            "memory",
+            "add",
+            "-",
+            "--kind",
+            "attempt",
+            "--scope",
+            "feat/stage23",
+            "--anchor",
+            "sym:rust:src/a.rs#f",
+            "--confidence",
+            "0.8",
+            "--supersedes",
+            "7",
+            "--json",
+        ])
+        else {
+            panic!("expected Add");
+        };
+        assert_eq!(body, "-", "`-` reaches the handler, which reads stdin");
+        assert_eq!(kind, rto_graph::MemoryKind::Attempt);
+        assert_eq!(scope, "feat/stage23");
+        assert_eq!(anchor.as_deref(), Some("sym:rust:src/a.rs#f"));
+        assert_eq!(confidence, Some(0.8));
+        assert_eq!(supersedes, Some(7));
+        assert!(json);
+    }
+
+    /// The kind vocabulary is closed at the command line too, and the refusal
+    /// lists what is accepted rather than only saying no.
+    #[test]
+    fn an_unknown_kind_is_refused_with_the_vocabulary() {
+        for kind in rto_graph::MemoryKind::ALL {
+            let MemoryAction::Add { kind: parsed, .. } =
+                action(["roteiro", "memory", "add", "body", "--kind", kind.as_str()])
+            else {
+                panic!("expected Add");
+            };
+            assert_eq!(parsed, kind);
+        }
+        let Err(err) = Cli::try_parse_from(["roteiro", "memory", "add", "body", "--kind", "note"])
+        else {
+            panic!("an unknown kind must not parse");
+        };
+        let err = err.to_string();
+        assert!(
+            err.contains("lesson"),
+            "the refusal must name the set: {err}"
+        );
+    }
+
+    #[test]
+    fn list_defaults_to_live_records_only() {
+        let MemoryAction::List {
+            scope,
+            kind,
+            anchor,
+            include_superseded,
+            limit,
+            json,
+        } = action(["roteiro", "memory", "list"])
+        else {
+            panic!("expected List");
+        };
+        assert_eq!((scope, kind, anchor), (None, None, None));
+        assert!(
+            !include_superseded,
+            "superseded knowledge is hidden unless asked for",
+        );
+        assert_eq!(limit, 50);
+        assert!(!json);
+    }
+
+    #[test]
+    fn list_narrows_by_scope_kind_and_anchor() {
+        let MemoryAction::List {
+            scope,
+            kind,
+            anchor,
+            include_superseded,
+            limit,
+            json,
+        } = action([
+            "roteiro",
+            "memory",
+            "list",
+            "--scope",
+            "repo",
+            "--kind",
+            "decision",
+            "--anchor",
+            "sym:rust:src/a.rs#f",
+            "--include-superseded",
+            "--limit",
+            "5",
+            "--json",
+        ])
+        else {
+            panic!("expected List");
+        };
+        assert_eq!(scope.as_deref(), Some("repo"));
+        assert_eq!(kind, Some(rto_graph::MemoryKind::Decision));
+        assert_eq!(anchor.as_deref(), Some("sym:rust:src/a.rs#f"));
+        assert!(include_superseded);
+        assert_eq!(limit, 5);
+        assert!(json);
+    }
+
+    /// `forget` takes exactly one id. Bare, it is a parse error rather than a
+    /// command that might mean "forget everything".
+    #[test]
+    fn forget_requires_one_id() {
+        let MemoryAction::Forget { id, json } = action(["roteiro", "memory", "forget", "12"])
+        else {
+            panic!("expected Forget");
+        };
+        assert_eq!(id, 12);
+        assert!(!json);
+        assert!(Cli::try_parse_from(["roteiro", "memory", "forget"]).is_err());
+        assert!(Cli::try_parse_from(["roteiro", "memory", "forget", "abc"]).is_err());
+    }
+
+    /// A listing row is one line, and truncation is marked — a body silently cut
+    /// at the terminal width would misreport what is stored.
+    #[test]
+    fn a_listing_row_is_one_marked_line() {
+        assert_eq!(first_line("short", 96), "short");
+        assert_eq!(first_line("  padded  ", 96), "padded");
+        assert_eq!(
+            first_line("first\nsecond", 96),
+            "first…",
+            "a second line is truncation and must be marked as such",
+        );
+        assert_eq!(
+            first_line(&"x".repeat(100), 10),
+            format!("{}…", "x".repeat(10))
+        );
+        // Counted in characters, not bytes, so a multi-byte body cannot panic on
+        // a split boundary.
+        assert_eq!(first_line("ééééé", 3), "ééé…");
+        assert_eq!(first_line("", 96), "");
+    }
+
+    #[test]
+    fn restored_records_are_pluralised() {
+        assert_eq!(plural_is(1), "is");
+        assert_eq!(plural_is(2), "are");
+    }
+
+    /// Build a record with a given anchor state, to check how a listing renders
+    /// it. Only the fields `applicability` reads matter here.
+    fn record(anchor: Option<&str>, state: rto_graph::AnchorState) -> rto_graph::MemoryRecord {
+        rto_graph::MemoryRecord {
+            id: 1,
+            scope: rto_graph::DEFAULT_MEMORY_SCOPE.to_owned(),
+            kind: rto_graph::MemoryKind::Lesson,
+            anchor: anchor.map(|key| rto_graph::MemoryAnchor {
+                key: key.to_owned(),
+                blob: Some("blob1".to_owned()),
+                path: None,
+            }),
+            anchor_state: state,
+            applies: state.applies(),
+            body: "a body".to_owned(),
+            confidence: None,
+            tree: None,
+            created_at: "2026-08-15 12:00:00".to_owned(),
+            superseded_by: None,
+            superseded_at: None,
+        }
+    }
+
+    /// **The two no-usable-anchor cases must not read alike.** A record that never
+    /// anchored is repo-wide and applies; a record whose anchor failed to resolve
+    /// does not apply here. They are opposite answers, so a listing that rendered
+    /// them the same way would hide the whole scope rule behind a shrug.
+    #[test]
+    fn a_record_with_no_anchor_reads_differently_from_one_that_failed_to_resolve() {
+        use rto_graph::AnchorState;
+
+        let none = applicability(&record(None, AnchorState::Unanchored));
+        assert_eq!(none, "applies — repo-wide (no anchor)");
+        assert!(
+            !none.contains("unanchored"),
+            "the bare token reads like a failure and this is the opposite: {none}",
+        );
+
+        let vanished = applicability(&record(
+            Some("sym:rust:src/gone.rs#dead"),
+            AnchorState::Vanished,
+        ));
+        assert_eq!(
+            vanished,
+            "does not apply here — vanished: sym:rust:src/gone.rs#dead"
+        );
+        assert_ne!(none, vanished, "opposite answers must not render alike");
+
+        // The reason is always named alongside the verdict, so an operator can
+        // check it rather than take it on trust.
+        for (state, token) in [
+            (AnchorState::Valid, "applies — valid"),
+            (AnchorState::Drifted, "does not apply here — drifted"),
+            (
+                AnchorState::Unverifiable,
+                "does not apply here — unverifiable",
+            ),
+        ] {
+            let line = applicability(&record(Some("sym:rust:a.rs#f"), state));
+            assert!(line.starts_with(token), "{state}: {line}");
+            assert!(line.ends_with("sym:rust:a.rs#f"), "{state}: {line}");
+        }
+    }
+}
+
 // The `roteiro security` surface: argument shapes, the analyzer peek that keeps
 // `ingest` a one-argument command, and the `--json` shapes callers parse. The
 // behaviour these wrap — layer replacement, idempotence, artifact purity — is
@@ -7786,5 +8508,63 @@ mod workspace_tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+#[cfg(test)]
+mod audio_stream_tests {
+    use super::audio_stream_lines;
+    use rto_graph::{Explanation, NodeSummary};
+
+    /// An explanation of a node with the given kind and rendered content.
+    fn explanation(kind: &str, content: &str) -> Explanation {
+        let mut node = rto_graph::Node::new("k", rto_graph::NodeKind::from_token(kind), "clip.mp3");
+        node.path = Some("assets/clip.mp3".to_owned());
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: NodeSummary {
+                key: node.key.clone(),
+                kind: kind.to_owned(),
+                name: node.name.clone(),
+                path: node.path.clone(),
+                lang: None,
+            },
+            meta: serde_json::json!({ "content": content }),
+            outgoing: Vec::new(),
+            incoming: Vec::new(),
+        }
+    }
+
+    /// The stream line is printed for an audio node, tags indented under it —
+    /// and, crucially, an estimated duration is shown **as** an estimate, because
+    /// the line is the same rendering search indexes rather than a second one
+    /// assembled here (ADR-0016).
+    #[test]
+    fn an_audio_stream_node_prints_its_stream_and_marks_an_estimate() {
+        let lines = audio_stream_lines(&explanation(
+            "audio_stream",
+            "mp3, 44100 Hz, mono, 26122 ms (estimated)\nartist: Someone",
+        ));
+        assert_eq!(
+            lines,
+            vec![
+                "  stream: mp3, 44100 Hz, mono, 26122 ms (estimated)".to_owned(),
+                "    artist: Someone".to_owned(),
+            ],
+        );
+    }
+
+    /// Any other node prints nothing extra. The gate is the node *kind*, not "has
+    /// content": an ADR or a README carries content too, and this must not start
+    /// dumping it into `roteiro query`'s output.
+    #[test]
+    fn other_kinds_print_nothing_extra() {
+        assert!(audio_stream_lines(&explanation("adr", "A decision record.")).is_empty());
+        assert!(audio_stream_lines(&explanation("file", "Some prose.")).is_empty());
+        // An audio node with no rendered content prints nothing rather than a
+        // blank line.
+        let mut bare = explanation("audio_stream", "");
+        bare.meta = serde_json::json!({});
+        assert!(audio_stream_lines(&bare).is_empty());
     }
 }

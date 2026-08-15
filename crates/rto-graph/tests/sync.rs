@@ -624,3 +624,73 @@ fn scope_aware_calls_disambiguate_ambiguous_names() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// An extractor whose *environment* differs from [`FileNodeExtractor`]'s while
+/// its output for a given blob does not — the shape of an `EXTRACT_VERSION` bump
+/// or a newly-installed model, as `sync` sees it.
+struct ShiftedEnv(u64);
+
+impl rto_graph::Extractor for ShiftedEnv {
+    fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> rto_graph::FactSet {
+        FileNodeExtractor.extract(path, blob_id, bytes)
+    }
+
+    fn env_tag(&self) -> u64 {
+        self.0
+    }
+}
+
+/// **A change to the extraction identity re-extracts even at an unchanged tree.**
+///
+/// The `no_op` short-circuit used to compare the tree alone, so a binary whose
+/// `EXTRACT_VERSION` had moved — or one with a newly-installed model, or a
+/// newly-enabled extraction feature — reported "up to date" and served the *old*
+/// version's facts until `HEAD` happened to move. That silently defeats the one
+/// guarantee the version bump exists to give.
+///
+/// Both halves are asserted: the identity change must re-extract, and a second
+/// run under that same identity must go back to being free.
+#[test]
+fn a_changed_extraction_identity_re_extracts_at_an_unchanged_tree() {
+    use rto_graph::Extractor as _;
+
+    let dir = fresh_dir("env-shift");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "a.txt", "alpha\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "initial"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+
+    let first = ShiftedEnv(1);
+    let r1 = sync(&mut store, &repo, &cache, &first).expect("cold sync");
+    assert!(!r1.no_op);
+    assert_eq!(r1.blobs_extracted, 1);
+
+    // Same identity, same tree: free.
+    let r2 = sync(&mut store, &repo, &cache, &first).expect("resync");
+    assert!(r2.no_op, "an unchanged tree and identity is a no-op");
+
+    // A different identity at the *same* tree must not be a no-op.
+    let second = ShiftedEnv(2);
+    assert_ne!(first.env_tag(), second.env_tag());
+    let r3 = sync(&mut store, &repo, &cache, &second).expect("shifted env");
+    assert!(
+        !r3.no_op,
+        "a changed extraction identity must re-extract, not report `up to date`",
+    );
+    assert_eq!(r1.tree, r3.tree, "the tree did not move");
+    assert_eq!(
+        r3.blobs_extracted, 1,
+        "the blob must be re-extracted under the new identity, not served from cache",
+    );
+
+    // …and the new identity is now the recorded one, so a repeat is free again.
+    assert!(
+        sync(&mut store, &repo, &cache, &second)
+            .expect("resync")
+            .no_op
+    );
+}

@@ -14,7 +14,15 @@ compromising the promise that the graph is a pure function of the source tree.**
 
 Stage numbering continues from the v1 plan (which ended at Stage 20). As there,
 stage numbers are **labels, not execution order**, and the `v1.x`/`v2.0` headings
-are *nominal targets* — release-plz cuts the real tags.
+are *nominal targets* — release-plz cuts the real tags from conventional commits,
+so a stage nominally marked `v1.16.0` may actually ship in a `v1.10.x`. Each
+delivered stage records **the version it really shipped in**.
+
+> **Keep this document current.** A stage is not finished when its code merges —
+> it is finished when its entry here says what shipped, in which release, and what
+> that settles for later stages. The stage entry is where the next person looks
+> first; a plan that lags the tree is worse than no plan, because it is trusted.
+> Update it in the same PR as the work wherever possible.
 
 ---
 
@@ -68,13 +76,13 @@ Verified against `main` at the time of writing:
 
 | Fact | Value | Consequence for V2 |
 |---|---|---|
-| Released | **v1.9.0** on crates.io | V2 work is post-1.0 — semver is now real. |
+| Released | **v1.10.1** on crates.io (baseline at V2's start: v1.9.0) | V2 work is post-1.0 — semver is now real. |
 | MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
 | Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
 | CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
-| Schema | migrations 1–7 applied | V2 appends only; see §5. |
-| `EXTRACT_VERSION` | `9` (`crates/rto-graph/src/extract.rs:39`) | Bumping it forces full re-extraction for every user. |
+| Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
+| `EXTRACT_VERSION` | **`10`** (`crates/rto-graph/src/extract.rs`) — bumped once by Stage 28 | Bumping it forces full re-extraction for every user. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
 | Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one. |
 
@@ -103,14 +111,14 @@ feature-gated and off by default.
 | Migration | Table | Lifetime | Evictable |
 |---|---|---|---|
 | **8** ✅ | analysis runs + findings (ADR-0012) | replaceable layer per `(analyzer, worktree)` | replaced wholesale, not aged out |
-| N | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
-| N+1 | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
+| **11** ✅ | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
+| N | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
 
 **Numbers are assigned in landing order, not reserved in advance.** Stage 21 landed
-first and took **8**; the memory tiers take the next two free numbers whenever they
-merge. Splitting memory across two migrations is intentional: different lifetimes
-and guarantees, so the eviction tier can later be altered without touching durable
-memory.
+first and took **8**; Stage 28 took **9** and **10**; episodic memory took **11**,
+and the cache tier takes the next free number whenever it merges. Splitting memory
+across two migrations is intentional: different lifetimes and guarantees, so the
+eviction tier can later be altered without touching durable memory.
 
 **Stages 22 and 24 need no migration** — `RunnerKind` shipped in migration 8 already
 naming all three backends, with the schema CHECK accepting them. Stage 22 confirmed
@@ -126,16 +134,18 @@ change in Stage 26, once — see the note there.
 
 ## 6. Staged roadmap
 
-Dependency shape — three tracks, only one hard chain:
+Dependency shape — four tracks, only one hard chain:
 
 ```
-Track A (findings):  21 ──► 22 ──► 22b ──► 24
-Track B (memory):    23 ──────────► 25
-Track C (lenses):    26   (independent of A and B throughout)
-                                    └──► 27 (v2.0 hardening)
+Track A (findings):  21 ✅ ──► 22 ✅ ──► 22b ──► 24
+Track B (memory):    23 ✅ ──────────────► 25
+Track C (lenses):    26         (independent of A and B throughout)
+Track D (media):     28 ✅ ──► 29
+                                          └──► 27 (v2.0 hardening)
 ```
 
-Stages 21, 23 and 26 can start in parallel. Nothing in Track C touches the artifact
+Stages 21, 23 and 26 were the parallel-startable set; 21, 22, 23 and 28 have now
+landed, leaving 22b, 24, 25, 26 and 29 open. Nothing in Track C touches the artifact
 stores; nothing in Track B blocks Track A. **22b is sequenced after 22 but does not
 block 24**: it adds one adapter behind a seam 24 does not touch.
 
@@ -356,6 +366,51 @@ no graph integration.
   `export_factset` unchanged; nothing enters `nodes`/`edges`; supersession recorded
   explicitly and superseded rows excluded from live listing.
 
+**Delivered in #317.** Migration 11 (`agent_memory`), the `rto_graph::memory`
+store, and `roteiro memory add|list|forget`. Every DoD item above has a test;
+`EXTRACT_VERSION` is unchanged and asserted so, because memory is not extraction
+output.
+
+**Four deviations from ADR-0013's proposed SQL**, each deliberate:
+
+1. **`kind` is a closed `CHECK … IN`** over the ADR's own five names
+   (`lesson|attempt|decision|pattern|outcome`), not the free `TEXT` proposed. Free
+   text makes `lesson`/`Lesson`/`lessons` three kinds, none findable by a filter,
+   and a vocabulary that cannot be filtered cannot later be ranked — which Stage 25
+   needs. Follows the `analysis_runs.runner`/`isolation` and `media_content.kind`
+   precedent. *Cost:* a sixth kind is an append-only migration, not a string.
+2. **`superseded_at` is `TEXT`, not `INTEGER`.** An integer here would hold the
+   generation of supersession — which *is* `superseded_by`, since the successor's
+   id is the generation — so it would duplicate the column beside it. As `TEXT` it
+   is a human timestamp on `created_at`'s terms: written, displayed, never read.
+3. **Four extra `CHECK`s** making half-states unrepresentable, per migration 10's
+   precedent: `superseded_by`/`superseded_at` stand or fall together (a moment with
+   no successor is supersession *inferred*, the one thing the ADR rules out);
+   nothing supersedes itself; anchor evidence requires an anchor key; empty
+   scope/body refused.
+4. **`AUTOINCREMENT` kept, and it is load-bearing** — not decoration. A plain
+   `INTEGER PRIMARY KEY` is the rowid, and SQLite reuses the largest deleted one,
+   so forgetting the newest record would hand its number to the next write:
+   `ORDER BY id DESC` stops being newest-first *and* a surviving `superseded_by`
+   silently re-points at an unrelated record.
+
+**Scope is settled, so Stage 25 inherits it rather than re-litigating it**
+(ADR-0013 v1.1 §*Scope*). The owner's rule: *a lesson learned on a feature branch
+is valid on `main` only if the relevant association is merged to `main` in the
+same format — if not, then no.* That needs no new machinery, because **the anchor
+is the scope test**: a record applies to a tree when its anchor resolves there
+with the same blob, or when it has no anchor at all (a general lesson, repo-wide).
+Drifted, vanished or unverifiable ⇒ does not apply *here*, kept and marked.
+"Same format" means the blob matches, strictly — a reformat breaks it, failing
+toward *marked* rather than toward silently applying a lesson to code that moved.
+Consequently **`scope` is a coarse per-repo/project namespace and never a branch
+label**; no branch bookkeeping exists anywhere in the schema. Recall in Stage 25
+should rank on this predicate (`AnchorState::applies`), not invent a second one.
+
+**Out of scope, still:** the bounded cache tier, recall ranking, decay, and any
+`search` integration — all Stage 25. Memory currently reaches `search` through no
+channel at all, which is asserted rather than assumed.
+
 ### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L**
 
 **Goal:** the reproducible, offline-capable local run — one command, pinned inputs,
@@ -386,10 +441,15 @@ cache that stops sessions re-deriving what they already know.
   never silently evicted. `build_context` is *proven* to reconstruct identically
   (`context.rs` asserts `built == cached`), which is what makes cache eviction cost
   cycles rather than information.
-- **Schema:** migration N+2 — `agent_cache` with `bytes`, `generation`,
-  `last_used`, `hits`. No **persisted** access tracking exists today, so the
-  signal must be introduced with the table (the in-memory `ModelCache` tracks
-  recency by list order, which does not survive a process).
+- **Schema:** migration N (the next free number after **11**) — `agent_cache` with
+  `bytes`, `generation`, `last_used`, `hits`. No **persisted** access tracking
+  exists today, so the signal must be introduced with the table (the in-memory
+  `ModelCache` tracks recency by list order, which does not survive a process).
+- **Inherited from Stage 23, do not re-derive:** applicability is already decided —
+  `AnchorState::applies` (ADR-0013 v1.1 §*Scope*) is the whole rule, and it is what
+  `anchor_penalty` below should be built on. Do **not** add a branch or scope term
+  to recall: `scope` is a namespace, the anchor is the validity test, and a second
+  rule would give two answers to one question.
 - **Eviction:** **byte budget**, following the existing `ModelCache`
   (`crates/rto-llama/src/llama.rs:120-137`) rather than a new row-count cap —
   evict oldest-first on `(anchor_valid ASC, last_used ASC)` until the tier fits,
@@ -462,7 +522,7 @@ it currently rests on no code or benchmark evidence.
   positives have a suppression story, a confidence signal and a baseline before any
   CI-gating is offered.
 
-### Stage 28 — Generated media content moves out of `derived` ([ADR-0015](adr/0015-generated-media-content-artifact-store.md)) → **v1.16.0** · effort **M–L** *(independent track)*
+### Stage 28 — Generated media content moves out of `derived` ([ADR-0015](adr/0015-generated-media-content-artifact-store.md)) → **v1.10.x** ✅ *delivered* *(independent track)*
 
 **Goal:** stop generative model output masquerading as deterministic extraction —
 without losing the ability to search it. Resolves #300.
@@ -509,6 +569,57 @@ without losing the ability to search it. Resolves #300.
   command; `export_factset` is byte-identical across a `media build`; dropping a
   producer's records leaves the graph untouched.
 
+**Delivered across two PRs, both merged:**
+
+- **28a** (#310) — the `media_content` store (migration 9), keyed by source blob +
+  producer identity; generated text stopped being written into `nodes.meta.content`;
+  `EXTRACT_VERSION` 9→10; `media build|status|clear`; `search --include-generated`
+  (off by default, always labelled, never the `authored` boost). A later fix
+  corrected the `generation` counter to read `MAX(generation)` **before** a `--force`
+  delete — a count is wrong under deletion, a max is not.
+- **28b** (#312) — the pre-generation gate (migration 10), evaluated **before the
+  model loads** and proved so by a test producer that panics if reached; the refusal
+  is **recorded with its measured value**, so `media status` distinguishes *not
+  generated* from *generated nothing*. Plus the explorer surfacing (attribution +
+  a copyable per-blob rebuild command; deliberately not a mutating endpoint, since
+  the explorer is llama-free per ADR-0010) and the deferred `media` CLI arg-shape
+  tests.
+
+**Closes #300.** Measured on a real repo: `media build --audio` refuses a silent
+clip in **0.013 s with no model load**, versus 12.9 s and ~2 KB of confabulated
+prose under `--force`.
+
+**Known limit, recorded rather than papered over:** MP3 and FLAC are **not gated**.
+They are entropy-coded, so measuring amplitude means decoding — behind the very load
+the gate avoids. The gate **abstains**, and abstention is a pass, so those formats
+still reach the model. Whether to close that gap with structural parsing (no
+dependency) is tracked separately.
+
+### Stage 29 — Audio metadata as `derived` facts ([ADR-0016](adr/0016-audio-metadata-extraction.md)) → *in progress* · effort **M** *(independent track)*
+
+**Goal:** the complement of Stage 28. That stage took *generated* content out of
+`derived` because it is invented; this one puts *extracted* content in because it is
+present in the bytes — codec, sample rate, bit depth, channels, duration, frame
+count and tags, from a **format read with no decoding and no model** (measured
+1–100 µs on this repo's own fixtures).
+
+- **Dependency:** `symphonia`, `default-features = false`, codec/container features
+  plus the `id3v1`/`id3v2`/`ape` metadata readers — which are separate feature flags
+  and are **not** implied by `flac`/`mp3`/`wav`; without them every MP3 tag is
+  invisible. Adds **MPL-2.0** to `deny.toml` (file-level copyleft; does not reach
+  Roteiro's own source), recorded with its rationale.
+- **The new subtlety:** MP3 duration is sometimes *estimated* (Xing/VBRI when
+  present, else inferred from bitrate, and only when seekable). A
+  deterministic-but-inexact `derived` fact is new here, so duration carries an
+  `exact | estimated` marker and **absence is recorded as absence, never a guess**.
+- **Out of scope, deliberately:** decoding for ASR (symphonia has no resampler or
+  channel mixer), widening `is_audio` (symphonia does not support Opus at all), and
+  cross-container duplicate detection (`duplicates` matches on git blob hash, so it
+  could never pair).
+- **DoD:** identical bytes yield byte-identical facts; one `EXTRACT_VERSION` bump;
+  `export_factset` unchanged in shape; tests need **no model**, so they run on CI
+  rather than self-skipping.
+
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
 
 - Semver review: query output is explicitly versioned, so new query shapes carry
@@ -533,7 +644,8 @@ without losing the ability to search it. Resolves #300.
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
-| v1.16.0 | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability |
+| v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
+| — | Stage 29 — audio metadata as `derived` facts | *in progress* |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -558,9 +670,11 @@ without losing the ability to search it. Resolves #300.
 1. **Cache bound value** (Stage 25): the *unit* is settled — a byte budget,
    following `ModelCache`. The *number* is a judgement about tolerable
    `.git/roteiro/` growth and still needs deciding.
-2. **Memory scope** (Stage 23): the store is per-repo and shared across branches
-   and worktrees. Is a lesson learned on a feature branch valid on `main`? The
-   `scope` column exists; the policy does not.
+2. ~~**Memory scope** (Stage 23)~~ — **answered**, ADR-0013 v1.1 §*Scope*. A lesson
+   is valid in a tree only if the relevant association is present there **in the
+   same format**, so the **anchor is the scope test** and `scope` is a coarse
+   per-repo namespace, never a branch label. Shipped in #317; Stage 25's recall
+   ranks on `AnchorState::applies` rather than inventing a second rule.
 3. **Semantic recall** (post-Stage 25): memory recall is lexical + anchor + decay in
    this plan. A vector index would need migration, model/dimension versioning,
    retention, rebuild and storage-size policy — materially more than "persist

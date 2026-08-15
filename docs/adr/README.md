@@ -21,10 +21,11 @@
 | [0013](0013-agent-memory-artifact-store.md) | Agent memory — a two-tier artifact store, decaying by evidence not by clock | For Review |
 | [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | For Review |
 | [0015](0015-generated-media-content-artifact-store.md) | Generated media content — its own artifact store, rebuildable on demand | For Review |
+| [0016](0016-audio-metadata-extraction.md) | Audio metadata as derived facts — symphonia for format reads, MPL-2.0 allowed | For Review |
 | [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | For Review |
 
-> **0016 and 0017 are not missing.** They are assigned to changes in flight on
-> other branches and arrive with their own PRs. Numbers are handed out in landing
+> **0017 is not missing.** It is assigned to a change in flight on another branch
+> and arrives with its own PR. Numbers are handed out in landing
 > order, so a gap in this table is a branch that has not merged yet, never a lost
 > decision.
 
