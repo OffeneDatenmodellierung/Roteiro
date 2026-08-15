@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.0...rto-graph-v1.10.1) - 2026-08-15
+
+### Fixed
+
+- *(llama)* share one backend per process
+
+### Other
+
+- *(extract)* justify the cast_possible_truncation allow
+
 ## [1.10.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.9.0...rto-graph-v1.10.0) - 2026-08-15
 
 ### Added
