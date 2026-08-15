@@ -108,11 +108,23 @@ use crate::engine::{EngineError, FinishReason};
 
 /// How many tokens the MTP head is asked to propose per verification round.
 ///
-/// llama.cpp's own default, and the shape the head is trained for: Qwen3.5's
-/// single `nextn` block predicts one step ahead, and llama.cpp chains it to reach
-/// three. Raising it costs a wider verification batch on every round and is only
-/// repaid while acceptance stays high, so the default stands until a measurement
-/// says otherwise.
+/// llama.cpp's own default, and measured rather than inherited. On
+/// Qwen3.8-27B-Q4 on an M5 Pro, median speedup over five interleaved pairs:
+///
+/// | width | code  | tool-call | prose | acceptance | extra RS memory |
+/// |------:|------:|----------:|------:|-----------:|----------------:|
+/// |     1 | 1.45× |     1.22× | 1.28× |     81–85% |         150 MiB |
+/// |     2 | 1.29× |     1.24× |     — |     76–82% |         300 MiB |
+/// |     3 | 1.50× |     1.35× | 1.26× |     54–71% |         449 MiB |
+///
+/// Wider proposals trade acceptance for coverage — a single trained `nextn`
+/// block predicts one step, and reaching three means running it on its own
+/// output — and they cost a wider verification batch plus one recurrent-state
+/// snapshot each (the `n_rs_seq` note in [`Mtp::try_new`]). Three is where the
+/// two curves crossed here. It is a per-model optimum, not a law: on
+/// Qwen3.5-9B the same sweep could not separate the widths from measurement
+/// noise, because at that size the drafter's own cost is a much larger share of
+/// the round.
 const DRAFT_MAX: i32 = 3;
 
 // `MtpSpeculative::new` rejects `n_max <= 0`, and the verification batch is sized
@@ -135,8 +147,8 @@ fn base_params(n_ctx: u32) -> llama_cpp_2::context::params::LlamaContextParams {
     llama_cpp_2::context::params::LlamaContextParams::default().with_n_ctx(Some(n_ctx))
 }
 
-/// The environment variable that disables speculative decoding.
-const KILL_SWITCH: &str = "ROTEIRO_SPECULATIVE";
+/// The environment variable that turns speculative decoding on.
+const SWITCH: &str = "ROTEIRO_SPECULATIVE";
 
 /// The sequence id llama.cpp's MTP wrapper binds itself to. Every batch that
 /// reaches [`MtpSpeculative::process`] must use this one and no other — the
@@ -144,29 +156,37 @@ const KILL_SWITCH: &str = "ROTEIRO_SPECULATIVE";
 /// path already uses.
 const SEQ: i32 = 0;
 
-/// Whether speculative decoding is permitted in this process.
+/// Whether speculative decoding is switched on in this process.
 ///
-/// On unless `ROTEIRO_SPECULATIVE` says otherwise; see
-/// [`kill_switch_allows`] for the accepted spellings.
+/// Off unless `ROTEIRO_SPECULATIVE` asks for it; see [`switch_enables`] for why
+/// that way round, and for the accepted spellings.
 pub(crate) fn speculative_enabled() -> bool {
-    kill_switch_allows(std::env::var(KILL_SWITCH).ok().as_deref())
+    switch_enables(std::env::var(SWITCH).ok().as_deref())
 }
 
 /// The pure decision behind [`speculative_enabled`], split out so it can be
 /// tested without touching the process environment.
 ///
-/// Unset means **on**: a model that ships a draft head uses it, because the
-/// output is identical either way. Only an explicit, recognised "off" turns it
-/// off — an unrecognised value is not treated as a disable, so a typo cannot
-/// silently cost the speedup.
-fn kill_switch_allows(value: Option<&str>) -> bool {
-    match value {
-        None => true,
-        Some(v) => !matches!(
+/// **Unset means off**, and that is the one judgement in this module that a
+/// measurement decided rather than a principle. Speculative decoding is exact in
+/// exact arithmetic, so "on by default" would have been right — but llama.cpp's
+/// logits for a token are not identical at batch width 1 and width 4, and on the
+/// hybrid Qwen3.5 family the gap is large enough to flip a greedy argmax at a
+/// near-tie. `tests/batch_numerics.rs` measures the gap and
+/// `tests/speculative.rs` catches the flips. So turning it on can change a
+/// completion, and *that* is a decision to be taken deliberately rather than
+/// inherited by upgrading.
+///
+/// Only an explicit, recognised "on" enables it: an unrecognised value is not
+/// treated as consent, because the failure this default exists to prevent is
+/// output changing without anyone having asked.
+fn switch_enables(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ),
-    }
+            "1" | "on" | "true" | "yes"
+        )
+    })
 }
 
 /// How many MTP (next-token-prediction) draft layers `model`'s GGUF ships, or
@@ -672,7 +692,7 @@ fn clear_from(ctx: &mut LlamaContext<'_>, pos: i32, which: &str) -> Result<(), E
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted_prefix, kill_switch_allows};
+    use super::{accepted_prefix, switch_enables};
     use llama_cpp_2::token::LlamaToken;
 
     /// A stand-in for the sampler + target model: `truth` is what the target
@@ -760,15 +780,17 @@ mod tests {
     }
 
     #[test]
-    fn speculation_is_on_unless_explicitly_disabled() {
-        // Unset is on: a model with a draft head uses it, because the output is
-        // the same either way.
-        assert!(kill_switch_allows(None));
-        for on in ["1", "on", "true", "yes", "anything else"] {
-            assert!(kill_switch_allows(Some(on)), "{on} should not disable");
+    fn speculation_is_off_unless_explicitly_asked_for() {
+        // Unset is off: turning it on can change a completion (llama.cpp's logits
+        // are not identical across batch widths), so it is opted into.
+        assert!(!switch_enables(None));
+        for on in ["1", "on", "true", "yes", "ON", " true "] {
+            assert!(switch_enables(Some(on)), "{on} should enable");
         }
-        for off in ["0", "off", "false", "no", "OFF", " 0 "] {
-            assert!(!kill_switch_allows(Some(off)), "{off} should disable");
+        // Anything unrecognised is *not* consent — including the spellings that
+        // would read as "off" and a typo that would otherwise silently opt in.
+        for off in ["0", "off", "false", "no", "", "yes please", "2"] {
+            assert!(!switch_enables(Some(off)), "{off:?} should not enable");
         }
     }
 
