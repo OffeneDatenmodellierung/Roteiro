@@ -7,12 +7,21 @@
 //! gate on the open question this modality raised: whether the llama.cpp `mtmd`
 //! audio path actually transcribes on the Metal backend.
 //!
-//! It needs the `llama` feature, the Voxtral audio model on disk, **and** a WAV
-//! fixture, so it is `#[ignore]`d and self-skips when any are missing — CI
-//! compiles it under `--all-features` but does not run it. Generate a real speech
-//! clip and run it with (on macOS — note `-v Samantha`: the *default* `say` voice
-//! can emit near-silence, which the model would then "transcribe" into
-//! hallucinated text):
+//! It needs the `llama` feature and the Voxtral audio model on disk, so it is
+//! `#[ignore]`d and self-skips when the model is missing — CI compiles it under
+//! `--all-features` but does not run it:
+//!
+//! ```text
+//! cargo test -p rto-llama --features llama --test audio -- --ignored --nocapture
+//! ```
+//!
+//! The clip defaults to a committed, synthesised fixture (see
+//! `crates/rto-graph/tests/fixtures/audio/README.md`), which exercises the decode
+//! and projection path but is not speech — the model will not find real words in
+//! it. To check the *transcription* rather than the path, point
+//! `ROTEIRO_TEST_AUDIO_WAV` at an actual speech clip. On macOS (note
+//! `-v Samantha`: the *default* `say` voice can emit near-silence, which the
+//! model would then "transcribe" into hallucinated text):
 //!
 //! ```text
 //! say -v Samantha -o /tmp/fox.aiff "The quick brown fox jumps over the lazy dog."
@@ -41,8 +50,18 @@ fn model_file(name: &str, file: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// The clip used when `ROTEIRO_TEST_AUDIO_WAV` is unset: the committed,
+/// synthesised speech-*shaped* fixture from `rto-graph`. It makes the test
+/// runnable with nothing but the model installed, which is the point — before
+/// the fixtures existed this test could not run at all without hand-making a
+/// clip first.
+fn default_clip() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../rto-graph/tests/fixtures/audio/syllables-16khz-mono-512ms.wav")
+}
+
 #[test]
-#[ignore = "needs the `llama` feature, the Voxtral GGUF on disk, and a WAV fixture; slow + Metal-dependent"]
+#[ignore = "needs the `llama` feature and the Voxtral GGUF on disk; slow + Metal-dependent"]
 fn transcribes_speech_audio_via_mtmd() {
     let (Some(gguf), Some(mmproj)) = (
         model_file(MODEL, "model.gguf"),
@@ -51,11 +70,9 @@ fn transcribes_speech_audio_via_mtmd() {
         eprintln!("SKIP: `{MODEL}` not installed (run `roteiro model pull {MODEL}`)");
         return;
     };
-    let Some(wav) = std::env::var_os("ROTEIRO_TEST_AUDIO_WAV") else {
-        eprintln!("SKIP: set ROTEIRO_TEST_AUDIO_WAV to a WAV/MP3/FLAC speech clip");
-        return;
-    };
+    let wav = std::env::var_os("ROTEIRO_TEST_AUDIO_WAV").map_or_else(default_clip, PathBuf::from);
     let bytes = std::fs::read(&wav).expect("read audio fixture");
+    eprintln!("clip: {} ({} bytes)", wav.display(), bytes.len());
 
     let engine = LlamaEngine::new(
         vec![Served {
