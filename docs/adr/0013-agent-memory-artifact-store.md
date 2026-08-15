@@ -49,7 +49,7 @@ determinism principles of
   - **Transient cache** — re-derivable by definition. **Bounded and freely
     evictable**, because the worst case is recomputing it.
   - The rule: **re-derivable ⇒ evictable; episodic ⇒ never silently evicted.**
-- **Depreciation is by evidence first, clock second.** A record whose anchor blob
+- **Deprecation is by evidence first, clock second.** A record whose anchor blob
   no longer matches is stale *by evidence*; a record explicitly superseded is
   stale *by fact*. Age is only a tiebreak between records that are otherwise
   equally valid.
