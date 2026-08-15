@@ -2096,10 +2096,16 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
             );
         }
         // Stream the response straight to disk, hashing as it writes and
-        // installing atomically — so a 20 GiB model never buffers in memory.
-        let reader = http_reader(f.url)?;
-        rto_graph::download_verified(reader, &dest, f.sha256)
-            .map_err(|e| anyhow::anyhow!("downloading {}: {e}", f.name))?;
+        // installing atomically — so a 20 GiB model never buffers in memory —
+        // and resume from whatever an interrupted earlier attempt left behind.
+        rto_graph::download_resumable(
+            &dest,
+            f.url,
+            f.sha256,
+            |from| http_range_reader(f.url, from),
+            report_download_event,
+        )
+        .map_err(|e| anyhow::anyhow!("downloading {}: {e}", f.name))?;
     }
     let use_hint = match spec.kind {
         rto_graph::ModelKind::Embedding => format!("roteiro infer --model {name}"),
@@ -2121,14 +2127,119 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Open a streaming HTTPS reader for `url` (the body is not buffered whole).
+/// Open a streaming HTTPS reader for `url` starting at byte `from` (the body is
+/// never buffered whole).
+///
+/// A non-zero `from` sends `Range: bytes=<from>-`, so an interrupted pull
+/// continues instead of restarting. What comes back is classified by
+/// [`rto_graph::interpret_range_response`]: a `206` is the requested tail, a
+/// `200` is the whole file however it was asked for — and the caller must not
+/// confuse the two.
 #[cfg(feature = "models")]
-fn http_reader(url: &str) -> anyhow::Result<impl std::io::Read> {
-    Ok(ureq::get(url)
+fn http_range_reader(
+    url: &str,
+    from: u64,
+) -> Result<rto_graph::RangeReply<impl std::io::Read>, rto_graph::DownloadError> {
+    let mut req = ureq::get(url);
+    if from > 0 {
+        req = req.header("Range", format!("bytes={from}-"));
+    }
+    // `ureq` turns 4xx/5xx into errors; 200 and 206 both arrive here as `Ok`.
+    let resp = req
         .call()
-        .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?
-        .into_body()
-        .into_reader())
+        .map_err(|e| rto_graph::DownloadError::Transport(format!("GET {url}: {e}").into()))?;
+
+    // Copy the headers out before `into_body` consumes the response.
+    let status = resp.status().as_u16();
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let accept_ranges = header("accept-ranges");
+    let content_range = header("content-range");
+    let content_length = header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
+
+    let (kind, total) = rto_graph::interpret_range_response(
+        status,
+        accept_ranges.as_deref(),
+        content_range.as_deref(),
+        content_length,
+        from,
+    )?;
+    let reader = resp.into_body().into_reader();
+    Ok(match kind {
+        rto_graph::RangeKind::Partial => rto_graph::RangeReply::Partial { reader, total },
+        rto_graph::RangeKind::Full { detail } => rto_graph::RangeReply::Full {
+            reader,
+            total,
+            detail,
+        },
+    })
+}
+
+/// Narrate a download's notable moments on stderr — resumption, a discarded
+/// partial and why, a server that will not do ranges.
+///
+/// These are exactly the things that would otherwise look like the command
+/// silently doing the wrong amount of work.
+#[cfg(feature = "models")]
+fn report_download_event(event: rto_graph::DownloadEvent) {
+    use rto_graph::DownloadEvent as E;
+    match event {
+        E::DiscardedPartial { bytes, reason } => {
+            eprintln!("  discarding the {} partial: {reason}", human_bytes(bytes))
+        }
+        E::Resuming { offset, total } => match total {
+            Some(t) => eprintln!(
+                "  resuming from {} of {} ({} to go)",
+                human_bytes(offset),
+                human_bytes(t),
+                human_bytes(t.saturating_sub(offset))
+            ),
+            None => eprintln!("  resuming from {}", human_bytes(offset)),
+        },
+        E::AlreadyComplete { bytes } => {
+            eprintln!("  {} already downloaded — verifying", human_bytes(bytes));
+        }
+        E::RangeUnsupported { discarded, detail } => eprintln!(
+            "  the server will not resume ({detail}); restarting from zero and \
+             discarding {}",
+            human_bytes(discarded)
+        ),
+        E::KeptPartial { bytes } => eprintln!(
+            "  transfer failed; keeping {} for a later `roteiro model pull` to resume from",
+            human_bytes(bytes)
+        ),
+        E::PoisonedPartial { bytes } => eprintln!(
+            "  checksum failed; discarding all {} — those bytes cannot be resumed from",
+            human_bytes(bytes)
+        ),
+    }
+}
+
+/// Format a byte count for a human: `1.4 GiB`, `812.0 MiB`, `947 B`.
+#[cfg(feature = "models")]
+fn human_bytes(bytes: u64) -> String {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a display string; f64 is exact well past any plausible model size"
+    )]
+    let mut value = bytes as f64;
+    let mut unit = "B";
+    for next in ["KiB", "MiB", "GiB", "TiB"] {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next;
+    }
+    if unit == "B" {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {unit}")
+    }
 }
 
 /// Import an external knowledge graph into the store (or, for codegraph, compare
