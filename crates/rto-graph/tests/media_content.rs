@@ -17,9 +17,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rto_graph::{
-    Edge, EdgeKind, FactSet, GeneratedContent, GraphArtifact, MediaBlob, MediaBuildOptions,
-    MediaFilter, MediaKind, MediaProducer, MediaWrite, Node, NodeKind, Producer, Provenance,
-    SearchOptions, Store, build_media, search, search_channels,
+    Edge, EdgeKind, FactSet, GateThresholds, GeneratedContent, GraphArtifact, MediaBlob,
+    MediaBuildOptions, MediaFilter, MediaKind, MediaProducer, MediaWrite, Node, NodeKind, Producer,
+    Provenance, SearchOptions, Store, build_media, search, search_channels,
 };
 
 /// The confabulation from issue #300, shortened. A clip of digital silence, and a
@@ -861,4 +861,311 @@ fn clearing_records_resets_the_generation_but_never_collides_with_a_live_one() {
         1,
         "with no surviving records the counter starts again, as documented",
     );
+}
+
+// --- The pre-generation gate (ADR-0015) -------------------------------------
+//
+// The gate's three claimed properties, each turned into an assertion: it runs
+// *before* the model, its refusal is *recorded*, and `--force` overrides it.
+// Everything here runs on the committed WAV fixtures — the very clip from issue
+// #300 — and none of it needs a model or a GPU.
+
+/// One committed audio fixture's bytes, read from `tests/fixtures/audio/`.
+///
+/// Real files rather than hand-rolled bytes: the gate's job is to recognise
+/// *this* clip, the digital silence that issue #300 was found on, and a fixture
+/// invented for the test could agree with the parser while disagreeing with the
+/// thing being described.
+fn fixture(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/audio")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// A producer that **panics if it is ever asked to generate**.
+///
+/// This is how "before the model loads" is proved without a model: in the real
+/// binary the llama.cpp engine is built lazily inside `generate`, so a run that
+/// never calls `generate` never loads one. A stub that cannot be called at all
+/// asserts exactly that, and does it in the GPU-free suite CI actually runs.
+struct NeverGenerates(Producer);
+
+impl MediaProducer for NeverGenerates {
+    fn producer(&self) -> &Producer {
+        &self.0
+    }
+
+    fn generate(&self, path: &str, _bytes: &[u8]) -> Option<GeneratedContent> {
+        panic!("the gate must refuse {path} before any producer is reached");
+    }
+}
+
+/// Run a build over `blobs`, feeding each the real bytes of `name`.
+fn run_build_on(
+    store: &mut Store,
+    producer: &dyn MediaProducer,
+    name: &str,
+    opts: MediaBuildOptions,
+) -> rto_graph::MediaBuildReport {
+    let bytes = fixture(name);
+    build_media(store, &silence(), &[producer], opts, |_| {
+        Some(bytes.clone())
+    })
+    .expect("build")
+}
+
+/// **The headline gate invariant.** A silent clip is refused *before* the
+/// producer is reached — proved by a producer that panics when called — and the
+/// refusal is visible in `media status` with the value that caused it.
+#[test]
+fn a_silent_clip_is_refused_before_the_producer_is_ever_reached() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+
+    let report = run_build_on(
+        &mut store,
+        &NeverGenerates(voxtral()),
+        "silence-16khz-mono-256ms.wav",
+        audio_only(),
+    );
+    assert_eq!(report.candidates, 1);
+    assert_eq!(report.gated, 1, "the gate must have refused the clip");
+    assert_eq!(report.generated, 0);
+    assert_eq!(
+        report.empty, 0,
+        "`empty` means a model ran and said nothing; nothing ran here",
+    );
+
+    // Recorded, not silent: one record, holding a measurement instead of text.
+    let records = store
+        .media_records(&MediaFilter::default())
+        .expect("records");
+    assert_eq!(records.len(), 1, "a skip is still a record");
+    let skip = records[0]
+        .outcome
+        .skip()
+        .expect("the record must carry the refusal");
+    assert_eq!(
+        skip,
+        rto_graph::MediaSkip {
+            reason: rto_graph::GateReason::Silence,
+            // Exact: digital silence is all-zero samples, so the sum of squares
+            // is zero and the square root of zero is zero. Nothing here rounds.
+            value: 0.0,
+            threshold: GateThresholds::default().silence_rms,
+        },
+    );
+    assert_eq!(
+        records[0].outcome.text(),
+        None,
+        "a skip has no text to read",
+    );
+
+    // …and `media status` surfaces it, with the measured value, so an operator
+    // can tell *not generated* from *generated nothing*.
+    let status = rto_graph::media_status(&store, &silence()).expect("status");
+    assert_eq!(status.skipped.len(), 1);
+    let entry = &status.skipped[0];
+    assert_eq!(entry.path, "assets/silence.wav");
+    assert_eq!(entry.producer_id, voxtral().id());
+    assert_eq!(
+        entry.skip.to_string(),
+        "below silence threshold (rms=0, threshold 0.0001)",
+        "the operator-facing line must name the metric and its value",
+    );
+    // The blob is counted as skipped, not as described — folding the two
+    // together would restore the ambiguity the record exists to remove.
+    let audio = status
+        .candidates
+        .iter()
+        .find(|c| c.kind == MediaKind::Audio)
+        .expect("an audio row");
+    assert_eq!((audio.blobs, audio.described, audio.skipped), (1, 0, 1));
+    assert_eq!(status.producers[0].skipped, 1);
+}
+
+/// **`--force` overrides the gate.** The same silent clip, forced, reaches the
+/// model — a legitimate request, and the flag would be worse than useless if it
+/// quietly declined.
+#[test]
+fn force_overrides_the_gate() {
+    let mut store = Store::open_in_memory().expect("store");
+    let producer = StubProducer::new(voxtral(), CONFABULATION);
+    let forced = MediaBuildOptions {
+        force: true,
+        ..audio_only()
+    };
+
+    let bytes = fixture("silence-16khz-mono-256ms.wav");
+    let report = build_media(&mut store, &silence(), &[&producer], forced, |_| {
+        Some(bytes.clone())
+    })
+    .expect("build");
+
+    assert_eq!(report.gated, 0, "--force must not consult the gate");
+    assert_eq!(report.generated, 1);
+    assert_eq!(producer.calls(), 1, "the model must actually have been run");
+    let records = store
+        .media_records(&MediaFilter::default())
+        .expect("records");
+    assert_eq!(records[0].outcome.text(), Some(CONFABULATION));
+}
+
+/// **A gated skip writes no generated text anywhere.** Not into the store, not
+/// into the graph, and not into either search channel — and `export_factset`
+/// stays byte-identical, which is the promise a `media build` must never break.
+#[test]
+fn a_gated_skip_writes_no_generated_text_anywhere() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+
+    let before_facts = serde_json::to_vec(&store.export_factset().expect("export")).expect("bytes");
+    let before_artifact =
+        serde_json::to_vec(&GraphArtifact::from_store(&store).expect("artifact")).expect("bytes");
+    let (before_nodes, before_edges) = (
+        store.node_count().expect("nodes"),
+        store.edge_count().expect("edges"),
+    );
+
+    let report = run_build_on(
+        &mut store,
+        &NeverGenerates(voxtral()),
+        "silence-16khz-mono-256ms.wav",
+        audio_only(),
+    );
+    assert_eq!(report.gated, 1);
+
+    assert_eq!(
+        serde_json::to_vec(&store.export_factset().expect("export")).expect("bytes"),
+        before_facts,
+        "export_factset must be byte-identical across a gated build",
+    );
+    assert_eq!(
+        serde_json::to_vec(&GraphArtifact::from_store(&store).expect("artifact")).expect("bytes"),
+        before_artifact,
+        "the published GraphArtifact must be byte-identical across a gated build",
+    );
+    assert_eq!(store.node_count().expect("nodes"), before_nodes);
+    assert_eq!(store.edge_count().expect("edges"), before_edges);
+
+    // Nothing in the store holds text under any producer.
+    for record in store
+        .media_records(&MediaFilter::default())
+        .expect("records")
+    {
+        assert_eq!(record.outcome.text(), None, "a skip must store no text");
+    }
+
+    // And a skip is unsearchable in **both** channels — including on its own
+    // path, which is the trap: a record with an empty snippet matching
+    // `silence.wav` would put the gated clip straight back into results.
+    for query in ["silence", "silence.wav", "world government", "assets"] {
+        let opted_in = search_channels(
+            &store,
+            query,
+            SearchOptions {
+                limit: 10,
+                include_generated: true,
+            },
+        )
+        .expect("search");
+        assert!(
+            opted_in.generated.is_empty(),
+            "`{query}` returned a gated record as a generated hit",
+        );
+    }
+}
+
+/// A signal that is *not* silence passes the gate and reaches the model. The
+/// converse of the headline test, and what stops the gate being "refuse
+/// everything" and still passing.
+#[test]
+fn a_tone_passes_the_gate_and_reaches_the_model() {
+    let mut store = Store::open_in_memory().expect("store");
+    let producer = StubProducer::new(voxtral(), "I think it's a good idea.");
+
+    let report = run_build_on(
+        &mut store,
+        &producer,
+        "tone-500hz-16khz-mono-256ms.wav",
+        audio_only(),
+    );
+    assert_eq!(report.gated, 0, "a 500 Hz tone is not silence");
+    assert_eq!(report.generated, 1);
+    assert_eq!(producer.calls(), 1);
+}
+
+/// A format the gate cannot measure **passes**. MP3 and FLAC are entropy-coded,
+/// and decoding them means the very model load the gate exists to avoid, so it
+/// abstains — and abstention must be a pass, because a false skip is the
+/// expensive mistake. The FLAC here is the same digital silence as the WAV.
+#[test]
+fn an_unmeasurable_format_passes_rather_than_being_refused() {
+    let mut store = Store::open_in_memory().expect("store");
+    let producer = StubProducer::new(voxtral(), CONFABULATION);
+
+    let report = run_build_on(
+        &mut store,
+        &producer,
+        "silence-16khz-mono-256ms.flac",
+        audio_only(),
+    );
+    assert_eq!(
+        report.gated, 0,
+        "the gate cannot decode FLAC, so it must not claim the clip is empty",
+    );
+    assert_eq!(producer.calls(), 1);
+}
+
+/// A gated blob is not re-measured on the next run: the skip record makes the
+/// pair already-decided, exactly as a generated record does. Incrementality
+/// applies to refusals too, or every build would re-read every silent clip.
+#[test]
+fn a_recorded_skip_makes_the_next_build_free() {
+    let mut store = Store::open_in_memory().expect("store");
+    let gate_only = &NeverGenerates(voxtral());
+
+    let first = run_build_on(
+        &mut store,
+        gate_only,
+        "silence-16khz-mono-256ms.wav",
+        audio_only(),
+    );
+    assert_eq!((first.gated, first.skipped_existing), (1, 0));
+
+    let second = run_build_on(
+        &mut store,
+        gate_only,
+        "silence-16khz-mono-256ms.wav",
+        audio_only(),
+    );
+    assert_eq!(
+        (second.gated, second.skipped_existing),
+        (0, 1),
+        "a second run must recognise the recorded refusal, not re-measure it",
+    );
+    assert_eq!(store.media_content_count().expect("count"), 1);
+}
+
+/// Turning the gate off (`[media] gate = false`, i.e.
+/// [`GateThresholds::disabled`]) sends the silent clip to the model, and does it
+/// through the same code path as an ordinary run rather than a second branch.
+#[test]
+fn a_disabled_gate_lets_silence_through() {
+    let mut store = Store::open_in_memory().expect("store");
+    let producer = StubProducer::new(voxtral(), CONFABULATION);
+
+    let report = run_build_on(
+        &mut store,
+        &producer,
+        "silence-16khz-mono-256ms.wav",
+        MediaBuildOptions {
+            thresholds: GateThresholds::disabled(),
+            ..audio_only()
+        },
+    );
+    assert_eq!(report.gated, 0);
+    assert_eq!(report.generated, 1);
+    assert_eq!(producer.calls(), 1);
 }
