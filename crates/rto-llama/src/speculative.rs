@@ -33,24 +33,37 @@
 //!   sees precisely the call sequence it sees without drafting — which is what
 //!   makes "same seed, same output" true rather than merely "same distribution".
 //!
-//! What remains outside the code's control is llama.cpp's own arithmetic: a
-//! batch of four tokens and four batches of one token are not guaranteed to
-//! produce bit-identical logits on a GPU, because the kernels differ. That is a
-//! property of the backend, not of this module, and it is why
-//! `tests/speculative.rs` checks the identity **empirically** against a real
-//! model rather than asserting it from first principles.
+//! **That is where the guarantee stops, and it stops short.** What remains
+//! outside this module's control is llama.cpp's own arithmetic: a batch of four
+//! tokens and four batches of one token do not produce bit-identical logits on a
+//! GPU, because the kernels differ — a matrix-vector product and a matrix-matrix
+//! product accumulate in a different order. `tests/batch_numerics.rs` measures
+//! that gap directly, and it is **not zero**. On the hybrid Qwen3.5 family it is
+//! large enough to flip a greedy argmax where the top two candidates are near a
+//! tie, and `tests/speculative.rs` catches those flips against a real model.
+//!
+//! So the honest statement of the invariant is: speculative decoding does not
+//! change the *distribution* being sampled — the sampler is driven identically,
+//! token for token — but it **can** change the *tokens*, because the floats it
+//! samples from came out of a differently-shaped batch. Fixing the seed does not
+//! reveal this and cannot prevent it; the divergence is in the backend's
+//! arithmetic, below the sampler entirely. Every claim here is measured, not
+//! argued: see [`switch_enables`] for what the measurement decided.
 //!
 //! # When it is on
 //!
-//! Automatically, whenever the served GGUF ships a draft head and the target
-//! request is text-only. There is nothing to configure because there is nothing
-//! to trade off: the output is the same either way (above), the head is already
-//! resident (below), and a model without one falls back by construction —
+//! **Never by default.** `ROTEIRO_SPECULATIVE=1` (or `on`/`true`/`yes`) is an
+//! opt-in, not a kill switch, and the paragraph above is the whole reason: a
+//! completion that changes because the decoder got faster is a change to be asked
+//! for deliberately, not one inherited by upgrading. With it on, and only then,
+//! it applies whenever the served GGUF ships a draft head and the target request
+//! is text-only — the head is already resident (below), and a model without one
+//! falls back by construction —
 //! [`draft_head_layers`] reads the GGUF's own `<arch>.nextn_predict_layers`, and
 //! even if that were wrong, llama.cpp refuses to build an MTP context for a model
-//! with no MTP layers and we take the plain path. `ROTEIRO_SPECULATIVE=0` is a
-//! kill switch for when a measurement (or a bug) needs the plain path on a model
-//! that has a head.
+//! with no MTP layers and we take the plain path. Anything other than a
+//! recognised "on" — unset, empty, misspelt — is the plain path, because an
+//! unrecognised value is not consent.
 //!
 //! Multimodal requests keep the plain path: `mtmd_eval_chunks` decodes the prompt
 //! itself, so the drafter's `process` hook cannot see those batches, and
