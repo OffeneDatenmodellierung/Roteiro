@@ -187,8 +187,29 @@ pub struct LlamaEngine {
 struct Loaded {
     name: String,
     /// On-disk GGUF size, used as a proxy for the model's memory footprint when
-    /// deciding what to evict (the real RSS is not cheaply available).
+    /// deciding what to evict (the real RSS is not cheaply available). Includes
+    /// `draft`'s file when there is one, so a split draft head is **charged to
+    /// the residency budget** rather than being memory the cache cannot see —
+    /// which is how issue #320's cost is surfaced instead of hidden.
     bytes: u64,
+    /// The **split** MTP draft head for this model (issue #320), when one is
+    /// installed beside its GGUF: `ggml-org`'s `mtp-*.gguf`, a whole model file
+    /// carrying only the head's tensors. `None` both for a model with no head at
+    /// all and for one that *bundles* its head in the main GGUF, where the head
+    /// is already resident and no second load exists.
+    ///
+    /// Resident rather than per-request, because every completion needs it and
+    /// the alternative is re-reading 1.7 GB per request — the same reasoning that
+    /// put [`Projector`] here.
+    ///
+    /// **Field order carries no meaning for this one**, unusually for this
+    /// struct, and that is worth saying rather than leaving to be inferred: a
+    /// draft model is an independent `LlamaModel`, not something built *over*
+    /// `model` the way a projector is, so nothing requires it to be freed before
+    /// or after its target. What it does share is the rule that binds every model
+    /// here — gone before the backend — and living in this entry is what gives it
+    /// that by construction, with nothing new for a caller to release.
+    draft: Option<Arc<LlamaModel>>,
     /// The multimodal projectors built over *this* loaded model, one per `mmproj`
     /// path (issue #301). Living in the model's own cache entry is what keys the
     /// cache by the model as well as by the projector: a different model — or the
@@ -261,6 +282,8 @@ impl Projector {
 /// eviction nor a concurrent release can pull them away mid-generation.
 struct Resolved {
     model: Arc<LlamaModel>,
+    /// The split MTP draft head, if this model has one; see [`Loaded::draft`].
+    draft: Option<Arc<LlamaModel>>,
     gen_lock: Arc<Mutex<()>>,
     projectors: Arc<KeyedSlot<PathBuf, Projector>>,
 }
@@ -405,9 +428,20 @@ impl LlamaEngine {
             let params = LlamaModelParams::default();
             let model = LlamaModel::load_from_file(&self.backend, path, &params)
                 .map_err(|e| EngineError::Inference(format!("load `{name}`: {e}")))?;
+            // A split MTP draft head installed beside the GGUF (issue #320). A
+            // head that will not load is not a failed model load: the request
+            // still has a perfectly good target model and decodes without one.
+            let draft = self.load_draft_head(path);
+            let draft_bytes = draft
+                .as_ref()
+                .map_or(0, |(_, draft_bytes)| *draft_bytes);
             cache.loaded.push(Loaded {
                 name: name.to_owned(),
-                bytes,
+                // The head is charged to the residency budget with the target it
+                // belongs to: it is loaded and freed with that entry, so the two
+                // are one footprint as far as eviction is concerned.
+                bytes: bytes.saturating_add(draft_bytes),
+                draft: draft.map(|(model, _)| Arc::new(model)),
                 // A freshly loaded model has no projectors yet: the first media
                 // request builds one, and it is bound to *this* model instance.
                 projectors: Arc::new(KeyedSlot::new()),
@@ -437,9 +471,39 @@ impl LlamaEngine {
         let l = &cache.loaded[idx];
         Ok(Resolved {
             model: Arc::clone(&l.model),
+            draft: l.draft.clone(),
             gen_lock: Arc::clone(&l.gen_lock),
             projectors: Arc::clone(&l.projectors),
         })
+    }
+
+    /// Load the split MTP draft head installed beside `path`, with its file size,
+    /// or `None` when there is none to load.
+    ///
+    /// Every way this can go wrong returns `None`: no `mtp.gguf` beside the
+    /// model, a file that will not load, or one that loads but turns out not to
+    /// carry a draft head after all. None of those is a reason to fail the
+    /// model load — the target model is fine and decoding without a head is
+    /// exactly what Roteiro did before issue #320.
+    ///
+    /// Runs under the cache lock, like the target model's own load.
+    fn load_draft_head(&self, path: &Path) -> Option<(LlamaModel, u64)> {
+        if !self.speculative_enabled {
+            return None;
+        }
+        let draft_path = crate::speculative::draft_gguf_beside(path)?;
+        let bytes = std::fs::metadata(&draft_path).ok()?.len();
+        let model =
+            LlamaModel::load_from_file(&self.backend, &draft_path, &LlamaModelParams::default())
+                .ok()?;
+        // Confirm rather than assume: the file is named by convention, so it has
+        // to say for itself that it is a draft head before it is treated as one.
+        // A `0` here means `mtp.gguf` is some other model, and keeping it
+        // resident would be pure waste.
+        if draft_head_layers(&model) == 0 {
+            return None;
+        }
+        Some((model, bytes))
     }
 
     /// The projector `mmproj` describes, over the model `resolved` names —
@@ -522,20 +586,33 @@ impl LlamaEngine {
     /// The metadata probe runs before the context is built so that a model
     /// without a head does not make llama.cpp log its "context type MTP
     /// requested but model doesn't contain MTP layers" warning once per request.
-    fn speculative_decoder<'m>(&self, model: &'m LlamaModel) -> Option<Mtp<'m>> {
-        if !self.speculative_enabled || draft_head_layers(model) == 0 {
+    fn speculative_decoder<'m>(
+        &self,
+        model: &'m LlamaModel,
+        draft: Option<&'m LlamaModel>,
+    ) -> Option<Mtp<'m>> {
+        // The head is in whichever file has one: the target GGUF for a bundled
+        // model, the sibling `mtp.gguf` for a split one. A model with neither
+        // takes the plain path.
+        let head = draft.unwrap_or(model);
+        if !self.speculative_enabled || draft_head_layers(head) == 0 {
             return None;
         }
-        Mtp::try_new(&self.backend, model, self.n_ctx)
+        Mtp::try_new(&self.backend, model, draft, self.n_ctx)
     }
 
     /// Text-only chat: apply the chat template, prime the prompt, and generate.
+    ///
+    /// Takes the whole [`Resolved`] rather than just its model, because this is
+    /// the path that may pair the model with a draft head (issue #320) and the
+    /// head is resolved from the cache alongside it.
     fn chat_text(
         &self,
-        model: &LlamaModel,
+        resolved: &Resolved,
         req: &ChatRequest,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<CompletionStats, EngineError> {
+        let model = &resolved.model;
         let messages = req
             .messages
             .iter()
@@ -573,7 +650,9 @@ impl LlamaEngine {
         // or a `ROTEIRO_SPECULATIVE=0` — simply gets the loop it always had, with
         // the same sampler and the same seed.
         let (completion_tokens, finish_reason) =
-            if let Some(mut mtp) = self.speculative_decoder(model) {
+            if let Some(mut mtp) =
+                self.speculative_decoder(model, resolved.draft.as_deref())
+            {
                 mtp.prime(&mut batch, &tokens)?;
                 self.speculative.activate();
                 crate::speculative::run_generation(
@@ -976,7 +1055,7 @@ impl Engine for LlamaEngine {
         }
 
         match (modality, mmproj.as_deref()) {
-            (None, _) => self.chat_text(model, req, on_token),
+            (None, _) => self.chat_text(&resolved, req, on_token),
             (Some(m), Some(mmproj)) => {
                 // Built on the first media blob for this (model, mmproj) pair and
                 // reused by every one after it (issue #301).

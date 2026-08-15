@@ -285,17 +285,48 @@ fn a_model_without_a_draft_head_falls_back_cleanly() {
     assert!(release_shared_backend(), "nothing outlives the engine");
 }
 
+/// One timed completion, in tokens per second.
+fn rate(engine: &LlamaEngine, prompt: &str) -> f64 {
+    let start = Instant::now();
+    let (text, tokens) = complete(engine, prompt);
+    let elapsed = start.elapsed().as_secs_f64();
+    assert!(!text.trim().is_empty());
+    f64::from(tokens) / elapsed
+}
+
+/// The median of a small sample.
+fn median(mut xs: Vec<f64>) -> f64 {
+    xs.sort_by(f64::total_cmp);
+    xs[xs.len() / 2]
+}
+
+/// How many timed pairs to run per prompt kind. Each pair is one plain and one
+/// speculative completion, back to back.
+const REPS: usize = 5;
+
 /// The before/after measurement (issue #320's deliverable), printed rather than
 /// asserted.
 ///
 /// Deliberately **not** an assertion: tok/s on a shared laptop GPU is not a
 /// contract, and a threshold here would either be so loose as to prove nothing or
-/// flaky enough to be disabled within a month. What is worth pinning — that the
-/// output is unchanged — is pinned above. This prints the numbers so a PR can
-/// quote them, per prompt kind, because the whole point is that they differ by
-/// prompt kind.
+/// flaky enough to be disabled within a month. What is worth pinning — how the
+/// two paths relate — is pinned above.
 ///
-/// `#[ignore]` because it runs six completions on a large model.
+/// **The protocol matters more than the numbers.** A developer laptop is a
+/// contended machine: a background build can halve the absolute tok/s of both
+/// arms while the run is in progress, and a single before-then-after measurement
+/// silently attributes that drift to the change. So this:
+///
+/// * holds **both** engines resident for the whole run, so neither arm pays a
+///   model load the other does not;
+/// * **interleaves** them — plain, speculative, plain, speculative — so load
+///   drift lands on both arms alike;
+/// * reports the **median of the per-pair ratios** rather than the ratio of the
+///   medians, because a ratio measured inside one pair is what cancels the drift;
+/// * prints the spread of the absolute rates, so a reader can see how contended
+///   the machine was rather than having to trust that it was not.
+///
+/// `#[ignore]` because it runs `3 × 2 × REPS` completions on a large model.
 #[test]
 #[ignore = "measurement: needs a large MTP model and takes minutes"]
 fn measure_speculative_speedup() {
@@ -305,33 +336,51 @@ fn measure_speculative_speedup() {
     };
     eprintln!("model: {}", path.display());
 
+    let plain = engine(&path, false);
+    let spec = engine(&path, true);
+    // Warm both models into residency and the file into the page cache, so the
+    // timed runs measure decoding rather than loading.
+    let _warm = complete(&plain, "Say OK.");
+    let _warm = complete(&spec, "Say OK.");
+
     for (kind, prompt) in PROMPTS {
-        let mut rates = [0.0f64; 2];
-        for (i, speculative) in [false, true].into_iter().enumerate() {
-            let engine = engine(&path, speculative);
-            // Warm the model into residency and the file into the page cache, so
-            // the timed run measures decoding rather than loading.
-            let _warm = complete(&engine, "Say OK.");
-
-            let start = Instant::now();
-            let (text, tokens) = complete(&engine, prompt);
-            let elapsed = start.elapsed().as_secs_f64();
-            assert!(!text.trim().is_empty());
-
-            rates[i] = f64::from(tokens) / elapsed;
-            let acceptance = engine
-                .speculative_stats()
-                .acceptance_rate()
-                .map_or_else(|| "n/a".to_owned(), |r| format!("{:.0}%", r * 100.0));
-            eprintln!(
-                "{kind:<10} {:>11}: {:6.2} tok/s ({tokens} tok in {elapsed:.2}s, \
-                 acceptance {acceptance})",
-                if speculative { "speculative" } else { "plain" },
-                rates[i],
-            );
-            drop(engine);
-            assert!(release_shared_backend(), "nothing outlives the engine");
+        let mut plain_rates = Vec::with_capacity(REPS);
+        let mut spec_rates = Vec::with_capacity(REPS);
+        let mut ratios = Vec::with_capacity(REPS);
+        // Acceptance is cumulative on the engine, so take the difference across
+        // this kind's completions: acceptance *per prompt kind* is the number
+        // that explains why the speedups differ.
+        let before = spec.speculative_stats();
+        for _ in 0..REPS {
+            let p = rate(&plain, prompt);
+            let s = rate(&spec, prompt);
+            ratios.push(s / p);
+            plain_rates.push(p);
+            spec_rates.push(s);
         }
-        eprintln!("{kind:<10} {:>11}: {:.2}x", "speedup", rates[1] / rates[0]);
+        let after = spec.speculative_stats();
+        let drafted = after.drafted - before.drafted;
+        let acceptance = if drafted == 0 {
+            "n/a".to_owned()
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let rate = (after.accepted - before.accepted) as f64 / drafted as f64;
+            format!("{:.0}%", rate * 100.0)
+        };
+        eprintln!(
+            "{kind:<10} plain {:6.2} tok/s [{:.1}–{:.1}]  speculative {:6.2} tok/s [{:.1}–{:.1}]  \
+             median ratio {:.2}x  (acceptance {acceptance})",
+            median(plain_rates.clone()),
+            plain_rates.iter().copied().fold(f64::MAX, f64::min),
+            plain_rates.iter().copied().fold(f64::MIN, f64::max),
+            median(spec_rates.clone()),
+            spec_rates.iter().copied().fold(f64::MAX, f64::min),
+            spec_rates.iter().copied().fold(f64::MIN, f64::max),
+            median(ratios),
+        );
     }
+
+    drop(plain);
+    drop(spec);
+    assert!(release_shared_backend(), "nothing outlives the engines");
 }

@@ -181,6 +181,11 @@ fn kill_switch_allows(value: Option<&str>) -> bool {
 ///
 /// A model whose architecture cannot be read, or that records no such key, has no
 /// draft head as far as this engine is concerned: `0`.
+///
+/// Works for both shapes the head ships in: a **bundled** GGUF records the key
+/// alongside everything else, and a **split** `mtp-*.gguf` — which is a whole
+/// model file carrying only the head's tensors — records it too, which is what
+/// lets [`draft_gguf_beside`]'s find be confirmed rather than assumed.
 #[must_use]
 pub fn draft_head_layers(model: &LlamaModel) -> u32 {
     let Ok(arch) = model.meta_val_str("general.architecture") else {
@@ -191,6 +196,33 @@ pub fn draft_head_layers(model: &LlamaModel) -> u32 {
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
         .unwrap_or(0)
+}
+
+/// The filename a **split** draft head is looked for under, beside the model it
+/// drafts for.
+pub(crate) const DRAFT_GGUF: &str = "mtp.gguf";
+
+/// The split draft head installed beside `model_gguf`, if there is one.
+///
+/// Not every MTP model bundles its head. `ggml-org/Qwen3.8-27B-GGUF` — the shape
+/// Roteiro's registry installs — ships it as a separate `mtp-*.gguf`, which is a
+/// complete model file containing only the head's tensors (about 1.7 GB at `Q4_0`
+/// for a 27B, against 19 GB for the target). The main GGUF of such a model
+/// records no `nextn_predict_layers` at all, so without this the model would
+/// simply fall back and the head would never be used.
+///
+/// Found by **convention rather than configuration**: `mtp.gguf` beside
+/// `model.gguf`, exactly as `mmproj.gguf` already sits beside it for a
+/// multimodal model. That keeps the registry, the config file and [`Served`]
+/// untouched — installing the file is all it takes — and it is checked, not
+/// trusted: the file still has to load and still has to report a draft head
+/// before anything drafts with it.
+///
+/// [`Served`]: crate::llama::Served
+#[must_use]
+pub fn draft_gguf_beside(model_gguf: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidate = model_gguf.parent()?.join(DRAFT_GGUF);
+    candidate.is_file().then_some(candidate)
 }
 
 /// Counters describing how a speculative generation actually went, so the
@@ -319,16 +351,32 @@ impl<'m> Mtp<'m> {
     /// helper that fails to initialise.
     ///
     /// Builds **both** contexts, because the target context is not the same one
-    /// a plain generation would use: see [`target_params`]. One `model` serves
-    /// both, because for a bundled MTP head they are the same model — the draft
-    /// context is a second, MTP-typed view of tensors that are already resident,
-    /// not a second load.
+    /// a plain generation would use — see the `n_rs_seq` note below.
+    ///
+    /// `draft_model` is where the head lives: `None` for a **bundled** GGUF
+    /// (Unsloth's `Qwen3.5-*-MTP-GGUF`), where the draft context is a second,
+    /// MTP-typed view of tensors already resident in `model` and there is no
+    /// second load at all; `Some` for a **split** one (`ggml-org`'s
+    /// `mtp-*.gguf`), where the head is its own file and so its own
+    /// [`LlamaModel`], which the engine keeps resident beside the target rather
+    /// than re-reading it per request.
     pub(crate) fn try_new(
         backend: &llama_cpp_2::llama_backend::LlamaBackend,
         model: &'m LlamaModel,
+        draft_model: Option<&'m LlamaModel>,
         n_ctx: u32,
     ) -> Option<Self> {
         use llama_cpp_2::context::params::LlamaContextType;
+
+        let head = draft_model.unwrap_or(model);
+        // llama.cpp's MTP drafter checks this with a `GGML_ASSERT`, which
+        // **aborts the process** rather than returning an error — so a mismatched
+        // pair has to be refused here, before the drafter is built. Only a split
+        // head can be mismatched: a bundled one is the same model, so the widths
+        // are equal by construction and this is free.
+        if head.n_embd_out() != model.n_embd() {
+            return None;
+        }
 
         // `n_rs_seq = 0`: the MTP context holds an attention KV cache for the
         // draft layers only and has no recurrent state to roll back, which is
@@ -340,7 +388,7 @@ impl<'m> Mtp<'m> {
         // llama.cpp declining here is expected for any model it will not draft
         // with, and it has already said why through the native-log bridge
         // `LlamaEngine` installs — so this is a fallback, not an error.
-        let draft = model.new_context(backend, draft_params).ok()?;
+        let draft = head.new_context(backend, draft_params).ok()?;
 
         // `n_rs_seq = DRAFT_MAX`: the target keeps that many snapshots of its
         // recurrent state so a rejected proposal can be *rolled back*. Qwen3.5 is
