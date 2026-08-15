@@ -12,9 +12,9 @@
 //! The suite is therefore split:
 //!
 //! * **Always-on tests** assert what holds in any build: an audio blob yields a
-//!   well-formed `file` node, binary bytes are never smuggled into `content` as
-//!   lossy UTF-8, an oversized clip is refused rather than truncated, and
-//!   flipping the `audio` toggle moves the extraction cache key so stale
+//!   well-formed `file` node, no `meta.content` is embedded while the toggle is
+//!   off, an oversized clip is refused rather than truncated, and flipping the
+//!   `audio` toggle moves the extraction cache key so stale
 //!   content-free facts cannot be served after the toggle changes. These need
 //!   no feature and no model, and are the coverage that actually protects the
 //!   path on every run. They also never *invoke* a model — see [`no_audio`] —
@@ -62,15 +62,31 @@ const FIXTURES: [&str; 6] = [
     "silence-44khz-mono-261ms.mp3",
 ];
 
+/// The extensions `is_audio` accepts, and nothing else.
+const ACCEPTED: [&str; 3] = ["wav", "mp3", "flac"];
+
 /// `is_audio` accepts exactly `wav`, `mp3` and `flac`, so the fixture set must
 /// cover all three — otherwise a format could quietly stop decoding and nothing
-/// here would notice.
+/// here would notice — and must contain nothing else, or a later test would be
+/// asserting over a file the extractor never classifies as audio.
+///
+/// The match is on `".{ext}"`, not `ext`: a suffix check would count
+/// `clip.notwav` as covering `wav`, and this same file deliberately treats
+/// `.wav.bak` as a *rejected* extension further down.
 #[test]
 fn the_fixture_set_covers_every_accepted_extension() {
-    for ext in ["wav", "mp3", "flac"] {
+    for ext in ACCEPTED {
         assert!(
-            FIXTURES.iter().any(|f| f.ends_with(ext)),
+            FIXTURES.iter().any(|f| f.ends_with(&format!(".{ext}"))),
             "no fixture covers the `{ext}` branch of `is_audio`",
+        );
+    }
+    for name in FIXTURES {
+        assert!(
+            ACCEPTED
+                .iter()
+                .any(|ext| name.ends_with(&format!(".{ext}"))),
+            "{name} is not an extension `is_audio` accepts",
         );
     }
 }
@@ -85,14 +101,23 @@ fn audio_blobs_become_well_formed_file_nodes() {
         let path = format!("assets/{name}");
         let facts = no_audio().extract(&path, "blob-id", &bytes);
 
-        let node = facts
-            .nodes
-            .iter()
-            .find(|n| n.kind == NodeKind::File)
-            .unwrap_or_else(|| panic!("{name}: no file node"));
+        // Exactly one node and no edges — not "at least one file node somewhere
+        // in the set", which would also hold if extraction started emitting
+        // spurious facts for a binary blob.
+        assert_eq!(
+            facts.nodes.len(),
+            1,
+            "{name}: an audio blob yields exactly one node, got {:?}",
+            facts.nodes.iter().map(|n| &n.key).collect::<Vec<_>>(),
+        );
+        assert!(facts.edges.is_empty(), "{name}: an audio blob has no edges");
+
+        let node = &facts.nodes[0];
+        assert_eq!(node.kind, NodeKind::File);
         assert_eq!(node.key, format!("file:{path}"));
         assert_eq!(node.name, name);
         assert_eq!(node.path.as_deref(), Some(path.as_str()));
+        assert_eq!(node.lang, None, "{name}: audio carries no language");
         assert_eq!(node.provenance, Provenance::Derived);
         assert_eq!(
             node.meta["bytes"].as_u64(),
@@ -107,28 +132,37 @@ fn audio_blobs_become_well_formed_file_nodes() {
     }
 }
 
-/// Audio must never reach `meta.content` as text. Without a model there is no
-/// transcript, and the fallback must be *no content* — not the blob decoded as
-/// lossy UTF-8, which would poison the embedding with mojibake and, for the
-/// silent fixtures, with kilobytes of NUL.
+/// With the `audio` toggle off there must be **no `meta.content` at all** — not
+/// merely no mojibake.
+///
+/// The weaker "if content exists, it must not contain U+FFFD or NUL" would pass
+/// while a transcript was being embedded against the toggle, which is precisely
+/// the failure #300 is about: model output stored as a `derived` fact. So the
+/// assertion is absence, and the byte inspection is kept only as the more
+/// legible message when something *is* there.
 #[test]
-fn audio_bytes_are_never_embedded_as_lossy_text() {
+fn no_content_is_embedded_for_audio_when_the_toggle_is_off() {
     for name in FIXTURES {
         let bytes = fixture(name);
         let facts = no_audio().extract(&format!("assets/{name}"), "blob-id", &bytes);
         let node = &facts.nodes[0];
-        if let Some(content) = node.meta.get("content").and_then(serde_json::Value::as_str) {
-            assert!(
-                !content.contains('\u{fffd}') && !content.contains('\0'),
-                "{name}: raw audio bytes leaked into meta.content",
-            );
-        }
+        let content = node.meta.get("content");
+        assert!(
+            content.is_none(),
+            "{name}: content was embedded with the `audio` toggle off: {content:?}",
+        );
     }
 }
 
 /// Extraction is a deterministic pure function of `(path, blob id, bytes)` — the
 /// core provenance invariant. Binary blobs are the interesting case: nothing
 /// about a clip may vary run to run.
+///
+/// The comparison is over the whole [`FactSet`], not just its nodes: determinism
+/// is claimed for everything extraction emits, so a change that perturbed edge
+/// order would otherwise slip through. And the set is asserted non-empty first,
+/// because two empty fact sets compare equal — a regression that stopped
+/// emitting facts for audio entirely would make this test *pass*.
 #[test]
 fn audio_extraction_is_deterministic() {
     for name in FIXTURES {
@@ -136,11 +170,11 @@ fn audio_extraction_is_deterministic() {
         let path = format!("assets/{name}");
         let once = no_audio().extract(&path, "blob-id", &bytes);
         let twice = no_audio().extract(&path, "blob-id", &bytes);
-        assert_eq!(
-            serde_json::to_string(&once.nodes).expect("serialize"),
-            serde_json::to_string(&twice.nodes).expect("serialize"),
-            "{name}: extraction is not deterministic",
+        assert!(
+            !once.nodes.is_empty(),
+            "{name}: extraction emitted nothing, so equality below would be vacuous",
         );
+        assert_eq!(once, twice, "{name}: extraction is not deterministic");
     }
 }
 
@@ -165,6 +199,18 @@ fn disabling_the_audio_toggle_yields_no_content_and_moves_the_cache_key() {
         off.env_tag(),
         Registry::default().env_tag(),
         "toggling `audio` off must change the cache key so cached transcripts are not reused",
+    );
+    // And the audio toggle must own its *own* bit. Without this, a registry that
+    // collapsed two toggles onto one bit would still satisfy the assertion above
+    // while letting a vision-off cache entry be served to an audio-off sync.
+    let vision_off = Registry::new(IngestConfig {
+        vision: false,
+        ..IngestConfig::default()
+    });
+    assert_ne!(
+        off.env_tag(),
+        vision_off.env_tag(),
+        "`audio` and `vision` must contribute distinct bits to the cache key",
     );
 }
 
@@ -197,6 +243,14 @@ fn an_oversized_clip_is_refused_rather_than_truncated() {
         node.meta["bytes"].as_u64(),
         u64::try_from(OVER_CAP).ok(),
         "the node must record the clip's real size even though it was not transcribed",
+    );
+    // "Not truncated" literally: the span still covers the whole blob rather than
+    // stopping at the cap.
+    let span = node.span.expect("the node carries a span");
+    assert_eq!(
+        u64::from(span.end),
+        u64::try_from(OVER_CAP).expect("fits u64"),
+        "the span must cover the whole clip, not stop at the cap",
     );
 }
 
@@ -281,6 +335,17 @@ mod transcription {
                  therefore transcribe — identically",
             );
         }
+
+        // Equality alone is satisfiable by a decoder that returns silence for
+        // everything — every clip would then transcribe the same, and every pair
+        // above would match. Different signals must reach the model *differently*.
+        assert_ne!(
+            transcripts["silence-16khz-mono-256ms.wav"],
+            transcripts["tone-500hz-16khz-mono-256ms.wav"],
+            "silence and a tone transcribed identically, which means the samples are not \
+             reaching the model — a decode that yields silence for everything would pass \
+             every other assertion here",
+        );
 
         assert!(
             release_media_engines(),

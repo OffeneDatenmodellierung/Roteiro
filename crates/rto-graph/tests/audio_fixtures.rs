@@ -79,6 +79,11 @@ fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
+/// How many fixtures [`fixtures`] must yield. Both tests here loop over that
+/// list, so an accidentally-empty list would make them pass while checking
+/// nothing at all; pinning the count is what stops a vacuous green.
+const FIXTURE_COUNT: usize = 6;
+
 #[test]
 fn fixtures_are_byte_reproducible() {
     let dir = fixture_dir();
@@ -87,6 +92,11 @@ fn fixtures_are_byte_reproducible() {
         std::fs::create_dir_all(&dir).expect("create fixture dir");
     }
 
+    assert_eq!(
+        fixtures().len(),
+        FIXTURE_COUNT,
+        "the fixture list changed size"
+    );
     for (name, bytes) in fixtures() {
         let path = dir.join(name);
         if write {
@@ -114,6 +124,11 @@ fn fixtures_are_byte_reproducible() {
 /// here rather than discovering it inside a three-gigabyte model run.
 #[test]
 fn fixtures_carry_the_magic_bytes_the_projector_sniffs_for() {
+    assert_eq!(
+        fixtures().len(),
+        FIXTURE_COUNT,
+        "the fixture list changed size"
+    );
     for (name, bytes) in fixtures() {
         assert!(
             bytes.len() >= 12,
