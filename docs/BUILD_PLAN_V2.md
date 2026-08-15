@@ -1,6 +1,6 @@
 # Roteiro — Build Plan V2
 
-Status: Proposed · Owner: The Roteiro Project Team · Last-modified: 2026-08-15
+Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-15
 Governing decisions: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md),
 [ADR-0012](adr/0012-analyzer-findings-artifact-model.md),
 [ADR-0013](adr/0013-agent-memory-artifact-store.md),
@@ -99,17 +99,22 @@ feature-gated and off by default.
 
 | Migration | Table | Lifetime | Evictable |
 |---|---|---|---|
-| N | analysis runs + findings (ADR-0012) | replaceable layer per `(analyzer, worktree)` | replaced wholesale, not aged out |
-| N+1 | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
-| N+2 | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
+| **8** ✅ | analysis runs + findings (ADR-0012) | replaceable layer per `(analyzer, worktree)` | replaced wholesale, not aged out |
+| N | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
+| N+1 | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
 
-**Numbers are assigned in landing order, not reserved in advance.** Whichever
-stage merges first takes `N`. Splitting memory across two migrations is
-intentional: different lifetimes and guarantees, so the eviction tier can later be
-altered without touching durable memory.
+**Numbers are assigned in landing order, not reserved in advance.** Stage 21 landed
+first and took **8**; the memory tiers take the next two free numbers whenever they
+merge. Splitting memory across two migrations is intentional: different lifetimes
+and guarantees, so the eviction tier can later be altered without touching durable
+memory.
+
+**Stages 22 and 24 need no migration** — `RunnerKind` shipped in migration 8 already
+naming all three backends, with the schema CHECK accepting them.
 
 **`EXTRACT_VERSION` does not change in Stages 21–25.** None of that work is
-extraction output. It *does* change in Stage 26, once — see the note there.
+extraction output (Stage 21 shipped without touching it, as required). It *does*
+change in Stage 26, once — see the note there.
 
 ---
 
@@ -129,7 +134,7 @@ stores; nothing in Track B blocks Track A.
 
 ---
 
-### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** · effort **S**
+### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** ✅ *delivered*
 
 **Goal:** land the whole value of the findings design with **no analyzer and no
 sandbox** — the seam, the schema, and a working ingest path. This is the stage that
@@ -153,6 +158,29 @@ makes CI ingestion and local execution the same code path.
   *disappears* on replacement; `export_factset` output is byte-identical before and
   after ingest (regression test); no new `nodes`/`edges` rows exist; findings never
   appear in `search` results ranked as `authored`.
+
+**Delivered in v1.10.0** (PR #293). What shipped, and what it changes for later
+stages:
+
+- `rto-exec` with `AnalyzerRunner` + `IngestRunner`. The preflight (`check_request`)
+  deliberately sits **outside** the trait, so a later backend cannot quietly skip
+  the consent/worktree checks.
+- **Migration 8** (`analysis_runs` + `findings`), appended; migrations 1–7 untouched.
+- `FindingKey` = `finding:<analyzer>:<analyzer's own ordered identity components>`
+  with escaping. The two analyzers named above are therefore **examples, not
+  schema** — a new analyzer needs no migration.
+- **`RunnerKind` already names all three backends** and the schema CHECK accepts
+  them, so **Stages 22 and 24 need no further migration.**
+- `execution` ships as a **default feature**, reconciling this plan's "behind a
+  feature" with ADR-0014's "ingest is always available": a named seam for later
+  stages that is nonetheless present in a stock install. `--no-default-features`
+  builds with no analyzer surface.
+- Owned-record cleanup was implemented, not inherited: `replace_findings_layer`
+  deletes the previous run's finding rows explicitly (cascade is defence in depth),
+  and `Store::orphan_finding_count()` exists so tests assert zero orphans directly.
+- Every DoD item above is pinned by a test; the artifact invariant was additionally
+  verified end-to-end through the CLI (ingest → list → re-ingest → removal), with
+  `nodes`/`edges` counts and the exported artifact digest unchanged throughout.
 
 ### Stage 22 — First analyzers: `cargo-audit`, then `semgrep` → **v1.11.0** · effort **M + M**
 
@@ -317,7 +345,7 @@ it currently rests on no code or benchmark evidence.
 
 | Release | Contains | Gate |
 |---|---|---|
-| v1.10.0 | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent |
+| v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
 | v1.11.0 | Stage 22 — cargo-audit + semgrep | Offline warm-cache run; named cold-cache failure |
 | v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
