@@ -130,7 +130,7 @@ change in Stage 26, once — see the note there.
 
 ## 6. Staged roadmap
 
-Dependency shape — three tracks, only one hard chain:
+Dependency shape — four tracks, only one hard chain:
 
 ```
 Track A (findings):  21 ✅ ──► 22 ──► 24
