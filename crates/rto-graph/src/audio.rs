@@ -49,11 +49,14 @@
 //! * duration is computed in **integer milliseconds** from the frame count and
 //!   the sample rate — symphonia's own `Time` carries a nanosecond remainder we
 //!   would have to round, and no floating point appears anywhere on this path;
-//! * tags are **sorted and de-duplicated**, never emitted in container order,
-//!   because a container may legitimately store them in any order;
+//! * tags are **sorted**, never emitted in container order, because a container
+//!   may legitimately store them in any order;
 //! * every metadata revision is merged (an MP3 can carry `ID3v2` at the head *and*
 //!   `ID3v1` at the tail), so the answer does not depend on which one a reader
-//!   happens to surface first.
+//!   happens to surface first — and tags are then **de-duplicated on
+//!   `(name, value)`**, so a fact two of those blocks both state is recorded once,
+//!   with a survivor chosen by byte order rather than by drain order
+//!   ([`read_tags`]).
 //!
 //! @rto:0016
 
@@ -174,6 +177,11 @@ pub struct AudioTag {
     pub value: String,
     /// The container's own key for this tag (`TPE1`, `ARTIST`, `IART`), kept so
     /// the normalisation is auditable rather than lossy.
+    ///
+    /// **Not part of a tag's identity.** Two rows with the same `name` and `value`
+    /// are one fact however many container keys stated it, so they are merged, and
+    /// the lowest `source_key` in byte order is the one recorded — see
+    /// [`read_tags`] for why that rule and not another.
     pub source_key: String,
 }
 
@@ -215,8 +223,10 @@ pub struct AudioFacts {
     /// recording nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<AudioDuration>,
-    /// Tags, sorted by `(name, value)` and de-duplicated, so the emission order is
-    /// a function of the content rather than of the container's layout.
+    /// Tags, sorted and de-duplicated on `(name, value)`, so both the emission
+    /// order and the set itself are a function of the content rather than of the
+    /// container's layout — one row per thing the file says, however many of its
+    /// tag blocks say it. See [`read_tags`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<AudioTag>,
 }
@@ -378,6 +388,39 @@ fn read_inner(bytes: &[u8], extension: Option<&str>) -> Option<AudioFacts> {
 /// `ID3v2` tag at the head and an `ID3v1` tag at the tail, and each arrives as its own
 /// revision. Sorting afterwards means the result does not depend on which
 /// revision a reader surfaces first, nor on the order tags appear within one.
+///
+/// # De-duplication is on `(name, value)`, not on the whole row
+///
+/// That same two-source MP3 is exactly why. Its artist arrives twice — once as
+/// `ID3v2`'s `TPE1`, once as `ID3v1`'s `ARTIST` — and both normalise to the same
+/// [`AudioTag::name`] and the same [`AudioTag::value`]. They are **one fact stated
+/// twice**, so they must collapse to one row; de-duplicating on the derived `Eq`
+/// would compare [`AudioTag::source_key`] too, keep both, and make
+/// [`AudioFacts::summary`] print `artist: …` on two consecutive lines.
+///
+/// Which `source_key` survives is decided by the sort, not by drain order: rows
+/// are ordered by the full `(name, value, source_key)` triple, and `dedup_by`
+/// keeps the **first** of each `(name, value)` run — so the lowest `source_key` in
+/// byte order wins. Two properties follow, and both are load-bearing:
+///
+/// * it is **total and deterministic**, because the ordering is over bytes that
+///   are themselves a function of the file. A rule like "keep whichever revision
+///   was drained first" would look identical on any single read while quietly
+///   making the exported factset depend on symphonia's revision ordering — which
+///   an upstream release could change without a byte of the file moving, breaking
+///   ADR-0016's byte-identical-facts requirement;
+/// * it deliberately **does not rank tag formats**. Preferring `ID3v2` over
+///   `ID3v1` as the richer source is a defensible instinct, but it cannot be
+///   implemented from what we have: nothing on a [`Tag`] says which reader
+///   produced it, so the preference would have to be *guessed* from the key's
+///   shape — a per-format table, which is the thing ADR-0016 adopted symphonia's
+///   normalisation to avoid.
+///
+/// The concrete consequence is worth stating outright rather than leaving to be
+/// discovered: `ARTIST` sorts before `TPE1`, so it is the `ID3v1` key that
+/// survives on such a file. Nothing about the *fact* changes with it — the name
+/// and value are identical by construction, and the discarded key is a second
+/// label for the same statement, not a second statement.
 fn read_tags(reader: &mut Box<dyn symphonia::core::formats::FormatReader + '_>) -> Vec<AudioTag> {
     let mut out: Vec<AudioTag> = Vec::new();
     {
@@ -394,8 +437,14 @@ fn read_tags(reader: &mut Box<dyn symphonia::core::formats::FormatReader + '_>) 
             }
         }
     }
+    // Sort on the full triple, so the run of rows sharing a `(name, value)` is
+    // contiguous *and* internally ordered — that second part is what makes the
+    // survivor below a function of the bytes rather than of the drain order.
     out.sort();
-    out.dedup();
+    // `dedup_by` passes the later element first and drops it when the closure
+    // returns true, so the earliest of each run — the lowest `source_key` — is the
+    // one kept.
+    out.dedup_by(|later, earlier| later.name == earlier.name && later.value == earlier.value);
     out.truncate(MAX_TAGS);
     out
 }

@@ -364,6 +364,77 @@ mod determinism {
         assert_eq!(facts.tags.len(), 1, "{:?}", facts.tags);
     }
 
+    /// **The same logical tag from two sources collapses to one row.**
+    ///
+    /// An MP3 carrying `ID3v2` at the head and `ID3v1` at the tail states its
+    /// artist twice, under two different container keys (`TPE1` and `ARTIST`).
+    /// They normalise to the same `name` and the same `value`, so they are one
+    /// fact — and de-duplicating on the whole struct, `source_key` included, would
+    /// keep both and make `summary()` print `artist: …` twice.
+    ///
+    /// Which key survives is fixed by the sort, not by which revision happened to
+    /// be drained first: rows are ordered by `(name, value, source_key)` and the
+    /// first of each `(name, value)` run is kept, so the lowest `source_key` in
+    /// byte order wins — `ARTIST` here. That is deliberately a rule about bytes
+    /// rather than about formats; see `read_tags` for why.
+    #[test]
+    fn the_same_tag_from_two_sources_is_one_row() {
+        let bytes = tagged::mp3_with_id3v2_and_id3v1("Hildegard");
+        let facts = rto_graph::audio::read(&bytes, Some("mp3")).expect("facts");
+
+        let artists: Vec<&super::AudioTag> =
+            facts.tags.iter().filter(|t| t.name == "artist").collect();
+        assert_eq!(
+            artists.len(),
+            1,
+            "one artist, stated twice in the file, must be one row: {:?}",
+            facts.tags,
+        );
+        assert_eq!(artists[0].value, "Hildegard");
+        assert_eq!(
+            artists[0].source_key, "ARTIST",
+            "the surviving provenance key is the lowest in byte order, not the \
+             first drained: {:?}",
+            facts.tags,
+        );
+
+        // The user-visible consequence, asserted where the user would see it.
+        let summary = facts.summary();
+        assert_eq!(
+            summary.matches("artist: Hildegard").count(),
+            1,
+            "the rendered summary must not repeat the line: {summary}",
+        );
+
+        // Both tags really did arrive — otherwise this would pass by reading only
+        // one of the two sources, which is a different bug wearing the same green.
+        assert!(
+            facts.tags.iter().any(|t| t.source_key == "TRACK"),
+            "the ID3v1 block must have been read at all: {:?}",
+            facts.tags,
+        );
+    }
+
+    /// The merge is a pure function of the bytes, `source_key` included: repeated
+    /// reads of a blob whose tags come from two sources are byte-identical.
+    ///
+    /// This is the determinism half of the de-duplication rule. A merge that kept
+    /// "whichever revision was drained first" would still pass the single-read
+    /// assertions above while making the exported factset depend on symphonia's
+    /// revision ordering — something an upstream release could change without a
+    /// byte of the file moving.
+    #[test]
+    fn a_two_source_merge_is_deterministic() {
+        let bytes = tagged::mp3_with_id3v2_and_id3v1("Hildegard");
+        let once = rto_graph::audio::read(&bytes, Some("mp3")).expect("facts");
+        let twice = rto_graph::audio::read(&bytes, Some("mp3")).expect("facts");
+        assert!(!once.tags.is_empty(), "nothing to compare");
+        assert_eq!(
+            serde_json::to_string(&once).expect("serialize"),
+            serde_json::to_string(&twice).expect("serialize"),
+        );
+    }
+
     /// Tag ordering is **byte order, not a locale collation**. `sort` on a
     /// `String` compares UTF-8 bytes, which is the same everywhere; a
     /// locale-sensitive collation orders `Ä` relative to `Z` differently
@@ -828,6 +899,42 @@ mod tagged {
         out.extend_from_slice(&synchsafe(u32::try_from(body.len()).expect("fits u32")));
         out.extend_from_slice(&body);
         out.extend_from_slice(&fixture("silence-44khz-mono-261ms.mp3"));
+        out
+    }
+
+    /// The committed MP3 carrying an `ID3v2` tag at the head **and** an `ID3v1`
+    /// tag at the tail — the layout that produces the same logical tag from two
+    /// sources, which is what a merged, de-duplicated view has to cope with.
+    ///
+    /// `artist` is deliberately the same string in both, so the two rows differ
+    /// only in the container's own key: `TPE1` from `ID3v2`, `ARTIST` from
+    /// `ID3v1`. Real files get here routinely — a tagger writes `ID3v2` and leaves
+    /// a legacy `ID3v1` block for old players.
+    ///
+    /// The `ID3v1` block is the format's fixed 128 bytes at end-of-file: `TAG`,
+    /// then 30-byte title/artist/album, a 4-byte year, a 30-byte comment and a
+    /// one-byte genre index. Only the artist field is filled; `0xFF` is the "no
+    /// genre" index, so symphonia emits no genre tag for it.
+    pub fn mp3_with_id3v2_and_id3v1(artist: &str) -> Vec<u8> {
+        /// A fixed-width, NUL-padded `ID3v1` text field.
+        fn field(text: &str, width: usize) -> Vec<u8> {
+            let mut out = text.as_bytes().to_vec();
+            assert!(
+                out.len() <= width,
+                "`{text}` overflows a {width}-byte field"
+            );
+            out.resize(width, 0);
+            out
+        }
+
+        let mut out = mp3_with_id3v2(&[("TPE1", artist)]);
+        out.extend_from_slice(b"TAG");
+        out.extend_from_slice(&field("", 30)); // title
+        out.extend_from_slice(&field(artist, 30)); // artist — the duplicate
+        out.extend_from_slice(&field("", 30)); // album
+        out.extend_from_slice(&field("", 4)); // year
+        out.extend_from_slice(&field("", 30)); // comment
+        out.push(0xFF); // genre: none
         out
     }
 
