@@ -20,9 +20,11 @@
 | [0012](0012-analyzer-findings-artifact-model.md) | Analyzer findings — a separate artifact model, never a provenance class | For Review |
 | [0013](0013-agent-memory-artifact-store.md) | Agent memory — a two-tier artifact store, decaying by evidence not by clock | For Review |
 | [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | For Review |
+| [0015](0015-generated-media-content-artifact-store.md) | Generated media content — its own artifact store, rebuildable on demand | For Review |
 
-> **ADRs 0012–0014 form one decision set** and are best read together. They share a
+> **ADRs 0012–0015 form one decision set** and are best read together. They share a
 > single structural rule: *knowledge that is not a derived/authored/inferred graph
-> fact gets its own artifact store, and never borrows the graph's trust.* 0012 and
-> 0013 apply that rule to analyzer findings and to agent memory; 0014 decides how
-> analyzers are executed. Their execution sequence is [BUILD_PLAN_V2](../BUILD_PLAN_V2.md).
+> fact gets its own artifact store, and never borrows the graph's trust.* 0012, 0013
+> and 0015 apply that rule to analyzer findings, to agent memory, and to
+> generatively-produced media content; 0014 decides how analyzers are executed.
+> Their execution sequence is [BUILD_PLAN_V2](../BUILD_PLAN_V2.md).
