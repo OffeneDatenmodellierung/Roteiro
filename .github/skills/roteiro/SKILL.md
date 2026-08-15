@@ -104,10 +104,35 @@ roteiro review --base main   # touched symbols' callers/callees, governing ADRs,
 roteiro check                # fail on ADR/annotation drift (also enforced by the pre-commit hook)
 ```
 
+## Proving a negative
+
+`grep` confirms presence; it cannot establish absence. A no-match only says your
+pattern missed — and you cannot see the vocabulary you failed to guess. `search`
+ranks over names, keys, paths and captured prose, so it finds the identifier you
+did not know existed.
+
+```sh
+roteiro search evict      # → lru_evict_count, ModelCache, budget_evicts_oldest_until_it_fits
+```
+
+That exact query once refuted an audit which had concluded, from
+`grep evict|ttl|prune|capacity|max_`, that “no eviction idiom exists anywhere”.
+
+Before writing *“there is no X”*, *“X does not exist yet”* or *“this would be the
+first X”*:
+
+1. Run `search` with two or three vocabularies — the concept, the likely
+   identifier, the likely test name.
+2. Still nothing? Report **NOT FOUND, naming the queries you ran** — not a flat
+   “does not exist”. Only one of those is honest.
+3. Cite the keys you relied on so the next reader can re-run the search.
+
 ## Rules of thumb
 
 - **Discover with `search`, then `explain`/`context` the key it returns.** Don't
   guess a key from memory — search for it.
+- **Never assert absence from `grep` alone** — see *Proving a negative*. A wrong
+  negative silently authorises rebuilding what already exists.
 - **Trust `derived` and `authored` facts; treat `inferred` edges as suggestions**
   and check their confidence.
 - **Before finishing a change, run `roteiro review` and `roteiro check`.** A
