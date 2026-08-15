@@ -12,8 +12,10 @@
 //! [`EngineSlot`] keeps the load-once-and-reuse behaviour but makes the engine
 //! **droppable at a point we choose**:
 //!
-//! - callers get an [`Arc`] handle, so the slot's lock is held only long enough
-//!   to hand one out — generation never serialises behind it;
+//! - callers get an [`Arc`] handle, and once the engine exists the slot's lock is
+//!   held only long enough to clone one out — generation never serialises behind
+//!   it. The one-time build itself *does* run under the lock, deliberately; see
+//!   [`EngineSlot::get_or_init`];
 //! - [`EngineSlot::release`] drops the slot's own handle at a deterministic
 //!   moment (the end of a CLI run), long before any C++ finalizer runs.
 //!
@@ -72,6 +74,15 @@ impl<T> EngineSlot<T> {
     /// "unavailable" and is remembered, so a missing model costs one probe per
     /// process rather than one per blob. The returned [`Arc`] keeps the engine
     /// alive for the caller even if [`EngineSlot::release`] runs meanwhile.
+    ///
+    /// **The lock is held across `init`**, which is what makes "at most once"
+    /// true rather than merely likely (pinned by
+    /// `tests::concurrent_callers_build_one_engine`). A caller arriving mid-build
+    /// therefore waits for that engine instead of starting a second load of the
+    /// same multi-gigabyte model — the intended trade: it happens once per
+    /// process, and a duplicate engine would mean a second set of GPU buffers to
+    /// account for. Every call after that takes the lock only long enough to clone
+    /// the [`Arc`], so inference never serialises behind the slot.
     pub(crate) fn get_or_init(&self, init: impl FnOnce() -> Option<T>) -> Option<Arc<T>> {
         // A poisoned lock only means some other caller's `init` panicked; the
         // slot itself is still consistent (the panic unwinds before any state is
