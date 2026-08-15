@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-08-15
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -112,6 +112,7 @@ A throwaway spike gated Tier A against the invariants (`ocrs 0.12.2`, `rten 0.25
 - **Models via the consent gate.** Tier A's `.rten` models and Tier B's VLM weights are registered in the ADR-0003 registry and pulled with consent into the model store — no implicit network fetch, offline-first preserved.
 - **Ingested image text/description is content, embedded like any other** — it produces `inferred` similarity edges (clearly labelled, confidence-scored) and participates in semantic dedup and the context cache. It is never authored fact.
 - **Tier B's shared engine must be *released* before the process exits.** The vision (and audio) engine is loaded once per process and reused across blobs, and it owns native llama.cpp/ggml state: on the Metal backend a loaded model's buffers stay registered in the device's residency set until the engine is **dropped**. Rust never drops `static`s, so holding the engine in a `static OnceLock` left that set non-empty when libc's C++ finalizers tore ggml-metal down at `exit()`; `ggml_metal_rsets_free` asserted and aborted a *successful* run with SIGABRT — exit 134 for any subcommand that described at least one image (issue #291). Extraction therefore keeps each engine in a releasable slot that [[crates/rto-graph/src/extract.rs#release_media_engines]] empties, and the CLI owns that teardown for the length of a run via [[crates/rto-graph/src/extract.rs#MediaEngineGuard]]. Recorded here, like the codec pin above, because parking the engine in a `static` is the obvious-looking way to write this and silently reintroduces the abort.
+- **One llama.cpp backend per process, shared by both modalities.** llama.cpp's backend is a process-global: `LlamaBackend::init()` refuses a second call while a first backend is alive. Each engine used to initialise its own, so in a build with both media features the *second* engine a run needed failed to construct — and because the extractors resolve an engine with `.ok()`, the second modality was **silently inert** rather than reported (issue #296). The backend is therefore started once and shared: engines hold an `Arc` handle from [[crates/rto-llama/src/backend.rs#shared_backend]] rather than a backend of their own. That also carries the release ordering above out of the engine struct without losing it — llama.cpp frees models before the backend, and [[crates/rto-llama/src/backend.rs#release_shared_backend]] simply **declines** while any engine still holds a handle, so "engines first, backend last" is a property of ownership rather than of call order. Both live in the same build-once/release-deterministically holder, [[crates/rto-llama/src/slot.rs#EngineSlot]]. Recorded here beside the release consequence because per-engine backend initialisation is the obvious-looking way to write this, and its failure mode is a missing capability rather than an error.
 - **Scope for v1:** Tier A (`image-ocr`) is the committed deliverable and ships first, since it is the default/common case and the gate passed. Tier B (`image-vision`) is designed here but sequenced after, as an opt-in enrichment.
 
 ## Advice Received
@@ -124,3 +125,4 @@ Project direction incorporated above: keep the **pure-Rust / no-C++-FFI** stance
 |---------|------|-------|
 | 1.0 | 2026-08-09 | Accepted. Two-tier image ingestion: Tier A pure-Rust OCR (`ocrs`/`rten`, feature `image-ocr`) as the default text tier; Tier B optional `candle` document-VLM understanding (feature `image-vision`) reusing ADR-0003. Rejects `rusto-rs` (MNN C++), `yingkitw/ocr` (immature/unvalidated), `oar-ocr` (ONNX Runtime C++), and the spliced `rten`+`candle`-TrOCR pipeline. Go/no-go spike passed: MSRV 1.94 build, no FFI, `cargo deny` clean at ~73 crates — provided `image` is pinned to minimal codecs (default features pull an AVIF→`libfuzzer-sys` NCSA chain). |
 | 1.1 | 2026-08-15 | Consequence added: the shared vision/audio engine must be released before process exit — a `static`-cached engine is never dropped and aborts a Metal build in ggml-metal's exit-time teardown (issue #291). No decision changed. |
+| 1.2 | 2026-08-15 | Consequence added: the llama.cpp backend is a process-global, so it is initialised once and shared by every engine — a second engine used to fail to construct and go silently inert (issue #296). Release ordering (engines, then backend) is now enforced by `Arc` ownership rather than by call order. No decision changed. |

@@ -32,6 +32,12 @@
 //! a SIGABRT at exit; Roteiro issue #291 is exactly that, and `rto-graph`'s
 //! `release_media_engines` is how its cached engines are given a deterministic
 //! end of life.
+//!
+//! The backend an engine holds is the process's **shared** one ([`crate::backend`],
+//! issue #296) — llama.cpp permits exactly one — so the "models before the
+//! backend" ordering now spans engines as well as struct fields: the backend is
+//! freed only once *no* engine borrows it, which is a fact about `Arc` ownership
+//! rather than a rule callers have to remember.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -109,11 +115,21 @@ pub struct Served {
 /// is never dropped at all leaves that residency set non-empty and aborts the
 /// process in ggml-metal's exit-time teardown (Roteiro issue #291), which is why
 /// callers must not park an engine in a `static`.
+///
+/// **The backend is shared, not owned** (issue #296). llama.cpp's backend is a
+/// process-global that may be initialised only once, so this is an [`Arc`] handle
+/// on the one [`crate::backend`] holds rather than a private backend of its own —
+/// which is what lets a second engine (a second modality, or a second model in
+/// `roteiro serve`) exist at all. Holding that handle is also what carries the
+/// ordering guarantee out of this struct without losing it: the backend cannot be
+/// freed while any engine is alive, because
+/// [`crate::backend::release_shared_backend`] declines while a handle is
+/// outstanding.
 pub struct LlamaEngine {
     cache: Mutex<ModelCache>,
     served: Vec<Served>,
     n_ctx: u32,
-    backend: LlamaBackend,
+    backend: Arc<LlamaBackend>,
 }
 
 /// One loaded model held in the residency cache.
@@ -159,11 +175,12 @@ fn lru_evict_count(sizes_lru_to_mru: &[u64], budget_bytes: u64) -> usize {
 impl LlamaEngine {
     /// Build an engine serving `served`, with an `n_ctx` context window
     /// (`0` selects the default). Keeps a single model resident; use
-    /// [`LlamaEngine::new_with_budget`] to hold several. Initialises the
-    /// llama.cpp backend once.
+    /// [`LlamaEngine::new_with_budget`] to hold several. Attaches to the
+    /// process's shared llama.cpp backend, starting it if this is the first
+    /// engine.
     ///
     /// # Errors
-    /// Returns an error if the llama.cpp backend fails to initialise.
+    /// Returns an error if the llama.cpp backend fails to start.
     pub fn new(served: Vec<Served>, n_ctx: u32) -> anyhow::Result<Self> {
         Self::new_with_budget(served, n_ctx, 0)
     }
@@ -173,20 +190,25 @@ impl LlamaEngine {
     /// least-recently-used past that cap. `0` keeps a single model (the default).
     ///
     /// # Errors
-    /// Returns an error if the llama.cpp backend fails to initialise.
+    /// Returns an error if the llama.cpp backend fails to start.
     pub fn new_with_budget(
         served: Vec<Served>,
         n_ctx: u32,
         budget_bytes: u64,
     ) -> anyhow::Result<Self> {
-        // Redirect llama.cpp + ggml's native logs through `tracing` *before*
-        // `LlamaBackend::init()` — the backend's device probe (e.g. ggml-metal's
+        // Redirect llama.cpp + ggml's native logs through `tracing` *before* the
+        // backend starts — its device probe (e.g. ggml-metal's
         // `ggml_metal_device_init` block) logs during init, so installing the
         // callback afterwards would let that first batch escape to stderr. The log
         // setters are global C functions that need no initialised backend, so
         // setting them first is safe and captures everything the model loads emit.
         install_native_log_bridge();
-        let backend = LlamaBackend::init()?;
+        // Not `LlamaBackend::init()`: llama.cpp's backend is a process-global, so
+        // a second engine initialising its own would be refused with
+        // `BackendAlreadyInitialized` and — since callers swallow that with
+        // `.ok()` — go silently inert (issue #296). Attach to the one the process
+        // already has, starting it only if there is none.
+        let backend = crate::backend::shared_backend()?;
         Ok(Self {
             backend,
             served,

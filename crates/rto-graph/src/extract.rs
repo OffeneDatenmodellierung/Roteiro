@@ -608,17 +608,21 @@ const ASR_MODEL: &str = "voxtral-mini-3b";
 
 /// The process-wide audio engine's slot; see [`asr_engine`].
 #[cfg(feature = "audio-transcribe")]
-static ASR_ENGINE: crate::engine_slot::EngineSlot<rto_llama::llama::LlamaEngine> =
-    crate::engine_slot::EngineSlot::new();
+static ASR_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
+    rto_llama::EngineSlot::new();
 
 /// The process-wide audio engine, built lazily from the installed `ASR_MODEL`
 /// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed —
 /// transcription is then inert (run `roteiro model pull voxtral-mini-3b`).
 ///
-/// Lives in an [`EngineSlot`](crate::engine_slot::EngineSlot) rather than a
+/// Lives in an [`EngineSlot`](rto_llama::EngineSlot) rather than a
 /// `static OnceLock` so [`release_media_engines`] can destroy it *before* the
 /// process exits — a `static` engine is never dropped, which aborts the process
 /// on Metal (issue #291).
+///
+/// It shares the process's one llama.cpp backend with [`vlm_engine`]
+/// (`rto_llama::backend`), so which of the two modalities a run happens to touch
+/// first no longer decides whether the other works at all (issue #296).
 #[cfg(feature = "audio-transcribe")]
 fn asr_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
     ASR_ENGINE.get_or_init(|| {
@@ -746,17 +750,21 @@ const VLM_MODEL: &str = "smolvlm-500m-gguf";
 
 /// The process-wide vision engine's slot; see [`vlm_engine`].
 #[cfg(feature = "image-vision")]
-static VLM_ENGINE: crate::engine_slot::EngineSlot<rto_llama::llama::LlamaEngine> =
-    crate::engine_slot::EngineSlot::new();
+static VLM_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
+    rto_llama::EngineSlot::new();
 
 /// The process-wide vision engine, built lazily from the installed
 /// `smolvlm-500m-gguf` (`model.gguf` + `mmproj.gguf`). `None` when the model is
 /// not installed — vision is then inert (run `roteiro model pull smolvlm-500m-gguf`).
 ///
-/// Lives in an [`EngineSlot`](crate::engine_slot::EngineSlot) rather than a
+/// Lives in an [`EngineSlot`](rto_llama::EngineSlot) rather than a
 /// `static OnceLock` so [`release_media_engines`] can destroy it *before* the
 /// process exits — a `static` engine is never dropped, which aborts the process
 /// on Metal (issue #291).
+///
+/// It shares the process's one llama.cpp backend with the audio engine
+/// (`rto_llama::backend`), so a run that touches both modalities gets two working
+/// engines rather than one working and one silently inert (issue #296).
 #[cfg(feature = "image-vision")]
 fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
     VLM_ENGINE.get_or_init(|| {
@@ -777,8 +785,9 @@ fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
     })
 }
 
-/// Destroy the process-wide media engines (vision, ASR) that extraction loaded,
-/// returning whether anything was released.
+/// Destroy the process-wide media engines (vision, ASR) that extraction loaded
+/// **and then** the llama.cpp backend they shared, returning whether anything was
+/// released.
 ///
 /// Extraction loads each GGUF engine once and reuses it for the whole run
 /// (`vlm_engine` / `asr_engine`). Those engines own native llama.cpp/ggml state:
@@ -797,14 +806,40 @@ fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
 ///
 /// Not a shutdown signal: an engine still borrowed by an in-flight extraction
 /// stays alive until that caller is done. Call it once the work is finished.
+///
+/// **Order matters, and is enforced rather than assumed.** Both engines share one
+/// process-wide llama.cpp backend (issue #296), which llama.cpp requires be freed
+/// *after* every model — so the backend is released last, here. It is not
+/// possible to get that wrong by editing this function: each engine holds an
+/// `Arc` on the backend, and `rto_llama::backend::release_shared_backend`
+/// declines while any handle is outstanding.
 // The return value is a fact about what happened, not a status to handle: exit
 // paths bind it to `_released` and move on, tests assert on it.
 #[must_use]
 pub fn release_media_engines() -> bool {
-    // Both are released; neither short-circuits the other.
+    // Every step runs; none short-circuits the others.
     let vision = release_vlm_engine();
     let audio = release_asr_engine();
-    vision || audio
+    // Last, once the engines that borrowed it are gone.
+    let backend = release_llama_backend();
+    vision || audio || backend
+}
+
+/// Release the shared llama.cpp backend, or nothing in a build that has no
+/// llama.cpp at all.
+///
+/// A `serve`-only build reaches `rto-llama` without going through this crate, so
+/// `roteiro`'s `main` additionally holds a `rto_llama::backend::SharedBackendGuard`;
+/// both call the same idempotent release, and each covers the builds the other
+/// cannot see.
+#[cfg(any(feature = "image-vision", feature = "audio-transcribe"))]
+fn release_llama_backend() -> bool {
+    rto_llama::backend::release_shared_backend()
+}
+
+#[cfg(not(any(feature = "image-vision", feature = "audio-transcribe")))]
+fn release_llama_backend() -> bool {
+    false
 }
 
 /// Release the vision engine, or nothing in a build without `image-vision`.
@@ -829,8 +864,9 @@ fn release_asr_engine() -> bool {
     false
 }
 
-/// Ties the lifetime of the process-wide media engines to a scope: dropping the
-/// guard runs [`release_media_engines`].
+/// Ties the lifetime of the process-wide media engines — and, after them, the
+/// llama.cpp backend they share — to a scope: dropping the guard runs
+/// [`release_media_engines`].
 ///
 /// Held for the whole of `roteiro`'s `main`, so the engines are destroyed while
 /// Rust is still running destructors — before the C++ finalizers that would
@@ -2970,6 +3006,38 @@ mod inner {
     }
 }
 
+/// A tiny in-memory PNG for the media-engine tests, so they need no fixture file
+/// on disk. A visible diagonal, so the model has *something* to describe.
+#[cfg(all(test, feature = "image-vision"))]
+fn tiny_png() -> Vec<u8> {
+    let img = image::RgbImage::from_fn(32, 32, |x, y| {
+        if x == y {
+            image::Rgb([0, 0, 0])
+        } else {
+            image::Rgb([255, 255, 255])
+        }
+    });
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode png");
+    png.into_inner()
+}
+
+/// Serialises the tests that drive the process-wide media engines.
+///
+/// The engine slots and the llama.cpp backend beneath them are process globals,
+/// and these tests both build and release them; the harness's default parallelism
+/// would otherwise let one test's [`release_media_engines`] land in the middle of
+/// another's engine lifetime, making both flaky. A poisoned lock only means an
+/// earlier test panicked, so recover rather than cascade.
+#[cfg(all(test, any(feature = "image-vision", feature = "audio-transcribe")))]
+fn serialise_media_engine_test() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Teardown cover for the real vision engine (issue #291), on a host that has
 /// the model installed.
 ///
@@ -2987,30 +3055,16 @@ mod inner {
 ///    (SIGABRT) after every test had "passed", exactly as `roteiro sync` did.
 ///
 /// The mechanism itself — release-once, idempotent, safe when uninitialised — is
-/// covered without any model or GPU in [`crate::engine_slot`]'s unit tests.
+/// covered without any model or GPU in `rto_llama::slot`'s unit tests.
 #[cfg(all(test, feature = "image-vision"))]
 mod vision_engine_teardown {
-    use super::{VLM_MODEL, release_media_engines, vlm_content};
-
-    /// A tiny in-memory PNG, so the test needs no fixture file on disk.
-    fn tiny_png() -> Vec<u8> {
-        let img = image::RgbImage::from_fn(32, 32, |x, y| {
-            // A visible diagonal, so the model has *something* to describe.
-            if x == y {
-                image::Rgb([0, 0, 0])
-            } else {
-                image::Rgb([255, 255, 255])
-            }
-        });
-        let mut png = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut png, image::ImageFormat::Png)
-            .expect("encode png");
-        png.into_inner()
-    }
+    use super::{
+        VLM_MODEL, release_media_engines, serialise_media_engine_test, tiny_png, vlm_content,
+    };
 
     #[test]
     fn describing_an_image_leaves_a_releasable_engine() {
+        let _serial = serialise_media_engine_test();
         let dir = crate::models::model_dir(VLM_MODEL);
         if !dir.join("model.gguf").exists() || !dir.join("mmproj.gguf").exists() {
             eprintln!("SKIP: `{VLM_MODEL}` not installed (run `roteiro model pull {VLM_MODEL}`)");
@@ -3025,6 +3079,120 @@ mod vision_engine_teardown {
         assert!(
             release_media_engines(),
             "the engine `vlm_content` cached must be released, not leaked to exit"
+        );
+        assert!(
+            !release_media_engines(),
+            "releasing again must be a no-op, so every exit path can call it"
+        );
+    }
+}
+
+/// Both modalities in one process (issue #296), on a host that has both models.
+///
+/// This is the case the shared backend exists for, and the one that could not be
+/// written before it: `LlamaBackend::init()` was per-engine, so whichever engine
+/// a run built second got `BackendAlreadyInitialized`, `.ok()` turned that into
+/// `None`, and the second modality was quietly missing. The first assertion below
+/// is that *both* engines now exist.
+///
+/// Compiled only when both media features are on, and **self-skipping** when
+/// either GGUF is absent, so CI — Ubuntu, no GPU, no models — compiles it and
+/// prints a skip. On a host that has them, three things are checked:
+///
+/// 1. both engines build in one process, and are the same backend's;
+/// 2. both actually run — the vision engine describes a generated PNG and the
+///    audio engine transcribes a generated WAV, so the audio path is exercised
+///    end to end (the coverage gap #292 could not close);
+/// 3. the **test binary's own exit status**, which is the sharpest guard of all:
+///    two engines' models are now resident on one backend, and if the backend
+///    were freed before them — or any engine leaked to `exit()` — this binary
+///    would abort in ggml-metal's teardown (SIGABRT, exit 134) *after* every
+///    test had "passed", exactly as `roteiro sync` did in #291.
+#[cfg(all(test, feature = "image-vision", feature = "audio-transcribe"))]
+mod two_modality_teardown {
+    use super::{
+        ASR_MODEL, VLM_MODEL, asr_content, asr_engine, release_media_engines,
+        serialise_media_engine_test, tiny_png, vlm_content, vlm_engine,
+    };
+
+    /// A quarter-second of 16-bit mono 16 kHz PCM in a WAV container, generated
+    /// here rather than committed: the repo carries no audio fixture, and a
+    /// couple of hundred lines of arithmetic is a better dependency than a binary
+    /// blob. A 440 Hz tone, not silence — near-silence makes an ASR model
+    /// hallucinate, and the point is to exercise decode + projection, not to
+    /// assert on words.
+    fn tiny_wav() -> Vec<u8> {
+        const SAMPLE_RATE: u32 = 16_000;
+        const SAMPLES: u32 = SAMPLE_RATE / 4;
+        const CHANNELS: u16 = 1;
+        const BITS: u16 = 16;
+
+        let byte_rate = SAMPLE_RATE * u32::from(CHANNELS) * u32::from(BITS / 8);
+        let block_align = CHANNELS * (BITS / 8);
+        let data_len = SAMPLES * u32::from(block_align);
+
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+        wav.extend_from_slice(&1u16.to_le_bytes()); // format: PCM
+        wav.extend_from_slice(&CHANNELS.to_le_bytes());
+        wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&BITS.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..SAMPLES {
+            let t = f64::from(i) / f64::from(SAMPLE_RATE);
+            #[allow(clippy::cast_possible_truncation)]
+            let sample = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        wav
+    }
+
+    /// Whether `name`'s GGUF pair is in the model store.
+    fn installed(name: &str) -> bool {
+        let dir = crate::models::model_dir(name);
+        dir.join("model.gguf").exists() && dir.join("mmproj.gguf").exists()
+    }
+
+    #[test]
+    fn both_modalities_get_a_working_engine_in_one_process() {
+        let _serial = serialise_media_engine_test();
+        if !installed(VLM_MODEL) || !installed(ASR_MODEL) {
+            eprintln!(
+                "SKIP: need both `{VLM_MODEL}` and `{ASR_MODEL}` installed \
+                 (run `roteiro model pull <name>`)"
+            );
+            return;
+        }
+
+        // (1) Construction, which is where #296 bit. Order is deliberate: the
+        // audio engine is the *second* one built, so it is the one that used to
+        // come back `None`.
+        assert!(vlm_engine().is_some(), "the vision engine must build");
+        assert!(
+            asr_engine().is_some(),
+            "the second engine must share the first's backend, not be inert (#296)"
+        );
+
+        // (2) Both actually infer. What the models make of a diagonal and a sine
+        // wave is not the subject — that each loaded a model on the shared
+        // backend and produced a completion is. `*_content` returns `None` on a
+        // blank result, so this asserts on reaching the model, not on its words.
+        let _description = vlm_content(&tiny_png());
+        let _transcript = asr_content(&tiny_wav());
+
+        // (3) Teardown, in the order llama.cpp requires: both engines, then the
+        // backend they shared. `release_media_engines` does that, and nothing
+        // here could have got it wrong — while either engine were alive, the
+        // backend release would simply have declined.
+        assert!(
+            release_media_engines(),
+            "two engines and a backend must all be released, not leaked to exit"
         );
         assert!(
             !release_media_engines(),
