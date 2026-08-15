@@ -1,0 +1,134 @@
+# Automated dependency updates with a minimum release age (ADR-0017).
+#
+# The policy: stay on the latest published version, but never adopt a release
+# younger than the minimum release age — **at least** 48 hours, currently 3 days —
+# so that a compromised publish has had time to be detected and yanked by someone
+# else. The point of this file is that the *updater* enforces that, not a reviewer
+# who has to remember it.
+#
+# ## Why Dependabot rather than Renovate
+#
+# Both can express a minimum release age for Cargo today. Dependabot wins on
+# three grounds that matter for a supply-chain control specifically:
+#
+#  1. **No new trust to grant.** Dependabot is native to GitHub — this file is
+#     the whole installation. Renovate needs either the Mend-hosted GitHub App
+#     (a third party with write access to the repository, which is a strange
+#     thing to add in the name of supply-chain security) or a self-hosted runner
+#     with a *classic* PAT — Renovate documents that neither `GITHUB_TOKEN` nor
+#     a fine-grained PAT will do — i.e. a long-lived broad-scope credential in
+#     repository secrets.
+#  2. **The security-fix bypass is free.** ADR-0017 §7 says a fix for an active
+#     advisory must be able to jump the queue. GitHub documents `cooldown` as
+#     applying to *version* updates only, never to security updates, so the
+#     bypass is structural. With Renovate it is another setting you have to
+#     remember (`vulnerabilityAlerts.minimumReleaseAge: null`) — discipline
+#     again, which is what this ADR exists to replace.
+#  3. **Cargo is a first-class `cooldown` ecosystem**, supporting `default-days`
+#     and all three per-semver-level options.
+#
+# Renovate's genuine advantages are sub-day granularity (`minimumReleaseAge` is
+# expressed in hours; `cooldown` only in whole days) and that it understands
+# Cargo's `[dev-dependencies]` as a distinct depType. The granularity turned out
+# not to matter — the configured hold is 3 whole days, see below — so only the
+# dev-dependency gap is a real loss. See the two limitations recorded below.
+#
+# ## Limitation 1 — dev-dependencies cannot be grouped separately here
+#
+# ADR-0017 asks for dev-dependencies grouped apart from production ones.
+# Dependabot's `groups.dependency-type` is documented as supported by bundler,
+# composer, mix, maven, npm and pip — **not cargo** — so this cannot be
+# expressed natively. Nor can it be faked with `patterns`: grouping matches on
+# dependency *name*, while "dev" is a per-manifest-section property, and in this
+# workspace `rusqlite`, `tokio` and `serde_json` are each *both* a production
+# dependency of one crate and a dev-dependency of another. A name pattern would
+# silently mis-sort the production copies.
+#
+# So it is not done, rather than done wrongly. Majors are separated (below),
+# which is where the review-attention argument actually bites; dev-dependency
+# separation is a convenience that Dependabot cannot honour for Cargo today.
+#
+# ## Limitation 2 — the age is enforced at the PR, not at the resolver
+#
+# This applies to **both** tools and is the real boundary of the mechanism.
+# `cooldown` decides when Dependabot opens a pull request. It does not pass a
+# minimum age to Cargo's resolver, so a *transitive* dependency that `cargo
+# update` picks up inside such a PR is not itself age-gated. The resolver-level
+# fix is `-Zmin-publish-age` (RFC 3923, tracking rust-lang/cargo#17009), which is
+# nightly-only and therefore unusable against this project's 1.94 stable MSRV;
+# Renovate's issue to wire it up (renovatebot/renovate#41659) is open and blocked
+# on the same thing. Revisit when it stabilises.
+#
+# ## Why 3 days and not 48 hours
+#
+# ADR-0017 says "at least 48 hours". That is a **floor, not a target** — and the
+# distinction matters here, because since 2026-07-14 Dependabot applies a **3-day**
+# cooldown by default. Configuring the literal 48 hours would mean setting the hold
+# *down* to two days, i.e. reducing safety relative to doing nothing at all, in
+# order to comply with a number in a document. The ADR was amended (v1.1) rather
+# than obeyed.
+#
+# So: **3 days**, matching the platform default, written out explicitly rather than
+# inherited. Explicit because a hold nobody can see is a hold nobody reviews — the
+# policy should be legible in the repository, not discoverable only by knowing what
+# GitHub currently defaults to.
+#
+# The rule for anyone changing these numbers is directional:
+#
+#   * Never below 2 (the ADR-0017 floor), and never below Dependabot's own default.
+#   * If the platform default rises above 3, raise these to match. Do **not** lower
+#     them to match a stale number in prose — that is the exact mistake v1.1 fixed.
+#   * Lowering below the floor is a change to ADR-0017, not a change to this file.
+
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    # The hold: 3 days, comfortably above ADR-0017's 48-hour floor. Set at every
+    # level explicitly rather than relying on `default-days` alone, so a reader
+    # can see the policy applies to majors, minors and patches alike without
+    # knowing the fallback rules. See "Why 3 days and not 48 hours" above before
+    # changing any of these.
+    cooldown:
+      default-days: 3
+      semver-major-days: 3
+      semver-minor-days: 3
+      semver-patch-days: 3
+    open-pull-requests-limit: 10
+    groups:
+      # Patch and minor together: individually low-risk, collectively tedious,
+      # and one green CI run is the same evidence for all of them.
+      cargo-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    # Majors are deliberately *not* grouped. Left ungrouped, Dependabot opens one
+    # PR per major bump, which is what a breaking change deserves: its own diff,
+    # its own CI run, and its own decision.
+    commit-message:
+      prefix: "chore(deps)"
+
+  # The workflows pin every action by commit SHA (with a version comment), which
+  # is the right posture but only if something keeps the pins current — an
+  # abandoned SHA pin is a stale action nobody is watching. Same hold.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(ci)"
