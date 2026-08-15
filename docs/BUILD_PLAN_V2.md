@@ -80,7 +80,7 @@ Verified against `main` at the time of writing:
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
 | Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
 | CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
-| Schema | **migrations 1–10 applied** (1–7 at V2's start) | V2 appends only; see §5. |
+| Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | **`10`** (`crates/rto-graph/src/extract.rs`) — bumped once by Stage 28 | Bumping it forces full re-extraction for every user. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
 | Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one. |
@@ -110,14 +110,14 @@ feature-gated and off by default.
 | Migration | Table | Lifetime | Evictable |
 |---|---|---|---|
 | **8** ✅ | analysis runs + findings (ADR-0012) | replaceable layer per `(analyzer, worktree)` | replaced wholesale, not aged out |
-| N | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
-| N+1 | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
+| **11** ✅ | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
+| N | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
 
 **Numbers are assigned in landing order, not reserved in advance.** Stage 21 landed
-first and took **8**; the memory tiers take the next two free numbers whenever they
-merge. Splitting memory across two migrations is intentional: different lifetimes
-and guarantees, so the eviction tier can later be altered without touching durable
-memory.
+first and took **8**; Stage 28 took **9** and **10**; episodic memory took **11**,
+and the cache tier takes the next free number whenever it merges. Splitting memory
+across two migrations is intentional: different lifetimes and guarantees, so the
+eviction tier can later be altered without touching durable memory.
 
 **Stages 22 and 24 need no migration** — `RunnerKind` shipped in migration 8 already
 naming all three backends, with the schema CHECK accepting them.
@@ -134,7 +134,7 @@ Dependency shape — four tracks, only one hard chain:
 
 ```
 Track A (findings):  21 ✅ ──► 22 ──► 24
-Track B (memory):    23 ─────────────► 25
+Track B (memory):    23 ✅ ──────────► 25
 Track C (lenses):    26      (independent of A and B throughout)
 Track D (media):     28 ✅ ──► 29
                                        └──► 27 (v2.0 hardening)
@@ -212,7 +212,7 @@ runner, honestly labelled.
   succeeds; offline with a cold cache fails with the named error and the exact
   prefetch command; `cargo deny` clean.
 
-### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.12.0** · effort **M**
+### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.10.x** ✅ *delivered*
 
 **Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
 no graph integration.
@@ -232,6 +232,51 @@ no graph integration.
 - **DoD:** memory survives `roteiro sync`/`rebuild` (the `imports` property);
   `export_factset` unchanged; nothing enters `nodes`/`edges`; supersession recorded
   explicitly and superseded rows excluded from live listing.
+
+**Delivered in #317.** Migration 11 (`agent_memory`), the `rto_graph::memory`
+store, and `roteiro memory add|list|forget`. Every DoD item above has a test;
+`EXTRACT_VERSION` is unchanged and asserted so, because memory is not extraction
+output.
+
+**Four deviations from ADR-0013's proposed SQL**, each deliberate:
+
+1. **`kind` is a closed `CHECK … IN`** over the ADR's own five names
+   (`lesson|attempt|decision|pattern|outcome`), not the free `TEXT` proposed. Free
+   text makes `lesson`/`Lesson`/`lessons` three kinds, none findable by a filter,
+   and a vocabulary that cannot be filtered cannot later be ranked — which Stage 25
+   needs. Follows the `analysis_runs.runner`/`isolation` and `media_content.kind`
+   precedent. *Cost:* a sixth kind is an append-only migration, not a string.
+2. **`superseded_at` is `TEXT`, not `INTEGER`.** An integer here would hold the
+   generation of supersession — which *is* `superseded_by`, since the successor's
+   id is the generation — so it would duplicate the column beside it. As `TEXT` it
+   is a human timestamp on `created_at`'s terms: written, displayed, never read.
+3. **Four extra `CHECK`s** making half-states unrepresentable, per migration 10's
+   precedent: `superseded_by`/`superseded_at` stand or fall together (a moment with
+   no successor is supersession *inferred*, the one thing the ADR rules out);
+   nothing supersedes itself; anchor evidence requires an anchor key; empty
+   scope/body refused.
+4. **`AUTOINCREMENT` kept, and it is load-bearing** — not decoration. A plain
+   `INTEGER PRIMARY KEY` is the rowid, and SQLite reuses the largest deleted one,
+   so forgetting the newest record would hand its number to the next write:
+   `ORDER BY id DESC` stops being newest-first *and* a surviving `superseded_by`
+   silently re-points at an unrelated record.
+
+**Scope is settled, so Stage 25 inherits it rather than re-litigating it**
+(ADR-0013 v1.1 §*Scope*). The owner's rule: *a lesson learned on a feature branch
+is valid on `main` only if the relevant association is merged to `main` in the
+same format — if not, then no.* That needs no new machinery, because **the anchor
+is the scope test**: a record applies to a tree when its anchor resolves there
+with the same blob, or when it has no anchor at all (a general lesson, repo-wide).
+Drifted, vanished or unverifiable ⇒ does not apply *here*, kept and marked.
+"Same format" means the blob matches, strictly — a reformat breaks it, failing
+toward *marked* rather than toward silently applying a lesson to code that moved.
+Consequently **`scope` is a coarse per-repo/project namespace and never a branch
+label**; no branch bookkeeping exists anywhere in the schema. Recall in Stage 25
+should rank on this predicate (`AnchorState::applies`), not invent a second one.
+
+**Out of scope, still:** the bounded cache tier, recall ranking, decay, and any
+`search` integration — all Stage 25. Memory currently reaches `search` through no
+channel at all, which is asserted rather than assumed.
 
 ### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L**
 
@@ -263,10 +308,15 @@ cache that stops sessions re-deriving what they already know.
   never silently evicted. `build_context` is *proven* to reconstruct identically
   (`context.rs` asserts `built == cached`), which is what makes cache eviction cost
   cycles rather than information.
-- **Schema:** migration N+2 — `agent_cache` with `bytes`, `generation`,
-  `last_used`, `hits`. No **persisted** access tracking exists today, so the
-  signal must be introduced with the table (the in-memory `ModelCache` tracks
-  recency by list order, which does not survive a process).
+- **Schema:** migration N (the next free number after **11**) — `agent_cache` with
+  `bytes`, `generation`, `last_used`, `hits`. No **persisted** access tracking
+  exists today, so the signal must be introduced with the table (the in-memory
+  `ModelCache` tracks recency by list order, which does not survive a process).
+- **Inherited from Stage 23, do not re-derive:** applicability is already decided —
+  `AnchorState::applies` (ADR-0013 v1.1 §*Scope*) is the whole rule, and it is what
+  `anchor_penalty` below should be built on. Do **not** add a branch or scope term
+  to recall: `scope` is a namespace, the anchor is the validity test, and a second
+  rule would give two answers to one question.
 - **Eviction:** **byte budget**, following the existing `ModelCache`
   (`crates/rto-llama/src/llama.rs:120-137`) rather than a new row-count cap —
   evict oldest-first on `(anchor_valid ASC, last_used ASC)` until the tier fits,
@@ -456,7 +506,7 @@ count and tags, from a **format read with no decoding and no model** (measured
 |---|---|---|
 | v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
 | v1.11.0 | Stage 22 — cargo-audit + semgrep | Offline warm-cache run; named cold-cache failure |
-| v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
+| v1.10.x ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met**; scope settled (the anchor is the scope test) |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
@@ -486,9 +536,11 @@ count and tags, from a **format read with no decoding and no model** (measured
 1. **Cache bound value** (Stage 25): the *unit* is settled — a byte budget,
    following `ModelCache`. The *number* is a judgement about tolerable
    `.git/roteiro/` growth and still needs deciding.
-2. **Memory scope** (Stage 23): the store is per-repo and shared across branches
-   and worktrees. Is a lesson learned on a feature branch valid on `main`? The
-   `scope` column exists; the policy does not.
+2. ~~**Memory scope** (Stage 23)~~ — **answered**, ADR-0013 v1.1 §*Scope*. A lesson
+   is valid in a tree only if the relevant association is present there **in the
+   same format**, so the **anchor is the scope test** and `scope` is a coarse
+   per-repo namespace, never a branch label. Shipped in #317; Stage 25's recall
+   ranks on `AnchorState::applies` rather than inventing a second rule.
 3. **Semantic recall** (post-Stage 25): memory recall is lexical + anchor + decay in
    this plan. A vector index would need migration, model/dimension versioning,
    retention, rebuild and storage-size policy — materially more than "persist

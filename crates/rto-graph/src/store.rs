@@ -6,6 +6,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::findings::{self, AnalysisRun, Finding, FindingsApplied, FindingsLayer};
 use crate::media::{self, MediaFilter, MediaKind, MediaRecord, MediaWrite, ProducerSummary};
+use crate::memory::{
+    self, MemoryError, MemoryFilter, MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite,
+};
 use crate::migrations;
 use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 use crate::provenance::Provenance;
@@ -994,6 +997,117 @@ impl Store {
             .collect())
     }
 
+    // --- Episodic agent memory (ADR-0013). A separate artifact store, on the
+    // same terms as findings and media above: these methods write `agent_memory`
+    // and nothing else — they *read* `nodes` to capture and check an anchor, and
+    // never write one. So `export_factset` stays a pure function of the tree
+    // across every memory write, and nothing an agent remembers can reach the
+    // `authored` relevance boost in `search`.
+    //
+    // These rows are not touched by `rebuild`, following the `imports` precedent:
+    // what has no generating function must not be destroyed by a re-derivation.
+    // ---
+
+    /// Record one memory, returning its id — the monotonic generation it was
+    /// written at.
+    ///
+    /// The anchor's blob and path, and the `sync_state` tree witness, are
+    /// captured **here, from the graph**, so a caller cannot record evidence the
+    /// node never carried. An anchor key naming no node is accepted and reads
+    /// back as [`crate::AnchorState::Vanished`].
+    ///
+    /// [`MemoryWrite::supersedes`] records the supersession explicitly, in the
+    /// same transaction as the successor: either both land or neither does.
+    ///
+    /// # Errors
+    /// Returns [`MemoryError::InvalidScope`] / [`MemoryError::InvalidBody`] /
+    /// [`MemoryError::InvalidConfidence`] for a record that could not be recalled,
+    /// [`MemoryError::NotFound`] or [`MemoryError::AlreadySuperseded`] for a bad
+    /// supersession target, or [`MemoryError::Store`] on a write failure — in
+    /// every case with nothing committed.
+    pub fn record_memory(&mut self, write: &MemoryWrite<'_>) -> Result<i64, MemoryError> {
+        let tx = self.conn.transaction().map_err(StoreError::from)?;
+        let id = memory::record(&tx, write)?;
+        tx.commit().map_err(StoreError::from)?;
+        Ok(id)
+    }
+
+    /// Memory records matching `filter`, newest generation first.
+    ///
+    /// Live records only unless [`MemoryFilter::include_superseded`] is set: a
+    /// superseded record drops out immediately and regardless of age, because the
+    /// test is a recorded pointer and not a clock.
+    ///
+    /// Each record's [`crate::AnchorState`] is computed against the **current**
+    /// graph on every call and is never stored.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or [`StoreError::Corrupt`]
+    /// if a row carries an unknown kind token.
+    pub fn memory_records(
+        &self,
+        filter: &MemoryFilter<'_>,
+    ) -> Result<Vec<MemoryRecord>, StoreError> {
+        memory::records(&self.conn, filter)
+    }
+
+    /// One memory record by id, or `None` if there is no such record.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or [`StoreError::Corrupt`]
+    /// if the row carries an unknown kind token.
+    pub fn memory_record(&self, id: i64) -> Result<Option<MemoryRecord>, StoreError> {
+        memory::get(&self.conn, id)
+    }
+
+    /// A [`MemoryListing`]: the records matching `filter`, plus the whole store's
+    /// live and superseded counts, so an empty result is legible as *nothing
+    /// matched* rather than *nothing is stored*.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or [`StoreError::Corrupt`]
+    /// if a row carries an unknown kind token.
+    pub fn memory_listing(&self, filter: &MemoryFilter<'_>) -> Result<MemoryListing, StoreError> {
+        let (live, superseded) = memory::counts(&self.conn)?;
+        Ok(MemoryListing {
+            schema: memory::MEMORY_SCHEMA,
+            records: self.memory_records(filter)?,
+            live,
+            superseded,
+        })
+    }
+
+    /// **The only way a memory record is ever removed.** Deletes it, and returns
+    /// `None` if there was no such record.
+    ///
+    /// Episodic memory is unbounded and never auto-evicted — no sweep, no TTL, no
+    /// capacity bound reaches this table — so an explicit call is the whole
+    /// reclamation story. It is also the privacy story: memory has no redaction
+    /// chokepoint, so a record that captured a token or a customer name is
+    /// removed by asking.
+    ///
+    /// Anything the deleted record had superseded becomes **live again** and is
+    /// named in [`MemoryForgotten::restored`]: leaving it superseded would hide it
+    /// on the authority of a record that no longer exists.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on a write failure; the transaction is
+    /// rolled back.
+    pub fn forget_memory(&mut self, id: i64) -> Result<Option<MemoryForgotten>, StoreError> {
+        let tx = self.conn.transaction()?;
+        let forgotten = memory::forget(&tx, id)?;
+        tx.commit()?;
+        Ok(forgotten)
+    }
+
+    /// How many memory records are stored, as `(live, superseded)`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn memory_counts(&self) -> Result<(u64, u64), StoreError> {
+        memory::counts(&self.conn)
+    }
+
     /// Findings whose owning run no longer exists. Always `0` in a healthy store;
     /// exposed so layer replacement can be asserted to clean up its own records
     /// rather than orphaning them.
@@ -1588,10 +1702,11 @@ mod tests {
         assert_eq!(store.node_count().expect("count"), 0);
         // Bumped to 8 by the analyzer-findings tables (ADR-0012), then to 9 by
         // the generated-media-content table (ADR-0015), then to 10 by that
-        // table's rebuild for the pre-generation gate's skip records. The
-        // literal is deliberate: a new migration should make someone confirm it
-        // is meant to apply on open, rather than passing silently.
-        assert_eq!(store.schema_version().expect("version"), 10);
+        // table's rebuild for the pre-generation gate's skip records, then to 11
+        // by the episodic agent-memory table (ADR-0013). The literal is
+        // deliberate: a new migration should make someone confirm it is meant to
+        // apply on open, rather than passing silently.
+        assert_eq!(store.schema_version().expect("version"), 11);
     }
 
     #[test]
@@ -1762,7 +1877,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 10);
+            assert_eq!(store.schema_version().expect("version"), 11);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

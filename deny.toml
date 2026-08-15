@@ -7,6 +7,28 @@
 # was invisible to both the licence and the advisory check.
 
 [licenses]
+# Every entry up to "ISC" is permissive. `MPL-2.0` is not, and it is here by
+# **decision, not oversight** — ADR-0016 admits it, and this comment is the record
+# a future reader is owed:
+#
+# * It entered for **`symphonia`** (ADR-0016): all seven `symphonia-*` crates are
+#   MPL-2.0. They provide the audio *format* read — codec, rate, bit depth,
+#   channels, duration, tags — behind the opt-in `audio-metadata` feature. Every
+#   transitive dependency they pull (`lazy_static`, `log`, `bitflags`, `bytemuck`,
+#   `smallvec`, `num-complex`, `num-traits`, `regex-lite`, `extended`) was already
+#   inside this allow-list, so MPL-2.0 was the sole addition.
+# * MPL-2.0 is **file-level (weak) copyleft**: the obligation attaches to the
+#   MPL-licensed *files themselves*. Modifying one obliges publishing that file's
+#   modifications; shipping binaries obliges the notice and the availability of
+#   those files' source. Using the crate unmodified — the expected and current
+#   case — reduces the obligation to keeping the notice.
+# * It therefore **does not reach Roteiro's own source**. Linking an MPL-2.0 crate
+#   does not license this repository under MPL-2.0, and the project's
+#   `MIT OR Apache-2.0` dual licence is untouched.
+#
+# If a *second* MPL-2.0 crate ever appears in the tree, re-run that reasoning for
+# it — this entry blessed a considered case, not the licence in general.
+#
 # Every entry up to "ISC" is a permissive **software** licence.
 #
 # `CDLA-Permissive-2.0` is admitted by **decision, not oversight** (ADR-0017,
@@ -48,6 +70,7 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "ISC",
+    "MPL-2.0",
     "CDLA-Permissive-2.0",
 ]
 
