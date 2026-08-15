@@ -47,6 +47,16 @@
 //! they are expensive to reproduce (a 715 MB projector load per blob, issue #301)
 //! and are not derivable from source alone.
 //!
+//! # Two outcomes, both recorded
+//!
+//! A record holds a [`MediaOutcome`], not a string. Either a model ran and
+//! produced text, or the [pre-generation gate](gate) refused the blob before any
+//! model was loaded — and **the refusal is stored too**, with the value it
+//! measured, so `media status` can distinguish *not generated* from *generated
+//! nothing*. The two cases are variants of one enum rather than a nullable text
+//! column precisely so that a skip cannot carry generated text and a generated
+//! record cannot claim a measurement.
+//!
 //! @rto:0015
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -54,7 +64,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::StoreError;
 
+pub mod gate;
 pub mod producers;
+
+pub use gate::{GateReason, GateThresholds, MediaSkip};
 
 /// The prefix of every rendered [`ProducerId`].
 pub const MEDIA_PRODUCER_PREFIX: &str = "media";
@@ -420,7 +433,59 @@ pub struct GeneratedContent {
     pub confidence: Option<f64>,
 }
 
-/// One stored record: a blob, the producer that described it, and what it said.
+/// What one producer run concluded about one blob: text, or a recorded refusal.
+///
+/// The two cases are a **sum type, not a nullable field**, because the invariant
+/// that matters is mutual exclusion: a gated skip must write no generated text
+/// anywhere, and a generated record must not claim a measurement it never made.
+/// Expressed this way, neither is representable — a `text` column and a
+/// `skip_reason` column would leave both mistakes a `NULL` away. (The store
+/// enforces the same thing again in SQL, because the table outlives this type.)
+///
+/// Serialises internally tagged, so every record's JSON says which it is:
+/// `{"outcome":"generated","text":…}` or
+/// `{"outcome":"skipped","reason":"silence","value":0.0,"threshold":0.0001}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "lowercase")]
+pub enum MediaOutcome {
+    /// A model ran and returned this text.
+    Generated(GeneratedContent),
+    /// The pre-generation gate refused the blob; **no model was loaded**. See
+    /// [`gate`].
+    Skipped(MediaSkip),
+}
+
+impl MediaOutcome {
+    /// The generated text, or `None` for a gated skip.
+    ///
+    /// The only way to reach a record's text, so every consumer — search,
+    /// the CLI, the explorer — has to acknowledge that a record may have none.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Generated(content) => Some(content.text.as_str()),
+            Self::Skipped(_) => None,
+        }
+    }
+
+    /// The recorded refusal, or `None` when a model actually ran.
+    #[must_use]
+    pub fn skip(&self) -> Option<MediaSkip> {
+        match self {
+            Self::Generated(_) => None,
+            Self::Skipped(skip) => Some(*skip),
+        }
+    }
+
+    /// Whether the gate refused this blob.
+    #[must_use]
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped(_))
+    }
+}
+
+/// One stored record: a blob, the producer that described it, and what it said —
+/// or why nothing was said.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaRecord {
     /// Git blob id of the source media.
@@ -450,9 +515,9 @@ pub struct MediaRecord {
     /// When the record was written, as `SQLite`'s `datetime('now')`. Written for
     /// humans and for `media status`; no ordering or policy depends on it.
     pub produced_at: String,
-    /// The generated text and its confidence signal.
+    /// What the run concluded: generated text, or a recorded gate refusal.
     #[serde(flatten)]
-    pub content: GeneratedContent,
+    pub outcome: MediaOutcome,
 }
 
 /// A narrowing filter for [`crate::Store::media_records`]. All-`None` means
@@ -474,12 +539,14 @@ pub struct MediaWrite<'a> {
     pub blob_id: &'a str,
     /// Repository path the blob was seen at.
     pub path: &'a str,
-    /// Who produced the text.
+    /// Who produced the text — or who *would* have, on a gated skip: a refusal
+    /// belongs to a producer identity too, so changing the model re-evaluates
+    /// the blob instead of inheriting the old identity's skip.
     pub producer: &'a Producer,
     /// Version of the tool doing the writing.
     pub tool_version: &'a str,
-    /// The text and its confidence signal.
-    pub content: &'a GeneratedContent,
+    /// What the run concluded.
+    pub outcome: &'a MediaOutcome,
     /// Replace an existing record for this exact `(blob, producer)` instead of
     /// leaving it alone. Only `media build --force` sets this: a *different*
     /// producer never mutates, it writes a new record.
@@ -497,10 +564,30 @@ pub struct ProducerSummary {
     pub model: String,
     /// Its quantisation.
     pub quantisation: String,
-    /// How many records it owns.
+    /// How many records it owns, skips included.
     pub records: u64,
+    /// How many of those are gate refusals rather than generated text. A
+    /// producer whose records are *all* skips has been run and has said nothing,
+    /// which is a very different report from having no records at all.
+    pub skipped: u64,
     /// The most recent `produced_at` among them.
     pub latest: String,
+}
+
+/// One gate refusal, as `media status` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkipEntry {
+    /// Git blob id of the refused source media.
+    pub blob_id: String,
+    /// Repository path it was seen at.
+    pub path: String,
+    /// The modality that would have described it.
+    pub kind: MediaKind,
+    /// The producer identity the refusal was recorded under.
+    pub producer_id: ProducerId,
+    /// Why, and what was measured.
+    #[serde(flatten)]
+    pub skip: MediaSkip,
 }
 
 /// The `media status` report.
@@ -520,6 +607,13 @@ pub struct MediaStatus {
     /// makes "0 records" legible as *cannot generate* rather than *nothing to
     /// generate*.
     pub available_producers: Vec<ProducerSummaryAvailable>,
+    /// Every blob the [pre-generation gate](gate) refused, with the value it
+    /// measured, ordered by `(producer, blob)`.
+    ///
+    /// This is the field that keeps a skip from being an invisible hole: an
+    /// operator reading `media status` sees *"assets/silence.wav — below silence
+    /// threshold (rms=0)"*, not a blob that silently failed to appear.
+    pub skipped: Vec<SkipEntry>,
 }
 
 /// How many blobs of one modality the current tree holds, and how many of them
@@ -530,8 +624,13 @@ pub struct CandidateCount {
     pub kind: MediaKind,
     /// Distinct media blobs in the tree (within the size cap).
     pub blobs: u64,
-    /// How many of those have at least one record.
+    /// How many of those have at least one record carrying **generated text**.
     pub described: u64,
+    /// How many of those the [gate](gate) refused, and no producer has since
+    /// described. Counted apart from `described` deliberately: a skipped blob is
+    /// not a described one, and folding the two together would restore exactly
+    /// the ambiguity the recorded skip exists to remove.
+    pub skipped: u64,
 }
 
 /// A producer this binary could run, as reported by `media status`.
@@ -565,8 +664,12 @@ pub trait MediaProducer {
     fn generate(&self, path: &str, bytes: &[u8]) -> Option<GeneratedContent>;
 }
 
-/// Which modalities a `media build` should run, and whether to redo work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which modalities a `media build` should run, whether to redo work, and what
+/// the [pre-generation gate](gate) refuses.
+///
+/// Not `Eq`, because the thresholds are floats. Nothing compares two option sets
+/// for equality; they are read, not matched.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MediaBuildOptions {
     /// Generate audio transcripts.
     pub audio: bool,
@@ -575,16 +678,24 @@ pub struct MediaBuildOptions {
     /// Regenerate even where a record already exists for the current producer,
     /// replacing it in place. Without this, `build` is incremental: a second run
     /// with the same producer does no work.
+    ///
+    /// **Also overrides the gate.** Asking explicitly for a silent clip to be
+    /// transcribed is a legitimate request — to see what the model says, or
+    /// because the operator disagrees with a threshold — and a flag named
+    /// `--force` that quietly declined would be worse than no flag at all.
     pub force: bool,
+    /// What the gate refuses. [`GateThresholds::disabled`] turns it off.
+    pub thresholds: GateThresholds,
 }
 
 impl Default for MediaBuildOptions {
-    /// Both modalities, incremental.
+    /// Both modalities, incremental, gate on at its conservative defaults.
     fn default() -> Self {
         Self {
             audio: true,
             vision: true,
             force: false,
+            thresholds: GateThresholds::default(),
         }
     }
 }
@@ -613,7 +724,14 @@ pub struct MediaBuildReport {
     /// Pairs skipped because a record for that exact producer already existed —
     /// the number that makes incrementality visible.
     pub skipped_existing: usize,
+    /// Pairs the [pre-generation gate](gate) refused **before loading a model**,
+    /// each of which wrote a skip record naming its measured value.
+    #[serde(default)]
+    pub gated: usize,
     /// Pairs where the model was invoked and returned nothing usable.
+    ///
+    /// Distinct from `gated`: this one *did* load a model and run it. The two
+    /// counts are what make the projector saving legible in a build report.
     pub empty: usize,
     /// Producer ids that ran, ordered.
     pub producers: Vec<ProducerId>,
@@ -691,6 +809,12 @@ pub fn media_blobs(repo: &crate::Repo) -> Result<Vec<MediaBlob>, crate::GitError
 /// its output is a **new record beside the old one**, never an overwrite. Only
 /// [`MediaBuildOptions::force`] replaces, and only for the identical producer.
 ///
+/// Before a producer is asked for anything, the [pre-generation gate](gate)
+/// measures the blob. A refusal writes a **skip record** — the reason and the
+/// measured value — and `generate` is never called, which is what keeps a
+/// repository of silent or blank assets from loading a model at all. `--force`
+/// overrides it.
+///
 /// `read` supplies a blob's bytes — [`crate::Repo::read_blob`] in production, a
 /// closure in tests.
 ///
@@ -738,6 +862,37 @@ where
                 report.empty += 1;
                 continue;
             };
+            // **The pre-generation gate**, evaluated here and not inside the
+            // producer. This is the whole point of its position: `generate` is
+            // never called, and the llama.cpp engines are built lazily *inside*
+            // `generate` (see `producers`), so a repository of silent or blank
+            // assets loads no model at all — no 715 MB projector, no backend
+            // init, nothing (ADR-0015; issue #301).
+            //
+            // `--force` skips the check outright rather than recording and then
+            // overriding: an operator who asked for the model to run wants the
+            // model to run.
+            let gated = if opts.force {
+                None
+            } else {
+                gate::evaluate(blob.kind, &bytes, opts.thresholds)
+            };
+            if let Some(skip) = gated {
+                // Recorded, not silent: the blob gets a record stating why and
+                // what was measured, so `media status` can tell an operator
+                // "skipped: below silence threshold (rms=0)" instead of leaving
+                // an indistinguishable hole.
+                store.record_media_content(&MediaWrite {
+                    blob_id: &blob.blob_id,
+                    path: &blob.path,
+                    producer: identity,
+                    tool_version,
+                    outcome: &MediaOutcome::Skipped(skip),
+                    replace: false,
+                })?;
+                report.gated += 1;
+                continue;
+            }
             let Some(content) = producer.generate(&blob.path, &bytes) else {
                 report.empty += 1;
                 continue;
@@ -751,7 +906,7 @@ where
                 path: &blob.path,
                 producer: identity,
                 tool_version,
-                content: &content,
+                outcome: &MediaOutcome::Generated(content),
                 replace: opts.force,
             })?;
             if written {
@@ -776,6 +931,7 @@ pub fn status(store: &crate::Store, blobs: &[MediaBlob]) -> Result<MediaStatus, 
     let mut candidates = Vec::new();
     for kind in [MediaKind::Audio, MediaKind::Vision] {
         let described_ids = store.described_media_blobs(kind)?;
+        let gated_ids = store.gated_media_blobs(kind)?;
         let in_tree: std::collections::BTreeSet<&str> = blobs
             .iter()
             .filter(|b| b.kind == kind)
@@ -785,10 +941,17 @@ pub fn status(store: &crate::Store, blobs: &[MediaBlob]) -> Result<MediaStatus, 
             .iter()
             .filter(|id| described_ids.contains(**id))
             .count();
+        // A blob one producer refused and another described counts as described,
+        // not skipped: it has content, so the operator has what they came for.
+        let skipped = in_tree
+            .iter()
+            .filter(|id| gated_ids.contains(**id) && !described_ids.contains(**id))
+            .count();
         candidates.push(CandidateCount {
             kind,
             blobs: u64::try_from(in_tree.len()).unwrap_or(u64::MAX),
             described: u64::try_from(described).unwrap_or(u64::MAX),
+            skipped: u64::try_from(skipped).unwrap_or(u64::MAX),
         });
     }
     let stored = store.media_producer_summaries()?;
@@ -805,12 +968,28 @@ pub fn status(store: &crate::Store, blobs: &[MediaBlob]) -> Result<MediaStatus, 
         })
         .collect();
     available_producers.sort_by(|a, b| a.producer_id.cmp(&b.producer_id));
+    // Read from the records themselves rather than from a counter, so a skip
+    // reported here is one that is actually stored.
+    let skipped = store
+        .media_records(&MediaFilter::default())?
+        .into_iter()
+        .filter_map(|record| {
+            record.outcome.skip().map(|skip| SkipEntry {
+                blob_id: record.blob_id,
+                path: record.path,
+                kind: record.producer.kind,
+                producer_id: record.producer_id,
+                skip,
+            })
+        })
+        .collect();
     Ok(MediaStatus {
         schema: MEDIA_SCHEMA,
         records: store.media_content_count()?,
         producers: stored,
         candidates,
         available_producers,
+        skipped,
     })
 }
 
@@ -822,7 +1001,8 @@ pub fn status(store: &crate::Store, blobs: &[MediaBlob]) -> Result<MediaStatus, 
 /// Columns of `media_content`, in the order [`record_from_row`] decodes them.
 const RECORD_COLS: &str = "m.blob_id, m.path, m.kind, m.producer, m.model, m.model_digest, \
      m.quantisation, m.mmproj_digest, m.prompt, m.temperature, m.max_tokens, \
-     m.tool_version, m.generation, m.produced_at, m.text, m.confidence";
+     m.tool_version, m.generation, m.produced_at, m.text, m.confidence, \
+     m.skip_reason, m.skip_value, m.skip_threshold";
 
 /// Write one record, returning whether a row was written. See [`MediaWrite`].
 pub(crate) fn record(conn: &Connection, write: &MediaWrite<'_>) -> Result<bool, StoreError> {
@@ -878,11 +1058,21 @@ pub(crate) fn record(conn: &Connection, write: &MediaWrite<'_>) -> Result<bool, 
         (None, _) => {}
     }
     let generation = u32::try_from(previous + 1).unwrap_or(u32::MAX);
+    // A generated record carries text and no measurement; a gated skip carries a
+    // measurement and — literally — no text. The table's `CHECK` refuses any
+    // other combination, so this is the only shape that can be written.
+    let (text, confidence, skip) = match write.outcome {
+        MediaOutcome::Generated(content) => {
+            (content.text.as_str(), content.confidence, None::<MediaSkip>)
+        }
+        MediaOutcome::Skipped(skip) => ("", None, Some(*skip)),
+    };
     conn.execute(
         "INSERT INTO media_content (
              blob_id, path, kind, producer, model, model_digest, quantisation, mmproj_digest,
-             prompt, temperature, max_tokens, tool_version, generation, text, confidence
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             prompt, temperature, max_tokens, tool_version, generation, text, confidence,
+             skip_reason, skip_value, skip_threshold
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             write.blob_id,
             write.path,
@@ -897,8 +1087,18 @@ pub(crate) fn record(conn: &Connection, write: &MediaWrite<'_>) -> Result<bool, 
             write.producer.max_tokens,
             write.tool_version,
             generation,
-            write.content.text,
-            write.content.confidence,
+            text,
+            confidence,
+            // All three from the SAME `Option`, and `MediaSkip`'s fields are not
+            // themselves optional — so the trio is all-present or all-absent by
+            // construction, matching the table's outcome `CHECK`. Sourcing any
+            // one of them from a different `Option` would make a row with a
+            // measurement but no reason writable, and such a row reads back as
+            // *generated content that happens to be empty*. The schema is the
+            // backstop; this is the guard.
+            skip.map(|s| s.reason.as_str()),
+            skip.map(|s| s.value),
+            skip.map(|s| s.threshold),
         ],
     )?;
     Ok(true)
@@ -968,7 +1168,8 @@ pub(crate) fn count(conn: &Connection) -> Result<u64, StoreError> {
 /// One summary row per producer, ordered by producer id.
 pub(crate) fn producer_summaries(conn: &Connection) -> Result<Vec<ProducerSummary>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT producer, kind, model, quantisation, COUNT(*), MAX(produced_at)
+        "SELECT producer, kind, model, quantisation, COUNT(*),
+                SUM(skip_reason IS NOT NULL), MAX(produced_at)
          FROM media_content GROUP BY producer, kind, model, quantisation ORDER BY producer",
     )?;
     let mut rows = stmt.query([])?;
@@ -978,25 +1179,55 @@ pub(crate) fn producer_summaries(conn: &Connection) -> Result<Vec<ProducerSummar
         let kind = MediaKind::from_token(&kind_token)
             .ok_or_else(|| StoreError::Corrupt(format!("unknown media kind: {kind_token}")))?;
         let records: i64 = row.get(4)?;
+        let skipped: i64 = row.get(5)?;
         out.push(ProducerSummary {
             producer_id: ProducerId(row.get(0)?),
             kind,
             model: row.get(2)?,
             quantisation: row.get(3)?,
             records: u64::try_from(records).unwrap_or(0),
-            latest: row.get(5)?,
+            skipped: u64::try_from(skipped).unwrap_or(0),
+            latest: row.get(6)?,
         });
     }
     Ok(out)
 }
 
-/// The set of blob ids that have at least one record, for a modality.
+/// The set of blob ids with at least one record carrying **generated text**, for
+/// a modality. A gated skip is not a description, so it does not appear here.
 pub(crate) fn described_blobs(
     conn: &Connection,
     kind: MediaKind,
 ) -> Result<std::collections::BTreeSet<String>, StoreError> {
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT blob_id FROM media_content WHERE kind = ?1 ORDER BY blob_id")?;
+    blob_ids(
+        conn,
+        "SELECT DISTINCT blob_id FROM media_content
+         WHERE kind = ?1 AND skip_reason IS NULL ORDER BY blob_id",
+        kind,
+    )
+}
+
+/// The set of blob ids the gate refused, for a modality. The complement of
+/// [`described_blobs`] over the records that exist.
+pub(crate) fn gated_blobs(
+    conn: &Connection,
+    kind: MediaKind,
+) -> Result<std::collections::BTreeSet<String>, StoreError> {
+    blob_ids(
+        conn,
+        "SELECT DISTINCT blob_id FROM media_content
+         WHERE kind = ?1 AND skip_reason IS NOT NULL ORDER BY blob_id",
+        kind,
+    )
+}
+
+/// Run a one-column blob-id query for one modality.
+fn blob_ids(
+    conn: &Connection,
+    sql: &str,
+    kind: MediaKind,
+) -> Result<std::collections::BTreeSet<String>, StoreError> {
+    let mut stmt = conn.prepare(sql)?;
     let mut rows = stmt.query([kind.as_str()])?;
     let mut out = std::collections::BTreeSet::new();
     while let Some(row) = rows.next()? {
@@ -1011,6 +1242,26 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MediaRecord, StoreError> {
     let kind = MediaKind::from_token(&kind_token)
         .ok_or_else(|| StoreError::Corrupt(format!("unknown media kind: {kind_token}")))?;
     let generation: i64 = row.get(12)?;
+    // `skip_reason` is the discriminant; the table's `CHECK` guarantees its two
+    // companions are present exactly when it is, so a row that disagrees is
+    // corruption and is reported as such rather than silently read as generated.
+    let skip_reason: Option<String> = row.get(16)?;
+    let outcome = match skip_reason {
+        Some(token) => {
+            let reason = GateReason::from_token(&token).ok_or_else(|| {
+                StoreError::Corrupt(format!("unknown media skip reason: {token}"))
+            })?;
+            MediaOutcome::Skipped(MediaSkip {
+                reason,
+                value: row.get(17)?,
+                threshold: row.get(18)?,
+            })
+        }
+        None => MediaOutcome::Generated(GeneratedContent {
+            text: row.get(14)?,
+            confidence: row.get(15)?,
+        }),
+    };
     Ok(MediaRecord {
         blob_id: row.get(0)?,
         path: row.get(1)?,
@@ -1028,10 +1279,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MediaRecord, StoreError> {
         tool_version: row.get(11)?,
         generation: u32::try_from(generation).unwrap_or(u32::MAX),
         produced_at: row.get(13)?,
-        content: GeneratedContent {
-            text: row.get(14)?,
-            confidence: row.get(15)?,
-        },
+        outcome,
     })
 }
 

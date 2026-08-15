@@ -21,3 +21,20 @@ audio = false
 # (the Build Plan/ADRs), while changelogs, the website, and Cargo manifests name
 # the marker categories in prose. Code debt is what `roteiro debt` should surface.
 ignore = ["docs/**", "website/**", "**/CHANGELOG.md", "**/Cargo.toml"]
+
+# [media]
+# The pre-generation gate `roteiro media build` applies before loading a model
+# (ADR-0015). It refuses blobs with nothing to read — digital silence, flat-colour
+# images — and records *why*, with the value it measured, so a skip shows up in
+# `media status` instead of being an indistinguishable hole.
+#
+# Left at its defaults here. They sit at the digital noise floor, because a false
+# skip is a silently missing description and that is worse than a false pass now
+# that generated output is clearly labelled. Quiet speech, room tone and subtly-
+# textured images all pass, and still confabulate: the gate raises the floor, it
+# does not fix the label.
+#
+# gate = true             # false sends every blob to the model
+# silence_rms = 0.0001    # RMS amplitude, full scale 1.0 (≈ -80 dBFS). WAV only —
+#                         # MP3/FLAC are not measured and always pass.
+# image_variance = 0.00001  # luma variance, a pixel being 0.0..1.0

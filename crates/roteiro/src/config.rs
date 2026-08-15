@@ -45,6 +45,8 @@ pub struct Config {
     pub duplicates: DuplicatesConfig,
     /// `roteiro sync` content-ingestion toggles.
     pub ingest: IngestConfig,
+    /// `roteiro media build`'s pre-generation gate.
+    pub media: MediaConfig,
     /// `roteiro serve --models` local endpoint settings.
     pub serve: ServeConfig,
     /// `roteiro debt` tuning (paths excluded from the intent-debt scan).
@@ -242,6 +244,51 @@ impl IngestConfig {
     }
 }
 
+/// `[media]` — the **pre-generation gate** `roteiro media build` applies before
+/// loading a model (ADR-0015).
+///
+/// The gate is a cheap, deterministic refusal of blobs with nothing to read:
+/// digital silence, flat-colour images. It is on by default at thresholds that
+/// sit at the digital noise floor, because **a false skip is worse than a false
+/// pass** now that generated output is clearly labelled — so raising a threshold
+/// is a deliberate act, taken here, and never something the tool does for you.
+///
+/// Every setting is `Option`, and unset means the built-in default
+/// ([`rto_graph::GateThresholds::default`]).
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MediaConfig {
+    /// Apply the gate at all. `false` sends every blob to the model, which is
+    /// what `--force` does for a single run.
+    pub gate: Option<bool>,
+    /// RMS amplitude (full scale `1.0`) at or below which an audio clip counts
+    /// as silent. Default `0.0001` (≈ -80 dBFS).
+    pub silence_rms: Option<f64>,
+    /// Luma variance (a pixel is `0.0`…`1.0`) at or below which an image counts
+    /// as uniform. Default `0.00001`.
+    pub image_variance: Option<f64>,
+}
+
+impl MediaConfig {
+    /// Resolve to the graph-layer thresholds, defaulting each unset value.
+    ///
+    /// `gate = false` resolves to [`rto_graph::GateThresholds::disabled`] rather
+    /// than to a separate flag: the two settings would otherwise have to be read
+    /// together everywhere, and a disabled gate is exactly a gate nothing can
+    /// fall below.
+    #[must_use]
+    pub fn resolve(&self) -> rto_graph::GateThresholds {
+        if self.gate == Some(false) {
+            return rto_graph::GateThresholds::disabled();
+        }
+        let default = rto_graph::GateThresholds::default();
+        rto_graph::GateThresholds {
+            silence_rms: self.silence_rms.unwrap_or(default.silence_rms),
+            image_variance: self.image_variance.unwrap_or(default.image_variance),
+        }
+    }
+}
+
 /// `[serve]` — the opt-in local OpenAI-compatible model endpoint (ADR-0006).
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -322,6 +369,11 @@ impl Config {
                 ocr: over.ingest.ocr.or(self.ingest.ocr),
                 vision: over.ingest.vision.or(self.ingest.vision),
                 audio: over.ingest.audio.or(self.ingest.audio),
+            },
+            media: MediaConfig {
+                gate: over.media.gate.or(self.media.gate),
+                silence_rms: over.media.silence_rms.or(self.media.silence_rms),
+                image_variance: over.media.image_variance.or(self.media.image_variance),
             },
             serve: ServeConfig {
                 addr: over.serve.addr.clone().or(self.serve.addr.clone()),

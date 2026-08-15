@@ -624,6 +624,12 @@ enum MediaAction {
     /// writes a **new record beside the old one**, never an overwrite, so two
     /// models' descriptions of the same clip can be compared.
     ///
+    /// A **pre-generation gate** refuses blobs with nothing to read — digital
+    /// silence, flat-colour images — before any model is loaded, and records
+    /// *why*, with the value it measured, so `media status` can show the skip
+    /// rather than leaving a hole. Tune it under `[media]`; `--force` overrides
+    /// it for one run.
+    ///
     /// Requires the matching feature (`audio-transcribe` / `image-vision`) and
     /// the model on disk; without either it fails with the command that fixes
     /// it. Honours `[ingest] audio` / `vision`, which mean *may this run
@@ -635,8 +641,18 @@ enum MediaAction {
         /// Describe image blobs. Default: both modalities.
         #[arg(long)]
         vision: bool,
+        /// Only this source blob (a git blob id, as printed by `media status`
+        /// and shown in the explorer). The per-blob rebuild the explorer's
+        /// "rebuild" action hands you: pair it with `--force` to redo exactly
+        /// one description without touching the rest of the tree.
+        #[arg(long, value_name = "BLOB")]
+        blob: Option<String>,
         /// Regenerate blobs that already have a record for the current producer,
         /// replacing it. Without this, `build` does no work on a second run.
+        ///
+        /// **Also overrides the pre-generation gate**, so a silent clip is sent
+        /// to the model anyway — which is a legitimate thing to ask for, and a
+        /// flag named `--force` that quietly declined would be worse than none.
         #[arg(long)]
         force: bool,
         /// Emit the build report as JSON.
@@ -752,6 +768,10 @@ fn main() -> anyhow::Result<()> {
     // Resolve the ingestion toggles once; every command that (re)builds the graph
     // extracts with the same set so they share one cache, never thrashing it.
     let ingest = cfg.effective.ingest.resolve();
+    // The pre-generation gate's thresholds (`[media]`), resolved once alongside
+    // the ingestion toggles — the two answer adjacent questions about media:
+    // *may* this run generate at all, and *should* it bother for this blob.
+    let gate = cfg.effective.media.resolve();
     // Paths excluded from the intent-debt scan (`[debt] ignore`), shared by
     // `debt` and `check`'s debt summary.
     let debt_ignore: &[String] = cfg.effective.debt.ignore.as_deref().unwrap_or(&[]);
@@ -811,7 +831,7 @@ fn main() -> anyhow::Result<()> {
             include_generated,
             json,
         } => run_search(ingest, &query, limit, include_generated, json),
-        Command::Media { action } => run_media(ingest, action),
+        Command::Media { action } => run_media(ingest, gate, action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
@@ -2716,14 +2736,23 @@ struct MediaClearReport {
 }
 
 /// Dispatch a `roteiro media` action.
-fn run_media(ingest: rto_graph::IngestConfig, action: MediaAction) -> anyhow::Result<()> {
+fn run_media(
+    ingest: rto_graph::IngestConfig,
+    gate: rto_graph::GateThresholds,
+    action: MediaAction,
+) -> anyhow::Result<()> {
     match action {
         MediaAction::Build {
             audio,
             vision,
+            blob,
             force,
             json,
-        } => run_media_build(media_options(ingest, audio, vision, force)?, json),
+        } => run_media_build(
+            media_options(ingest, gate, audio, vision, force)?,
+            blob.as_deref(),
+            json,
+        ),
         MediaAction::Status { json } => run_media_status(json),
         MediaAction::Clear { producer, json } => run_media_clear(producer.as_deref(), json),
     }
@@ -2731,13 +2760,15 @@ fn run_media(ingest: rto_graph::IngestConfig, action: MediaAction) -> anyhow::Re
 
 /// Which modalities a `media build` invocation should run: the flags if either
 /// was given, otherwise both — then narrowed by `[ingest]`, which decides
-/// whether generation is permitted in this repository at all.
+/// whether generation is permitted in this repository at all. `gate` carries the
+/// pre-generation thresholds through unchanged.
 ///
 /// A modality asked for **explicitly** but disabled in config is an error, not a
 /// silent no-op: the operator asked for something the configuration forbids, and
 /// being told so is the difference between a policy and a surprise.
 fn media_options(
     ingest: rto_graph::IngestConfig,
+    gate: rto_graph::GateThresholds,
     audio: bool,
     vision: bool,
     force: bool,
@@ -2780,19 +2811,37 @@ fn media_options(
         audio: want_audio,
         vision: want_vision,
         force,
+        thresholds: gate,
     })
 }
 
-/// Generate content for media blobs that lack a record for the current producer.
+/// Generate content for media blobs that lack a record for the current producer,
+/// optionally narrowed to a single `blob`.
 ///
 /// Nothing here touches the graph. The blobs come from the `HEAD` tree, the
 /// records go to the media store, and `roteiro export` is byte-identical either
 /// side of the call.
-fn run_media_build(opts: rto_graph::MediaBuildOptions, json: bool) -> anyhow::Result<()> {
+fn run_media_build(
+    opts: rto_graph::MediaBuildOptions,
+    blob: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
     let (repo, mut store, _cache) = open_graph()?;
     // Resolved before any model is loaded, so a build with nothing to do costs
     // nothing — and a build this binary cannot perform says so immediately.
-    let blobs = rto_graph::media_blobs(&repo)?;
+    let mut blobs = rto_graph::media_blobs(&repo)?;
+    if let Some(wanted) = blob {
+        blobs.retain(|b| b.blob_id == wanted);
+        if blobs.is_empty() {
+            anyhow::bail!(
+                "no media blob `{wanted}` in this tree — `roteiro media status --json` lists \
+                 the blob ids that are there"
+            );
+        }
+    }
+    // Assembling a producer checks that its model is *installed*; it does not
+    // load it. The GGUF load happens on the first blob that actually reaches the
+    // model, so a run the gate refuses outright never pays for one (ADR-0015).
     let producers = rto_graph::media::producers::installed(opts)?;
     let refs: Vec<&dyn rto_graph::MediaProducer> = producers.iter().map(AsRef::as_ref).collect();
 
@@ -2805,9 +2854,17 @@ fn run_media_build(opts: rto_graph::MediaBuildOptions, json: bool) -> anyhow::Re
         println!("no media blobs to describe in this tree");
     } else {
         println!(
-            "{} candidate(s) — {} generated, {} already described, {} produced nothing",
-            report.candidates, report.generated, report.skipped_existing, report.empty,
+            "{} candidate(s) — {} generated, {} already described, \
+             {} refused by the gate (no model loaded), {} produced nothing",
+            report.candidates,
+            report.generated,
+            report.skipped_existing,
+            report.gated,
+            report.empty,
         );
+        if report.gated > 0 {
+            println!("  see `roteiro media status` for each refusal and the value it measured");
+        }
         for producer in &report.producers {
             println!("  producer  {producer}");
         }
@@ -2824,22 +2881,39 @@ fn run_media_status(json: bool) -> anyhow::Result<()> {
         emit_json(&status)?;
         return Ok(());
     }
-    println!("{} generated record(s)", status.records);
+    // "media record(s)", not "generated record(s)": since the gate a record can
+    // be a refusal, and calling a skip "generated" would misreport the one thing
+    // this command exists to make legible.
+    println!(
+        "{} media record(s), {} of them gate refusals",
+        status.records,
+        status.skipped.len(),
+    );
     for producer in &status.producers {
         println!(
-            "  {}  {} ({}, {})  {} record(s), latest {}",
+            "  {}  {} ({}, {})  {} record(s) ({} skipped), latest {}",
             producer.producer_id,
             producer.model,
             producer.kind,
             producer.quantisation,
             producer.records,
+            producer.skipped,
             producer.latest,
         );
     }
     for candidate in &status.candidates {
         println!(
-            "  {:<7} {} blob(s) in tree, {} described",
-            candidate.kind, candidate.blobs, candidate.described
+            "  {:<7} {} blob(s) in tree, {} described, {} skipped by the gate",
+            candidate.kind, candidate.blobs, candidate.described, candidate.skipped,
+        );
+    }
+    // Each refusal, with the value that caused it. Without this line a skipped
+    // blob is an indistinguishable hole, and an operator cannot tell "nothing
+    // was generated for this" from "nothing was generated, and here is why".
+    for entry in &status.skipped {
+        println!(
+            "  skipped    {}  {}  ({})",
+            entry.path, entry.skip, entry.producer_id,
         );
     }
     for producer in &status.available_producers {
@@ -5773,6 +5847,240 @@ mod url_tests {
             source_blob_base("git@gitlab.com:o/r.git", "abc123"),
             Some("https://gitlab.com/o/r/-/blob/abc123".to_owned())
         );
+    }
+}
+
+// The `roteiro media` surface: argument shapes, the config narrowing that turns
+// flags into a [`rto_graph::MediaBuildOptions`], and the `--json` shape callers
+// parse. Ungated, exactly as [`MediaAction`] is — the store, its status and its
+// clearing exist in every build, so these shapes must hold in every build too.
+//
+// The behaviour they wrap — incrementality, the pre-generation gate, artifact
+// purity — is tested where it lives, in `rto-graph`.
+#[cfg(test)]
+mod media_cli {
+    use super::{Cli, Command, MediaAction, MediaClearReport, media_options};
+    use clap::Parser as _;
+
+    fn parse<const N: usize>(args: [&str; N]) -> Command {
+        Cli::try_parse_from(args).expect("parse").command
+    }
+
+    fn action<const N: usize>(args: [&str; N]) -> MediaAction {
+        let Command::Media { action } = parse(args) else {
+            panic!("expected Media");
+        };
+        action
+    }
+
+    /// `(audio, vision, blob, force, json)`. Every toggle off is the shape
+    /// `media_options` reads as "both modalities".
+    fn build<const N: usize>(args: [&str; N]) -> (bool, bool, Option<String>, bool, bool) {
+        let MediaAction::Build {
+            audio,
+            vision,
+            blob,
+            force,
+            json,
+        } = action(args)
+        else {
+            panic!("expected Build");
+        };
+        (audio, vision, blob, force, json)
+    }
+
+    #[test]
+    fn build_takes_no_flags_and_defaults_them_all_off() {
+        assert_eq!(
+            build(["roteiro", "media", "build"]),
+            (false, false, None, false, false)
+        );
+    }
+
+    #[test]
+    fn build_accepts_each_modality_and_the_force_and_json_flags() {
+        assert_eq!(
+            build(["roteiro", "media", "build", "--audio", "--force", "--json"]),
+            (true, false, None, true, true)
+        );
+        assert_eq!(
+            build(["roteiro", "media", "build", "--vision"]),
+            (false, true, None, false, false)
+        );
+        // Both named explicitly is the same request as neither, and must parse.
+        assert_eq!(
+            build(["roteiro", "media", "build", "--audio", "--vision"]),
+            (true, true, None, false, false)
+        );
+    }
+
+    /// The per-blob rebuild the explorer's rebuild action hands the operator:
+    /// one blob id, plus `--force` to actually redo it.
+    #[test]
+    fn build_narrows_to_one_blob() {
+        assert_eq!(
+            build(["roteiro", "media", "build", "--blob", "a1b2c3d4", "--force",]),
+            (false, false, Some("a1b2c3d4".to_owned()), true, false)
+        );
+        // `--blob` takes a value; bare, it is a parse error rather than a
+        // silent whole-tree rebuild.
+        assert!(Cli::try_parse_from(["roteiro", "media", "build", "--blob"]).is_err());
+    }
+
+    #[test]
+    fn status_takes_only_json() {
+        let MediaAction::Status { json } = action(["roteiro", "media", "status"]) else {
+            panic!("expected Status");
+        };
+        assert!(!json);
+        let MediaAction::Status { json } = action(["roteiro", "media", "status", "--json"]) else {
+            panic!("expected Status");
+        };
+        assert!(json);
+    }
+
+    #[test]
+    fn clear_defaults_to_every_producer_and_can_narrow() {
+        let MediaAction::Clear { producer, json } = action(["roteiro", "media", "clear"]) else {
+            panic!("expected Clear");
+        };
+        assert_eq!(producer, None);
+        assert!(!json);
+
+        let MediaAction::Clear { producer, json } = action([
+            "roteiro",
+            "media",
+            "clear",
+            "--producer",
+            "media:audio:voxtral-mini-3b:0123456789abcdef",
+            "--json",
+        ]) else {
+            panic!("expected Clear");
+        };
+        assert_eq!(
+            producer.as_deref(),
+            Some("media:audio:voxtral-mini-3b:0123456789abcdef"),
+            "a producer id is taken verbatim — `:` must not be treated as a separator"
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn media_requires_an_action() {
+        assert!(Cli::try_parse_from(["roteiro", "media"]).is_err());
+        assert!(Cli::try_parse_from(["roteiro", "media", "nonsense"]).is_err());
+    }
+
+    #[test]
+    fn no_modality_flag_means_both() {
+        let opts = media_options(
+            rto_graph::IngestConfig::default(),
+            rto_graph::GateThresholds::default(),
+            false,
+            false,
+            false,
+        )
+        .expect("both modalities are allowed by default");
+        assert!(opts.audio && opts.vision);
+        assert!(!opts.force);
+        // The gate's thresholds arrive intact — a build must not quietly run
+        // with the gate off because the plumbing dropped them.
+        assert_eq!(opts.thresholds, rto_graph::GateThresholds::default());
+    }
+
+    /// `[media] gate = false` reaches the build as thresholds nothing can fall
+    /// below, which is how the gate is turned off without a second flag for
+    /// every call site to remember.
+    #[test]
+    fn a_disabled_gate_resolves_to_thresholds_that_refuse_nothing() {
+        let cfg = crate::config::MediaConfig {
+            gate: Some(false),
+            silence_rms: Some(0.5),
+            image_variance: Some(0.5),
+        };
+        assert_eq!(cfg.resolve(), rto_graph::GateThresholds::disabled());
+
+        // Unset values fall back to the conservative defaults, and a set one
+        // overrides only itself.
+        let tuned = crate::config::MediaConfig {
+            gate: None,
+            silence_rms: Some(0.01),
+            image_variance: None,
+        }
+        .resolve();
+        assert_eq!(
+            tuned,
+            rto_graph::GateThresholds {
+                silence_rms: 0.01,
+                ..rto_graph::GateThresholds::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_modality_disabled_in_config_is_dropped_silently_but_refused_when_asked_for() {
+        let no_audio = rto_graph::IngestConfig {
+            audio: false,
+            ..rto_graph::IngestConfig::default()
+        };
+        let gate = rto_graph::GateThresholds::default();
+        // Implicit: narrow to what is permitted, no error.
+        let opts =
+            media_options(no_audio, gate, false, false, false).expect("vision is still allowed");
+        assert!(!opts.audio && opts.vision);
+
+        // Explicit: the operator asked for something the configuration forbids,
+        // and is told so rather than silently getting nothing.
+        let err = media_options(no_audio, gate, true, false, false).expect_err("must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("[ingest] audio = false"),
+            "the refusal must name the setting: {message}"
+        );
+    }
+
+    #[test]
+    fn disabling_both_modalities_leaves_nothing_to_do() {
+        let none = rto_graph::IngestConfig {
+            audio: false,
+            vision: false,
+            ..rto_graph::IngestConfig::default()
+        };
+        let err = media_options(
+            none,
+            rto_graph::GateThresholds::default(),
+            false,
+            false,
+            false,
+        )
+        .expect_err("must be refused");
+        assert!(
+            err.to_string().contains("nothing for `media build` to do"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    #[test]
+    fn the_clear_json_shape_is_the_documented_one() {
+        let value = serde_json::to_value(MediaClearReport {
+            producer: Some("media:audio:voxtral-mini-3b:0123456789abcdef".to_owned()),
+            removed: 3,
+        })
+        .expect("serialize");
+        assert_eq!(value["removed"], 3);
+        assert_eq!(
+            value["producer"],
+            "media:audio:voxtral-mini-3b:0123456789abcdef"
+        );
+
+        // Clearing everything reports a `null` producer, not an absent key: a
+        // caller can tell "all producers" from "this one" without guessing.
+        let value = serde_json::to_value(MediaClearReport {
+            producer: None,
+            removed: 0,
+        })
+        .expect("serialize");
+        assert!(value["producer"].is_null());
     }
 }
 

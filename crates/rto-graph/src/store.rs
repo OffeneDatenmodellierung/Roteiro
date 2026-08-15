@@ -951,7 +951,9 @@ impl Store {
         media::producer_summaries(&self.conn)
     }
 
-    /// The blob ids that have at least one record for `kind`.
+    /// The blob ids that have at least one record carrying **generated text**
+    /// for `kind`. A blob the pre-generation gate refused is not described, so it
+    /// is not here — see [`Store::gated_media_blobs`].
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] on query failure.
@@ -960,6 +962,19 @@ impl Store {
         kind: MediaKind,
     ) -> Result<std::collections::BTreeSet<String>, StoreError> {
         media::described_blobs(&self.conn, kind)
+    }
+
+    /// The blob ids the [pre-generation gate](crate::media::gate) refused for
+    /// `kind` — silent clips, blank images — each of which has a record naming
+    /// the value that refused it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn gated_media_blobs(
+        &self,
+        kind: MediaKind,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        media::gated_blobs(&self.conn, kind)
     }
 
     /// Records whose blob is no longer anywhere in `present`. Exposed so a caller
@@ -1572,10 +1587,11 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
         // Bumped to 8 by the analyzer-findings tables (ADR-0012), then to 9 by
-        // the generated-media-content table (ADR-0015). The literal is
-        // deliberate: a new migration should make someone confirm it is meant to
-        // apply on open, rather than passing silently.
-        assert_eq!(store.schema_version().expect("version"), 9);
+        // the generated-media-content table (ADR-0015), then to 10 by that
+        // table's rebuild for the pre-generation gate's skip records. The
+        // literal is deliberate: a new migration should make someone confirm it
+        // is meant to apply on open, rather than passing silently.
+        assert_eq!(store.schema_version().expect("version"), 10);
     }
 
     #[test]
@@ -1746,7 +1762,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 9);
+            assert_eq!(store.schema_version().expect("version"), 10);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

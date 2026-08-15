@@ -1725,6 +1725,77 @@
     ];
   }
 
+  // The "Generated media content" section of the node detail, or `null` when the
+  // node's blob has no records. Returns the section's children, like
+  // `crossRepoSection`.
+  //
+  // Three things are non-negotiable here, and each is pinned by a test:
+  //
+  //  * every record is ATTRIBUTED — the producer identity (model, quantisation,
+  //    projector, prompt, sampling) is rendered on the record itself, not in a
+  //    tooltip, so attribution cannot be missed by not hovering;
+  //  * nothing is rendered as extracted content — the block carries its own
+  //    heading, its own styling and the words "produced by a model", matching how
+  //    `search --include-generated` marks its channel; and
+  //  * each record offers a PER-BLOB rebuild. The explorer is a read-only view
+  //    and a rebuild loads a multi-gigabyte model, so what it hands over is the
+  //    exact command, selectable in one click — not a button that would block an
+  //    HTTP handler on a projector load.
+  //
+  // A record the gate refused has `text: null` and a `skipped` object; it shows
+  // the measured value instead of an empty panel, so "not generated" is legible
+  // as a decision rather than as a gap.
+  function generatedSection(records) {
+    if (!Array.isArray(records) || !records.length) return null;
+    const blocks = records.map((r) => {
+      const kids = [
+        el("div", {
+          class: "p-generated-warning",
+          text: "produced by a model — not extracted from the source",
+        }),
+        el(
+          "div",
+          { class: "p-node-meta" },
+          el("span", {
+            class: "p-badge p-generated-badge",
+            text: `generated · ${r.kind || "media"}`,
+          }),
+          el("span", { class: "p-badge", text: r.model || "unknown model" })
+        ),
+        el("div", {
+          class: "p-generated-producer",
+          text: `producer ${r.producer || "?"}`,
+        }),
+      ];
+      if (r.skipped) {
+        kids.push(
+          el("div", {
+            class: "p-generated-skip",
+            text: `skipped: ${r.skipped.explanation || r.skipped.reason} — no model was run`,
+          })
+        );
+      } else {
+        kids.push(
+          el("div", { class: "p-generated-text", text: r.text || "" })
+        );
+      }
+      if (r.rebuild) {
+        kids.push(
+          el("code", {
+            class: "p-generated-rebuild",
+            title: "rebuild this blob's generated content — run in the repository",
+            text: r.rebuild,
+          })
+        );
+      }
+      return el("div", { class: "p-generated" }, ...kids);
+    });
+    return [
+      el("div", { class: "p-sec-title", text: "Generated media content" }),
+      ...blocks,
+    ];
+  }
+
   function renderNodeDetail(exp) {
     const pane = pPane("node");
     const node = exp.node || {};
@@ -1768,6 +1839,14 @@
         el("pre", { class: "p-node-content" }, el("code", { text: content }))
       );
     }
+
+    // Model-GENERATED media content for this node's blob (ADR-0015): an ASR
+    // transcript, a VLM description, or a recorded refusal from the
+    // pre-generation gate. Rendered UNDER its own heading, never merged into
+    // "Content" above — extracted text and invented text must not be readable as
+    // the same thing, which is the whole defect issue #300 records.
+    const generated = generatedSection(exp.generated);
+    if (generated) kids.push(...generated);
 
     // Neighbour chips — clicking one navigates to that node.
     const chipRow = (title, refs) => {

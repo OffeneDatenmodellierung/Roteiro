@@ -606,7 +606,15 @@ fn search_generated(
     }
     let mut hits: Vec<GeneratedHit> = Vec::new();
     for record in store.media_records(&crate::MediaFilter::default())? {
-        let text = record.content.text.to_lowercase();
+        // A record the pre-generation gate refused holds a measurement, not text.
+        // It is deliberately unsearchable: it has nothing to match on, and the
+        // path *would* match — which would put a silent clip back into search
+        // results as a hit with an empty snippet, which is the shape of the very
+        // bug ADR-0015 exists to correct.
+        let Some(generated_text) = record.outcome.text() else {
+            continue;
+        };
+        let text = generated_text.to_lowercase();
         let path = record.path.to_lowercase();
         if !tokens.iter().all(|t| text.contains(t) || path.contains(t)) {
             continue;
@@ -619,7 +627,7 @@ fn search_generated(
             kind: record.producer.kind.as_str(),
             blob: record.blob_id.clone(),
             path: record.path.clone(),
-            snippet: content_snippet(&serde_json::json!({ "content": record.content.text })),
+            snippet: content_snippet(&serde_json::json!({ "content": generated_text })),
         });
     }
     hits.sort_by(|a, b| {
