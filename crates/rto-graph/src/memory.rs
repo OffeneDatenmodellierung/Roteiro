@@ -729,6 +729,27 @@ mod tests {
         }
     }
 
+    /// **`EXTRACT_VERSION` does not change for agent memory.**
+    ///
+    /// It is folded into the content-addressed cache key, so bumping it discards
+    /// every cached fact set in every clone and forces a full re-extraction of
+    /// every repository. That cost is right when extraction *output* changes —
+    /// and memory is not extraction output at all. It is not derived from
+    /// `(path, blob id, bytes)`, no extractor emits it, and no cached fact set
+    /// can contain it. This is a stage-scoped guard on a shared constant, and it
+    /// lives here rather than in an integration test because the constant is
+    /// crate-private.
+    #[test]
+    fn agent_memory_does_not_bump_the_extraction_version() {
+        assert_eq!(
+            crate::extract::EXTRACT_VERSION
+                - if cfg!(feature = "pdf-text") { 100 } else { 0 }
+                - if cfg!(feature = "image-ocr") { 200 } else { 0 },
+            10,
+            "memory is not extraction output; nothing here may invalidate the fact cache",
+        );
+    }
+
     #[test]
     fn kind_tokens_round_trip_and_reject_the_unknown() {
         for kind in MemoryKind::ALL {
