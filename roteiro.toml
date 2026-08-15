@@ -1,5 +1,20 @@
 # Roteiro project configuration (ADR-0007).
 
+[ingest]
+# The only audio in this repository is the synthesised test fixtures under
+# `crates/rto-graph/tests/fixtures/audio/` — tones, silence and a speech-*shaped*
+# signal, none of which contain spoken words. An ASR model asked to transcribe
+# them does not return nothing; it returns fluent invented prose (a 500 Hz tone
+# yields "I think it's a good idea" on a loop, digital silence yields a lecture on
+# world government). That text would be stored as a *derived* fact and would then
+# rank in `roteiro search`, so on a machine with the model installed, dogfooding
+# `sync` over this repo embeds pure fabrication into its own graph.
+#
+# `[ingest]` toggles are all-or-nothing per content class — there is no per-path
+# exclusion — so the honest setting for *this* repository is off. A project whose
+# audio is real speech should leave it on (the default).
+audio = false
+
 [debt]
 # Paths excluded from the intent-debt scan. These carry the debt *vocabulary* as
 # content, not as real code debt: planning docs record postponed work by design

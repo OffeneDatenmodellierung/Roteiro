@@ -1,0 +1,381 @@
+//! Behavioural cover for the audio ingestion path (`extract.rs`'s `is_audio` /
+//! `audio_content` / `asr_content`) using the committed fixtures.
+//!
+//! # Why this splits into two tiers
+//!
+//! Audio ingestion is inert without a model: `asr_content` returns `None` when
+//! the Voxtral GGUF is not installed, exactly as it does when the clip is over
+//! the size cap or the `audio` toggle is off. So on a machine with no model —
+//! which is every CI runner, since the model store is not provisioned there —
+//! the *presence* of a transcript cannot distinguish those cases.
+//!
+//! The suite is therefore split:
+//!
+//! * **Always-on tests** assert what holds in any build: an audio blob yields a
+//!   well-formed `file` node, no `meta.content` is embedded while the toggle is
+//!   off, an oversized clip is refused rather than truncated, and flipping the
+//!   `audio` toggle moves the extraction cache key so stale
+//!   content-free facts cannot be served after the toggle changes. These need
+//!   no feature and no model, and are the coverage that actually protects the
+//!   path on every run. They also never *invoke* a model — see [`no_audio`] —
+//!   so `cargo test --all-features` stays fast even where one is installed.
+//! * **Model-gated tests** ([`transcription`]) exercise real transcription and
+//!   the extension classification that only becomes observable once a model can
+//!   produce content. They are `#[ignore]`d and additionally self-skip with a
+//!   visible message when the model is absent, following the pattern #292
+//!   established for the vision teardown test.
+
+use rto_graph::{Extractor, IngestConfig, NodeKind, Provenance, Registry};
+
+/// A fixture's bytes, by file name.
+fn fixture(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("audio")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()))
+}
+
+/// A registry with the `audio` toggle off, used by every always-on test.
+///
+/// This matters for more than tidiness. CI runs `--all-features`, so
+/// `audio-transcribe` is compiled in; on a *developer* machine that also has the
+/// model installed, a `Registry::default()` here would load three gigabytes and
+/// transcribe six clips on every `cargo test --workspace --all-features`. These
+/// tests are about the model-independent shape of the facts, so they say so, and
+/// the behaviour that genuinely needs a model lives in [`transcription`].
+fn no_audio() -> Registry {
+    Registry::new(IngestConfig {
+        audio: false,
+        ..IngestConfig::default()
+    })
+}
+
+/// Every committed fixture, in the order they are asserted over.
+const FIXTURES: [&str; 6] = [
+    "silence-16khz-mono-256ms.wav",
+    "tone-500hz-16khz-mono-256ms.wav",
+    "syllables-16khz-mono-512ms.wav",
+    "silence-16khz-mono-256ms.flac",
+    "tone-500hz-16khz-mono-256ms.flac",
+    "silence-44khz-mono-261ms.mp3",
+];
+
+/// The extensions `is_audio` accepts, and nothing else.
+const ACCEPTED: [&str; 3] = ["wav", "mp3", "flac"];
+
+/// `is_audio` accepts exactly `wav`, `mp3` and `flac`, so the fixture set must
+/// cover all three — otherwise a format could quietly stop decoding and nothing
+/// here would notice — and must contain nothing else, or a later test would be
+/// asserting over a file the extractor never classifies as audio.
+///
+/// The match is on `".{ext}"`, not `ext`: a suffix check would count
+/// `clip.notwav` as covering `wav`, and this same file deliberately treats
+/// `.wav.bak` as a *rejected* extension further down.
+#[test]
+fn the_fixture_set_covers_every_accepted_extension() {
+    for ext in ACCEPTED {
+        assert!(
+            FIXTURES.iter().any(|f| f.ends_with(&format!(".{ext}"))),
+            "no fixture covers the `{ext}` branch of `is_audio`",
+        );
+    }
+    for name in FIXTURES {
+        assert!(
+            ACCEPTED
+                .iter()
+                .any(|ext| name.ends_with(&format!(".{ext}"))),
+            "{name} is not an extension `is_audio` accepts",
+        );
+    }
+}
+
+/// An audio blob is a first-class `file` node whatever the build: correct key,
+/// kind, name, span and byte count, derived provenance. This is what a `sync`
+/// stores for every clip, model or no model.
+#[test]
+fn audio_blobs_become_well_formed_file_nodes() {
+    for name in FIXTURES {
+        let bytes = fixture(name);
+        let path = format!("assets/{name}");
+        let facts = no_audio().extract(&path, "blob-id", &bytes);
+
+        // Exactly one node and no edges — not "at least one file node somewhere
+        // in the set", which would also hold if extraction started emitting
+        // spurious facts for a binary blob.
+        assert_eq!(
+            facts.nodes.len(),
+            1,
+            "{name}: an audio blob yields exactly one node, got {:?}",
+            facts.nodes.iter().map(|n| &n.key).collect::<Vec<_>>(),
+        );
+        assert!(facts.edges.is_empty(), "{name}: an audio blob has no edges");
+
+        let node = &facts.nodes[0];
+        assert_eq!(node.kind, NodeKind::File);
+        assert_eq!(node.key, format!("file:{path}"));
+        assert_eq!(node.name, name);
+        assert_eq!(node.path.as_deref(), Some(path.as_str()));
+        assert_eq!(node.lang, None, "{name}: audio carries no language");
+        assert_eq!(node.provenance, Provenance::Derived);
+        assert_eq!(
+            node.meta["bytes"].as_u64(),
+            u64::try_from(bytes.len()).ok(),
+            "{name}: byte count must be the real size",
+        );
+        let span = node.span.expect("audio file node carries a span");
+        assert_eq!(
+            u64::from(span.end),
+            u64::try_from(bytes.len()).expect("fixture fits u64")
+        );
+    }
+}
+
+/// With the `audio` toggle off there must be **no `meta.content` at all** — not
+/// merely no mojibake.
+///
+/// The weaker "if content exists, it must not contain U+FFFD or NUL" would pass
+/// while a transcript was being embedded against the toggle, which is precisely
+/// the failure #300 is about: model output stored as a `derived` fact. So the
+/// assertion is absence, and the byte inspection is kept only as the more
+/// legible message when something *is* there.
+#[test]
+fn no_content_is_embedded_for_audio_when_the_toggle_is_off() {
+    for name in FIXTURES {
+        let bytes = fixture(name);
+        let facts = no_audio().extract(&format!("assets/{name}"), "blob-id", &bytes);
+        let node = &facts.nodes[0];
+        let content = node.meta.get("content");
+        assert!(
+            content.is_none(),
+            "{name}: content was embedded with the `audio` toggle off: {content:?}",
+        );
+    }
+}
+
+/// Extraction is a deterministic pure function of `(path, blob id, bytes)` — the
+/// core provenance invariant. Binary blobs are the interesting case: nothing
+/// about a clip may vary run to run.
+///
+/// The comparison is over the whole [`FactSet`], not just its nodes: determinism
+/// is claimed for everything extraction emits, so a change that perturbed edge
+/// order would otherwise slip through. And the set is asserted non-empty first,
+/// because two empty fact sets compare equal — a regression that stopped
+/// emitting facts for audio entirely would make this test *pass*.
+#[test]
+fn audio_extraction_is_deterministic() {
+    for name in FIXTURES {
+        let bytes = fixture(name);
+        let path = format!("assets/{name}");
+        let once = no_audio().extract(&path, "blob-id", &bytes);
+        let twice = no_audio().extract(&path, "blob-id", &bytes);
+        assert!(
+            !once.nodes.is_empty(),
+            "{name}: extraction emitted nothing, so equality below would be vacuous",
+        );
+        assert_eq!(once, twice, "{name}: extraction is not deterministic");
+    }
+}
+
+/// Turning the `audio` ingest toggle off must produce no content — and, just as
+/// importantly, must move the extraction cache key, so a sync after the toggle
+/// change re-extracts instead of serving the transcript it cached while the
+/// toggle was on.
+///
+/// The cache key is the assertion with teeth here: "no content" is also what a
+/// model-less machine produces, but a *changed* `env_tag` is observable
+/// everywhere and is what actually keeps stale content from being served.
+#[test]
+fn disabling_the_audio_toggle_yields_no_content_and_moves_the_cache_key() {
+    let bytes = fixture("tone-500hz-16khz-mono-256ms.wav");
+    let off = no_audio();
+    let facts = off.extract("assets/clip.wav", "blob-id", &bytes);
+    assert!(
+        facts.nodes[0].meta.get("content").is_none(),
+        "the `audio` toggle is off, so no transcript may be embedded",
+    );
+    assert_ne!(
+        off.env_tag(),
+        Registry::default().env_tag(),
+        "toggling `audio` off must change the cache key so cached transcripts are not reused",
+    );
+    // And the audio toggle must own its *own* bit. Without this, a registry that
+    // collapsed two toggles onto one bit would still satisfy the assertion above
+    // while letting a vision-off cache entry be served to an audio-off sync.
+    let vision_off = Registry::new(IngestConfig {
+        vision: false,
+        ..IngestConfig::default()
+    });
+    assert_ne!(
+        off.env_tag(),
+        vision_off.env_tag(),
+        "`audio` and `vision` must contribute distinct bits to the cache key",
+    );
+}
+
+/// A clip over `MAX_AUDIO_BYTES` (50 MiB) must be **refused**, not truncated to
+/// the cap and transcribed in part: a partial transcript presented as a whole
+/// one is a derived fact that is quietly wrong.
+///
+/// The blob is built here rather than committed — 50 MiB of fixture would dwarf
+/// the repository — and the node must still record its true size.
+///
+/// This is the one always-on test that deliberately runs with the `audio` toggle
+/// **on**, because the cap is what has to do the refusing: it costs nothing on a
+/// model-less machine, and on one with the model installed it is the assertion's
+/// whole point — a 3 GB transcription must *not* start.
+#[test]
+fn an_oversized_clip_is_refused_rather_than_truncated() {
+    /// `MAX_AUDIO_BYTES` in `extract.rs`, plus one byte.
+    const OVER_CAP: usize = 50 * 1024 * 1024 + 1;
+
+    let mut bytes = fixture("silence-16khz-mono-256ms.wav");
+    bytes.resize(OVER_CAP, 0);
+    let facts = Registry::default().extract("assets/huge.wav", "blob-id", &bytes);
+
+    let node = &facts.nodes[0];
+    assert!(
+        node.meta.get("content").is_none(),
+        "a clip over the cap must yield no transcript at all, not a partial one",
+    );
+    assert_eq!(
+        node.meta["bytes"].as_u64(),
+        u64::try_from(OVER_CAP).ok(),
+        "the node must record the clip's real size even though it was not transcribed",
+    );
+    // "Not truncated" literally: the span still covers the whole blob rather than
+    // stopping at the cap.
+    let span = node.span.expect("the node carries a span");
+    assert_eq!(
+        u64::from(span.end),
+        u64::try_from(OVER_CAP).expect("fits u64"),
+        "the span must cover the whole clip, not stop at the cap",
+    );
+}
+
+/// Real transcription. Needs the `audio-transcribe` feature, the Voxtral GGUF on
+/// disk, and several gigabytes of RAM, so these are `#[ignore]`d — CI compiles
+/// them under `--all-features` but never runs them, and a developer who runs
+/// them without the model gets a skip message rather than a failure.
+///
+/// ```text
+/// roteiro model pull voxtral-mini-3b
+/// cargo test -p rto-graph --features audio-transcribe --test audio_ingest \
+///   -- --ignored --nocapture --test-threads=1
+/// ```
+///
+/// `--test-threads=1` matters: each test builds and releases its own engine, and
+/// running them concurrently holds two copies of a 3 GB model in memory at once.
+#[cfg(feature = "audio-transcribe")]
+mod transcription {
+    use super::fixture;
+    use rto_graph::{Extractor, IngestConfig, Registry, model_dir, release_media_engines};
+
+    /// Registry name of the audio model (`~/.roteiro/models/<name>/`).
+    const MODEL: &str = "voxtral-mini-3b";
+
+    /// `true` when the model is installed; prints the skip line and returns
+    /// `false` otherwise.
+    fn model_present() -> bool {
+        let dir = model_dir(MODEL);
+        if dir.join("model.gguf").exists() && dir.join("mmproj.gguf").exists() {
+            return true;
+        }
+        eprintln!("SKIP: `{MODEL}` not installed (run `roteiro model pull {MODEL}`)");
+        false
+    }
+
+    /// The transcript a fixture extracts to, or `None` when it embedded no
+    /// content. Drives the production path — this is exactly what `sync` does
+    /// for an audio blob.
+    fn transcribe(path: &str, name: &str) -> Option<String> {
+        let facts = Registry::new(IngestConfig::default()).extract(path, "blob-id", &fixture(name));
+        facts.nodes[0]
+            .meta
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    }
+
+    /// End-to-end: every committed fixture goes through the real projector, in
+    /// all three formats, and comes back with content.
+    ///
+    /// The assertions are about the *path*, not the words. What a 3B model hears
+    /// in a 500 Hz tone is not a contract — and, as the printed transcripts show,
+    /// what it hears is confident invented prose, which is why this repository
+    /// sets `[ingest] audio = false` on itself. What *is* a contract is that a
+    /// WAV and a FLAC of the same samples decode to the same PCM and so, at
+    /// temperature 0, transcribe identically. That check is what proves the
+    /// hand-written FLAC encoder is right rather than merely well-formed, and it
+    /// would catch a decoder regression in either format.
+    #[test]
+    #[ignore = "needs the Voxtral GGUF on disk; slow and several GB of RAM"]
+    fn every_fixture_format_reaches_the_projector() {
+        if !model_present() {
+            return;
+        }
+        let mut transcripts = std::collections::BTreeMap::new();
+        for name in super::FIXTURES {
+            let out = transcribe(&format!("assets/{name}"), name);
+            eprintln!("{name}: {out:?}");
+            assert!(
+                out.is_some(),
+                "{name}: reached the projector but yielded no content",
+            );
+            transcripts.insert(name, out);
+        }
+
+        // The two stems that exist in both containers, carrying identical samples.
+        for stem in ["silence-16khz-mono-256ms", "tone-500hz-16khz-mono-256ms"] {
+            assert_eq!(
+                transcripts[&*format!("{stem}.wav")],
+                transcripts[&*format!("{stem}.flac")],
+                "{stem}: the WAV and FLAC hold the same samples, so they must decode — and \
+                 therefore transcribe — identically",
+            );
+        }
+
+        // Equality alone is satisfiable by a decoder that returns silence for
+        // everything — every clip would then transcribe the same, and every pair
+        // above would match. Different signals must reach the model *differently*.
+        assert_ne!(
+            transcripts["silence-16khz-mono-256ms.wav"],
+            transcripts["tone-500hz-16khz-mono-256ms.wav"],
+            "silence and a tone transcribed identically, which means the samples are not \
+             reaching the model — a decode that yields silence for everything would pass \
+             every other assertion here",
+        );
+
+        assert!(
+            release_media_engines(),
+            "the ASR engine must be releasable, not leaked to exit (#291)",
+        );
+    }
+
+    /// The classification `is_audio` performs is only observable once a model can
+    /// produce content: identical bytes under an accepted extension transcribe,
+    /// and under a rejected one do not. Without a model both are `None` and the
+    /// distinction is invisible, which is why this test lives behind the gate.
+    #[test]
+    #[ignore = "needs the Voxtral GGUF on disk; slow and several GB of RAM"]
+    fn only_accepted_extensions_are_transcribed() {
+        if !model_present() {
+            return;
+        }
+        let name = "syllables-16khz-mono-512ms.wav";
+        let accepted = transcribe("assets/clip.wav", name);
+        eprintln!("as .wav: {accepted:?}");
+        assert!(
+            accepted.is_some(),
+            "a `.wav` clip must transcribe when the model is installed",
+        );
+        for rejected in ["assets/clip.ogg", "assets/clip.m4a", "assets/clip.wav.bak"] {
+            assert!(
+                transcribe(rejected, name).is_none(),
+                "{rejected}: `is_audio` accepts only wav/mp3/flac, so this must not transcribe",
+            );
+        }
+        assert!(release_media_engines(), "the ASR engine must be releasable");
+    }
+}
