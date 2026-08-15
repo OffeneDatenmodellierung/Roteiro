@@ -73,6 +73,15 @@ pub enum ExecError {
     /// A finding's identity components were not usable as a stable key.
     #[error("finding identity: {0}")]
     Identity(#[from] FindingsError),
+    /// This build has no adapter for the requested analyzer, so it can neither
+    /// run it nor read its native output.
+    #[error("no adapter for analyzer {requested:?} in this build (known: {known})")]
+    UnknownAnalyzer {
+        /// The analyzer the caller asked for.
+        requested: String,
+        /// The analyzer ids this build does know, comma-separated.
+        known: String,
+    },
     /// The report was not valid JSON.
     #[error("report is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
