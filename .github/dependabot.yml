@@ -1,0 +1,119 @@
+# Automated dependency updates with a 48-hour minimum release age (ADR-0017).
+#
+# The policy: stay on the latest published version, but never adopt a release
+# less than 48 hours old, so that a compromised publish has had time to be
+# detected and yanked by someone else. The point of this file is that the
+# *updater* enforces that, not a reviewer who has to remember it.
+#
+# ## Why Dependabot rather than Renovate
+#
+# Both can express a minimum release age for Cargo today. Dependabot wins on
+# three grounds that matter for a supply-chain control specifically:
+#
+#  1. **No new trust to grant.** Dependabot is native to GitHub — this file is
+#     the whole installation. Renovate needs either the Mend-hosted GitHub App
+#     (a third party with write access to the repository, which is a strange
+#     thing to add in the name of supply-chain security) or a self-hosted runner
+#     with a *classic* PAT — Renovate documents that neither `GITHUB_TOKEN` nor
+#     a fine-grained PAT will do — i.e. a long-lived broad-scope credential in
+#     repository secrets.
+#  2. **The security-fix bypass is free.** ADR-0017 §7 says a fix for an active
+#     advisory must be able to jump the queue. GitHub documents `cooldown` as
+#     applying to *version* updates only, never to security updates, so the
+#     bypass is structural. With Renovate it is another setting you have to
+#     remember (`vulnerabilityAlerts.minimumReleaseAge: null`) — discipline
+#     again, which is what this ADR exists to replace.
+#  3. **Cargo is a first-class `cooldown` ecosystem**, supporting `default-days`
+#     and all three per-semver-level options.
+#
+# Renovate's genuine advantage is granularity: `minimumReleaseAge: "48 hours"`
+# is expressed in hours, and it understands Cargo's `[dev-dependencies]` section
+# as a distinct depType. See the two limitations recorded below.
+#
+# ## Limitation 1 — dev-dependencies cannot be grouped separately here
+#
+# ADR-0017 asks for dev-dependencies grouped apart from production ones.
+# Dependabot's `groups.dependency-type` is documented as supported by bundler,
+# composer, mix, maven, npm and pip — **not cargo** — so this cannot be
+# expressed natively. Nor can it be faked with `patterns`: grouping matches on
+# dependency *name*, while "dev" is a per-manifest-section property, and in this
+# workspace `rusqlite`, `tokio` and `serde_json` are each *both* a production
+# dependency of one crate and a dev-dependency of another. A name pattern would
+# silently mis-sort the production copies.
+#
+# So it is not done, rather than done wrongly. Majors are separated (below),
+# which is where the review-attention argument actually bites; dev-dependency
+# separation is a convenience that Dependabot cannot honour for Cargo today.
+#
+# ## Limitation 2 — the age is enforced at the PR, not at the resolver
+#
+# This applies to **both** tools and is the real boundary of the mechanism.
+# `cooldown` decides when Dependabot opens a pull request. It does not pass a
+# minimum age to Cargo's resolver, so a *transitive* dependency that `cargo
+# update` picks up inside such a PR is not itself age-gated. The resolver-level
+# fix is `-Zmin-publish-age` (RFC 3923, tracking rust-lang/cargo#17009), which is
+# nightly-only and therefore unusable against this project's 1.94 stable MSRV;
+# Renovate's issue to wire it up (renovatebot/renovate#41659) is open and blocked
+# on the same thing. Revisit when it stabilises.
+#
+# ## A deliberate override
+#
+# Since July 2026 Dependabot applies a **3-day** cooldown by default. The 2 days
+# set below is therefore *less* conservative than doing nothing. That is on
+# purpose: ADR-0017 fixes the policy at 48 hours and explicitly rejects longer
+# holds as the default ("the marginal detection benefit is small and the
+# staleness cost compounds"). Stating it also means the policy cannot drift when
+# the platform default changes again. To adopt the platform default instead,
+# change the four `-days` values to 3 — and update ADR-0017, because it is the
+# ADR that says 48.
+
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    # The 48-hour hold. Set at every level explicitly rather than relying on
+    # `default-days` alone, so a reader can see the policy applies to majors,
+    # minors and patches alike without knowing the fallback rules.
+    cooldown:
+      default-days: 2
+      semver-major-days: 2
+      semver-minor-days: 2
+      semver-patch-days: 2
+    open-pull-requests-limit: 10
+    groups:
+      # Patch and minor together: individually low-risk, collectively tedious,
+      # and one green CI run is the same evidence for all of them.
+      cargo-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    # Majors are deliberately *not* grouped. Left ungrouped, Dependabot opens one
+    # PR per major bump, which is what a breaking change deserves: its own diff,
+    # its own CI run, and its own decision.
+    commit-message:
+      prefix: "chore(deps)"
+
+  # The workflows pin every action by commit SHA (with a version comment), which
+  # is the right posture but only if something keeps the pins current — an
+  # abandoned SHA pin is a stale action nobody is watching. Same 48-hour hold.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    cooldown:
+      default-days: 2
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(ci)"
