@@ -548,7 +548,10 @@ mod tests {
             );",
         )
         .expect("bootstrap");
-        for m in MIGRATIONS.iter().take_while(|m| m.version < latest_version()) {
+        for m in MIGRATIONS
+            .iter()
+            .take_while(|m| m.version < latest_version())
+        {
             conn.execute_batch(m.sql).expect("legacy migration");
             conn.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
@@ -871,10 +874,19 @@ mod tests {
             .is_ok()
         };
         assert!(!update(Some(2), None), "a successor with no moment");
-        assert!(!update(None, Some("2026-01-01")), "a moment with no successor");
+        assert!(
+            !update(None, Some("2026-01-01")),
+            "a moment with no successor"
+        );
         assert!(!update(Some(1), Some("2026-01-01")), "self-supersession");
-        assert!(update(Some(2), Some("2026-01-01")), "the one legitimate shape");
-        assert!(update(None, None), "and clearing it again is legitimate too");
+        assert!(
+            update(Some(2), Some("2026-01-01")),
+            "the one legitimate shape"
+        );
+        assert!(
+            update(None, None),
+            "and clearing it again is legitimate too"
+        );
     }
 
     /// Anchor evidence with no anchor key names nothing and can never be checked
@@ -891,7 +903,10 @@ mod tests {
             )
             .is_ok()
         };
-        assert!(insert(None, None, None), "an unanchored memory is legitimate");
+        assert!(
+            insert(None, None, None),
+            "an unanchored memory is legitimate"
+        );
         assert!(insert(Some("sym:rust:a.rs#f"), Some("blob1"), Some("a.rs")));
         assert!(!insert(None, Some("blob1"), None), "a blob naming no node");
         assert!(!insert(None, None, Some("a.rs")), "a path naming no node");
