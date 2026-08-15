@@ -3146,6 +3146,11 @@ mod two_modality_teardown {
         wav.extend_from_slice(&data_len.to_le_bytes());
         for i in 0..SAMPLES {
             let t = f64::from(i) / f64::from(SAMPLE_RATE);
+            // `cast_possible_truncation`: `sin()` is bounded to [-1.0, 1.0], so the
+            // scaled amplitude never leaves ±8000 — a quarter of `i16`'s ±32_768.
+            // The cast can therefore only drop the fraction, and dropping the
+            // fraction *is* the quantisation to 16-bit PCM that this format is made
+            // of, not a loss of range.
             #[allow(clippy::cast_possible_truncation)]
             let sample = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
             wav.extend_from_slice(&sample.to_le_bytes());
