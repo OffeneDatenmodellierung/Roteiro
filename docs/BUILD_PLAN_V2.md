@@ -81,7 +81,7 @@ Verified against `main` at the time of writing:
 | Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
 | CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
 | Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
-| `EXTRACT_VERSION` | **`10`** (`crates/rto-graph/src/extract.rs`) — bumped once by Stage 28 | Bumping it forces full re-extraction for every user. |
+| `EXTRACT_VERSION` | **`11`** (`crates/rto-graph/src/extract.rs`) — the Stage 28 bump landed in #316 | Bumping it forces full re-extraction for every user. No test pins the value. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
 | Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one. |
 
@@ -235,8 +235,9 @@ no graph integration.
 
 **Delivered in #317.** Migration 11 (`agent_memory`), the `rto_graph::memory`
 store, and `roteiro memory add|list|forget`. Every DoD item above has a test;
-`EXTRACT_VERSION` is unchanged and asserted so, because memory is not extraction
-output.
+memory cannot invalidate the fact cache, and is asserted so as a property of
+memory writes (`tests/sync.rs::memory_writes_do_not_invalidate_the_fact_cache`),
+because memory is not extraction output.
 
 **Four deviations from ADR-0013's proposed SQL**, each deliberate:
 

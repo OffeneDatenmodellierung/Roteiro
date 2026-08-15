@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rto_graph::{
-    EdgeKind, FileNodeExtractor, ObjectCache, Registry, Repo, Store, sync, sync_worktree,
+    DEFAULT_MEMORY_SCOPE, EdgeKind, FileNodeExtractor, MemoryKind, MemoryWrite, ObjectCache,
+    Registry, Repo, Store, sync, sync_worktree,
 };
 
 /// Run `git` in `dir` with hermetic identity/signing settings, asserting success.
@@ -693,4 +694,145 @@ fn a_changed_extraction_identity_re_extracts_at_an_unchanged_tree() {
             .expect("resync")
             .no_op
     );
+}
+
+/// Every cache entry as `(path relative to the cache root, bytes)`, sorted — the
+/// whole fact cache, in a form two snapshots can be compared on.
+fn cache_entries(cache: &ObjectCache) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                out.push((rel, std::fs::read(&path).expect("read cache entry")));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(cache.root(), cache.root(), &mut out);
+    out.sort();
+    out
+}
+
+/// A default memory write: unanchored, `lesson`, default scope.
+fn lesson(body: &str) -> MemoryWrite<'_> {
+    MemoryWrite {
+        scope: DEFAULT_MEMORY_SCOPE,
+        kind: MemoryKind::Lesson,
+        anchor: None,
+        body,
+        confidence: None,
+        supersedes: None,
+    }
+}
+
+/// **Writing agent memory does not invalidate the fact cache** (ADR-0013).
+///
+/// Memory is not extraction output: it is not derived from `(path, blob id,
+/// bytes)`, no extractor emits it, and no cached fact set can contain it. So the
+/// extraction identity — `EXTRACT_VERSION` plus the extractor environment, the
+/// pair folded into every cache key — must be untouched by any memory write, and
+/// a `sync` that follows one must still be free.
+///
+/// **If this test fails, you have a bug, not a renumbering.** It says a memory
+/// code path reached the extraction identity or the cached facts, which is the
+/// thing memory's separate-store design exists to prevent. It does not move when
+/// `EXTRACT_VERSION` is bumped for a real change to extraction output (that is
+/// what a bump is *for*, and no test pins the constant's value — see the note on
+/// its declaration in `src/extract.rs`); both snapshots here are taken from the
+/// same binary, so a legitimate bump by unrelated work cannot trip it.
+///
+/// This replaces an equality assertion on `EXTRACT_VERSION` that lived in
+/// `src/memory.rs`. That form fired on ADR-0016's audio bump — work memory had no
+/// part in — because a global constant cannot express a claim about one module's
+/// share of it. The property can, and it is also strictly stronger: pinning the
+/// number would still have passed if a memory write had cleared the recorded
+/// identity or retired a cached fact set.
+#[test]
+fn memory_writes_do_not_invalidate_the_fact_cache() {
+    let dir = fresh_dir("memory-cache");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "a.txt", "alpha\n");
+    write(&dir, "src/c.rs", "fn main() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "initial"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+    let ex = FileNodeExtractor;
+
+    let cold = sync(&mut store, &repo, &cache, &ex).expect("cold sync");
+    assert!(!cold.no_op);
+    assert_eq!(cold.blobs_extracted, 2, "both blobs are extracted cold");
+
+    let facts_before = cache_entries(&cache);
+    assert!(
+        !facts_before.is_empty(),
+        "the cache must have something in it"
+    );
+    let identity_before = store.sync_env().expect("sync env");
+    let tree_before = store.sync_state().expect("sync state");
+    assert!(identity_before.is_some(), "a sync records an identity");
+
+    // The same spread of writes the artifact-purity test uses: anchored,
+    // unanchored, superseding, and a forget.
+    let anchored = store
+        .record_memory(&MemoryWrite {
+            anchor: Some("file:src/c.rs"),
+            kind: MemoryKind::Attempt,
+            confidence: Some(0.9),
+            ..lesson("The retry loop double-counted partial batches.")
+        })
+        .expect("anchored write");
+    store
+        .record_memory(&MemoryWrite {
+            supersedes: Some(anchored),
+            ..lesson("Superseded: the dedup key alone was not enough.")
+        })
+        .expect("superseding write");
+    let doomed = store
+        .record_memory(&lesson("A record that will be forgotten."))
+        .expect("write");
+    store.forget_memory(doomed).expect("forget");
+    assert_eq!(
+        store.memory_counts().expect("counts"),
+        (1, 1),
+        "the writes must actually have done work",
+    );
+
+    assert_eq!(
+        store.sync_env().expect("sync env"),
+        identity_before,
+        "a memory write must not perturb the recorded extraction identity",
+    );
+    assert_eq!(
+        store.sync_state().expect("sync state"),
+        tree_before,
+        "a memory write must not disturb the synced tree",
+    );
+    assert_eq!(
+        cache_entries(&cache),
+        facts_before,
+        "no cached fact set may be added, rewritten or retired by a memory write",
+    );
+
+    // The consequence that costs real time if it is ever lost: the next sync is
+    // still free, rather than re-extracting the repository.
+    let after = sync(&mut store, &repo, &cache, &ex).expect("resync");
+    assert!(
+        after.no_op,
+        "a sync after a memory write must still be a no-op",
+    );
+    assert_eq!(
+        after.blobs_extracted, 0,
+        "memory must not force a single blob to be re-extracted",
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -22,8 +22,13 @@
 //!   precedent — `rebuild` deletes only `edges` and `nodes`, and what cannot be
 //!   re-derived must not be destroyed by a re-derivation.
 //!
-//! Nothing here adds a [`crate::Provenance`] variant, and `EXTRACT_VERSION` does
-//! not change: memory is not extraction output.
+//! Nothing here adds a [`crate::Provenance`] variant, and no memory write may
+//! invalidate the content-addressed fact cache: memory is not extraction output,
+//! so it is not part of the extraction identity `EXTRACT_VERSION` belongs to.
+//! That is asserted as a property — a full spread of memory writes leaves the
+//! recorded extraction identity and every cached fact set untouched, and the next
+//! `sync` is still a no-op — by `memory_writes_do_not_invalidate_the_fact_cache`
+//! in `tests/sync.rs`, where the cache it is about lives.
 //!
 //! # This is the episodic tier only
 //!
@@ -839,26 +844,19 @@ mod tests {
         }
     }
 
-    /// **`EXTRACT_VERSION` does not change for agent memory.**
-    ///
-    /// It is folded into the content-addressed cache key, so bumping it discards
-    /// every cached fact set in every clone and forces a full re-extraction of
-    /// every repository. That cost is right when extraction *output* changes —
-    /// and memory is not extraction output at all. It is not derived from
-    /// `(path, blob id, bytes)`, no extractor emits it, and no cached fact set
-    /// can contain it. This is a stage-scoped guard on a shared constant, and it
-    /// lives here rather than in an integration test because the constant is
-    /// crate-private.
-    #[test]
-    fn agent_memory_does_not_bump_the_extraction_version() {
-        assert_eq!(
-            crate::extract::EXTRACT_VERSION
-                - if cfg!(feature = "pdf-text") { 100 } else { 0 }
-                - if cfg!(feature = "image-ocr") { 200 } else { 0 },
-            10,
-            "memory is not extraction output; nothing here may invalidate the fact cache",
-        );
-    }
+    // The invariant that used to be asserted here — *memory must not invalidate
+    // the fact cache* — now lives in `tests/sync.rs` as
+    // `memory_writes_do_not_invalidate_the_fact_cache`, stated as a property of
+    // memory writes rather than as an equality on `EXTRACT_VERSION`.
+    //
+    // The equality could not express it. `EXTRACT_VERSION` is global, so pinning
+    // its value here asserted the whole crate's extraction work, not memory's
+    // share of it: the guard fired on ADR-0016's legitimate audio bump, in which
+    // memory played no part, and it would have fired again on every later one —
+    // each time asking the tripper to decide whether they had broken an invariant
+    // or merely renumbered a constant. It also could not catch what it was named
+    // for, because a memory change that *did* reach extraction would show up as a
+    // stale-facts bug, not as an unexpected number.
 
     #[test]
     fn kind_tokens_round_trip_and_reject_the_unknown() {
