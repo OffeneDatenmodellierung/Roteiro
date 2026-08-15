@@ -370,6 +370,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_js_labels_generated_media_content_and_never_as_extracted() {
+        // ADR-0015's UI clause: a media node's generated content is surfaced
+        // ALWAYS visibly attributed to the producer that made it, with a
+        // per-blob rebuild — and it must never render as if it were extracted.
+        //
+        // Pin the wiring headlessly (full visual QA needs a browser): the
+        // section reads the `generated` array the node endpoint adds, renders it
+        // under its own heading with the model/producer attribution and the
+        // "produced by a model" warning, and offers the per-blob rebuild
+        // command. It must NOT be merged into the `p-node-content` block, which
+        // is where a node's EXTRACTED text lives.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            "function generatedSection",
+            // driven off the endpoint's sibling key, not off `meta.content`
+            "generatedSection(exp.generated)",
+            // its own heading, its own warning, and attribution on the record
+            "Generated media content",
+            "produced by a model — not extracted from the source",
+            "`producer ${r.producer || \"?\"}`",
+            "`generated · ${r.kind || \"media\"}`",
+            // a gate refusal shows its measurement instead of an empty panel
+            "r.skipped",
+            "no model was run",
+            // the per-blob rebuild affordance
+            "p-generated-rebuild",
+            "r.rebuild",
+        ] {
+            assert!(body.contains(needle), "app.js must reference `{needle}`");
+        }
+        // The generated block must be a DIFFERENT element from the extracted
+        // content block. If a refactor ever renders a transcript into
+        // `p-node-content`, this is what catches it.
+        assert!(
+            !body.contains("p-node-content\" }, el(\"code\", { text: r.text"),
+            "generated text must never be rendered into the extracted-content block"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_styles_generated_media_content_distinctly() {
+        // Generated content must not LOOK like extracted content either: it has
+        // its own class hooks, and they must survive a CSS refactor.
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        for needle in [
+            ".p-generated",
+            ".p-generated-warning",
+            ".p-generated-producer",
+            ".p-generated-rebuild",
+            ".p-badge.p-generated-badge",
+        ] {
+            assert!(body.contains(needle), "shell CSS must define `{needle}`");
+        }
+    }
+
+    #[tokio::test]
     async fn shell_styles_the_node_content_and_model_dropdown() {
         // The two new UX surfaces need their styles shipped in the shell: the Node
         // detail's captured-content block and the Ask model `<select>`. Pin the class

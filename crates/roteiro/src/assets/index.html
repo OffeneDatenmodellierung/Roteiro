@@ -977,6 +977,64 @@
         border: none;
         padding: 0;
       }
+      /* Generated media content (ADR-0015). Deliberately NOT styled like
+         `.p-node-content`: extracted text and model-generated text must not look
+         alike at a glance. A warning-coloured left rule, a producer badge that
+         is always present, and a monospace command for the per-blob rebuild. */
+      .p-generated {
+        margin: 0.35rem 0 0.6rem;
+        padding: 0.5rem 0.6rem;
+        border: 1px solid #5c4a13;
+        border-left: 3px solid var(--pauthored);
+        border-radius: 6px;
+        background: #14100a;
+      }
+      .p-generated + .p-generated {
+        margin-top: 0.5rem;
+      }
+      .p-generated-warning {
+        font-size: 0.7rem;
+        color: var(--pauthored);
+        margin: 0 0 0.35rem;
+      }
+      .p-badge.p-generated-badge {
+        color: var(--pauthored);
+        border-color: #5c4a13;
+      }
+      .p-generated-producer {
+        font-size: 0.68rem;
+        color: var(--pmuted);
+        word-break: break-all;
+        margin: 0.3rem 0;
+      }
+      .p-generated-text {
+        margin: 0.35rem 0 0.4rem;
+        max-height: 260px;
+        overflow: auto;
+        font-size: 0.75rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--pfg);
+      }
+      .p-generated-skip {
+        font-size: 0.72rem;
+        color: var(--pmuted);
+        margin: 0.35rem 0 0.4rem;
+      }
+      .p-generated-rebuild {
+        display: block;
+        margin-top: 0.35rem;
+        padding: 0.3rem 0.4rem;
+        border: 1px solid var(--pline);
+        border-radius: 5px;
+        background: #0d1117;
+        font-family: var(--pmono, ui-monospace, SFMono-Regular, Menlo, monospace);
+        font-size: 0.7rem;
+        color: var(--pmuted);
+        word-break: break-all;
+        user-select: all;
+      }
       .p-chips {
         display: flex;
         flex-wrap: wrap;

@@ -479,18 +479,92 @@ async fn project_nodes(
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/{project}/node/{key}` → the node plus its
-/// in/out edges (`query::explain`). 404 when the key is unknown.
+/// in/out edges (`query::explain`), and — on a media node — the **generated**
+/// media content recorded for its blob. 404 when the key is unknown.
+///
+/// The generated array is added beside `explain`'s reply rather than inside it:
+/// [`rto_graph::Explanation`] is a statement about the *graph*, and generated
+/// text is not a graph fact (ADR-0015). Keeping it a sibling key is the same
+/// separation `search --include-generated` makes between its two channels, and
+/// it means a consumer that does not know about the field cannot accidentally
+/// read a transcript as part of a node's explanation.
 async fn node_detail(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let project = require_project(&params)?;
     let key = require_key(&params)?;
-    let explanation = ws.with_store(Some(project), |s| explain(s, key))??;
-    match explanation {
-        Some(e) => Ok(Json(e).into_response()),
+    let detail = ws.with_store(Some(project), |s| -> Result<_, StoreError> {
+        let Some(explanation) = explain(s, key)? else {
+            return Ok(None);
+        };
+        let generated = match s.get_node(key)?.and_then(|n| n.blob_hash) {
+            Some(blob) => generated_for_blob(s, &blob)?,
+            None => Vec::new(),
+        };
+        Ok(Some((explanation, generated)))
+    })??;
+    match detail {
+        Some((explanation, generated)) => {
+            let mut body = serde_json::to_value(&explanation)
+                .map_err(|e| ApiError::Internal(format!("could not render node `{key}`: {e}")))?;
+            if let Some(object) = body.as_object_mut() {
+                object.insert("generated".to_owned(), Value::Array(generated));
+            }
+            Ok(Json(body).into_response())
+        }
         None => Err(ApiError::NotFound(format!(
             "no node `{key}` in project `{project}`"
         ))),
     }
+}
+
+/// Every generated-media record for one source blob, rendered for the explorer.
+///
+/// Each entry is **self-describing about its origin**: `generated: true`, the
+/// full producer identity, the model that ran, its quantisation and the prompt
+/// it was given. There is no shape here that a consumer could mistake for
+/// extracted content — the node's own `meta.content` is a different key entirely,
+/// and a record's text lives under `text`, never merged into it.
+///
+/// A record the [pre-generation gate](rto_graph::media::gate) refused carries
+/// `text: null` and a `skipped` object with the value measured, so the UI can
+/// say *why* nothing was generated rather than showing an empty panel.
+///
+/// `rebuild` is the exact command that regenerates this one blob. The explorer
+/// is a read-only view over graphs a server already holds, and a rebuild means
+/// loading a multi-gigabyte model — so the UI hands the operator the command
+/// rather than running it inside an HTTP handler.
+fn generated_for_blob(store: &Store, blob: &str) -> Result<Vec<Value>, StoreError> {
+    let records = store.media_records(&rto_graph::MediaFilter {
+        blob_id: Some(blob),
+        ..rto_graph::MediaFilter::default()
+    })?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            json!({
+                "generated": true,
+                "producer": record.producer_id.to_string(),
+                "model": record.producer.model,
+                "kind": record.producer.kind.as_str(),
+                "quantisation": record.producer.quantisation,
+                "prompt": record.producer.prompt,
+                "blob": record.blob_id,
+                "path": record.path,
+                "generation": record.generation,
+                "producedAt": record.produced_at,
+                "toolVersion": record.tool_version,
+                "text": record.outcome.text(),
+                "skipped": record.outcome.skip().map(|skip| json!({
+                    "reason": skip.reason.as_str(),
+                    "metric": skip.reason.metric(),
+                    "value": skip.value,
+                    "threshold": skip.threshold,
+                    "explanation": skip.to_string(),
+                })),
+                "rebuild": format!("roteiro media build --blob {} --force", record.blob_id),
+            })
+        })
+        .collect())
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/{project}/neighbourhood/{key}?depth=1` → the
@@ -1942,6 +2016,141 @@ mod tests {
         )
         .await;
         assert_eq!(missing, StatusCode::NOT_FOUND);
+    }
+
+    /// A media node's generated content reaches the explorer **attributed**, and
+    /// a gate refusal reaches it as a refusal rather than as a hole (ADR-0015).
+    ///
+    /// The two records here are the two outcomes: one producer transcribed the
+    /// clip, another was refused by the pre-generation gate. Both must come back
+    /// on the node, marked `generated`, and neither may appear anywhere the UI
+    /// reads *extracted* content — which is why the assertions also check the
+    /// node's own `meta`.
+    #[tokio::test]
+    async fn node_detail_surfaces_generated_media_attributed_to_its_producer() {
+        let store = Store::open_in_memory().expect("store");
+        let mut clip = Node::new("file:assets/silence.wav", NodeKind::File, "silence.wav");
+        clip.path = Some("assets/silence.wav".to_owned());
+        clip.blob_hash = Some("blob-silence".to_owned());
+        let mut store = apply(store, &FactSet::new().with_node(clip));
+
+        let voxtral = rto_graph::Producer {
+            kind: rto_graph::MediaKind::Audio,
+            model: "voxtral-mini-3b".to_owned(),
+            model_digest: "4705be8e".to_owned(),
+            quantisation: "Q4_K_M".to_owned(),
+            mmproj_digest: "4f24c4ef".to_owned(),
+            prompt: "Transcribe this audio recording.".to_owned(),
+            temperature: 0.0,
+            max_tokens: 512,
+        };
+        let successor = rto_graph::Producer {
+            model: "voxtral-small-24b".to_owned(),
+            ..voxtral.clone()
+        };
+        for (producer, outcome) in [
+            (
+                &voxtral,
+                rto_graph::MediaOutcome::Generated(rto_graph::GeneratedContent {
+                    text: "Tonight I want to talk about world government.".to_owned(),
+                    confidence: None,
+                }),
+            ),
+            (
+                &successor,
+                rto_graph::MediaOutcome::Skipped(rto_graph::MediaSkip {
+                    reason: rto_graph::GateReason::Silence,
+                    value: 0.0,
+                    threshold: 0.0001,
+                }),
+            ),
+        ] {
+            store
+                .record_media_content(&rto_graph::MediaWrite {
+                    blob_id: "blob-silence",
+                    path: "assets/silence.wav",
+                    producer,
+                    tool_version: "9.9.9",
+                    outcome: &outcome,
+                    replace: false,
+                })
+                .expect("record");
+        }
+
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, store)),
+            None,
+            "/v1/graph/hub/node/file:assets/silence.wav",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let records = json["generated"].as_array().expect("a generated array");
+        assert_eq!(records.len(), 2, "both producers' records must surface");
+
+        // Ordered by producer id, so the assertions can name them.
+        let transcript = records
+            .iter()
+            .find(|r| r["text"].is_string())
+            .expect("the generated record");
+        assert_eq!(transcript["generated"], true, "an unmissable marker");
+        assert_eq!(transcript["model"], "voxtral-mini-3b");
+        assert_eq!(transcript["kind"], "audio");
+        assert_eq!(transcript["quantisation"], "Q4_K_M");
+        assert_eq!(
+            transcript["producer"],
+            voxtral.id().to_string(),
+            "the full producer identity, not just the model name",
+        );
+        assert!(transcript["skipped"].is_null());
+        // The per-blob rebuild the UI hands the operator.
+        assert_eq!(
+            transcript["rebuild"],
+            "roteiro media build --blob blob-silence --force"
+        );
+
+        let refusal = records
+            .iter()
+            .find(|r| !r["skipped"].is_null())
+            .expect("the gated record");
+        assert!(
+            refusal["text"].is_null(),
+            "a gated skip carries no text to render",
+        );
+        assert_eq!(refusal["skipped"]["reason"], "silence");
+        assert_eq!(refusal["skipped"]["metric"], "rms");
+        assert_eq!(
+            refusal["skipped"]["explanation"], "below silence threshold (rms=0, threshold 0.0001)",
+            "the operator-facing line names the metric and its measured value",
+        );
+
+        // …and none of it leaked into the node itself. `meta` is where the UI
+        // reads EXTRACTED content from, so a transcript appearing there is
+        // exactly the confusion ADR-0015 exists to prevent.
+        assert!(
+            !json["meta"].to_string().contains("world government"),
+            "generated text must not reach the node's meta: {}",
+            json["meta"],
+        );
+        assert_eq!(json["node"]["key"], "file:assets/silence.wav");
+    }
+
+    /// A node with no blob — every symbol, every config key — gets an **empty**
+    /// generated array, not a missing key. The UI can then branch on length
+    /// alone instead of on presence.
+    #[tokio::test]
+    async fn a_node_without_media_reports_an_empty_generated_array() {
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/node/sym:main",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["generated"].as_array().map(Vec::len),
+            Some(0),
+            "the key is always present, so a consumer never has to guess",
+        );
     }
 
     #[tokio::test]
