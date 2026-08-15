@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.1...rto-graph-v1.10.2) - 2026-08-15
+
+### Fixed
+
+- *(test)* one WAV encoder in the workspace ([#302](https://github.com/OffeneDatenmodellierung/Roteiro/pull/302))
+
+### Other
+
+- *(tests)* name the right constraint per direction
+
 ## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.0...rto-graph-v1.10.1) - 2026-08-15
 
 ### Fixed
