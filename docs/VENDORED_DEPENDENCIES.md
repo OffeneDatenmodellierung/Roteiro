@@ -84,4 +84,4 @@ different thing from one nobody has looked at.
 
 ---
 
-Governed by ADR-0017 ([[docs/adr/0017-dependency-security-policy.md]]).
+Governed by [ADR-0017](adr/0017-dependency-security-policy.md).
