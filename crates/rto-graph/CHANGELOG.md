@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.9.0...rto-graph-v1.10.0) - 2026-08-15
+
+### Added
+
+- *(exec)* add AnalyzerRunner contract and security ingest
+
+### Fixed
+
+- *(findings)* state the full analyzer-id contract in rejection errors
+- *(extract)* drop cached vision/ASR engines before exit
+
+### Other
+
+- *(engine-slot)* describe the init lock precisely
+
 ## [1.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.8.0...rto-graph-v1.9.0) - 2026-08-14
 
 ### Added
