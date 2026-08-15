@@ -1,17 +1,108 @@
+# cargo-deny configuration — the licence, advisory and ban gates (ADR-0017).
+#
+# CI runs this with `--all-features` (`.github/workflows/ci.yml`), so the gate
+# sees every optional feature the project ships, not just the default build.
+# Widening it is what closed #318; before that, anything reachable only through
+# `models`, `serve`, `pdf-text`, `image-vision`, `audio-transcribe` and friends
+# was invisible to both the licence and the advisory check.
+
 [licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "Unicode-3.0", "Zlib", "ISC"]
+# Every entry up to "ISC" is a plain permissive **software** licence and needs no
+# argument. Two entries are not, and each is here by **decision, not oversight**,
+# with its reasoning recorded below: `MPL-2.0` (ADR-0016) and
+# `CDLA-Permissive-2.0` (ADR-0017). Adding a third means writing the same kind of
+# record — a licence outside the plain-permissive set is a decision, never an
+# expedient.
+#
+# ## `MPL-2.0` — ADR-0016
+#
+# This comment is the record a future reader is owed:
+#
+# * It entered for **`symphonia`** (ADR-0016): all seven `symphonia-*` crates are
+#   MPL-2.0. They provide the audio *format* read — codec, rate, bit depth,
+#   channels, duration, tags — behind the opt-in `audio-metadata` feature. Every
+#   transitive dependency they pull (`lazy_static`, `log`, `bitflags`, `bytemuck`,
+#   `smallvec`, `num-complex`, `num-traits`, `regex-lite`, `extended`) was already
+#   inside this allow-list, so MPL-2.0 was the sole addition.
+# * MPL-2.0 is **file-level (weak) copyleft**: the obligation attaches to the
+#   MPL-licensed *files themselves*. Modifying one obliges publishing that file's
+#   modifications; shipping binaries obliges the notice and the availability of
+#   those files' source. Using the crate unmodified — the expected and current
+#   case — reduces the obligation to keeping the notice.
+# * It therefore **does not reach Roteiro's own source**. Linking an MPL-2.0 crate
+#   does not license this repository under MPL-2.0, and the project's
+#   `MIT OR Apache-2.0` dual licence is untouched.
+#
+# If a *second* MPL-2.0 crate ever appears in the tree, re-run that reasoning for
+# it — this entry blessed a considered case, not the licence in general.
+#
+# ## `CDLA-Permissive-2.0` — ADR-0017
+#
+# Admitted under ADR-0017, "Gates that see what the project actually ships". It
+# surfaced only when the gate was widened to the feature matrix (#318), having sat
+# unchecked in the lockfile until then. This comment is the record a future reader
+# is owed:
+#
+# * It entered for **`webpki-roots`** — Mozilla's CA root store, pulled in by
+#   `ureq` under the opt-in `models` feature, which is what fetches GGUF models
+#   with consent. It is the trust anchor for those HTTPS downloads.
+# * **It licenses data, not code.** The crate is a single generated `src/lib.rs`
+#   that is a table of CA certificates derived from the Common CA Database; the
+#   crate's own README states the data "is used via the CCADB Data Usage Terms"
+#   and "is a derived work of the CCADB data". There is no library to speak of.
+# * **CDLA-Permissive-2.0 is not copyleft.** Unlike MPL-2.0 — the one other
+#   non-standard-permissive entry the project has weighed — it carries no
+#   share-alike or reciprocal obligation. §3.1 is explicit that the agreement
+#   "does not impose any restriction or obligations with respect to the use,
+#   modification, or sharing of Results", and Results include anything computed
+#   from the data. Roteiro's own MIT OR Apache-2.0 licensing is unaffected.
+# * **The one obligation is attribution-shaped**: §2.1 requires that a recipient
+#   who shares the Data includes the text of the agreement with it. The crate
+#   ships that text in its `LICENSE` file, so a binary that vendors the crate
+#   satisfies it the same way it satisfies MIT/BSD notice retention.
+# * **The alternative was considered and rejected.** Dropping it means dropping
+#   `ureq`'s default `rustls` roots for a platform verifier or `native-tls` —
+#   trading a permissive data licence for a larger native-TLS surface, or for
+#   platform-dependent trust behaviour, on the one code path whose entire job is
+#   to verify a download. That is a worse security outcome, not a better one.
+#
+# Revisit if `webpki-roots` relicenses, if the obligation in §2.1 stops being
+# satisfiable by shipping the crate's `LICENSE`, or if the `models` feature stops
+# needing a bundled root store.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "ISC",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
 
 [bans]
 multiple-versions = "warn"
 
 [advisories]
 yanked = "deny"
+# **Every `ignore` entry states four things** (ADR-0017, "Advisory exceptions
+# carry their reasoning"). An entry without them is incomplete and should be
+# rejected in review:
+#
+#   1. *why* the advisory is tolerable — normally "unmaintained, no known
+#      vulnerability", never "it was noisy";
+#   2. *how the crate enters the tree* — which feature and which parent, so the
+#      blast radius is legible;
+#   3. *what would trigger a revisit* — the condition that makes this stale;
+#   4. *whether the justification is feature-scoped*, because `cargo deny` cannot
+#      scope an ignore to a feature. A feature-scoped rationale is a promise the
+#      tool cannot keep, and the entry must say so out loud.
+#
+# Ignores are for **advisories**, never for licences: a licence outside the
+# allow-list above is a decision, not an exception.
 ignore = [
-    # `paste` (build-time-only proc-macro) is unmaintained but has no known
-    # vulnerability. It enters the tree only via candle → gemm under the
-    # optional `inference-local-models` feature; the default/`inference` builds
-    # never pull it. Revisit if gemm/candle drop the dependency.
-    "RUSTSEC-2024-0436",
     # `ttf-parser` is unmaintained (author-declared, no known vulnerability). It
     # enters the tree only via pdf-extract → lopdf under the optional `pdf-text`
     # feature; the default and `inference*` builds never pull it. It is a mature,

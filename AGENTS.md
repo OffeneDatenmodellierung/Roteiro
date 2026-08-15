@@ -86,10 +86,23 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - `cargo test --workspace --all-features` — green.
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
-- `cargo deny check` and `cargo audit` — clean. **Every new dependency's licence
-  must be on the allow-list** — the exact SPDX ids in `deny.toml`: MIT,
-  Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC,
-  Zlib, Unicode-3.0. Verify each grammar/model dep.
+- `cargo deny --all-features check` and `cargo audit` — clean. **Every new
+  dependency's licence must be on the allow-list** — the exact SPDX ids in
+  `deny.toml`: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
+  BSD-3-Clause, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0. Verify each
+  grammar/model dep. Note the `--all-features`: the gate must see what the
+  project *ships*, not just the default build, and it costs under a second
+  because cargo-deny resolves metadata rather than compiling (ADR-0017, #318).
+  A licence outside the list is a **decision**, recorded next to its `deny.toml`
+  entry — never an `ignore`, and never "to make CI green".
+- **Dependency currency is a mechanism, not a habit** (ADR-0017). Dependabot
+  proposes updates weekly under a **minimum release age — at least 48 hours, 3
+  days as configured** — so a
+  compromised publish has time to be caught before Roteiro depends on it. Native
+  and vendored code (llama.cpp, SQLite, tree-sitter) is outside `cargo audit`'s
+  reach and is tracked by name in
+  [`docs/VENDORED_DEPENDENCIES.md`](docs/VENDORED_DEPENDENCIES.md); a change that
+  vendors non-Rust code adds its row in the same PR.
 - **Offline by default.** The default build needs no network and no model. Keep
   heavy dependencies (llama.cpp, GGUF models, PDF/OCR/vision, the model server)
   behind **feature flags** so the default build stays small, and never touch the
