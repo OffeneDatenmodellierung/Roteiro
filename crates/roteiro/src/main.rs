@@ -616,12 +616,19 @@ enum SecurityAction {
 /// first, or a gate failure on a run that described an image would abort in
 /// ggml-metal's exit-time teardown and report 134 instead of 1 (issue #291).
 ///
+/// The shared llama.cpp backend goes the same way, and in the same order —
+/// engines, then backend (issue #296). It is released *after* the call above and
+/// cannot be released out of turn: while any engine still holds a handle,
+/// `release_shared_backend` declines.
+///
 /// This is the **only** sanctioned exit-without-`Err` in the CLI. A subcommand
 /// that wants a non-zero status returns an error and lets `main` unwind, which is
 /// what `security ingest` does — nothing in the findings path calls
 /// `std::process::exit` directly, so nothing there can skip the guard.
 fn exit_gate_failure() -> ! {
     let _released = rto_graph::release_media_engines();
+    #[cfg(feature = "inference-local-models")]
+    let _backend = rto_llama::backend::release_shared_backend();
     std::process::exit(1)
 }
 
@@ -673,6 +680,16 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    // Own the process's single llama.cpp backend for the rest of `main` (issue
+    // #296). Declared **before** the media guard below precisely so that it drops
+    // *after* it: Rust drops locals in reverse declaration order, and llama.cpp
+    // requires every model be freed before the backend. This covers the engines
+    // `rto-graph` never sees — `serve`'s resident model, `infer --model`, `spec
+    // draft` — while `release_media_engines` covers the extractors'; both call the
+    // same idempotent release, and neither can free the backend out of turn,
+    // because an engine that still holds a handle makes the release decline.
+    #[cfg(feature = "inference-local-models")]
+    let _backend = rto_llama::backend::SharedBackendGuard::hold();
     // Own the media extractors' native engines for the rest of `main`. Extraction
     // loads a llama.cpp vision/ASR engine once and reuses it across blobs; on the
     // Metal backend that engine must be *dropped* before libc's C++ finalizers run,
