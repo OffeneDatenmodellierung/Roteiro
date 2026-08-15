@@ -48,6 +48,16 @@ pub const FINDING_KEY_PREFIX: &str = "finding";
 /// not a finding, and is refused before it can bloat the store.
 pub const MAX_IDENTITY_PART: usize = 512;
 
+/// Longest permitted analyzer id, in characters. Real analyzer ids are short
+/// (`cargo-audit`, `semgrep`, `trivy.fs`); the bound exists because an analyzer
+/// id is a component of both a layer key and every finding key, and those are
+/// stored, indexed and printed.
+///
+/// The constant is the single home of the number: [`is_valid_analyzer_id`]
+/// enforces it and [`analyzer_id_error`] quotes it, so the enforced rule and the
+/// reported rule cannot drift apart.
+pub const MAX_ANALYZER_ID: usize = 64;
+
 /// Errors raised when constructing the identity values this store is keyed by.
 ///
 /// These are *validation* errors, raised by the constructors, so the store never
@@ -55,9 +65,11 @@ pub const MAX_IDENTITY_PART: usize = 512;
 /// [`crate::Store::replace_findings_layer`] it is already well-formed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FindingsError {
-    /// An analyzer id was empty or contained characters outside
-    /// `[a-z0-9]` plus `.`, `_` and `-`.
-    #[error("invalid analyzer id: {0:?} (expected lowercase [a-z0-9._-], non-empty)")]
+    /// An analyzer id broke one of the rules [`is_valid_analyzer_id`] enforces:
+    /// non-empty, at most [`MAX_ANALYZER_ID`] characters, and lowercase
+    /// `[a-z0-9]` plus `.`, `_` and `-`. The message names the rule that was
+    /// actually broken — see [`analyzer_id_error`].
+    #[error("{}", analyzer_id_error(.0))]
     InvalidAnalyzerId(String),
     /// A worktree id was empty or contained characters outside `[a-z0-9-]`.
     #[error("invalid worktree id: {0:?} (expected lowercase [a-z0-9-], 1..=64 chars)")]
@@ -345,15 +357,64 @@ impl std::fmt::Display for WorktreeId {
     }
 }
 
-/// Whether `id` is a well-formed analyzer id: non-empty, and lowercase
-/// `[a-z0-9]` plus `.`, `_`, `-`.
+/// Whether a character may appear in an analyzer id.
+fn is_analyzer_id_char(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+}
+
+/// Whether `id` is a well-formed analyzer id: 1..=[`MAX_ANALYZER_ID`]
+/// characters, every one of them lowercase `[a-z0-9]` or one of `.`, `_`, `-`.
+///
+/// All three rules are reported by [`analyzer_id_error`], so a caller told its
+/// id was rejected is told which of them it broke.
 #[must_use]
 pub fn is_valid_analyzer_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id.bytes().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
-        })
+    !id.is_empty() && id.len() <= MAX_ANALYZER_ID && id.chars().all(is_analyzer_id_char)
+}
+
+/// The rejection message for an analyzer id that [`is_valid_analyzer_id`]
+/// refuses: which rule it broke, then the whole contract.
+///
+/// Every layer that rejects an analyzer id formats its error through this — this
+/// crate's [`FindingsError::InvalidAnalyzerId`] and `rto-exec`'s
+/// `ExecError::InvalidAnalyzerId` — so one rejection cannot read two different
+/// ways depending on how deep it was caught. It is a function rather than a
+/// format string so the enforced rule and the reported rule stay one thing.
+///
+/// ```
+/// # use rto_graph::analyzer_id_error;
+/// assert_eq!(
+///     analyzer_id_error("Semgrep"),
+///     "invalid analyzer id \"Semgrep\": it contains 'S' — an analyzer id is 1 to 64 \
+///      characters of lowercase [a-z0-9._-]"
+/// );
+/// ```
+#[must_use]
+pub fn analyzer_id_error(id: &str) -> String {
+    format!(
+        "invalid analyzer id {id:?}: {} — an analyzer id is 1 to {MAX_ANALYZER_ID} \
+         characters of lowercase [a-z0-9._-]",
+        analyzer_id_rejection(id)
+    )
+}
+
+/// Which rule `id` broke, as a phrase. The character-set rule is checked before
+/// the length rule so a non-ASCII id is reported by the character it contains,
+/// never by a byte count that would not match what the caller sees.
+fn analyzer_id_rejection(id: &str) -> String {
+    if id.is_empty() {
+        return "it is empty".to_owned();
+    }
+    if let Some(bad) = id.chars().find(|c| !is_analyzer_id_char(*c)) {
+        return format!("it contains {bad:?}");
+    }
+    let length = id.chars().count();
+    if length > MAX_ANALYZER_ID {
+        return format!("it is {length} characters, over the {MAX_ANALYZER_ID}-character limit");
+    }
+    // Unreachable for an id `is_valid_analyzer_id` rejected; a caller that
+    // formats a valid id gets an honest answer rather than a wrong one.
+    "it is well-formed".to_owned()
 }
 
 /// Render the layer key a findings layer is filed under:
@@ -363,8 +424,9 @@ pub fn is_valid_analyzer_id(id: &str) -> bool {
 /// wholesale (see [`crate::Store::replace_findings_layer`]).
 ///
 /// # Errors
-/// Returns [`FindingsError::InvalidAnalyzerId`] if `analyzer` is not a
-/// well-formed analyzer id.
+/// Returns [`FindingsError::InvalidAnalyzerId`] if `analyzer` is not 1..=
+/// [`MAX_ANALYZER_ID`] characters of lowercase `[a-z0-9._-]`; the error names
+/// which of those rules was broken.
 pub fn layer_key(analyzer: &str, worktree: &WorktreeId) -> Result<String, FindingsError> {
     if !is_valid_analyzer_id(analyzer) {
         return Err(FindingsError::InvalidAnalyzerId(analyzer.to_owned()));
@@ -401,7 +463,8 @@ impl FindingKey {
     /// Build a key from an analyzer id and its ordered identity components.
     ///
     /// # Errors
-    /// Returns [`FindingsError::InvalidAnalyzerId`] for a malformed analyzer id,
+    /// Returns [`FindingsError::InvalidAnalyzerId`] if `analyzer` is not 1..=
+    /// [`MAX_ANALYZER_ID`] characters of lowercase `[a-z0-9._-]`,
     /// [`FindingsError::EmptyIdentity`] if `parts` is empty, or
     /// [`FindingsError::InvalidIdentityPart`] if a component is empty, longer
     /// than [`MAX_IDENTITY_PART`], or contains a control character.
@@ -893,8 +956,8 @@ fn finding_from_row(row: &rusqlite::Row<'_>) -> Result<Finding, StoreError> {
 mod tests {
     use super::{
         AdvisoryDb, CommandPolicy, EnvironmentPolicy, FindingKey, FindingsError, Isolation,
-        MAX_IDENTITY_PART, NetworkPolicy, RunnerKind, Severity, WorktreeAccess, WorktreeId,
-        is_valid_analyzer_id, layer_key,
+        MAX_ANALYZER_ID, MAX_IDENTITY_PART, NetworkPolicy, RunnerKind, Severity, WorktreeAccess,
+        WorktreeId, analyzer_id_error, is_valid_analyzer_id, layer_key,
     };
 
     #[test]
@@ -1024,6 +1087,61 @@ mod tests {
         assert!(!is_valid_analyzer_id(""));
         // A `:` in an analyzer id would make a layer key ambiguous.
         assert!(!is_valid_analyzer_id("a:b"));
+        // The length rule, at the boundary: exactly the limit is fine, one over
+        // is not.
+        assert!(is_valid_analyzer_id(&"a".repeat(MAX_ANALYZER_ID)));
+        assert!(!is_valid_analyzer_id(&"a".repeat(MAX_ANALYZER_ID + 1)));
+    }
+
+    /// A caller must be able to fix its input from the message alone. Each rule
+    /// the validator enforces has to be *nameable* by the error, and the whole
+    /// contract has to be stated — the earlier message claimed only "non-empty",
+    /// so an id rejected for length was told to satisfy a rule it already met.
+    #[test]
+    fn a_rejected_analyzer_id_says_which_rule_it_broke() {
+        let contract = "an analyzer id is 1 to 64 characters of lowercase [a-z0-9._-]";
+
+        let empty = analyzer_id_error("");
+        assert_eq!(
+            empty,
+            format!("invalid analyzer id \"\": it is empty — {contract}")
+        );
+
+        let cased = analyzer_id_error("Semgrep");
+        assert_eq!(
+            cased,
+            format!("invalid analyzer id \"Semgrep\": it contains 'S' — {contract}")
+        );
+
+        let long = "a".repeat(MAX_ANALYZER_ID + 13);
+        let over = analyzer_id_error(&long);
+        assert!(
+            over.contains("it is 77 characters, over the 64-character limit"),
+            "a too-long id must be told about the length rule, got: {over}"
+        );
+        assert!(over.contains(contract), "and the whole contract: {over}");
+
+        // The character rule is reported before the length rule, so a non-ASCII
+        // id is never described by a byte count the caller cannot see.
+        let wide = analyzer_id_error(&"é".repeat(MAX_ANALYZER_ID + 1));
+        assert!(wide.contains("it contains 'é'"), "got: {wide}");
+    }
+
+    /// The rendered `FindingsError` is the message, not a paraphrase of it: the
+    /// variant's `Display` and the shared formatter cannot drift apart.
+    #[test]
+    fn the_error_variant_renders_the_shared_message() {
+        let err = FindingsError::InvalidAnalyzerId("Semgrep".to_owned());
+        assert_eq!(err.to_string(), analyzer_id_error("Semgrep"));
+
+        let long = "a".repeat(MAX_ANALYZER_ID + 1);
+        let err = layer_key(&long, &WorktreeId::new("ab12").expect("worktree"))
+            .expect_err("a too-long analyzer id must be refused");
+        assert_eq!(err.to_string(), analyzer_id_error(&long));
+        assert!(
+            err.to_string().contains("over the 64-character limit"),
+            "the rejection must name the length rule: {err}"
+        );
     }
 
     #[test]

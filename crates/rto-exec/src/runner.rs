@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use rto_graph::{
     AnalysisRun, Finding, FindingsError, Isolation, NetworkPolicy, RunnerKind, SourceIdentity,
-    WorktreeAccess, WorktreeId, is_valid_analyzer_id,
+    WorktreeAccess, WorktreeId, analyzer_id_error, is_valid_analyzer_id,
 };
 
 use crate::sha256_hex;
@@ -26,8 +26,14 @@ pub enum ExecError {
     /// manifests and lockfiles; none of them needs to write to the tree.
     #[error("the analyzed worktree must be read-only")]
     WorktreeNotReadOnly,
-    /// The requested analyzer id is not well-formed.
-    #[error("invalid analyzer id: {0:?} (expected lowercase [a-z0-9._-], non-empty)")]
+    /// The requested analyzer id is not well-formed: an analyzer id is
+    /// 1..=`MAX_ANALYZER_ID` characters of lowercase `[a-z0-9._-]`.
+    ///
+    /// The message is produced by [`rto_graph::analyzer_id_error`], the same
+    /// function `rto-graph`'s own rejection uses, so an id refused here reads
+    /// exactly as it would had the store caught it — and it names the rule that
+    /// was broken, not just the contract.
+    #[error("{}", analyzer_id_error(.0))]
     InvalidAnalyzerId(String),
     /// The report describes a different analyzer than the one requested — a
     /// mixed-up file, or a report substituted for another.
@@ -198,7 +204,9 @@ pub trait AnalyzerRunner {
 ///
 /// # Errors
 /// Returns [`ExecError::ConsentRequired`], [`ExecError::UnsupportedNetworkPolicy`],
-/// [`ExecError::WorktreeNotReadOnly`], or [`ExecError::InvalidAnalyzerId`].
+/// [`ExecError::WorktreeNotReadOnly`], or [`ExecError::InvalidAnalyzerId`] — the
+/// last when the analyzer id is not 1..=[`rto_graph::MAX_ANALYZER_ID`]
+/// characters of lowercase `[a-z0-9._-]`.
 pub fn check_request(request: &AnalysisRequest) -> Result<(), ExecError> {
     if request.consent != Consent::Granted {
         return Err(ExecError::ConsentRequired);
@@ -289,6 +297,45 @@ mod tests {
             check_request(&req),
             Err(ExecError::InvalidAnalyzerId(_))
         ));
+    }
+
+    /// The preflight enforces a length limit as well as a character set, so the
+    /// rejection has to say so. Being told an over-long id must be "non-empty" —
+    /// which it plainly was — is no help at all.
+    #[test]
+    fn preflight_refuses_an_over_long_analyzer_id_and_says_why() {
+        let mut req = request();
+        req.analyzer = "a".repeat(rto_graph::MAX_ANALYZER_ID + 1);
+        let err = check_request(&req).expect_err("an over-long id must be refused");
+        assert!(matches!(err, ExecError::InvalidAnalyzerId(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("over the 64-character limit"),
+            "the rejection must name the length rule: {message}"
+        );
+        assert!(
+            message.contains("1 to 64 characters of lowercase [a-z0-9._-]"),
+            "and state the whole contract: {message}"
+        );
+    }
+
+    /// One rejection, one wording. Both layers format through
+    /// `rto_graph::analyzer_id_error`, so an id refused at the seam reads exactly
+    /// as it would had the store caught it — a caller cannot be told two stories
+    /// about the same input depending on how deep the check happened to run.
+    #[test]
+    fn the_two_layers_word_a_rejection_identically() {
+        for id in [
+            "",
+            "Semgrep",
+            "a:b",
+            &"a".repeat(rto_graph::MAX_ANALYZER_ID + 1),
+        ] {
+            let seam = ExecError::InvalidAnalyzerId(id.to_owned()).to_string();
+            let store = rto_graph::FindingsError::InvalidAnalyzerId(id.to_owned()).to_string();
+            assert_eq!(seam, store, "{id:?} reads differently in the two layers");
+            assert_eq!(seam, rto_graph::analyzer_id_error(id));
+        }
     }
 
     #[test]
