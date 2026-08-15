@@ -77,6 +77,38 @@ rten = { version = "0.24", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 yaml-rust2 = "0.11.0"
 
+# `audio-metadata` only (ADR-0016): the *format* layer of a decoding library, used
+# for a container read and nothing else — codec, rate, bit depth, channels,
+# duration and tags — with no decoder ever instantiated. Pure safe Rust
+# (`#![forbid(unsafe_code)]` upstream too): no FFI, no C toolchain, no model.
+#
+# `default-features = false` drops the SIMD/FFT optimisations (they only serve
+# decoding, which we never do) and every container and codec we do not read. The
+# enabled set is then exactly two groups:
+#
+# * `flac`, `mp3`, `wav` — the three containers `crate::media::is_audio` admits,
+#   and no more. ADR-0016 explicitly declines to widen that set.
+# * `id3v1`, `id3v2`, `ape` — the **standalone tag readers**. These are *not*
+#   implied by `mp3`: with them off, `symphonia::default::get_probe()` registers
+#   no metadata reader, and every ID3/APE tag on an MP3 is invisible while the
+#   ADR promises to extract them. They add **no package** to the tree (all three
+#   are feature flags on `symphonia-metadata`, which `flac` and `wav` already
+#   pull), so honouring the ADR's tag list costs nothing but code size. FLAC's
+#   Vorbis comments and WAV's RIFF INFO need no flag — they are embedded in
+#   those containers and arrive with `flac`/`wav`.
+#
+# **MPL-2.0** — the licence ADR-0016 admits to `deny.toml`'s allow-list, with the
+# reasoning recorded there. Pinned to an exact minor: upstream's bus factor is 1
+# (ADR-0016, "Negative / costs"), so a version move should be a decision.
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "flac",
+    "mp3",
+    "wav",
+    "id3v1",
+    "id3v2",
+    "ape",
+], optional = true }
+
 [dev-dependencies]
 # Also needed by the integration tests in `tests/`, which don't inherit the
 # crate's normal dependencies.
@@ -113,6 +145,18 @@ image-vision = ["models", "dep:rto-llama", "rto-llama/llama", "dep:image"]
 # resampled by llama.cpp's bundled miniaudio, so no extra audio-decoding crate is
 # needed. See [`crate::extract`].
 audio-transcribe = ["models", "dep:rto-llama", "rto-llama/llama"]
+# Extract audio *metadata* — codec, sample rate, bit depth, channels, duration and
+# tags — as `derived` facts, by reading the container with `symphonia` (ADR-0016).
+# Opt-in (off by default) because it adds a dependency tree, but unlike every other
+# media feature it needs **no model, no network and no C/C++ toolchain**: it is a
+# format read, so its tests run everywhere CI does.
+#
+# Deliberately independent of `audio-transcribe` in both directions: that feature
+# *generates* text about a blob (ADR-0015, and it lives in `crate::media`), this
+# one *extracts* facts from it (ADR-0016, and it lives in the graph). Wiring
+# either to imply the other would blur exactly the boundary the two ADRs draw.
+# See [`crate::audio`].
+audio-metadata = ["dep:symphonia"]
 
 [lints]
 workspace = true
