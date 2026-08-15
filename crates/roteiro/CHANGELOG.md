@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.10.1...roteiro-v1.11.0) - 2026-08-15
+
+### Added
+
+- *(explorer)* surface generated media content, always attributed
+- *(media)* add the pre-generation gate, recorded not silent
+- *(media)* move generated content to its own artifact store
+
+### Fixed
+
+- *(media)* stop `media status` calling a gate refusal a generated record
+- *(media)* correct the generation counter and the status advice
+
+### Other
+
+- *(media)* add the deferred `media` argument-shape tests
+
 ## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.10.0...roteiro-v1.10.1) - 2026-08-15
 
 ### Fixed

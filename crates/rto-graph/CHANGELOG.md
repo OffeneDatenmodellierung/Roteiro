@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.1...rto-graph-v1.11.0) - 2026-08-15
+
+### Added
+
+- *(media)* add the pre-generation gate, recorded not silent
+- *(media)* move generated content to its own artifact store
+
+### Fixed
+
+- *(gate)* abstain on a WAV data chunk that is not whole samples
+- *(media)* close the outcome CHECK's measurement-without-reason hole
+- *(media)* correct the generation counter and the status advice
+- *(test)* one WAV encoder in the workspace ([#302](https://github.com/OffeneDatenmodellierung/Roteiro/pull/302))
+
+### Other
+
+- *(media)* satisfy clippy on the two review fixes
+- *(media)* assert each pre-generation gate invariant
+- *(llama)* cache the mtmd projector per model, not per blob
+- *(tests)* name the right constraint per direction
+
 ## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.0...rto-graph-v1.10.1) - 2026-08-15
 
 ### Fixed
