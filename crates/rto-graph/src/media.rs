@@ -1089,6 +1089,13 @@ pub(crate) fn record(conn: &Connection, write: &MediaWrite<'_>) -> Result<bool, 
             generation,
             text,
             confidence,
+            // All three from the SAME `Option`, and `MediaSkip`'s fields are not
+            // themselves optional — so the trio is all-present or all-absent by
+            // construction, matching the table's outcome `CHECK`. Sourcing any
+            // one of them from a different `Option` would make a row with a
+            // measurement but no reason writable, and such a row reads back as
+            // *generated content that happens to be empty*. The schema is the
+            // backstop; this is the guard.
             skip.map(|s| s.reason.as_str()),
             skip.map(|s| s.value),
             skip.map(|s| s.threshold),

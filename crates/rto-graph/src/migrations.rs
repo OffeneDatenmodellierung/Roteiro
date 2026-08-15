@@ -306,9 +306,16 @@ CREATE TABLE media_content_v2 (
     -- The two outcomes, and nothing in between. Either the model ran (no skip
     -- columns at all), or the gate refused the blob before it did — in which
     -- case the measurement is complete AND the row holds no generated text.
+    --
+    -- All three skip columns are named in BOTH branches, so they stand or fall
+    -- together. `skip_reason` in particular must be named in the second branch:
+    -- it is the discriminant the Rust decoder reads, so a row with a value and a
+    -- threshold but no reason would come back as *generated content that happens
+    -- to be empty* — the exact confusion this constraint exists to prevent.
     CHECK (
         (skip_reason IS NULL AND skip_value IS NULL AND skip_threshold IS NULL)
-        OR (skip_value IS NOT NULL AND skip_threshold IS NOT NULL AND text = '')
+        OR (skip_reason IS NOT NULL AND skip_value IS NOT NULL
+            AND skip_threshold IS NOT NULL AND text = '')
     )
 );
 INSERT INTO media_content_v2 (
@@ -474,6 +481,121 @@ mod tests {
                 .expect("count");
             assert_eq!(rows, 0, "{table} starts empty");
         }
+    }
+
+    /// Insert one `media_content` row with the given outcome columns, returning
+    /// whether `SQLite` accepted it. `blob` keys the row, so each attempt needs
+    /// its own (the table is UNIQUE on `(blob_id, producer)`).
+    fn insert_outcome(
+        conn: &Connection,
+        blob: &str,
+        text: &str,
+        skip_reason: Option<&str>,
+        skip_value: Option<f64>,
+        skip_threshold: Option<f64>,
+    ) -> bool {
+        conn.execute(
+            "INSERT INTO media_content (
+                 blob_id, path, kind, producer, model, model_digest, quantisation,
+                 mmproj_digest, prompt, temperature, max_tokens, tool_version, generation,
+                 text, skip_reason, skip_value, skip_threshold
+             ) VALUES (
+                 ?1, 'assets/clip.wav', 'audio', 'media:audio:m:0', 'm', 'd', 'Q4_K_M',
+                 'p', 'prompt', 0.0, 512, '9.9.9', 1, ?2, ?3, ?4, ?5
+             )",
+            rusqlite::params![blob, text, skip_reason, skip_value, skip_threshold],
+        )
+        .is_ok()
+    }
+
+    /// **The outcome constraint has to bite.** A `media_content` row is either a
+    /// generated description or a recorded gate refusal, and migration 10 exists
+    /// to make anything between the two unrepresentable *in the schema* — not
+    /// only in the Rust type that writes it today.
+    ///
+    /// The case that motivated tightening it is the first rejection below: a row
+    /// with a measurement but **no reason**. `skip_reason` is the discriminant
+    /// the decoder reads, so such a row comes back as generated content that
+    /// happens to be empty — a silent lie of exactly the kind ADR-0015 exists to
+    /// stop, arrived at through a `NULL` rather than through any code path.
+    #[test]
+    fn the_media_outcome_constraint_admits_only_the_two_real_outcomes() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+
+        // The two legitimate shapes insert.
+        assert!(
+            insert_outcome(&conn, "blob-generated", "a transcript", None, None, None),
+            "a generated record carries text and no measurement",
+        );
+        assert!(
+            insert_outcome(
+                &conn,
+                "blob-skipped",
+                "",
+                Some("silence"),
+                Some(0.0),
+                Some(1e-4)
+            ),
+            "a gated skip carries a complete measurement and no text",
+        );
+
+        /// `(name, text, reason, value, threshold)` for a shape that must be
+        /// refused.
+        type Rejected = (
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+            Option<f64>,
+            Option<f64>,
+        );
+        let rejected: [Rejected; 6] = [
+            // The hole this test was written for: a measurement with no reason
+            // reads back as an empty *generated* record.
+            (
+                "value-and-threshold-but-no-reason",
+                "",
+                None,
+                Some(0.0),
+                Some(1e-4),
+            ),
+            (
+                "reason-with-no-value",
+                "",
+                Some("silence"),
+                None,
+                Some(1e-4),
+            ),
+            (
+                "reason-with-no-threshold",
+                "",
+                Some("silence"),
+                Some(0.0),
+                None,
+            ),
+            ("value-alone", "", None, Some(0.0), None),
+            ("threshold-alone", "", None, None, Some(1e-4)),
+            // A skip that also claims text: the other half of the exclusion.
+            (
+                "a-skip-that-also-has-text",
+                "a transcript",
+                Some("silence"),
+                Some(0.0),
+                Some(1e-4),
+            ),
+        ];
+        for (name, text, reason, value, threshold) in rejected {
+            assert!(
+                !insert_outcome(&conn, name, text, reason, value, threshold),
+                "`{name}` must be rejected by the outcome CHECK, not stored",
+            );
+        }
+
+        // Only the two accepted rows are there.
+        let stored: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_content", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(stored, 2, "no refused shape may have slipped through");
     }
 
     /// ADR-0015 adds an artifact store, **not** a provenance class. The three
