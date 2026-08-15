@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-15
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -168,6 +168,71 @@ free, skew-proof monotonic generation, and `sync_state.tree` (`migrations.rs:56-
 is recorded as the repo-state witness. `created_at` is retained for human display
 only — written but not read, exactly as `imported_at` is today.
 
+### Scope: a namespace, with the anchor as the validity test
+
+*Added in v1.1, settling the question v1.0 left to the reviewer.*
+
+The store is per-repo and shared across branches, worktrees and clones, so: **is a
+lesson learned on a feature branch valid on `main`?** The rule is:
+
+> A lesson learned on a feature branch is valid on `main` **only if the relevant
+> association is merged to `main` in the same format** — if not, then no.
+
+**This needs no new machinery: the anchor already is that test.** Validity is not
+a property of the branch that wrote a record. It is whether the record's anchor
+resolves in the tree being looked at, which is exactly what `anchor_penalty`
+above computes:
+
+| Anchor resolves against this tree | Meaning | Applies here |
+|---|---|---|
+| present, blob matches | merged, in the same format | **yes** |
+| present, blob differs (`drifted`) | merged in a *different* form | no |
+| absent (`vanished`) | not merged | no |
+| present, blob unmeasurable (`unverifiable`) | cannot be shown | no |
+| **no anchor recorded at all** | a general lesson about the repo | **yes, everywhere** |
+
+"Is this valid on `main`?" is answered by resolving the anchor against `main`'s
+graph — and the identical mechanism answers it on any branch, worktree or clone,
+with **no branch bookkeeping anywhere**. Nothing is stored to make this work, and
+the verdict is recomputed on every read, so it is always about the tree in front
+of you rather than the tree that existed when the record was written.
+
+Three consequences worth stating, because each is a place the rule could be
+weakened by accident:
+
+- **"In the same format" means the blob matches**, deliberately strictly: even a
+  pure reformat breaks the association. This fails toward *marked drifted* rather
+  than toward silently applying a lesson to code that has moved on, and that
+  asymmetry is the point — a false "does not apply" costs a re-read, a false
+  "applies" costs a wrong decision.
+- **`unverifiable` does not apply.** Where the blob cannot be compared, the
+  association cannot be shown to be present in the same format, so the strict
+  reading holds. It is nonetheless kept distinct from `drifted`, which asserts
+  something stronger (the code *did* move).
+
+  The implementation flagged this state as its own reading rather than something
+  the rule stated, since a node carrying no blob hash was measured neither way.
+  **The strict reading was put to the decision-makers and ratified**: a memory
+  that cannot be *shown* to apply is kept, marked, and reported as not applying
+  here, rather than quietly asserted against code nobody verified. Recorded so it
+  is not re-opened as an oversight; the lenient reading remains a one-line change
+  to `AnchorState::applies` if the trade is ever revisited.
+- **A record with no anchor is repo-wide and always applies** — "CI is
+  Ubuntu-only" is true wherever the repository is. This must never be conflated
+  with an anchor that failed to resolve: they both lack a usable anchor and they
+  have *opposite* answers, so they are separate states.
+
+**Therefore `scope` is a coarse namespace** — which repo or project a record
+belongs to in a multi-repo workspace ([[docs/adr/0008-multi-repo-workspace-serve.md]])
+— and is **not a branch label**. Nothing keys off it but an exact-match filter: no
+isolation, no inheritance, no merging. Giving it a second, branch-shaped job would
+produce two answers to one question, and the branch-shaped answer would be the
+wrong one: a lesson does not become false because the branch that learned it was
+deleted, nor true because it was merged.
+
+None of this changes the depreciation model above; it names what that model was
+already deciding.
+
 ### Supersession, recorded not guessed
 
 New research overruling old is expressed **explicitly** via a nullable
@@ -258,11 +323,21 @@ eviction tier can later be altered without touching durable memory.
 
 For Review. This ADR is itself the smallest useful step, since it forecloses the
 cheap `NodeKind::Other("memory")` shortcut that someone will otherwise take.
-Execution is planned in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) Stage 23; the first
-code PR is the episodic migration plus `roteiro memory add|list` — write path
-only, no retrieval, no graph integration.
+Execution is planned in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) Stage 23, whose
+episodic half is **delivered**: migration 11, the `agent_memory` store, and
+`roteiro memory add|list|forget` — write path only, no retrieval ranking, no
+graph integration. The cache tier remains Stage 25.
 
-**Open for the reviewer to settle** (deliberately not decided here): the cache
-tier's byte budget *value* (the unit follows `ModelCache`; the number is a
-judgement about tolerable `.git/roteiro/` growth), and whether `scope` isolates
-memory per branch/worktree or shares it repo-wide.
+**Settled since v1.0:** the `scope` question, above — scope is a namespace, and
+applicability is decided by anchor resolution.
+
+**Still open for the reviewer** (deliberately not decided here): the cache tier's
+byte budget *value*. The unit follows `ModelCache`; the number is a judgement
+about tolerable `.git/roteiro/` growth, and it is not needed until Stage 25.
+
+## Document version history
+
+| Version | Date | Notes |
+|---------|------|-------|
+| 1.0 | 2026-08-15 | For Review. Two-tier artifact store for durable agent-learned knowledge: episodic (unbounded, never auto-evicted, following the `imports` precedent) and a byte-budget-bounded transient cache (porting `rto-llama`'s `ModelCache` LRU to disk). Depreciation by evidence — anchor drift and explicit supersession — not by clock; decay computed at retrieval, never stored. Nothing enters `nodes`/`edges`; no `Provenance` variant; `EXTRACT_VERSION` unchanged. Rejects `NodeKind::Other("memory")`, authored-with-metadata, and a single TTL'd table. Left two questions to the reviewer: the cache byte budget, and what `scope` means. |
+| 1.1 | 2026-08-15 | **Scope settled** (new §*Scope*): a lesson is valid in a tree only if the relevant association is present there *in the same format*, so **the anchor is the scope test** and `scope` is a coarse per-repo/project **namespace, never a branch label**. Records what "same format" means (the blob matches — strictly, so a reformat breaks it and the failure is toward *marked*, not toward silently applying), that `unverifiable` therefore does not apply, and that a record with **no anchor** is repo-wide and must never be conflated with an anchor that failed to resolve. No new machinery: this names what the existing anchor check was already deciding, and no decision from 1.0 changed. Also records the episodic tier as delivered. |

@@ -40,6 +40,10 @@ mod markers;
 // function of the bytes, so it is not a `derived` fact and never enters
 // `nodes`/`edges`.
 pub mod media;
+// Episodic agent memory (ADR-0013): what a session learned, which has no
+// generating function at all — so it is neither `derived` nor `authored`, and it
+// gets a *separate* artifact store on the same terms as findings and media.
+mod memory;
 mod migrations;
 mod model;
 #[cfg(feature = "models")]
@@ -87,6 +91,11 @@ pub use media::{
     MediaError, MediaFilter, MediaKind, MediaOutcome, MediaProducer, MediaRecord, MediaSkip,
     MediaStatus, MediaWrite, Producer, ProducerId, ProducerSummary, ProducerSummaryAvailable,
     SkipEntry, build_media, is_valid_model_id, media_blobs, status as media_status,
+};
+pub use memory::{
+    AnchorState, DEFAULT_MEMORY_SCOPE, MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MEMORY_SCHEMA,
+    MemoryAnchor, MemoryError, MemoryFilter, MemoryForgotten, MemoryKind, MemoryListing,
+    MemoryRecord, MemoryWrite,
 };
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
