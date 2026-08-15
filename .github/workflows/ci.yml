@@ -30,11 +30,17 @@ jobs:
         run: cargo test --workspace --all-features
       - name: Dogfood (roteiro check)
         run: cargo run -p roteiro -- check
-      # `cargo audit` reads **Cargo.lock**, which lists every optional dependency
-      # regardless of which features are on, so it already sees the whole feature
-      # matrix — it is `cargo deny` that did not (#318, fixed below). Kept as the
-      # RustSec-native second opinion; note it exits 0 on `unmaintained`
-      # advisories, so `cargo deny check advisories` is the enforcing gate.
+      # DO NOT "fix" this to match the deny step below. `cargo audit` reads
+      # **Cargo.lock**, which lists every optional dependency regardless of which
+      # features are on, so it already sees the whole feature matrix — it is
+      # `cargo deny` that did not (#318). Measured: audit reports `ttf-parser`
+      # (reachable only under the opt-in `pdf-text` feature) while `cargo deny
+      # check` without `--all-features` said "no crate matched advisory criteria"
+      # for the same crate. There is no `--all-features` to add here and it would
+      # mean nothing if there were; ADR-0017 §3 records the measurement.
+      # Kept as the RustSec-native second opinion. Note it exits 0 on
+      # `unmaintained` advisories, so `cargo deny check advisories` — which exits
+      # 1 on them — is the enforcing gate of the two.
       - name: Audit
         run: |
           cargo install cargo-audit --locked

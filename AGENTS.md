@@ -96,7 +96,8 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   A licence outside the list is a **decision**, recorded next to its `deny.toml`
   entry — never an `ignore`, and never "to make CI green".
 - **Dependency currency is a mechanism, not a habit** (ADR-0017). Dependabot
-  proposes updates weekly under a **48-hour minimum release age**, so a
+  proposes updates weekly under a **minimum release age — at least 48 hours, 3
+  days as configured** — so a
   compromised publish has time to be caught before Roteiro depends on it. Native
   and vendored code (llama.cpp, SQLite, tree-sitter) is outside `cargo audit`'s
   reach and is tracked by name in

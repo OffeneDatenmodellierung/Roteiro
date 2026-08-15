@@ -1,9 +1,10 @@
-# Automated dependency updates with a 48-hour minimum release age (ADR-0017).
+# Automated dependency updates with a minimum release age (ADR-0017).
 #
 # The policy: stay on the latest published version, but never adopt a release
-# less than 48 hours old, so that a compromised publish has had time to be
-# detected and yanked by someone else. The point of this file is that the
-# *updater* enforces that, not a reviewer who has to remember it.
+# younger than the minimum release age — **at least** 48 hours, currently 3 days —
+# so that a compromised publish has had time to be detected and yanked by someone
+# else. The point of this file is that the *updater* enforces that, not a reviewer
+# who has to remember it.
 #
 # ## Why Dependabot rather than Renovate
 #
@@ -26,9 +27,11 @@
 #  3. **Cargo is a first-class `cooldown` ecosystem**, supporting `default-days`
 #     and all three per-semver-level options.
 #
-# Renovate's genuine advantage is granularity: `minimumReleaseAge: "48 hours"`
-# is expressed in hours, and it understands Cargo's `[dev-dependencies]` section
-# as a distinct depType. See the two limitations recorded below.
+# Renovate's genuine advantages are sub-day granularity (`minimumReleaseAge` is
+# expressed in hours; `cooldown` only in whole days) and that it understands
+# Cargo's `[dev-dependencies]` as a distinct depType. The granularity turned out
+# not to matter — the configured hold is 3 whole days, see below — so only the
+# dev-dependency gap is a real loss. See the two limitations recorded below.
 #
 # ## Limitation 1 — dev-dependencies cannot be grouped separately here
 #
@@ -56,16 +59,26 @@
 # Renovate's issue to wire it up (renovatebot/renovate#41659) is open and blocked
 # on the same thing. Revisit when it stabilises.
 #
-# ## A deliberate override
+# ## Why 3 days and not 48 hours
 #
-# Since July 2026 Dependabot applies a **3-day** cooldown by default. The 2 days
-# set below is therefore *less* conservative than doing nothing. That is on
-# purpose: ADR-0017 fixes the policy at 48 hours and explicitly rejects longer
-# holds as the default ("the marginal detection benefit is small and the
-# staleness cost compounds"). Stating it also means the policy cannot drift when
-# the platform default changes again. To adopt the platform default instead,
-# change the four `-days` values to 3 — and update ADR-0017, because it is the
-# ADR that says 48.
+# ADR-0017 says "at least 48 hours". That is a **floor, not a target** — and the
+# distinction matters here, because since 2026-07-14 Dependabot applies a **3-day**
+# cooldown by default. Configuring the literal 48 hours would mean setting the hold
+# *down* to two days, i.e. reducing safety relative to doing nothing at all, in
+# order to comply with a number in a document. The ADR was amended (v1.1) rather
+# than obeyed.
+#
+# So: **3 days**, matching the platform default, written out explicitly rather than
+# inherited. Explicit because a hold nobody can see is a hold nobody reviews — the
+# policy should be legible in the repository, not discoverable only by knowing what
+# GitHub currently defaults to.
+#
+# The rule for anyone changing these numbers is directional:
+#
+#   * Never below 2 (the ADR-0017 floor), and never below Dependabot's own default.
+#   * If the platform default rises above 3, raise these to match. Do **not** lower
+#     them to match a stale number in prose — that is the exact mistake v1.1 fixed.
+#   * Lowering below the floor is a change to ADR-0017, not a change to this file.
 
 version: 2
 updates:
@@ -76,14 +89,16 @@ updates:
       day: "monday"
       time: "07:00"
       timezone: "Etc/UTC"
-    # The 48-hour hold. Set at every level explicitly rather than relying on
-    # `default-days` alone, so a reader can see the policy applies to majors,
-    # minors and patches alike without knowing the fallback rules.
+    # The hold: 3 days, comfortably above ADR-0017's 48-hour floor. Set at every
+    # level explicitly rather than relying on `default-days` alone, so a reader
+    # can see the policy applies to majors, minors and patches alike without
+    # knowing the fallback rules. See "Why 3 days and not 48 hours" above before
+    # changing any of these.
     cooldown:
-      default-days: 2
-      semver-major-days: 2
-      semver-minor-days: 2
-      semver-patch-days: 2
+      default-days: 3
+      semver-major-days: 3
+      semver-minor-days: 3
+      semver-patch-days: 3
     open-pull-requests-limit: 10
     groups:
       # Patch and minor together: individually low-risk, collectively tedious,
@@ -100,7 +115,7 @@ updates:
 
   # The workflows pin every action by commit SHA (with a version comment), which
   # is the right posture but only if something keeps the pins current — an
-  # abandoned SHA pin is a stale action nobody is watching. Same 48-hour hold.
+  # abandoned SHA pin is a stale action nobody is watching. Same hold.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -109,7 +124,7 @@ updates:
       time: "07:00"
       timezone: "Etc/UTC"
     cooldown:
-      default-days: 2
+      default-days: 3
     open-pull-requests-limit: 5
     groups:
       github-actions:

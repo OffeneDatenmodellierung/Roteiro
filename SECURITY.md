@@ -2,17 +2,23 @@
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue for a security problem.**
+**Please do not put the details in a public issue.**
 
-Report it privately through GitHub: go to the
+**Preferred, if it is available to you:** open GitHub's
 [Security tab](https://github.com/OffeneDatenmodellierung/Roteiro/security) and
-choose **Report a vulnerability**. That opens a private advisory visible only to
-you and the maintainers, and it is the preferred route because the fix, the
-disclosure and the credit all happen in one place.
+look for **Report a vulnerability**. That creates a private advisory visible only
+to you and the maintainers, and it is the best route because the report, the fix,
+the disclosure and the credit all live in one place.
 
-If that option is not available to you, open a public issue that says only that
-you have found a security problem and are looking for a private channel — no
-details, no reproduction — and a maintainer will arrange one.
+**If you do not see that button, it is not switched on yet — and that is on us,
+not on you.** GitHub's private reporting is a per-repository setting, and it may
+still be off. Do not let that stop you: open a public issue containing **only**
+that you have found a security problem and would like a private channel. No
+details, no version, no reproduction — a maintainer will arrange somewhere private
+and take it from there. An almost-empty issue is not a disclosure; it is a
+knock on the door.
+
+Either way, do not post the details publicly first.
 
 Useful things to include, to the extent you have them: what you did, what
 happened, which version or commit, and which feature flags were enabled. Roteiro
@@ -58,7 +64,7 @@ lists what is vendored, at which version, and where each project takes reports.
 
 Deliberately, and written down: see
 [ADR-0017](docs/adr/0017-dependency-security-policy.md). In short — dependencies
-are kept current automatically, no release is adopted until it is at least 48
-hours old, `cargo deny` and `cargo audit` run in CI across the whole feature
-matrix, and vendored native code is tracked by name because `cargo audit` cannot
-see it.
+are kept current automatically, no release is adopted until it has been published
+for at least 48 hours (3 days as configured), `cargo deny` runs in CI across the
+whole feature matrix alongside `cargo audit`, and vendored native code is tracked
+by name because `cargo audit` cannot see it.
