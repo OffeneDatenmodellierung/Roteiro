@@ -76,15 +76,26 @@ Two constraints shape the answer.
 `(path, blob id, bytes)`. Memory is accumulated, session-dependent, and
 unreproducible. It can only coexist with that contract by being *outside* it.
 
-**2. The substrate has no eviction idiom.** An audit found none — `node_context`
+**2. No *persisted* store is bounded — but an eviction idiom does exist, and we
+follow it.** Nothing in SQLite is capacity-managed: `node_context`
 (`migrations.rs:94-100`) is `(key, fingerprint, json)` with no timestamp, no hit
-counter, no TTL, no LRU, and no `VACUUM` anywhere in `crates/`; `ObjectCache`
-(`cache.rs`) has no delete method at all and *orphans* stale entries by folding
-`EXTRACT_VERSION` into the key rather than deleting them; telemetry rotates by
-time only, with size-based rotation explicitly deferred (`telemetry.rs:81-82`).
-The house idiom for staleness is **content-addressed key invalidation, not
-expiry**. A bounded tier is therefore genuinely new work, and should be justified
-rather than assumed.
+counter, no TTL and no LRU; `ObjectCache` (`cache.rs`) has no delete method at all
+and *orphans* stale entries by folding `EXTRACT_VERSION` into the key rather than
+deleting them; telemetry rotates by time only, with size-based rotation explicitly
+deferred (`telemetry.rs:81-82`). For *persistent* staleness the house idiom is
+**content-addressed key invalidation, not expiry**.
+
+However, Roteiro already has a working eviction policy in memory:
+`rto-llama`'s `ModelCache { budget_bytes, loaded }` with `lru_evict_count`
+(`crates/rto-llama/src/llama.rs:120-137`) evicts oldest-first until the resident
+set fits a **byte budget**, always keeping at least the most-recently-used entry
+(a budget of `0` therefore keeps exactly one). Its behaviour is pinned by
+`tests::budget_evicts_oldest_until_it_fits`.
+
+This ADR therefore does **not** invent a policy: it **ports an existing one to
+disk**. The consequences are concrete — the cache tier is bounded by *bytes*
+rather than row count, and inherits the always-keep-the-MRU rule, so a session's
+just-written entry can never be evicted by its own sweep.
 
 **3. There is no clock to rank by.** Only two timestamps exist — `imports.imported_at`
 and `schema_migrations.applied_at` — and **neither is read by any query**; no
@@ -117,11 +128,14 @@ current code, query results. Safety comes free — `build_context` is proven to
 reconstruct identically (`context.rs:445-453` asserts `built == cached`), so
 eviction costs cycles, never information.
 
-Bound by **row count**, evicting on `(anchor_valid ASC, last_used ASC)`. Because
-no access tracking exists anywhere in the codebase today, `last_used` and `hits`
-must be introduced with the table. Sweep at the existing maintenance seam where
-`refresh_contexts` is already called (`main.rs:2508`) — **not on the read path**,
-so reads stay non-mutating.
+Bound by a **byte budget**, following `ModelCache` (`llama.rs:120-137`) rather
+than inventing a row-count cap: entries vary hugely in size, and bytes are what
+actually constrain `.git/roteiro/`. Evict oldest-first on
+`(anchor_valid ASC, last_used ASC)` until the tier fits, **always keeping at least
+the most-recently-used entry**. No *persisted* access tracking exists today, so
+`last_used`, `hits` and `bytes` are introduced with the table. Sweep at the
+existing maintenance seam where `refresh_contexts` is already called
+(`main.rs:2508`) — **not on the read path**, so reads stay non-mutating.
 
 **Never evict:** anything in Tier 1, and any Tier 2 row whose anchor is still
 valid *and* was written in the current generation.
@@ -230,8 +244,10 @@ eviction tier can later be altered without touching durable memory.
 
 **Negative / costs**
 
-- Roteiro's **first** capacity-based eviction policy — a new idiom to maintain,
-  including the `last_used`/`hits` tracking that nothing currently has.
+- Roteiro's first **persisted** capacity-based eviction policy. The policy itself
+  is not new (`ModelCache` already does byte-budget LRU in memory), but durable
+  eviction adds the `last_used`/`hits`/`bytes` tracking that no table currently
+  carries.
 - Two migrations and a second retrieval surface.
 - Anchor-drift marking (rather than pruning) deliberately departs from the
   authored layer's rule and must be explained wherever memory is surfaced.
@@ -247,5 +263,6 @@ code PR is the episodic migration plus `roteiro memory add|list` — write path
 only, no retrieval, no graph integration.
 
 **Open for the reviewer to settle** (deliberately not decided here): the cache
-tier's bound (row count vs byte budget, and the number), and whether `scope`
-isolates memory per branch/worktree or shares it repo-wide.
+tier's byte budget *value* (the unit follows `ModelCache`; the number is a
+judgement about tolerable `.git/roteiro/` growth), and whether `scope` isolates
+memory per branch/worktree or shares it repo-wide.

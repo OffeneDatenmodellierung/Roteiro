@@ -7,7 +7,7 @@ Governing decisions: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledg
 [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)
 
 This plan succeeds [BUILD_PLAN.md](BUILD_PLAN.md), which took Roteiro from the
-v0.0.1 scaffold through Stage 20 to the released v1.x. V2 covers the next arc:
+v0.0.1 scaffold through Stage 20 to the released v1.9.0. V2 covers the next arc:
 **Roteiro learns things that are not in the source tree — and stores them without
 compromising the promise that the graph is a pure function of the source tree.**
 
@@ -65,7 +65,7 @@ Verified against `main` at the time of writing:
 
 | Fact | Value | Consequence for V2 |
 |---|---|---|
-| Released | v1.x on crates.io (v1.0.0, then v1.1.0) | V2 work is post-1.0 — semver is now real. |
+| Released | **v1.9.0** on crates.io | V2 work is post-1.0 — semver is now real. |
 | MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
 | Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
@@ -73,7 +73,7 @@ Verified against `main` at the time of writing:
 | Schema | migrations 1–7 applied | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | `9` (`crates/rto-graph/src/extract.rs:39`) | Bumping it forces full re-extraction for every user. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
-| Eviction idiom | **none exists anywhere** | Stage 25 introduces the first one. |
+| Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one. |
 
 ---
 
@@ -129,7 +129,7 @@ stores; nothing in Track B blocks Track A.
 
 ---
 
-### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.2.0** · effort **S**
+### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** · effort **S**
 
 **Goal:** land the whole value of the findings design with **no analyzer and no
 sandbox** — the seam, the schema, and a working ingest path. This is the stage that
@@ -154,7 +154,7 @@ makes CI ingestion and local execution the same code path.
   after ingest (regression test); no new `nodes`/`edges` rows exist; findings never
   appear in `search` results ranked as `authored`.
 
-### Stage 22 — First analyzers: `cargo-audit`, then `semgrep` → **v1.3.0** · effort **M + M**
+### Stage 22 — First analyzers: `cargo-audit`, then `semgrep` → **v1.11.0** · effort **M + M**
 
 **Goal:** two real analyzers behind the Stage 21 contract, via the subprocess
 runner, honestly labelled.
@@ -173,7 +173,7 @@ runner, honestly labelled.
   succeeds; offline with a cold cache fails with the named error and the exact
   prefetch command; `cargo deny` clean.
 
-### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.4.0** · effort **M**
+### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.12.0** · effort **M**
 
 **Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
 no graph integration.
@@ -194,7 +194,7 @@ no graph integration.
   `export_factset` unchanged; nothing enters `nodes`/`edges`; supersession recorded
   explicitly and superseded rows excluded from live listing.
 
-### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.5.0** · effort **L**
+### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L**
 
 **Goal:** the reproducible, offline-capable local run — one command, pinned inputs,
 digest-level evidence.
@@ -215,7 +215,7 @@ digest-level evidence.
   no network but a warm cache produces a full run; `cargo deny` clean on the
   resolved tree.
 
-### Stage 25 — Memory recall: cache tier, decay, supersession → **v1.6.0** · effort **L**
+### Stage 25 — Memory recall: cache tier, decay, supersession → **v1.14.0** · effort **L**
 
 **Goal:** make memory *useful* — recall that ranks by evidence, plus the bounded
 cache that stops sessions re-deriving what they already know.
@@ -225,12 +225,16 @@ cache that stops sessions re-deriving what they already know.
   (`context.rs` asserts `built == cached`), which is what makes cache eviction cost
   cycles rather than information.
 - **Schema:** migration N+2 — `agent_cache` with `bytes`, `generation`,
-  `last_used`, `hits`. **These columns do not exist anywhere today**; no access
-  tracking exists in the codebase, so the signal must be introduced with the table.
-- **Eviction:** row-count cap, evicting on `(anchor_valid ASC, last_used ASC)`,
-  swept at the existing maintenance seam where `refresh_contexts` is already
-  called — **not on the read path**, so reads never mutate. Never evict: anything
-  episodic, or a valid-anchored row written in the current generation.
+  `last_used`, `hits`. No **persisted** access tracking exists today, so the
+  signal must be introduced with the table (the in-memory `ModelCache` tracks
+  recency by list order, which does not survive a process).
+- **Eviction:** **byte budget**, following the existing `ModelCache`
+  (`crates/rto-llama/src/llama.rs:120-137`) rather than a new row-count cap —
+  evict oldest-first on `(anchor_valid ASC, last_used ASC)` until the tier fits,
+  **always keeping at least the most-recently-used entry**. Swept at the existing
+  maintenance seam where `refresh_contexts` is already called — **not on the read
+  path**, so reads never mutate. Never evict: anything episodic, or a
+  valid-anchored row written in the current generation.
 - **Ranking (retrieval-time, never stored):**
   `score = base_confidence × anchor_penalty × decay(current_generation − row.generation)`
   with `decay ∈ {linear, exponential, none}` and **`none` guaranteeing reproducible
@@ -246,7 +250,7 @@ cache that stops sessions re-deriving what they already know.
   recall immediately regardless of age; an unanchored memory is still retrievable
   and clearly labelled.
 
-### Stage 26 — Analysis lenses (A1) → **v1.7.0** · effort **S–M per lens** *(independent track)*
+### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)*
 
 **Goal:** deepen the graph itself — the on-brand work — with **honest costs**.
 
@@ -313,12 +317,12 @@ it currently rests on no code or benchmark evidence.
 
 | Release | Contains | Gate |
 |---|---|---|
-| v1.2.0 | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent |
-| v1.3.0 | Stage 22 — cargo-audit + semgrep | Offline warm-cache run; named cold-cache failure |
-| v1.4.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
-| v1.5.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
-| v1.6.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
-| v1.7.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
+| v1.10.0 | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent |
+| v1.11.0 | Stage 22 — cargo-audit + semgrep | Offline warm-cache run; named cold-cache failure |
+| v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
+| v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
+| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
+| v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -340,8 +344,9 @@ it currently rests on no code or benchmark evidence.
 
 ## 9. Open questions (decide before the stage that needs them)
 
-1. **Cache bound** (Stage 25): row count or byte budget — and what number? This is
-   a judgement about tolerable `.git/roteiro/` growth, not a technical constraint.
+1. **Cache bound value** (Stage 25): the *unit* is settled — a byte budget,
+   following `ModelCache`. The *number* is a judgement about tolerable
+   `.git/roteiro/` growth and still needs deciding.
 2. **Memory scope** (Stage 23): the store is per-repo and shared across branches
    and worktrees. Is a lesson learned on a feature branch valid on `main`? The
    `scope` column exists; the policy does not.
