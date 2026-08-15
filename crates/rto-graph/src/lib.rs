@@ -16,9 +16,10 @@ mod cache;
 mod codegraph;
 mod config_keys;
 mod context;
-// Holder for the media extractors' process-wide native engines, and the
-// deterministic release that keeps a Metal build from aborting at exit (#291).
-mod engine_slot;
+// The holder for the media extractors' process-wide native engines — and the
+// deterministic release that keeps a Metal build from aborting at exit (#291) —
+// now lives one level down, next to the llama.cpp backend that shares the same
+// mechanism: `rto_llama::EngineSlot` (#296).
 mod extract;
 // Analyzer findings (ADR-0012): a *separate* artifact store, deliberately not a
 // provenance class and deliberately not in `nodes`/`edges`.

@@ -16,6 +16,11 @@ pub mod types;
 // / `rto_serve::llama` (and the engine types) keep resolving for this crate's
 // modules and existing callers.
 pub use rto_llama::engine;
+// The process-wide llama.cpp backend the served engine shares with every other
+// engine in the process (issue #296) — re-exported so an embedder depending on
+// `rto-serve` alone can still give it a deterministic end of life.
+#[cfg(feature = "llama")]
+pub use rto_llama::backend;
 #[cfg(feature = "llama")]
 pub use rto_llama::llama;
 

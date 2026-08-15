@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
-last-modified: 2026-08-09
+version: "1.2"
+last-modified: 2026-08-15
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -94,6 +94,7 @@ Forces to reconcile: offline-first & self-contained (ADR-0001); don't become a g
 - Serving **only ever exposes installed models** and **never downloads** — the ADR-0003 consent gate is preserved.
 - The served model is **code-aware**: Roteiro's graph tools are auto-registered, so a local model can `explain`/`search`/`path`/`debt` over this repo — dogfooding the one query surface (ADR-0001) for external agents.
 - **Direction — inference-core unify.** Performance matters for the internal uses too (`spec draft`, `infer`), so llama.cpp — now proven fast and `deny`-clean — is the stated target for the *whole* inference core: a **staged migration off candle** (generation first; embeddings move to GGUF models; vision to `mmproj`), recorded as a follow-up amendment to ADR-0003, not a big-bang. Until then candle remains the internal backend and the two coexist only transitionally (serving reads the same GGUFs candle does, so generation stays consistent).
+- **`serve` shares the process's one llama.cpp backend, so a second engine is possible at all.** llama.cpp's backend is a process-global and refuses a second initialisation, so while each engine initialised its own, the long-lived `serve` process was limited to whichever engine it built first: a second modality arriving alongside chat could not be served without a restart, and — because callers resolve an engine with `.ok()` — the failure surfaced as a **quietly missing capability** rather than an error, which is far worse in a server than in a one-shot CLI run (issue #296). The backend is now started once and handed out as an `Arc` by [[crates/rto-llama/src/backend.rs#shared_backend]]; the server's engine and the extractors' engines are peers on it, and it is freed only once none of them holds a handle ([[crates/rto-llama/src/backend.rs#release_shared_backend]]). This is a property of the shared engine core, so it applies identically to `serve`, `infer --model` and `spec draft`.
 - Composes with ADR-0007: `[serve]` sets defaults (enable, addr, which models, tool-registration on/off), overridable by CLI flags.
 
 ## Advice Received
@@ -106,3 +107,4 @@ Project direction incorporated: **prioritise performance** (background use; deve
 |---------|------|-------|
 | 1.0 | 2026-08-09 | Accepted. Opt-in loopback OpenAI-compatible endpoint reusing installed models, warm + serialised over the ADR-0002 stack; scoped to reuse; candle-implied engine; rejected Ollama-replacement and MCP-only as the front door. |
 | 1.1 | 2026-08-09 | Revised after a head-to-head engine de-risk. **Engine → llama.cpp (`llama-cpp-2`)** — fastest, and the only candidate passing `cargo deny` unchanged (mistral.rs fails on MPL-2.0/CDLA/0BSD; candle is slower). **Serving via our own thin `/v1`** (not stock `llama-server`) so **Roteiro's graph tools auto-register** into the model (code-aware serving). Accepts a C/C++ toolchain for the opt-in `serve` feature; no `deny` change needed. States the candle→llama.cpp inference-core unify as the direction (follow-up ADR-0003 amendment). |
+| 1.2 | 2026-08-15 | Consequence added: llama.cpp's backend is a process-global, initialised once and shared by every engine, so a long-lived `serve` process can hold more than one engine instead of silently losing every engine after the first (issue #296). No decision changed. |
