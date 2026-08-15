@@ -77,6 +77,30 @@ fn the_fixture_set_covers_every_accepted_extension() {
     }
 }
 
+/// How many nodes one audio blob yields, and how many edges.
+///
+/// Without `audio-metadata` an audio blob is one bare `file` node and nothing
+/// else. With it (ADR-0016) the container's own account of the stream becomes a
+/// second node — `audio:<path>` — under a `contains` edge from the file. Pinning
+/// the exact counts either way is what stops extraction quietly growing spurious
+/// facts for a binary blob; asserting "at least a file node" would not.
+///
+/// Every committed fixture, the degenerate MP3 included, yields a stream node:
+/// that fixture has no *duration* the reader will state, but it does have a codec,
+/// a rate and a channel count. ADR-0016's **absent** case is therefore about the
+/// duration field, not about the node — see `audio_metadata.rs`, which asserts
+/// both that and the harder case of a blob the reader rejects outright.
+#[cfg(feature = "audio-metadata")]
+fn expected_shape(_name: &str) -> (usize, usize) {
+    (2, 1)
+}
+
+/// Without the feature, every audio blob is exactly one `file` node.
+#[cfg(not(feature = "audio-metadata"))]
+fn expected_shape(_name: &str) -> (usize, usize) {
+    (1, 0)
+}
+
 /// An audio blob is a first-class `file` node whatever the build: correct key,
 /// kind, name, span and byte count, derived provenance. This is what a `sync`
 /// stores for every clip, model or no model.
@@ -87,17 +111,25 @@ fn audio_blobs_become_well_formed_file_nodes() {
         let path = format!("assets/{name}");
         let facts = Registry::default().extract(&path, "blob-id", &bytes);
 
-        // Exactly one node and no edges — not "at least one file node somewhere
-        // in the set", which would also hold if extraction started emitting
-        // spurious facts for a binary blob.
+        let (nodes, edges) = expected_shape(name);
         assert_eq!(
             facts.nodes.len(),
-            1,
-            "{name}: an audio blob yields exactly one node, got {:?}",
+            nodes,
+            "{name}: unexpected node count, got {:?}",
             facts.nodes.iter().map(|n| &n.key).collect::<Vec<_>>(),
         );
-        assert!(facts.edges.is_empty(), "{name}: an audio blob has no edges");
+        assert_eq!(
+            facts.edges.len(),
+            edges,
+            "{name}: unexpected edge count, got {:?}",
+            facts
+                .edges
+                .iter()
+                .map(|e| (&e.src, &e.dst))
+                .collect::<Vec<_>>(),
+        );
 
+        // The `file` node is emitted first, whatever else joins it.
         let node = &facts.nodes[0];
         assert_eq!(node.kind, NodeKind::File);
         assert_eq!(node.key, format!("file:{path}"));
@@ -132,8 +164,14 @@ fn audio_blobs_become_well_formed_file_nodes() {
 /// The assertion is absence, not "content that contains no mojibake": the weaker
 /// form would pass while a transcript was being embedded, which is precisely the
 /// failure being guarded.
+///
+/// **It is specifically the `file` node that stays empty**, and it stays empty in
+/// an `audio-metadata` build too. ADR-0016 adds container facts on a *separate*
+/// `audio_stream` node precisely so this slot — the one ADR-0015 emptied — is not
+/// reoccupied by anything, and so "an audio file node with content" remains an
+/// unambiguous bug rather than a thing that now has two possible causes.
 #[test]
-fn extraction_never_embeds_content_for_audio() {
+fn extraction_never_embeds_content_for_the_audio_file_node() {
     for name in FIXTURES {
         let bytes = fixture(name);
         for ingest in [
@@ -144,10 +182,16 @@ fn extraction_never_embeds_content_for_audio() {
             },
         ] {
             let facts = Registry::new(ingest).extract(&format!("assets/{name}"), "blob-id", &bytes);
-            let content = facts.nodes[0].meta.get("content");
+            let file = facts
+                .nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::File)
+                .expect("every audio blob yields a file node");
+            let content = file.meta.get("content");
             assert!(
                 content.is_none(),
-                "{name}: extraction embedded content for audio (audio toggle = {}): {content:?}",
+                "{name}: extraction embedded content on the audio *file* node (audio toggle = \
+                 {}): {content:?}",
                 ingest.audio,
             );
         }
