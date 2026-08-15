@@ -272,12 +272,30 @@ impl AudioFacts {
 }
 
 /// Read one audio blob's metadata from its bytes, or `None` when the container
-/// yields nothing usable.
+/// yields nothing usable at all.
 ///
-/// `None` is a real answer, not an error swallowed: the repository's degenerate
-/// 1 040-byte MP3 fixture reaches symphonia and comes back with no track at all,
-/// and ADR-0016 requires that to be recorded as **absence**, never as a guess.
-/// The caller emits no node in that case.
+/// # `None` and an absent duration are different answers
+///
+/// Both are forms of "we do not know", and ADR-0016 turns on keeping them apart,
+/// so this is the contract:
+///
+/// * **`None`** — the bytes are not a readable audio container: the probe matched
+///   no format, or the container carries no audio track. Nothing is known, so
+///   [`crate::extract`] emits **no `audio_stream` node** for the blob (the `file`
+///   node is unaffected). Pinned by `a_blob_the_reader_rejects_yields_no_facts`
+///   and `an_unreadable_audio_blob_emits_no_stream_node`.
+/// * **`Some` with [`AudioFacts::duration`] `None`** — the container *is* readable
+///   and its facts are recorded; it simply states no frame count, so no duration
+///   can be derived. This is the expected outcome for the repository's degenerate
+///   1 040-byte MP3 fixture, which still yields codec, sample rate and channel
+///   count from its frame headers. Pinned by
+///   `a_container_that_states_no_length_yields_no_duration_at_all`.
+///
+/// Conflating the two would undo the point: ADR-0016 exists so that an unknown
+/// duration is *recorded as unknown* rather than guessed, and a partially-known
+/// blob keeps the parts that are known instead of being discarded whole. Every
+/// optional field on [`AudioFacts`] behaves the same way — absent means the
+/// container did not say, never a default standing in for one.
 ///
 /// `extension` seeds symphonia's probe [`Hint`]; it is an optimisation, and a
 /// wrong or missing hint changes nothing about the answer, only the search the

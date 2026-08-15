@@ -148,16 +148,36 @@ mod exactness {
     /// So there is no duration — and the correct record of that is *nothing*. Not
     /// zero, not a null, not a nearby guess from the file size. This is the
     /// assertion ADR-0016 exists for.
+    ///
+    /// **The whole struct is pinned**, field by field, not just the absent
+    /// duration. `read` returning `Some` here — rather than `None` — is the
+    /// distinction its documentation now turns on, and an equality over every
+    /// field is what stops that documentation drifting away from the behaviour
+    /// again: a change that started discarding this blob wholesale, or started
+    /// inventing a `frames` for it, fails here.
     #[test]
     fn a_container_that_states_no_length_yields_no_duration_at_all() {
         let facts = facts_of("silence-44khz-mono-261ms.mp3");
-        assert_eq!(facts.duration, None, "a missing length must stay missing");
-        assert_eq!(facts.frames, None);
-        // What it *does* say is still recorded: absence of one fact is not
-        // absence of all of them.
-        assert_eq!(facts.container, "mp3");
-        assert_eq!(facts.sample_rate_hz, Some(44_100));
-        assert_eq!(facts.channels, Some(1));
+        assert_eq!(
+            facts,
+            rto_graph::AudioFacts {
+                container: "mp3".to_owned(),
+                codec: "mp3".to_owned(),
+                sample_rate_hz: Some(44_100),
+                // The frame headers state no bit depth or sample format, and MPEG
+                // audio has neither until it is decoded.
+                bit_depth: None,
+                channels: Some(1),
+                channel_layout: Some("front_left".to_owned()),
+                sample_format: None,
+                // The two that matter: nothing to count, so nothing to record.
+                frames: None,
+                duration: None,
+                tags: Vec::new(),
+            },
+            "the degenerate fixture must yield facts with an absent duration, not \
+             be discarded whole",
+        );
 
         // …and the JSON has no `duration` key whatsoever, rather than a null.
         let json = serde_json::to_value(&facts).expect("serialize");
@@ -167,8 +187,11 @@ mod exactness {
         );
     }
 
-    /// A blob the reader cannot make sense of yields **no facts**, and therefore
-    /// no node — the harder absence: nothing at all rather than a partial record.
+    /// A blob the reader cannot make sense of yields **no facts at all** — the
+    /// other, harder absence, and the *only* thing `read`'s `None` means.
+    ///
+    /// The distinction from the test above is the whole point: that fixture is a
+    /// readable container missing one fact, this is not a container at all.
     #[test]
     fn a_blob_the_reader_rejects_yields_no_facts() {
         assert_eq!(rto_graph::audio::read(b"", Some("wav")), None);
@@ -179,6 +202,35 @@ mod exactness {
         // A truncated header is not guessed at either.
         let truncated = &fixture("silence-16khz-mono-256ms.flac")[..8];
         assert_eq!(rto_graph::audio::read(truncated, Some("flac")), None);
+    }
+
+    /// …and `None` really does mean **no node**, which is the half of the contract
+    /// only the extraction path can demonstrate.
+    ///
+    /// The `file` node is still emitted, with the blob's true size: a `.wav` whose
+    /// bytes are nonsense is still a file in the tree. It just has nothing to say
+    /// about its stream, and says nothing rather than saying it emptily.
+    #[test]
+    fn an_unreadable_audio_blob_emits_no_stream_node() {
+        use rto_graph::{Extractor, NodeKind, Registry};
+
+        let bytes = b"this is not a wav file, whatever the extension claims";
+        let facts = Registry::default().extract("assets/broken.wav", "blob-id", bytes);
+        assert_eq!(
+            facts.nodes.len(),
+            1,
+            "only the file node: {:?}",
+            facts.nodes.iter().map(|n| &n.key).collect::<Vec<_>>(),
+        );
+        assert_eq!(facts.nodes[0].kind, NodeKind::File);
+        assert!(
+            facts.edges.is_empty(),
+            "no stream node means no contains edge either",
+        );
+        assert_eq!(
+            facts.nodes[0].meta["bytes"].as_u64(),
+            u64::try_from(bytes.len()).ok(),
+        );
     }
 
     /// Every rendering of a duration names its exactness — the property that
