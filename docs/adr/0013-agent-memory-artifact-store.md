@@ -209,6 +209,14 @@ weakened by accident:
   association cannot be shown to be present in the same format, so the strict
   reading holds. It is nonetheless kept distinct from `drifted`, which asserts
   something stronger (the code *did* move).
+
+  The implementation flagged this state as its own reading rather than something
+  the rule stated, since a node carrying no blob hash was measured neither way.
+  **The strict reading was put to the decision-makers and ratified**: a memory
+  that cannot be *shown* to apply is kept, marked, and reported as not applying
+  here, rather than quietly asserted against code nobody verified. Recorded so it
+  is not re-opened as an oversight; the lenient reading remains a one-line change
+  to `AnchorState::applies` if the trade is ever revisited.
 - **A record with no anchor is repo-wide and always applies** — "CI is
   Ubuntu-only" is true wherever the repository is. This must never be conflated
   with an anchor that failed to resolve: they both lack a usable anchor and they
