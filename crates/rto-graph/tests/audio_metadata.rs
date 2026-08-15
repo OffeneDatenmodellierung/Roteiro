@@ -28,7 +28,7 @@
 //! * a CBR MP3 long enough for symphonia to estimate a duration from — the
 //!   committed 10-frame MP3, repeated (see [`long_cbr_mp3`]);
 //! * WAV and MP3 files carrying tags — the committed clips with a RIFF `LIST`
-//!   `INFO` chunk or an ID3v2 tag spliced in (see [`tagged`]).
+//!   `INFO` chunk or an `ID3v2` tag spliced in (see [`tagged`]).
 
 use rto_graph::{Extractor, NodeKind, Registry};
 
@@ -451,6 +451,41 @@ mod placement {
         );
     }
 
+    /// `export_factset` — and therefore the published `GraphArtifact` — stays a
+    /// **byte-identical function of the tree**.
+    ///
+    /// The audio facts are new nodes and edges in the export, so this is the check
+    /// that they carry no ordering incidental: two stores built from the same
+    /// blobs, in *different insertion orders*, must export the same bytes. Order
+    /// matters here because the previous test only proves one build is repeatable;
+    /// this one proves the export does not remember how the store was filled.
+    #[test]
+    fn the_exported_factset_is_a_byte_identical_function_of_the_tree() {
+        let forwards = super::store_with(&[
+            ("assets/a.flac", "tone-500hz-16khz-mono-256ms.flac"),
+            ("assets/b.wav", "syllables-16khz-mono-512ms.wav"),
+            ("assets/c.mp3", "silence-44khz-mono-261ms.mp3"),
+        ]);
+        let backwards = super::store_with(&[
+            ("assets/c.mp3", "silence-44khz-mono-261ms.mp3"),
+            ("assets/b.wav", "syllables-16khz-mono-512ms.wav"),
+            ("assets/a.flac", "tone-500hz-16khz-mono-256ms.flac"),
+        ]);
+        let export = |s: &rto_graph::Store| {
+            serde_json::to_string(&s.export_factset().expect("export")).expect("serialize")
+        };
+        let a = export(&forwards);
+        assert!(
+            a.contains("audio:assets/a.flac"),
+            "the export must actually contain the audio facts, or this is vacuous",
+        );
+        assert_eq!(
+            a,
+            export(&backwards),
+            "the export moved with insertion order"
+        );
+    }
+
     /// The two stores stay disjoint. ADR-0016's facts are nodes and edges;
     /// ADR-0015's generated content is neither, and lives in `media_content`.
     /// Extracting audio metadata must not write a media record, and the generated
@@ -543,7 +578,7 @@ mod tags {
         );
     }
 
-    /// **The check on the feature-flag decision.** ID3v2 is a *standalone* tag
+    /// **The check on the feature-flag decision.** `ID3v2` is a *standalone* tag
     /// reader in symphonia: with `id3v2` off it is never registered on the probe,
     /// and every tag on an MP3 is silently invisible while ADR-0016 promises to
     /// extract them. This asserts the flag is on and the tags arrive.
@@ -621,6 +656,9 @@ mod tagged {
     /// The committed fixture's canonical 44-byte header makes the splice point
     /// exact: 12 bytes of `RIFF….WAVE`, then a 24-byte `fmt ` chunk, then `data`.
     pub fn wav_with_riff_info(pairs: &[(&str, &str)]) -> Vec<u8> {
+        /// Offset of the `data` chunk in the committed fixture's canonical header.
+        const DATA_AT: usize = 36;
+
         let mut info = Vec::new();
         info.extend_from_slice(b"INFO");
         for (key, value) in pairs {
@@ -639,9 +677,6 @@ mod tagged {
         chunk.extend_from_slice(b"LIST");
         chunk.extend_from_slice(&u32::try_from(info.len()).expect("fits u32").to_le_bytes());
         chunk.extend_from_slice(&info);
-
-        /// Offset of the `data` chunk in the committed fixture's canonical header.
-        const DATA_AT: usize = 36;
 
         let source = fixture("silence-16khz-mono-256ms.wav");
         assert_eq!(
@@ -675,6 +710,10 @@ mod tagged {
             u32::try_from(bytes.len()).expect("fits u32").to_le_bytes()
         }
 
+        /// Offset of the first audio frame: `fLaC` (4) + block header (4) +
+        /// `STREAMINFO` (34).
+        const FRAME_AT: usize = 42;
+
         // Vendor string, then a count, then `KEY=value` entries.
         let vendor = b"roteiro-test";
         let mut payload = Vec::new();
@@ -686,10 +725,6 @@ mod tagged {
             payload.extend_from_slice(&le_len(&entry));
             payload.extend_from_slice(&entry);
         }
-
-        /// Offset of the first audio frame: `fLaC` (4) + block header (4) +
-        /// `STREAMINFO` (34).
-        const FRAME_AT: usize = 42;
 
         let source = fixture("silence-16khz-mono-256ms.flac");
         assert_eq!(
@@ -714,7 +749,7 @@ mod tagged {
 
     /// The committed MP3 with an ID3v2.3 tag prepended.
     ///
-    /// An ID3v2 tag sits in front of the first MPEG sync word, which is exactly
+    /// An `ID3v2` tag sits in front of the first MPEG sync word, which is exactly
     /// how real MP3s carry one — and exactly the layout that needs symphonia's
     /// standalone `id3v2` reader to be registered on the probe.
     pub fn mp3_with_id3v2(frames: &[(&str, &str)]) -> Vec<u8> {
@@ -744,7 +779,7 @@ mod tagged {
         out
     }
 
-    /// ID3v2's synchsafe integer: 28 bits spread over four bytes, seven bits
+    /// `ID3v2`'s synchsafe integer: 28 bits spread over four bytes, seven bits
     /// apiece, so the size field can never contain a false MPEG sync word.
     fn synchsafe(value: u32) -> [u8; 4] {
         assert!(value < 1 << 28, "an ID3v2 tag size is 28 bits");

@@ -51,11 +51,13 @@
 //!   would have to round, and no floating point appears anywhere on this path;
 //! * tags are **sorted and de-duplicated**, never emitted in container order,
 //!   because a container may legitimately store them in any order;
-//! * every metadata revision is merged (an MP3 can carry ID3v2 at the head *and*
-//!   ID3v1 at the tail), so the answer does not depend on which one a reader
+//! * every metadata revision is merged (an MP3 can carry `ID3v2` at the head *and*
+//!   `ID3v1` at the tail), so the answer does not depend on which one a reader
 //!   happens to surface first.
 //!
 //! @rto:0016
+
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -163,7 +165,7 @@ impl std::fmt::Display for AudioDuration {
 pub struct AudioTag {
     /// The **normalised** name, `snake_case` — `track_title`, `album_artist`.
     ///
-    /// Taken from symphonia's [`StandardTag`], which already maps ID3v2's `TPE1`,
+    /// Taken from symphonia's [`StandardTag`], which already maps `ID3v2`'s `TPE1`,
     /// a Vorbis comment's `ARTIST` and RIFF INFO's `IART` onto one vocabulary; we
     /// deliberately keep no tag-name table of our own (ADR-0016). When a tag has
     /// no standard mapping this falls back to the container's own key, lowercased.
@@ -261,7 +263,9 @@ impl AudioFacts {
         }
         let mut out = parts.join(", ");
         for tag in &self.tags {
-            out.push_str(&format!("\n{}: {}", tag.name, tag.value));
+            // One tag per line, so a search snippet of the summary reads as a
+            // list rather than as a run-on sentence.
+            let _ = write!(out, "\n{}: {}", tag.name, tag.value);
         }
         out
     }
@@ -353,7 +357,7 @@ fn read_inner(bytes: &[u8], extension: Option<&str>) -> Option<AudioFacts> {
 /// log.
 ///
 /// **All** revisions are drained, not just the current one: an MP3 can carry an
-/// ID3v2 tag at the head and an ID3v1 tag at the tail, and each arrives as its own
+/// `ID3v2` tag at the head and an `ID3v1` tag at the tail, and each arrives as its own
 /// revision. Sorting afterwards means the result does not depend on which
 /// revision a reader surfaces first, nor on the order tags appear within one.
 fn read_tags(reader: &mut Box<dyn symphonia::core::formats::FormatReader + '_>) -> Vec<AudioTag> {

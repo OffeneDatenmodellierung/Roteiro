@@ -2624,6 +2624,7 @@ fn run_query(
                 if let Some(path) = &ex.node.path {
                     println!("  path: {path}");
                 }
+                print_audio_stream(&ex);
                 if !ex.outgoing.is_empty() {
                     println!("  outgoing:");
                     for e in &ex.outgoing {
@@ -2664,6 +2665,49 @@ fn run_query(
         }
     }
     Ok(())
+}
+
+/// Print an `audio_stream` node's stream line, and nothing at all for any other
+/// node (ADR-0016).
+///
+/// The line is the node's own rendered `meta.content` — the same string
+/// [`rto_graph::search`] matches on — so the human surface and the search index
+/// cannot drift apart, and there is no second place to remember to qualify a
+/// duration. That matters here specifically: an MP3's duration is often an
+/// **estimate**, and ADR-0016 requires every surface that shows one to say so.
+/// It does, because `AudioDuration`'s rendering carries the marker with the
+/// number rather than beside it.
+///
+/// Deliberately narrow: it fires on the node kind, not on "any node with
+/// content", so ADRs and READMEs keep printing exactly as they did.
+fn print_audio_stream(ex: &rto_graph::Explanation) {
+    for line in audio_stream_lines(ex) {
+        println!("{line}");
+    }
+}
+
+/// The lines [`print_audio_stream`] emits — empty for any node that is not an
+/// `audio_stream`. Split out from the printing so the gate is testable without
+/// capturing stdout.
+fn audio_stream_lines(ex: &rto_graph::Explanation) -> Vec<String> {
+    if ex.node.kind != "audio_stream" {
+        return Vec::new();
+    }
+    let Some(content) = ex.meta.get("content").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .enumerate()
+        // The first line is the stream shape; any that follow are tags.
+        .map(|(i, line)| {
+            if i == 0 {
+                format!("  stream: {line}")
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect()
 }
 
 /// Search the graph by text and print ranked hits (highest score first). A
@@ -7061,5 +7105,63 @@ mod workspace_tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+#[cfg(test)]
+mod audio_stream_tests {
+    use super::audio_stream_lines;
+    use rto_graph::{Explanation, NodeSummary};
+
+    /// An explanation of a node with the given kind and rendered content.
+    fn explanation(kind: &str, content: &str) -> Explanation {
+        let mut node = rto_graph::Node::new("k", rto_graph::NodeKind::from_token(kind), "clip.mp3");
+        node.path = Some("assets/clip.mp3".to_owned());
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: NodeSummary {
+                key: node.key.clone(),
+                kind: kind.to_owned(),
+                name: node.name.clone(),
+                path: node.path.clone(),
+                lang: None,
+            },
+            meta: serde_json::json!({ "content": content }),
+            outgoing: Vec::new(),
+            incoming: Vec::new(),
+        }
+    }
+
+    /// The stream line is printed for an audio node, tags indented under it —
+    /// and, crucially, an estimated duration is shown **as** an estimate, because
+    /// the line is the same rendering search indexes rather than a second one
+    /// assembled here (ADR-0016).
+    #[test]
+    fn an_audio_stream_node_prints_its_stream_and_marks_an_estimate() {
+        let lines = audio_stream_lines(&explanation(
+            "audio_stream",
+            "mp3, 44100 Hz, mono, 26122 ms (estimated)\nartist: Someone",
+        ));
+        assert_eq!(
+            lines,
+            vec![
+                "  stream: mp3, 44100 Hz, mono, 26122 ms (estimated)".to_owned(),
+                "    artist: Someone".to_owned(),
+            ],
+        );
+    }
+
+    /// Any other node prints nothing extra. The gate is the node *kind*, not "has
+    /// content": an ADR or a README carries content too, and this must not start
+    /// dumping it into `roteiro query`'s output.
+    #[test]
+    fn other_kinds_print_nothing_extra() {
+        assert!(audio_stream_lines(&explanation("adr", "A decision record.")).is_empty());
+        assert!(audio_stream_lines(&explanation("file", "Some prose.")).is_empty());
+        // An audio node with no rendered content prints nothing rather than a
+        // blank line.
+        let mut bare = explanation("audio_stream", "");
+        bare.meta = serde_json::json!({});
+        assert!(audio_stream_lines(&bare).is_empty());
     }
 }
