@@ -156,7 +156,7 @@ pub trait Adapter: Sync + std::fmt::Debug {
     fn summary(&self) -> &'static str;
 
     /// The languages this adapter produces findings for, as the coverage matrix
-    /// in ADR-0015 states them. Reported by the CLI so the claim is inspectable
+    /// in ADR-0016 states them. Reported by the CLI so the claim is inspectable
     /// rather than only documented.
     fn languages(&self) -> &'static [&'static str];
 

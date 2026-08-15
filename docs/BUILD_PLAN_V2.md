@@ -203,6 +203,42 @@ runner, honestly labelled.
   succeeds; offline with a cold cache fails with the named error and the exact
   prefetch command; `cargo deny` clean.
 
+**Coverage is a matrix, not an analyzer list** ([ADR-0016](adr/0016-analyzer-coverage-matrix.md)).
+The requirement is findings for Rust, Python, SQL, Java and Node, and the two
+named analyzers deliver that **on the SAST axis only**:
+
+| Language | SAST | Dependency vulnerabilities |
+|---|---|---|
+| Rust | semgrep (GA) | cargo-audit (RustSec) |
+| Python | semgrep (GA) | *gap* → `osv-scanner` |
+| Java | semgrep (GA) | *gap* → `osv-scanner` |
+| Node (JS/TS) | semgrep (GA) | *gap* → `osv-scanner` |
+| SQL | semgrep `generic` — token matching, no parser | n/a |
+
+Semgrep's published language list has **no SQL entry at any maturity level**, so
+SQL is matched generically and is labelled as such everywhere it is reported.
+Semgrep's dependency scanning is a hosted product feature, not something the OSS
+CLI does, so it contributes nothing to the second column.
+
+### Stage 22b — `osv-scanner`: the dependency axis for Python, Java and Node → effort **M**
+
+Split out of Stage 22 because it is a different axis, not more of the same one,
+and because the SAST half is independently useful and independently reviewable.
+
+- **Rust surface:** one more adapter behind the existing seam. The subprocess
+  runner, the asset cache, `prefetch`/`status` and the finding schema are all
+  reused unchanged — which is the seam doing its job.
+- **Provisioning:** OSV's per-ecosystem databases
+  (`https://osv-vulnerabilities.storage.googleapis.com/<ECOSYSTEM>/all.zip`) are
+  single files at stable URLs, so they are the first asset that genuinely wants a
+  download-by-URL source. `AssetSource` is `#[non_exhaustive]` for that.
+- **Open question for that change:** `osv-scanner` also reads `Cargo.lock`, so it
+  will overlap `cargo-audit` on Rust. Deduplication across analyzers is
+  deliberately not decided in Stage 22.
+- **DoD:** a Python, a Java and a Node lockfile each produce findings; offline
+  with a pinned database succeeds; the Rust overlap with `cargo-audit` is
+  explicitly resolved rather than left to chance.
+
 ### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.12.0** · effort **M**
 
 **Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
@@ -395,7 +431,8 @@ without losing the ability to search it. Resolves #300.
 | Release | Contains | Gate |
 |---|---|---|
 | v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
-| v1.11.0 | Stage 22 — cargo-audit + semgrep | Offline warm-cache run; named cold-cache failure |
+| v1.11.0 | Stage 22 — cargo-audit + semgrep (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure |
+| v1.11.x | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved |
 | v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
