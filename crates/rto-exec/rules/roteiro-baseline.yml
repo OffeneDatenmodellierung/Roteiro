@@ -1,0 +1,211 @@
+# Roteiro's baseline semgrep rule set — pinned, vendored, offline.
+#
+# WHY THIS FILE EXISTS
+#
+# `semgrep --config p/default` resolves against the Semgrep Registry, which is a
+# **network service**. An analyzer that reaches a registry on every run is not
+# offline-capable, and its answer is not reproducible: the same source at the
+# same commit yields different findings as the registry moves underneath it.
+# This file is the pinned alternative. `roteiro security prefetch` installs it
+# into the asset cache and records its SHA-256, and every run stamps that digest
+# onto its `AnalysisRun` as `rules_digest` (ADR-0012).
+#
+# LICENCE
+#
+# Every rule here was written for this repository and is covered by the
+# repository's own licence (MIT OR Apache-2.0). **No rule from the Semgrep
+# Registry is vendored or copied.** Registry rules — including the Community
+# Edition set in semgrep/semgrep-rules — are distributed under the *Semgrep
+# Rules License v1.0*, which is not one of the SPDX identifiers on this
+# project's `deny.toml` allow-list. `cargo deny` governs crates and would never
+# have caught a rule file, so the position is stated here instead of assumed.
+# Semgrep the *tool* is LGPL-2.1 and is invoked as a separate process; it is
+# never linked, and it is never vendored or redistributed by Roteiro.
+#
+# SCOPE — THIS IS A BASELINE, NOT A SECURITY AUDIT
+#
+# The point of these rules is that each of the project's primary languages
+# **produces findings through the whole pipeline**, with a rule set that is
+# pinned rather than fetched. They are deliberately few and deliberately
+# unambiguous. A team that wants real coverage should pin a larger rule set of
+# its own choosing; the machinery does not care how many rules there are.
+#
+# SQL IS MATCHED GENERICALLY, AND THAT IS A LIMITATION
+#
+# Semgrep's published language list has no SQL entry at any maturity level, so
+# the SQL rules below use `generic` mode: a token matcher with no AST, no
+# dataflow and no type information. It can say "this statement grants ALL
+# PRIVILEGES". It cannot say "this value reaches a query unsanitised". Do not
+# read a clean SQL scan here as an AST-backed one.
+
+rules:
+  # ---------------------------------------------------------------- rust ----
+  - id: roteiro.rust.shell-out-to-sh
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Spawning a shell (`sh -c`) turns every argument into shell syntax, so any
+      interpolated value becomes code. Invoke the program directly and pass
+      arguments as separate `.arg()` calls.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: std::process::Command::new("sh")
+          - pattern: Command::new("sh")
+          - pattern: std::process::Command::new("bash")
+          - pattern: Command::new("bash")
+
+  - id: roteiro.rust.unwrap-on-env-var
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      `std::env::var(...).unwrap()` panics when the variable is unset, which
+      turns a missing configuration value into a crash with no diagnostic.
+      Handle the `Err` and say what was missing.
+    metadata:
+      category: correctness
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: std::env::var($NAME).unwrap()
+          - pattern: env::var($NAME).unwrap()
+
+  # -------------------------------------------------------------- python ----
+  - id: roteiro.python.subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `shell=True` runs the command through a shell, so any interpolated value
+      becomes shell syntax. Pass a list of arguments and leave `shell` at its
+      default.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.Popen(..., shell=True, ...)
+          - pattern: subprocess.check_output(..., shell=True, ...)
+
+  - id: roteiro.python.eval-of-input
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `eval`/`exec` on a value that came from outside the program executes
+      whatever the caller supplied. Parse the value instead.
+    metadata:
+      category: security
+      cwe: "CWE-95: Eval Injection"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+
+  # ---------------------------------------------------------------- java ----
+  - id: roteiro.java.runtime-exec
+    languages: [java]
+    severity: ERROR
+    message: >-
+      `Runtime.getRuntime().exec(...)` with a composed string is command
+      injection when any part of that string came from outside the program. Use
+      `ProcessBuilder` with a list of arguments.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      confidence: MEDIUM
+    patterns:
+      - pattern: Runtime.getRuntime().exec(...)
+
+  - id: roteiro.java.concatenated-sql
+    languages: [java]
+    severity: ERROR
+    message: >-
+      A SQL string built by concatenation is SQL injection as soon as any part
+      of it is caller-supplied. Use a `PreparedStatement` with bound parameters.
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: $STMT.executeQuery("..." + ...)
+          - pattern: $STMT.executeUpdate("..." + ...)
+          - pattern: $STMT.execute("..." + ...)
+
+  # -------------------------------------------- javascript / typescript ----
+  - id: roteiro.js.child-process-exec
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      `child_process.exec` runs its argument through a shell. Use `execFile` or
+      `spawn` with an argument array so no value can become shell syntax.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: require("child_process").exec(...)
+          - pattern: $CP.exec(...)
+      # `execFile` takes an argument array and never reaches a shell, so it is
+      # the fix this rule is asking for, not another instance of the problem.
+      - pattern-not: $CP.execFile(...)
+
+  - id: roteiro.js.eval-call
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      `eval` executes whatever string it is given. If any part of that string
+      came from outside the program, so did the code.
+    metadata:
+      category: security
+      cwe: "CWE-95: Eval Injection"
+      confidence: HIGH
+    patterns:
+      - pattern: eval(...)
+
+  # ----------------------------------------------------------------- sql ----
+  # `generic` mode: token matching, no parser. See the header.
+  - id: roteiro.sql.grant-all-privileges
+    languages: [generic]
+    paths:
+      include:
+        - "*.sql"
+    severity: WARNING
+    message: >-
+      Granting ALL PRIVILEGES hands over every current and future permission on
+      the object, including ones that did not exist when the grant was written.
+      Grant the specific rights the role needs.
+    metadata:
+      category: security
+      cwe: "CWE-732: Incorrect Permission Assignment"
+      confidence: HIGH
+      engine-note: >-
+        Matched by semgrep's generic (token) engine, not a SQL parser.
+    patterns:
+      - pattern: GRANT ALL PRIVILEGES ON ... TO ...
+
+  - id: roteiro.sql.select-star-into-outfile
+    languages: [generic]
+    paths:
+      include:
+        - "*.sql"
+    severity: ERROR
+    message: >-
+      `INTO OUTFILE` writes query results to a file on the database server's
+      filesystem. It is almost never what an application migration wants, and it
+      is a common exfiltration primitive.
+    metadata:
+      category: security
+      cwe: "CWE-552: Files Accessible to External Parties"
+      confidence: HIGH
+      engine-note: >-
+        Matched by semgrep's generic (token) engine, not a SQL parser.
+    patterns:
+      - pattern: INTO OUTFILE ...

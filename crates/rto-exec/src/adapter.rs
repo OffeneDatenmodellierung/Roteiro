@@ -33,6 +33,7 @@ use rto_graph::SourceIdentity;
 
 use crate::ingest::NormalizedReport;
 use crate::runner::ExecError;
+use crate::snippet::SnippetSource;
 
 pub mod cargo_audit;
 pub mod semgrep;
@@ -44,7 +45,7 @@ pub mod semgrep;
 /// and `cargo audit` does not even record its own version. Rather than let an
 /// adapter invent them, the caller supplies what it actually knows, and an
 /// adapter that has nothing better says so ([`UNKNOWN_VERSION`]).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NativeContext<'a> {
     /// When the run started, RFC 3339 UTC. A subprocess run measures it; an
     /// ingest of a report file uses the file's modification time, which is the
@@ -64,6 +65,30 @@ pub struct NativeContext<'a> {
     pub source: &'a SourceIdentity,
     /// Digest of the rule set the analyzer ran with, where one applies.
     pub rules_digest: Option<String>,
+    /// Where to read the source a finding points at, for identity recipes that
+    /// include a snippet hash.
+    ///
+    /// It is here rather than inside an adapter because the *caller* knows which
+    /// checkout the report describes, and because both execution paths must read
+    /// the same one — that is what makes a subprocess run and an ingest of its
+    /// output produce identical finding keys.
+    pub snippets: &'a dyn SnippetSource,
+}
+
+// Hand-written because `&dyn SnippetSource` is not `Debug` and does not need to
+// be: what a debug print of a context should show is the evidence it carries,
+// not the identity of the thing that reads files.
+impl std::fmt::Debug for NativeContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeContext")
+            .field("started_at", &self.started_at)
+            .field("ended_at", &self.ended_at)
+            .field("analyzer_version", &self.analyzer_version)
+            .field("exit_status", &self.exit_status)
+            .field("source", self.source)
+            .field("rules_digest", &self.rules_digest)
+            .finish_non_exhaustive()
+    }
 }
 
 impl NativeContext<'_> {
@@ -209,22 +234,40 @@ pub fn known_analyzers() -> Vec<&'static str> {
     ids
 }
 
+/// Recorded in place of a snippet hash when the source could not be read — an
+/// ingested report about a tree this checkout does not have.
+///
+/// A named marker rather than a hash of the empty string, so a reader of a
+/// finding key can tell "the code was empty" from "the code was unavailable".
+pub const NO_SNIPPET: &str = "no-snippet";
+
 /// Short SHA-256 prefix of a snippet, used by identity recipes that need to
 /// notice that the *code* at a location changed even though the location did
 /// not.
 ///
 /// Sixteen hex characters is 64 bits — far more than enough to keep two
 /// snippets at the same rule and offset distinct, and short enough that a
-/// rendered key stays readable in a terminal.
+/// rendered key stays readable in a terminal. Leading and trailing whitespace is
+/// stripped first, so a reformat that only moved indentation is not a new
+/// finding.
 #[must_use]
 pub fn snippet_hash(snippet: &str) -> String {
     crate::sha256_hex(snippet.trim().as_bytes())[..16].to_owned()
 }
 
+/// [`snippet_hash`] of what `snippets` holds for the span, or [`NO_SNIPPET`].
+#[must_use]
+pub fn snippet_hash_at(snippets: &dyn SnippetSource, path: &str, start: u32, end: u32) -> String {
+    snippets
+        .snippet(path, start, end)
+        .map_or_else(|| NO_SNIPPET.to_owned(), |text| snippet_hash(&text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AssetPaths, NativeContext, UNKNOWN_VERSION, adapter_for, known_analyzers, snippet_hash,
+        AssetPaths, NO_SNIPPET, NativeContext, UNKNOWN_VERSION, adapter_for, known_analyzers,
+        snippet_hash, snippet_hash_at,
     };
     use rto_graph::SourceIdentity;
 
@@ -238,6 +281,7 @@ mod tests {
             exit_status: 0,
             source: &SOURCE,
             rules_digest: None,
+            snippets: &crate::snippet::NoSnippets,
         }
     }
 
@@ -278,6 +322,15 @@ mod tests {
         assert_eq!(hash.len(), 16);
         assert_eq!(hash, snippet_hash("  eval(user_input)\n"));
         assert_ne!(hash, snippet_hash("eval(other_input)"));
+    }
+
+    /// A report about a tree this checkout does not have still yields a
+    /// well-formed identity, and one that says why it is weaker.
+    #[test]
+    fn an_unavailable_snippet_is_named_not_hashed_as_empty() {
+        let hash = snippet_hash_at(&crate::snippet::NoSnippets, "a.py", 0, 4);
+        assert_eq!(hash, NO_SNIPPET);
+        assert_ne!(hash, snippet_hash(""));
     }
 
     #[test]

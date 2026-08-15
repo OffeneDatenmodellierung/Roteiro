@@ -342,6 +342,7 @@ mod tests {
             exit_status: 1,
             source,
             rules_digest: None,
+            snippets: &crate::snippet::NoSnippets,
         }
     }
 

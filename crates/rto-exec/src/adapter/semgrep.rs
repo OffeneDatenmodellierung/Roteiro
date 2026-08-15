@@ -28,7 +28,7 @@
 
 use serde::Deserialize;
 
-use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext, snippet_hash};
+use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext, snippet_hash_at};
 use crate::ingest::{NormalizedReport, REPORT_SCHEMA, ReportFinding};
 use crate::runner::ExecError;
 use rto_graph::{Severity, Span};
@@ -82,6 +82,13 @@ impl Adapter for Semgrep {
                 // Configured, not enforced — see `SubprocessRunner`.
                 "--metrics=off".to_owned(),
                 "--disable-version-check".to_owned(),
+                // Without this, semgrep prefixes every rule id with the
+                // *filesystem path* of the config it was loaded from, so a
+                // finding key would embed the local asset-cache directory —
+                // user-identifying data in a stored record, and a key that
+                // differs between two machines running the same scan. Verified
+                // against semgrep 1.136.0.
+                "--no-rewrite-rule-ids".to_owned(),
                 "--config".to_owned(),
                 assets.arg(RULES_ASSET),
                 ".".to_owned(),
@@ -113,7 +120,7 @@ impl Adapter for Semgrep {
             if result.extra.is_ignored {
                 continue;
             }
-            findings.push(convert(&result)?);
+            findings.push(convert(&result, ctx)?);
         }
 
         Ok(NormalizedReport {
@@ -136,7 +143,7 @@ impl Adapter for Semgrep {
 }
 
 /// One semgrep result → one normalized finding.
-fn convert(result: &SemgrepResult) -> Result<ReportFinding, ExecError> {
+fn convert(result: &SemgrepResult, ctx: &NativeContext<'_>) -> Result<ReportFinding, ExecError> {
     if result.check_id.trim().is_empty() {
         return Err(ExecError::MalformedReport(
             "a semgrep result has no `check_id`".to_owned(),
@@ -168,7 +175,12 @@ fn convert(result: &SemgrepResult) -> Result<ReportFinding, ExecError> {
             result.check_id.clone(),
             result.path.clone(),
             start.to_string(),
-            snippet_hash(&result.extra.lines),
+            // Read from the tree, not from `extra.lines`: the open-source
+            // semgrep CLI redacts that field to the literal "requires login"
+            // unless the caller is authenticated to Semgrep's hosted platform,
+            // which would make this component a constant today and change every
+            // stored key the day someone logs in. See `crate::snippet`.
+            snippet_hash_at(ctx.snippets, &result.path, start, end),
         ],
         rule: result.check_id.clone(),
         severity: severity(&result.extra.severity),
@@ -289,6 +301,9 @@ mod tests {
             exit_status: 1,
             source: &SOURCE,
             rules_digest: Some("cafe1234".to_owned()),
+            // The unit tests here exercise the *parsing*; the snippet component
+            // is covered by `tests/equivalence.rs`, which reads a real tree.
+            snippets: &crate::snippet::NoSnippets,
         }
     }
 
@@ -347,12 +362,30 @@ mod tests {
         assert_eq!(finding.span.map(|s| (s.start, s.end)), Some((240, 280)));
     }
 
+    /// A stand-in worktree: whatever text was put in it, for any span.
+    struct FakeTree(&'static str);
+
+    impl crate::snippet::SnippetSource for FakeTree {
+        fn snippet(&self, _path: &str, _start: u32, _end: u32) -> Option<String> {
+            Some(self.0.to_owned())
+        }
+    }
+
+    fn ctx_with_tree(tree: &'static FakeTree) -> NativeContext<'static> {
+        let mut ctx = ctx();
+        ctx.snippets = tree;
+        ctx
+    }
+
     /// The identity recipe ADR-0012 specifies, component by component. It is
     /// asserted positionally because the *order* is the contract: a reordering
     /// would silently re-key every stored finding.
     #[test]
     fn uses_the_rule_path_offset_snippet_identity() {
-        let report = Semgrep.normalize(NATIVE.as_bytes(), &ctx()).expect("parse");
+        static TREE: FakeTree = FakeTree("    subprocess.run(cmd, shell=True)");
+        let report = Semgrep
+            .normalize(NATIVE.as_bytes(), &ctx_with_tree(&TREE))
+            .expect("parse");
         let identity = &report.findings[0].identity;
         assert_eq!(identity[0], "roteiro.python.subprocess-shell-true");
         assert_eq!(identity[1], "svc/app.py");
@@ -367,12 +400,52 @@ mod tests {
     /// new finding rather than the old one silently carried forward.
     #[test]
     fn changed_code_at_the_same_offset_is_a_different_finding() {
-        let other = NATIVE.replace("subprocess.run(cmd, shell=True)", "os.system(cmd)");
-        let a = Semgrep.normalize(NATIVE.as_bytes(), &ctx()).expect("a");
-        let b = Semgrep.normalize(other.as_bytes(), &ctx()).expect("b");
+        static BEFORE: FakeTree = FakeTree("subprocess.run(cmd, shell=True)");
+        static AFTER: FakeTree = FakeTree("os.system(cmd)");
+        let a = Semgrep
+            .normalize(NATIVE.as_bytes(), &ctx_with_tree(&BEFORE))
+            .expect("a");
+        let b = Semgrep
+            .normalize(NATIVE.as_bytes(), &ctx_with_tree(&AFTER))
+            .expect("b");
         assert_ne!(a.findings[0].identity, b.findings[0].identity);
         // …and only the snippet component moved.
         assert_eq!(a.findings[0].identity[..3], b.findings[0].identity[..3]);
+    }
+
+    /// Semgrep's own `extra.lines` is the literal "requires login" in the
+    /// open-source CLI, so it must never reach an identity: a finding key that
+    /// depended on it would be a constant today and would change the day a user
+    /// authenticated. The tree is the source of truth instead.
+    #[test]
+    fn the_identity_ignores_semgreps_redacted_snippet_field() {
+        static TREE: FakeTree = FakeTree("subprocess.run(cmd, shell=True)");
+        let redacted = NATIVE.replace(
+            r#""lines": "    subprocess.run(cmd, shell=True)","#,
+            r#""lines": "requires login","#,
+        );
+        assert!(
+            redacted.contains("requires login"),
+            "the fixture was rewritten"
+        );
+        let from_real = Semgrep
+            .normalize(NATIVE.as_bytes(), &ctx_with_tree(&TREE))
+            .expect("a");
+        let from_redacted = Semgrep
+            .normalize(redacted.as_bytes(), &ctx_with_tree(&TREE))
+            .expect("b");
+        assert_eq!(
+            from_real.findings[0].identity,
+            from_redacted.findings[0].identity
+        );
+    }
+
+    /// A report about a tree this checkout does not have still normalises; the
+    /// identity says the snippet was unavailable instead of inventing one.
+    #[test]
+    fn a_missing_tree_yields_a_named_snippet_component() {
+        let report = Semgrep.normalize(NATIVE.as_bytes(), &ctx()).expect("parse");
+        assert_eq!(report.findings[0].identity[3], crate::adapter::NO_SNIPPET);
     }
 
     #[test]

@@ -65,10 +65,11 @@ pub mod adapter;
 mod clock;
 mod ingest;
 mod runner;
+pub mod snippet;
 
 pub use adapter::{
-    ADAPTERS, Adapter, AssetPaths, Invocation, NativeContext, UNKNOWN_VERSION, adapter_for,
-    known_analyzers, snippet_hash,
+    ADAPTERS, Adapter, AssetPaths, Invocation, NO_SNIPPET, NativeContext, UNKNOWN_VERSION,
+    adapter_for, known_analyzers, snippet_hash, snippet_hash_at,
 };
 pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 pub use ingest::{
@@ -79,6 +80,7 @@ pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,
     check_reported_path, check_request, worktree_id,
 };
+pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
 
 /// Lowercase hex SHA-256 of `bytes`.
 ///
