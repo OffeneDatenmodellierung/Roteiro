@@ -2881,7 +2881,14 @@ fn run_media_status(json: bool) -> anyhow::Result<()> {
         emit_json(&status)?;
         return Ok(());
     }
-    println!("{} generated record(s)", status.records);
+    // "media record(s)", not "generated record(s)": since the gate a record can
+    // be a refusal, and calling a skip "generated" would misreport the one thing
+    // this command exists to make legible.
+    println!(
+        "{} media record(s), {} of them gate refusals",
+        status.records,
+        status.skipped.len(),
+    );
     for producer in &status.producers {
         println!(
             "  {}  {} ({}, {})  {} record(s) ({} skipped), latest {}",
