@@ -19,10 +19,10 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
 /// blob — the version is folded into the cache key. See [`crate::sync`].
 ///
-/// The `pdf-text` and `image-ocr` features change what PDFs and images extract
-/// to, so each occupies a distinct version namespace: a feature build and a
-/// default build never serve each other stale (content-bearing vs content-free)
-/// facts from a shared cache. (OCR output also depends on *which* models are
+/// The `pdf-text`, `image-ocr` and `audio-metadata` features change what PDFs,
+/// images and audio blobs extract to, so each occupies a distinct version
+/// namespace: a feature build and a default build never serve each other stale
+/// (content-bearing vs content-free) facts from a shared cache. (OCR output also depends on *which* models are
 /// installed; that runtime state is folded into the cache key separately — see
 /// [`media_env_tag`] and [`crate::sync`].)
 ///
@@ -43,10 +43,21 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // descriptions are no longer written into `meta.content` at all, so every cached
 // fact set that carries one must be regenerated without it. The `image-vision`
 // (+400) and `audio-transcribe` (+800) namespaces are dropped in the same change,
-// because those features no longer affect extraction output.
-pub(crate) const EXTRACT_VERSION: u32 = 10
+// because those features no longer affect extraction output. Bumped 10 → 11 for
+// ADR-0016: audio blobs now emit an `audio_stream` node carrying the container's
+// own account of the stream, so cached fact sets must be regenerated. The
+// `audio-metadata` namespace (+400) reoccupies `image-vision`'s retired slot —
+// safe because the base version moved with it, so no historical key can collide,
+// and because the namespaces are powers of ten *bit* values (100/200/400/800)
+// that must stay disjoint: +300 would alias a `pdf-text` + `image-ocr` build.
+pub(crate) const EXTRACT_VERSION: u32 = 11
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
-    + if cfg!(feature = "image-ocr") { 200 } else { 0 };
+    + if cfg!(feature = "image-ocr") { 200 } else { 0 }
+    + if cfg!(feature = "audio-metadata") {
+        400
+    } else {
+        0
+    };
 
 /// Max characters of embeddable content (markdown body / doc-comment / PDF text)
 /// captured into a node's `meta.content`, to keep the store small while giving
@@ -220,6 +231,13 @@ fn extract_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) 
     // deploys) rather than a plain file node (ADR-0009 derived facts).
     if is_dockerfile(path) {
         return dockerfile_facts(path, blob_id, bytes, ingest);
+    }
+    // Audio blobs additionally yield an `audio_stream` node carrying what the
+    // container says about them (ADR-0016). Without the `audio-metadata` feature
+    // this produces exactly the plain file node the extension dispatch below
+    // would have produced, so the default build's output is unchanged.
+    if crate::media::is_audio(path) {
+        return audio_facts(path, blob_id, bytes, ingest);
     }
     let ext = extension(path);
     match ext.as_deref() {
@@ -406,6 +424,68 @@ fn dockerfile_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfi
         ));
     }
     facts
+}
+
+/// Emit the facts for an audio blob (ADR-0016): the usual `file` node, plus — in
+/// an `audio-metadata` build, where the container yielded anything — one
+/// `audio_stream` node under a `contains` edge from the file.
+///
+/// The metadata is a **format read**: codec, sample rate, bit depth, channels,
+/// duration and tags, with no decoder instantiated and no model consulted. That
+/// makes it a deterministic pure function of the bytes, which is what qualifies it
+/// as `derived` at all — the mirror image of ADR-0015, which moved *generated*
+/// text out of this path for failing exactly that test.
+///
+/// A blob the reader cannot make sense of contributes **no node**, rather than a
+/// node full of nulls: absence is recorded as absence.
+fn audio_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
+    let facts = FactSet::new().with_node(file_node(path, blob_id, bytes, None, ingest));
+    let Some(node) = audio_stream_node(path, blob_id, bytes) else {
+        return facts;
+    };
+    let node_key = node.key.clone();
+    facts
+        .with_node(node)
+        .with_edge(Edge::derived(file_key(path), node_key, EdgeKind::Contains))
+}
+
+/// The `audio_stream` node for one audio blob, or `None` when the container had
+/// nothing to say.
+///
+/// The facts land in `meta` as the serialised [`crate::audio::AudioFacts`], plus a
+/// rendered `meta.content` so [`crate::search`] finds them through the **ordinary**
+/// scorer — no new branch, and therefore no new ranking rule. Being `derived`, the
+/// node takes no `authored` boost.
+///
+/// Note what is *not* here: nothing is written to the audio **`file`** node's
+/// `meta.content`. That slot is the one ADR-0015 emptied of transcripts, and
+/// leaving it empty is what keeps "this audio file node carries content" an
+/// unambiguous statement.
+#[cfg(feature = "audio-metadata")]
+fn audio_stream_node(path: &str, blob_id: &str, bytes: &[u8]) -> Option<Node> {
+    let facts = crate::audio::read(bytes, extension(path).as_deref())?;
+    let mut meta = serde_json::to_value(&facts).ok()?;
+    // The searchable rendering, capped like every other `meta.content`. Written
+    // last so it cannot be shadowed by a field of the same name.
+    meta["content"] = serde_json::Value::from(cap_content(&facts.summary()));
+    let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+    let mut node = Node::new(
+        format!("audio:{path}"),
+        NodeKind::Other(crate::audio::AUDIO_STREAM_KIND.into()),
+        name,
+    );
+    node.path = Some(path.to_owned());
+    node.blob_hash = Some(blob_id.to_owned());
+    node.span = Some(Span::new(0, u32::try_from(bytes.len()).unwrap_or(u32::MAX)));
+    node.meta = meta;
+    Some(node)
+}
+
+/// No-op without `audio-metadata`: an audio blob is a plain `file` node, exactly
+/// as it was before ADR-0016.
+#[cfg(not(feature = "audio-metadata"))]
+fn audio_stream_node(_path: &str, _blob_id: &str, _bytes: &[u8]) -> Option<Node> {
+    None
 }
 
 /// The remainder of a `FROM ` line (case-insensitive prefix), or `None`.

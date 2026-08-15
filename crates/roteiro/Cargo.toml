@@ -120,6 +120,13 @@ image-vision = ["models", "rto-graph/image-vision"]
 # `rto-graph/audio-transcribe` (voxtral + audio mmproj) — no candle. Implies
 # `models` so `roteiro model pull voxtral-mini-3b` can fetch it.
 audio-transcribe = ["models", "rto-graph/audio-transcribe"]
+# Extract audio metadata — codec, sample rate, bit depth, channels, duration, tags
+# — as `derived` facts during `roteiro sync` (ADR-0016; off by default). Reads the
+# container with `symphonia`; **no model, no network and no C/C++ toolchain**, so
+# unlike `audio-transcribe` this one costs a compile and nothing else. Implies
+# neither `models` nor `audio-transcribe`: extraction and generation are separate
+# stories (ADR-0015 / ADR-0016).
+audio-metadata = ["rto-graph/audio-metadata"]
 # Local model serving (`roteiro serve --models`): the opt-in, loopback,
 # OpenAI-compatible `/v1` endpoint over installed models (ADR-0006). Pulls
 # `rto-serve` with its llama.cpp engine; also enables the internal llama.cpp uses

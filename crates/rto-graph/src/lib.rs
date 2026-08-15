@@ -12,6 +12,12 @@
 //! @rto:0001
 
 mod artifact;
+// Audio metadata (ADR-0016): codec, rate, bit depth, channels, duration and tags,
+// read from the container without decoding and without a model. Unlike the media
+// module below, these *are* `derived` facts and do live in `nodes`/`edges` — the
+// complement of ADR-0015 rather than an exception to it.
+#[cfg(feature = "audio-metadata")]
+pub mod audio;
 mod cache;
 mod codegraph;
 mod config_keys;
@@ -45,6 +51,8 @@ mod sync;
 mod workspace;
 
 pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
+#[cfg(feature = "audio-metadata")]
+pub use audio::{AUDIO_STREAM_KIND, AudioDuration, AudioFacts, AudioTag, Exactness};
 pub use cache::{CacheError, ObjectCache};
 pub use codegraph::{ORACLE_SCHEMA, OracleError, OracleReport, compare as compare_codegraph};
 pub use config_keys::{

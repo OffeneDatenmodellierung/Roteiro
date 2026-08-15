@@ -71,16 +71,6 @@ pub fn sync(
 ) -> Result<SyncReport, SyncError> {
     let tree = repo.head_tree_id()?;
 
-    if store.sync_state()?.as_deref() == Some(tree.as_str()) {
-        return Ok(SyncReport {
-            no_op: true,
-            nodes: store.node_count()?,
-            edges: store.edge_count()?,
-            tree,
-            ..SyncReport::default()
-        });
-    }
-
     // The extraction *identity*: the extractor code version (`EXTRACT_VERSION`,
     // bumped when extraction output changes) plus its environment (installed image
     // models + ingestion toggles). Both change what an unchanged file extracts to,
@@ -93,6 +83,33 @@ pub fn sync(
         crate::extract::EXTRACT_VERSION,
         extractor.env_tag()
     );
+
+    // Nothing to do only when **both** the tree and the extraction identity are
+    // unchanged.
+    //
+    // The identity half is load-bearing, and its absence was a real hole: an
+    // `EXTRACT_VERSION` bump is supposed to guarantee that no user is served the
+    // previous version's facts, but a store already synced at the current `HEAD`
+    // returned `no_op` here before the identity was ever computed — so the new
+    // binary's facts appeared only once `HEAD` next moved. Enabling a feature that
+    // changes extraction output (`audio-metadata`, `pdf-text`, `image-ocr`) on a
+    // quiet repository therefore looked like it had done nothing at all. Every
+    // *other* consumer of the identity — the content-cache key, the incremental
+    // path below — already agreed on it; this one had simply never been asked.
+    //
+    // A store with no recorded identity (`None`) does not match, which is the safe
+    // direction: it re-extracts once and records one.
+    if store.sync_state()?.as_deref() == Some(tree.as_str())
+        && store.sync_env()?.as_deref() == Some(env.as_str())
+    {
+        return Ok(SyncReport {
+            no_op: true,
+            nodes: store.node_count()?,
+            edges: store.edge_count()?,
+            tree,
+            ..SyncReport::default()
+        });
+    }
 
     // Fast path: if the last sync was a committed one at a known tree with the
     // same extraction identity, update only the paths that changed. Falls back to

@@ -21,6 +21,7 @@
 | [0013](0013-agent-memory-artifact-store.md) | Agent memory — a two-tier artifact store, decaying by evidence not by clock | For Review |
 | [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | For Review |
 | [0015](0015-generated-media-content-artifact-store.md) | Generated media content — its own artifact store, rebuildable on demand | For Review |
+| [0016](0016-audio-metadata-extraction.md) | Audio metadata as derived facts — symphonia for format reads, MPL-2.0 allowed | For Review |
 
 > **ADRs 0012–0015 form one decision set** and are best read together. They share a
 > single structural rule: *knowledge that is not a derived/authored/inferred graph
