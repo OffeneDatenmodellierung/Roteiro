@@ -422,7 +422,7 @@ fn decode_samples(
     // description — and avoiding it is what the whole gate is calibrated
     // around. Handing an unreadable clip to the model costs one model load;
     // refusing a readable one costs the operator something they cannot see.
-    if data.len() % width != 0 {
+    if !data.len().is_multiple_of(width) {
         return None;
     }
     let mut out = Vec::with_capacity(data.len() / width);

@@ -520,6 +520,16 @@ mod tests {
     /// stop, arrived at through a `NULL` rather than through any code path.
     #[test]
     fn the_media_outcome_constraint_admits_only_the_two_real_outcomes() {
+        /// `(name, text, reason, value, threshold)` for a shape that must be
+        /// refused.
+        type Rejected = (
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+            Option<f64>,
+            Option<f64>,
+        );
+
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
 
@@ -540,15 +550,6 @@ mod tests {
             "a gated skip carries a complete measurement and no text",
         );
 
-        /// `(name, text, reason, value, threshold)` for a shape that must be
-        /// refused.
-        type Rejected = (
-            &'static str,
-            &'static str,
-            Option<&'static str>,
-            Option<f64>,
-            Option<f64>,
-        );
         let rejected: [Rejected; 6] = [
             // The hole this test was written for: a measurement with no reason
             // reads back as an empty *generated* record.
