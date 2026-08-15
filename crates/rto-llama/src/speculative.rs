@@ -120,6 +120,21 @@ const DRAFT_MAX: i32 = 3;
 // runtime.
 const _: () = assert!(DRAFT_MAX > 0 && DRAFT_MAX < i32::MAX);
 
+/// [`DRAFT_MAX`] as the width llama.cpp's `n_rs_seq` wants. Infallible by the
+/// `const` assertion above; the fallback is only there because `const` blocks
+/// cannot participate in `?`.
+fn draft_max_u32() -> u32 {
+    u32::try_from(DRAFT_MAX).unwrap_or(0)
+}
+
+/// The context parameters a generation uses, speculative or not — the shape
+/// `LlamaEngine::new_context` builds, restated here because a speculative
+/// generation needs to derive two contexts from it rather than one.
+fn base_params(n_ctx: u32) -> llama_cpp_2::context::params::LlamaContextParams {
+    let n_ctx = std::num::NonZeroU32::new(n_ctx).unwrap_or(std::num::NonZeroU32::MIN);
+    llama_cpp_2::context::params::LlamaContextParams::default().with_n_ctx(Some(n_ctx))
+}
+
 /// The environment variable that disables speculative decoding.
 const KILL_SWITCH: &str = "ROTEIRO_SPECULATIVE";
 
@@ -303,32 +318,44 @@ impl<'m> Mtp<'m> {
     /// shared KV memory, or a head this build cannot use), and a speculative
     /// helper that fails to initialise.
     ///
-    /// Takes `model` twice over — once as the target's model and once as the
-    /// draft's — because for a bundled MTP head they *are* the same model: the
-    /// draft context is a second, MTP-typed view of tensors that are already
-    /// resident, not a second load.
+    /// Builds **both** contexts, because the target context is not the same one
+    /// a plain generation would use: see [`target_params`]. One `model` serves
+    /// both, because for a bundled MTP head they are the same model — the draft
+    /// context is a second, MTP-typed view of tensors that are already resident,
+    /// not a second load.
     pub(crate) fn try_new(
         backend: &llama_cpp_2::llama_backend::LlamaBackend,
         model: &'m LlamaModel,
         n_ctx: u32,
-        target: LlamaContext<'m>,
     ) -> Option<Self> {
-        use llama_cpp_2::context::params::{LlamaContextParams, LlamaContextType};
-        use std::num::NonZeroU32;
+        use llama_cpp_2::context::params::LlamaContextType;
 
-        let n_ctx = NonZeroU32::new(n_ctx).unwrap_or(NonZeroU32::MIN);
         // `n_rs_seq = 0`: the MTP context holds an attention KV cache for the
-        // draft layers only and has no recurrent state of its own, which is what
-        // llama.cpp's own MTP context construction asks for.
-        let params = LlamaContextParams::default()
-            .with_n_ctx(Some(n_ctx))
+        // draft layers only and has no recurrent state to roll back, which is
+        // what llama.cpp's own MTP context construction asks for.
+        let draft_params = base_params(n_ctx)
             .with_context_type(LlamaContextType::Mtp)
             .with_n_rs_seq(0);
 
         // llama.cpp declining here is expected for any model it will not draft
         // with, and it has already said why through the native-log bridge
         // `LlamaEngine` installs — so this is a fallback, not an error.
-        let draft = model.new_context(backend, params).ok()?;
+        let draft = model.new_context(backend, draft_params).ok()?;
+
+        // `n_rs_seq = DRAFT_MAX`: the target keeps that many snapshots of its
+        // recurrent state so a rejected proposal can be *rolled back*. Qwen3.5 is
+        // a hybrid — attention KV plus an SSM state — and an SSM state cannot be
+        // partially rewound after the fact, only restored from a snapshot. Without
+        // this the first rejected proposal fails the rollback with "couldn't
+        // remove partial sequence", which is llama.cpp saying exactly that.
+        // llama.cpp clamps it back to 0 for architectures with no recurrent state
+        // to snapshot, so it costs nothing on the models that do not need it.
+        let target = model
+            .new_context(
+                backend,
+                base_params(n_ctx).with_n_rs_seq(draft_max_u32()),
+            )
+            .ok()?;
 
         let params = MtpSpeculativeParams {
             n_max: DRAFT_MAX,

@@ -162,6 +162,12 @@ pub struct LlamaEngine {
     /// see [`LlamaEngine::projector_inits`]. Not native state — a counter, so its
     /// position among the fields carries no teardown meaning.
     projector_inits: AtomicUsize,
+    /// Whether this engine may pair a model with its MTP draft head (issue
+    /// #320). Resolved once from `ROTEIRO_SPECULATIVE` at construction — reading
+    /// it per request would let a long-lived `roteiro serve` change decode
+    /// strategy underneath itself — and overridable with
+    /// [`LlamaEngine::with_speculative`].
+    speculative_enabled: bool,
     /// What MTP speculative decoding has done on this engine (issue #320): also
     /// plain counters, and also carrying no teardown meaning. The draft head's
     /// own native state is *not* here — it is created and dropped inside a single
@@ -324,12 +330,28 @@ impl LlamaEngine {
             served,
             n_ctx: if n_ctx == 0 { DEFAULT_N_CTX } else { n_ctx },
             projector_inits: AtomicUsize::new(0),
+            speculative_enabled: crate::speculative::speculative_enabled(),
             speculative: SpecCounters::default(),
             cache: Mutex::new(ModelCache {
                 budget_bytes,
                 loaded: Vec::new(),
             }),
         })
+    }
+
+    /// Turn MTP speculative decoding (issue #320) on or off for this engine,
+    /// overriding the `ROTEIRO_SPECULATIVE` default.
+    ///
+    /// There is no quality trade-off to make here — the output is identical
+    /// either way — so this exists for the two cases where the *path* matters
+    /// rather than the result: measuring one against the other, and pinning a
+    /// process to the plain loop while a suspected llama.cpp bug is investigated.
+    /// Turning it **on** cannot force speculation onto a model with no draft
+    /// head; that still falls back.
+    #[must_use]
+    pub fn with_speculative(mut self, enabled: bool) -> Self {
+        self.speculative_enabled = enabled;
+        self
     }
 
     /// How many multimodal projectors this engine has loaded since it was built.
@@ -501,15 +523,10 @@ impl LlamaEngine {
     /// without a head does not make llama.cpp log its "context type MTP
     /// requested but model doesn't contain MTP layers" warning once per request.
     fn speculative_decoder<'m>(&self, model: &'m LlamaModel) -> Option<Mtp<'m>> {
-        if !crate::speculative::speculative_enabled() || draft_head_layers(model) == 0 {
+        if !self.speculative_enabled || draft_head_layers(model) == 0 {
             return None;
         }
-        // Only now is a target context worth building through this path; if the
-        // pairing fails, `chat_text` builds a plain one instead. That is a wasted
-        // context allocation on an exceptional path, and the price of never
-        // handing back a half-built decoder.
-        let target = self.new_context(model).ok()?;
-        Mtp::try_new(&self.backend, model, self.n_ctx, target)
+        Mtp::try_new(&self.backend, model, self.n_ctx)
     }
 
     /// Text-only chat: apply the chat template, prime the prompt, and generate.
