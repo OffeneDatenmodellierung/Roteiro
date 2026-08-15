@@ -79,7 +79,7 @@ also silently violates the assumption behind the content-addressed cache and
 
 ### The boundary: generation, not models
 
-The line is **not** "produced by a model". It is whether the artefact being read
+The line is **not** "produced by a model". It is whether the artifact being read
 *exists in the bytes*:
 
 | Content | Nature | Verdict |
