@@ -215,6 +215,10 @@ fn convert(entry: &Entry, kind: &str, lockfile: &str) -> Result<ReportFinding, E
             "patched": entry.versions.as_ref().map(|v| v.patched.clone()).unwrap_or_default(),
             "cvss": advisory.and_then(|a| a.cvss.clone()),
             "aliases": advisory.map(|a| a.aliases.clone()).unwrap_or_default(),
+            // Real advisories often carry the CVE under `related` rather than
+            // `aliases` — RUSTSEC-2020-0159 lists CVE-2020-26235 there — so
+            // dropping it would lose the identifier most people search by.
+            "related": advisory.map(|a| a.related.clone()).unwrap_or_default(),
             "categories": advisory.map(|a| a.categories.clone()).unwrap_or_default(),
             "url": advisory.and_then(|a| a.url.clone()),
             "advisory_date": advisory.and_then(|a| a.date.clone()),
@@ -301,6 +305,8 @@ struct Advisory {
     informational: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
+    #[serde(default)]
+    related: Vec<String>,
     #[serde(default)]
     categories: Vec<String>,
 }

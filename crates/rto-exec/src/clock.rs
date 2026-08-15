@@ -109,18 +109,52 @@ pub fn unix_from_rfc3339(s: &str) -> Option<i64> {
         if hour > 23 || minute > 59 || second > 60 {
             return None;
         }
-        // Only UTC is accepted. Reading `+02:00` as if it were `Z` would put an
-        // advisory database's age out by hours for free, and a staleness claim
-        // that is quietly wrong is worse than one that is refused.
-        match bytes.get(19) {
-            None | Some(b'Z') => {}
-            Some(_) => return None,
-        }
         secs += hour * 3600 + minute * 60 + second;
+        // An offset is *converted*, never ignored. `cargo audit --json` really
+        // does stamp its database as `2026-08-12T12:42:29+02:00`, so reading the
+        // offset as if it were `Z` would put an advisory database's age out by
+        // hours — a staleness claim that is quietly wrong. Anything that is
+        // neither `Z` nor a well-formed offset is refused instead of guessed.
+        secs -= offset_seconds(&s[19..])?;
     } else if bytes.len() != 10 {
         return None;
     }
     Some(secs)
+}
+
+/// Seconds to subtract to turn a local time into UTC: `0` for `Z` or an absent
+/// suffix, `+7200` for `+02:00`. `None` for anything else.
+///
+/// Fractional seconds are tolerated ahead of the offset, because RFC 3339
+/// permits them and a producer that emits them is not wrong; they are dropped,
+/// since this type has second granularity.
+fn offset_seconds(suffix: &str) -> Option<i64> {
+    let suffix = match suffix.split_once('.') {
+        // Skip the fraction: digits up to the offset marker.
+        Some((_, rest)) => rest.trim_start_matches(|c: char| c.is_ascii_digit()),
+        None => suffix,
+    };
+    if suffix.is_empty() || suffix == "Z" || suffix == "z" {
+        return Some(0);
+    }
+    let sign = match suffix.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = &suffix[1..];
+    // Both `+02:00` and `+0200` occur in the wild.
+    let (hours, minutes) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        None if rest.len() == 4 => rest.split_at(2),
+        None => return None,
+    };
+    let hours: i64 = hours.parse().ok()?;
+    let minutes: i64 = minutes.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3600 + minutes * 60))
 }
 
 /// `(year, month, day)` → days since 1970-01-01, the inverse of
@@ -198,14 +232,27 @@ mod tests {
             "2026-13-01",
             "2026-08-32",
             "2026-08-15T00:00",
-            // An offset other than `Z` is refused rather than silently read as
-            // UTC — an hour's error in an advisory-DB age is a staleness claim
-            // that is quietly wrong.
-            "2026-08-15T00:00:00+02:00",
+            "2026-08-15T00:00:00+bad",
+            "2026-08-15T00:00:00 UTC",
+            "2026-08-15T00:00:00+99:00",
         ] {
             assert_eq!(unix_from_rfc3339(bad), None, "{bad:?}");
         }
         assert_eq!(age_in_days("2026-08-15", "not a date"), None);
+    }
+
+    /// `cargo audit --json` stamps its advisory database with a numeric offset
+    /// (`2026-08-12T12:42:29+02:00`, observed from cargo-audit 0.22.2), so the
+    /// offset has to be *converted*. Reading it as UTC would put every staleness
+    /// age out by the offset.
+    #[test]
+    fn converts_a_numeric_offset_rather_than_ignoring_it() {
+        let utc = unix_from_rfc3339("2026-08-12T10:42:29Z").expect("utc");
+        assert_eq!(unix_from_rfc3339("2026-08-12T12:42:29+02:00"), Some(utc));
+        assert_eq!(unix_from_rfc3339("2026-08-12T12:42:29+0200"), Some(utc));
+        assert_eq!(unix_from_rfc3339("2026-08-12T08:42:29-02:00"), Some(utc));
+        // Fractional seconds are permitted by RFC 3339 and dropped here.
+        assert_eq!(unix_from_rfc3339("2026-08-12T10:42:29.512Z"), Some(utc));
     }
 
     #[test]
