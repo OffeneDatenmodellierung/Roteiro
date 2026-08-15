@@ -22,12 +22,8 @@
 | [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | For Review |
 | [0015](0015-generated-media-content-artifact-store.md) | Generated media content — its own artifact store, rebuildable on demand | For Review |
 | [0016](0016-audio-metadata-extraction.md) | Audio metadata as derived facts — symphonia for format reads, MPL-2.0 allowed | For Review |
+| [0017](0017-dependency-security-policy.md) | Dependency security — current by default, monitored, held for a minimum release age of at least 48 hours | For Review |
 | [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | For Review |
-
-> **0017 is not missing.** It is assigned to a change in flight on another branch
-> and arrives with its own PR. Numbers are handed out in landing
-> order, so a gap in this table is a branch that has not merged yet, never a lost
-> decision.
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
