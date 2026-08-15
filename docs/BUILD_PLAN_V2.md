@@ -27,6 +27,8 @@ knowledge that **do not fit that model** and would corrupt it if forced in:
    rules and advisory databases that change independently of the source.
 2. **Agent memory** — accumulated across sessions, episodic, unreproducible, and
    often the record of something that *failed*.
+2b. **Generated media content** — ASR transcripts and VLM descriptions, invented
+   fluently when the source contains nothing to read (ADR-0015, Stage 28).
 3. **Deeper analysis lenses** — genuinely derived facts, which stay in the graph,
    but whose true cost was previously understated by an order of magnitude.
 
@@ -328,6 +330,38 @@ it currently rests on no code or benchmark evidence.
   positives have a suppression story, a confidence signal and a baseline before any
   CI-gating is offered.
 
+### Stage 28 — Generated media content moves out of `derived` ([ADR-0015](adr/0015-generated-media-content-artifact-store.md)) → **v1.16.0** · effort **M–L** *(independent track)*
+
+**Goal:** stop generative model output masquerading as deterministic extraction —
+without losing the ability to search it. Resolves #300.
+
+- **The boundary is generation, not models.** OCR (`ocrs-text`) and PDF text stay
+  `derived`: they decode content that *exists in the bytes*, and their errors are
+  misreadings correctable against the source. ASR transcripts and VLM descriptions
+  move out: they invent fluent text when there is nothing to read.
+- **Schema:** a `media_content` store keyed by **source blob id + producer identity**
+  (model id + digest, quantisation, mmproj digest, prompt, sampling parameters).
+  Re-describing with a better model is a **new record, not a mutation**. Records
+  survive `rebuild`, following the `imports` precedent — they are expensive to
+  reproduce (a 715 MB projector load per blob, see #301) and not derivable from
+  source alone.
+- **CLI (ships WITH the move, not after it):** `roteiro media build [--audio]
+  [--vision] [--force]` (incremental — only blobs lacking a record for the current
+  producer), `media status [--json]`, `media clear [--producer <id>]`.
+- **Retrieval:** `roteiro search --include-generated`, **off by default**; when on,
+  every hit is visibly marked as generated, ranked in its own channel, and never
+  given the `authored` boost. The explorer UI surfaces generated content on a media
+  node with its producer and a per-blob rebuild action.
+- **`EXTRACT_VERSION` bumps here** — extraction output genuinely changes. This is the
+  one bump referenced in §5; batch it with Stage 26's extraction-touching lenses if
+  they land together, so users re-extract once rather than twice.
+- **Complementary, tracked separately:** a silence/blank gate before generation, and
+  the projector cache (#301).
+- **DoD:** a silent clip cannot put prose into default `search` results; generated
+  text is attributable to a named producer everywhere it surfaces; `media build`
+  restores full searchability in one command; `export_factset` is byte-identical
+  across a `media build`; dropping a producer's records leaves the graph untouched.
+
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
 
 - Semver review: query output is explicitly versioned, so new query shapes carry
@@ -351,6 +385,7 @@ it currently rests on no code or benchmark evidence.
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
+| v1.16.0 | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
