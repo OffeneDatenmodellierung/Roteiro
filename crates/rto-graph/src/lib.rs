@@ -29,6 +29,11 @@ mod git;
 mod infer;
 mod links;
 mod markers;
+// Generated media content (ADR-0015): ASR transcripts and VLM descriptions. Like
+// findings, a *separate* artifact store — generated text is not a deterministic
+// function of the bytes, so it is not a `derived` fact and never enters
+// `nodes`/`edges`.
+pub mod media;
 mod migrations;
 mod model;
 #[cfg(feature = "models")]
@@ -68,6 +73,13 @@ pub use infer::{
 pub use links::{
     EXTERNAL_REF_KIND, LINKS_REF, external_ref_key, external_ref_node, external_ref_target,
 };
+pub use media::{
+    CandidateCount, GeneratedContent, MAX_MODEL_ID, MAX_PROMPT, MEDIA_PRODUCER_PREFIX,
+    MEDIA_SCHEMA, MediaBlob, MediaBuildOptions, MediaBuildReport, MediaError, MediaFilter,
+    MediaKind, MediaProducer, MediaRecord, MediaStatus, MediaWrite, Producer, ProducerId,
+    ProducerSummary, ProducerSummaryAvailable, build_media, is_valid_model_id, media_blobs,
+    status as media_status,
+};
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
 pub use models::{
@@ -77,8 +89,9 @@ pub use models::{
 };
 pub use provenance::Provenance;
 pub use query::{
-    DebtItem, DebtReport, EdgeRef, Explanation, Listing, NodeSummary, Path, PathHop, SCHEMA,
-    SearchHit, debt, explain, list_kind, path, search,
+    DebtItem, DebtReport, EdgeRef, Explanation, GeneratedHit, Listing, NodeSummary, Path, PathHop,
+    SCHEMA, SearchHit, SearchOptions, SearchResults, debt, explain, list_kind, path, search,
+    search_channels,
 };
 pub use store::{ImportApplied, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_tree, sync_worktree};

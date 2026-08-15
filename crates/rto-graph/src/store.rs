@@ -5,6 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::findings::{self, AnalysisRun, Finding, FindingsApplied, FindingsLayer};
+use crate::media::{self, MediaFilter, MediaKind, MediaRecord, MediaWrite, ProducerSummary};
 use crate::migrations;
 use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 use crate::provenance::Provenance;
@@ -874,6 +875,110 @@ impl Store {
         findings::count_runs(&self.conn)
     }
 
+    // --- Generated media content (ADR-0015). A separate artifact store, on the
+    // same terms as findings above: these methods touch `media_content` only,
+    // never `nodes`/`edges`, so `export_factset` stays a pure function of the
+    // tree across a `media build`, and generated text can never reach the
+    // `authored` relevance boost in `search`. ---
+
+    /// Write one generated-content record, returning `true` if a row was written.
+    ///
+    /// Keyed by `(blob_id, producer)`. A record for that exact pair already
+    /// present is **left alone** and `false` is returned — which is what makes
+    /// `media build` incremental and a second run free. A *different* producer is
+    /// a new row beside it, never an overwrite: that is the point of keying on the
+    /// producer identity, so a better model's description can be compared with the
+    /// one it replaces and a distrusted producer can be dropped wholesale.
+    /// [`MediaWrite::replace`] (only `media build --force`) is the one path that
+    /// overwrites, and only for the identical producer.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on a write failure; the transaction is
+    /// rolled back.
+    pub fn record_media_content(&mut self, write: &MediaWrite<'_>) -> Result<bool, StoreError> {
+        let tx = self.conn.transaction()?;
+        let written = media::record(&tx, write)?;
+        tx.commit()?;
+        Ok(written)
+    }
+
+    /// Whether a record already exists for exactly this `(blob, producer)`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn has_media_record(&self, blob_id: &str, producer: &str) -> Result<bool, StoreError> {
+        media::exists(&self.conn, blob_id, producer)
+    }
+
+    /// Stored records matching `filter`, ordered by `(producer, blob id)`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or
+    /// [`StoreError::Corrupt`] if a row carries an unknown modality token.
+    pub fn media_records(&self, filter: &MediaFilter<'_>) -> Result<Vec<MediaRecord>, StoreError> {
+        media::records(&self.conn, filter)
+    }
+
+    /// Discard records — all of them, or only those written by `producer`.
+    /// Returns how many rows went.
+    ///
+    /// Nothing in the graph is touched: dropping a model you no longer trust must
+    /// not cost you a re-sync.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on a write failure.
+    pub fn clear_media_content(&mut self, producer: Option<&str>) -> Result<usize, StoreError> {
+        let tx = self.conn.transaction()?;
+        let removed = media::delete(&tx, producer)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Number of generated-content records currently stored.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn media_content_count(&self) -> Result<u64, StoreError> {
+        media::count(&self.conn)
+    }
+
+    /// One summary per producer that owns records, ordered by producer id.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or
+    /// [`StoreError::Corrupt`] if a row carries an unknown modality token.
+    pub fn media_producer_summaries(&self) -> Result<Vec<ProducerSummary>, StoreError> {
+        media::producer_summaries(&self.conn)
+    }
+
+    /// The blob ids that have at least one record for `kind`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn described_media_blobs(
+        &self,
+        kind: MediaKind,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        media::described_blobs(&self.conn, kind)
+    }
+
+    /// Records whose blob is no longer anywhere in `present`. Exposed so a caller
+    /// can see what a tree change has orphaned; nothing deletes them implicitly,
+    /// because a record is expensive to reproduce and a blob can return.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn orphan_media_records(
+        &self,
+        present: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<MediaRecord>, StoreError> {
+        Ok(self
+            .media_records(&MediaFilter::default())?
+            .into_iter()
+            .filter(|r| !present.contains(&r.blob_id))
+            .collect())
+    }
+
     /// Findings whose owning run no longer exists. Always `0` in a healthy store;
     /// exposed so layer replacement can be asserted to clean up its own records
     /// rather than orphaning them.
@@ -1466,10 +1571,11 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        // Bumped to 8 by the analyzer-findings tables (ADR-0012). The literal is
+        // Bumped to 8 by the analyzer-findings tables (ADR-0012), then to 9 by
+        // the generated-media-content table (ADR-0015). The literal is
         // deliberate: a new migration should make someone confirm it is meant to
         // apply on open, rather than passing silently.
-        assert_eq!(store.schema_version().expect("version"), 8);
+        assert_eq!(store.schema_version().expect("version"), 9);
     }
 
     #[test]
@@ -1640,7 +1746,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 8);
+            assert_eq!(store.schema_version().expect("version"), 9);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

@@ -181,12 +181,40 @@ enum Command {
     Search {
         /// Free-text query (one or more words).
         query: String,
-        /// Maximum number of hits to return.
+        /// Maximum number of hits to return, **per channel**.
         #[arg(long, default_value_t = 10)]
         limit: usize,
-        /// Emit the results as JSON.
+        /// Also search model-generated media content — ASR transcripts and VLM
+        /// descriptions from `roteiro media build`. **Off by default**:
+        /// generated text is not a graph fact, and a model asked to transcribe
+        /// silence returns confident invented prose (ADR-0015).
+        ///
+        /// When on, generated hits come back in their **own channel**, each
+        /// marked `[generated]` with the producer that wrote it, ranked by a
+        /// scorer that has no `authored` boost, and never mixed in with the
+        /// graph hits. The limit applies per channel, so opting in never
+        /// displaces a graph hit.
+        #[arg(long)]
+        include_generated: bool,
+        /// Emit the results as JSON. Without `--include-generated` this is the
+        /// long-standing array of hits; with it, the two-channel object
+        /// (`{schema, hits, generated}`) — so only a caller that opted in sees a
+        /// different shape.
         #[arg(long)]
         json: bool,
+    },
+    /// Generated media content: build it, report on it, discard it (ADR-0015).
+    ///
+    /// An ASR transcript or a VLM description is **generated**, not decoded —
+    /// asked to transcribe digital silence a model returns fluent invented
+    /// prose — so it is not a `derived` fact and lives in a **separate artifact
+    /// store**, keyed by source blob and producer identity. Nothing here writes
+    /// a node or an edge: `roteiro export` is unaffected by every one of these
+    /// commands, and the content is reachable from `search` only via
+    /// `--include-generated`.
+    Media {
+        #[command(subcommand)]
+        action: MediaAction,
     },
     /// Fetch a node's cached context bundle (its provenance-labelled
     /// neighbourhood), or refresh all cached contexts that have gone stale.
@@ -578,6 +606,69 @@ enum ModelAction {
     },
 }
 
+/// `roteiro media` actions.
+///
+/// Deliberately **not** feature-gated. The store, its status and its clearing
+/// work in every build, so a default binary can still report what a
+/// feature-enabled one produced and can still discard a producer it no longer
+/// trusts. Only `build` needs a generator, and it says so by name when it has
+/// none rather than quietly doing nothing.
+#[derive(Subcommand)]
+enum MediaAction {
+    /// Generate content for media blobs that lack a record for the current
+    /// producer.
+    ///
+    /// **Incremental by default**: a blob already described by exactly this
+    /// model, quantisation, projector, prompt and sampling configuration is
+    /// skipped without loading the model. A producer whose identity changed
+    /// writes a **new record beside the old one**, never an overwrite, so two
+    /// models' descriptions of the same clip can be compared.
+    ///
+    /// Requires the matching feature (`audio-transcribe` / `image-vision`) and
+    /// the model on disk; without either it fails with the command that fixes
+    /// it. Honours `[ingest] audio` / `vision`, which mean *may this run
+    /// generate at all*.
+    Build {
+        /// Transcribe audio blobs. Default: both modalities.
+        #[arg(long)]
+        audio: bool,
+        /// Describe image blobs. Default: both modalities.
+        #[arg(long)]
+        vision: bool,
+        /// Regenerate blobs that already have a record for the current producer,
+        /// replacing it. Without this, `build` does no work on a second run.
+        #[arg(long)]
+        force: bool,
+        /// Emit the build report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report what is stored: how many records, by which producer and model,
+    /// when, and how much of the tree's media is described.
+    ///
+    /// Also lists the producers *this binary* could run right now, so "0
+    /// records" is legible as **cannot generate** (no feature, or no model)
+    /// rather than **nothing to generate**.
+    Status {
+        /// Emit the status report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Discard records — all of them, or one producer's.
+    ///
+    /// The graph is untouched: dropping a model you no longer trust costs you
+    /// nothing but the generation time.
+    Clear {
+        /// Only this producer's records (a `media:<kind>:<model>:<id>` token, as
+        /// printed by `media status`). Omit to clear every record.
+        #[arg(long, value_name = "ID")]
+        producer: Option<String>,
+        /// Emit the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// `roteiro security` actions.
 #[cfg(feature = "execution")]
 #[derive(Subcommand)]
@@ -714,7 +805,13 @@ fn main() -> anyhow::Result<()> {
             app_config_only,
             json,
         } => run_query(ingest, key, kind, app_config_only, json),
-        Command::Search { query, limit, json } => run_search(ingest, &query, limit, json),
+        Command::Search {
+            query,
+            limit,
+            include_generated,
+            json,
+        } => run_search(ingest, &query, limit, include_generated, json),
+        Command::Media { action } => run_media(ingest, action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
@@ -2552,26 +2649,251 @@ fn run_query(
 /// Search the graph by text and print ranked hits (highest score first). A
 /// read-only report: it exits zero even when nothing matches, keeping stdout
 /// empty (or an empty JSON array) so it composes in scripts.
+///
+/// With `--include-generated`, model-generated media content is searched too and
+/// printed **under its own heading, after the graph hits**, each line prefixed
+/// `[generated]` and tagged with the producer that wrote it (ADR-0015). The two
+/// channels are ranked separately and limited separately: opting in cannot
+/// displace a graph hit, and a generated hit can never be read as an extracted
+/// fact.
 fn run_search(
     ingest: rto_graph::IngestConfig,
     query: &str,
     limit: usize,
+    include_generated: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
-    let hits = rto_graph::search(&store, query, limit)?;
+    let opts = rto_graph::SearchOptions {
+        limit,
+        include_generated,
+    };
+    let results = rto_graph::search_channels(&store, query, opts)?;
     if json {
-        emit_json(&hits)?;
-    } else if hits.is_empty() {
+        // Without the opt-in, emit exactly the shape callers already parse: the
+        // bare array of graph hits. Adding a wrapper for everyone would be a
+        // breaking change to pay for a feature they did not ask for.
+        if include_generated {
+            emit_json(&results)?;
+        } else {
+            emit_json(&results.hits)?;
+        }
+        return Ok(());
+    }
+    if results.hits.is_empty() && results.generated.is_empty() {
         // Keep stdout empty on a miss; report to stderr.
         eprintln!("no matches for `{query}`");
-    } else {
-        for hit in &hits {
-            println!("  {:>4}  {:<8}  {}", hit.score, hit.node.kind, hit.node.key);
+        return Ok(());
+    }
+    for hit in &results.hits {
+        println!("  {:>4}  {:<8}  {}", hit.score, hit.node.kind, hit.node.key);
+    }
+    println!("{} hit(s)", results.hits.len());
+    if !results.generated.is_empty() {
+        println!();
+        println!("generated media content — produced by a model, not extracted from the source:");
+        for hit in &results.generated {
+            println!(
+                "  {:>4}  [generated:{}]  {}  ({})",
+                hit.score, hit.kind, hit.path, hit.producer
+            );
         }
-        println!("{} hit(s)", hits.len());
+        println!("{} generated hit(s)", results.generated.len());
+    }
+    Ok(())
+}
+
+/// The `--json` shape of `roteiro media clear`.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct MediaClearReport {
+    /// The producer cleared, or `null` for every producer.
+    producer: Option<String>,
+    /// Records removed.
+    removed: usize,
+}
+
+/// Dispatch a `roteiro media` action.
+fn run_media(ingest: rto_graph::IngestConfig, action: MediaAction) -> anyhow::Result<()> {
+    match action {
+        MediaAction::Build {
+            audio,
+            vision,
+            force,
+            json,
+        } => run_media_build(media_options(ingest, audio, vision, force)?, json),
+        MediaAction::Status { json } => run_media_status(json),
+        MediaAction::Clear { producer, json } => run_media_clear(producer.as_deref(), json),
+    }
+}
+
+/// Which modalities a `media build` invocation should run: the flags if either
+/// was given, otherwise both — then narrowed by `[ingest]`, which decides
+/// whether generation is permitted in this repository at all.
+///
+/// A modality asked for **explicitly** but disabled in config is an error, not a
+/// silent no-op: the operator asked for something the configuration forbids, and
+/// being told so is the difference between a policy and a surprise.
+fn media_options(
+    ingest: rto_graph::IngestConfig,
+    audio: bool,
+    vision: bool,
+    force: bool,
+) -> anyhow::Result<rto_graph::MediaBuildOptions> {
+    let explicit = audio || vision;
+    let (mut want_audio, mut want_vision) = if explicit {
+        (audio, vision)
+    } else {
+        (true, true)
+    };
+    for (asked, allowed, name) in [
+        (
+            &mut want_audio,
+            ingest.generates(rto_graph::MediaKind::Audio),
+            "audio",
+        ),
+        (
+            &mut want_vision,
+            ingest.generates(rto_graph::MediaKind::Vision),
+            "vision",
+        ),
+    ] {
+        if *asked && !allowed {
+            if explicit {
+                anyhow::bail!(
+                    "`[ingest] {name} = false` in this repository's configuration forbids \
+                     generating {name} content; remove the setting to allow it"
+                );
+            }
+            *asked = false;
+        }
+    }
+    if !want_audio && !want_vision {
+        anyhow::bail!(
+            "`[ingest]` disables both audio and vision generation in this repository, so \
+             there is nothing for `media build` to do"
+        );
+    }
+    Ok(rto_graph::MediaBuildOptions {
+        audio: want_audio,
+        vision: want_vision,
+        force,
+    })
+}
+
+/// Generate content for media blobs that lack a record for the current producer.
+///
+/// Nothing here touches the graph. The blobs come from the `HEAD` tree, the
+/// records go to the media store, and `roteiro export` is byte-identical either
+/// side of the call.
+fn run_media_build(opts: rto_graph::MediaBuildOptions, json: bool) -> anyhow::Result<()> {
+    let (repo, mut store, _cache) = open_graph()?;
+    // Resolved before any model is loaded, so a build with nothing to do costs
+    // nothing — and a build this binary cannot perform says so immediately.
+    let blobs = rto_graph::media_blobs(&repo)?;
+    let producers = rto_graph::media::producers::installed(opts)?;
+    let refs: Vec<&dyn rto_graph::MediaProducer> = producers.iter().map(AsRef::as_ref).collect();
+
+    let report = rto_graph::build_media(&mut store, &blobs, &refs, opts, |blob| {
+        repo.read_blob(&blob.blob_id).ok()
+    })?;
+    if json {
+        emit_json(&report)?;
+    } else if report.candidates == 0 {
+        println!("no media blobs to describe in this tree");
+    } else {
+        println!(
+            "{} candidate(s) — {} generated, {} already described, {} produced nothing",
+            report.candidates, report.generated, report.skipped_existing, report.empty,
+        );
+        for producer in &report.producers {
+            println!("  producer  {producer}");
+        }
+    }
+    Ok(())
+}
+
+/// Report what the media store holds, and what this binary could add to it.
+fn run_media_status(json: bool) -> anyhow::Result<()> {
+    let (repo, store, _cache) = open_graph()?;
+    let blobs = rto_graph::media_blobs(&repo)?;
+    let status = rto_graph::media_status(&store, &blobs)?;
+    if json {
+        emit_json(&status)?;
+        return Ok(());
+    }
+    println!("{} generated record(s)", status.records);
+    for producer in &status.producers {
+        println!(
+            "  {}  {} ({}, {})  {} record(s), latest {}",
+            producer.producer_id,
+            producer.model,
+            producer.kind,
+            producer.quantisation,
+            producer.records,
+            producer.latest,
+        );
+    }
+    for candidate in &status.candidates {
+        println!(
+            "  {:<7} {} blob(s) in tree, {} described",
+            candidate.kind, candidate.blobs, candidate.described
+        );
+    }
+    for producer in &status.available_producers {
+        let state = if producer.current {
+            "current"
+        } else {
+            "would write new records"
+        };
+        println!(
+            "  available  {}  {} ({state})",
+            producer.producer_id, producer.model
+        );
+    }
+    // The distinction that was missing before ADR-0015: nothing stored because
+    // nothing *can* be generated here. Reported per modality, and — the part that
+    // matters — separating the two reasons it can be unavailable. They call for
+    // completely different actions, and telling someone to recompile when all
+    // they need is a download costs them an afternoon.
+    for kind in [rto_graph::MediaKind::Audio, rto_graph::MediaKind::Vision] {
+        if status.available_producers.iter().any(|p| p.kind == kind) {
+            continue;
+        }
+        if kind.compiled_in() {
+            println!(
+                "  unavailable  {kind}: the model is not installed — run `roteiro model pull {}`",
+                kind.model(),
+            );
+        } else {
+            println!(
+                "  unavailable  {kind}: this build has no {kind} generator — rebuild with \
+                 `--features {}`, then `roteiro model pull {}`",
+                kind.feature(),
+                kind.model(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Discard records, wholly or per producer. The graph is untouched.
+fn run_media_clear(producer: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let (_repo, mut store, _cache) = open_graph()?;
+    let removed = store.clear_media_content(producer)?;
+    if json {
+        emit_json(&MediaClearReport {
+            producer: producer.map(ToOwned::to_owned),
+            removed,
+        })?;
+    } else {
+        match producer {
+            Some(id) => println!("removed {removed} record(s) produced by {id}"),
+            None => println!("removed {removed} record(s)"),
+        }
+        println!("the graph is unchanged");
     }
     Ok(())
 }

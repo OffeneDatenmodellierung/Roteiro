@@ -485,6 +485,181 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
     Ok(hits)
 }
 
+/// A hit in the **generated** channel: text a model produced about a media blob,
+/// never a graph fact.
+///
+/// It is deliberately *not* a [`SearchHit`]. A generated hit has no node, no
+/// provenance and no key, and giving it a [`NodeSummary`] would be the first step
+/// towards it being treated like one — the exact mistake ADR-0015 exists to
+/// correct. Everything a consumer needs to label it is on the struct, including
+/// the literal `generated: true`, so a caller that reads nothing else still
+/// cannot mistake it for extracted text.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GeneratedHit {
+    /// Relevance within the generated channel. Not comparable with a
+    /// [`SearchHit::score`]: the two are ranked by different scorers, in
+    /// different channels, on purpose.
+    pub score: u32,
+    /// Always `true`. A marker a consumer cannot miss or forget to check.
+    pub generated: bool,
+    /// The producer identity that wrote the text — which model, at which
+    /// quantisation, under which prompt (see [`crate::Producer::id`]).
+    pub producer: String,
+    /// The model's registry name, repeated for legibility.
+    pub model: String,
+    /// The modality (`audio` | `vision`).
+    pub kind: &'static str,
+    /// Git blob id of the source media.
+    pub blob: String,
+    /// Repository path the blob was seen at.
+    pub path: String,
+    /// A bounded, whitespace-collapsed excerpt of the generated text, on the same
+    /// terms as [`SearchHit::snippet`].
+    pub snippet: Option<String>,
+}
+
+/// The two channels a search returns.
+///
+/// They are separate fields rather than one merged list because merging is
+/// precisely what must not happen: generated text may be *retrievable*, but it
+/// may never be *indistinguishable* from a derived or authored fact, and a single
+/// ranked list would make the distinction a matter of reading each element
+/// carefully.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SearchResults {
+    /// Stable schema tag ([`SCHEMA`]).
+    pub schema: &'static str,
+    /// The graph channel: ranked nodes, exactly what [`search`] returns.
+    pub hits: Vec<SearchHit>,
+    /// The generated channel. **Empty unless
+    /// [`SearchOptions::include_generated`] was set** — off by default, so a
+    /// silent clip's confabulated prose cannot reach a default search.
+    pub generated: Vec<GeneratedHit>,
+}
+
+/// How to search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchOptions {
+    /// Maximum hits **per channel**. Each channel is ranked and truncated
+    /// independently, so opting in to generated content never displaces a graph
+    /// hit, and never silently returns fewer of them.
+    pub limit: usize,
+    /// Fold in the generated channel. Off by default (see
+    /// [`SearchOptions::default`]).
+    pub include_generated: bool,
+}
+
+impl Default for SearchOptions {
+    /// Ten hits, graph channel only. The default is the safe answer: generated
+    /// content is opt-in, always.
+    fn default() -> Self {
+        Self {
+            limit: 10,
+            include_generated: false,
+        }
+    }
+}
+
+/// Search both channels: the graph, and — only when
+/// [`SearchOptions::include_generated`] is set — model-generated media content.
+///
+/// The graph channel is exactly [`search`]. The generated channel is ranked by
+/// [a scorer of its own](generated_score) which has **no provenance term at
+/// all**, so generated text cannot acquire the `authored` boost that curated
+/// intent gets. It could not do so even by accident: a generated record is not a
+/// node, so it never reaches the code that applies that boost.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure.
+pub fn search_channels(
+    store: &Store,
+    query: &str,
+    opts: SearchOptions,
+) -> Result<SearchResults, StoreError> {
+    let hits = search(store, query, opts.limit)?;
+    let generated = if opts.include_generated {
+        search_generated(store, query, opts.limit)?
+    } else {
+        Vec::new()
+    };
+    Ok(SearchResults {
+        schema: SCHEMA,
+        hits,
+        generated,
+    })
+}
+
+/// Rank the generated channel alone. Ties break by `(producer, blob)` so results
+/// are stable.
+fn search_generated(
+    store: &Store,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<GeneratedHit>, StoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let q = query.trim().to_lowercase();
+    let tokens: Vec<&str> = q.split("::").flat_map(str::split_whitespace).collect();
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut hits: Vec<GeneratedHit> = Vec::new();
+    for record in store.media_records(&crate::MediaFilter::default())? {
+        let text = record.content.text.to_lowercase();
+        let path = record.path.to_lowercase();
+        if !tokens.iter().all(|t| text.contains(t) || path.contains(t)) {
+            continue;
+        }
+        hits.push(GeneratedHit {
+            score: generated_score(&q, &tokens, &text, &path),
+            generated: true,
+            producer: record.producer_id.to_string(),
+            model: record.producer.model.clone(),
+            kind: record.producer.kind.as_str(),
+            blob: record.blob_id.clone(),
+            path: record.path.clone(),
+            snippet: content_snippet(&serde_json::json!({ "content": record.content.text })),
+        });
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| (&a.producer, &a.blob).cmp(&(&b.producer, &b.blob)))
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+/// Relevance of one generated record: whole-query and per-token matches over its
+/// text and path, and **nothing else**.
+///
+/// The omissions are the point, and each is deliberate:
+///
+/// - **no `authored` boost** — generated text is not curated intent, and the
+///   graph's +40 for an ADR must never land on a transcript;
+/// - **no overview boost** — a README's landing-page privilege is about authored
+///   documentation;
+/// - **no name or key term** — a generated record has neither.
+///
+/// Because this scorer shares no branch with the node scorer, "generated content
+/// never acquires the authored boost" is a structural fact rather than a
+/// condition to be maintained.
+fn generated_score(q: &str, tokens: &[&str], text: &str, path: &str) -> u32 {
+    let mut relevance: i32 = 0;
+    if text.contains(q) {
+        relevance += 25;
+    }
+    for t in tokens {
+        if text.contains(t) {
+            relevance += 8;
+        } else if path.contains(t) {
+            relevance += 3;
+        }
+    }
+    u32::try_from(relevance.max(0)).unwrap_or(0)
+}
+
 /// Whether `path` (already lowercased) is a README/overview doc — the natural
 /// landing for "what is this project" questions, so it is ranked up. Matches a
 /// `readme*` or `overview*` basename (blueprints, the other overview docs, are
