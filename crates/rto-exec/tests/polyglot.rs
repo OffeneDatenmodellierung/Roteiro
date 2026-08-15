@@ -1,7 +1,7 @@
 //! The coverage claim, as an executable check.
 //!
 //! The requirement is that findings are produced for **Rust, Python, SQL, Java
-//! and Node**. ADR-0016 records which analyzer delivers each; this file checks
+//! and Node**. ADR-0018 records which analyzer delivers each; this file checks
 //! that the pipeline really produces them, from real semgrep output over a real
 //! polyglot tree.
 //!
@@ -47,7 +47,7 @@ fn every_required_language_yields_a_finding() {
             .collect();
         assert!(
             !hits.is_empty(),
-            "no finding for {language} ({path}); the coverage claim in ADR-0016 is not met"
+            "no finding for {language} ({path}); the coverage claim in ADR-0018 is not met"
         );
     }
 }

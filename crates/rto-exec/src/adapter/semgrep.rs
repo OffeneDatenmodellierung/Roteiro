@@ -1,6 +1,6 @@
 //! `semgrep` — static analysis across the project's languages.
 //!
-//! Semgrep is the SAST half of the coverage matrix (ADR-0016): it parses source
+//! Semgrep is the SAST half of the coverage matrix (ADR-0018): it parses source
 //! and matches patterns against the AST, and it is the one tool that covers
 //! Rust, Python, Java, JavaScript and TypeScript with a single output format.
 //!
@@ -11,7 +11,7 @@
 //! semgrep's `generic` mode, which is Generally available but is a *token*
 //! matcher, not a parser: no AST, no dataflow, no type information. A SQL rule
 //! can say "this statement grants ALL PRIVILEGES"; it cannot say "this value
-//! reaches a query unsanitised". That is stated here, in ADR-0016, and in the
+//! reaches a query unsanitised". That is stated here, in ADR-0018, and in the
 //! rule file itself, so nobody reads a clean SQL scan as an AST-backed one.
 //!
 //! # Rules are ours, and pinned
@@ -25,7 +25,7 @@
 //! rather than an SPDX-allowlisted licence.
 //!
 //! @rto:0012
-//! @rto:0016
+//! @rto:0018
 
 use serde::Deserialize;
 
@@ -56,7 +56,7 @@ impl Adapter for Semgrep {
     fn languages(&self) -> &'static [&'static str] {
         // SQL is listed because findings are produced for it, and qualified
         // everywhere it matters: the engine behind it is `generic`, not a SQL
-        // parser. See the module docs and ADR-0016.
+        // parser. See the module docs and ADR-0018.
         &[
             "rust",
             "python",

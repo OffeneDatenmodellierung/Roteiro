@@ -48,7 +48,7 @@ fn read(relative: &str) -> Vec<u8> {
 /// that must yield at least one finding for it.
 ///
 /// The list is the coverage claim, in executable form: adding a language to
-/// ADR-0016's matrix without a fixture that proves it would leave this table
+/// ADR-0018's matrix without a fixture that proves it would leave this table
 /// disagreeing with the document.
 pub const REQUIRED_LANGUAGES: &[(&str, &str)] = &[
     ("rust", "rust/src/deploy.rs"),

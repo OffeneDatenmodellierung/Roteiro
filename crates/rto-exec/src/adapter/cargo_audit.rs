@@ -1,6 +1,6 @@
 //! `cargo-audit` — `RustSec` advisories against a resolved `Cargo.lock`.
 //!
-//! This is the dependency-vulnerability half of the coverage matrix (ADR-0016),
+//! This is the dependency-vulnerability half of the coverage matrix (ADR-0018),
 //! and it covers **Rust only**: `cargo audit` reads `Cargo.lock` and nothing
 //! else. Python, Java and Node dependency vulnerabilities are a different tool
 //! and a separate change; nothing here should be read as covering them.
@@ -26,7 +26,7 @@
 //! carrying the vector unchanged.
 //!
 //! @rto:0012
-//! @rto:0016
+//! @rto:0018
 
 use serde::Deserialize;
 

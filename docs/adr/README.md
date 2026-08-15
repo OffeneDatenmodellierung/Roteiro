@@ -21,10 +21,15 @@
 | [0013](0013-agent-memory-artifact-store.md) | Agent memory — a two-tier artifact store, decaying by evidence not by clock | For Review |
 | [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | For Review |
 | [0015](0015-generated-media-content-artifact-store.md) | Generated media content — its own artifact store, rebuildable on demand | For Review |
-| [0016](0016-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | For Review |
+| [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | For Review |
 
-> **ADR 0016** is the third of the analyzer trio: 0012 decides how findings are
-> stored, 0014 how analyzers are executed and provisioned, and 0016 *which*
+> **0016 and 0017 are not missing.** They are assigned to changes in flight on
+> other branches and arrive with their own PRs. Numbers are handed out in landing
+> order, so a gap in this table is a branch that has not merged yet, never a lost
+> decision.
+
+> **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
+> stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
 > analyzers are shipped and what each one actually covers — with the evidence,
 > since 0012 and 0014 name `cargo-audit` and `semgrep` only as examples.
 

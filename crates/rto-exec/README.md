@@ -58,7 +58,7 @@ are never nodes or edges, never acquire a provenance class, and never appear in
 the exported graph artifact.
 
 See ADR-0012 (the findings artifact model), ADR-0014 (execution and
-provisioning) and ADR-0016 (which analyzers cover which languages, and on which
+provisioning) and ADR-0018 (which analyzers cover which languages, and on which
 axis).
 
 Licensed under MIT OR Apache-2.0.

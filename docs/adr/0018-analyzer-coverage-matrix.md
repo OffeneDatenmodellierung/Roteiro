@@ -5,7 +5,7 @@ Parent: ADRs
 
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
-adr-id: "0016"
+adr-id: "0018"
 status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
@@ -16,7 +16,7 @@ last-modified: 2026-08-15
 confluence-url:
 ---
 
-# ADR-0016: Analyzer coverage — which analyzers deliver which languages, and on which axis
+# ADR-0018: Analyzer coverage — which analyzers deliver which languages, and on which axis
 
 | | |
 |---|---|
@@ -170,6 +170,41 @@ linked, never vendored, never redistributed by Roteiro.
 Operators who want broader coverage pin their own rule set. The machinery does
 not care how many rules there are; the baseline exists to prove the pipeline, not
 to be an audit.
+
+### `prefetch` verifies and pins; as shipped, it fetches nothing
+
+[[docs/adr/0014-sandboxed-analyzer-execution.md]] describes `roteiro security
+prefetch` as "fetch and verify all pinned assets by digest". As implemented for
+this stage it **verifies and pins, and fetches nothing at all**. That is a
+deviation from the wording, recorded here rather than discovered later.
+
+Neither shipped asset is fetchable in the sense that wording implies:
+
+- **The semgrep rule set is vendored into the binary.** There is nothing to
+  fetch: `prefetch` writes the compiled-in bytes to the cache, digests them, and
+  records the result. This is a feature, not a shortcut — a fresh machine with no
+  network can provision and then scan, which is the case ADR-0014's "mostly
+  offline" model exists to serve.
+- **The `RustSec` advisory database is a git checkout**, not a file with a
+  digest-stable URL. GitHub's generated tarballs are not byte-stable over time,
+  so a `sha256` pin against one would break on a re-gzip that changed no advisory.
+  Rather than shell out to `git` — which is precisely the "silent fall back to
+  host tools" ADR-0014 forbids — `prefetch` verifies the directory is there,
+  digests its contents, records the digest and the publication date, and refuses
+  with the exact clone command when it is absent.
+
+The important half of the contract is unaffected and is arguably *strengthened*:
+a run consults inputs whose identity was pinned before it started, nothing is
+ever fetched implicitly, and no code path falls back to whatever the host
+happens to have installed. What is deferred is only the fetching.
+
+**The first genuinely downloadable asset arrives with `osv-scanner` in Stage
+22b.** Its per-ecosystem databases
+(`https://osv-vulnerabilities.storage.googleapis.com/<ECOSYSTEM>/all.zip`) are
+single files at stable URLs — exactly what a digest pin wants. `AssetSource` is
+`#[non_exhaustive]` so that source can be added without a breaking change, and
+ADR-0014's wording becomes literally true at that point rather than
+aspirationally true now.
 
 ### Three things the tools do that their documentation does not say
 
