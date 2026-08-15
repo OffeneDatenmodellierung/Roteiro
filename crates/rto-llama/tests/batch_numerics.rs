@@ -68,7 +68,12 @@ fn logits_for(
     let last = prompt.len() - 1;
     for (i, token) in prompt.iter().enumerate() {
         batch
-            .add(*token, i32::try_from(i).expect("prompt fits i32"), &[0], i == last)
+            .add(
+                *token,
+                i32::try_from(i).expect("prompt fits i32"),
+                &[0],
+                i == last,
+            )
             .expect("prompt batch");
     }
     ctx.decode(&mut batch).expect("prompt decodes");
@@ -83,7 +88,10 @@ fn logits_for(
         }
         ctx.decode(&mut batch).expect("batched decode");
         for i in 0..follow.len() {
-            out.push(ctx.get_logits_ith(i32::try_from(i).expect("width fits i32")).to_vec());
+            out.push(
+                ctx.get_logits_ith(i32::try_from(i).expect("width fits i32"))
+                    .to_vec(),
+            );
         }
     } else {
         for (i, token) in follow.iter().enumerate() {
@@ -203,7 +211,10 @@ fn one_at_a_time_versus_all_at_once() {
         if ia != ib {
             disagreements += 1;
         }
-        eprintln!("{i:>3}  {delta:>12.6}  {ia:>12}  {ib:>12}  {ma:>10.6}  {:>10}", ia == ib);
+        eprintln!(
+            "{i:>3}  {delta:>12.6}  {ia:>12}  {ib:>12}  {ma:>10.6}  {:>10}",
+            ia == ib
+        );
     }
     eprintln!(
         "greedy pick differs at {disagreements}/{WIDTH} positions in this sample; \

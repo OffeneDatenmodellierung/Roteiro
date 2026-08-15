@@ -419,10 +419,7 @@ impl<'m> Mtp<'m> {
         // llama.cpp clamps it back to 0 for architectures with no recurrent state
         // to snapshot, so it costs nothing on the models that do not need it.
         let target = model
-            .new_context(
-                backend,
-                base_params(n_ctx).with_n_rs_seq(draft_max_u32()),
-            )
+            .new_context(backend, base_params(n_ctx).with_n_rs_seq(draft_max_u32()))
             .ok()?;
 
         let params = MtpSpeculativeParams {
@@ -793,5 +790,4 @@ mod tests {
             assert!(!switch_enables(Some(off)), "{off:?} should not enable");
         }
     }
-
 }

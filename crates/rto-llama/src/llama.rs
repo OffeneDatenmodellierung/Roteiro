@@ -432,9 +432,7 @@ impl LlamaEngine {
             // head that will not load is not a failed model load: the request
             // still has a perfectly good target model and decodes without one.
             let draft = self.load_draft_head(path);
-            let draft_bytes = draft
-                .as_ref()
-                .map_or(0, |(_, draft_bytes)| *draft_bytes);
+            let draft_bytes = draft.as_ref().map_or(0, |(_, draft_bytes)| *draft_bytes);
             cache.loaded.push(Loaded {
                 name: name.to_owned(),
                 // The head is charged to the residency budget with the target it
@@ -650,9 +648,7 @@ impl LlamaEngine {
         // or a `ROTEIRO_SPECULATIVE=0` — simply gets the loop it always had, with
         // the same sampler and the same seed.
         let (completion_tokens, finish_reason) =
-            if let Some(mut mtp) =
-                self.speculative_decoder(model, resolved.draft.as_deref())
-            {
+            if let Some(mut mtp) = self.speculative_decoder(model, resolved.draft.as_deref()) {
                 mtp.prime(&mut batch, &tokens)?;
                 self.speculative.activate();
                 crate::speculative::run_generation(
@@ -668,7 +664,14 @@ impl LlamaEngine {
                 let mut ctx = self.new_context(model)?;
                 ctx.decode(&mut batch)
                     .map_err(|e| EngineError::Inference(format!("prompt decode: {e}")))?;
-                run_generation(model, &mut ctx, start, &mut sampler, req.max_tokens, on_token)?
+                run_generation(
+                    model,
+                    &mut ctx,
+                    start,
+                    &mut sampler,
+                    req.max_tokens,
+                    on_token,
+                )?
             };
         Ok(CompletionStats {
             prompt_tokens,

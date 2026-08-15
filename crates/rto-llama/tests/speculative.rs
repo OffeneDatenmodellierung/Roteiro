@@ -128,7 +128,10 @@ fn mtp_gguf() -> Option<PathBuf> {
         if path.exists() {
             return Some(path);
         }
-        eprintln!("SKIP: {GGUF_ENV} is set but {} does not exist", path.display());
+        eprintln!(
+            "SKIP: {GGUF_ENV} is set but {} does not exist",
+            path.display()
+        );
         return None;
     }
     if let Some(path) = MTP_MODELS
@@ -137,9 +140,7 @@ fn mtp_gguf() -> Option<PathBuf> {
     {
         return Some(path);
     }
-    eprintln!(
-        "SKIP: no MTP-capable GGUF found — set {GGUF_ENV}, or install one of {MTP_MODELS:?}"
-    );
+    eprintln!("SKIP: no MTP-capable GGUF found — set {GGUF_ENV}, or install one of {MTP_MODELS:?}");
     None
 }
 
@@ -227,7 +228,10 @@ fn speculation_does_not_change_the_output() {
     }
 
     let stats = spec.speculative_stats();
-    eprintln!("speculative stats: {stats:?} acceptance={:?}", stats.acceptance_rate());
+    eprintln!(
+        "speculative stats: {stats:?} acceptance={:?}",
+        stats.acceptance_rate()
+    );
     assert_eq!(
         stats.activations,
         PROMPTS.len() as u64,
