@@ -4,6 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::findings::{self, AnalysisRun, Finding, FindingsApplied, FindingsLayer};
 use crate::migrations;
 use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 use crate::provenance::Provenance;
@@ -789,6 +790,99 @@ impl Store {
         }
         Ok(out)
     }
+
+    // --- Analyzer findings (ADR-0012). A separate artifact store: these methods
+    // touch `analysis_runs`/`findings` only, never `nodes`/`edges`, so
+    // `export_factset` — and the published `GraphArtifact` — stays a pure
+    // function of the tree no matter what an analyzer reports. ---
+
+    /// Replace the findings layer `run.layer` **wholesale**, atomically: the
+    /// previous run for that layer and every finding row it owned are deleted,
+    /// then this run and its findings are written. A finding that has since been
+    /// fixed therefore *disappears* instead of lingering, and re-ingesting an
+    /// unchanged report is idempotent — the store ends up with the same rows and
+    /// no growth.
+    ///
+    /// The owned-record cleanup is explicit rather than inherited. The import
+    /// path ([`Store::apply_import_layer`]) deletes a layer's edges but leaves its
+    /// obsolete *nodes* behind; copying that shape here would silently orphan
+    /// findings, so the previous run's rows are deleted by hand and counted in
+    /// [`FindingsApplied::removed`]. The schema's `ON DELETE CASCADE` is kept as
+    /// defence in depth, not as the mechanism.
+    ///
+    /// `findings` must carry distinct [`FindingKey`](crate::FindingKey)s: a
+    /// duplicate identity is a producer bug and is rejected by the unique index
+    /// *inside* the transaction, so nothing is committed. Callers that parse
+    /// untrusted reports should reject duplicates earlier, with a better message.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Json`] if the run's command policy or a finding's
+    /// `meta` cannot be serialized, or [`StoreError::Sqlite`] on write failure. On
+    /// any error the transaction is rolled back and the previous layer survives
+    /// intact.
+    pub fn replace_findings_layer(
+        &mut self,
+        run: &AnalysisRun,
+        findings: &[Finding],
+    ) -> Result<FindingsApplied, StoreError> {
+        let tx = self.conn.transaction()?;
+        let applied = findings::replace_layer(&tx, run, findings)?;
+        tx.commit()?;
+        Ok(applied)
+    }
+
+    /// Delete a findings layer and every finding row it owns, returning how many
+    /// findings went with it, or `None` if the layer was not live.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure; nothing is committed on
+    /// error.
+    pub fn delete_findings_layer(&mut self, layer: &str) -> Result<Option<usize>, StoreError> {
+        let tx = self.conn.transaction()?;
+        let removed = findings::delete_layer(&tx, layer)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Every live findings layer with its findings, ordered by layer key and, in
+    /// each layer, by finding key. Pass `analyzer` to narrow to one analyzer.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, [`StoreError::Json`] if a
+    /// stored policy or `meta` cannot be decoded, or [`StoreError::Corrupt`] on an
+    /// unrecognised stored token.
+    pub fn findings_layers(
+        &self,
+        analyzer: Option<&str>,
+    ) -> Result<Vec<FindingsLayer>, StoreError> {
+        findings::layers(&self.conn, analyzer)
+    }
+
+    /// Number of findings currently stored, across every layer.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn finding_count(&self) -> Result<u64, StoreError> {
+        findings::count_findings(&self.conn)
+    }
+
+    /// Number of live analysis runs — one per findings layer.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn analysis_run_count(&self) -> Result<u64, StoreError> {
+        findings::count_runs(&self.conn)
+    }
+
+    /// Findings whose owning run no longer exists. Always `0` in a healthy store;
+    /// exposed so layer replacement can be asserted to clean up its own records
+    /// rather than orphaning them.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn orphan_finding_count(&self) -> Result<u64, StoreError> {
+        findings::count_orphan_findings(&self.conn)
+    }
 }
 
 // --- Free helpers operating on a `Connection` (a `Transaction` derefs to one) ---
@@ -1372,7 +1466,10 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        assert_eq!(store.schema_version().expect("version"), 7);
+        // Bumped to 8 by the analyzer-findings tables (ADR-0012). The literal is
+        // deliberate: a new migration should make someone confirm it is meant to
+        // apply on open, rather than passing silently.
+        assert_eq!(store.schema_version().expect("version"), 8);
     }
 
     #[test]
@@ -1543,7 +1640,7 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 7);
+            assert_eq!(store.schema_version().expect("version"), 8);
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

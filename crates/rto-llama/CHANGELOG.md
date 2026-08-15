@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.9.0...rto-llama-v1.10.0) - 2026-08-15
+
+### Fixed
+
+- *(extract)* drop cached vision/ASR engines before exit
+
 ## [1.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.6.0...rto-llama-v1.7.0) - 2026-08-14
 
 ### Fixed

@@ -1,0 +1,363 @@
+# Roteiro — Build Plan V2
+
+Status: Proposed · Owner: The Roteiro Project Team · Last-modified: 2026-08-15
+Governing decisions: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md),
+[ADR-0012](adr/0012-analyzer-findings-artifact-model.md),
+[ADR-0013](adr/0013-agent-memory-artifact-store.md),
+[ADR-0014](adr/0014-sandboxed-analyzer-execution.md)
+
+This plan succeeds [BUILD_PLAN.md](BUILD_PLAN.md), which took Roteiro from the
+v0.0.1 scaffold through Stage 20 to the released v1.9.0. V2 covers the next arc:
+**Roteiro learns things that are not in the source tree — and stores them without
+compromising the promise that the graph is a pure function of the source tree.**
+
+Stage numbering continues from the v1 plan (which ended at Stage 20). As there,
+stage numbers are **labels, not execution order**, and the `v1.x`/`v2.0` headings
+are *nominal targets* — release-plz cuts the real tags.
+
+---
+
+## 1. Thesis of V2
+
+V1 built one thing well: a provenance-tagged graph, deterministically derived from
+git blobs, that humans and agents query through one surface. V2 adds three kinds of
+knowledge that **do not fit that model** and would corrupt it if forced in:
+
+1. **Analyzer findings** — asserted by an external tool at a point in time, against
+   rules and advisory databases that change independently of the source.
+2. **Agent memory** — accumulated across sessions, episodic, unreproducible, and
+   often the record of something that *failed*.
+3. **Deeper analysis lenses** — genuinely derived facts, which stay in the graph,
+   but whose true cost was previously understated by an order of magnitude.
+
+The organising rule for (1) and (2) is one sentence, and it is what makes V2
+coherent rather than a list of features:
+
+> **Knowledge that is not a derived/authored/inferred graph fact gets its own
+> artifact store, and never borrows the graph's trust.**
+
+`imports` already works this way — it exists precisely because `sync`'s rebuild
+would destroy it, and is re-applied afterwards. V2 generalises that precedent
+instead of inventing something new.
+
+---
+
+## 2. Principles
+
+All seven principles of [BUILD_PLAN.md §1](BUILD_PLAN.md) remain binding. V2 adds
+three invariants that constrain every stage below:
+
+8. **The graph stays a pure function of source.** Nothing in V2 writes to
+   `nodes`/`edges` unless it is deterministically derived from `(path, blob id,
+   bytes)`. `export_factset` must remain byte-identical for a given tree.
+9. **Artifact stores never borrow graph trust.** No V2 record acquires the
+   `authored` relevance boost, and none is exported in the `GraphArtifact`.
+10. **Offline-capable, not "offline".** Optional capabilities may require
+    pre-provisioned assets; they must be digest-pinned, explicitly prefetched, and
+    must fail with a named, actionable error rather than fetching implicitly or
+    silently degrading.
+
+---
+
+## 3. Baseline (start of V2)
+
+Verified against `main` at the time of writing:
+
+| Fact | Value | Consequence for V2 |
+|---|---|---|
+| Released | **v1.9.0** on crates.io | V2 work is post-1.0 — semver is now real. |
+| MSRV | `rust-version = "1.94"` | New deps must respect it. |
+| Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
+| Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
+| CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
+| Schema | migrations 1–7 applied | V2 appends only; see §5. |
+| `EXTRACT_VERSION` | `9` (`crates/rto-graph/src/extract.rs:39`) | Bumping it forces full re-extraction for every user. |
+| Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
+| Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one. |
+
+---
+
+## 4. Crate & feature map
+
+| Crate | Change | Notes |
+|---|---|---|
+| `rto-exec` | **new** | `AnalyzerRunner` trait + three backends (ADR-0014). Feature `execution`, subfeatures `exec-boxlite`, `exec-subprocess`. |
+| `rto-graph` | extended | Artifact-store tables + accessors; new query fns for lenses. Graph model untouched. |
+| `roteiro` (CLI) | extended | `security {prefetch,status,run,ingest}`, `memory {add,list,recall,forget}`, new lens subcommands. |
+| `rto-serve` | extended | New lenses surfaced to served-chat tools; memory recall exposed only behind explicit opt-in. |
+| `rto-render` | extended | Findings and lens renderers. |
+
+Default install gains **no new dependency**. Everything in Stages 22/24 is
+feature-gated and off by default.
+
+---
+
+## 5. Schema plan — migration discipline
+
+`migrations.rs` mandates append-only SQL: never edit a shipped migration. V2 adds
+**three** tables across three migrations, deliberately not merged:
+
+| Migration | Table | Lifetime | Evictable |
+|---|---|---|---|
+| N | analysis runs + findings (ADR-0012) | replaceable layer per `(analyzer, worktree)` | replaced wholesale, not aged out |
+| N+1 | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
+| N+2 | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
+
+**Numbers are assigned in landing order, not reserved in advance.** Whichever
+stage merges first takes `N`. Splitting memory across two migrations is
+intentional: different lifetimes and guarantees, so the eviction tier can later be
+altered without touching durable memory.
+
+**`EXTRACT_VERSION` does not change in Stages 21–25.** None of that work is
+extraction output. It *does* change in Stage 26, once — see the note there.
+
+---
+
+## 6. Staged roadmap
+
+Dependency shape — three tracks, only one hard chain:
+
+```
+Track A (findings):  21 ──► 22 ──► 24
+Track B (memory):    23 ──────────► 25
+Track C (lenses):    26   (independent of A and B throughout)
+                                    └──► 27 (v2.0 hardening)
+```
+
+Stages 21, 23 and 26 can start in parallel. Nothing in Track C touches the artifact
+stores; nothing in Track B blocks Track A.
+
+---
+
+### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** · effort **S**
+
+**Goal:** land the whole value of the findings design with **no analyzer and no
+sandbox** — the seam, the schema, and a working ingest path. This is the stage that
+makes CI ingestion and local execution the same code path.
+
+- **Rust surface:** new `rto-exec` crate; `AnalyzerRunner` trait (request: analyzer
+  id, read-only worktree, `network: Deny`, explicit consent → response: normalized
+  findings + evidence); `IngestRunner` as the first implementation; normalized
+  `Finding` + `AnalysisRun` types in `rto-graph`.
+- **Schema:** migration N — analysis runs + findings, with stable finding identity
+  keys (`finding:semgrep:<rule>:<path>:<start-byte>:<snippet-hash>`,
+  `finding:cargo-audit:<advisory>:<pkg>:<version>:<lockfile-blob>`) and layer
+  replacement keyed `security:<analyzer>:<worktree-id>`.
+- **CLI:** `roteiro security ingest <normalized-json>`, `roteiro security list
+  [--json]`.
+- **Deps:** none beyond serde. No feature flag needed for ingest.
+- **Known gap to implement, not assume:** existing import code deletes edges but
+  **not obsolete owned nodes**; owned-record cleanup on layer replacement is
+  net-new work and is part of this stage's DoD.
+- **DoD:** ingesting a report twice is idempotent; a finding fixed between runs
+  *disappears* on replacement; `export_factset` output is byte-identical before and
+  after ingest (regression test); no new `nodes`/`edges` rows exist; findings never
+  appear in `search` results ranked as `authored`.
+
+### Stage 22 — First analyzers: `cargo-audit`, then `semgrep` → **v1.11.0** · effort **M + M**
+
+**Goal:** two real analyzers behind the Stage 21 contract, via the subprocess
+runner, honestly labelled.
+
+- **Rust surface:** `SubprocessRunner` (feature `exec-subprocess`); per-analyzer
+  adapters normalising native output into `Finding`.
+- **CLI:** `roteiro security run <analyzer> [--allow-unsandboxed]`. The flag is
+  **required** for subprocess execution; evidence records `isolation=none`.
+- **Provisioning:** `roteiro security prefetch` / `status` land here — digest-pinned
+  advisory DB and rule sets, with `assets-unavailable-offline` as the cold-cache
+  failure (never an implicit fetch, never a silent host-tool fallback).
+- **Staleness honesty:** a cached-but-old advisory DB still runs, but results carry
+  `advisory_db_published_at`, `fetched_at`, age, and a *possibly stale* label.
+- **DoD:** both analyzers produce identical normalized findings from the same
+  inputs whether run locally or ingested from CI; offline with a warm cache
+  succeeds; offline with a cold cache fails with the named error and the exact
+  prefetch command; `cargo deny` clean.
+
+### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.12.0** · effort **M**
+
+**Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
+no graph integration.
+
+- **Rust surface:** `agent_memory` accessors in `rto-graph`; anchor capture as
+  `(anchor_key, anchor_blob, anchor_path)`; explicit `superseded_by` /
+  `superseded_at`. **`span` is not an anchor** — it is byte offsets and shifts on
+  any edit above it; `blob_hash + node_key` is the stable pair.
+- **Ordering:** `INTEGER PRIMARY KEY AUTOINCREMENT` supplies the monotonic
+  generation. `created_at` is written for humans and **never read** — matching how
+  `imported_at` already behaves. No wall-clock ranking, because the store is shared
+  across worktrees and branches and `datetime('now')` is second-granular.
+- **Storage location:** `.git/roteiro/` beside `graph.db` — per-clone, never
+  committed, never pushed. Privacy forces this: extraction redacts secret-looking
+  config values before persistence, and memory has **no such chokepoint**.
+- **CLI:** `roteiro memory add|list|forget`.
+- **DoD:** memory survives `roteiro sync`/`rebuild` (the `imports` property);
+  `export_factset` unchanged; nothing enters `nodes`/`edges`; supersession recorded
+  explicitly and superseded rows excluded from live listing.
+
+### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L**
+
+**Goal:** the reproducible, offline-capable local run — one command, pinned inputs,
+digest-level evidence.
+
+- **Deps:** `boxlite` (Apache-2.0), **pinned exactly**, behind `exec-boxlite`.
+  Publication on crates.io was verified directly (17 versions, default 0.9.7, not
+  yanked), so this is a dependency addition, not a packaging problem.
+- **Rust surface:** `BoxliteRunner`; digest-pinned OCI image; read-only worktree
+  mount, scrubbed environment, no ambient credentials, egress denied by default.
+- **CI:** `--all-features` must not fail on a runner without `/dev/kvm` — gate
+  sandbox tests on a runtime capability probe and skip with a visible message.
+  Apple Silicon microVM execution stays **untested in CI**, documented as an
+  accepted gap.
+- **Standing duties (from the ADR):** exact pin, deliberate advisory tracking,
+  `cargo deny` over the full resolved native/FFI closure.
+- **DoD:** the same analyzer produces the same findings via subprocess and via
+  boxlite, differing only in the isolation label and image digest; a machine with
+  no network but a warm cache produces a full run; `cargo deny` clean on the
+  resolved tree.
+
+### Stage 25 — Memory recall: cache tier, decay, supersession → **v1.14.0** · effort **L**
+
+**Goal:** make memory *useful* — recall that ranks by evidence, plus the bounded
+cache that stops sessions re-deriving what they already know.
+
+- **The two-tier split is the whole design.** Re-derivable ⇒ evictable; episodic ⇒
+  never silently evicted. `build_context` is *proven* to reconstruct identically
+  (`context.rs` asserts `built == cached`), which is what makes cache eviction cost
+  cycles rather than information.
+- **Schema:** migration N+2 — `agent_cache` with `bytes`, `generation`,
+  `last_used`, `hits`. No **persisted** access tracking exists today, so the
+  signal must be introduced with the table (the in-memory `ModelCache` tracks
+  recency by list order, which does not survive a process).
+- **Eviction:** **byte budget**, following the existing `ModelCache`
+  (`crates/rto-llama/src/llama.rs:120-137`) rather than a new row-count cap —
+  evict oldest-first on `(anchor_valid ASC, last_used ASC)` until the tier fits,
+  **always keeping at least the most-recently-used entry**. Swept at the existing
+  maintenance seam where `refresh_contexts` is already called — **not on the read
+  path**, so reads never mutate. Never evict: anything episodic, or a
+  valid-anchored row written in the current generation.
+- **Ranking (retrieval-time, never stored):**
+  `score = base_confidence × anchor_penalty × decay(current_generation − row.generation)`
+  with `decay ∈ {linear, exponential, none}` and **`none` guaranteeing reproducible
+  recall**. A stored decaying score would rewrite the store on every read.
+- **Anchor drift demotes, never deletes.** The authored layer prunes links to
+  vanished symbols; memory must not — *a lesson about a deleted function is often
+  the most valuable thing you have*. Unanchored records are marked, kept, ranked
+  lower.
+- **Surfacing:** if memory appears in `search` at all it needs a visually distinct
+  channel and its own score. It never takes the `authored` +40 boost.
+- **DoD:** `decay=none` gives byte-identical recall for a fixed repo state across
+  runs; eviction never removes an episodic row; a superseded memory drops out of
+  recall immediately regardless of age; an unanchored memory is still retrievable
+  and clearly labelled.
+
+### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)*
+
+**Goal:** deepen the graph itself — the on-brand work — with **honest costs**.
+
+**Cost correction, which this stage exists to respect:** a fully surfaced lens is
+**~195–500 LOC across 6–8 files**, not the ~20-line mirror previously assumed. That
+figure describes only the internal query fn. There are **seven** surfacing stages,
+not four: extraction (`scan_markers` + `augment`), the query fn, the query result
+types, **MCP** (`GraphServer`) and **served-chat** (`GraphToolRegistry`) as
+*separate* registries, Obsidian render, and CLI-side aggregation — plus tests and
+docs.
+
+Shortlist, in order:
+
+1. **Q3 — directed coupling** *(the standout)*. `Calls` edges already retain
+   direction, and today's hotspot view **throws that away by incrementing both
+   ends**. Highest value per line in the set.
+2. **Q1 — debt density.** Builds directly on delivered intent-debt tracking.
+3. **S1 — config-secret inventory** *(renamed, deliberately)*. Values are redacted
+   before persistence, so this lens can report *"secret-named config keys present
+   and safely redacted"* with paths and key names. It **cannot** detect hardcoded
+   credentials in source, judge validity, or distinguish a real secret from a
+   placeholder. The old title promised a scanner that this architecture cannot
+   build.
+
+Explicitly **deferred out of this stage**, with reasons:
+
+- **Q2 (LOC hotspots)** is not a pure query — `Node.span` is *byte offsets*, so it
+  needs net-new extraction metadata.
+- **Q10 (dependency pins)** is mis-scoped — existing pins are Docker `image_ref`
+  and submodules; package-manifest pins are extraction work. Split S / M.
+- **Q7 (doc coverage)** needs a language and a denominator; docs live mostly in
+  symbol `meta.content`, not `Doc` nodes.
+
+**`EXTRACT_VERSION` bump:** required **once**, if and only if a lens adds derived
+extraction metadata (Q2 and Q10 do; Q1/Q3/S1 as scoped do not). Bumping invalidates
+every cached blob for every user and forces full re-extraction — so batch all
+extraction-touching lenses behind a **single** bump rather than paying it twice.
+
+**Also in scope (documentation debt):** normalise the security taxonomy — the prose
+defines GDS/NNX/EXT/LLM while rows S1–S6 use undefined GPB/CVE/SAST labels — and
+mark the "SmolVLM is too small to emit `<tool_call>`" claim as a **hypothesis**, as
+it currently rests on no code or benchmark evidence.
+
+- **DoD per lens:** deterministic output; `roteiro check` green; surfaced on all
+  applicable surfaces or explicitly documented as CLI-only; scale-benchmarked on
+  this repo (whole-graph lenses matter — `search` already scans all nodes); false
+  positives have a suppression story, a confidence signal and a baseline before any
+  CI-gating is offered.
+
+### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
+
+- Semver review: query output is explicitly versioned, so new query shapes carry
+  semver weight.
+- Scale benchmarks for every whole-graph lens and for memory recall.
+- Docs: blueprint updated, `docs/JSON_SCHEMA.md` extended for findings + memory,
+  every "offline" claim re-audited to say **offline-capable once provisioned**
+  where that is the truth.
+- Coverage ratchet held at 85% across all new crates; `cargo deny` clean with
+  `--all-features` on the resolved native closure.
+
+---
+
+## 7. Milestones → releases
+
+| Release | Contains | Gate |
+|---|---|---|
+| v1.10.0 | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent |
+| v1.11.0 | Stage 22 — cargo-audit + semgrep | Offline warm-cache run; named cold-cache failure |
+| v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
+| v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
+| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
+| v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
+| **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
+
+---
+
+## 8. Risk register
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| A V2 record leaks into `nodes`/`edges` and breaks artifact purity | **High** | `NodeKind::Other("…")` is *mechanically* possible — that is the trap. CI regression test asserting `export_factset` is byte-identical across ingest/memory writes. |
+| Unreviewed memory acquires `authored` relevance | High | Separate store, separate ranking channel; assert in tests that memory never scores through the authored path. |
+| Memory captures secrets (tokens, stack traces, customer names) | High | Uncommitted `.git/roteiro/` placement; explicit `forget`; documented that memory has no redaction chokepoint. |
+| boxlite advisory lands and is missed | Medium | Exact pin + deliberate advisory tracking as a standing duty (ADR-0014). |
+| `--all-features` CI fails without `/dev/kvm` | Medium | Runtime capability probe; sandbox tests skip visibly. |
+| Unbounded episodic growth | Medium | Accepted by design; explicit user reclamation only. |
+| A single-vendor factual claim drives a design | Medium | This plan already survived one: a "boxlite is unpublished, therefore unmergeable" blocker was refuted by direct crates.io checking. Verify checkable externals independently. |
+| `EXTRACT_VERSION` bumped twice, forcing two full re-extractions | Low | Batch all extraction-touching lenses behind one bump (Stage 26). |
+
+---
+
+## 9. Open questions (decide before the stage that needs them)
+
+1. **Cache bound value** (Stage 25): the *unit* is settled — a byte budget,
+   following `ModelCache`. The *number* is a judgement about tolerable
+   `.git/roteiro/` growth and still needs deciding.
+2. **Memory scope** (Stage 23): the store is per-repo and shared across branches
+   and worktrees. Is a lesson learned on a feature branch valid on `main`? The
+   `scope` column exists; the policy does not.
+3. **Semantic recall** (post-Stage 25): memory recall is lexical + anchor + decay in
+   this plan. A vector index would need migration, model/dimension versioning,
+   retention, rebuild and storage-size policy — materially more than "persist
+   embeddings", and deferred deliberately.
+4. **`code_interpreter`** remains rejected (ADR-0014). The sharper question behind
+   it — *is local code execution something Roteiro wants to be?* — is a product
+   decision, not a backend one. If it ever becomes "yes", boxlite is the vehicle and
+   Track A rides along; until then the answer stays "no".
+5. **Findings ↔ graph cross-surfacing**: joining findings to graph facts is
+   deliberately not free in this design. When it is wanted, it needs a designed
+   join, not an implicit one.

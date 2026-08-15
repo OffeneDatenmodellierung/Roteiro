@@ -386,6 +386,17 @@ enum Command {
         #[command(subcommand)]
         action: ModelAction,
     },
+    /// Analyzer findings: ingest a normalized report and list what is live
+    /// (ADR-0012). Findings are a **separate artifact store** — they are never
+    /// nodes or edges, never carry a provenance class, and never appear in the
+    /// exported graph artifact, because an analyzer's verdict is asserted at a
+    /// point in time against rules and an advisory database that change
+    /// independently of the source tree.
+    #[cfg(feature = "execution")]
+    Security {
+        #[command(subcommand)]
+        action: SecurityAction,
+    },
     /// Start the network HTTP server: the OpenAI-compatible `/v1` model endpoint
     /// (+ graph tools + Ask) when built `--features serve` with a model installed,
     /// always alongside the read-only `/v1/graph/*` API and the `/` web UI (ADR-0006,
@@ -567,6 +578,53 @@ enum ModelAction {
     },
 }
 
+/// `roteiro security` actions.
+#[cfg(feature = "execution")]
+#[derive(Subcommand)]
+enum SecurityAction {
+    /// Ingest a normalized analyzer report produced elsewhere — a CI job, or a
+    /// developer's own tooling — as a replaceable findings layer.
+    ///
+    /// The layer is keyed `security:<analyzer>:<worktree-id>` and is replaced
+    /// **wholesale**, so re-ingesting is idempotent and a finding that has been
+    /// fixed disappears instead of lingering. Nothing is written to the graph:
+    /// `roteiro export` is unaffected by this command.
+    Ingest {
+        /// Normalized report file (`-` reads from stdin).
+        file: String,
+        /// Emit the ingest report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the live findings for this worktree, newest run per analyzer.
+    List {
+        /// Only this analyzer's layer (e.g. `cargo-audit`).
+        #[arg(long, value_name = "NAME")]
+        analyzer: Option<String>,
+        /// Emit the listing as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Exit `1` because a **gate** failed (drift, unresolved link, no path) — the
+/// long-standing contract for `check`/`review`/`path`/`links`, which report the
+/// failure on stdout/stderr and then set a non-zero status without an `Err`.
+///
+/// `std::process::exit` never runs destructors, so `main`'s
+/// [`rto_graph::MediaEngineGuard`] would not fire here: release the media engines
+/// first, or a gate failure on a run that described an image would abort in
+/// ggml-metal's exit-time teardown and report 134 instead of 1 (issue #291).
+///
+/// This is the **only** sanctioned exit-without-`Err` in the CLI. A subcommand
+/// that wants a non-zero status returns an error and lets `main` unwind, which is
+/// what `security ingest` does — nothing in the findings path calls
+/// `std::process::exit` directly, so nothing there can skip the guard.
+fn exit_gate_failure() -> ! {
+    let _released = rto_graph::release_media_engines();
+    std::process::exit(1)
+}
+
 // `main` is a one-arm-per-subcommand dispatcher; splitting the match further just
 // scatters the CLI wiring, so the line-count lint is noise here.
 #[allow(clippy::too_many_lines)]
@@ -615,6 +673,16 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    // Own the media extractors' native engines for the rest of `main`. Extraction
+    // loads a llama.cpp vision/ASR engine once and reuses it across blobs; on the
+    // Metal backend that engine must be *dropped* before libc's C++ finalizers run,
+    // or ggml-metal's device teardown finds a non-empty residency set and aborts a
+    // successful run with SIGABRT (exit 134, issue #291). Dropping this guard at the
+    // end of `main` releases them while Rust destructors still run — on the normal
+    // path, on a `?` error out of a subcommand, and on an unwinding panic alike.
+    // The `std::process::exit` gate failures below skip destructors, so they call
+    // `exit_gate_failure`, which releases first.
+    let _engines = rto_graph::MediaEngineGuard::hold();
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
         Command::Check {
@@ -701,6 +769,8 @@ fn main() -> anyhow::Result<()> {
         } => run_duplicates(&cfg.effective, ingest, min_similarity, limit, json),
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
+        #[cfg(feature = "execution")]
+        Command::Security { action } => run_security(action),
         #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
         Command::Serve {
             models,
@@ -1161,7 +1231,7 @@ fn run_check(
     }
 
     if report.has_violations() {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }
@@ -1214,7 +1284,7 @@ fn run_review(
         print_review(&review, base);
     }
     if review.has_drift() {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }
@@ -2621,7 +2691,7 @@ fn run_path(
     }
 
     if !result.found {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }
@@ -2846,7 +2916,7 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
     }
 
     if drift > 0 {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }
@@ -3534,6 +3604,204 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
         store.node_count()?,
         store.edge_count()?
     );
+    Ok(())
+}
+
+/// Dispatch a `roteiro security` action.
+#[cfg(feature = "execution")]
+fn run_security(action: SecurityAction) -> anyhow::Result<()> {
+    match action {
+        SecurityAction::Ingest { file, json } => run_security_ingest(&file, json),
+        SecurityAction::List { analyzer, json } => run_security_list(analyzer.as_deref(), json),
+    }
+}
+
+/// The `--json` shape of `roteiro security ingest`.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityIngestReport {
+    /// The replaceable layer that was written.
+    layer: String,
+    /// The analyzer the report came from, and its version.
+    analyzer: String,
+    analyzer_version: String,
+    /// Which backend produced the result, and what isolation it really had.
+    runner: rto_graph::RunnerKind,
+    isolation: rto_graph::Isolation,
+    /// Findings written, and owned rows removed from the previous layer.
+    findings: usize,
+    removed: usize,
+    /// Whether a previous run of this layer was replaced.
+    replaced: bool,
+    /// SHA-256 of the exact report bytes these findings came from.
+    report_digest: String,
+}
+
+/// The `--json` shape of `roteiro security list`.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityListing {
+    /// Every live layer with its run evidence and findings.
+    layers: Vec<rto_graph::FindingsLayer>,
+    /// Total findings across those layers.
+    findings: usize,
+}
+
+/// Just enough of a normalized report to learn which analyzer it claims to be
+/// from, so `security ingest <file>` needs no `--analyzer` flag.
+#[cfg(feature = "execution")]
+#[derive(serde::Deserialize)]
+struct AnalyzerPeek {
+    analyzer: String,
+}
+
+/// The analyzer a report declares.
+///
+/// The runner re-checks this against the request, so peeking here only removes a
+/// flag from the command line — it does not weaken the substituted-report check
+/// that protects programmatic callers and a future `security run <analyzer>`.
+#[cfg(feature = "execution")]
+fn report_analyzer(bytes: &[u8], source: &str) -> anyhow::Result<String> {
+    let peek: AnalyzerPeek = serde_json::from_slice(bytes)
+        .map_err(|e| anyhow::anyhow!("{source} is not a normalized analyzer report: {e}"))?;
+    Ok(peek.analyzer)
+}
+
+/// Ingest a normalized analyzer report as a replaceable findings layer.
+///
+/// The graph is deliberately **not** built or touched here: an analyzer's verdict
+/// is not derived from the tree, so it neither needs a fresh graph nor may alter
+/// one. The store is opened, the layer is replaced wholesale, and `nodes`/`edges`
+/// are never written — which is what keeps `roteiro export` byte-identical across
+/// an ingest.
+#[cfg(feature = "execution")]
+fn run_security_ingest(file: &str, json: bool) -> anyhow::Result<()> {
+    use rto_exec::{AnalysisRequest, AnalyzerRunner, Consent, IngestRunner, Worktree};
+
+    let bytes = if file == "-" {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+        buf
+    } else {
+        std::fs::read(file)?
+    };
+
+    // The analyzer id comes from the report itself, so the command stays
+    // `security ingest <file>`.
+    let analyzer = report_analyzer(&bytes, file)?;
+
+    let (repo, mut store, _cache) = open_graph()?;
+    let worktree_path = repo
+        .workdir()
+        .unwrap_or_else(|| repo.git_dir())
+        .to_path_buf();
+    let request = AnalysisRequest {
+        analyzer,
+        worktree: Worktree::read_only(&worktree_path)?,
+        // Egress denied: ingest reads a local file and nothing else.
+        network: rto_graph::NetworkPolicy::Deny,
+        // Naming a report file on the command line *is* the consent for reading
+        // it. A backend that fetches assets or executes a container will have to
+        // ask, and this is the field it asks through.
+        consent: Consent::Granted,
+        // Best-effort source identity from the checkout we are standing in; the
+        // report's own record fills whatever this cannot supply.
+        source: rto_graph::SourceIdentity {
+            commit: repo.head_commit_id().ok(),
+            tree: repo.head_tree_id().ok(),
+            lockfile_blob: None,
+        },
+    };
+
+    let response = IngestRunner::new(bytes).run(&request)?;
+    let applied = store.replace_findings_layer(&response.run, &response.findings)?;
+
+    if json {
+        emit_json(&SecurityIngestReport {
+            layer: applied.layer,
+            analyzer: response.run.analyzer,
+            analyzer_version: response.run.analyzer_version,
+            runner: response.run.runner,
+            isolation: response.run.isolation,
+            findings: applied.findings,
+            removed: applied.removed,
+            replaced: applied.replaced,
+            report_digest: response.run.report_digest,
+        })?;
+    } else {
+        let digest = &response.run.report_digest[..12];
+        println!(
+            "ingested {} finding(s) from {} {} → {} (runner {}, isolation {}, report {digest}…)",
+            applied.findings,
+            response.run.analyzer,
+            response.run.analyzer_version,
+            applied.layer,
+            response.run.runner.as_str(),
+            response.run.isolation.as_str(),
+        );
+        if applied.replaced {
+            println!(
+                "replaced the previous layer: {} finding(s) removed, {} now live",
+                applied.removed, applied.findings
+            );
+        }
+        if let Some(db) = &response.run.advisory_db {
+            // Say when the advisory data was published, never that it is current:
+            // the same analyzer at the same commit with a newer database
+            // legitimately reports something different.
+            let published = db.published_at.as_deref().unwrap_or("unknown");
+            println!(
+                "advisory db {} published {published} — results are as current as that database, no more",
+                db.digest
+            );
+        }
+    }
+    Ok(())
+}
+
+/// List the live findings layers for this worktree.
+#[cfg(feature = "execution")]
+fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let (_repo, store, _cache) = open_graph()?;
+    let layers = store.findings_layers(analyzer)?;
+    let total: usize = layers.iter().map(|l| l.findings.len()).sum();
+
+    if json {
+        emit_json(&SecurityListing {
+            layers,
+            findings: total,
+        })?;
+        return Ok(());
+    }
+
+    if layers.is_empty() {
+        match analyzer {
+            Some(name) => println!("no findings ingested for `{name}`"),
+            None => println!("no findings ingested (`roteiro security ingest <report.json>`)"),
+        }
+        return Ok(());
+    }
+    for layer in &layers {
+        println!(
+            "{} — {} {} ({}, isolation {}), {} finding(s)",
+            layer.run.layer,
+            layer.run.analyzer,
+            layer.run.analyzer_version,
+            layer.run.runner.as_str(),
+            layer.run.isolation.as_str(),
+            layer.findings.len(),
+        );
+        for finding in &layer.findings {
+            let where_ = finding.path.as_deref().unwrap_or("-");
+            println!(
+                "  {:<8} {:<24} {where_}  {}",
+                finding.severity.as_str(),
+                finding.rule,
+                finding.title
+            );
+        }
+    }
+    println!("{total} finding(s) across {} layer(s)", layers.len());
     Ok(())
 }
 
@@ -5166,6 +5434,129 @@ mod url_tests {
             source_blob_base("git@gitlab.com:o/r.git", "abc123"),
             Some("https://gitlab.com/o/r/-/blob/abc123".to_owned())
         );
+    }
+}
+
+// The `roteiro security` surface: argument shapes, the analyzer peek that keeps
+// `ingest` a one-argument command, and the `--json` shapes callers parse. The
+// behaviour these wrap — layer replacement, idempotence, artifact purity — is
+// tested where it lives, in `rto-graph` and `rto-exec`.
+#[cfg(all(test, feature = "execution"))]
+mod security_cli {
+    use super::{
+        Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, report_analyzer,
+    };
+    use clap::Parser as _;
+
+    fn parse<const N: usize>(args: [&str; N]) -> Command {
+        Cli::try_parse_from(args).expect("parse").command
+    }
+
+    fn action<const N: usize>(args: [&str; N]) -> SecurityAction {
+        let Command::Security { action } = parse(args) else {
+            panic!("expected Security");
+        };
+        action
+    }
+
+    #[test]
+    fn ingest_takes_one_report_argument() {
+        let SecurityAction::Ingest { file, json } =
+            action(["roteiro", "security", "ingest", "r.json"])
+        else {
+            panic!("expected Ingest");
+        };
+        assert_eq!(file, "r.json");
+        assert!(!json);
+    }
+
+    #[test]
+    fn ingest_reads_stdin_and_emits_json_like_its_neighbours() {
+        let SecurityAction::Ingest { file, json } =
+            action(["roteiro", "security", "ingest", "-", "--json"])
+        else {
+            panic!("expected Ingest");
+        };
+        assert_eq!(file, "-", "`-` is stdin, matching `roteiro load`");
+        assert!(json);
+    }
+
+    #[test]
+    fn list_defaults_to_every_analyzer_and_can_narrow() {
+        let SecurityAction::List { analyzer, json } = action(["roteiro", "security", "list"])
+        else {
+            panic!("expected List");
+        };
+        assert_eq!(analyzer, None);
+        assert!(!json);
+
+        let SecurityAction::List { analyzer, json } = action([
+            "roteiro",
+            "security",
+            "list",
+            "--analyzer",
+            "cargo-audit",
+            "--json",
+        ]) else {
+            panic!("expected List");
+        };
+        assert_eq!(analyzer.as_deref(), Some("cargo-audit"));
+        assert!(json);
+    }
+
+    #[test]
+    fn security_requires_an_action() {
+        assert!(Cli::try_parse_from(["roteiro", "security"]).is_err());
+    }
+
+    #[test]
+    fn the_analyzer_is_read_out_of_the_report() {
+        let report = br#"{"schema":"roteiro.findings/v1","analyzer":"cargo-audit"}"#;
+        assert_eq!(
+            report_analyzer(report, "r.json").expect("peek"),
+            "cargo-audit"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_report_fails_with_a_message_naming_it() {
+        let err = report_analyzer(b"not json", "r.json").expect_err("must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("r.json") && message.contains("not a normalized analyzer report"),
+            "unhelpful error: {message}"
+        );
+        // A JSON object that simply is not a report fails the same way, rather
+        // than being half-ingested.
+        assert!(report_analyzer(b"{\"nope\":1}", "r.json").is_err());
+    }
+
+    #[test]
+    fn the_json_shapes_are_the_documented_ones() {
+        let report = SecurityIngestReport {
+            layer: "security:cargo-audit:ab12cd34".to_owned(),
+            analyzer: "cargo-audit".to_owned(),
+            analyzer_version: "0.21.0".to_owned(),
+            runner: rto_graph::RunnerKind::Ingested,
+            isolation: rto_graph::Isolation::Ingested,
+            findings: 2,
+            removed: 3,
+            replaced: true,
+            report_digest: "abc".to_owned(),
+        };
+        let value = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(value["runner"], "ingested");
+        assert_eq!(value["isolation"], "ingested");
+        assert_eq!(value["removed"], 3);
+        assert_eq!(value["replaced"], true);
+
+        let listing = SecurityListing {
+            layers: Vec::new(),
+            findings: 0,
+        };
+        let value = serde_json::to_value(&listing).expect("serialize");
+        assert_eq!(value["findings"], 0);
+        assert!(value["layers"].as_array().expect("array").is_empty());
     }
 }
 
