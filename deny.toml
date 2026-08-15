@@ -7,9 +7,16 @@
 # was invisible to both the licence and the advisory check.
 
 [licenses]
-# Every entry up to "ISC" is permissive. `MPL-2.0` is not, and it is here by
-# **decision, not oversight** — ADR-0016 admits it, and this comment is the record
-# a future reader is owed:
+# Every entry up to "ISC" is a plain permissive **software** licence and needs no
+# argument. Two entries are not, and each is here by **decision, not oversight**,
+# with its reasoning recorded below: `MPL-2.0` (ADR-0016) and
+# `CDLA-Permissive-2.0` (ADR-0017). Adding a third means writing the same kind of
+# record — a licence outside the plain-permissive set is a decision, never an
+# expedient.
+#
+# ## `MPL-2.0` — ADR-0016
+#
+# This comment is the record a future reader is owed:
 #
 # * It entered for **`symphonia`** (ADR-0016): all seven `symphonia-*` crates are
 #   MPL-2.0. They provide the audio *format* read — codec, rate, bit depth,
@@ -29,11 +36,12 @@
 # If a *second* MPL-2.0 crate ever appears in the tree, re-run that reasoning for
 # it — this entry blessed a considered case, not the licence in general.
 #
-# Every entry up to "ISC" is a permissive **software** licence.
+# ## `CDLA-Permissive-2.0` — ADR-0017
 #
-# `CDLA-Permissive-2.0` is admitted by **decision, not oversight** (ADR-0017,
-# "Gates that see what the project actually ships"), and this comment is the
-# record a future reader is owed:
+# Admitted under ADR-0017, "Gates that see what the project actually ships". It
+# surfaced only when the gate was widened to the feature matrix (#318), having sat
+# unchecked in the lockfile until then. This comment is the record a future reader
+# is owed:
 #
 # * It entered for **`webpki-roots`** — Mozilla's CA root store, pulled in by
 #   `ureq` under the opt-in `models` feature, which is what fetches GGUF models
