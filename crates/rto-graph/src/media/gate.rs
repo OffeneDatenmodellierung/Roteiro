@@ -414,6 +414,17 @@ fn decode_samples(
     if width == 0 || data.len() / width > max_samples {
         return None;
     }
+    // A `data` chunk that is not a whole number of samples is a corrupt or
+    // truncated file. **Abstain rather than measure the aligned prefix**: the
+    // decoders below use `chunks_exact`, which silently drops the remainder, so
+    // measuring anyway would report an RMS for part of a clip and could refuse
+    // a blob on the strength of it. That is a false skip — a silently missing
+    // description — and avoiding it is what the whole gate is calibrated
+    // around. Handing an unreadable clip to the model costs one model load;
+    // refusing a readable one costs the operator something they cannot see.
+    if data.len() % width != 0 {
+        return None;
+    }
     let mut out = Vec::with_capacity(data.len() / width);
     match (format, bits) {
         // Unsigned, mid-scale at 128 — the one PCM width that is not signed.
@@ -512,6 +523,67 @@ mod tests {
         out.extend_from_slice(&u32::try_from(data.len()).expect("fits").to_le_bytes());
         out.extend_from_slice(&data);
         out
+    }
+
+    /// A WAV declaring `bits` per sample around a `data` chunk of exactly
+    /// `data` — which the caller may deliberately leave unaligned to the sample
+    /// width, unlike [`wav16`], whose `data` is always whole samples.
+    fn wav_with_data(bits: u16, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&u32::try_from(36 + data.len()).expect("fits").to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16_u32.to_le_bytes()); // chunk size
+        out.extend_from_slice(&1_u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1_u16.to_le_bytes()); // mono
+        out.extend_from_slice(&8000_u32.to_le_bytes()); // sample rate
+        out.extend_from_slice(&16_000_u32.to_le_bytes()); // byte rate
+        out.extend_from_slice(&2_u16.to_le_bytes()); // block align
+        out.extend_from_slice(&bits.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&u32::try_from(data.len()).expect("fits").to_le_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// **A `data` chunk that is not a whole number of samples must abstain, not
+    /// be measured on its aligned prefix.**
+    ///
+    /// The decoders use `chunks_exact`, which silently drops the remainder — so
+    /// without the length check a truncated file would be measured on whatever
+    /// happened to align. Every case here is all-zero bytes, which is the
+    /// dangerous shape: the aligned prefix measures `rms = 0`, so the gate would
+    /// **refuse** a clip it could not actually read. A false skip is a silently
+    /// missing description, and avoiding it is the rule the whole gate is
+    /// calibrated around.
+    #[test]
+    fn an_unaligned_data_chunk_abstains_rather_than_being_measured() {
+        // `(bits, data length)`, each length short of a whole sample. Only the
+        // integer-PCM widths this builder declares (`format = 1`), so every case
+        // reaches a real decoder arm and is refused for its length rather than
+        // for an unsupported format.
+        for (bits, len) in [(16_u16, 65_usize), (24, 64), (32, 66)] {
+            let wav = wav_with_data(bits, &vec![0_u8; len]);
+            assert!(
+                audio_stats(&wav).is_none(),
+                "{bits}-bit with a {len}-byte data chunk must not be measured",
+            );
+            assert!(
+                evaluate(MediaKind::Audio, &wav, GateThresholds::default()).is_none(),
+                "{bits}-bit with a {len}-byte data chunk must PASS — measuring the \
+                 aligned prefix of a corrupt clip would be a false skip",
+            );
+        }
+
+        // The same builder with an aligned chunk still measures, so the guard is
+        // rejecting misalignment and not simply everything it is handed.
+        assert_eq!(
+            audio_stats(&wav_with_data(16, &[0; 64])).expect("64 bytes is 32 whole samples"),
+            AudioStats {
+                peak: 0.0,
+                rms: 0.0
+            },
+        );
     }
 
     #[test]
