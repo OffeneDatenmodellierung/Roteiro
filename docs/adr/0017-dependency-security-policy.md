@@ -34,8 +34,16 @@ where the project's quality bar described gates that the pipeline did not run.
 
 Extends the quality-gate commitments of
 [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]], and governs the
-licence allowlist that
-[[docs/adr/0016-audio-metadata-extraction.md]] most recently amended.
+licence allowlist that ADR-0016 (audio metadata extraction) most recently amended.
+
+> ADR-0016 is referenced by name rather than by `[[link]]` because it is still in
+> flight in PR #316 and is not on `main`. The drift gate resolves authored links
+> against the graph, so a link to an unmerged file fails `roteiro check` — which
+> it did. Restore the `[[docs/adr/0016-audio-metadata-extraction.md]]` link when
+> #316 merges. The same applies to this ADR's MPL-2.0 precedent below: the
+> `MPL-2.0` allow-list entry and its recorded rationale arrive with #316, so on
+> `main` today the `CDLA-Permissive-2.0` entry is the first of its kind rather
+> than the second.
 
 ## Summary
 
