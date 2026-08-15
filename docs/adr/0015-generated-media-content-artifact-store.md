@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-15
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -56,7 +56,8 @@ Resolves issue #300.
   an explicit opt-in that always labels it as generated.
 - **A deterministic pre-generation gate** refuses obviously-empty inputs (silence,
   blank images) *before* a model is invoked — adopted as a complement, not as the
-  fix.
+  fix. Its refusals are **recorded with the value they measured**, so a skip is
+  legible rather than an indistinguishable hole.
 - The graph keeps rebuilding identically from source; `export_factset` stays a pure
   function of the tree.
 - **`EXTRACT_VERSION` bumps once** — this genuinely changes extraction output.
@@ -145,16 +146,23 @@ derivable from source alone.
 Moving content out of the graph must not make it hard to get back. This is a
 deliberate requirement of the decision, not an afterthought:
 
-- **`roteiro media build [--audio] [--vision] [--force]`** — generate content for
-  media blobs that lack a record for the current producer. Incremental by default:
-  only blobs with no record, or whose producer identity changed, are processed.
+- **`roteiro media build [--audio] [--vision] [--blob <id>] [--force]`** — generate
+  content for media blobs that lack a record for the current producer. Incremental
+  by default: only blobs with no record, or whose producer identity changed, are
+  processed. `--blob` narrows to one source blob, which is the per-blob rebuild the
+  explorer's action hands over.
 - **`roteiro media status [--json]`** — what exists, produced by which model, when,
   how much is stale relative to the currently-installed models, and what a rebuild
   would cost.
 - **`roteiro media clear [--producer <id>]`** — discard records, wholly or per
   producer, so a distrusted model's output can be dropped without touching the graph.
 - **UI**: the explorer surfaces generated content on a media node, always visibly
-  labelled with its producer, with a rebuild action for that blob.
+  labelled with its producer, with a rebuild action for that blob. The action
+  hands over the exact per-blob command (`roteiro media build --blob <id>
+  --force`) rather than running it: the explorer is a read-only view over graphs
+  a server already holds, and a rebuild means a multi-gigabyte model load, which
+  does not belong behind an HTTP handler in a build that is deliberately
+  llama-free ([[docs/adr/0010-explorer-web-app-vendored-js.md]]).
 - **Search/context**: `roteiro search --include-generated` (and the equivalent
   config toggle) folds generated text into results. It is **off by default**, and
   when on, every hit is visibly marked as generated and ranked in its own channel —
@@ -194,6 +202,46 @@ generated output is clearly labelled anyway. `--force` overrides it.
 noisy room tone, or a subtly-textured image will still confabulate. The gate raises
 the floor; only the artifact store fixes the label. It is adopted because it is
 cheap and helps, not because it addresses the defect in #300.
+
+#### As built
+
+| | Audio | Images |
+|---|---|---|
+| Measured | RMS amplitude over the whole clip, full scale `1.0` | variance of the luma plane, a pixel being `0.0`…`1.0` |
+| Default threshold | `silence_rms = 0.0001` (≈ **-80 dBFS**) | `image_variance = 0.00001` (σ ≈ **0.8 levels of 255**) |
+| Config key | `[media] silence_rms` | `[media] image_variance` |
+| Readable formats | **WAV only** | PNG and JPEG |
+
+`[media] gate = false` turns it off wholesale; `roteiro media build --force`
+overrides it for one run. Both defaults sit at the digital noise floor: 16-bit
+dither is `≈0.00003` of full scale and is still refused, while a hissy room tone
+at -60 dBFS (`0.001`) passes with an order of magnitude to spare. That asymmetry
+is deliberate — a false skip is a silently missing description, which is worse
+than a false pass now that generated output is labelled.
+
+Three limits are worth stating plainly, because none of them is visible from the
+threshold table:
+
+1. **MP3 and FLAC are not measured.** They are entropy-coded, and decoding them
+   means the audio decoder bundled inside llama.cpp — behind the very model load
+   the gate exists to avoid. The gate therefore **abstains** on those formats and
+   they reach the model exactly as before. Abstention is always a pass, never a
+   skip. Adding a decoder would be a new dependency for a check whose whole
+   justification is that it is nearly free.
+2. **Images are measured only in a build with an image codec** (`image-ocr` or
+   `image-vision`) — which is exactly the build that could generate a description
+   in the first place, so nothing is lost.
+3. **Everything above the floor still confabulates.** Quiet speech, room tone,
+   tape hiss, a faint gradient, a watermark, a scan of a blank page: all pass, and
+   a model handed any of them still returns confident invented prose. The gate
+   removes the unambiguous cases from the model's path. It does not make what the
+   model says about the rest any more true, and nothing here should be read as
+   claiming it does.
+
+The saving is real and is the reason the gate sits where it does: the llama.cpp
+engines are built lazily *inside* the producer's `generate`, and `build_media`
+evaluates the gate **before** calling it — so a repository of silent or blank
+assets completes a `media build` without loading a model at all.
 
 ### What this fixes for the operator
 
@@ -239,6 +287,8 @@ for something extracted from the source.
 
 ## Status
 
-For Review. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) as Stage 28. The
-silence/blank gate and the projector cache (#301) are complementary and tracked
-separately.
+For Review. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) as Stage 28, and
+implemented across two changes: the artifact store, its CLI and the search
+channel (Stage 28a), then the pre-generation gate and the explorer surfacing
+(Stage 28b). The projector cache (#301) is complementary and tracked separately;
+the gate compounds with it, since a refused blob loads no projector to cache.
