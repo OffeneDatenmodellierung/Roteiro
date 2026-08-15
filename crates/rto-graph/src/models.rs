@@ -315,6 +315,47 @@ pub const REGISTRY: &[ModelSpec] = &[
             }],
         }],
     },
+    // The current strongest offline instruct pick for a workstation. Qwen3.8-27B
+    // is a dense 27B declaring llama.cpp arch `qwen35`, which the pinned
+    // `llama-cpp-2` 0.1.154 registers (`LLM_ARCH_QWEN35` in its vendored
+    // `llama-arch.cpp`) — verified by loading this exact file with this repo's
+    // own build and getting a `<tool_call>` for a graph tool, not merely a
+    // successful load. A model Roteiro serves that cannot call
+    // `search`/`explain`/`path`/`debt` is much less useful to it.
+    //
+    // **`ggml-org` rather than `unsloth` deliberately.** Unsloth bundles the
+    // multi-token-prediction tensors inside the main GGUF, and on this build they
+    // are allocated whether or not the head is used — roughly 0.3–0.5 GB resident
+    // for something Roteiro never runs. `ggml-org` ships MTP as separate
+    // `mtp-*.gguf` files, so *not* listing them here is the whole saving.
+    //
+    // **Q4_K_M rather than Q5_K_M deliberately.** Generation on Metal is
+    // bandwidth-bound, so Q5 costs ~13–15% per token for the life of the model,
+    // against a quality difference not observable at 27B.
+    //
+    // The repo also publishes `mmproj-*.gguf` (it is a vision-language model
+    // upstream). Those are deliberately not listed: this entry is the *text*
+    // generative tier, and a Vision-tier entry could add the projector later.
+    ModelSpec {
+        name: "qwen3.8-27b",
+        kind: ModelKind::Generative,
+        role: ModelRole::Instruct,
+        tier: ResourceTier::High,
+        dim: 0,
+        licence: "Apache-2.0",
+        description: "Qwen3.8-27B (Q4_K_M GGUF) — strongest offline instruct pick, tool-calling, for a workstation",
+        size_mib: 18095,
+        variants: &[ModelVariant {
+            platform: Platform::Standard,
+            files: &[ModelFile {
+                name: "model.gguf",
+                url: "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf",
+                // Measured over the downloaded file: Hugging Face publishes no
+                // SHA-256 for it, so this can come from nowhere else.
+                sha256: "31629f53165ab6a7dad8c9847dcfd1fdf55829dac1e6e748f4a68581b0033d34",
+            }],
+        }],
+    },
     // Stage 20: opt-in coding + reasoning generative models for local use and
     // serving (ADR-0006). GGUF-only (the embedded tokenizer serves llama.cpp — no
     // separate `tokenizer.json`); `role` distinguishes them from the general
