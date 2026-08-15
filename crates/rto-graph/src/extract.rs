@@ -3126,15 +3126,22 @@ mod two_modality_teardown {
     /// table, no `f64::sin` and no `as i16`), so it needs no
     /// `cast_possible_truncation` suppression where the generator here did.
     ///
-    /// It cannot simply be *called* from here, though: it lives in an
-    /// integration-test target, and the library is rebuilt without `cfg(test)`
-    /// for those, so nothing in `tests/` is nameable from a unit test (and
-    /// nothing behind `#[cfg(test)]` in `src/` is nameable from `tests/`). What
-    /// crosses the boundary is the encoder's *output* — the bytes it already
-    /// commits under `tests/fixtures/audio/`, whose reproducibility
-    /// `fixtures_are_byte_reproducible` gates on every run. So this test reads
-    /// the artefact instead of re-implementing the tool, and the workspace is
-    /// left with exactly one WAV encoder.
+    /// It cannot simply be *called* from here, though — and a shared helper in
+    /// `src/` could not be called from there either. Both directions are
+    /// blocked, for *different* reasons:
+    ///
+    /// * `src/` → `tests/`: each file under `tests/` is compiled as its own
+    ///   crate, which links the library. The library cannot depend on them; they
+    ///   depend on it. `cfg(test)` has nothing to do with this direction.
+    /// * `tests/` → `src/`: the library is rebuilt *without* `--cfg test` when
+    ///   an integration-test crate links it, so a `#[cfg(test)]` helper in
+    ///   `src/` is simply absent from the artefact those crates see.
+    ///
+    /// So what crosses the boundary is the encoder's *output*, not its source:
+    /// the bytes it already commits under `tests/fixtures/audio/`, whose
+    /// reproducibility `fixtures_are_byte_reproducible` gates on every run. This
+    /// test reads the artefact instead of re-implementing the tool, and the
+    /// workspace is left with exactly one WAV encoder.
     ///
     /// `include_bytes!` rather than `std::fs::read`, so a renamed or deleted
     /// fixture is a build error rather than a panic inside a test whose subject

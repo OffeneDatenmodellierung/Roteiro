@@ -30,13 +30,18 @@
 //! # Consumers outside this file
 //!
 //! `tests/audio_ingest.rs` reads the whole set at run time. Less obviously,
-//! `syllables-16khz-mono-512ms.wav` is `include_bytes!`d by the two-modality
-//! teardown test *inside the library* (`src/extract.rs`), which cannot call
-//! [`wav::encode`] because the library is rebuilt without `cfg(test)` for
-//! integration-test targets. Sharing the committed artefact rather than the
-//! encoder's source is what keeps this the workspace's only WAV writer (#302),
-//! so renaming that one file is a compile error in `src/`, not just a failure
-//! here.
+//! `syllables-16khz-mono-512ms.wav` is included via `include_bytes!` by the
+//! two-modality teardown test *inside the library* (`src/extract.rs`).
+//!
+//! That test cannot call [`wav::encode`] because this file is compiled as its
+//! own crate, which links the library rather than the other way round — nothing
+//! here is nameable from `src/`. The reverse is blocked too, but for a
+//! different reason: the library is rebuilt *without* `--cfg test` when an
+//! integration-test crate links it, so a `#[cfg(test)]` helper in `src/` would
+//! not exist here either. Sharing the committed artefact rather than the
+//! encoder's source is therefore what keeps this the workspace's only WAV
+//! writer (#302), and renaming that one file is a compile error in `src/`, not
+//! just a failure here.
 
 use std::path::PathBuf;
 
