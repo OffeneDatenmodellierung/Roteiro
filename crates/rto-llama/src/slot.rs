@@ -29,6 +29,12 @@
 //! the slot to its pristine state — a later call re-initialises, which is what
 //! makes the mechanism testable without a GPU or an installed model.
 //!
+//! [`KeyedSlot`] is the same discipline for a resource that exists in **several
+//! distinct instances** rather than one: the multimodal projectors (issue #301),
+//! where a process can legitimately hold a vision one and an audio one at the
+//! same time and handing a caller the wrong one would be a correctness bug, not
+//! merely a waste. It is one slot per key, built once per key, released together.
+//!
 //! This module is compiled unconditionally — it needs neither the `llama` feature
 //! nor a C/C++ toolchain — so its unit tests cover the teardown mechanism on
 //! every platform CI runs on; only the media features and the shared backend
@@ -199,9 +205,107 @@ impl<T> EngineSlot<T> {
     }
 }
 
+/// A lazily initialised, explicitly releasable holder for **one native resource
+/// per key**.
+///
+/// [`EngineSlot`]'s sibling for the case where "the resource" is not a singleton:
+/// Roteiro's multimodal projectors (issue #301). A process may hold a vision
+/// projector and an audio projector at once, and they are not
+/// interchangeable — `mtmd_init_from_file` loads whichever modality the `mmproj`
+/// on disk implements, so a single unkeyed slot would hand an audio caller the
+/// vision projector and fail the request (or, worse, answer it wrongly). The key
+/// is therefore part of the mechanism rather than a caller's discipline; the
+/// per-key isolation is pinned by `tests::each_key_gets_its_own_resource`.
+///
+/// The keeping-it-alive and releasing-it rules are [`EngineSlot`]'s, unchanged:
+/// callers get an [`Arc`] handle, the lock is held across a build so "once per
+/// key" is true rather than likely, [`KeyedSlot::release`] drops the slot's own
+/// handles at a moment of our choosing, and an outstanding handle keeps its
+/// resource alive past that release rather than being freed underneath.
+///
+/// Entries live in a `Vec` and are found by linear scan. That is deliberate: a
+/// slot holds one or two projectors, so a map's hashing would cost more than the
+/// scan, and `K` then needs only [`Eq`] — no `Hash` bound on a key type
+/// (a `PathBuf`) chosen for what it *identifies*, not for how it hashes.
+pub struct KeyedSlot<K, T> {
+    entries: Mutex<Vec<(K, Arc<T>)>>,
+}
+
+impl<K, T> Default for KeyedSlot<K, T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, T> KeyedSlot<K, T> {
+    /// An empty slot. `const` so a slot can be a `static`. Unbounded in `K`, so an
+    /// empty slot costs no `Eq` — only looking a key *up* does.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Drop the slot's handle on **every** resource it holds and reset it to
+    /// empty.
+    ///
+    /// Returns how many were released — `0` when nothing was ever built, so
+    /// calling this on every exit path is free. Idempotent: a second call releases
+    /// nothing.
+    ///
+    /// A resource a caller still holds an [`Arc`] on outlives this call and dies
+    /// with that handle instead, exactly as in [`EngineSlot::release`]: release
+    /// ends a slot's ownership, it does not interrupt work in flight.
+    pub fn release(&self) -> usize {
+        // Take the entries out under the lock but let them *drop* after the guard:
+        // freeing several hundred megabytes of projector should not hold the slot.
+        let previous =
+            std::mem::take(&mut *self.entries.lock().unwrap_or_else(PoisonError::into_inner));
+        previous.len()
+    }
+}
+
+impl<K: Eq, T> KeyedSlot<K, T> {
+    /// The resource stored under `key`, building it with a **fallible** `init` on
+    /// first use and reusing it afterwards.
+    ///
+    /// `init` runs at most once per key per initialisation cycle. As in
+    /// [`EngineSlot::get_or_try_init`] the lock is held across it, so concurrent
+    /// first-callers for the same key resolve to exactly one initialisation. A
+    /// caller for a *different* key waits behind that build too — the honest cost
+    /// of the simpler mechanism, and a small one: each key is built once per
+    /// process, so the wait is bounded by the total number of keys, and Roteiro's
+    /// two projectors live in two different engines' slots anyway, so in practice
+    /// they never contend.
+    ///
+    /// A failure leaves the key **uninitialised** so a later caller retries; as in
+    /// the unkeyed slot, an error cannot be cloned for callers that did not run
+    /// `init`, so each reports its own.
+    ///
+    /// # Errors
+    /// Returns whatever `init` returned, unchanged.
+    pub fn get_or_try_init<E>(
+        &self,
+        key: K,
+        init: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Arc<T>, E> {
+        // As in `EngineSlot`: a poisoned lock only means another caller's `init`
+        // panicked, and the panic unwinds before anything is written, so the
+        // entries are still consistent. Recover rather than cascade.
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, resource)) = entries.iter().find(|(k, _)| *k == key) {
+            return Ok(Arc::clone(resource));
+        }
+        let resource = Arc::new(init()?);
+        entries.push((key, Arc::clone(&resource)));
+        Ok(resource)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::EngineSlot;
+    use super::{EngineSlot, KeyedSlot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -444,5 +548,214 @@ mod tests {
         let (slot, drops) = slot();
         assert!(!slot.release_if_unshared());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    /// The keyed slot the multimodal projectors live in (issue #301). Same
+    /// payload, same drop counting, no GPU and no model — so Ubuntu CI runs all
+    /// of this on the default feature set.
+    mod keyed {
+        use super::{KeyedSlot, Payload};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A fresh keyed slot plus the drop counter its payloads report to.
+        fn slot() -> (KeyedSlot<&'static str, Payload>, Arc<AtomicUsize>) {
+            (KeyedSlot::new(), Arc::new(AtomicUsize::new(0)))
+        }
+
+        #[test]
+        fn initialises_once_per_key_and_reuses() {
+            // The whole point of #301: N blobs through one projector must build it
+            // once, not N times.
+            let (slot, drops) = slot();
+            let inits = AtomicUsize::new(0);
+            let mut built = Vec::new();
+            for _ in 0..5 {
+                built.push(
+                    slot.get_or_try_init("vision", || -> Result<_, &str> {
+                        inits.fetch_add(1, Ordering::SeqCst);
+                        Ok(Payload(Arc::clone(&drops)))
+                    })
+                    .expect("built"),
+                );
+            }
+
+            assert_eq!(inits.load(Ordering::SeqCst), 1, "one projector for 5 blobs");
+            assert!(
+                built.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])),
+                "every caller got the same resource, not a look-alike copy"
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 0, "still resident");
+        }
+
+        #[test]
+        fn each_key_gets_its_own_resource() {
+            // The constraint that makes this slot *keyed*: a vision projector and
+            // an audio projector coexist in one process (issue #298), and an audio
+            // caller handed the vision one would fail — or silently answer with the
+            // wrong modality. Two keys, two resources, never shared.
+            let (slot, drops) = slot();
+            let inits = AtomicUsize::new(0);
+            let build = || -> Result<Payload, &'static str> {
+                inits.fetch_add(1, Ordering::SeqCst);
+                Ok(Payload(Arc::clone(&drops)))
+            };
+
+            let vision = slot.get_or_try_init("vision", build).expect("built");
+            let audio = slot.get_or_try_init("audio", build).expect("built");
+            assert_eq!(inits.load(Ordering::SeqCst), 2, "one build per key");
+            assert!(
+                !Arc::ptr_eq(&vision, &audio),
+                "distinct keys must not share one resource"
+            );
+
+            // ...and each key keeps returning *its* resource, not the other's.
+            assert!(Arc::ptr_eq(
+                &vision,
+                &slot
+                    .get_or_try_init("vision", || -> Result<Payload, &str> {
+                        panic!("must not rebuild a resident key")
+                    })
+                    .expect("resident")
+            ));
+            assert!(Arc::ptr_eq(
+                &audio,
+                &slot
+                    .get_or_try_init("audio", || -> Result<Payload, &str> {
+                        panic!("must not rebuild a resident key")
+                    })
+                    .expect("resident")
+            ));
+            assert_eq!(inits.load(Ordering::SeqCst), 2, "no rebuilds");
+        }
+
+        #[test]
+        fn release_drops_every_key_exactly_once_and_is_idempotent() {
+            let (slot, drops) = slot();
+            for key in ["vision", "audio"] {
+                slot.get_or_try_init(key, || -> Result<_, &str> {
+                    Ok(Payload(Arc::clone(&drops)))
+                })
+                .expect("built");
+            }
+
+            assert_eq!(slot.release(), 2, "both projectors reported released");
+            assert_eq!(drops.load(Ordering::SeqCst), 2, "both actually dropped");
+            assert_eq!(slot.release(), 0, "a second release has nothing to drop");
+            assert_eq!(drops.load(Ordering::SeqCst), 2, "no double free");
+        }
+
+        #[test]
+        fn release_is_safe_when_never_initialised() {
+            // Every teardown path calls this unconditionally, including on a build
+            // that never touched a media blob.
+            let (slot, drops) = slot();
+            assert_eq!(slot.release(), 0);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn an_outstanding_handle_keeps_its_resource_alive_past_release() {
+            // Teardown ordering, expressed as ownership: releasing the slot while a
+            // request is mid-flight must not free the projector under it. This is
+            // the property that makes "projectors die before the engine, which dies
+            // before the backend" hold even when release lands mid-run.
+            let (slot, drops) = slot();
+            let held = slot
+                .get_or_try_init("audio", || -> Result<_, &str> {
+                    Ok(Payload(Arc::clone(&drops)))
+                })
+                .expect("built");
+
+            assert_eq!(slot.release(), 1, "the slot gave up its own handle");
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "an in-flight caller is never freed underneath"
+            );
+
+            drop(held);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "freed with the last handle"
+            );
+        }
+
+        #[test]
+        fn release_resets_the_slot_for_a_later_run() {
+            let (slot, drops) = slot();
+            slot.get_or_try_init("vision", || -> Result<_, &str> {
+                Ok(Payload(Arc::clone(&drops)))
+            })
+            .expect("built");
+            assert_eq!(slot.release(), 1);
+
+            assert!(
+                slot.get_or_try_init("vision", || -> Result<_, &str> {
+                    Ok(Payload(Arc::clone(&drops)))
+                })
+                .is_ok(),
+                "a released slot re-initialises on demand"
+            );
+            assert_eq!(slot.release(), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 2, "each dropped once");
+        }
+
+        #[test]
+        fn a_failed_init_is_not_cached_and_the_key_stays_retryable() {
+            // A projector that failed to load (a truncated `mmproj`, say) is an
+            // error the *caller* must see; it is not a verdict recorded for every
+            // later blob, and it must leave nothing resident to release.
+            let (slot, drops) = slot();
+            assert_eq!(
+                slot.get_or_try_init("audio", || Err::<Payload, _>("boom"))
+                    .err(),
+                Some("boom")
+            );
+            assert_eq!(slot.release(), 0, "a failed init left nothing resident");
+
+            assert!(
+                slot.get_or_try_init("audio", || -> Result<_, &str> {
+                    Ok(Payload(Arc::clone(&drops)))
+                })
+                .is_ok(),
+                "a later caller retries rather than inheriting the failure"
+            );
+            assert_eq!(slot.release(), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn concurrent_callers_build_one_resource_per_key() {
+            // "Once per key" has to hold under a race, not merely usually: two
+            // threads that both loaded the same 715 MB projector would mean two
+            // sets of GPU buffers to account for at teardown.
+            let (slot, drops) = slot();
+            let inits = AtomicUsize::new(0);
+
+            std::thread::scope(|scope| {
+                for i in 0..8 {
+                    let slot = &slot;
+                    let (inits, drops) = (&inits, &drops);
+                    scope.spawn(move || {
+                        let key = if i % 2 == 0 { "vision" } else { "audio" };
+                        let got = slot.get_or_try_init(key, || -> Result<_, &str> {
+                            inits.fetch_add(1, Ordering::SeqCst);
+                            Ok(Payload(Arc::clone(drops)))
+                        });
+                        assert!(got.is_ok());
+                    });
+                }
+            });
+
+            assert_eq!(
+                inits.load(Ordering::SeqCst),
+                2,
+                "eight callers, two keys, two resources"
+            );
+            assert_eq!(slot.release(), 2);
+            assert_eq!(drops.load(Ordering::SeqCst), 2);
+        }
     }
 }

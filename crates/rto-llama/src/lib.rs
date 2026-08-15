@@ -30,4 +30,4 @@ pub mod slot;
 pub use engine::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
-pub use slot::EngineSlot;
+pub use slot::{EngineSlot, KeyedSlot};

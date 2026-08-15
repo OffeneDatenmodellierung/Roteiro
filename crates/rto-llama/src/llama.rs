@@ -38,9 +38,32 @@
 //! backend" ordering now spans engines as well as struct fields: the backend is
 //! freed only once *no* engine borrows it, which is a fact about `Arc` ownership
 //! rather than a rule callers have to remember.
+//!
+//! **Projector residency (issue #301).** The multimodal projector an `mmproj`
+//! GGUF holds used to be loaded per media blob: a sync over twenty audio files
+//! re-read the 688 MB Voxtral projector twenty times, building and freeing a clip
+//! context and its GPU buffers each time. It is now built once per
+//! `(loaded model, mmproj path)` and reused — see [`Projector`] and
+//! [`LlamaEngine::projector`].
+//!
+//! What that is worth depends on the host, and less than the issue expected on
+//! the one it was measured on: an `mmproj` is `mmap`ed, so a repeat load of a
+//! page-cache-warm file costs system CPU rather than wall-clock. Over a six-clip
+//! sync on an M5 Pro the five avoided loads moved wall time by less than half a
+//! percent while cutting kernel CPU by about a third; the ~5 s per clip reported
+//! in #299 is the clip's own encode-and-generate cost, which this does not touch.
+//! The reload was still pure waste, and on a host that cannot keep 688 MB
+//! resident it is I/O rather than bookkeeping.
+//!
+//! Caching it adds a third native object to the teardown chain, and it is placed
+//! *inside* the existing one rather than beside it: a projector is owned by the
+//! [`ModelCache`] entry of the very model it was initialised over, so it is freed
+//! when that model is evicted or when the engine is dropped, and always before the
+//! backend. Nothing new has to be released, and nothing new can be forgotten.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use llama_cpp_2::ChatTemplateError;
@@ -57,6 +80,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
 use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo};
+use crate::slot::KeyedSlot;
 
 /// Default context window when the caller does not set one.
 const DEFAULT_N_CTX: u32 = 4096;
@@ -111,7 +135,11 @@ pub struct Served {
 /// (`llama_backend_free` is the last call of a process): freeing a model is what
 /// releases its ggml buffers — and, on Metal, deregisters them from the device's
 /// residency set. So `cache` (the resident models) is declared first and
-/// `backend` last. See also [`crate::llama`]'s note on teardown: an engine that
+/// `backend` last. The cached multimodal projectors (issue #301) own ggml buffers
+/// of their own, and they sit *inside* `cache` — each in the [`Loaded`] entry of
+/// the model it is bound to — so dropping this struct frees projectors, then
+/// models, then the backend handle, in that order and by construction. See also
+/// [`crate::llama`]'s note on teardown: an engine that
 /// is never dropped at all leaves that residency set non-empty and aborts the
 /// process in ggml-metal's exit-time teardown (Roteiro issue #291), which is why
 /// callers must not park an engine in a `static`.
@@ -129,15 +157,37 @@ pub struct LlamaEngine {
     cache: Mutex<ModelCache>,
     served: Vec<Served>,
     n_ctx: u32,
+    /// How many multimodal projectors this engine has loaded since it was built;
+    /// see [`LlamaEngine::projector_inits`]. Not native state — a counter, so its
+    /// position among the fields carries no teardown meaning.
+    projector_inits: AtomicUsize,
     backend: Arc<LlamaBackend>,
 }
 
 /// One loaded model held in the residency cache.
+///
+/// **Field order is load-bearing here too**: `projectors` is declared before
+/// `model`, so evicting an entry frees its multimodal projectors before the model
+/// they were initialised over. (Each [`Projector`] also carries its own handle on
+/// that model, so the ordering holds for a projector handed out to an in-flight
+/// request as well — this declaration order is the same statement made where a
+/// reader of the cache will look for it.)
 struct Loaded {
     name: String,
     /// On-disk GGUF size, used as a proxy for the model's memory footprint when
     /// deciding what to evict (the real RSS is not cheaply available).
     bytes: u64,
+    /// The multimodal projectors built over *this* loaded model, one per `mmproj`
+    /// path (issue #301). Living in the model's own cache entry is what keys the
+    /// cache by the model as well as by the projector: a different model — or the
+    /// same model reloaded after eviction — gets a different entry and so builds
+    /// its own projector, which is required, because `mtmd_init_from_file` records
+    /// the `llama_model *` it was given and every later `tokenize`/`eval_chunks`
+    /// call dereferences it.
+    ///
+    /// Shared as an [`Arc`] so a caller can hold the slot (and so keep a projector
+    /// resident) after the cache lock is released, exactly as it does the model.
+    projectors: Arc<KeyedSlot<PathBuf, Projector>>,
     /// The loaded model, shared so a request can keep decoding on it after the
     /// cache lock is dropped (and even after eviction) — the [`Arc`] outlives the
     /// cache entry for the duration of any in-flight generation.
@@ -147,6 +197,60 @@ struct Loaded {
     /// different locks and decode concurrently. Cloned out under the cache lock
     /// and held across the whole decode.
     gen_lock: Arc<Mutex<()>>,
+}
+
+/// A multimodal projector, bound to the model it was initialised over.
+///
+/// `mtmd_init_from_file(mmproj, text_model, …)` does not copy the model: the
+/// returned `mtmd_context` keeps the `llama_model *` and dereferences it on every
+/// `mtmd_tokenize` and `mtmd_eval_chunks`. A projector is therefore **not**
+/// reusable across models, and reusing one whose model has been freed would be a
+/// use-after-free — the sharp edge of caching something llama.cpp used to rebuild
+/// per call.
+///
+/// So the binding is carried by the value rather than by a rule: this struct owns
+/// a handle on that model, and `mtmd` is declared **before** `model` so Rust's
+/// field order frees the projector first and releases the model handle second. A
+/// [`Projector`] is thus safe to use for as long as it exists, wherever it exists,
+/// which is what lets one be handed to a caller and outlive the cache entry it
+/// came from.
+///
+/// **Sharing one costs no new serialisation.** An `mtmd_context` is no more
+/// thread-safe than the rest of llama.cpp, and a cached one is reachable by every
+/// request for its model where a per-call one was not — but those requests already
+/// take that model's `gen_lock` for the whole of `chat_media`, and a projector is
+/// only ever reachable through the model it belongs to. Same projector implies
+/// same model implies same lock, so two threads cannot be inside one projector at
+/// once. Requests to a *different* model still run concurrently, exactly as
+/// before.
+struct Projector {
+    /// The loaded projector. Dropped before `model`.
+    mtmd: MtmdContext,
+    /// The model `mtmd` holds a raw pointer to, kept alive for its lifetime.
+    model: Arc<LlamaModel>,
+}
+
+impl Projector {
+    /// The loaded projector.
+    fn mtmd(&self) -> &MtmdContext {
+        &self.mtmd
+    }
+
+    /// The model this projector is bound to — the only model it may be used with,
+    /// so the media path reads it from here rather than being passed one
+    /// separately that would have to be *checked* to be the same.
+    fn model(&self) -> &LlamaModel {
+        &self.model
+    }
+}
+
+/// What [`LlamaEngine::resolve`] hands back: shared handles onto one resident
+/// model, held by the caller for the duration of a request so that neither
+/// eviction nor a concurrent release can pull them away mid-generation.
+struct Resolved {
+    model: Arc<LlamaModel>,
+    gen_lock: Arc<Mutex<()>>,
+    projectors: Arc<KeyedSlot<PathBuf, Projector>>,
 }
 
 /// A memory-bounded LRU of loaded models. Entries are ordered least- to
@@ -213,11 +317,25 @@ impl LlamaEngine {
             backend,
             served,
             n_ctx: if n_ctx == 0 { DEFAULT_N_CTX } else { n_ctx },
+            projector_inits: AtomicUsize::new(0),
             cache: Mutex::new(ModelCache {
                 budget_bytes,
                 loaded: Vec::new(),
             }),
         })
+    }
+
+    /// How many multimodal projectors this engine has loaded since it was built.
+    ///
+    /// The number issue #301 is about, and the only externally visible difference
+    /// between a cached projector and a rebuilt one: a media request served from
+    /// the cache does not increment it, so a sync over N blobs of one modality
+    /// leaves this at `1` where it used to leave it at `N`. Two modalities in one
+    /// engine leave it at `2`. Exposed so a test can assert on the count rather
+    /// than on wall-clock, which would be flaky.
+    #[must_use]
+    pub fn projector_inits(&self) -> usize {
+        self.projector_inits.load(Ordering::Relaxed)
     }
 
     /// Ensure the model named `name` (GGUF at `path`) is resident in `cache`,
@@ -248,6 +366,9 @@ impl LlamaEngine {
             cache.loaded.push(Loaded {
                 name: name.to_owned(),
                 bytes,
+                // A freshly loaded model has no projectors yet: the first media
+                // request builds one, and it is bound to *this* model instance.
+                projectors: Arc::new(KeyedSlot::new()),
                 model: Arc::new(model),
                 gen_lock: Arc::new(Mutex::new(())),
             });
@@ -260,22 +381,72 @@ impl LlamaEngine {
     }
 
     /// Ensure `name` (GGUF at `path`) is resident and hand back cloned shared
-    /// handles — the model and its per-instance generation lock — releasing the
-    /// cache lock before returning. Holding the returned `Arc`s lets the caller
-    /// generate without pinning the cache: other models stay servable, and this
-    /// model survives eviction until the last handle drops.
-    fn resolve(
-        &self,
-        name: &str,
-        path: &Path,
-    ) -> Result<(Arc<LlamaModel>, Arc<Mutex<()>>), EngineError> {
+    /// handles — the model, its per-instance generation lock, and its projector
+    /// slot — releasing the cache lock before returning. Holding the returned
+    /// `Arc`s lets the caller generate without pinning the cache: other models
+    /// stay servable, and this model (with its projectors) survives eviction until
+    /// the last handle drops.
+    fn resolve(&self, name: &str, path: &Path) -> Result<Resolved, EngineError> {
         let mut cache = self
             .cache
             .lock()
             .map_err(|_| EngineError::Inference("engine mutex poisoned".to_owned()))?;
         let idx = self.ensure_loaded(&mut cache, name, path)?;
         let l = &cache.loaded[idx];
-        Ok((Arc::clone(&l.model), Arc::clone(&l.gen_lock)))
+        Ok(Resolved {
+            model: Arc::clone(&l.model),
+            gen_lock: Arc::clone(&l.gen_lock),
+            projectors: Arc::clone(&l.projectors),
+        })
+    }
+
+    /// The projector `mmproj` describes, over the model `resolved` names —
+    /// **loaded once and reused** for every later media blob (issue #301).
+    ///
+    /// The cache key is the pair `(loaded model, mmproj path)`, and each half is
+    /// there for its own reason:
+    ///
+    /// * the **mmproj path** because two projectors legitimately coexist in one
+    ///   process (issue #298) and they are not interchangeable — an audio request
+    ///   handed the vision projector fails `support_audio`. It is the path rather
+    ///   than a digest of the file because that is what identifies a projector to
+    ///   every other part of Roteiro (`Served::mmproj`, the model store's
+    ///   `mmproj.gguf`); a hash would cost a re-read of the 715 MB file to detect
+    ///   a change that would mean the model store was edited under a running
+    ///   process, which is not a case this cache is trying to survive.
+    /// * the **model** because an `mtmd_context` holds the `llama_model *` it was
+    ///   built with (see [`Projector`]), so a projector is only ever sound for
+    ///   that one model *instance*. That half of the key is structural rather than
+    ///   compared: the slot lives in the model's own [`Loaded`] entry, so a
+    ///   different model — or the same model reloaded after eviction — cannot
+    ///   reach this one's projectors.
+    ///
+    /// The [`MtmdContextParams`] are not part of the key because they are constant
+    /// (`default()`); if a request ever chose them, they would have to be.
+    ///
+    /// Runs under the caller's per-model generation lock, like every other
+    /// `LlamaModel` FFI call on this path.
+    fn projector(&self, resolved: &Resolved, mmproj: &Path) -> Result<Arc<Projector>, EngineError> {
+        let mmproj_path = mmproj
+            .to_str()
+            .ok_or_else(|| EngineError::Inference("non-UTF-8 mmproj path".to_owned()))?;
+        resolved
+            .projectors
+            .get_or_try_init(mmproj.to_path_buf(), || {
+                let mtmd = MtmdContext::init_from_file(
+                    mmproj_path,
+                    &resolved.model,
+                    &MtmdContextParams::default(),
+                )
+                .map_err(|e| EngineError::Inference(format!("init projector: {e}")))?;
+                self.projector_inits.fetch_add(1, Ordering::Relaxed);
+                Ok(Projector {
+                    mtmd,
+                    // The handle that makes the projector safe to use wherever it
+                    // travels, rather than only while this cache entry lives.
+                    model: Arc::clone(&resolved.model),
+                })
+            })
     }
 
     /// Resolve a served model name to its GGUF path.
@@ -351,26 +522,28 @@ impl LlamaEngine {
     }
 
     /// Multimodal chat (ADR-0006): project the request's `modality` media
-    /// (images or audio) through `mmproj` and generate. The media are placed at
+    /// (images or audio) through `projector` and generate. The media are placed at
     /// media markers inside the last user turn; the use case is just a prompt
     /// ("transcribe the text in this image" / "transcribe this audio"). Both
     /// modalities share this path — the projector decodes the raw file bytes
     /// (images via `stb_image`, audio via miniaudio) and only the support check
     /// and which byte vectors are read differ.
+    ///
+    /// The projector arrives already loaded, from [`LlamaEngine::projector`]'s
+    /// per-model cache (issue #301) — this used to re-read the `mmproj` GGUF on
+    /// every call. The model is read from the projector rather than passed
+    /// alongside it, because the only model this projector may be used with is the
+    /// one it is bound to.
     fn chat_media(
         &self,
-        model: &LlamaModel,
-        mmproj: &Path,
+        projector: &Projector,
         req: &ChatRequest,
         modality: Modality,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<CompletionStats, EngineError> {
-        let mmproj = mmproj
-            .to_str()
-            .ok_or_else(|| EngineError::Inference("non-UTF-8 mmproj path".to_owned()))?;
-        let mtmd = MtmdContext::init_from_file(mmproj, model, &MtmdContextParams::default())
-            .map_err(|e| EngineError::Inference(format!("init projector: {e}")))?;
-        if !modality.supported(&mtmd) {
+        let model = projector.model();
+        let mtmd = projector.mtmd();
+        if !modality.supported(mtmd) {
             return Err(EngineError::Inference(format!(
                 "this projector does not support {}",
                 modality.noun(),
@@ -382,7 +555,7 @@ impl LlamaEngine {
         let bitmaps = modality
             .media(req)
             .iter()
-            .map(|blob| MtmdBitmap::from_buffer(&mtmd, blob, false))
+            .map(|blob| MtmdBitmap::from_buffer(mtmd, blob, false))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| EngineError::Inference(format!("decode {}: {e}", modality.noun())))?;
         let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
@@ -404,7 +577,7 @@ impl LlamaEngine {
         // `eval_chunks` decodes text + projected media (image/audio) embeddings
         // into the context and returns the new position to continue generating.
         let n_past = chunks
-            .eval_chunks(&mtmd, &ctx, 0, 0, 512, true)
+            .eval_chunks(mtmd, &ctx, 0, 0, 512, true)
             .map_err(|e| EngineError::Inference(format!("mtmd eval: {e}")))?;
 
         let (completion_tokens, finish_reason) = run_generation(
@@ -675,7 +848,8 @@ impl Engine for LlamaEngine {
         // Resolve + load under the cache lock, clone the shared handles, then
         // release the lock so generation on a *different* model can run
         // concurrently (see the module-level "Concurrency" note).
-        let (model, gen_lock) = self.resolve(&req.model, &path)?;
+        let resolved = self.resolve(&req.model, &path)?;
+        let model = &resolved.model;
 
         // Serialise *all* interactions with this model instance (llama.cpp is not
         // assumed thread-safe): acquire the per-model generation lock BEFORE any
@@ -684,7 +858,8 @@ impl Engine for LlamaEngine {
         // unserialised. The lock is per-model, so a *different* model still decodes
         // concurrently; nothing below re-locks it (`chat_text`/`chat_media` borrow
         // the already-locked model).
-        let _gen = gen_lock
+        let _gen = resolved
+            .gen_lock
             .lock()
             .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
@@ -707,8 +882,13 @@ impl Engine for LlamaEngine {
         }
 
         match (modality, mmproj.as_deref()) {
-            (None, _) => self.chat_text(&model, req, on_token),
-            (Some(m), Some(mmproj)) => self.chat_media(&model, mmproj, req, m, on_token),
+            (None, _) => self.chat_text(model, req, on_token),
+            (Some(m), Some(mmproj)) => {
+                // Built on the first media blob for this (model, mmproj) pair and
+                // reused by every one after it (issue #301).
+                let projector = self.projector(&resolved, mmproj)?;
+                self.chat_media(&projector, req, m, on_token)
+            }
             (Some(m), None) => Err(EngineError::InvalidRequest(format!(
                 "model `{}` is text-only and cannot accept {}",
                 req.model,
@@ -723,8 +903,10 @@ impl Engine for LlamaEngine {
             .ok_or_else(|| EngineError::UnknownModel(model.to_owned()))?;
         // Resolve + load under the cache lock, then release it before running the
         // (potentially long) embedding pass; serialise on this model instance.
-        let (model_ref, gen_lock) = self.resolve(model, &path)?;
-        let _gen = gen_lock
+        let resolved = self.resolve(model, &path)?;
+        let model_ref = &resolved.model;
+        let _gen = resolved
+            .gen_lock
             .lock()
             .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
