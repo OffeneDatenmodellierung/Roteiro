@@ -74,11 +74,11 @@ pub use links::{
     EXTERNAL_REF_KIND, LINKS_REF, external_ref_key, external_ref_node, external_ref_target,
 };
 pub use media::{
-    CandidateCount, GeneratedContent, MAX_MODEL_ID, MAX_PROMPT, MEDIA_PRODUCER_PREFIX,
-    MEDIA_SCHEMA, MediaBlob, MediaBuildOptions, MediaBuildReport, MediaError, MediaFilter,
-    MediaKind, MediaProducer, MediaRecord, MediaStatus, MediaWrite, Producer, ProducerId,
-    ProducerSummary, ProducerSummaryAvailable, build_media, is_valid_model_id, media_blobs,
-    status as media_status,
+    CandidateCount, GateReason, GateThresholds, GeneratedContent, MAX_MODEL_ID, MAX_PROMPT,
+    MEDIA_PRODUCER_PREFIX, MEDIA_SCHEMA, MediaBlob, MediaBuildOptions, MediaBuildReport,
+    MediaError, MediaFilter, MediaKind, MediaOutcome, MediaProducer, MediaRecord, MediaSkip,
+    MediaStatus, MediaWrite, Producer, ProducerId, ProducerSummary, ProducerSummaryAvailable,
+    SkipEntry, build_media, is_valid_model_id, media_blobs, status as media_status,
 };
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]

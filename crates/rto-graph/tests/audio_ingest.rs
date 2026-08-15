@@ -285,7 +285,7 @@ mod generation {
         MediaBuildOptions {
             audio: true,
             vision: false,
-            force: false,
+            ..MediaBuildOptions::default()
         }
     }
 

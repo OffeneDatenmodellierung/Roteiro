@@ -257,6 +257,74 @@ CREATE INDEX idx_media_content_producer ON media_content(producer);
 CREATE INDEX idx_media_content_kind ON media_content(kind);
 ";
 
+/// Migration 10: record the **pre-generation gate**'s refusals (ADR-0015).
+///
+/// A blob the gate refuses — digital silence, a flat-colour image — gets a
+/// `media_content` row like any other, but one carrying the *measurement* that
+/// refused it instead of generated text. Without it a skip would be an
+/// indistinguishable hole, and an operator could not tell **not generated** from
+/// **generated nothing**; recording an invisible skip would be its own small lie
+/// in an ADR about not lying.
+///
+/// The table is rebuilt rather than `ALTER`ed because the point of the three new
+/// columns is a constraint `ALTER TABLE` cannot add: **a skip carries a
+/// measurement and no text, and a generated row is the exact converse**. That is
+/// the invariant the whole change rests on — a gated blob must not put text
+/// anywhere — and it belongs in the schema, not only in the Rust type that
+/// happens to write it today. `text` stays `NOT NULL`, so a skip stores `''`,
+/// which the `CHECK` requires.
+///
+/// The rebuild copies every existing row with all three columns `NULL` (every
+/// pre-existing record was generated, by construction — the gate did not exist),
+/// then drops the old table. Dropping it takes its indexes with it, so the three
+/// are recreated verbatim below.
+const M0010_MEDIA_GATE: &str = "
+CREATE TABLE media_content_v2 (
+    id             INTEGER PRIMARY KEY,
+    blob_id        TEXT NOT NULL,
+    path           TEXT NOT NULL,
+    kind           TEXT NOT NULL CHECK (kind IN ('audio','vision')),
+    producer       TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    model_digest   TEXT NOT NULL,
+    quantisation   TEXT NOT NULL,
+    mmproj_digest  TEXT NOT NULL,
+    prompt         TEXT NOT NULL,
+    temperature    REAL NOT NULL,
+    max_tokens     INTEGER NOT NULL,
+    tool_version   TEXT NOT NULL,
+    generation     INTEGER NOT NULL,
+    produced_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    text           TEXT NOT NULL,
+    confidence     REAL,
+    skip_reason    TEXT CHECK (skip_reason IS NULL OR skip_reason IN ('silence','uniform')),
+    skip_value     REAL,
+    skip_threshold REAL,
+    -- A confidence signal, when a runtime exposes one, is a probability. It is
+    -- **not** the score an `inferred` edge carries and must never be read as one.
+    CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
+    -- The two outcomes, and nothing in between. Either the model ran (no skip
+    -- columns at all), or the gate refused the blob before it did — in which
+    -- case the measurement is complete AND the row holds no generated text.
+    CHECK (
+        (skip_reason IS NULL AND skip_value IS NULL AND skip_threshold IS NULL)
+        OR (skip_value IS NOT NULL AND skip_threshold IS NOT NULL AND text = '')
+    )
+);
+INSERT INTO media_content_v2 (
+    id, blob_id, path, kind, producer, model, model_digest, quantisation, mmproj_digest,
+    prompt, temperature, max_tokens, tool_version, generation, produced_at, text, confidence
+) SELECT
+    id, blob_id, path, kind, producer, model, model_digest, quantisation, mmproj_digest,
+    prompt, temperature, max_tokens, tool_version, generation, produced_at, text, confidence
+FROM media_content;
+DROP TABLE media_content;
+ALTER TABLE media_content_v2 RENAME TO media_content;
+CREATE UNIQUE INDEX idx_media_content_blob_producer ON media_content(blob_id, producer);
+CREATE INDEX idx_media_content_producer ON media_content(producer);
+CREATE INDEX idx_media_content_kind ON media_content(kind);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -294,6 +362,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 9,
         sql: M0009_MEDIA_CONTENT,
+    },
+    Migration {
+        version: 10,
+        sql: M0010_MEDIA_GATE,
     },
 ];
 
@@ -375,7 +447,7 @@ mod tests {
             );",
         )
         .expect("bootstrap");
-        for m in MIGRATIONS.iter().take_while(|m| m.version < 9) {
+        for m in MIGRATIONS.iter().take_while(|m| m.version < 10) {
             conn.execute_batch(m.sql).expect("legacy migration");
             conn.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
@@ -391,7 +463,7 @@ mod tests {
 
         apply(&mut conn).expect("upgrade");
 
-        assert_eq!(recorded_versions(&conn).last().copied(), Some(9));
+        assert_eq!(recorded_versions(&conn).last().copied(), Some(10));
         let nodes: i64 = conn
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
             .expect("count");

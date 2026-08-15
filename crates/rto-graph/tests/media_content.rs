@@ -130,7 +130,7 @@ fn audio_only() -> MediaBuildOptions {
     MediaBuildOptions {
         audio: true,
         vision: false,
-        force: false,
+        ..MediaBuildOptions::default()
     }
 }
 
@@ -404,7 +404,10 @@ fn a_different_producer_writes_a_new_record_beside_the_old_one() {
         ["blob-silence"].into_iter().collect(),
         "…of the same blob",
     );
-    let texts: Vec<&str> = records.iter().map(|r| r.content.text.as_str()).collect();
+    let texts: Vec<&str> = records
+        .iter()
+        .map(|r| r.outcome.text().expect("both records were generated"))
+        .collect();
     assert!(texts.contains(&CONFABULATION));
     assert!(texts.iter().any(|t| t.contains("no speech")));
 
@@ -637,7 +640,7 @@ fn a_record_round_trips_its_whole_evidence_chain() {
         path: "assets/silence.wav",
         producer: &identity,
         tool_version: "9.9.9",
-        content: &content,
+        outcome: &rto_graph::MediaOutcome::Generated(content.clone()),
         replace: false,
     };
     assert!(store.record_media_content(&write).expect("write"));
@@ -655,7 +658,10 @@ fn a_record_round_trips_its_whole_evidence_chain() {
     assert_eq!(record.path, "assets/silence.wav");
     assert_eq!(record.tool_version, "9.9.9");
     assert_eq!(record.generation, 1);
-    assert_eq!(record.content, content);
+    assert_eq!(
+        record.outcome,
+        rto_graph::MediaOutcome::Generated(content.clone())
+    );
     assert_eq!(record.producer, identity);
     assert_eq!(record.producer_id, identity.id());
 

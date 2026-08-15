@@ -95,15 +95,22 @@ pub fn installed(opts: MediaBuildOptions) -> Result<Vec<Box<dyn MediaProducer>>,
 }
 
 /// The audio generator, or why there isn't one.
+///
+/// Availability is decided from the **installed files** ([`asr_producer`] returns
+/// `None` when a pinned file is missing), not by building the engine: the engine
+/// is loaded lazily on the first [`MediaProducer::generate`] that actually needs
+/// it. That is what lets the [pre-generation gate](super::gate) save the load —
+/// a build over nothing but silent clips never reaches `generate`, so the 715 MB
+/// projector is never touched (issue #301).
 #[cfg(feature = "audio-transcribe")]
 fn audio_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
     let producer = asr_producer().ok_or_else(|| MediaError::ModelMissing {
         model: ASR_MODEL.to_owned(),
     })?;
-    let engine = asr_engine().ok_or_else(|| MediaError::ModelMissing {
-        model: ASR_MODEL.to_owned(),
-    })?;
-    Ok(Box::new(LlamaProducer { producer, engine }))
+    Ok(Box::new(LlamaProducer {
+        producer,
+        engine: asr_engine,
+    }))
 }
 
 #[cfg(not(feature = "audio-transcribe"))]
@@ -114,16 +121,17 @@ fn audio_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
     })
 }
 
-/// The vision generator, or why there isn't one.
+/// The vision generator, or why there isn't one. Lazy, for the same reason as
+/// [`audio_producer`].
 #[cfg(feature = "image-vision")]
 fn vision_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
     let producer = vlm_producer().ok_or_else(|| MediaError::ModelMissing {
         model: VLM_MODEL.to_owned(),
     })?;
-    let engine = vlm_engine().ok_or_else(|| MediaError::ModelMissing {
-        model: VLM_MODEL.to_owned(),
-    })?;
-    Ok(Box::new(LlamaProducer { producer, engine }))
+    Ok(Box::new(LlamaProducer {
+        producer,
+        engine: vlm_engine,
+    }))
 }
 
 #[cfg(not(feature = "image-vision"))]
@@ -212,10 +220,18 @@ fn quantisation_of(url: &str) -> String {
 /// A generator backed by the shared llama.cpp engine — the same `mtmd`
 /// multimodal path for both modalities, differing only in whether the blob is
 /// handed over as audio or as an image.
+///
+/// `engine` is a **function, not an engine**. Holding the `Arc` here would load
+/// the model when the producer was assembled, which is before `build_media` has
+/// looked at a single blob — so a repository of silent clips would pay the 715 MB
+/// projector load to then skip everything. Resolving it inside `generate` means
+/// the load happens on the first blob that actually reaches the model, and never
+/// at all if none does. The slot behind it is process-wide and idempotent
+/// ([`asr_engine`] / [`vlm_engine`]), so this costs one atomic read per blob.
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
 struct LlamaProducer {
     producer: Producer,
-    engine: std::sync::Arc<rto_llama::llama::LlamaEngine>,
+    engine: fn() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>>,
 }
 
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
@@ -238,8 +254,9 @@ impl MediaProducer for LlamaProducer {
             MediaKind::Vision => (vec![bytes.to_vec()], Vec::new()),
             MediaKind::Audio => (Vec::new(), vec![bytes.to_vec()]),
         };
-        let completion = self
-            .engine
+        // The model load, at the last possible moment.
+        let engine = (self.engine)()?;
+        let completion = engine
             .chat(&rto_llama::ChatRequest {
                 model: self.producer.model.clone(),
                 messages: vec![rto_llama::Message {
@@ -309,10 +326,12 @@ pub(crate) fn asr_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngin
 #[cfg(all(test, feature = "audio-transcribe"))]
 pub(crate) fn asr_content(bytes: &[u8]) -> Option<String> {
     let producer = asr_producer()?;
-    let engine = asr_engine()?;
-    LlamaProducer { producer, engine }
-        .generate("fixture.wav", bytes)
-        .map(|c| c.text)
+    LlamaProducer {
+        producer,
+        engine: asr_engine,
+    }
+    .generate("fixture.wav", bytes)
+    .map(|c| c.text)
 }
 
 /// The process-wide vision engine, built lazily from the installed [`VLM_MODEL`].
@@ -327,10 +346,12 @@ pub(crate) fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngin
 #[cfg(all(test, feature = "image-vision"))]
 pub(crate) fn vlm_content(bytes: &[u8]) -> Option<String> {
     let producer = vlm_producer()?;
-    let engine = vlm_engine()?;
-    LlamaProducer { producer, engine }
-        .generate("fixture.png", bytes)
-        .map(|c| c.text)
+    LlamaProducer {
+        producer,
+        engine: vlm_engine,
+    }
+    .generate("fixture.png", bytes)
+    .map(|c| c.text)
 }
 
 /// Build a `mtmd` engine over an installed model's `model.gguf` + `mmproj.gguf`.
@@ -401,7 +422,7 @@ mod tests {
         let err = refusal(MediaBuildOptions {
             audio: true,
             vision: false,
-            force: false,
+            ..MediaBuildOptions::default()
         });
         assert_eq!(
             err,
@@ -422,7 +443,7 @@ mod tests {
         let err = refusal(MediaBuildOptions {
             audio: false,
             vision: true,
-            force: false,
+            ..MediaBuildOptions::default()
         });
         assert!(
             err.to_string().contains("--features image-vision"),
@@ -438,7 +459,7 @@ mod tests {
         let none = installed(MediaBuildOptions {
             audio: false,
             vision: false,
-            force: false,
+            ..MediaBuildOptions::default()
         })
         .expect("asking for nothing cannot fail");
         assert!(none.is_empty());
