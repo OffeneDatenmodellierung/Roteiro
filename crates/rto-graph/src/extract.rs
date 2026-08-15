@@ -3103,11 +3103,18 @@ mod vision_engine_teardown {
 /// 2. both actually run — the vision engine describes a generated PNG and the
 ///    audio engine transcribes a committed WAV fixture, so the audio path is
 ///    exercised end to end (the coverage gap #292 could not close);
-/// 3. the **test binary's own exit status**, which is the sharpest guard of all:
-///    two engines' models are now resident on one backend, and if the backend
-///    were freed before them — or any engine leaked to `exit()` — this binary
-///    would abort in ggml-metal's teardown (SIGABRT, exit 134) *after* every
-///    test had "passed", exactly as `roteiro sync` did in #291.
+/// 3. that each modality loads **its own** projector, exactly once (issue #301).
+///    Two blobs per modality leave each engine at one projector initialisation,
+///    and the two projectors are separate objects: a cache that ignored *which*
+///    projector was being asked for would hand the audio engine the vision one,
+///    whose `support_audio` is false — the failure mode #298 makes possible by
+///    letting both modalities be live at the same time;
+/// 4. the **test binary's own exit status**, which is the sharpest guard of all:
+///    two engines' models — and now their cached projectors — are resident on one
+///    backend, and if the backend were freed before them, or any of them leaked
+///    to `exit()`, this binary would abort in ggml-metal's teardown (SIGABRT,
+///    exit 134) *after* every test had "passed", exactly as `roteiro sync` did in
+///    #291.
 #[cfg(all(test, feature = "image-vision", feature = "audio-transcribe"))]
 mod two_modality_teardown {
     use super::{
@@ -3154,7 +3161,10 @@ mod two_modality_teardown {
     /// It is also the fixture `audio_ingest.rs` already drives through the real
     /// projector, so it is known to decode. The point is still to reach the
     /// model, not to assert on its words.
-    const TINY_WAV: &[u8] =
+    /// `pub(super)` so the sibling `projector_binding` test drives the same clip
+    /// rather than reaching for a second fixture — one committed WAV, read by
+    /// everything that needs one (#302).
+    pub(super) const TINY_WAV: &[u8] =
         include_bytes!("../tests/fixtures/audio/syllables-16khz-mono-512ms.wav");
 
     /// Whether `name`'s GGUF pair is in the model store.
@@ -3187,11 +3197,26 @@ mod two_modality_teardown {
         // voiced bursts is not the subject — that each loaded a model on the
         // shared backend and produced a completion is. `*_content` returns `None`
         // on a blank result, so this asserts on reaching the model, not on its
-        // words.
-        let _description = vlm_content(&tiny_png());
+        // words. Two blobs per modality, because one could not tell a cached
+        // projector from a rebuilt one.
+        let png = tiny_png();
+        let _description = vlm_content(&png);
         let _transcript = asr_content(TINY_WAV);
+        let _description_again = vlm_content(&png);
+        let _transcript_again = asr_content(TINY_WAV);
 
-        // (3) Teardown, in the order llama.cpp requires: both engines, then the
+        // (3) Each modality loaded its own projector, once (#301). Before the
+        // cache these counts would have been 2 and 2; with a cache that was not
+        // keyed per projector, the second modality would have been handed the
+        // first's context and produced nothing at all.
+        let (vision, audio) = (
+            vlm_engine().expect("resident").projector_inits(),
+            asr_engine().expect("resident").projector_inits(),
+        );
+        assert_eq!(vision, 1, "two images must load the vision projector once");
+        assert_eq!(audio, 1, "two clips must load the audio projector once");
+
+        // (4) Teardown, in the order llama.cpp requires: both engines, then the
         // backend they shared. `release_media_engines` does that, and nothing
         // here could have got it wrong — while either engine were alive, the
         // backend release would simply have declined.
@@ -3202,6 +3227,120 @@ mod two_modality_teardown {
         assert!(
             !release_media_engines(),
             "releasing again must be a no-op, so every exit path can call it"
+        );
+    }
+}
+
+/// A cached projector never outlives the model it is bound to (issue #301).
+///
+/// This is the hazard caching an `mtmd_context` introduces, and the reason the
+/// cache is keyed by the model as well as by the `mmproj`: `mtmd_init_from_file`
+/// keeps the `llama_model *` it was handed and dereferences it on every
+/// `tokenize`/`eval_chunks`. Models are not permanent — the residency cache
+/// evicts them — so a projector that survived its model would be a dangling
+/// pointer waiting for the next blob.
+///
+/// The test drives that eviction deliberately: one engine, both models, and the
+/// default budget, which keeps exactly **one** model resident. Alternating
+/// modalities therefore unloads and reloads, and the projector count is what
+/// distinguishes the two designs — a cache keyed on the `mmproj` path alone would
+/// hand the third call the first call's projector, pointing at freed memory.
+///
+/// Self-skipping when either GGUF is absent, like its neighbours, and it uses the
+/// fixtures they already commit rather than generating new ones. Its own exit
+/// status is an assertion too: it builds projectors over a model that is then
+/// freed, which is precisely the sequence that would abort at `exit()` if a
+/// projector were left behind.
+#[cfg(all(test, feature = "image-vision", feature = "audio-transcribe"))]
+mod projector_binding {
+    use super::two_modality_teardown::TINY_WAV;
+    use super::{
+        ASR_MODEL, VLM_MODEL, release_media_engines, serialise_media_engine_test, tiny_png,
+    };
+    use rto_llama::llama::{LlamaEngine, Served};
+    use rto_llama::{ChatRequest, Engine, Message};
+
+    /// `name`'s installed GGUF pair, or `None` when it is not in the model store.
+    fn served(name: &str) -> Option<Served> {
+        let dir = crate::models::model_dir(name);
+        let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
+        (gguf.exists() && mmproj.exists()).then(|| Served {
+            name: name.to_owned(),
+            path: gguf,
+            mmproj: Some(mmproj),
+        })
+    }
+
+    /// One media request through `engine`, returning the completion text.
+    fn media_chat(
+        engine: &LlamaEngine,
+        model: &str,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+    ) -> String {
+        engine
+            .chat(&ChatRequest {
+                model: model.to_owned(),
+                messages: vec![Message {
+                    role: "user".to_owned(),
+                    content: "Describe what you perceive in one short sentence.".to_owned(),
+                }],
+                images,
+                audio,
+                temperature: 0.0,
+                max_tokens: 32,
+            })
+            .expect("the blob reaches its projector and completes")
+            .content
+    }
+
+    #[test]
+    fn evicting_a_model_rebuilds_its_projector_rather_than_reusing_a_stale_one() {
+        let _serial = serialise_media_engine_test();
+        let (Some(vlm), Some(asr)) = (served(VLM_MODEL), served(ASR_MODEL)) else {
+            eprintln!(
+                "SKIP: need both `{VLM_MODEL}` and `{ASR_MODEL}` installed \
+                 (run `roteiro model pull <name>`)"
+            );
+            return;
+        };
+
+        // Budget 0: one model resident, so each switch of modality evicts the
+        // other — and takes its projector with it.
+        let engine = LlamaEngine::new(vec![vlm, asr], 0).expect("engine builds");
+
+        let first = media_chat(&engine, ASR_MODEL, Vec::new(), vec![TINY_WAV.to_vec()]);
+        assert_eq!(engine.projector_inits(), 1, "the audio projector loaded");
+
+        let described = media_chat(&engine, VLM_MODEL, vec![tiny_png()], Vec::new());
+        assert!(
+            !described.trim().is_empty(),
+            "a second, different projector must work in the same process (#298)"
+        );
+        assert_eq!(
+            engine.projector_inits(),
+            2,
+            "a different mmproj is a different projector — never the first one reused"
+        );
+
+        // The audio model was evicted by the image; asking for it again reloads it
+        // at a new address, so its projector must be rebuilt against *that* model.
+        let again = media_chat(&engine, ASR_MODEL, Vec::new(), vec![TINY_WAV.to_vec()]);
+        assert_eq!(
+            engine.projector_inits(),
+            3,
+            "a reloaded model gets a freshly bound projector, not the evicted model's"
+        );
+        assert_eq!(
+            first, again,
+            "and the rebuilt projector produces exactly what the original did"
+        );
+
+        // Engine first (its models and their projectors), backend last.
+        drop(engine);
+        assert!(
+            release_media_engines(),
+            "the backend is releasable once the engine holding it is gone"
         );
     }
 }
