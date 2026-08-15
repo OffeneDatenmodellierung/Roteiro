@@ -22,6 +22,13 @@ pub mod engine;
 pub mod backend;
 #[cfg(feature = "llama")]
 pub mod llama;
+// MTP speculative decoding (issue #320): the draft head a Qwen3.5+ GGUF already
+// carries, used to propose the next few tokens so the target model can confirm
+// several per decode instead of one. Identical output, fewer passes over the
+// weights — see the module docs for why the first half of that is a property of
+// the code rather than a hope about the library.
+#[cfg(feature = "llama")]
+pub mod speculative;
 // The build-once / release-deterministically holder that both the shared backend
 // and `rto-graph`'s per-modality media engines live in. Compiled unconditionally
 // — it needs no C/C++ toolchain — so its unit tests run in the default CI build.
