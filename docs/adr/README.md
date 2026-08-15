@@ -17,3 +17,12 @@
 | [0009](0009-cross-repo-workspace-links.md) | Cross-repo workspace links — interlink a hub app with its deployment repos | Accepted |
 | [0010](0010-explorer-web-app-vendored-js.md) | Explorer web app — vendored client-side JS (cytoscape.js) for the served UI | Accepted |
 | [0011](0011-structured-file-logging-otel-groundwork.md) | Structured file logging — OpenTelemetry-shaped JSON, rotated, groundwork for OTLP | Accepted |
+| [0012](0012-analyzer-findings-artifact-model.md) | Analyzer findings — a separate artifact model, never a provenance class | For Review |
+| [0013](0013-agent-memory-artifact-store.md) | Agent memory — a two-tier artifact store, decaying by evidence not by clock | For Review |
+| [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | For Review |
+
+> **ADRs 0012–0014 form one decision set** and are best read together. They share a
+> single structural rule: *knowledge that is not a derived/authored/inferred graph
+> fact gets its own artifact store, and never borrows the graph's trust.* 0012 and
+> 0013 apply that rule to analyzer findings and to agent memory; 0014 decides how
+> analyzers are executed. Their execution sequence is [BUILD_PLAN_V2](../BUILD_PLAN_V2.md).
