@@ -22,6 +22,16 @@
 //! request even if it is evicted from the cache meanwhile. (Cross-model
 //! concurrency on the Metal backend is exercised by the `--ignored` stress test
 //! in `tests/concurrency.rs`.)
+//!
+//! **Teardown.** An [`LlamaEngine`] owns native state that a GPU backend expects
+//! to be handed back: on Metal, a loaded model's buffers stay registered in the
+//! device's residency set until the model is freed, and ggml-metal's own
+//! teardown — which libc runs from `exit()`, after `main` — asserts that set is
+//! empty. An engine must therefore be **dropped** before the process exits.
+//! Parking one in a `static` (which Rust never drops) turns a successful run into
+//! a SIGABRT at exit; Roteiro issue #291 is exactly that, and `rto-graph`'s
+//! `release_media_engines` is how its cached engines are given a deterministic
+//! end of life.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -89,11 +99,21 @@ pub struct Served {
 }
 
 /// A llama.cpp inference engine over a fixed set of installed GGUF models.
+///
+/// **Field order is load-bearing.** Rust drops fields in declaration order, and
+/// llama.cpp's contract is that every model is freed *before* the backend is
+/// (`llama_backend_free` is the last call of a process): freeing a model is what
+/// releases its ggml buffers — and, on Metal, deregisters them from the device's
+/// residency set. So `cache` (the resident models) is declared first and
+/// `backend` last. See also [`crate::llama`]'s note on teardown: an engine that
+/// is never dropped at all leaves that residency set non-empty and aborts the
+/// process in ggml-metal's exit-time teardown (Roteiro issue #291), which is why
+/// callers must not park an engine in a `static`.
 pub struct LlamaEngine {
-    backend: LlamaBackend,
+    cache: Mutex<ModelCache>,
     served: Vec<Served>,
     n_ctx: u32,
-    cache: Mutex<ModelCache>,
+    backend: LlamaBackend,
 }
 
 /// One loaded model held in the residency cache.

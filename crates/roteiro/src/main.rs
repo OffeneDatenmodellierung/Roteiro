@@ -567,6 +567,19 @@ enum ModelAction {
     },
 }
 
+/// Exit `1` because a **gate** failed (drift, unresolved link, no path) — the
+/// long-standing contract for `check`/`review`/`path`/`links`, which report the
+/// failure on stdout/stderr and then set a non-zero status without an `Err`.
+///
+/// `std::process::exit` never runs destructors, so `main`'s
+/// [`rto_graph::MediaEngineGuard`] would not fire here: release the media engines
+/// first, or a gate failure on a run that described an image would abort in
+/// ggml-metal's exit-time teardown and report 134 instead of 1 (issue #291).
+fn exit_gate_failure() -> ! {
+    let _released = rto_graph::release_media_engines();
+    std::process::exit(1)
+}
+
 // `main` is a one-arm-per-subcommand dispatcher; splitting the match further just
 // scatters the CLI wiring, so the line-count lint is noise here.
 #[allow(clippy::too_many_lines)]
@@ -615,6 +628,16 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    // Own the media extractors' native engines for the rest of `main`. Extraction
+    // loads a llama.cpp vision/ASR engine once and reuses it across blobs; on the
+    // Metal backend that engine must be *dropped* before libc's C++ finalizers run,
+    // or ggml-metal's device teardown finds a non-empty residency set and aborts a
+    // successful run with SIGABRT (exit 134, issue #291). Dropping this guard at the
+    // end of `main` releases them while Rust destructors still run — on the normal
+    // path, on a `?` error out of a subcommand, and on an unwinding panic alike.
+    // The `std::process::exit` gate failures below skip destructors, so they call
+    // `exit_gate_failure`, which releases first.
+    let _engines = rto_graph::MediaEngineGuard::hold();
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
         Command::Check {
@@ -1161,7 +1184,7 @@ fn run_check(
     }
 
     if report.has_violations() {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }
@@ -1214,7 +1237,7 @@ fn run_review(
         print_review(&review, base);
     }
     if review.has_drift() {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }
@@ -2621,7 +2644,7 @@ fn run_path(
     }
 
     if !result.found {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }
@@ -2846,7 +2869,7 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
     }
 
     if drift > 0 {
-        std::process::exit(1);
+        exit_gate_failure();
     }
     Ok(())
 }

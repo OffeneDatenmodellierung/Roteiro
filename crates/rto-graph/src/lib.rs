@@ -16,6 +16,9 @@ mod cache;
 mod codegraph;
 mod config_keys;
 mod context;
+// Holder for the media extractors' process-wide native engines, and the
+// deterministic release that keeps a Metal build from aborting at exit (#291).
+mod engine_slot;
 mod extract;
 mod git;
 #[cfg(feature = "inference")]
@@ -42,7 +45,10 @@ pub use config_keys::{
 pub use context::{
     ContextRefresh, NodeContext, build_context, context, dependents, refresh_contexts,
 };
-pub use extract::{Extractor, FileNodeExtractor, IngestConfig, Registry, RustExtractor};
+pub use extract::{
+    Extractor, FileNodeExtractor, IngestConfig, MediaEngineGuard, Registry, RustExtractor,
+    release_media_engines,
+};
 pub use git::{BlobRef, ChangeStatus, ChangedFile, GitError, Repo, Submodule};
 #[cfg(feature = "inference")]
 pub use infer::{
