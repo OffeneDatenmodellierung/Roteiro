@@ -30,6 +30,34 @@ mirrored to `.github/skills/roteiro/` for the Copilot reviewer.
 
 **Before finishing a change**, run `roteiro review` and `roteiro check`.
 
+### Never assert absence from `grep` alone
+
+`grep` is good at confirming something *is* there and bad at proving it is not:
+a negative result only tells you your pattern missed, and you cannot see what
+you failed to guess. `roteiro search` ranks over names, keys, paths and captured
+prose, so it finds the thing you did not know how to spell.
+
+> **Worked example.** An audit of this repo concluded “no capacity/TTL/LRU
+> eviction idiom exists anywhere” after grepping `evict|ttl|prune|capacity|max_`.
+> `roteiro search evict` returned `lru_evict_count`, `ModelCache` and
+> `tests::budget_evicts_oldest_until_it_fits` in `rto-llama` on the first hit.
+> The false negative nearly led to designing a new eviction policy alongside the
+> one that already existed.
+
+So, whenever you are about to write *“there is no X”*, *“X does not exist yet”*
+or *“this would be the first X”*:
+
+1. Confirm it with `roteiro search` (try two or three vocabularies — the concept,
+   the likely identifier, the likely test name), not with `grep` alone.
+2. If you still find nothing, write **NOT FOUND with the queries you ran** rather
+   than a flat “does not exist”. They are different claims, and only one of them
+   is honest.
+3. Cite the node keys you relied on, so the next reader can re-run your search
+   instead of re-doing your investigation.
+
+A wrong negative is more expensive than a missed positive: it silently
+authorises building something the codebase already has.
+
 ## Provenance invariants (the core model — never violate)
 
 Every node and edge records *how it was produced*. This is the point of the
