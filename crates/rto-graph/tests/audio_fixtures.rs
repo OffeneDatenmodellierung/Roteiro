@@ -26,6 +26,17 @@
 //! comparison, so a passing run means the committed bytes are exactly what this
 //! source produces. Without the variable the test only *checks*, and fails with
 //! the offending path when a fixture has drifted.
+//!
+//! # Consumers outside this file
+//!
+//! `tests/audio_ingest.rs` reads the whole set at run time. Less obviously,
+//! `syllables-16khz-mono-512ms.wav` is `include_bytes!`d by the two-modality
+//! teardown test *inside the library* (`src/extract.rs`), which cannot call
+//! [`wav::encode`] because the library is rebuilt without `cfg(test)` for
+//! integration-test targets. Sharing the committed artefact rather than the
+//! encoder's source is what keeps this the workspace's only WAV writer (#302),
+//! so renaming that one file is a compile error in `src/`, not just a failure
+//! here.
 
 use std::path::PathBuf;
 

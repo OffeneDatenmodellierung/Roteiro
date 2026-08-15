@@ -3101,8 +3101,8 @@ mod vision_engine_teardown {
 ///
 /// 1. both engines build in one process, and are the same backend's;
 /// 2. both actually run — the vision engine describes a generated PNG and the
-///    audio engine transcribes a generated WAV, so the audio path is exercised
-///    end to end (the coverage gap #292 could not close);
+///    audio engine transcribes a committed WAV fixture, so the audio path is
+///    exercised end to end (the coverage gap #292 could not close);
 /// 3. the **test binary's own exit status**, which is the sharpest guard of all:
 ///    two engines' models are now resident on one backend, and if the backend
 ///    were freed before them — or any engine leaked to `exit()` — this binary
@@ -3115,48 +3115,40 @@ mod two_modality_teardown {
         serialise_media_engine_test, tiny_png, vlm_content, vlm_engine,
     };
 
-    /// A quarter-second of 16-bit mono 16 kHz PCM in a WAV container, generated
-    /// here rather than committed: the repo carries no audio fixture, and a
-    /// couple of hundred lines of arithmetic is a better dependency than a binary
-    /// blob. A 440 Hz tone, not silence — near-silence makes an ASR model
-    /// hallucinate, and the point is to exercise decode + projection, not to
-    /// assert on words.
-    fn tiny_wav() -> Vec<u8> {
-        const SAMPLE_RATE: u32 = 16_000;
-        const SAMPLES: u32 = SAMPLE_RATE / 4;
-        const CHANNELS: u16 = 1;
-        const BITS: u16 = 16;
-
-        let byte_rate = SAMPLE_RATE * u32::from(CHANNELS) * u32::from(BITS / 8);
-        let block_align = CHANNELS * (BITS / 8);
-        let data_len = SAMPLES * u32::from(block_align);
-
-        let mut wav = Vec::with_capacity(44 + data_len as usize);
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-        wav.extend_from_slice(&1u16.to_le_bytes()); // format: PCM
-        wav.extend_from_slice(&CHANNELS.to_le_bytes());
-        wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-        wav.extend_from_slice(&byte_rate.to_le_bytes());
-        wav.extend_from_slice(&block_align.to_le_bytes());
-        wav.extend_from_slice(&BITS.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&data_len.to_le_bytes());
-        for i in 0..SAMPLES {
-            let t = f64::from(i) / f64::from(SAMPLE_RATE);
-            // `cast_possible_truncation`: `sin()` is bounded to [-1.0, 1.0], so the
-            // scaled amplitude never leaves ±8000 — a quarter of `i16`'s ±32_768.
-            // The cast can therefore only drop the fraction, and dropping the
-            // fraction *is* the quantisation to 16-bit PCM that this format is made
-            // of, not a loss of range.
-            #[allow(clippy::cast_possible_truncation)]
-            let sample = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
-            wav.extend_from_slice(&sample.to_le_bytes());
-        }
-        wav
-    }
+    /// Half a second of 16-bit mono 16 kHz PCM in a WAV container: the committed
+    /// `syllables` fixture, embedded at compile time.
+    ///
+    /// This test used to synthesise its own WAV here, which made the workspace
+    /// carry two hand-written RIFF writers (#302). The other one — in
+    /// `tests/audio_fixtures.rs` — is the one worth keeping: it is a reusable
+    /// `encode(rate, samples)` rather than one hardcoded clip, it sits alongside
+    /// the FLAC and MP3 writers, and it is integer-exact end to end (a Q15 sine
+    /// table, no `f64::sin` and no `as i16`), so it needs no
+    /// `cast_possible_truncation` suppression where the generator here did.
+    ///
+    /// It cannot simply be *called* from here, though: it lives in an
+    /// integration-test target, and the library is rebuilt without `cfg(test)`
+    /// for those, so nothing in `tests/` is nameable from a unit test (and
+    /// nothing behind `#[cfg(test)]` in `src/` is nameable from `tests/`). What
+    /// crosses the boundary is the encoder's *output* — the bytes it already
+    /// commits under `tests/fixtures/audio/`, whose reproducibility
+    /// `fixtures_are_byte_reproducible` gates on every run. So this test reads
+    /// the artefact instead of re-implementing the tool, and the workspace is
+    /// left with exactly one WAV encoder.
+    ///
+    /// `include_bytes!` rather than `std::fs::read`, so a renamed or deleted
+    /// fixture is a build error rather than a panic inside a test whose subject
+    /// is engine teardown.
+    ///
+    /// `syllables` and not `silence` for the reason the old generator picked a
+    /// tone over silence — near-silence makes an ASR model hallucinate — and over
+    /// the tone because it is speech-*shaped* (four voiced bursts under a
+    /// trapezoidal envelope), which is a fairer exercise of decode + projection.
+    /// It is also the fixture `audio_ingest.rs` already drives through the real
+    /// projector, so it is known to decode. The point is still to reach the
+    /// model, not to assert on its words.
+    const TINY_WAV: &[u8] =
+        include_bytes!("../tests/fixtures/audio/syllables-16khz-mono-512ms.wav");
 
     /// Whether `name`'s GGUF pair is in the model store.
     fn installed(name: &str) -> bool {
@@ -3184,12 +3176,13 @@ mod two_modality_teardown {
             "the second engine must share the first's backend, not be inert (#296)"
         );
 
-        // (2) Both actually infer. What the models make of a diagonal and a sine
-        // wave is not the subject — that each loaded a model on the shared
-        // backend and produced a completion is. `*_content` returns `None` on a
-        // blank result, so this asserts on reaching the model, not on its words.
+        // (2) Both actually infer. What the models make of a diagonal and four
+        // voiced bursts is not the subject — that each loaded a model on the
+        // shared backend and produced a completion is. `*_content` returns `None`
+        // on a blank result, so this asserts on reaching the model, not on its
+        // words.
         let _description = vlm_content(&tiny_png());
-        let _transcript = asr_content(&tiny_wav());
+        let _transcript = asr_content(TINY_WAV);
 
         // (3) Teardown, in the order llama.cpp requires: both engines, then the
         // backend they shared. `release_media_engines` does that, and nothing

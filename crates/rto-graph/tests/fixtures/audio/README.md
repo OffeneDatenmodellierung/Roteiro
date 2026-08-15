@@ -4,6 +4,14 @@ Tiny, deterministic audio clips for the ASR ingestion path
 (`rto-graph`'s `is_audio` / `audio_content` / `asr_content`, and `rto-llama`'s
 `chat_media` with `Modality::Audio`).
 
+> **`syllables-16khz-mono-512ms.wav` is `include_bytes!`d from `src/`.** The
+> two-modality teardown test in `crates/rto-graph/src/extract.rs` is a *library
+> unit* test, so it cannot call the encoder in `../../audio_fixtures.rs` — the
+> library is rebuilt without `cfg(test)` for integration-test targets. It embeds
+> that one committed clip instead, which is what keeps the repository down to a
+> single hand-written WAV writer (issue #302). Renaming or deleting it breaks
+> the build, not just this suite.
+
 ## Provenance and licence
 
 **Every file here is synthesised by this repository.** Nothing was downloaded,
