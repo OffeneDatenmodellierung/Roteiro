@@ -5776,6 +5776,178 @@ mod url_tests {
     }
 }
 
+// The `roteiro media` surface: argument shapes, the config narrowing that turns
+// flags into a [`rto_graph::MediaBuildOptions`], and the `--json` shape callers
+// parse. Ungated, exactly as [`MediaAction`] is — the store, its status and its
+// clearing exist in every build, so these shapes must hold in every build too.
+//
+// The behaviour they wrap — incrementality, the pre-generation gate, artifact
+// purity — is tested where it lives, in `rto-graph`.
+#[cfg(test)]
+mod media_cli {
+    use super::{Cli, Command, MediaAction, MediaClearReport, media_options};
+    use clap::Parser as _;
+
+    fn parse<const N: usize>(args: [&str; N]) -> Command {
+        Cli::try_parse_from(args).expect("parse").command
+    }
+
+    fn action<const N: usize>(args: [&str; N]) -> MediaAction {
+        let Command::Media { action } = parse(args) else {
+            panic!("expected Media");
+        };
+        action
+    }
+
+    /// Every toggle off is the shape `media_options` reads as "both modalities".
+    fn build<const N: usize>(args: [&str; N]) -> (bool, bool, bool, bool) {
+        let MediaAction::Build {
+            audio,
+            vision,
+            force,
+            json,
+        } = action(args)
+        else {
+            panic!("expected Build");
+        };
+        (audio, vision, force, json)
+    }
+
+    #[test]
+    fn build_takes_no_flags_and_defaults_them_all_off() {
+        assert_eq!(
+            build(["roteiro", "media", "build"]),
+            (false, false, false, false)
+        );
+    }
+
+    #[test]
+    fn build_accepts_each_modality_and_the_force_and_json_flags() {
+        assert_eq!(
+            build(["roteiro", "media", "build", "--audio", "--force", "--json"]),
+            (true, false, true, true)
+        );
+        assert_eq!(
+            build(["roteiro", "media", "build", "--vision"]),
+            (false, true, false, false)
+        );
+        // Both named explicitly is the same request as neither, and must parse.
+        assert_eq!(
+            build(["roteiro", "media", "build", "--audio", "--vision"]),
+            (true, true, false, false)
+        );
+    }
+
+    #[test]
+    fn status_takes_only_json() {
+        let MediaAction::Status { json } = action(["roteiro", "media", "status"]) else {
+            panic!("expected Status");
+        };
+        assert!(!json);
+        let MediaAction::Status { json } = action(["roteiro", "media", "status", "--json"]) else {
+            panic!("expected Status");
+        };
+        assert!(json);
+    }
+
+    #[test]
+    fn clear_defaults_to_every_producer_and_can_narrow() {
+        let MediaAction::Clear { producer, json } = action(["roteiro", "media", "clear"]) else {
+            panic!("expected Clear");
+        };
+        assert_eq!(producer, None);
+        assert!(!json);
+
+        let MediaAction::Clear { producer, json } = action([
+            "roteiro",
+            "media",
+            "clear",
+            "--producer",
+            "media:audio:voxtral-mini-3b:0123456789abcdef",
+            "--json",
+        ]) else {
+            panic!("expected Clear");
+        };
+        assert_eq!(
+            producer.as_deref(),
+            Some("media:audio:voxtral-mini-3b:0123456789abcdef"),
+            "a producer id is taken verbatim — `:` must not be treated as a separator"
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn media_requires_an_action() {
+        assert!(Cli::try_parse_from(["roteiro", "media"]).is_err());
+        assert!(Cli::try_parse_from(["roteiro", "media", "nonsense"]).is_err());
+    }
+
+    #[test]
+    fn no_modality_flag_means_both() {
+        let opts = media_options(rto_graph::IngestConfig::default(), false, false, false)
+            .expect("both modalities are allowed by default");
+        assert!(opts.audio && opts.vision);
+        assert!(!opts.force);
+    }
+
+    #[test]
+    fn a_modality_disabled_in_config_is_dropped_silently_but_refused_when_asked_for() {
+        let no_audio = rto_graph::IngestConfig {
+            audio: false,
+            ..rto_graph::IngestConfig::default()
+        };
+        // Implicit: narrow to what is permitted, no error.
+        let opts = media_options(no_audio, false, false, false).expect("vision is still allowed");
+        assert!(!opts.audio && opts.vision);
+
+        // Explicit: the operator asked for something the configuration forbids,
+        // and is told so rather than silently getting nothing.
+        let err = media_options(no_audio, true, false, false).expect_err("must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("[ingest] audio = false"),
+            "the refusal must name the setting: {message}"
+        );
+    }
+
+    #[test]
+    fn disabling_both_modalities_leaves_nothing_to_do() {
+        let none = rto_graph::IngestConfig {
+            audio: false,
+            vision: false,
+            ..rto_graph::IngestConfig::default()
+        };
+        let err = media_options(none, false, false, false).expect_err("must be refused");
+        assert!(
+            err.to_string().contains("nothing for `media build` to do"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    #[test]
+    fn the_clear_json_shape_is_the_documented_one() {
+        let value = serde_json::to_value(MediaClearReport {
+            producer: Some("media:audio:voxtral-mini-3b:0123456789abcdef".to_owned()),
+            removed: 3,
+        })
+        .expect("serialize");
+        assert_eq!(value["removed"], 3);
+        assert_eq!(
+            value["producer"],
+            "media:audio:voxtral-mini-3b:0123456789abcdef"
+        );
+
+        // Clearing everything reports a `null` producer, not an absent key: a
+        // caller can tell "all producers" from "this one" without guessing.
+        let value = serde_json::to_value(MediaClearReport {
+            producer: None,
+            removed: 0,
+        })
+        .expect("serialize");
+        assert!(value["producer"].is_null());
+    }
+}
+
 // The `roteiro security` surface: argument shapes, the analyzer peek that keeps
 // `ingest` a one-argument command, and the `--json` shapes callers parse. The
 // behaviour these wrap — layer replacement, idempotence, artifact purity — is
