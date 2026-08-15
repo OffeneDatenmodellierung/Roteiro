@@ -73,6 +73,41 @@ pub enum ExecError {
     /// A finding's identity components were not usable as a stable key.
     #[error("finding identity: {0}")]
     Identity(#[from] FindingsError),
+    /// The analyzer's pinned inputs are not provisioned, and Roteiro will not
+    /// fetch them mid-run.
+    ///
+    /// This is ADR-0014's named cold-cache failure. The message carries
+    /// everything needed to act on it without a second command: which analyzer,
+    /// which assets, the digest pinned for each, why each one could not be used,
+    /// and the exact `prefetch` invocation. The `assets-unavailable-offline`
+    /// token is part of the message so the failure is greppable and scriptable
+    /// rather than merely readable.
+    #[cfg(feature = "exec-subprocess")]
+    #[error(
+        "assets-unavailable-offline: {analyzer} cannot run because its pinned inputs are not \
+         provisioned\n  missing: {}\n  fix it with: {command}\n  \
+         (roteiro never fetches analyzer assets during a run, and never falls back to whatever \
+         the host has installed)",
+        .missing.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n           ")
+    )]
+    AssetsUnavailableOffline {
+        /// The analyzer whose run was refused.
+        analyzer: String,
+        /// Every asset that was missing, unverifiable, or changed underneath its
+        /// record.
+        missing: Vec<crate::assets::MissingAsset>,
+        /// The exact command that provisions them.
+        command: String,
+    },
+    /// The analyzer binary could not be executed, or exited with a status that
+    /// does not carry a usable report.
+    #[cfg(feature = "exec-subprocess")]
+    #[error("{0}")]
+    Subprocess(#[from] crate::subprocess::SubprocessError),
+    /// Provisioning an asset failed.
+    #[cfg(feature = "exec-subprocess")]
+    #[error(transparent)]
+    Asset(#[from] crate::assets::AssetError),
     /// This build has no adapter for the requested analyzer, so it can neither
     /// run it nor read its native output.
     #[error("no adapter for analyzer {requested:?} in this build (known: {known})")]

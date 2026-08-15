@@ -268,14 +268,19 @@ struct Position {
     offset: u64,
 }
 
+/// Semgrep's `extra` block.
+///
+/// `lines` and `fingerprint` are deliberately **not** deserialized. In the
+/// open-source CLI both are the literal string `"requires login"` unless the
+/// caller is authenticated to Semgrep's hosted platform, so parsing them would
+/// only offer a field that looks like the matched code and is not. The snippet
+/// comes from the worktree ([`crate::snippet`]) instead.
 #[derive(Debug, Default, Deserialize)]
 struct Extra {
     #[serde(default)]
     message: String,
     #[serde(default)]
     severity: String,
-    #[serde(default)]
-    lines: String,
     #[serde(default)]
     is_ignored: bool,
     #[serde(default)]

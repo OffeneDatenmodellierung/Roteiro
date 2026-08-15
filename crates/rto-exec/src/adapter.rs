@@ -137,7 +137,7 @@ pub struct Invocation {
 }
 
 /// One analyzer's native output format and invocation.
-pub trait Adapter: Sync {
+pub trait Adapter: Sync + std::fmt::Debug {
     /// The analyzer id — the value that appears in every layer key and finding
     /// key this adapter produces.
     fn analyzer(&self) -> &'static str;
