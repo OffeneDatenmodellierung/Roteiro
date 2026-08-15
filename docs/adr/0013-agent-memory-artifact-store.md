@@ -189,7 +189,7 @@ CREATE TABLE agent_memory (
   anchor_key TEXT, anchor_blob TEXT, anchor_path TEXT,
   body TEXT NOT NULL, confidence REAL,
   tree TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  superseded_by INTEGER REFERENCES agent_memory(id), superseded_at INTEGER);
+  superseded_by INTEGER REFERENCES agent_memory(id), superseded_at TEXT);
 CREATE INDEX idx_mem_anchor ON agent_memory(anchor_key);
 CREATE INDEX idx_mem_live ON agent_memory(scope, superseded_by, id DESC);
 
