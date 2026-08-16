@@ -85,9 +85,16 @@ execution = ["dep:rto-exec"]
 # The subprocess analyzer backend and its provisioning: `roteiro security
 # run|prefetch|status` (ADR-0014). **Off by default** — it executes third-party
 # binaries on the host with no isolation boundary, so it must be asked for at
-# build time as well as consented to per run with `--allow-unsandboxed`. Adds no
-# third-party dependency.
-exec-subprocess = ["execution", "rto-exec/exec-subprocess"]
+# build time as well as consented to per run with `--allow-unsandboxed`.
+#
+# Takes `ureq`, which is already here for `roteiro model pull` — so this adds an
+# edge to the dependency graph rather than a crate to the lockfile. It is the
+# transport for `security prefetch --allow-download`, which provisions
+# `osv-scanner`'s per-ecosystem OSV databases. `rto-exec` deliberately does
+# **not** gain a network dependency for this: it takes the fetcher as a function
+# argument, so the code that can open a socket lives in the CLI and is reachable
+# only from `prefetch`.
+exec-subprocess = ["execution", "rto-exec/exec-subprocess", "dep:ureq"]
 mcp = ["rto-render/mcp", "dep:tokio"]
 # The interactive workspace explorer's read-only `/v1/graph/*` JSON API, off by
 # default. Pure Rust: adds only axum + tokio, never `rto-serve`/llama.cpp, so it

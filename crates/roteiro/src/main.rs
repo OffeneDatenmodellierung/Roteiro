@@ -907,6 +907,17 @@ enum SecurityAction {
         /// Only this analyzer's assets. Default: all of them.
         #[arg(long, value_name = "NAME")]
         analyzer: Option<String>,
+        /// Allow downloading the assets that are fetched by URL — today that is
+        /// `osv-scanner`'s per-ecosystem OSV databases, roughly **260 MB**.
+        ///
+        /// Without it a downloadable asset that is not already present is
+        /// refused with the command that obtains it, exactly as the
+        /// operator-provisioned `RustSec` checkout is. Provisioning is the only
+        /// thing that may fetch, and even here it is asked for rather than
+        /// assumed: `prefetch` is a command people run when unsure, and a
+        /// quarter-gigabyte download is not a reasonable answer to that.
+        #[arg(long)]
+        allow_download: bool,
         /// Emit the result as JSON.
         #[arg(long)]
         json: bool,
@@ -4775,9 +4786,11 @@ fn run_security(action: SecurityAction) -> anyhow::Result<()> {
             json,
         } => run_security_run(&analyzer, allow_unsandboxed, json),
         #[cfg(feature = "exec-subprocess")]
-        SecurityAction::Prefetch { analyzer, json } => {
-            run_security_prefetch(analyzer.as_deref(), json)
-        }
+        SecurityAction::Prefetch {
+            analyzer,
+            allow_download,
+            json,
+        } => run_security_prefetch(analyzer.as_deref(), allow_download, json),
         #[cfg(feature = "exec-subprocess")]
         SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
     }
@@ -4810,8 +4823,96 @@ struct SecurityIngestReport {
 struct SecurityListing {
     /// Every live layer with its run evidence and findings.
     layers: Vec<rto_graph::FindingsLayer>,
-    /// Total findings across those layers.
+    /// Total findings across those layers. **Unchanged** by the cross-reference
+    /// below — see [`SecurityCrossReference`].
     findings: usize,
+    /// Dependency advisories seen across analyzers, where more than one
+    /// dependency analyzer has a live layer. Empty otherwise, because there is
+    /// nothing to cross-reference against.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cross_reference: Vec<SecurityCrossReference>,
+}
+
+/// One advisory in the `--json` cross-reference (ADR-0018 v1.1).
+///
+/// A **view**, not a record: every finding it names is still in its own layer
+/// under its own key, and `findings` above still counts them all. This is what
+/// makes a duplicate pair read as one advisory confirmed by two analyzers rather
+/// than as a count that silently halved.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityCrossReference {
+    /// The advisory's canonical id — the RUSTSEC id where both sides publish one.
+    advisory: String,
+    /// Every identifier it is published under.
+    aliases: Vec<String>,
+    /// The package and resolved version it is about.
+    package: String,
+    version: String,
+    /// How many distinct analyzers reported it. `1` is a normal state, not a
+    /// discrepancy: the two databases are pinned independently, and `yanked` is
+    /// not an advisory kind OSV can carry at all.
+    confirmed_by: usize,
+    /// Which analyzers, and the still-addressable finding key each one wrote.
+    reports: Vec<SecurityCrossReferenceReport>,
+}
+
+/// One analyzer's report inside a [`SecurityCrossReference`].
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityCrossReferenceReport {
+    analyzer: String,
+    /// The finding key, unchanged and still addressable.
+    key: String,
+    /// The id *this* analyzer fired, which need not be the canonical one.
+    rule: String,
+    severity: rto_graph::Severity,
+}
+
+/// The cross-reference for a listing, or empty when there is nothing to cross-
+/// reference.
+///
+/// Below two dependency analyzers the section is suppressed rather than shown
+/// with every row reading "confirmed by 1" — that would be noise dressed as
+/// information, and it is exactly the case where a single source carries no
+/// signal about agreement either way.
+#[cfg(feature = "execution")]
+fn security_cross_reference(layers: &[rto_graph::FindingsLayer]) -> Vec<SecurityCrossReference> {
+    let correspondences = rto_exec::cross_reference(layers);
+    let mut analyzers: Vec<&str> = correspondences
+        .iter()
+        .flat_map(|c| c.analyzers())
+        .collect::<Vec<_>>();
+    analyzers.sort_unstable();
+    analyzers.dedup();
+    if analyzers.len() < 2 {
+        return Vec::new();
+    }
+    correspondences
+        .into_iter()
+        .map(|c| SecurityCrossReference {
+            advisory: c.advisory,
+            aliases: c.aliases,
+            package: c.package,
+            version: c.version,
+            confirmed_by: c
+                .reports
+                .iter()
+                .map(|r| &r.analyzer)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            reports: c
+                .reports
+                .into_iter()
+                .map(|r| SecurityCrossReferenceReport {
+                    analyzer: r.analyzer,
+                    key: r.key,
+                    rule: r.rule,
+                    severity: r.severity,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Just enough of a normalized report to learn which analyzer it claims to be
@@ -4983,6 +5084,12 @@ fn run_security_ingest(file: &str, analyzer: Option<&str>, json: bool) -> anyhow
             // `None` when nothing is provisioned, which is honest: an ingested
             // report says nothing about what this machine has.
             advisory_db: advisory_db_evidence(&request.analyzer),
+            // The checkout we are standing in, so an analyzer that reports
+            // absolute paths — `osv-scanner` does — produces the same
+            // worktree-relative finding keys here as it does under `security
+            // run`. A report about some *other* tree simply will not relativise,
+            // and the adapter records that rather than guessing.
+            worktree: Some(&worktree_path),
             snippets: &snippets,
         };
         let report = rto_exec::normalize_native(&request.analyzer, &bytes, &ctx)?;
@@ -5040,10 +5147,13 @@ fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
     let layers = store.findings_layers(analyzer)?;
     let total: usize = layers.iter().map(|l| l.findings.len()).sum();
 
+    let cross_reference = security_cross_reference(&layers);
+
     if json {
         emit_json(&SecurityListing {
             layers,
             findings: total,
+            cross_reference,
         })?;
         return Ok(());
     }
@@ -5076,7 +5186,76 @@ fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
         }
     }
     println!("{total} finding(s) across {} layer(s)", layers.len());
+    print_cross_reference(&cross_reference);
     Ok(())
+}
+
+/// Render the cross-reference block beneath a listing (ADR-0018 v1.1).
+///
+/// The total above is printed **before** this and is not adjusted by it: a
+/// duplicate pair is two findings and one advisory, and both numbers are true.
+/// Advisories two analyzers agree on come first, because agreement between
+/// independent sources is the evidence this decision exists to keep; the
+/// single-source ones follow, counted rather than listed, and labelled as the
+/// ordinary state they are.
+#[cfg(feature = "execution")]
+fn print_cross_reference(cross_reference: &[SecurityCrossReference]) {
+    if cross_reference.is_empty() {
+        return;
+    }
+    let (confirmed, single): (Vec<_>, Vec<_>) =
+        cross_reference.iter().partition(|c| c.confirmed_by > 1);
+
+    println!();
+    println!(
+        "cross-reference: {} advisory/advisories across analyzers",
+        cross_reference.len()
+    );
+    for entry in &confirmed {
+        let analyzers: Vec<&str> = entry
+            .reports
+            .iter()
+            .map(|r| r.analyzer.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        println!(
+            "  {} — {} {} — confirmed by {} ({})",
+            entry.advisory,
+            entry.package,
+            entry.version,
+            entry.confirmed_by,
+            analyzers.join(", ")
+        );
+        // Both keys stay addressable: a reader who fixes the advisory must see
+        // both of these disappear, and cannot do that without being told them.
+        for report in &entry.reports {
+            println!("      {}", report.key);
+        }
+    }
+    if !single.is_empty() {
+        let mut by_analyzer: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for entry in &single {
+            for report in &entry.reports {
+                *by_analyzer.entry(report.analyzer.as_str()).or_default() += 1;
+            }
+        }
+        let breakdown: Vec<String> = by_analyzer
+            .iter()
+            .map(|(analyzer, count)| format!("{count} only in {analyzer}"))
+            .collect();
+        // Not a discrepancy. The two databases are pinned and prefetched
+        // independently, so they legitimately differ for a window; and `yanked`
+        // comes from the crates.io index rather than from an advisory, so OSV
+        // cannot carry it at all.
+        println!(
+            "  {} reported by one analyzer ({}) — expected: the databases are pinned separately, \
+             and some kinds only one of them carries",
+            single.len(),
+            breakdown.join(", ")
+        );
+    }
 }
 
 /// The `--json` shape of `roteiro security run`.
@@ -5239,14 +5418,139 @@ struct SecurityPrefetchReport {
     provisioned: Vec<rto_exec::InstalledAsset>,
 }
 
+/// Stream `url` into `path`, for the one asset kind that is fetched by URL.
+///
+/// The transport lives here rather than in `rto-exec` on purpose: that crate
+/// has no network dependency and does not acquire one to provision an asset.
+/// It takes this as a function, so the code that *could* fetch is reachable
+/// only from `prefetch` — see [`rto_exec::provision_with`].
+///
+/// The body is streamed to disk rather than buffered: `npm/all.zip` alone is
+/// around 210 MB, and reading that into a `Vec` to write it straight back out
+/// would be a needless spike.
+///
+/// # A body of unknown length is refused, because this is where the pin is set
+///
+/// [`rto_exec::AssetSource::Download`] has **no compile-time digest** — the
+/// upstream files are rebuilt daily, so what gets recorded as the asset's pin is
+/// the digest of whatever this function wrote. Bytes that arrive here are
+/// therefore self-certifying: nothing downstream can contradict them, and
+/// `security status` will report a truncated database as present and matching.
+///
+/// `std::io::copy` returns `Ok` on a clean early EOF, so completeness has to be
+/// established from the response's framing. Measured against **ureq 3.4.0**,
+/// four of the five framings detect a truncated transfer on their own:
+///
+/// | Framing | Truncation detected |
+/// |---|---|
+/// | `Content-Length`, short body | yes — `UnexpectedEof` |
+/// | `Content-Encoding: gzip` | yes — decode error |
+/// | chunked, dropped mid-chunk | yes — `UnexpectedEof` |
+/// | chunked, terminator missing | yes — `UnexpectedEof` |
+/// | **close-delimited** (neither header) | **no — `Ok`** |
+///
+/// The last row is the hole, and it is not fixable by counting: that framing
+/// *defines* the body as ending when the connection closes, so a mid-transfer
+/// drop is indistinguishable from a complete file. A length that cannot be
+/// established is not a length that checks out, so such a response is refused
+/// rather than pinned — the same rule this feature applies to a cold cache,
+/// which fails by name instead of quietly fetching.
+///
+/// `Accept-Encoding: identity` is sent to ask for the one framing that can be
+/// verified end to end. The shipped OSV URLs answer it with `Content-Length` and
+/// no transfer encoding, so this refuses nothing that works today. A mirror that
+/// can only serve close-delimited bodies is not supported by `--allow-download`;
+/// its files can still be placed in the documented cache layout by hand, which
+/// `prefetch` then digests and pins without fetching anything.
+///
+/// The payload is deliberately **not** parsed. These are zips, and a structural
+/// check would be redundant: `osv-scanner` 2.5.0 already refuses a truncated
+/// database loudly — exit `127`, *"zip: not a valid zip file"* — and `127` is not
+/// a declared success status, so a corrupt database fails a scan rather than
+/// silently shrinking it. Parsing here would duplicate that for one asset kind
+/// while doing nothing for a future non-zip one.
+#[cfg(feature = "exec-subprocess")]
+fn download_asset_file(url: &str, path: &std::path::Path) -> Result<(), String> {
+    let response = ureq::get(url)
+        // Ask for the framing whose completeness can be checked. ureq decodes a
+        // compressed body and then reports no `Content-Length` at all, which
+        // would leave nothing to verify against.
+        .header("Accept-Encoding", "identity")
+        .call()
+        .map_err(|e| format!("GET {url}: {e}"))?;
+
+    let declared = declared_body_length(
+        response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .ok_or_else(|| {
+        format!(
+            "GET {url}: the response declares no usable Content-Length, so a complete download \
+             cannot be told from a truncated one. Refusing rather than digesting bytes of unknown \
+             completeness and recording them as this asset's pin. If the server cannot send a \
+             Content-Length, place the file in the asset cache by hand — prefetch verifies and \
+             pins what is already there without fetching."
+        )
+    })?;
+
+    let mut reader = response.into_body().into_reader();
+    let mut file =
+        std::fs::File::create(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
+    // Names the URL as well as the path. The common failure here is the peer
+    // hanging up mid-body — ureq enforces the declared framing and surfaces that
+    // from this call — which is a fact about the transfer, not the local file.
+    let written = std::io::copy(&mut reader, &mut file)
+        .map_err(|e| format!("transferring {url} to {}: {e}", path.display()))?;
+    std::io::Write::flush(&mut file).map_err(|e| format!("flushing {}: {e}", path.display()))?;
+
+    verify_transferred(url, declared, written)
+}
+
+/// The body length the response declares, or `None` if it declares none usable.
+///
+/// Split out so the parsing has a test that does not need a socket. An empty,
+/// negative or non-numeric value is `None` rather than an error: the caller's
+/// answer to "no usable length" is the same refusal either way, and it says so
+/// in one place.
+#[cfg(feature = "exec-subprocess")]
+fn declared_body_length(header: Option<&str>) -> Option<u64> {
+    header?.trim().parse::<u64>().ok()
+}
+
+/// Check what was written against what the server said it was sending.
+///
+/// Belt and braces over ureq's own `Content-Length` enforcement, which was
+/// measured to catch this case already (see [`download_asset_file`]). It is kept
+/// because the guarantee belongs to this function rather than to a dependency's
+/// current behaviour: this is the only code that can put network bytes into a
+/// pinned asset, and a ureq upgrade must not be able to silently relax it.
+#[cfg(feature = "exec-subprocess")]
+fn verify_transferred(url: &str, declared: u64, written: u64) -> Result<(), String> {
+    if written == declared {
+        return Ok(());
+    }
+    Err(format!(
+        "GET {url}: the server declared {declared} byte(s) and the transfer produced {written}. \
+         A short asset must not be digested and pinned as a complete one, so nothing was installed."
+    ))
+}
+
 /// Install and verify every pinned asset, recording each digest.
 ///
-/// This is the only command that writes to the asset cache. It fetches nothing
-/// over the network: the rule set is compiled into this binary, and the advisory
-/// database is a directory the operator provides — if it is absent, this says
-/// where it looked and which command obtains it, and does not go and get it.
+/// This is the only command that writes to the asset cache, and the only one
+/// that can reach the network at all — and only with `--allow-download`. The
+/// rule set is compiled into this binary; the `RustSec` advisory database is a
+/// directory the operator provides, and if it is absent this says where it
+/// looked and which command obtains it rather than going and getting it; the
+/// OSV databases are fetched by URL, which is what `--allow-download` is for.
 #[cfg(feature = "exec-subprocess")]
-fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
+fn run_security_prefetch(
+    analyzer: Option<&str>,
+    allow_download: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let specs: Vec<&rto_exec::AssetSpec> = match analyzer {
         Some(name) => {
@@ -5262,6 +5566,7 @@ fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<(
         None => rto_exec::ASSETS.iter().collect(),
     };
 
+    let fetcher: &rto_exec::Fetcher<'_> = &download_asset_file;
     let mut provisioned = Vec::with_capacity(specs.len());
     let mut failures = Vec::new();
     for spec in specs {
@@ -5275,8 +5580,21 @@ fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<(
                 spec.kind.as_str(),
                 spec.licence
             );
+            if allow_download && let rto_exec::AssetSource::Download { files } = spec.source {
+                // Name every URL before opening a socket to any of them. What
+                // this command talks to is the operator's business, and a
+                // quarter-gigabyte transfer should not be a surprise.
+                eprintln!("  downloading {} file(s):", files.len());
+                for file in files {
+                    eprintln!("    {}", file.url);
+                }
+            }
         }
-        match rto_exec::provision(&root, spec) {
+        // The fetcher is passed only when the operator asked for downloads. A
+        // downloadable asset that is already present still provisions without
+        // it, so re-running `prefetch` over a warm cache needs no flag and no
+        // network.
+        match rto_exec::provision_with(&root, spec, allow_download.then_some(fetcher)) {
             Ok(record) => provisioned.push(record),
             // One unprovisionable asset must not hide the others: report it and
             // carry on, then fail at the end with everything that went wrong.
@@ -7630,6 +7948,262 @@ mod memory_cli {
     }
 }
 
+// The one path that can put network bytes into the pinned asset cache.
+//
+// `AssetSource::Download` has no compile-time digest: whatever arrives here is
+// digested and recorded as the asset's own pin, so a truncated database would be
+// certified by `security status` as present and matching. These tests serve raw
+// HTTP over a loopback `TcpListener` — no external network, no fixtures — and
+// assert both that a bad transfer fails and that it leaves nothing a later
+// `prefetch` would treat as installed.
+#[cfg(all(test, feature = "exec-subprocess"))]
+mod asset_download {
+    use super::{declared_body_length, download_asset_file, verify_transferred};
+    use std::io::{Read as _, Write as _};
+
+    /// Serve `response` verbatim to exactly one client, then close.
+    ///
+    /// Raw bytes rather than a framework, because what is under test *is* the
+    /// framing: a declared length the body does not honour, or a body with no
+    /// declared length at all.
+    fn serve_once(response: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Read the request line so the client is not writing into a
+                // closed socket, then answer and hang up.
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/all.zip")
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("roteiro-dl-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// The positive control. Without it the refusals below could all be passing
+    /// because nothing ever succeeds.
+    #[test]
+    fn a_complete_download_succeeds_and_writes_every_byte() {
+        // 10 bytes: the 4-byte zip signature plus `hello!`.
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nPK\x03\x04hello!");
+        let dir = scratch("complete");
+        let path = dir.join("all.zip");
+        download_asset_file(&url, &path).expect("a complete transfer must install");
+        assert_eq!(std::fs::read(&path).expect("read"), b"PK\x03\x04hello!");
+    }
+
+    /// The reviewed defect: a server that declares a length and then closes
+    /// cleanly part-way through. This must fail rather than install a short
+    /// database that `status` would certify.
+    ///
+    /// **This test pins ureq, not this crate.** Measured against ureq 3.4.0, the
+    /// transport enforces `Content-Length` framing itself and raises
+    /// `UnexpectedEof` here, so reverting the guard in `download_asset_file`
+    /// does *not* turn this red — only a transport that stopped enforcing it
+    /// would. It is kept deliberately, as the regression pin on the dependency
+    /// behaviour the rest of this design now leans on.
+    #[test]
+    fn a_truncated_body_fails_and_leaves_nothing_installed() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nPK\x03\x04truncated");
+        let dir = scratch("truncated");
+        let path = dir.join("all.zip");
+
+        let err = download_asset_file(&url, &path).expect_err("a short body must not succeed");
+        // The refusal comes from the transport — ureq enforces `Content-Length`
+        // framing and reports the peer hanging up — so the assertion is that the
+        // failure is attributable, not that it carries this function's own
+        // mismatch wording.
+        assert!(err.contains(&url), "the failure must name the URL: {err}");
+
+        // Whatever bytes arrived must not survive as a usable asset. The
+        // fetcher writes to a staging path that `download_all` removes on
+        // failure; what must never exist is a complete-looking file.
+        let installed = std::fs::read(&path).unwrap_or_default();
+        assert_ne!(
+            installed.len(),
+            4096,
+            "a partial body must never look like the declared asset"
+        );
+    }
+
+    /// The framing that no byte count can rescue: neither `Content-Length` nor
+    /// chunked, so the body is defined as ending when the connection closes and
+    /// a mid-transfer drop is indistinguishable from a complete file.
+    ///
+    /// Measured against ureq 3.4.0, this is the one framing where a truncated
+    /// transfer reads as `Ok`. An unestablishable length is refused rather than
+    /// pinned.
+    #[test]
+    fn a_body_of_unknown_length_is_refused_rather_than_pinned() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\n\r\nPK\x03\x04could-be-half-a-database");
+        let dir = scratch("unframed");
+        let path = dir.join("all.zip");
+
+        let err =
+            download_asset_file(&url, &path).expect_err("an unverifiable length must be refused");
+        assert!(err.contains("Content-Length"), "{err}");
+        assert!(
+            err.contains("truncated") || err.contains("completeness"),
+            "the refusal must say what it could not establish: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "nothing may be written when the response cannot be verified"
+        );
+    }
+
+    /// End to end, through the code `prefetch` actually runs: a bad server must
+    /// leave the asset unprovisioned, with no record and no stray bytes for a
+    /// later `provision`/`status` to fold into a pin.
+    #[test]
+    fn a_failed_fetch_leaves_the_asset_unprovisioned_and_the_cache_clean() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\n\r\nhalf-a-database");
+        let root = scratch("provision");
+        // `DownloadFile` holds `&'static str`; a loopback URL has a fresh port
+        // each run, so it is leaked for the life of the test process.
+        let leaked: &'static str = Box::leak(url.into_boxed_str());
+        let files: &'static [rto_exec::DownloadFile] =
+            Box::leak(Box::new([rto_exec::DownloadFile {
+                path: "osv-scalibr/crates.io/all.zip",
+                url: leaked,
+            }]));
+        let spec = rto_exec::AssetSpec {
+            id: "osv-db",
+            analyzer: "osv-scanner",
+            kind: rto_exec::AssetKind::AdvisoryDb,
+            source: rto_exec::AssetSource::Download { files },
+            file: "",
+            licence: "test",
+        };
+
+        let fetcher: &rto_exec::Fetcher<'_> = &download_asset_file;
+        let err = rto_exec::provision_with(&root, &spec, Some(fetcher))
+            .expect_err("an unverifiable download must not provision");
+        assert!(
+            err.to_string().contains("Content-Length"),
+            "the provisioning failure must carry the fetcher's reason: {err}"
+        );
+
+        // Nothing recorded, and nothing left in the tree that a later successful
+        // provision would digest into the pin.
+        let status = rto_exec::status(&root, Some("osv-scanner"));
+        assert_eq!(status.len(), 1);
+        assert!(
+            status[0].installed.is_none(),
+            "a failed fetch must not read as provisioned"
+        );
+        assert_eq!(status[0].verified, None);
+
+        let strays: Vec<std::path::PathBuf> = walk(&root);
+        assert!(
+            strays.is_empty(),
+            "a failed fetch must leave no bytes behind: {strays:?}"
+        );
+    }
+
+    /// Every file under `dir`, recursively.
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// The request asks for the one framing whose completeness can be checked.
+    ///
+    /// Served by a listener that content-negotiates: it answers a request
+    /// carrying `Accept-Encoding: identity` with a length-framed body, and
+    /// anything else with a close-delimited one. Succeeding therefore proves the
+    /// header was sent — without it, this download would be refused as
+    /// unverifiable, which is the fail-closed direction but a needless one
+    /// against a server that would have obliged.
+    #[test]
+    fn the_request_asks_for_a_framing_it_can_verify() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+                let response: &[u8] = if request.contains("accept-encoding: identity") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nPK\x03\x04ok"
+                } else {
+                    b"HTTP/1.1 200 OK\r\n\r\nPK\x03\x04ok"
+                };
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        let url = format!("http://{addr}/all.zip");
+        let dir = scratch("negotiated");
+        let path = dir.join("all.zip");
+
+        download_asset_file(&url, &path)
+            .expect("a server offering a verifiable framing must be taken up on it");
+        assert_eq!(std::fs::read(&path).expect("read"), b"PK\x03\x04ok");
+    }
+
+    /// A length that cannot be parsed is the same answer as no length at all —
+    /// stated once, so a blank or malformed header cannot read as zero bytes.
+    #[test]
+    fn only_a_real_number_counts_as_a_declared_length() {
+        assert_eq!(declared_body_length(Some("3374965")), Some(3_374_965));
+        assert_eq!(declared_body_length(Some("  42 ")), Some(42));
+        assert_eq!(declared_body_length(Some("0")), Some(0));
+        assert_eq!(declared_body_length(None), None);
+        assert_eq!(declared_body_length(Some("")), None);
+        assert_eq!(declared_body_length(Some("lots")), None);
+        assert_eq!(declared_body_length(Some("-1")), None);
+        assert_eq!(declared_body_length(Some("1.5")), None);
+    }
+
+    /// The mismatch is reported with both counts, so the failure says how short
+    /// the transfer was rather than only that something went wrong.
+    ///
+    /// Exercised directly: ureq 3.4.0 enforces `Content-Length` framing itself
+    /// and errors before this branch is reached, so it is defence against a
+    /// dependency changing that — which is precisely why it is tested here
+    /// rather than assumed to be unreachable.
+    #[test]
+    fn a_short_transfer_is_reported_with_both_counts() {
+        verify_transferred("https://example.invalid/all.zip", 4096, 4096)
+            .expect("an exact transfer is fine");
+
+        let err = verify_transferred("https://example.invalid/all.zip", 4096, 1200)
+            .expect_err("a short transfer must fail");
+        assert!(err.contains("4096"), "{err}");
+        assert!(err.contains("1200"), "{err}");
+        assert!(err.contains("https://example.invalid/all.zip"), "{err}");
+        assert!(
+            err.contains("pinned"),
+            "the message must say why it matters: {err}"
+        );
+
+        // A body *longer* than declared is equally wrong: it is not the resource
+        // the server described.
+        assert!(verify_transferred("https://example.invalid/all.zip", 10, 11).is_err());
+    }
+}
+
 // The `roteiro security` surface: argument shapes, the analyzer peek that keeps
 // `ingest` a one-argument command, and the `--json` shapes callers parse. The
 // behaviour these wrap — layer replacement, idempotence, artifact purity — is
@@ -7638,6 +8212,7 @@ mod memory_cli {
 mod security_cli {
     use super::{
         Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, report_analyzer,
+        security_cross_reference,
     };
     use clap::Parser as _;
 
@@ -7791,10 +8366,74 @@ mod security_cli {
         let listing = SecurityListing {
             layers: Vec::new(),
             findings: 0,
+            cross_reference: Vec::new(),
         };
         let value = serde_json::to_value(&listing).expect("serialize");
         assert_eq!(value["findings"], 0);
         assert!(value["layers"].as_array().expect("array").is_empty());
+        // Nothing to cross-reference is an absent section, not an empty one:
+        // a consumer must not have to tell "no duplicates" from "not computed".
+        assert!(value.get("cross_reference").is_none());
+    }
+
+    /// The cross-reference is suppressed below two dependency analyzers, and
+    /// present at two.
+    ///
+    /// With one analyzer every row would read "confirmed by 1", which is noise
+    /// dressed as information: a single source carries no signal about agreement
+    /// in either direction. With two it is exactly the evidence ADR-0018 v1.1
+    /// decided to keep.
+    #[test]
+    fn the_cross_reference_appears_only_once_there_is_something_to_compare() {
+        fn layer(analyzer: &str, rule: &str, package: &str) -> rto_graph::FindingsLayer {
+            rto_graph::FindingsLayer {
+                run: rto_graph::AnalysisRun {
+                    layer: format!("security:{analyzer}:ab12cd34"),
+                    analyzer: analyzer.to_owned(),
+                    analyzer_version: "1.0.0".to_owned(),
+                    runner: rto_graph::RunnerKind::Ingested,
+                    isolation: rto_graph::Isolation::Ingested,
+                    image_digest: None,
+                    rules_digest: None,
+                    advisory_db: None,
+                    command_policy: rto_graph::CommandPolicy {
+                        network: rto_graph::NetworkPolicy::Deny,
+                        worktree: rto_graph::WorktreeAccess::ReadOnly,
+                        environment: rto_graph::EnvironmentPolicy::Scrubbed,
+                    },
+                    source: rto_graph::SourceIdentity::default(),
+                    started_at: "2026-08-16T09:00:00Z".to_owned(),
+                    ended_at: "2026-08-16T09:00:01Z".to_owned(),
+                    exit_status: 1,
+                    report_digest: "0".repeat(64),
+                },
+                findings: vec![rto_graph::Finding {
+                    key: rto_graph::FindingKey::new(analyzer, &[rule.to_owned()]).expect("key"),
+                    rule: rule.to_owned(),
+                    severity: rto_graph::Severity::High,
+                    title: format!("{package} is affected"),
+                    message: String::new(),
+                    path: None,
+                    span: None,
+                    meta: serde_json::json!({"package": package, "version": "1.0.0"}),
+                }],
+            }
+        }
+
+        let one = vec![layer("cargo-audit", "RUSTSEC-2026-0001", "widget")];
+        assert!(
+            security_cross_reference(&one).is_empty(),
+            "one analyzer has nothing to be cross-referenced against"
+        );
+
+        let two = vec![
+            layer("cargo-audit", "RUSTSEC-2026-0001", "widget"),
+            layer("osv-scanner", "RUSTSEC-2026-0001", "widget"),
+        ];
+        let crossref = security_cross_reference(&two);
+        assert_eq!(crossref.len(), 1, "one advisory, not two problems");
+        assert_eq!(crossref[0].confirmed_by, 2);
+        assert_eq!(crossref[0].reports.len(), 2, "both keys stay addressable");
     }
 
     /// The flag that accepts an unsandboxed run is required, and it is a flag
@@ -7842,13 +8481,19 @@ mod security_cli {
     #[cfg(feature = "exec-subprocess")]
     #[test]
     fn prefetch_and_status_default_to_every_analyzer() {
-        let SecurityAction::Prefetch { analyzer, json } =
-            action(["roteiro", "security", "prefetch"])
+        let SecurityAction::Prefetch {
+            analyzer,
+            allow_download,
+            json,
+        } = action(["roteiro", "security", "prefetch"])
         else {
             panic!("expected Prefetch");
         };
         assert_eq!(analyzer, None);
         assert!(!json);
+        // Downloading is asked for, never assumed: a bare `prefetch` must not
+        // start a quarter-gigabyte transfer.
+        assert!(!allow_download);
 
         let SecurityAction::Status { analyzer, json } = action([
             "roteiro",

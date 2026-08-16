@@ -123,8 +123,9 @@ eviction tier can later be altered without touching durable memory.
 **Stages 22 and 24 need no migration** — `RunnerKind` shipped in migration 8 already
 naming all three backends, with the schema CHECK accepting them. Stage 22 confirmed
 this: two analyzers landed with no schema change at all, because `FindingKey`
-takes each analyzer's own ordered identity components. Stage 22b adds a third the
-same way.
+takes each analyzer's own ordered identity components. **Stage 22b confirmed it
+again**: `osv-scanner` landed with a five-component identity and no schema change,
+and a test asserts exactly that.
 
 **`EXTRACT_VERSION` does not change in Stages 21–25.** None of that work is
 extraction output (Stage 21 shipped without touching it, as required). It *does*
@@ -137,17 +138,18 @@ change in Stage 26, once — see the note there.
 Dependency shape — four tracks, only one hard chain:
 
 ```
-Track A (findings):  21 ✅ ──► 22 ✅ ──► 22b ──► 24
+Track A (findings):  21 ✅ ──► 22 ✅ ──► 22b ✅ ──► 24
 Track B (memory):    23 ✅ ──────────────► 25
 Track C (lenses):    26         (independent of A and B throughout)
 Track D (media):     28 ✅ ──► 29
                                           └──► 27 (v2.0 hardening)
 ```
 
-Stages 21, 23 and 26 were the parallel-startable set; 21, 22, 23 and 28 have now
-landed, leaving 22b, 24, 25, 26 and 29 open. Nothing in Track C touches the artifact
-stores; nothing in Track B blocks Track A. **22b is sequenced after 22 but does not
-block 24**: it adds one adapter behind a seam 24 does not touch.
+Stages 21, 23 and 26 were the parallel-startable set; 21, 22, 22b, 23 and 28 have
+now landed, leaving 24, 25, 26 and 29 open. Nothing in Track C touches the artifact
+stores; nothing in Track B blocks Track A. **22b was sequenced after 22 and did not
+block 24**: it added one adapter behind a seam 24 does not touch, and needed no
+migration.
 
 ---
 
@@ -223,15 +225,15 @@ stages:
 
 **Coverage is a matrix, not an analyzer list**
 ([ADR-0018](adr/0018-analyzer-coverage-matrix.md)). The requirement is findings
-for Rust, Python, SQL, Java and Node, and the two named analyzers deliver that
-**on the SAST axis only**:
+for Rust, Python, SQL, Java and Node. The two analyzers named in Stage 22 deliver
+that **on the SAST axis only**; Stage 22b closed the dependency axis:
 
 | Language | SAST | Dependency vulnerabilities |
 |---|---|---|
-| Rust | semgrep (GA) | cargo-audit (RustSec) |
-| Python | semgrep (GA) | *gap* → `osv-scanner` (22b) |
-| Java | semgrep (GA) | *gap* → `osv-scanner` (22b) |
-| Node (JS/TS) | semgrep (GA) | *gap* → `osv-scanner` (22b) |
+| Rust | semgrep (GA) | cargo-audit (RustSec) **+ `osv-scanner`** — both kept, cross-referenced (22b) |
+| Python | semgrep (GA) | `osv-scanner` (OSV `PyPI`) ✅ 22b |
+| Java | semgrep (GA) | `osv-scanner` (OSV `Maven`) ✅ 22b |
+| Node (JS/TS) | semgrep (GA) | `osv-scanner` (OSV `npm`) ✅ 22b |
 | SQL | semgrep `generic` — token matching, no parser | n/a — no dependency ecosystem |
 
 - Semgrep's published language list has **no SQL entry at any maturity level** —
@@ -316,7 +318,7 @@ docs and ADR-0018 rather than assumed.
 **No new dependencies** — `Cargo.lock` is untouched; `exec-subprocess` is
 `std::process` over the crates already present, and is **off by default**.
 
-### Stage 22b — `osv-scanner`: the dependency axis for Python, Java and Node → effort **M**
+### Stage 22b — `osv-scanner`: the dependency axis for Python, Java and Node → effort **M** ✅ *delivered*
 
 Split out of Stage 22 because it is a different axis, not more of the same one,
 and because the SAST half is independently useful and independently reviewable.
@@ -352,6 +354,51 @@ and because the SAST half is independently useful and independently reviewable.
 - **DoD:** a Python, a Java and a Node lockfile each produce findings; offline
   with a pinned database succeeds; the Rust overlap with `cargo-audit` is
   explicitly resolved and recorded, rather than left to chance.
+
+**Delivered.** What shipped, and what it changes for later stages:
+
+- **The `osv-scanner` adapter**, behind the Stage 21 seam. The subprocess runner,
+  asset cache, `prefetch`/`status` and finding schema were reused **unchanged**,
+  and — as Stage 21 predicted — it needed **no migration**: `FindingKey` already
+  takes each analyzer's own ordered identity components (`advisory, ecosystem,
+  package, version, manifest`), and `RunnerKind` already names the backends. A
+  test asserts the new analyzer's keys are valid with no schema change.
+- **`AssetSource::Download`**, the first asset fetched by URL — OSV's
+  per-ecosystem `all.zip` databases. `rto-exec` gained **no network dependency**:
+  it takes the fetcher as a function argument, so the code that can open a socket
+  lives in the CLI and is reachable only from `prefetch`. That flag is new and
+  required: `roteiro security prefetch --analyzer osv-scanner --allow-download`,
+  because the four databases are roughly **260 MB** (`npm` alone is ~210 MB) and
+  that is not a reasonable surprise. The stale comment in `assets.rs` claiming an
+  unused fetch path is a security surface with no user was updated, not left to
+  contradict the code.
+- **The Rust overlap is implemented as ADR-0018 v1.1 decided**: both analyzers'
+  findings are kept, and `rto_exec::cross_reference` joins them at the reporting
+  layer on identifiers both upstreams publish. `security list` renders a
+  duplicate pair as one advisory confirmed by two analyzers with both finding
+  keys still addressable, and prints the finding total **unchanged** above it.
+  Real fixture data added a constraint the decision did not state: `chrono`'s
+  `cargo-audit` advisory lists `time`'s CVE under `related`, so the join also
+  requires the same package at the same version, and names a correspondence only
+  by an id an analyzer actually fired.
+- **Both open items were measured, and ADR-0018 is at v1.2 in this PR.**
+  (1) `osv-scanner` 2.5.0 **does** report `RustSec`'s `unmaintained` and
+  `unsound` by default — v1.0's options table conflated the database with the
+  tool. Only `yanked` is unavailable, and structurally: it is not an advisory,
+  `cargo audit` reads it from the crates.io index. (2) RustSec→OSV ingestion lag
+  is **~2.5 minutes**, not days; what actually makes the two analyzers differ is
+  **pin age**, since each database is provisioned separately. "Present in one" is
+  rendered as a normal single-source row with its cause named.
+- **Three more undocumented tool behaviours**, each of which would have been a
+  silent defect and all three now recorded in ADR-0018: `--offline-vulnerabilities`
+  alone consults no database and reports a clean scan (`--offline` is what loads
+  it); reported paths are absolute even when the target is `.`, which would have
+  put the scanning machine's home directory into a persisted finding key; and the
+  same advisory is listed twice under its RUSTSEC and GHSA ids, with `groups`
+  already saying so.
+- Fixtures are **real captured output** from osv-scanner 2.5.0 over a committed
+  four-ecosystem lockfile tree, taken fully offline against pinned databases. The
+  tool-dependent test self-skips visibly when no `osv-scanner` is on `PATH`.
 
 ### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.11.0** · effort **M** ✅ *delivered*
 
@@ -738,7 +785,7 @@ is why it rides an independent track.
 |---|---|---|
 | v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
 | v1.11.0 ✅ | Stage 22 — semgrep + cargo-audit (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure — **met** |
-| v1.11.x | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved |
+| v1.11.x ✅ | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved — **met** |
 | v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |

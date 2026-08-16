@@ -39,6 +39,41 @@ pub fn cargo_audit_native() -> Vec<u8> {
     read("native/cargo-audit.json")
 }
 
+/// The dependency-manifest tree — one lockfile per ecosystem `osv-scanner`
+/// covers. See its `README.md`.
+#[must_use]
+pub fn deps_root() -> PathBuf {
+    fixtures().join("deps")
+}
+
+/// Real `osv-scanner --format json` output over [`deps_root`], captured fully
+/// offline from osv-scanner 2.5.0 against pinned per-ecosystem databases.
+#[must_use]
+pub fn osv_scanner_native() -> Vec<u8> {
+    read("native/osv-scanner-deps.json")
+}
+
+/// The worktree root the committed `osv-scanner` capture was rewritten to.
+///
+/// `osv-scanner` reports absolute paths, so the capture named the machine it ran
+/// on; the four source paths were rewritten to this placeholder rather than a
+/// developer's home directory being committed. Tests pass it as the worktree,
+/// which is what makes them exercise the relativisation the adapter really does.
+pub const CAPTURE_ROOT: &str = "/checkout";
+
+/// Every ecosystem the dependency axis must cover, paired with the manifest that
+/// has to yield at least one finding for it.
+///
+/// The list is ADR-0018's dependency column in executable form: closing the gap
+/// for Python, Java and Node without a manifest that proves it would leave this
+/// table disagreeing with the document.
+pub const REQUIRED_ECOSYSTEMS: &[(&str, &str)] = &[
+    ("PyPI", "python/requirements.txt"),
+    ("Maven", "java/gradle.lockfile"),
+    ("npm", "node/package-lock.json"),
+    ("crates.io", "rust/Cargo.lock"),
+];
+
 fn read(relative: &str) -> Vec<u8> {
     let path = fixtures().join(relative);
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading fixture {}: {e}", path.display()))
