@@ -761,9 +761,23 @@ is why it rides an independent track.
 
 ## 9. Open questions (decide before the stage that needs them)
 
-1. **Cache bound value** (Stage 25): the *unit* is settled — a byte budget,
-   following `ModelCache`. The *number* is a judgement about tolerable
-   `.git/roteiro/` growth and still needs deciding.
+1. ~~**Cache bound value** (Stage 25)~~ — **answered: 256 MB by default,
+   configurable** (decided by the owner). The unit was already settled as a byte
+   budget following `ModelCache`; this fixes the number and makes it raisable for
+   larger repositories.
+
+   The scale that justifies it, measured on this repository: `.git/roteiro` is
+   **49 MB** (44 MB object cache over 2,395 entries, 4.6 MB `graph.db`) against a
+   **91 MB** `.git`. Roteiro's sidecar is already ~54% of the repository it
+   describes, so a cache tier is not a new cost category — it is a bound on one
+   that is currently unbounded in every direction. 256 MB is small against `.git`,
+   trivial against an 18 GB model store, and large enough that an ordinary session
+   never evicts.
+
+   Erring small is deliberate and cheap: `build_context` is *proven* to reconstruct
+   identically (`context.rs` asserts `built == cached`), so **eviction costs cycles,
+   never information**. Erring large only costs disk. Neither error is expensive,
+   which is precisely why this did not warrant more analysis than a measurement.
 2. ~~**Memory scope** (Stage 23)~~ — **answered**, ADR-0013 v1.1 §*Scope*. A lesson
    is valid in a tree only if the relevant association is present there **in the
    same format**, so the **anchor is the scope test** and `scope` is a coarse
