@@ -79,7 +79,7 @@ Verified against `main` at the time of writing:
 | Released | **v1.10.1** on crates.io; workspace at **1.11.0**, publish in flight (only `rto-llama-v1.11.0` tagged so far) | V2 work is post-1.0 — semver is now real. |
 | MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
-| Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
+| Coverage | **measured in CI, not gated** — `cargo llvm-cov` runs non-blocking; the 85% per-file floor is an aspiration (ADR-0001), never an enforced check (issue #319) | Every stage below still carries test cost, but a DoD may not cite "85% coverage" as if something verified it. |
 | CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
 | Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | **`11`** (`crates/rto-graph/src/extract.rs`) — the Stage 28 bump landed in #316 | Bumping it forces full re-extraction for every user. No test pins the value. |
@@ -865,6 +865,101 @@ is why it rides an independent track.
   the model shown to load on the pinned engine **and** to emit a `<tool_call>`,
   because a served model that cannot reach the graph tools is much less useful.
 
+### Stage 32 — Guardrails: four ways a wrong answer looked like a right one → **v1.12.0** · effort **M** ✅ *delivered* *(independent track)*
+
+**Goal:** close four defects that share one shape — each let Roteiro, or its own
+documentation, state something false *confidently*. Every one of them was found
+during this project's own development, and every one passed CI. The fix in each
+case is to make the failure **loud**, not merely to make the output correct.
+
+- **Duplicate `adr-id` (#324).** ADR nodes are keyed `adr:NNNN`, so two ADR files
+  declaring one id collapse into a single node: `query adr:0016` answers for one
+  decision while the other is invisible, `@rto:0016` binds to whichever won, and
+  the published artifact carries only the survivor. The two files merge cleanly
+  in git and `check` reported **0 violations**. This happened here — two parallel
+  branches both authored ADR-0016. `check` now reports a `duplicate-adr-id`
+  violation naming **both** paths and the id. The collision class does not exist
+  for blueprints, `lat.md`, files or symbols: their ids *are* their paths, and a
+  tree cannot hold two files at one path.
+- **Graph API applied no debt exclusions (#321).** `debt(s, &[], &[])` — the
+  ignore lists passed empty — so the explorer UI counted markers the CLI
+  excludes and browser and terminal disagreed about the same repository. Fixed on
+  three axes: pass the exclusions; resolve them **per repo** from the target's
+  own root (ADR-0009's rule extended to scanning — *a repository's own config
+  governs how it is scanned, whoever is asking*); and make `[debt] ignore`
+  **merge** across config layers instead of the project layer silently discarding
+  the user layer, with an explicit `ignore_reset` as the way to inherit nothing.
+  ADR-0007 amended to v1.1. The MCP `debt` tool had the same defect.
+- **The 85% coverage ratchet was never wired into CI (#319).** The docs asserted
+  `cargo-llvm-cov` ran with a per-file floor; the workflow contained no coverage
+  tooling at all, making every DoD citing "85% coverage" unverifiable. Coverage
+  is now **measured, non-blocking**, and every document saying otherwise was
+  corrected. Measured baseline: **87.51% lines** workspace-wide, **7 of 64 files**
+  below 85%. The workspace already clears 85%; a *per-file* gate would fail seven
+  files whose coverage is low for reasons about what the code does (CLI wiring,
+  and paths needing a loaded model, a GPU or a sandboxed subprocess). Choosing
+  the threshold is deliberately a separate change, now informed by real numbers.
+- **Worktrees and the graph store (#330).** Investigated, and the reported root
+  cause did not hold: `graph.db` already lives under each worktree's **own** git
+  dir, not the shared common dir — verified with real linked worktrees. The
+  *observed* symptoms ("`check` said 17 ADRs while 18 files sat on disk";
+  "`sync` said up to date while the store lacked three ADRs") were reproduced,
+  and their real cause is unrelated to worktrees: `sync_worktree` deliberately
+  overlays **untracked** files into the derived layer, while the authored layer
+  read only the `HEAD` tree — so a brand-new ADR had its symbols extracted but
+  was never parsed as an ADR, in a single tree, silently. Fixed by making the two
+  layers agree. The per-worktree layout is now pinned by a test, and a
+  worktree stamp (migration 12) makes a store that *does* come to hold another
+  tree rebuild loudly rather than answer "up to date".
+- **A migration could be skipped permanently.** `apply` ran migrations with
+  `version > MAX(recorded)`, so a store stamped by a build that knew migration
+  **13** but not **12** never got 12 — `12 > 13` is false, forever. The store
+  opened cleanly, reported a schema it did not have, and failed at run time on
+  the missing column. Reproduced against a copy of this repository's real
+  `graph.db`: `sync` died on `no such column: worktree`, i.e. **the #330 tree
+  stamp added above was itself the thing silently absent**. Selection is now by
+  **set membership**, so an unrecorded migration is repaired on the next open
+  wherever it sits; ordering comes from the migration list, which a `const`
+  assertion holds strictly ascending at **compile time**. `schema_version()` now
+  reports the highest *gap-free* version rather than the maximum, so it cannot
+  name a schema the store lacks. No gate could have caught this: CI always starts
+  from a fresh store, where both rules agree. It is the `EXTRACT_VERSION`
+  incident's shape exactly — two independently-correct branches, a failure that
+  exists only in the combination. **Consequence:** merging guardrails before
+  stage25 was load-bearing and a mistake would have been permanent for any store
+  that met stage25 first; it is now a preference.
+
+**Known gap, not fixed here (separate work).** The *other* direction is still
+silent: a store at migration 13 opened by a binary that knows only 1..12 opens
+without complaint. Reads stay sound — migrations are additive in effect, so the
+columns an older binary reads still exist — but `sync` would re-extract under an
+older `EXTRACT_VERSION` and **rewrite the graph with worse content**: a silent
+downgrade, not a crash. A hard error in `apply` was considered and rejected as
+the wrong granularity, since it would also block the reads that are provably
+safe. The fix belongs on the *write* paths (`sync`/`reconcile`/`rebuild`),
+refusing to rewrite a graph whose store is newer than the binary, and it needs a
+`StoreError` variant — a semver-visible addition on a 1.x crate. Filed rather
+than folded in.
+
+**Deliberately NOT done:** per-worktree databases. `findings`, `media_content`,
+`agent_memory` and `imports` all live inside `graph.db`, and [ADR-0013](adr/0013-agent-memory-artifact-store.md)
+v1.1 depends on that store being **shared** — its scope rule (a memory applies
+wherever its anchor resolves, with no branch bookkeeping) was demonstrated with
+one row in one store giving opposite verdicts on two branches. Splitting the
+database per worktree would silently reintroduce the branch-scoping that ADR
+rejected, and would need the ADR **amended**, not extended. Note the distinction
+the codebase already draws and this preserves: `ObjectCache` is content-addressed
+by blob id, so sharing it across worktrees is *correct and valuable*; the
+assembled graph is not, so sharing it would mean last-writer-wins.
+
+- **DoD:** every guard proved by fault injection — the guarded behaviour broken,
+  the test watched to go red, the file restored and verified byte-identical —
+  because every real defect found in this project today passed CI, and an
+  untested-for-failure test is an assumption in costume. No absolute assertions
+  on shared constants (`EXTRACT_VERSION`, `schema_version`, migration counts);
+  migration 12 is covered by the existing additive-migration property test (#329)
+  rather than a pinned version number.
+
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
 
 - Semver review: query output is explicitly versioned, so new query shapes carry
@@ -873,8 +968,9 @@ is why it rides an independent track.
 - Docs: blueprint updated, `docs/JSON_SCHEMA.md` extended for findings + memory,
   every "offline" claim re-audited to say **offline-capable once provisioned**
   where that is the truth.
-- Coverage ratchet held at 85% across all new crates; `cargo deny` clean with
-  `--all-features` on the resolved native closure.
+- Coverage **measured** across all new crates and the numbers reviewed before
+  release (there is no ratchet enforcing 85% — issue #319); `cargo deny` clean
+  with `--all-features` on the resolved native closure.
 
 ---
 
@@ -893,6 +989,7 @@ is why it rides an independent track.
 | v1.11.0 ✅ | Stage 29 — audio metadata as `derived` facts | Format read costs 1–100 µs and instantiates no decoder; duration exact/estimated/absent never guessed — **met** |
 | v1.11.0 ✅ | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
 | v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
+| v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---

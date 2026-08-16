@@ -595,11 +595,25 @@ async fn neighbourhood(
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/{project}/debt` → the intent-debt report
-/// (`query::debt`).
+/// (`query::debt`), under **that project's own** `[debt] ignore` exclusions.
+///
+/// The exclusions are not decoration: without them this endpoint — which the
+/// explorer UI reads — counted every marker under `docs/**`, `website/**`,
+/// `CHANGELOG.md` and `Cargo.toml` that the CLI excludes, so the browser and the
+/// terminal reported different debt for the same repository. Two disagreeing
+/// numbers are worse than either being wrong, because neither looks wrong.
+///
+/// The exclusions come from the **target project's own** repository
+/// ([`crate::config::debt_ignore_for`]), not the repo the server was started in.
+/// An unreadable or malformed `roteiro.toml` there is a 500, deliberately: a
+/// fallback to "no exclusions" would serve a silently different number, which is
+/// the defect rather than a graceful degradation.
 async fn project_debt(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let project = require_project(&params)?;
-    let report = ws.with_store(Some(project), |s| debt(s, &[], &[]))??;
+    let ignore = crate::config::debt_ignore_for(ws, Some(project))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let report = ws.with_store(Some(project), |s| debt(s, &[], &ignore))??;
     Ok(Json(report).into_response())
 }
 
@@ -2185,6 +2199,149 @@ mod tests {
         assert!(json["schema"].is_string());
         assert!(json["total"].is_number());
         assert!(json["items"].is_array());
+    }
+
+    // ---- Issue #321: the graph API must apply the *target repo's own* debt
+    // exclusions, so the explorer UI and that repo's CLI report one number. ----
+
+    /// One intent-debt marker as extraction emits it, at `path`.
+    fn marker_node(path: &str, line: u32) -> Node {
+        let mut node = Node::new(
+            format!("marker:{path}#{line}"),
+            NodeKind::Marker,
+            "TODO: finish".to_owned(),
+        );
+        node.path = Some(path.to_owned());
+        node.meta = json!({ "category": "todo", "text": "TODO: finish", "line": line });
+        node
+    }
+
+    /// A real git repository at `dir` with an optional `roteiro.toml` and a
+    /// `graph.db` holding one debt marker per path — the on-disk shape
+    /// [`Workspace::from_repo_paths`] discovers, which is what makes the per-repo
+    /// config resolution observable at all.
+    fn debt_repo(dir: &std::path::Path, toml: Option<&str>, markers: &[&str]) {
+        std::fs::create_dir_all(dir).expect("mkdir repo");
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .expect("run git init")
+            .success();
+        assert!(ok, "git init failed in {}", dir.display());
+        if let Some(toml) = toml {
+            std::fs::write(dir.join("roteiro.toml"), toml).expect("write roteiro.toml");
+        }
+        let store_dir = dir.join(".git").join("roteiro");
+        std::fs::create_dir_all(&store_dir).expect("mkdir store");
+        let mut store = Store::open(&store_dir.join("graph.db")).expect("open store");
+        let mut facts = FactSet::new();
+        for (i, path) in markers.iter().enumerate() {
+            facts = facts.with_node(marker_node(path, u32::try_from(i).unwrap() + 1));
+        }
+        store.apply_factset(&facts).expect("apply markers");
+    }
+
+    fn fresh_repo_root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "roteiro-api-debt-{}-{name}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    #[tokio::test]
+    async fn debt_endpoint_applies_the_repos_own_exclusions() {
+        // Before the fix this endpoint called `debt(s, &[], &[])`: the ignore
+        // lists were passed EMPTY, so the browser counted markers the CLI
+        // excluded and the two disagreed about the same repository.
+        let root = fresh_repo_root("own");
+        let repo = root.join("app");
+        debt_repo(
+            &repo,
+            Some("[debt]\nignore = [\"docs/**\", \"CHANGELOG.md\"]\n"),
+            &["src/lib.rs", "docs/guide.md", "CHANGELOG.md"],
+        );
+
+        let ws = Workspace::from_repo_paths([&repo]).expect("workspace");
+        let (status, json) = get(single_set(ws), None, "/v1/graph/app/debt").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Only `src/lib.rs` survives — `docs/**` and `CHANGELOG.md` are excluded
+        // by the repo's own config, exactly as the CLI excludes them.
+        assert_eq!(
+            json["total"], 1,
+            "excluded paths must not be counted: {json}"
+        );
+        let paths: Vec<&str> = json["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|i| i["path"].as_str())
+            .collect();
+        assert_eq!(paths, vec!["src/lib.rs"], "kept the right marker");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn each_repo_is_scanned_under_its_own_config_not_the_first_ones() {
+        // The multi-repo half (#321b): repo B's own `[debt] ignore` must govern B
+        // even though the request arrives at a server that also hosts A. A
+        // repository's own config governs how it is scanned, whoever is asking.
+        let root = fresh_repo_root("per-repo");
+        let (a, b) = (root.join("alpha"), root.join("beta"));
+        // Same marker paths in both repos; different exclusions.
+        let markers = ["src/lib.rs", "docs/guide.md", "vendor/dep.rs"];
+        debt_repo(&a, Some("[debt]\nignore = [\"docs/**\"]\n"), &markers);
+        debt_repo(&b, Some("[debt]\nignore = [\"vendor/**\"]\n"), &markers);
+
+        let ws = Workspace::from_repo_paths([&a, &b]).expect("workspace");
+        let set = WorkspaceSet::from_workspaces([("ws".to_owned(), ws, true)]);
+        let app = router(Arc::new(set), Some("ws".to_owned()));
+
+        let (sa, ja) = send(app.clone(), "GET", "/v1/graph/alpha/debt").await;
+        let (sb, jb) = send(app, "GET", "/v1/graph/beta/debt").await;
+        assert_eq!((sa, sb), (StatusCode::OK, StatusCode::OK));
+
+        let paths = |j: &Value| -> Vec<String> {
+            j["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .filter_map(|i| i["path"].as_str().map(str::to_owned))
+                .collect()
+        };
+        // alpha hides docs/, beta hides vendor/ — neither borrows the other's list.
+        assert_eq!(
+            paths(&ja),
+            vec!["src/lib.rs".to_owned(), "vendor/dep.rs".to_owned()],
+            "alpha uses alpha's config: {ja}"
+        );
+        assert_eq!(
+            paths(&jb),
+            vec!["docs/guide.md".to_owned(), "src/lib.rs".to_owned()],
+            "beta uses beta's config, not alpha's: {jb}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn debt_endpoint_reports_no_exclusions_for_a_repoless_project() {
+        // A pre-opened store has no repository on disk, so there is no config to
+        // consult — and substituting the invoking process's would be the very
+        // mix-up the per-repo resolution exists to prevent. Everything counts.
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/debt",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["total"].is_number(), "still answers: {json}");
     }
 
     #[tokio::test]

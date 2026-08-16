@@ -65,3 +65,157 @@ fn config_reflects_project_toml_and_rejects_malformed() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `roteiro config` must show **which layer each `[debt] ignore` pattern came
+/// from** (issue #321c). The list merges across layers, so one `(project)` label
+/// for the whole key would misreport a list holding patterns from both — and the
+/// merge is only safe if it is legible.
+#[test]
+fn config_shows_per_pattern_debt_ignore_provenance() {
+    let dir = std::env::temp_dir().join(format!("roteiro-config-debt-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
+    // `ROTEIRO_HOME` is `dir`, so `dir/config.toml` is the *user* layer.
+    std::fs::write(
+        dir.join("config.toml"),
+        "[debt]\nignore = [\"vendor/**\", \"target/**\"]\n",
+    )
+    .expect("write user config");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[debt]\nignore = [\"thirdparty/**\"]\n",
+    )
+    .expect("write project config");
+
+    let out = roteiro(&dir, &["config"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "config failed: {out:?}");
+    assert!(
+        text.contains("[debt]"),
+        "a [debt] section is printed: {text}"
+    );
+    // Every pattern survives the merge, each tagged with its own origin.
+    assert!(
+        text.contains("\"vendor/**\"  (user)"),
+        "user pattern kept and labelled: {text}"
+    );
+    assert!(
+        text.contains("\"target/**\"  (user)"),
+        "second user pattern kept: {text}"
+    );
+    assert!(
+        text.contains("\"thirdparty/**\"  (project)"),
+        "project pattern labelled: {text}"
+    );
+
+    // `--json` carries the merged effective list.
+    let json = roteiro(&dir, &["config", "--json"]);
+    let cfg: serde_json::Value = serde_json::from_slice(&json.stdout).expect("valid JSON");
+    assert_eq!(cfg["debt"]["ignore"][0], "vendor/**");
+    assert_eq!(cfg["debt"]["ignore"][1], "target/**");
+    assert_eq!(cfg["debt"]["ignore"][2], "thirdparty/**");
+
+    // With `ignore_reset`, the inherited patterns are dropped *and named*.
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[debt]\nignore_reset = true\nignore = [\"thirdparty/**\"]\n",
+    )
+    .expect("write project config");
+    let reset = roteiro(&dir, &["config"]);
+    let text = String::from_utf8_lossy(&reset.stdout).into_owned();
+    assert!(
+        text.contains("ignore_reset = true"),
+        "the reset is shown: {text}"
+    );
+    assert!(
+        text.contains("\"vendor/**\"  (discarded from user)"),
+        "what the reset dropped is named, not silently gone: {text}"
+    );
+    assert!(
+        !text.contains("\"vendor/**\"  (user)"),
+        "and it is no longer in the effective list: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `roteiro config` must not claim a reset that never happened (PR #343 review).
+///
+/// A user-layer `ignore_reset` governs nothing — a reset drops what a layer
+/// inherits, and the user layer is the lowest — but the effective flag used to
+/// inherit it, so this command printed "inherited patterns dropped" directly
+/// above a list in which every inherited pattern was still present. The command
+/// whose whole job is explaining the configuration was the one making the false
+/// statement.
+#[test]
+fn config_reports_an_inert_user_layer_reset_instead_of_claiming_a_drop() {
+    let dir = std::env::temp_dir().join(format!("roteiro-config-inert-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
+    // `ROTEIRO_HOME` is `dir`, so `dir/config.toml` is the *user* layer.
+    std::fs::write(
+        dir.join("config.toml"),
+        "[debt]\nignore_reset = true\nignore = [\"vendor/**\", \"target/**\"]\n",
+    )
+    .expect("write user config");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[debt]\nignore = [\"thirdparty/**\"]\n",
+    )
+    .expect("write project config");
+
+    let out = roteiro(&dir, &["config"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "config failed: {out:?}");
+
+    // The false headline is gone…
+    assert!(
+        !text.contains("(inherited patterns dropped)"),
+        "nothing was dropped, so nothing may claim a drop: {text}"
+    );
+    // …and no pattern is reported as discarded either.
+    assert!(
+        !text.contains("(discarded from user)"),
+        "no pattern was discarded: {text}"
+    );
+    // The inert request is still surfaced, since a silent no-op is the failure
+    // this key exists to prevent.
+    assert!(
+        text.contains("NO EFFECT"),
+        "an inert user-layer reset must say so: {text}"
+    );
+    // The merged list is untouched — this was only ever a reporting defect.
+    for kept in [
+        "\"vendor/**\"  (user)",
+        "\"target/**\"  (user)",
+        "\"thirdparty/**\"  (project)",
+    ] {
+        assert!(text.contains(kept), "{kept} must survive the merge: {text}");
+    }
+
+    // Moving the same reset to the project layer makes it real: it governs, the
+    // drop is reported, and the inert note is not printed.
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[debt]\nignore_reset = true\nignore = [\"thirdparty/**\"]\n",
+    )
+    .expect("write project config");
+    let real = roteiro(&dir, &["config"]);
+    let text = String::from_utf8_lossy(&real.stdout).into_owned();
+    assert!(
+        text.contains("(inherited patterns dropped)"),
+        "a project-layer reset really drops: {text}"
+    );
+    assert!(
+        text.contains("\"vendor/**\"  (discarded from user)"),
+        "and names what it dropped: {text}"
+    );
+    assert!(
+        !text.contains("NO EFFECT"),
+        "the inert note must not appear when the reset did take effect: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

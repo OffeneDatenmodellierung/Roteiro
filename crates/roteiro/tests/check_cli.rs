@@ -191,3 +191,90 @@ fn check_validates_blueprint_links_like_adrs() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn check_fails_when_two_adr_files_share_an_adr_id() {
+    // Issue #324, reproduced with two *real* ADR files: two branches each author
+    // ADR-0016. Git merges them cleanly (they share no line), both parse, and
+    // both key on `adr:0016` — so before this check `check` reported 0
+    // violations while one of the two decisions had silently vanished.
+    let dir = fresh_dir("duplicate-adr-id");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    write(
+        &dir,
+        "docs/adr/0016-audio-metadata.md",
+        "---\nadr-id: \"0016\"\nstatus: Accepted\n---\n\n\
+         # ADR-0016: Audio metadata extraction\n\n## Decision\n\nFormat reads are cheap.\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    // One ADR, one id: clean.
+    let ok = roteiro(&dir, &["check", "--committed"]);
+    assert!(
+        ok.status.success(),
+        "a single ADR-0016 should pass: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    // The parallel branch's ADR-0016 lands: a different decision, the same id.
+    write(
+        &dir,
+        "docs/adr/0016-speculative-decoding.md",
+        "---\nadr-id: \"0016\"\nstatus: Accepted\n---\n\n\
+         # ADR-0016: MTP speculative decoding\n\n## Decision\n\nOpt-in only.\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "second 0016"]);
+
+    let bad = roteiro(&dir, &["check", "--committed"]);
+    let stderr = String::from_utf8_lossy(&bad.stderr).into_owned();
+    assert!(
+        !bad.status.success(),
+        "two ADRs on one id must fail check; stdout: {}",
+        String::from_utf8_lossy(&bad.stdout)
+    );
+    assert!(
+        stderr.contains("duplicate-adr-id"),
+        "labelled as a duplicate id: {stderr}"
+    );
+    // The violation must name BOTH files and the id, so the reader does not hunt.
+    assert!(stderr.contains("0016"), "names the shared id: {stderr}");
+    assert!(
+        stderr.contains("docs/adr/0016-audio-metadata.md"),
+        "names the first file: {stderr}"
+    );
+    assert!(
+        stderr.contains("docs/adr/0016-speculative-decoding.md"),
+        "names the second file: {stderr}"
+    );
+
+    // `--json` carries the same finding for machine consumers.
+    let json = roteiro(&dir, &["check", "--committed", "--json"]);
+    let stdout = String::from_utf8_lossy(&json.stdout).into_owned();
+    assert!(
+        stdout.contains("duplicate-adr-id"),
+        "json report carries the kind: {stdout}"
+    );
+
+    // Renaming one decision onto a free id clears it — the check is about the
+    // collision, not about having two files.
+    std::fs::remove_file(dir.join("docs/adr/0016-speculative-decoding.md")).expect("rm");
+    write(
+        &dir,
+        "docs/adr/0017-speculative-decoding.md",
+        "---\nadr-id: \"0017\"\nstatus: Accepted\n---\n\n\
+         # ADR-0017: MTP speculative decoding\n\n## Decision\n\nOpt-in only.\n",
+    );
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "renumber"]);
+    let fixed = roteiro(&dir, &["check", "--committed"]);
+    assert!(
+        fixed.status.success(),
+        "distinct ids pass: {}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

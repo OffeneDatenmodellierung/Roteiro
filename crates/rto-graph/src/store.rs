@@ -96,17 +96,25 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// The schema version this store has been migrated to.
+    /// The schema version this store has been migrated to: the highest `v` for
+    /// which every migration `1..=v` is recorded as applied.
+    ///
+    /// **Not the maximum recorded version.** Migrations are selected by set
+    /// membership rather than `> MAX(version)` (see [`crate::migrations`]), so a
+    /// store *can* hold a gap — one written by a build that knew a higher
+    /// migration but not a lower one. For a store recorded as `1..11, 13`, the
+    /// maximum is 13 while none of migration 12's schema is present; reporting 13
+    /// would be a higher number than the truth. The contiguous prefix reports 11,
+    /// which is the version the store can actually be relied on to provide.
+    ///
+    /// The gap is transient in practice — the next [`Store::open`] repairs it —
+    /// but this must not answer wrongly in the window where it exists, which is
+    /// exactly the window in which someone is debugging.
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] on query failure.
     pub fn schema_version(&self) -> Result<u32, StoreError> {
-        let v: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(u32::try_from(v).unwrap_or(0))
+        Ok(migrations::store_version(&self.conn)?)
     }
 
     /// Number of nodes currently in the store.
@@ -204,6 +212,48 @@ impl Store {
     pub fn set_sync_env(&self, env: &str) -> Result<(), StoreError> {
         self.conn
             .execute("UPDATE sync_state SET env = ?1 WHERE id = 0", [env])?;
+        Ok(())
+    }
+
+    /// Which working tree this graph was assembled from, or `None` when the store
+    /// has never been synced or predates the column (issue #330).
+    ///
+    /// `graph.db` is an assembled view of **one** tree, so a store that came to
+    /// describe a different tree — restored from a backup, copied along with a
+    /// `.git` directory, or reached after a layout change — would otherwise
+    /// answer confidently about the wrong one: `sync` reporting "up to date"
+    /// against a state id belonging to someone else's tree, `check` validating a
+    /// tree nobody is looking at. `None` reads as "unknown" and is *adopted*
+    /// rather than treated as a mismatch, so an existing store is never rebuilt
+    /// merely for predating the stamp.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn synced_worktree(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT worktree FROM sync_state WHERE id = 0", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten())
+    }
+
+    /// Stamp this graph as assembled from `worktree`. Called by every sync entry
+    /// point right after it writes the tree state, so the two always agree about
+    /// whose tree the state describes. A no-op if no tree is recorded.
+    ///
+    /// Unlike [`Store::set_sync_env`]'s value, this survives a tree write: it
+    /// identifies the *store*, not the tree, and a new commit does not move the
+    /// graph to a different working tree.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn set_synced_worktree(&self, worktree: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE sync_state SET worktree = ?1 WHERE id = 0",
+            [worktree],
+        )?;
         Ok(())
     }
 
@@ -1590,6 +1640,56 @@ mod tests {
         );
     }
 
+    /// The worktree stamp (issue #330) identifies the *store*, not the tree: an
+    /// unstamped store reads as "unknown" and is adopted rather than rebuilt, and
+    /// a new tree state must not clear the stamp the way it clears `env`.
+    #[test]
+    fn the_worktree_stamp_survives_tree_writes_and_starts_unknown() {
+        let mut store = Store::open_in_memory().expect("open");
+        let facts = FactSet::new().with_node(sample_node("sym:a"));
+
+        // Never synced ⇒ no stamp. A legacy store reads the same way, which is
+        // why "unknown" must mean adopt, not mismatch.
+        assert_eq!(store.synced_worktree().expect("stamp"), None);
+
+        store.reconcile(&facts, Some("t1")).expect("reconcile");
+        assert_eq!(
+            store.synced_worktree().expect("stamp"),
+            None,
+            "writing a tree does not invent a stamp; the sync engine records it"
+        );
+
+        store.set_synced_worktree("/w/one").expect("stamp");
+        store.set_sync_env("env-1").expect("env");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/one")
+        );
+
+        // A later tree write clears `env` (it is only valid for one tree) but must
+        // KEEP the stamp: a new commit does not move the graph to another tree.
+        store.reconcile(&facts, Some("t2")).expect("reconcile");
+        assert_eq!(store.sync_env().expect("env"), None, "env is tree-scoped");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/one"),
+            "the stamp identifies the store, not the tree, so it must survive"
+        );
+
+        // Re-stamping replaces it (the store was adopted by another tree).
+        store.set_synced_worktree("/w/two").expect("restamp");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/two")
+        );
+
+        // Clearing the synced state clears the stamp with it: a store with no
+        // recorded tree describes no working tree either.
+        store.rebuild(&facts, None).expect("rebuild unstated");
+        assert_eq!(store.sync_state().expect("state"), None);
+        assert_eq!(store.synced_worktree().expect("stamp"), None);
+    }
+
     #[test]
     fn reconcile_writes_only_the_edge_delta() {
         // An unchanged edge must keep its row (proving reconcile does not wipe and
@@ -1818,18 +1918,162 @@ mod tests {
         // here (8 for analyzer findings, then 9, 10, 11 as the media and
         // agent-memory tables landed). The literal was defended as making someone
         // confirm a new migration is meant to apply on open — but it could not do
-        // that job: `apply` runs *every* migration newer than the recorded
-        // version, so "applies on open" is not a per-migration choice there is
-        // anything to confirm. What the literal actually asserted was the value of
-        // a shared constant, which every future migration then has to come here
-        // and edit, in a file it otherwise has no business in. This is the idiom
+        // that job: `apply` applies every migration not already recorded, so
+        // "applies on open" is not a per-migration choice there is anything to
+        // confirm. What the literal actually asserted was the value of a shared
+        // constant, which every future migration then has to come here and edit,
+        // in a file it otherwise has no business in — the brittleness #329
+        // replaced with a property test elsewhere. This is the idiom
         // `migrations::tests::a_later_migration_is_additive_on_a_populated_store`
         // already uses, for the same reason.
+        //
+        // Since migrations are selected by set membership, the property is now
+        // strictly stronger than "the biggest recorded number is N":
+        // `schema_version` is the highest **gap-free** version, so equality with
+        // `latest_version` also rules out a store that skipped one and stamped a
+        // higher one. A fresh store cannot exhibit that gap, so
+        // `reopening_repairs_a_skipped_migration` exercises it directly.
         assert_eq!(
             store.schema_version().expect("version"),
             crate::migrations::latest_version(),
-            "opening a store applies the whole migration set",
+            "opening a store must apply every known migration, with no gaps"
         );
+    }
+
+    /// Reopening a store that is **missing a lower-numbered migration while
+    /// carrying a higher one** repairs it — through the real public API, which
+    /// is where it matters to callers.
+    ///
+    /// This is not a hypothetical: it is the shape `main` itself carries.
+    /// `feat/stage25-memory-recall` merged migration **13** while migration
+    /// **12** was still on this branch, so every store opened by a current-`main`
+    /// build — including this repository's own `.git/roteiro/graph.db` and each
+    /// linked worktree's — records `1..11, 13`. Under the old
+    /// `version > MAX(recorded)` rule, `12 > 13` is false and migration 12 would
+    /// never be applied to any of them, permanently: the store opens cleanly,
+    /// reports a schema it does not have, and `synced_worktree()` fails with
+    /// `no such column: worktree` — the issue #330 tree stamp, silently absent.
+    ///
+    /// The two migrations are deliberately named by number rather than derived
+    /// from `latest_version()`. Which one is missing and which is present is the
+    /// specific historical fact being tested; arithmetic on the newest version
+    /// would quietly re-aim the test at whatever lands next and stop covering
+    /// this.
+    #[test]
+    fn reopening_repairs_a_skipped_migration() {
+        /// The migration this branch adds — absent from a current-`main` store.
+        const SKIPPED: u32 = 12;
+        /// The migration `main` added in parallel — present, and stamped higher.
+        const AHEAD: u32 = 13;
+
+        let path = std::env::temp_dir().join(format!(
+            "roteiro-migration-gap-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_file(&path).ok();
+
+        {
+            let mut store = Store::open(&path).expect("open");
+            // Reconcile rather than a bare upsert: it records a synced tree, so
+            // `sync_state` has the row the worktree stamp updates. Without one,
+            // `set_synced_worktree` is a documented no-op and would prove nothing.
+            let facts = FactSet::new().with_node(sample_node("kept"));
+            store
+                .reconcile(&facts, Some("t1"))
+                .expect("seed graph and sync state");
+        }
+        // Rewind to exactly what a current-`main` build leaves behind: migration
+        // 12's column and record gone, 13's schema and record intact.
+        {
+            let conn = rusqlite::Connection::open(&path).expect("reopen raw");
+            conn.execute_batch("ALTER TABLE sync_state DROP COLUMN worktree;")
+                .expect("undo migration 12");
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE version = ?1",
+                [SKIPPED],
+            )
+            .expect("unrecord 12");
+            // Sanity: the store really is in the damaged shape, 13 and all.
+            let recorded: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                    [AHEAD],
+                    |r| r.get(0),
+                )
+                .expect("count 13");
+            assert_eq!(recorded, 1, "migration {AHEAD} must still be recorded");
+        }
+        // Migration 13's own state, captured before the repair so it can be shown
+        // untouched afterwards — a repair that healed the gap by disturbing the
+        // other branch's tables would be no better than the bug.
+        let clock_before = cache_clock(&path);
+
+        // Before the repair the store under-reports rather than over-reports: it
+        // claims the last gap-free version, never the higher stamped one.
+        {
+            let damaged = rusqlite::Connection::open(&path).expect("reopen raw");
+            assert_eq!(
+                crate::migrations::store_version(&damaged).expect("version"),
+                SKIPPED - 1,
+                "a gapped store must report the version it actually provides, \
+                 not the maximum recorded ({AHEAD})"
+            );
+        }
+
+        // Reopening through the public API repairs the gap…
+        let store = Store::open(&path).expect("reopen");
+        assert_eq!(
+            store.schema_version().expect("version"),
+            crate::migrations::latest_version(),
+            "1..={AHEAD} is contiguous once the skipped migration is applied"
+        );
+        // …migration 12's schema is really back, which is what the caller
+        // depends on — recorded-but-absent would be the same bug in a new
+        // costume…
+        assert!(
+            store.synced_worktree().is_ok(),
+            "the repaired migration's column must exist, not merely be recorded"
+        );
+        store
+            .set_synced_worktree("/w/repaired")
+            .expect("the stamp must be writable, not just readable");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/repaired")
+        );
+        // …migration 13's tables are untouched, clock row and all…
+        assert_eq!(
+            cache_clock(&path),
+            clock_before,
+            "the other branch's seeded `agent_cache_clock` row must survive the \
+             repair unchanged"
+        );
+        {
+            let conn = rusqlite::Connection::open(&path).expect("reopen raw");
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM agent_cache", [], |r| r.get(0))
+                .expect("agent_cache must still exist");
+            assert_eq!(rows, 0, "`agent_cache` is present and empty, not recreated");
+        }
+        // …and no data was lost.
+        assert!(store.get_node("kept").expect("get").is_some());
+        assert_eq!(store.node_count().expect("count"), 1);
+
+        std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    /// Migration 13's single `agent_cache_clock` row as `(ticks, generation)`,
+    /// read raw so this test does not depend on the recall API another branch
+    /// owns.
+    fn cache_clock(path: &std::path::Path) -> (i64, i64) {
+        let conn = rusqlite::Connection::open(path).expect("open raw");
+        conn.query_row(
+            "SELECT ticks, generation FROM agent_cache_clock WHERE id = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the seeded clock row must exist")
     }
 
     #[test]
@@ -2006,6 +2250,7 @@ mod tests {
             assert_eq!(
                 store.schema_version().expect("version"),
                 crate::migrations::latest_version(),
+                "reopening applies any migration added since the file was written"
             );
             assert!(store.get_node("persisted").expect("get").is_some());
         }
