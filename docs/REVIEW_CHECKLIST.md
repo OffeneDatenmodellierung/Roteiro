@@ -25,6 +25,9 @@ blast radius) rather than the diff alone.
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
       clean; any `#[allow(...)]` is justified in a comment.
 - [ ] `cargo test --workspace --all-features` green; new behaviour has a test.
+      `--all-features` includes `exec-boxlite`, whose build refuses until the
+      sandbox runtime is provisioned and pinned — see `AGENTS.md` for the
+      one-time `security prefetch` + `BOXLITE_RUNTIME_URL` recipe.
 - [ ] `cargo run -p roteiro -- check` green — ADR `[[…]]` links and `// @rto:`
       annotations resolve (CI dogfoods this).
 - [ ] `cargo deny --all-features check` + `cargo audit` clean; any new
