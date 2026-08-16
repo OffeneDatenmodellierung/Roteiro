@@ -328,24 +328,32 @@ and because the SAST half is independently useful and independently reviewable.
   (`https://osv-vulnerabilities.storage.googleapis.com/<ECOSYSTEM>/all.zip`) are
   single files at stable URLs, so they are the first asset that genuinely wants a
   download-by-URL source. `AssetSource` is `#[non_exhaustive]` for that.
-- **Inherited open question — resolve it here, do not rediscover it.**
-  `osv-scanner` also reads `Cargo.lock`, and OSV.dev ingests the `RustSec`
-  advisory database, so **the same Rust vulnerability will be reported twice**
-  under two different finding keys (`finding:osv-scanner:…` and
-  `finding:cargo-audit:…`). Stage 22 deliberately did not decide what to do about
-  that, because deduplication *across* analyzers is a new concept the findings
-  schema has no notion of: a layer is keyed `security:<analyzer>:<worktree-id>`
-  and is replaced wholesale per analyzer. The options are (a) keep both and
-  cross-reference them at the reporting layer, (b) drop `cargo-audit`'s
-  vulnerability findings and keep only its informational kinds
-  (`unmaintained`/`unsound`/`yanked`, which OSV does not carry — and which this
-  repository's own `deny.toml` already relies on), or (c) leave both and say so.
-  Whichever is chosen, the reasoning belongs in ADR-0018 as a version bump.
+- **The Rust overlap is now DECIDED — implement it, do not re-open it.**
+  `osv-scanner` also reads `Cargo.lock` and OSV ingests RustSec, so the same Rust
+  advisory arrives twice under two finding keys. [ADR-0018](adr/0018-analyzer-coverage-matrix.md)
+  **v1.1** resolves it: **keep both findings and cross-reference them at the
+  reporting layer.** Neither layer is filtered or made conditional on the other.
+  The join key needs no invention — OSV keys a RustSec-derived record by the
+  RUSTSEC id itself and carries `aliases` (`RUSTSEC-2020-0071` →
+  `CVE-2020-26235`, `GHSA-wcg3-cvx6-7396`), and `cargo-audit`'s adapter already
+  stores `aliases` verbatim in `meta` (`crates/rto-exec/src/adapter/cargo_audit.rs:225`).
+  Join on the RUSTSEC id, fall back to alias-set intersection. Render a duplicate
+  pair as **one advisory confirmed by two analyzers**, with both finding keys
+  still addressable — never a merged super-finding, and never a count that
+  silently halves.
+- **Two things to MEASURE here, not assume.** (1) OSV.dev the *database* does
+  carry RustSec informational advisories — `RUSTSEC-2024-0388`,
+  `RUSTSEC-2021-0139` and `RUSTSEC-2026-0192` all resolve, each with
+  `aliases: null` — but whether `osv-scanner` the *tool* surfaces them by default
+  is unestablished, and ADR-0018 v1.0 conflated the two. Measure it and correct
+  the ADR. (2) RustSec→OSV ingestion lag: if it can trail by days the analyzers
+  will legitimately disagree for a window, and "present in one, absent in the
+  other" must render as a real state rather than a defect.
 - **DoD:** a Python, a Java and a Node lockfile each produce findings; offline
   with a pinned database succeeds; the Rust overlap with `cargo-audit` is
   explicitly resolved and recorded, rather than left to chance.
 
-### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.12.0** · effort **M**
+### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.11.0** · effort **M** ✅ *delivered*
 
 **Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
 no graph integration.
@@ -798,7 +806,7 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 | v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
 | v1.11.0 ✅ | Stage 22 — semgrep + cargo-audit (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure — **met** |
 | v1.11.x | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved |
-| v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
+| v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
@@ -829,9 +837,23 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 
 ## 9. Open questions (decide before the stage that needs them)
 
-1. **Cache bound value** (Stage 25): the *unit* is settled — a byte budget,
-   following `ModelCache`. The *number* is a judgement about tolerable
-   `.git/roteiro/` growth and still needs deciding.
+1. ~~**Cache bound value** (Stage 25)~~ — **answered: 256 MB by default,
+   configurable** (decided by the owner). The unit was already settled as a byte
+   budget following `ModelCache`; this fixes the number and makes it raisable for
+   larger repositories.
+
+   The scale that justifies it, measured on this repository: `.git/roteiro` is
+   **49 MB** (44 MB object cache over 2,395 entries, 4.6 MB `graph.db`) against a
+   **91 MB** `.git`. Roteiro's sidecar is already ~54% of the repository it
+   describes, so a cache tier is not a new cost category — it is a bound on one
+   that is currently unbounded in every direction. 256 MB is small against `.git`,
+   trivial against an 18 GB model store, and large enough that an ordinary session
+   never evicts.
+
+   Erring small is deliberate and cheap: `build_context` is *proven* to reconstruct
+   identically (`context.rs` asserts `built == cached`), so **eviction costs cycles,
+   never information**. Erring large only costs disk. Neither error is expensive,
+   which is precisely why this did not warrant more analysis than a measurement.
 2. ~~**Memory scope** (Stage 23)~~ — **answered**, ADR-0013 v1.1 §*Scope*. A lesson
    is valid in a tree only if the relevant association is present there **in the
    same format**, so the **anchor is the scope test** and `scope` is a coarse
