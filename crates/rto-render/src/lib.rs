@@ -12,7 +12,8 @@ pub use docs::{
     IndexEntry, RenderedAdr, markdown_to_html, render_adr, render_adr_index, render_doc,
 };
 pub use obsidian::{
-    AdrEntry, HOME_NOTE, VaultNote, VaultSummary, note_name, render_home, render_note,
+    AdrEntry, CouplingEntry, HOME_NOTE, VaultNote, VaultSummary, note_name, render_home,
+    render_note,
 };
 
 /// A render target for the graph.

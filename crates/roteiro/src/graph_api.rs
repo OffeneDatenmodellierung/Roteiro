@@ -197,6 +197,7 @@ fn graph_routes(prefix: &str) -> Router<AppState> {
         )
         .route(&format!("{prefix}/{{project}}/debt"), get(project_debt))
         .route(&format!("{prefix}/{{project}}/hotspots"), get(hotspots))
+        .route(&format!("{prefix}/{{project}}/coupling"), get(coupling))
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +316,16 @@ struct DepthQuery {
 struct LimitQuery {
     /// Number of top-degree nodes to return (default [`DEFAULT_HOTSPOTS`]).
     limit: Option<usize>,
+}
+
+/// A `limit` + `order` for `/v1/graph/{project}/coupling`.
+#[derive(Deserialize)]
+struct CouplingQuery {
+    /// Number of top-coupled nodes to return (default [`DEFAULT_HOTSPOTS`]);
+    /// `0` returns every coupled node.
+    limit: Option<usize>,
+    /// Ranking: `total` | `fan_in` | `fan_out` (default `total`).
+    order: Option<String>,
 }
 
 /// The `qualified` key for `/v1/graph/resolve`.
@@ -629,6 +640,38 @@ async fn hotspots(
     let limit = lq.limit.unwrap_or(DEFAULT_HOTSPOTS);
     let ranked = ws.with_store(Some(project), |s| compute_hotspots(s, limit))??;
     Ok(Json(json!({ "hotspots": ranked, "limit": limit })).into_response())
+}
+
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/coupling?limit=&order=` → the
+/// top-`limit` nodes by **directed** call coupling, each with `fan_in`,
+/// `fan_out` and Martin's `instability`.
+///
+/// The counterpart to `/hotspots`, which ranks by *undirected* degree over every
+/// edge kind and so cannot distinguish "everything calls this" from "this calls
+/// everything". `/hotspots` is left as it is: total degree is a different — and
+/// still useful — question, and the explorer UI depends on its shape.
+///
+/// An unknown `order` is a 400 rather than a silent fall back to `total`: a
+/// caller that asked for `fan_in` and got a total ranking has no way to tell.
+async fn coupling(
+    State(st): State<AppState>,
+    params: RawPathParams,
+    Query(cq): Query<CouplingQuery>,
+) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let order = match cq.order.as_deref() {
+        None => rto_graph::CouplingOrder::default(),
+        Some(token) => rto_graph::CouplingOrder::from_token(token).ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "unknown order `{token}` (expected {})",
+                rto_graph::CouplingOrder::tokens().join("|")
+            ))
+        })?,
+    };
+    let limit = cq.limit.unwrap_or(DEFAULT_HOTSPOTS);
+    let report = ws.with_store(Some(project), |s| rto_graph::coupling(s, order, limit))??;
+    Ok(Json(report).into_response())
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/resolve?qualified=<project>::<key>` → the
@@ -1235,6 +1278,13 @@ fn neighbourhood_subgraph(
 
 /// The top-`limit` nodes by total degree (in + out edges), each as
 /// `{ key, name, kind, degree }`. Ties break by key, so the order is stable.
+///
+/// **This deliberately discards direction** — both ends of every edge are
+/// incremented — because "how connected is this node" is a question about
+/// degree, over every edge kind. It is *not* a coupling measure: a node called
+/// by twenty callers and a node calling twenty callees score identically here.
+/// `/coupling` answers that question instead (`rto_graph::coupling`), and the
+/// two are kept separate rather than one being bent into the other.
 fn compute_hotspots(store: &Store, limit: usize) -> Result<Vec<Value>, StoreError> {
     let mut degree: BTreeMap<String, u32> = BTreeMap::new();
     for edge in store.all_edges()? {
@@ -2359,6 +2409,39 @@ mod tests {
         // `sym:helper` sorts first.
         assert_eq!(top["degree"], 1);
         assert_eq!(top["key"], "sym:helper");
+    }
+
+    #[tokio::test]
+    async fn coupling_endpoint_reports_the_direction_hotspots_discards() {
+        // `sym:main` calls `sym:helper`, so the two have identical *degree* — and
+        // `/hotspots` therefore ranks them equal. `/coupling` must not.
+        let set = || single_set(Workspace::single(HUB, hub_store()));
+
+        let (status, json) = get(set(), None, "/v1/graph/hub/coupling?order=fan_in&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["order"], "fan_in");
+        assert_eq!(json["edge_kind"], "calls");
+        assert_eq!(json["items"][0]["key"], "sym:helper", "the callee: {json}");
+        assert_eq!(json["items"][0]["fan_in"], 1);
+        assert_eq!(json["items"][0]["fan_out"], 0);
+
+        let (status, json) = get(set(), None, "/v1/graph/hub/coupling?order=fan_out&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["items"][0]["key"], "sym:main", "the caller: {json}");
+        assert_eq!(json["items"][0]["fan_out"], 1);
+    }
+
+    #[tokio::test]
+    async fn coupling_endpoint_rejects_an_unknown_order() {
+        // Falling back to `total` would answer a question the caller did not ask
+        // and give them no way to tell.
+        let (status, _) = get(
+            single_set(Workspace::single(HUB, hub_store())),
+            None,
+            "/v1/graph/hub/coupling?order=degree",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
