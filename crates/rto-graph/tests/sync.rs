@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rto_graph::{
-    EdgeKind, FileNodeExtractor, ObjectCache, Registry, Repo, Store, sync, sync_worktree,
+    DEFAULT_MEMORY_SCOPE, EdgeKind, FileNodeExtractor, MemoryKind, MemoryWrite, ObjectCache,
+    Registry, Repo, Store, sync, sync_worktree,
 };
 
 /// Run `git` in `dir` with hermetic identity/signing settings, asserting success.
@@ -693,4 +694,197 @@ fn a_changed_extraction_identity_re_extracts_at_an_unchanged_tree() {
             .expect("resync")
             .no_op
     );
+}
+
+/// Every cache entry as `(path relative to the cache root, bytes)`, sorted — the
+/// whole fact cache, in a form two snapshots can be compared on.
+///
+/// **Every failure here panics rather than being skipped.** This helper exists to
+/// prove a cache is *unchanged*, and an empty snapshot compares equal to another
+/// empty snapshot — so a swallowed `read_dir` error, a skipped unreadable entry
+/// or a silently absent root would let the comparison pass having checked
+/// nothing. Vacuous success is the one failure mode a same-value assertion cannot
+/// detect on its own, so the reads are `expect`ed, the entry results are
+/// propagated rather than `flatten`ed away, and `strip_prefix` must succeed —
+/// there is no absolute-path fallback, because a path outside the root means the
+/// walk is not reading the cache it was pointed at. The caller additionally
+/// asserts the snapshot is non-empty.
+fn cache_entries(cache: &ObjectCache) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("cache entry under {}: {e}", dir.display()))
+                .path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "cache entry {} is not under the cache root {}",
+                            path.display(),
+                            root.display(),
+                        )
+                    })
+                    .to_path_buf();
+                let bytes = std::fs::read(&path)
+                    .unwrap_or_else(|e| panic!("read cache entry {}: {e}", path.display()));
+                out.push((rel, bytes));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(cache.root(), cache.root(), &mut out);
+    out.sort();
+    out
+}
+
+/// A default memory write: unanchored, `lesson`, default scope.
+fn lesson(body: &str) -> MemoryWrite<'_> {
+    MemoryWrite {
+        scope: DEFAULT_MEMORY_SCOPE,
+        kind: MemoryKind::Lesson,
+        anchor: None,
+        body,
+        confidence: None,
+        supersedes: None,
+    }
+}
+
+/// **Writing agent memory does not invalidate the fact cache** (ADR-0013).
+///
+/// Memory is not extraction output: it is not derived from `(path, blob id,
+/// bytes)`, no extractor emits it, and no cached fact set can contain it. So the
+/// extraction identity — `EXTRACT_VERSION` plus the extractor environment, the
+/// pair folded into every cache key — must be untouched by any memory write, and
+/// a `sync` that follows one must still be free.
+///
+/// **If this test fails, you have a bug, not a renumbering.** It says a memory
+/// code path reached the extraction identity or the cached facts, which is the
+/// thing memory's separate-store design exists to prevent. It does not move when
+/// `EXTRACT_VERSION` is bumped for a real change to extraction output (that is
+/// what a bump is *for*, and no test pins the constant's value — see the note on
+/// its declaration in `src/extract.rs`); both snapshots here are taken from the
+/// same binary, so a legitimate bump by unrelated work cannot trip it.
+///
+/// # Why no test pins `EXTRACT_VERSION`'s value
+///
+/// This replaces `agent_memory_does_not_bump_the_extraction_version` in
+/// `src/memory.rs`, which asserted the constant's literal value, and the history
+/// of that test is the argument for this one.
+///
+/// ADR-0016 (#316) bumped the base 10 → 11 and added the `audio-metadata` (+400)
+/// namespace, legitimately: `audio_stream` nodes genuinely change extraction
+/// output, which is exactly what the constant is for. ADR-0013 (#317) added the
+/// guard, asserting the base it saw — 10, less the two namespaces that existed
+/// when it was written. The two merged **57 seconds apart**, so #317's CI had
+/// never seen #316. Each was green alone; the trunk was not, under *every*
+/// feature combination — 11 ≠ 10 by default, 411 ≠ 10 under `--all-features`,
+/// the second because the subtraction list had silently gone stale too.
+///
+/// Nobody did anything wrong, and that is the point: the failure was a property
+/// of the *form* of the assertion. A literal value of a shared global constant
+/// cannot express a claim about one module's share of it, so it fires on work
+/// that module had no part in — and it fires at merge time, on whoever is
+/// unlucky with ordering, who must then work out whether they have broken an
+/// invariant or merely renumbered a constant. Re-pinning it to 11 would restore
+/// green and re-arm exactly the same trap for the next parallel merge; Stage
+/// 26's lenses are expected to bump the constant again.
+///
+/// So **no test pins this constant's value, deliberately** (see the note on its
+/// declaration in `src/extract.rs`). Bumping it for a real change in extraction
+/// output should never be a test failure — that is what a bump is *for*. Tests
+/// assert what the version is *for* instead: that it is folded into the cache key,
+/// that a changed identity re-extracts at an unchanged tree, and — here — that
+/// work which is not extraction cannot perturb it. **If a test does fail when you
+/// bump it, it is reporting a real coupling, not a literal that needs updating.**
+///
+/// The property is also strictly stronger than the number it replaces: pinning
+/// the integer would still have passed if a memory write had cleared the recorded
+/// extraction identity or retired a cached fact set.
+#[test]
+fn memory_writes_do_not_invalidate_the_fact_cache() {
+    let dir = fresh_dir("memory-cache");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "a.txt", "alpha\n");
+    write(&dir, "src/c.rs", "fn main() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "initial"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+    let ex = FileNodeExtractor;
+
+    let cold = sync(&mut store, &repo, &cache, &ex).expect("cold sync");
+    assert!(!cold.no_op);
+    assert_eq!(cold.blobs_extracted, 2, "both blobs are extracted cold");
+
+    let facts_before = cache_entries(&cache);
+    assert!(
+        !facts_before.is_empty(),
+        "the cache must have something in it"
+    );
+    let identity_before = store.sync_env().expect("sync env");
+    let tree_before = store.sync_state().expect("sync state");
+    assert!(identity_before.is_some(), "a sync records an identity");
+
+    // The same spread of writes the artifact-purity test uses: anchored,
+    // unanchored, superseding, and a forget.
+    let anchored = store
+        .record_memory(&MemoryWrite {
+            anchor: Some("file:src/c.rs"),
+            kind: MemoryKind::Attempt,
+            confidence: Some(0.9),
+            ..lesson("The retry loop double-counted partial batches.")
+        })
+        .expect("anchored write");
+    store
+        .record_memory(&MemoryWrite {
+            supersedes: Some(anchored),
+            ..lesson("Superseded: the dedup key alone was not enough.")
+        })
+        .expect("superseding write");
+    let doomed = store
+        .record_memory(&lesson("A record that will be forgotten."))
+        .expect("write");
+    store.forget_memory(doomed).expect("forget");
+    assert_eq!(
+        store.memory_counts().expect("counts"),
+        (1, 1),
+        "the writes must actually have done work",
+    );
+
+    assert_eq!(
+        store.sync_env().expect("sync env"),
+        identity_before,
+        "a memory write must not perturb the recorded extraction identity",
+    );
+    assert_eq!(
+        store.sync_state().expect("sync state"),
+        tree_before,
+        "a memory write must not disturb the synced tree",
+    );
+    assert_eq!(
+        cache_entries(&cache),
+        facts_before,
+        "no cached fact set may be added, rewritten or retired by a memory write",
+    );
+
+    // The consequence that costs real time if it is ever lost: the next sync is
+    // still free, rather than re-extracting the repository.
+    let after = sync(&mut store, &repo, &cache, &ex).expect("resync");
+    assert!(
+        after.no_op,
+        "a sync after a memory write must still be a no-op",
+    );
+    assert_eq!(
+        after.blobs_extracted, 0,
+        "memory must not force a single blob to be re-extracted",
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -1,0 +1,310 @@
+{
+  "database": {
+    "advisory-count": 1216,
+    "last-commit": "69f93e1d081d8b6fbee010e48f0b5e0d13661415",
+    "last-updated": "2026-08-12T12:42:29+02:00"
+  },
+  "lockfile": {
+    "dependency-count": 19
+  },
+  "settings": {
+    "ignore": [],
+    "informational_warnings": [
+      "unmaintained",
+      "unsound",
+      "notice"
+    ],
+    "severity": null,
+    "target_arch": [],
+    "target_os": []
+  },
+  "vulnerabilities": {
+    "count": 2,
+    "found": true,
+    "list": [
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [
+            "code-execution",
+            "memory-corruption"
+          ],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2020-11-10",
+          "description": "### Impact\n\nUnix-like operating systems may segfault due to dereferencing a dangling pointer in specific circumstances. This requires an environment variable to be set in a different thread than the affected functions. This may occur without the user's knowledge, notably in a third-party library.\n\n### Workarounds\n\nNo workarounds are known.\n\n### References\n\n- [time-rs/time#293](https://github.com/time-rs/time/issues/293)",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2020-0159",
+          "informational": null,
+          "keywords": [
+            "segfault"
+          ],
+          "license": "CC0-1.0",
+          "package": "chrono",
+          "references": [],
+          "related": [
+            "CVE-2020-26235",
+            "RUSTSEC-2020-0071"
+          ],
+          "source": null,
+          "title": "Potential segfault in `localtime_r` invocations",
+          "url": "https://github.com/chronotope/chrono/issues/499",
+          "withdrawn": null
+        },
+        "affected": null,
+        "package": {
+          "checksum": "670ad68c9088c2a963aaa298cb369688cf3f9465ce5e2d4ca10e6e0098a1ce73",
+          "dependencies": [
+            {
+              "name": "libc",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.2.189"
+            },
+            {
+              "name": "num-integer",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.1.47"
+            },
+            {
+              "name": "num-traits",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.2.19"
+            },
+            {
+              "name": "time",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.1.44"
+            },
+            {
+              "name": "winapi",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.3.9"
+            }
+          ],
+          "name": "chrono",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "0.4.19"
+        },
+        "versions": {
+          "patched": [
+            ">=0.4.20"
+          ],
+          "unaffected": []
+        }
+      },
+      {
+        "advisory": {
+          "aliases": [
+            "CVE-2020-26235",
+            "GHSA-wcg3-cvx6-7396"
+          ],
+          "categories": [
+            "code-execution",
+            "memory-corruption"
+          ],
+          "collection": "crates",
+          "cvss": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+          "date": "2020-11-18",
+          "description": "### Impact\n\nThe affected functions set environment variables without synchronization. On Unix-like operating systems, this can crash in multithreaded programs. Programs may segfault due to dereferencing a dangling pointer if an environment variable is read in a different thread than the affected functions. This may occur without the user's knowledge, notably in the Rust standard library or third-party libraries.\n\nThe affected functions from time 0.2.7 through 0.2.22 are:\n\n- `time::UtcOffset::local_offset_at`\n- `time::UtcOffset::try_local_offset_at`\n- `time::UtcOffset::current_local_offset`\n- `time::UtcOffset::try_current_local_offset`\n- `time::OffsetDateTime::now_local`\n- `time::OffsetDateTime::try_now_local`\n\nThe affected functions in time 0.1 (all versions) are:\n\n- `time::at_utc`\n- `time::at`\n- `time::now`\n- `time::tzset`\n\nNon-Unix targets (including Windows and wasm) are unaffected.\n\n### Patches\n\nPending a proper fix, the internal method that determines the local offset has been modified to always return `None` on the affected operating systems. This has the effect of returning an `Err` on the `try_*` methods and `UTC` on the non-`try_*` methods.\n\nUsers and library authors with time in their dependency tree should perform `cargo update`, which will pull in the updated, unaffected code.\n\nUsers of time 0.1 do not have a patch and should upgrade to an unaffected version: time 0.2.23 or greater or the 0.3 series.\n\n### Workarounds\n\nA possible workaround for crates affected through the transitive dependency in `chrono`, is to avoid using the default `oldtime` feature dependency of the `chrono` crate by disabling its `default-features` and manually specifying the required features instead.\n\n#### Examples:\n\n`Cargo.toml`:  \n\n```toml\nchrono = { version = \"0.4\", default-features = false, features = [\"serde\"] }\n```\n\n```toml\nchrono = { version = \"0.4.22\", default-features = false, features = [\"clock\"] }\n```\n\nCommandline:  \n\n```bash\ncargo add chrono --no-default-features -F clock\n```\n\nSources:  \n - [chronotope/chrono#602 (comment)](https://github.com/chronotope/chrono/issues/602#issuecomment-1242149249)  \n - [vityafx/serde-aux#21](https://github.com/vityafx/serde-aux/issues/21)",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2020-0071",
+          "informational": null,
+          "keywords": [
+            "segfault"
+          ],
+          "license": "CC0-1.0",
+          "package": "time",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "Potential segfault in the time crate",
+          "url": "https://github.com/time-rs/time/issues/293",
+          "withdrawn": null
+        },
+        "affected": {
+          "arch": [],
+          "functions": {
+            "time::OffsetDateTime::now_local": [
+              "<0.2.23"
+            ],
+            "time::OffsetDateTime::try_now_local": [
+              "<0.2.23"
+            ],
+            "time::UtcOffset::current_local_offset": [
+              "<0.2.23"
+            ],
+            "time::UtcOffset::local_offset_at": [
+              "<0.2.23"
+            ],
+            "time::UtcOffset::try_current_local_offset": [
+              "<0.2.23"
+            ],
+            "time::UtcOffset::try_local_offset_at": [
+              "<0.2.23"
+            ],
+            "time::at": [
+              "^0.1"
+            ],
+            "time::at_utc": [
+              "^0.1"
+            ],
+            "time::now": [
+              "^0.1"
+            ]
+          },
+          "os": [
+            "linux",
+            "redox",
+            "solaris",
+            "android",
+            "ios",
+            "macos",
+            "netbsd",
+            "openbsd",
+            "freebsd"
+          ]
+        },
+        "package": {
+          "checksum": "6db9e6914ab8b1ae1c260a4ae7a49b6c5611b40328a735b21862567685e73255",
+          "dependencies": [
+            {
+              "name": "libc",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.2.189"
+            },
+            {
+              "name": "wasi",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.10.0+wasi-snapshot-preview1"
+            },
+            {
+              "name": "winapi",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.3.9"
+            }
+          ],
+          "name": "time",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "0.1.44"
+        },
+        "versions": {
+          "patched": [
+            ">=0.2.23"
+          ],
+          "unaffected": [
+            "=0.2.0",
+            "=0.2.1",
+            "=0.2.2",
+            "=0.2.3",
+            "=0.2.4",
+            "=0.2.5",
+            "=0.2.6"
+          ]
+        }
+      }
+    ]
+  },
+  "warnings": {
+    "unmaintained": [
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2024-10-07",
+          "description": "The creator of the crate `paste` has stated in the [`README.md`](https://github.com/dtolnay/paste/blob/master/README.md) \nthat this project is not longer maintained as well as archived the repository\n\n## Possible Alternative(s)\n\n- [`pastey`]: a fork of paste and is aimed to be a drop-in replacement with additional features for paste crate\n- [`with_builtin_macros`]: crate providing a [superset of `paste`'s functionality including general `macro_rules!` eager expansions](https://docs.rs/with_builtin_macros/0.1.0/with_builtin_macros/macro.with_eager_expansions.html)  and `concat!`/`concat_idents!` macros\n\n[`pastey`]: https://crates.io/crates/pastey\n[`with_builtin_macros`]: https://crates.io/crates/with_builtin_macros",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2024-0436",
+          "informational": "unmaintained",
+          "keywords": [],
+          "license": "CC0-1.0",
+          "package": "paste",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "paste - no longer maintained",
+          "url": "https://github.com/dtolnay/paste",
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unmaintained",
+        "package": {
+          "checksum": "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a",
+          "name": "paste",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "1.0.15"
+        },
+        "versions": {
+          "patched": [],
+          "unaffected": []
+        }
+      },
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2024-09-01",
+          "description": "proc-macro-error's maintainer seems to be unreachable, with no commits for 2 years, no releases pushed for 4 years, and no activity on the GitLab repo or response to email.\n\nproc-macro-error also depends on `syn 1.x`, which may be bringing duplicate dependencies into dependant build trees.\n\n## Possible Alternative(s)\n\n- [manyhow](https://crates.io/crates/manyhow)\n- [proc-macro2-diagnostics](https://github.com/SergioBenitez/proc-macro2-diagnostics)",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2024-0370",
+          "informational": "unmaintained",
+          "keywords": [],
+          "license": "CC0-1.0",
+          "package": "proc-macro-error",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "proc-macro-error is unmaintained",
+          "url": "https://gitlab.com/CreepySkeleton/proc-macro-error/-/issues/20",
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unmaintained",
+        "package": {
+          "checksum": "da25490ff9892aab3fcf7c36f08cfb902dd3e71ca0f9f9517bea02a73a5ce38c",
+          "dependencies": [
+            {
+              "name": "proc-macro-error-attr",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "1.0.4"
+            },
+            {
+              "name": "proc-macro2",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "1.0.107"
+            },
+            {
+              "name": "quote",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "1.0.47"
+            },
+            {
+              "name": "syn",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "1.0.109"
+            },
+            {
+              "name": "version_check",
+              "source": "registry+https://github.com/rust-lang/crates.io-index",
+              "version": "0.9.5"
+            }
+          ],
+          "name": "proc-macro-error",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "1.0.4"
+        },
+        "versions": {
+          "patched": [],
+          "unaffected": []
+        }
+      }
+    ]
+  }
+}
