@@ -30,6 +30,21 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 /// any more**: since ADR-0015 they change nothing about extraction output, so
 /// they must not perturb a cache key. What they produce is generated content,
 /// which lives in [`crate::media`].
+///
+/// # Changing this number
+///
+/// **No test pins its value, deliberately.** A bump is the correct response to a
+/// real change in extraction output, so it must not also be a test failure —
+/// pinning it made every legitimate bump land on whoever tripped the guard, who
+/// then had to work out whether they had broken an invariant or merely renumbered
+/// a constant. Tests assert what the version is *for* instead: that it is folded
+/// into the cache key (`sync::tests::cache_key_separates_paths_but_is_stable`),
+/// that a changed identity re-extracts at an unchanged tree, and that work which
+/// is not extraction cannot perturb it
+/// (`tests/sync.rs::memory_writes_do_not_invalidate_the_fact_cache`). So if a
+/// test *does* fail when you bump this, it is reporting a real coupling, not the
+/// number. Record the bump in the history comment below and in the ADR that
+/// motivates it; that record, and review, are what keep bumps honest.
 // Bumped 5 → 6 for config-key nodes (ADR-0009): config files now emit
 // `config_key` nodes, so cached extraction facts must be regenerated. Bumped
 // 6 → 7 for YAML config keys + Dockerfile `image_ref` nodes (ADR-0009 derived
