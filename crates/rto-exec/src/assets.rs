@@ -450,8 +450,20 @@ pub enum AssetError {
 /// supply one that writes fixture bytes and never opens a socket, which is how
 /// the download path is exercised without a network.
 ///
-/// An implementation must write the whole file or fail — a truncated download
-/// that returned `Ok` would be digested and pinned as if it were complete.
+/// # The contract, and why it cannot be checked here
+///
+/// **An implementation must write the whole file or fail.** A truncated download
+/// that returned `Ok` would be renamed into place, digested, and recorded as the
+/// asset's pin — and [`AssetSource::Download`] has no compile-time digest to
+/// contradict it, so `status` would then report the short file as present and
+/// matching. Staging through a `.partial` file guards against a crash, not
+/// against a fetcher that misreports success.
+///
+/// Nothing in this crate can verify that: completeness is a property of the
+/// transport's framing, and this crate deliberately has no transport. The
+/// shipped implementation is `download_asset_file` in the CLI, which establishes
+/// it from the response's declared length and refuses a body whose length cannot
+/// be established at all.
 pub type Fetcher<'a> = dyn Fn(&str, &Path) -> Result<(), String> + 'a;
 
 /// Install and verify one asset, without any ability to download.
@@ -579,13 +591,27 @@ fn download_all(
             })?;
         }
         // Fetch beside the destination and rename, so an interrupted download
-        // never leaves a half-file that the next run would digest and pin.
+        // never leaves a half-file at the path the analyzer reads.
+        //
+        // Staging protects the pin from a *crash*; it cannot protect it from a
+        // fetcher that returns `Ok` over a short body, because then the rename
+        // happens and the truncated file is what gets digested. That half of the
+        // contract is the fetcher's, and is stated on [`Fetcher`].
         let partial = destination.with_extension("partial");
         std::fs::remove_file(&partial).ok();
-        fetch(file.url, &partial).map_err(|message| AssetError::Fetch {
-            id: spec.id,
-            url: file.url,
-            message,
+        fetch(file.url, &partial).map_err(|message| {
+            // Leave nothing behind. The stray file is not at a path any analyzer
+            // reads, but `digest_tree` covers the whole asset directory — so a
+            // later successful provision (of the remaining files, or after the
+            // operator placed this one by hand) would fold these bytes into the
+            // recorded pin, and removing them afterwards would then read as
+            // tampering.
+            std::fs::remove_file(&partial).ok();
+            AssetError::Fetch {
+                id: spec.id,
+                url: file.url,
+                message,
+            }
         })?;
         std::fs::rename(&partial, &destination).map_err(|source| {
             std::fs::remove_file(&partial).ok();

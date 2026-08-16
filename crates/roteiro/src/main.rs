@@ -5428,21 +5428,113 @@ struct SecurityPrefetchReport {
 /// The body is streamed to disk rather than buffered: `npm/all.zip` alone is
 /// around 210 MB, and reading that into a `Vec` to write it straight back out
 /// would be a needless spike.
+///
+/// # A body of unknown length is refused, because this is where the pin is set
+///
+/// [`rto_exec::AssetSource::Download`] has **no compile-time digest** — the
+/// upstream files are rebuilt daily, so what gets recorded as the asset's pin is
+/// the digest of whatever this function wrote. Bytes that arrive here are
+/// therefore self-certifying: nothing downstream can contradict them, and
+/// `security status` will report a truncated database as present and matching.
+///
+/// `std::io::copy` returns `Ok` on a clean early EOF, so completeness has to be
+/// established from the response's framing. Measured against **ureq 3.4.0**,
+/// four of the five framings detect a truncated transfer on their own:
+///
+/// | Framing | Truncation detected |
+/// |---|---|
+/// | `Content-Length`, short body | yes — `UnexpectedEof` |
+/// | `Content-Encoding: gzip` | yes — decode error |
+/// | chunked, dropped mid-chunk | yes — `UnexpectedEof` |
+/// | chunked, terminator missing | yes — `UnexpectedEof` |
+/// | **close-delimited** (neither header) | **no — `Ok`** |
+///
+/// The last row is the hole, and it is not fixable by counting: that framing
+/// *defines* the body as ending when the connection closes, so a mid-transfer
+/// drop is indistinguishable from a complete file. A length that cannot be
+/// established is not a length that checks out, so such a response is refused
+/// rather than pinned — the same rule this feature applies to a cold cache,
+/// which fails by name instead of quietly fetching.
+///
+/// `Accept-Encoding: identity` is sent to ask for the one framing that can be
+/// verified end to end. The shipped OSV URLs answer it with `Content-Length` and
+/// no transfer encoding, so this refuses nothing that works today. A mirror that
+/// can only serve close-delimited bodies is not supported by `--allow-download`;
+/// its files can still be placed in the documented cache layout by hand, which
+/// `prefetch` then digests and pins without fetching anything.
+///
+/// The payload is deliberately **not** parsed. These are zips, and a structural
+/// check would be redundant: `osv-scanner` 2.5.0 already refuses a truncated
+/// database loudly — exit `127`, *"zip: not a valid zip file"* — and `127` is not
+/// a declared success status, so a corrupt database fails a scan rather than
+/// silently shrinking it. Parsing here would duplicate that for one asset kind
+/// while doing nothing for a future non-zip one.
 #[cfg(feature = "exec-subprocess")]
 fn download_asset_file(url: &str, path: &std::path::Path) -> Result<(), String> {
     let response = ureq::get(url)
+        // Ask for the framing whose completeness can be checked. ureq decodes a
+        // compressed body and then reports no `Content-Length` at all, which
+        // would leave nothing to verify against.
+        .header("Accept-Encoding", "identity")
         .call()
         .map_err(|e| format!("GET {url}: {e}"))?;
+
+    let declared = declared_body_length(
+        response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .ok_or_else(|| {
+        format!(
+            "GET {url}: the response declares no usable Content-Length, so a complete download \
+             cannot be told from a truncated one. Refusing rather than digesting bytes of unknown \
+             completeness and recording them as this asset's pin. If the server cannot send a \
+             Content-Length, place the file in the asset cache by hand — prefetch verifies and \
+             pins what is already there without fetching."
+        )
+    })?;
+
     let mut reader = response.into_body().into_reader();
     let mut file =
         std::fs::File::create(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
-    // A short write is an error, not a smaller asset: a truncated database that
-    // returned `Ok` here would be digested and pinned as if it were complete,
-    // and would then quietly under-report findings on every run.
-    std::io::copy(&mut reader, &mut file)
-        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    // Names the URL as well as the path. The common failure here is the peer
+    // hanging up mid-body — ureq enforces the declared framing and surfaces that
+    // from this call — which is a fact about the transfer, not the local file.
+    let written = std::io::copy(&mut reader, &mut file)
+        .map_err(|e| format!("transferring {url} to {}: {e}", path.display()))?;
     std::io::Write::flush(&mut file).map_err(|e| format!("flushing {}: {e}", path.display()))?;
-    Ok(())
+
+    verify_transferred(url, declared, written)
+}
+
+/// The body length the response declares, or `None` if it declares none usable.
+///
+/// Split out so the parsing has a test that does not need a socket. An empty,
+/// negative or non-numeric value is `None` rather than an error: the caller's
+/// answer to "no usable length" is the same refusal either way, and it says so
+/// in one place.
+#[cfg(feature = "exec-subprocess")]
+fn declared_body_length(header: Option<&str>) -> Option<u64> {
+    header?.trim().parse::<u64>().ok()
+}
+
+/// Check what was written against what the server said it was sending.
+///
+/// Belt and braces over ureq's own `Content-Length` enforcement, which was
+/// measured to catch this case already (see [`download_asset_file`]). It is kept
+/// because the guarantee belongs to this function rather than to a dependency's
+/// current behaviour: this is the only code that can put network bytes into a
+/// pinned asset, and a ureq upgrade must not be able to silently relax it.
+#[cfg(feature = "exec-subprocess")]
+fn verify_transferred(url: &str, declared: u64, written: u64) -> Result<(), String> {
+    if written == declared {
+        return Ok(());
+    }
+    Err(format!(
+        "GET {url}: the server declared {declared} byte(s) and the transfer produced {written}. \
+         A short asset must not be digested and pinned as a complete one, so nothing was installed."
+    ))
 }
 
 /// Install and verify every pinned asset, recording each digest.
@@ -7853,6 +7945,262 @@ mod memory_cli {
             assert!(line.starts_with(token), "{state}: {line}");
             assert!(line.ends_with("sym:rust:a.rs#f"), "{state}: {line}");
         }
+    }
+}
+
+// The one path that can put network bytes into the pinned asset cache.
+//
+// `AssetSource::Download` has no compile-time digest: whatever arrives here is
+// digested and recorded as the asset's own pin, so a truncated database would be
+// certified by `security status` as present and matching. These tests serve raw
+// HTTP over a loopback `TcpListener` — no external network, no fixtures — and
+// assert both that a bad transfer fails and that it leaves nothing a later
+// `prefetch` would treat as installed.
+#[cfg(all(test, feature = "exec-subprocess"))]
+mod asset_download {
+    use super::{declared_body_length, download_asset_file, verify_transferred};
+    use std::io::{Read as _, Write as _};
+
+    /// Serve `response` verbatim to exactly one client, then close.
+    ///
+    /// Raw bytes rather than a framework, because what is under test *is* the
+    /// framing: a declared length the body does not honour, or a body with no
+    /// declared length at all.
+    fn serve_once(response: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Read the request line so the client is not writing into a
+                // closed socket, then answer and hang up.
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/all.zip")
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("roteiro-dl-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// The positive control. Without it the refusals below could all be passing
+    /// because nothing ever succeeds.
+    #[test]
+    fn a_complete_download_succeeds_and_writes_every_byte() {
+        // 10 bytes: the 4-byte zip signature plus `hello!`.
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nPK\x03\x04hello!");
+        let dir = scratch("complete");
+        let path = dir.join("all.zip");
+        download_asset_file(&url, &path).expect("a complete transfer must install");
+        assert_eq!(std::fs::read(&path).expect("read"), b"PK\x03\x04hello!");
+    }
+
+    /// The reviewed defect: a server that declares a length and then closes
+    /// cleanly part-way through. This must fail rather than install a short
+    /// database that `status` would certify.
+    ///
+    /// **This test pins ureq, not this crate.** Measured against ureq 3.4.0, the
+    /// transport enforces `Content-Length` framing itself and raises
+    /// `UnexpectedEof` here, so reverting the guard in `download_asset_file`
+    /// does *not* turn this red — only a transport that stopped enforcing it
+    /// would. It is kept deliberately, as the regression pin on the dependency
+    /// behaviour the rest of this design now leans on.
+    #[test]
+    fn a_truncated_body_fails_and_leaves_nothing_installed() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nPK\x03\x04truncated");
+        let dir = scratch("truncated");
+        let path = dir.join("all.zip");
+
+        let err = download_asset_file(&url, &path).expect_err("a short body must not succeed");
+        // The refusal comes from the transport — ureq enforces `Content-Length`
+        // framing and reports the peer hanging up — so the assertion is that the
+        // failure is attributable, not that it carries this function's own
+        // mismatch wording.
+        assert!(err.contains(&url), "the failure must name the URL: {err}");
+
+        // Whatever bytes arrived must not survive as a usable asset. The
+        // fetcher writes to a staging path that `download_all` removes on
+        // failure; what must never exist is a complete-looking file.
+        let installed = std::fs::read(&path).unwrap_or_default();
+        assert_ne!(
+            installed.len(),
+            4096,
+            "a partial body must never look like the declared asset"
+        );
+    }
+
+    /// The framing that no byte count can rescue: neither `Content-Length` nor
+    /// chunked, so the body is defined as ending when the connection closes and
+    /// a mid-transfer drop is indistinguishable from a complete file.
+    ///
+    /// Measured against ureq 3.4.0, this is the one framing where a truncated
+    /// transfer reads as `Ok`. An unestablishable length is refused rather than
+    /// pinned.
+    #[test]
+    fn a_body_of_unknown_length_is_refused_rather_than_pinned() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\n\r\nPK\x03\x04could-be-half-a-database");
+        let dir = scratch("unframed");
+        let path = dir.join("all.zip");
+
+        let err =
+            download_asset_file(&url, &path).expect_err("an unverifiable length must be refused");
+        assert!(err.contains("Content-Length"), "{err}");
+        assert!(
+            err.contains("truncated") || err.contains("completeness"),
+            "the refusal must say what it could not establish: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "nothing may be written when the response cannot be verified"
+        );
+    }
+
+    /// End to end, through the code `prefetch` actually runs: a bad server must
+    /// leave the asset unprovisioned, with no record and no stray bytes for a
+    /// later `provision`/`status` to fold into a pin.
+    #[test]
+    fn a_failed_fetch_leaves_the_asset_unprovisioned_and_the_cache_clean() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\n\r\nhalf-a-database");
+        let root = scratch("provision");
+        // `DownloadFile` holds `&'static str`; a loopback URL has a fresh port
+        // each run, so it is leaked for the life of the test process.
+        let leaked: &'static str = Box::leak(url.into_boxed_str());
+        let files: &'static [rto_exec::DownloadFile] =
+            Box::leak(Box::new([rto_exec::DownloadFile {
+                path: "osv-scalibr/crates.io/all.zip",
+                url: leaked,
+            }]));
+        let spec = rto_exec::AssetSpec {
+            id: "osv-db",
+            analyzer: "osv-scanner",
+            kind: rto_exec::AssetKind::AdvisoryDb,
+            source: rto_exec::AssetSource::Download { files },
+            file: "",
+            licence: "test",
+        };
+
+        let fetcher: &rto_exec::Fetcher<'_> = &download_asset_file;
+        let err = rto_exec::provision_with(&root, &spec, Some(fetcher))
+            .expect_err("an unverifiable download must not provision");
+        assert!(
+            err.to_string().contains("Content-Length"),
+            "the provisioning failure must carry the fetcher's reason: {err}"
+        );
+
+        // Nothing recorded, and nothing left in the tree that a later successful
+        // provision would digest into the pin.
+        let status = rto_exec::status(&root, Some("osv-scanner"));
+        assert_eq!(status.len(), 1);
+        assert!(
+            status[0].installed.is_none(),
+            "a failed fetch must not read as provisioned"
+        );
+        assert_eq!(status[0].verified, None);
+
+        let strays: Vec<std::path::PathBuf> = walk(&root);
+        assert!(
+            strays.is_empty(),
+            "a failed fetch must leave no bytes behind: {strays:?}"
+        );
+    }
+
+    /// Every file under `dir`, recursively.
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// The request asks for the one framing whose completeness can be checked.
+    ///
+    /// Served by a listener that content-negotiates: it answers a request
+    /// carrying `Accept-Encoding: identity` with a length-framed body, and
+    /// anything else with a close-delimited one. Succeeding therefore proves the
+    /// header was sent — without it, this download would be refused as
+    /// unverifiable, which is the fail-closed direction but a needless one
+    /// against a server that would have obliged.
+    #[test]
+    fn the_request_asks_for_a_framing_it_can_verify() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+                let response: &[u8] = if request.contains("accept-encoding: identity") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nPK\x03\x04ok"
+                } else {
+                    b"HTTP/1.1 200 OK\r\n\r\nPK\x03\x04ok"
+                };
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        let url = format!("http://{addr}/all.zip");
+        let dir = scratch("negotiated");
+        let path = dir.join("all.zip");
+
+        download_asset_file(&url, &path)
+            .expect("a server offering a verifiable framing must be taken up on it");
+        assert_eq!(std::fs::read(&path).expect("read"), b"PK\x03\x04ok");
+    }
+
+    /// A length that cannot be parsed is the same answer as no length at all —
+    /// stated once, so a blank or malformed header cannot read as zero bytes.
+    #[test]
+    fn only_a_real_number_counts_as_a_declared_length() {
+        assert_eq!(declared_body_length(Some("3374965")), Some(3_374_965));
+        assert_eq!(declared_body_length(Some("  42 ")), Some(42));
+        assert_eq!(declared_body_length(Some("0")), Some(0));
+        assert_eq!(declared_body_length(None), None);
+        assert_eq!(declared_body_length(Some("")), None);
+        assert_eq!(declared_body_length(Some("lots")), None);
+        assert_eq!(declared_body_length(Some("-1")), None);
+        assert_eq!(declared_body_length(Some("1.5")), None);
+    }
+
+    /// The mismatch is reported with both counts, so the failure says how short
+    /// the transfer was rather than only that something went wrong.
+    ///
+    /// Exercised directly: ureq 3.4.0 enforces `Content-Length` framing itself
+    /// and errors before this branch is reached, so it is defence against a
+    /// dependency changing that — which is precisely why it is tested here
+    /// rather than assumed to be unreachable.
+    #[test]
+    fn a_short_transfer_is_reported_with_both_counts() {
+        verify_transferred("https://example.invalid/all.zip", 4096, 4096)
+            .expect("an exact transfer is fine");
+
+        let err = verify_transferred("https://example.invalid/all.zip", 4096, 1200)
+            .expect_err("a short transfer must fail");
+        assert!(err.contains("4096"), "{err}");
+        assert!(err.contains("1200"), "{err}");
+        assert!(err.contains("https://example.invalid/all.zip"), "{err}");
+        assert!(
+            err.contains("pinned"),
+            "the message must say why it matters: {err}"
+        );
+
+        // A body *longer* than declared is equally wrong: it is not the resource
+        // the server described.
+        assert!(verify_transferred("https://example.invalid/all.zip", 10, 11).is_err());
     }
 }
 

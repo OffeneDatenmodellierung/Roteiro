@@ -424,3 +424,52 @@ fn a_provisioned_osv_database_shows_up_in_status_as_verified() {
     assert_eq!(status[0].verified, Some(true));
     assert_eq!(status[0].age_days, Some(0));
 }
+
+/// A fetcher that writes some bytes and *then* fails — the shape of a transfer
+/// that dies part-way through.
+///
+/// This is the half of the truncation contract that lives in this crate: whether
+/// bytes from a failed fetch survive in the asset directory. The other half —
+/// establishing that a transfer was complete at all — belongs to the transport,
+/// and is tested where the transport lives.
+#[test]
+fn a_fetch_that_fails_part_way_leaves_no_bytes_in_the_cache() {
+    let cache = Cache::cold("osv-partial");
+    let spec = assets::asset("osv-db").expect("spec");
+
+    let fetch = |_url: &str, path: &std::path::Path| -> Result<(), String> {
+        std::fs::write(path, b"half a database").map_err(|e| format!("{e}"))?;
+        Err("the peer hung up".to_owned())
+    };
+
+    let err =
+        assets::provision_with(&cache.0, spec, Some(&fetch)).expect_err("a failed fetch must fail");
+    assert!(err.to_string().contains("the peer hung up"), "{err}");
+
+    // Nothing recorded…
+    assert!(assets::installed(&cache.0, spec).is_none());
+    // …and no bytes left anywhere under the asset directory. `digest_tree`
+    // covers the whole tree, so a stray staging file would be folded into the
+    // pin the next time this asset provisioned successfully.
+    let mut strays = Vec::new();
+    collect_files(&assets::asset_dir(&cache.0, spec), &mut strays);
+    assert!(
+        strays.is_empty(),
+        "a failed fetch must leave the cache clean: {strays:?}"
+    );
+}
+
+/// Every file under `dir`, recursively.
+fn collect_files(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, into);
+        } else {
+            into.push(path);
+        }
+    }
+}
