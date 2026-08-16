@@ -7,8 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::findings::{self, AnalysisRun, Finding, FindingsApplied, FindingsLayer};
 use crate::media::{self, MediaFilter, MediaKind, MediaRecord, MediaWrite, ProducerSummary};
 use crate::memory::{
-    self, MemoryError, MemoryFilter, MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite,
-    Recall, RecallOptions,
+    self, CacheEntry, CacheStats, CacheSweep, CacheWrite, MemoryError, MemoryFilter,
+    MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite, Recall, RecallOptions,
 };
 use crate::migrations;
 use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
@@ -1139,6 +1139,87 @@ impl Store {
             live,
             superseded,
         })
+    }
+
+    // --- The bounded cache tier (ADR-0013, Tier 2). The *opposite* rules to the
+    // episodic tier above, because it holds the opposite kind of knowledge:
+    // everything here is re-derivable, so eviction costs cycles and never
+    // information. Nothing in this section can reach `agent_memory` — it has no
+    // `bytes`, no `last_used` and no `hits` for a capacity policy to grip. ---
+
+    /// Write (or replace) one cache entry.
+    ///
+    /// The payload size is computed here and the anchor's blob is captured from
+    /// the graph here, so the sweep can order and total the tier without reading
+    /// it, and a caller cannot record evidence a node never carried.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn agent_cache_put(&self, write: &CacheWrite<'_>) -> Result<(), StoreError> {
+        memory::cache_put(&self.conn, write)
+    }
+
+    /// Read one cache entry back, **recording the access** — `hits` increments and
+    /// `last_used` advances.
+    ///
+    /// This is the one read in the memory store that writes, and what it writes is
+    /// the cache's own bookkeeping: those two columns exist to be moved by exactly
+    /// this, and a hit counter nothing increments is a column that lies. It
+    /// touches nothing outside `agent_cache`, so [`Store::recall_memory`] — the
+    /// read whose reproducibility is promised — stays free of it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_get(&self, key: &str) -> Result<Option<CacheEntry>, StoreError> {
+        memory::cache_get(&self.conn, key)
+    }
+
+    /// Every cache entry, ordered by key, **without** recording an access:
+    /// inspecting a cache is not using it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_entries(&self) -> Result<Vec<CacheEntry>, StoreError> {
+        memory::cache_entries(&self.conn)
+    }
+
+    /// Delete one cache entry, returning whether there was one.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn agent_cache_forget(&self, key: &str) -> Result<bool, StoreError> {
+        memory::cache_forget(&self.conn, key)
+    }
+
+    /// What the cache tier holds, against `budget_bytes`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_stats(&self, budget_bytes: u64) -> Result<CacheStats, StoreError> {
+        memory::cache_stats(&self.conn, budget_bytes)
+    }
+
+    /// **Sweep the cache tier down to `budget_bytes`**, evicting oldest-first on
+    /// `(anchor_valid ASC, last_used ASC)`, and advance the generation.
+    ///
+    /// Called at the maintenance seam (beside `refresh_contexts`) and **never on
+    /// the read path**, so an ordinary query never mutates the store. Three things
+    /// are never evicted: anything episodic — structurally, there is no column to
+    /// grip it by; an entry written in the current generation whose anchor still
+    /// applies, which is the session's own work; and the most-recently-used entry,
+    /// always, even if it alone exceeds the budget.
+    ///
+    /// That last pair means a sweep can legitimately finish still over budget.
+    /// [`CacheSweep::over_budget`] reports it rather than leaving a bound that
+    /// silently failed to bind.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on failure; the transaction is rolled back.
+    pub fn sweep_agent_cache(&mut self, budget_bytes: u64) -> Result<CacheSweep, StoreError> {
+        let tx = self.conn.transaction()?;
+        let swept = memory::cache_sweep(&tx, budget_bytes)?;
+        tx.commit()?;
+        Ok(swept)
     }
 
     /// Findings whose owning run no longer exists. Always `0` in a healthy store;

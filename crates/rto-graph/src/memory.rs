@@ -30,14 +30,30 @@
 //! `sync` is still a no-op — by `memory_writes_do_not_invalidate_the_fact_cache`
 //! in `tests/sync.rs`, where the cache it is about lives.
 //!
-//! # This is the episodic tier only
+//! # Two tiers, opposite rules
 //!
 //! ADR-0013 describes two tiers with **opposite rules**, because they have
-//! opposite recovery costs: re-derivable knowledge is evictable, episodic
-//! knowledge is not. This module is the episodic half — **unbounded, never
-//! auto-evicted, removed only by an explicit [`crate::Store::forget_memory`]**.
-//! Bounding it would be data loss, not cache management. The bounded cache tier
-//! is a separate table with its own eviction policy and is not implemented here.
+//! opposite recovery costs, and both live here in separate tables:
+//!
+//! | | [`MemoryRecord`] — episodic | [`CacheEntry`] — transient |
+//! |---|---|---|
+//! | Table | `agent_memory` (migration 11) | `agent_cache` (migration 12) |
+//! | Re-derivable | **no** — there is no generating function | **yes**, by definition |
+//! | Bounded | never | by a byte budget ([`DEFAULT_CACHE_BUDGET_BYTES`]) |
+//! | Removed by | an explicit [`crate::Store::forget_memory`], and nothing else | that, or a sweep |
+//! | Cost of losing one | the knowledge, permanently | some cycles |
+//!
+//! **The rule: re-derivable ⇒ evictable; episodic ⇒ never silently evicted.**
+//! Bounding the episodic tier would be data loss wearing cache management's
+//! clothes; leaving the cache tier unbounded is the growth ADR-0013 exists to
+//! stop. What licenses the asymmetry is that `build_context` is *proven* to
+//! reconstruct identically (`context.rs` asserts `built == cached`), so evicting a
+//! cache entry costs cycles and never information.
+//!
+//! [`crate::Store::sweep_agent_cache`] is the only thing here that deletes without
+//! being asked, and it **cannot** reach the episodic tier: that table has no
+//! `bytes`, no `last_used` and no `hits`, so there is no column for a capacity
+//! policy to grip it by. The separation is structural rather than careful.
 //!
 //! # Anchoring: a node key and a blob, never a span
 //!
@@ -243,6 +259,15 @@ pub enum MemoryError {
     /// A stored row could not be interpreted (database corruption).
     #[error("corrupt memory record: {0}")]
     Corrupt(String),
+    /// [`CACHE_BUDGET_ENV`] was set to something that is not a budget. Refused
+    /// rather than ignored: running the default under a name that says otherwise
+    /// is how an operator ends up believing in a bound that was never applied.
+    #[error(
+        "invalid {CACHE_BUDGET_ENV}={0:?}: expected a whole number of megabytes (the default is \
+         {default} MB)",
+        default = DEFAULT_CACHE_BUDGET_BYTES / (1024 * 1024)
+    )]
+    InvalidBudget(String),
 }
 
 impl From<rusqlite::Error> for MemoryError {
@@ -907,6 +932,149 @@ pub struct MemoryForgotten {
     pub restored: Vec<i64>,
 }
 
+// --- Tier 2: the bounded, evictable cache ------------------------------------
+
+/// Stable schema tag on [`CacheSweep`] and [`CacheStats`].
+pub const CACHE_SCHEMA: &str = "roteiro.cache/v1";
+
+/// The default byte budget for the cache tier: **256 MB**, and raisable.
+///
+/// The number is a measurement, not a guess. On this repository `.git/roteiro/`
+/// is 49 MB against a 91 MB `.git` — the sidecar is already ~54% of the
+/// repository it describes — so a cache tier is not a new cost category, it is a
+/// bound on one that is currently unbounded in every direction. 256 MB is small
+/// against `.git`, trivial against a model store, and large enough that an
+/// ordinary session never evicts.
+///
+/// Erring small is deliberate and cheap: everything in this tier is re-derivable,
+/// and `build_context` is *proven* to reconstruct identically, so eviction costs
+/// cycles and never information. Erring large only costs disk. Neither error is
+/// expensive, which is why this is a default rather than a policy.
+pub const DEFAULT_CACHE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Environment variable that raises or lowers [`DEFAULT_CACHE_BUDGET_BYTES`], in
+/// **whole megabytes** — so a large repository can hold more without a rebuild.
+pub const CACHE_BUDGET_ENV: &str = "ROTEIRO_CACHE_BUDGET_MB";
+
+/// The configured cache budget in bytes: [`CACHE_BUDGET_ENV`] megabytes if it is
+/// set, otherwise [`DEFAULT_CACHE_BUDGET_BYTES`].
+///
+/// A value that cannot be read is an **error, not a fallback**. Silently ignoring
+/// it would run the default under a name that says otherwise, and an operator who
+/// asked for a bound has to be told the ask did not land.
+///
+/// # Errors
+/// Returns [`MemoryError::InvalidBudget`] if the variable is set to something
+/// that is not a whole number of megabytes, or to a number of megabytes that does
+/// not fit in bytes.
+pub fn cache_budget_bytes() -> Result<u64, MemoryError> {
+    let Some(raw) = std::env::var_os(CACHE_BUDGET_ENV) else {
+        return Ok(DEFAULT_CACHE_BUDGET_BYTES);
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    let megabytes: u64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| MemoryError::InvalidBudget(raw.clone()))?;
+    megabytes
+        .checked_mul(1024 * 1024)
+        .ok_or(MemoryError::InvalidBudget(raw))
+}
+
+/// The values [`crate::Store::agent_cache_put`] writes.
+///
+/// `anchor` is a **node key**; the blob stored beside it is captured by the store
+/// from the graph at write time, exactly as [`MemoryWrite`]'s is, so there is one
+/// place that decides what an anchor's evidence is.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheWrite<'a> {
+    /// The cache key. Content-addressed by the caller; nothing here interprets it.
+    pub key: &'a str,
+    /// The freshness witness. A reader compares it with the fingerprint the
+    /// current graph yields and treats a mismatch as a miss — capacity eviction is
+    /// a separate, orthogonal policy.
+    pub fingerprint: &'a str,
+    /// The cached payload.
+    pub json: &'a str,
+    /// The node key this entry is derived from, if any. Supplies the
+    /// `anchor_valid` half of the eviction order.
+    pub anchor: Option<&'a str>,
+}
+
+/// One entry in the cache tier, with its anchor resolved against the current
+/// graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheEntry {
+    /// The cache key.
+    pub key: String,
+    /// The freshness witness stored with the payload.
+    pub fingerprint: String,
+    /// The cached payload.
+    pub json: String,
+    /// The entry's payload size — what the byte budget is spent on.
+    pub bytes: u64,
+    /// The sweep generation this entry was written in.
+    pub generation: i64,
+    /// The access tick it was last read or written at. A logical counter, never a
+    /// clock.
+    pub last_used: i64,
+    /// How many times it has been read back.
+    pub hits: u64,
+    /// The node key it is derived from, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// What that anchor is worth against the **current** graph. Computed on read;
+    /// no column holds it.
+    pub anchor_state: AnchorState,
+}
+
+/// What the cache tier currently holds, against what it is allowed to hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheStats {
+    /// Stable schema tag ([`CACHE_SCHEMA`]).
+    pub schema: &'static str,
+    /// Entries in the tier.
+    pub entries: u64,
+    /// Bytes they occupy.
+    pub bytes: u64,
+    /// The budget those bytes are measured against.
+    pub budget_bytes: u64,
+    /// The current sweep generation.
+    pub generation: i64,
+}
+
+/// What one sweep of the cache tier did.
+///
+/// Reported in full — including what was **kept** and whether the tier is still
+/// over budget — because a sweep that silently declined to free anything and a
+/// sweep that had nothing to free look identical from the outside, and they mean
+/// opposite things.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheSweep {
+    /// Stable schema tag ([`CACHE_SCHEMA`]).
+    pub schema: &'static str,
+    /// The budget this sweep enforced.
+    pub budget_bytes: u64,
+    /// Entries considered.
+    pub scanned: u64,
+    /// Entries that could not be evicted: written in the current generation with
+    /// a valid anchor, or the most-recently-used entry, which is always kept.
+    pub pinned: u64,
+    /// Entries deleted.
+    pub evicted: u64,
+    /// Bytes their deletion freed.
+    pub freed_bytes: u64,
+    /// Bytes still held after the sweep.
+    pub retained_bytes: u64,
+    /// **Whether the tier is still over budget** after the sweep — which happens
+    /// when what remains is all pinned. Reported rather than hidden: a bound that
+    /// silently fails to bind is worse than one that says so.
+    pub over_budget: bool,
+    /// The generation the tier advanced to. Entries written before it are
+    /// evictable by the next sweep.
+    pub generation: i64,
+}
+
 // --- Persistence. Free helpers over a `Connection` (a `Transaction` derefs to
 // one), mirroring the findings and media stores. Every statement here touches
 // `agent_memory` and reads `nodes` for anchor evidence; nothing in this module
@@ -1212,6 +1380,310 @@ pub(crate) fn counts(conn: &Connection) -> Result<(u64, u64), StoreError> {
     ))
 }
 
+// --- Tier 2 persistence: the bounded cache and its sweep ---------------------
+
+/// Advance the access tick and return the new value.
+///
+/// The durable equivalent of `ModelCache`'s position in its `Vec`: strictly
+/// increasing, unique per access, and **not a clock** — the store is shared across
+/// worktrees, where wall-clock is not monotone and second granularity ties.
+fn next_tick(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(conn.query_row(
+        "UPDATE agent_cache_clock SET ticks = ticks + 1 WHERE id = 0 RETURNING ticks",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// The current sweep generation.
+fn cache_generation(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(conn.query_row(
+        "SELECT generation FROM agent_cache_clock WHERE id = 0",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Write (or replace) one cache entry.
+///
+/// `bytes` is the payload's own size, computed here so the sweep can total and
+/// order the tier without reading every `json` in it. `hits` survives a
+/// replacement: the counter is about how often this *key* is worth having, and the
+/// value under it is re-derivable by definition.
+pub(crate) fn cache_put(conn: &Connection, write: &CacheWrite<'_>) -> Result<(), StoreError> {
+    let bytes = u64::try_from(write.key.len() + write.fingerprint.len() + write.json.len())
+        .unwrap_or(u64::MAX);
+    // Anchor evidence, captured from the graph as it stands — the same capture
+    // the episodic tier does, so the two agree about what an anchor was worth.
+    let anchor_blob: Option<String> = match write.anchor {
+        Some(key) => conn
+            .query_row("SELECT blob_hash FROM nodes WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten(),
+        None => None,
+    };
+    let tick = next_tick(conn)?;
+    let generation = cache_generation(conn)?;
+    conn.execute(
+        "INSERT INTO agent_cache
+             (key, fingerprint, json, bytes, generation, last_used, hits, anchor_key, anchor_blob)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
+         ON CONFLICT(key) DO UPDATE SET
+             fingerprint = excluded.fingerprint,
+             json        = excluded.json,
+             bytes       = excluded.bytes,
+             generation  = excluded.generation,
+             last_used   = excluded.last_used,
+             anchor_key  = excluded.anchor_key,
+             anchor_blob = excluded.anchor_blob",
+        params![
+            write.key,
+            write.fingerprint,
+            write.json,
+            i64::try_from(bytes).unwrap_or(i64::MAX),
+            generation,
+            tick,
+            write.anchor,
+            anchor_blob,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Columns of `agent_cache` plus the joined anchor evidence, in the order
+/// [`cache_entry_from_row`] decodes them.
+const CACHE_COLS: &str = "c.key, c.fingerprint, c.json, c.bytes, c.generation, c.last_used, \
+     c.hits, c.anchor_key, c.anchor_blob, n.key, n.blob_hash";
+
+/// The `LEFT JOIN` resolving a cache entry's anchor against the current graph.
+const CACHE_FROM: &str = " FROM agent_cache c LEFT JOIN nodes n ON n.key = c.anchor_key";
+
+/// Read one entry back, **recording the access**: `hits` increments and
+/// `last_used` advances.
+///
+/// This is the one read in this module that writes, and the write is the cache's
+/// own bookkeeping — `hits` and `last_used` exist to be moved by exactly this, and
+/// a hit counter nothing increments is a column that lies. It touches nothing
+/// outside `agent_cache`, so the *ranked* read this module is really about
+/// ([`recall`]) stays free of it and stays reproducible.
+pub(crate) fn cache_get(conn: &Connection, key: &str) -> Result<Option<CacheEntry>, StoreError> {
+    let sql = format!("SELECT {CACHE_COLS}{CACHE_FROM} WHERE c.key = ?1");
+    let entry = conn
+        .query_row(&sql, [key], |row| Ok(cache_entry_from_row(row)))
+        .optional()?
+        .transpose()?;
+    if entry.is_some() {
+        let tick = next_tick(conn)?;
+        conn.execute(
+            "UPDATE agent_cache SET hits = hits + 1, last_used = ?1 WHERE key = ?2",
+            params![tick, key],
+        )?;
+    }
+    Ok(entry)
+}
+
+/// Every entry, ordered by key. Does **not** record an access — this is the
+/// inspection path (stats, the sweep, tests), and inspecting a cache is not using
+/// it.
+pub(crate) fn cache_entries(conn: &Connection) -> Result<Vec<CacheEntry>, StoreError> {
+    let sql = format!("SELECT {CACHE_COLS}{CACHE_FROM} ORDER BY c.key");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(cache_entry_from_row(row)?);
+    }
+    Ok(out)
+}
+
+/// Delete one entry, returning whether there was one.
+pub(crate) fn cache_forget(conn: &Connection, key: &str) -> Result<bool, StoreError> {
+    Ok(conn.execute("DELETE FROM agent_cache WHERE key = ?1", [key])? > 0)
+}
+
+/// What the tier holds against `budget_bytes`.
+pub(crate) fn cache_stats(conn: &Connection, budget_bytes: u64) -> Result<CacheStats, StoreError> {
+    let (entries, bytes): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM agent_cache",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(CacheStats {
+        schema: CACHE_SCHEMA,
+        entries: u64::try_from(entries).unwrap_or(0),
+        bytes: u64::try_from(bytes).unwrap_or(0),
+        budget_bytes,
+        generation: cache_generation(conn)?,
+    })
+}
+
+/// **How many of the evictable entries must go**, given their sizes in eviction
+/// order (first to go first), the bytes held by entries that cannot be evicted,
+/// and the budget.
+///
+/// A pure function, and a deliberate port of `rto-llama`'s `lru_evict_count`
+/// (`llama.rs:120-137`, pinned by `budget_evicts_oldest_until_it_fits`) rather
+/// than a new policy: drop the oldest until the remainder fits. The one structural
+/// difference is where "always keep the most-recently-used entry" lives — there it
+/// is a `len - evict > 1` guard, here the caller has already moved that entry into
+/// `pinned_bytes`, because this tier pins other rows too and one rule for all of
+/// them is simpler than two.
+///
+/// Consequently this **can** return short of the budget: when everything left is
+/// pinned, the tier stays over. That is the ADR's rule, not a bug — a session's
+/// own just-written work is not thrown away by the maintenance pass behind it —
+/// and [`CacheSweep::over_budget`] says so out loud.
+fn evict_count(evictable_lru_first: &[u64], pinned_bytes: u64, budget_bytes: u64) -> usize {
+    let mut total: u64 = pinned_bytes.saturating_add(evictable_lru_first.iter().sum());
+    let mut evict = 0;
+    while evict < evictable_lru_first.len() && total > budget_bytes {
+        total = total.saturating_sub(evictable_lru_first[evict]);
+        evict += 1;
+    }
+    evict
+}
+
+/// Sweep the cache tier down to `budget_bytes`, oldest-first on
+/// `(anchor_valid ASC, last_used ASC)`, and advance the generation.
+///
+/// **Nothing episodic is reachable from here.** Every statement names
+/// `agent_cache`; `agent_memory` has no `bytes`, no `last_used` and no `hits`, so
+/// there is no column for this policy to grip it by even by mistake. That is the
+/// two-tier split doing its job: re-derivable ⇒ evictable, episodic ⇒ never
+/// silently evicted.
+///
+/// Three classes of entry are never evicted:
+///
+/// * anything in the episodic tier, as above;
+/// * an entry written in the **current generation** whose anchor still applies —
+///   the session's own work, which the maintenance pass that follows it must not
+///   undo;
+/// * the **most-recently-used** entry, always, even if it alone exceeds the budget
+///   — `ModelCache`'s rule, for `ModelCache`'s reason: what was just asked for has
+///   to be there.
+pub(crate) fn cache_sweep(conn: &Connection, budget_bytes: u64) -> Result<CacheSweep, StoreError> {
+    let generation = cache_generation(conn)?;
+    let entries = cache_entries(conn)?;
+    let scanned = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+
+    // The most-recently-used entry, by the tick counter: always kept.
+    let mru = entries.iter().max_by_key(|e| e.last_used).map(|e| &e.key);
+
+    let mut pinned_bytes: u64 = 0;
+    let mut candidates: Vec<&CacheEntry> = Vec::new();
+    for entry in &entries {
+        let is_mru = mru.is_some_and(|k| *k == entry.key);
+        let own_work = entry.generation >= generation && entry.anchor_state.applies();
+        if is_mru || own_work {
+            pinned_bytes = pinned_bytes.saturating_add(entry.bytes);
+        } else {
+            candidates.push(entry);
+        }
+    }
+    // The eviction order, exactly as ADR-0013 states it: entries whose anchor no
+    // longer applies go before entries that still describe this tree, and within
+    // each group the least recently used goes first. `key` breaks the last tie so
+    // a sweep is deterministic even on a store where two entries somehow share a
+    // tick.
+    candidates.sort_by(|a, b| {
+        a.anchor_state
+            .applies()
+            .cmp(&b.anchor_state.applies())
+            .then_with(|| a.last_used.cmp(&b.last_used))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    let sizes: Vec<u64> = candidates.iter().map(|e| e.bytes).collect();
+    let evict = evict_count(&sizes, pinned_bytes, budget_bytes);
+    let mut freed_bytes: u64 = 0;
+    for entry in candidates.iter().take(evict) {
+        conn.execute("DELETE FROM agent_cache WHERE key = ?1", [&entry.key])?;
+        freed_bytes = freed_bytes.saturating_add(entry.bytes);
+    }
+
+    let held: u64 = entries.iter().map(|e| e.bytes).sum();
+    let retained_bytes = held.saturating_sub(freed_bytes);
+    // The generation advances *after* the sweep, so what this session wrote is
+    // pinned for this pass and evictable by the next one. Without the advance the
+    // pin would be permanent and the budget would never bind.
+    let generation: i64 = conn.query_row(
+        "UPDATE agent_cache_clock SET generation = generation + 1 WHERE id = 0
+         RETURNING generation",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(CacheSweep {
+        schema: CACHE_SCHEMA,
+        budget_bytes,
+        scanned,
+        pinned: u64::try_from(entries.len().saturating_sub(candidates.len())).unwrap_or(0),
+        evicted: u64::try_from(evict).unwrap_or(0),
+        freed_bytes,
+        retained_bytes,
+        over_budget: retained_bytes > budget_bytes,
+        generation,
+    })
+}
+
+/// Decode an `agent_cache` row joined against `nodes`.
+fn cache_entry_from_row(row: &rusqlite::Row<'_>) -> Result<CacheEntry, StoreError> {
+    let anchor_key: Option<String> = row.get(7)?;
+    let anchor_blob: Option<String> = row.get(8)?;
+    let node_key: Option<String> = row.get(9)?;
+    let node_blob: Option<String> = row.get(10)?;
+    let bytes: i64 = row.get(3)?;
+    let hits: i64 = row.get(6)?;
+    Ok(CacheEntry {
+        key: row.get(0)?,
+        fingerprint: row.get(1)?,
+        json: row.get(2)?,
+        bytes: u64::try_from(bytes).unwrap_or(0),
+        generation: row.get(4)?,
+        last_used: row.get(5)?,
+        hits: u64::try_from(hits).unwrap_or(0),
+        // The same rule the episodic tier reads by — one implementation, so the
+        // two tiers can never disagree about what an anchor is worth.
+        anchor_state: resolve_anchor(
+            anchor_key.as_deref(),
+            anchor_blob.as_deref(),
+            node_key.as_deref(),
+            node_blob.as_deref(),
+        ),
+        anchor: anchor_key,
+    })
+}
+
+/// **The anchor rule, in one place.** What a recorded anchor is worth against the
+/// node the `LEFT JOIN` resolved it to — `node_key` of `None` meaning there is no
+/// such node now, which is the vanished case rather than a missing column.
+///
+/// Both tiers call this and neither has a copy: the episodic tier ranks on it and
+/// the cache tier orders eviction by it, and two implementations of one rule is
+/// how they would come to disagree about what "applies here" means.
+fn resolve_anchor(
+    anchor_key: Option<&str>,
+    anchor_blob: Option<&str>,
+    node_key: Option<&str>,
+    node_blob: Option<&str>,
+) -> AnchorState {
+    match (anchor_key, node_key) {
+        (None, _) => AnchorState::Unanchored,
+        (Some(_), None) => AnchorState::Vanished,
+        (Some(_), Some(_)) => match (anchor_blob, node_blob) {
+            // Both halves of the stable pair are present, so drift is a real
+            // comparison rather than an assumption.
+            (Some(captured), Some(current)) if captured == current => AnchorState::Valid,
+            (Some(_), Some(_)) => AnchorState::Drifted,
+            // One side has no blob: the node is there, but nothing can be
+            // concluded about the code under it. Said plainly rather than
+            // rounded up to `Valid`.
+            _ => AnchorState::Unverifiable,
+        },
+    }
+}
+
 /// Decode an `agent_memory` row joined against `nodes`.
 fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> {
     let kind_token: String = row.get(2)?;
@@ -1224,20 +1696,12 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> 
     let node_key: Option<String> = row.get(12)?;
     let node_blob: Option<String> = row.get(13)?;
 
-    let anchor_state = match (&anchor_key, &node_key) {
-        (None, _) => AnchorState::Unanchored,
-        (Some(_), None) => AnchorState::Vanished,
-        (Some(_), Some(_)) => match (&anchor_blob, &node_blob) {
-            // Both halves of the stable pair are present, so drift is a real
-            // comparison rather than an assumption.
-            (Some(captured), Some(current)) if captured == current => AnchorState::Valid,
-            (Some(_), Some(_)) => AnchorState::Drifted,
-            // One side has no blob: the node is there, but nothing can be
-            // concluded about the code under it. Said plainly rather than
-            // rounded up to `Valid`.
-            _ => AnchorState::Unverifiable,
-        },
-    };
+    let anchor_state = resolve_anchor(
+        anchor_key.as_deref(),
+        anchor_blob.as_deref(),
+        node_key.as_deref(),
+        node_blob.as_deref(),
+    );
     let anchor = anchor_key.map(|key| MemoryAnchor {
         key,
         blob: anchor_blob,
@@ -1265,7 +1729,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> 
 mod tests {
     use super::{
         AnchorState, DEFAULT_DECAY_SPAN, DEFAULT_HALF_LIFE, DEFAULT_MEMORY_SCOPE, Decay,
-        MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind, MemoryWrite, anchor_penalty,
+        MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind, MemoryWrite, anchor_penalty, evict_count,
     };
 
     fn write(body: &str) -> MemoryWrite<'_> {
@@ -1513,6 +1977,72 @@ mod tests {
         assert!(
             anchor_penalty(AnchorState::Vanished) > anchor_penalty(AnchorState::Drifted),
             "a record about deleted code must not be the most demoted of all",
+        );
+    }
+
+    // --- The eviction policy, as a pure function ------------------------------
+
+    /// **Parity with the policy this ports.** `rto-llama`'s `lru_evict_count`
+    /// (`llama.rs:120-137`) is pinned by `tests::budget_evicts_oldest_until_it_
+    /// fits`, and these are that test's cases restated on this signature: three
+    /// 100-byte entries, the newest of which is pinned by the caller as
+    /// `pinned_bytes` rather than by a `len - evict > 1` guard.
+    ///
+    /// Stated as parity on purpose. The value of porting an existing policy
+    /// instead of inventing one is entirely lost if the port quietly behaves
+    /// differently, so the numbers are the same numbers.
+    #[test]
+    fn eviction_matches_the_model_cache_policy_it_ports() {
+        // `lru_evict_count(&[100, 100, 100], 250) == 1`
+        assert_eq!(evict_count(&[100, 100], 100, 250), 1);
+        // `… == 2` at a budget of zero: everything goes but the pinned entry.
+        assert_eq!(evict_count(&[100, 100], 100, 0), 2);
+        // `… == 0` when it already fits.
+        assert_eq!(evict_count(&[100, 100], 100, 1000), 0);
+        // Exactly at the budget is not over it.
+        assert_eq!(evict_count(&[100, 100], 100, 300), 0);
+    }
+
+    /// **Always keep at least one entry, even one that alone blows the budget.**
+    /// `ModelCache`'s rule, for `ModelCache`'s reason: what was just asked for has
+    /// to be there. Here the caller pins it, so this function's job is only to
+    /// never evict what it was not given.
+    #[test]
+    fn nothing_evictable_means_nothing_evicted_however_small_the_budget() {
+        assert_eq!(evict_count(&[], 500, 10), 0, "the sole entry survives");
+        assert_eq!(evict_count(&[], 0, 0), 0, "an empty tier sweeps to nothing");
+        assert_eq!(
+            evict_count(&[100], 500, 10),
+            1,
+            "and everything else still goes",
+        );
+    }
+
+    /// Eviction stops the moment the remainder fits — it does not keep going to
+    /// make room it was not asked for. A cache that over-evicts pays the recompute
+    /// cost of entries it had no reason to drop.
+    #[test]
+    fn eviction_stops_as_soon_as_the_remainder_fits() {
+        // Three evictable entries of 10, 20 and 30 in eviction order, plus 40
+        // pinned: 100 bytes held. At a budget of 70, dropping the 10 leaves 90 and
+        // dropping the 20 leaves 70 — which fits, so the 30 stays put.
+        assert_eq!(evict_count(&[10, 20, 30], 40, 70), 2);
+        assert_eq!(evict_count(&[10, 20, 30], 40, 90), 1);
+        assert_eq!(evict_count(&[10, 20, 30], 40, 100), 0, "it already fits");
+        // Down at the pinned set's own size, everything evictable goes — and no
+        // further, because there is nothing further to go.
+        assert_eq!(evict_count(&[10, 20, 30], 40, 40), 3);
+    }
+
+    /// Pinned bytes count against the budget even though they cannot be freed, so
+    /// a tier full of pinned entries evicts everything else and then legitimately
+    /// stays over — which `CacheSweep::over_budget` is there to say.
+    #[test]
+    fn pinned_bytes_are_counted_but_never_freed() {
+        assert_eq!(
+            evict_count(&[10, 10], 1000, 100),
+            2,
+            "everything evictable goes when the pinned set alone exceeds the budget",
         );
     }
 }
