@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.12.0...rto-serve-v1.13.0) - 2026-08-16
+
+### Other
+
+- *(llama,serve)* pin the batch guard, and measure what the wider batch costs
+
 ## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.10.0...rto-serve-v1.10.1) - 2026-08-15
 
 ### Fixed

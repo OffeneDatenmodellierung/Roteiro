@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.12.0...rto-llama-v1.13.0) - 2026-08-16
+
+### Fixed
+
+- *(llama)* derive the media chunk width from the context, not a literal
+- *(llama)* refuse over-long prompts instead of aborting the process
+
+### Other
+
+- *(llama,serve)* pin the batch guard, and measure what the wider batch costs
+
 ## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.10.1...rto-llama-v1.11.0) - 2026-08-16
 
 ### Added
