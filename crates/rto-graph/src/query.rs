@@ -5,16 +5,17 @@
 //! can depend on the shape. The primitives are [`explain`] (a node and its
 //! provenance-labelled neighbourhood), [`list_kind`] (all nodes of a kind),
 //! [`path`] (a shortest path between two nodes), [`debt`] (the intent-debt marker
-//! inventory), and [`search`] (relevance-ranked node search). All return
+//! inventory), [`coupling`] (directed fan-in/fan-out over `Calls` edges), and
+//! [`search`] (relevance-ranked node search). All return
 //! mixed-provenance results — the "one query surface" from ADR-0001 — with every
 //! edge carrying its `provenance`.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
 use crate::store::{Store, StoreError};
-use crate::{Edge, NodeKind, Provenance};
+use crate::{Edge, EdgeKind, NodeKind, Provenance};
 
 /// The versioned schema tag emitted on every query result. Bump the version on
 /// any breaking change to the shape.
@@ -219,6 +220,223 @@ fn match_token_chars(pat: &[char], chars: &[char]) -> bool {
             !chars.is_empty() && chars[0] == ch && match_token_chars(&pat[1..], &chars[1..])
         }
     }
+}
+
+/// How a [`CouplingReport`]'s items are ranked. The three orders answer three
+/// different questions, which a single undirected degree cannot tell apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CouplingOrder {
+    /// By `fan_in + fan_out` — overall call coupling.
+    #[default]
+    Total,
+    /// By `fan_in` — the most depended-on symbols ("what calls this?").
+    FanIn,
+    /// By `fan_out` — the symbols that reach furthest ("what does this call?").
+    FanOut,
+}
+
+impl CouplingOrder {
+    /// The stable token for this order, as accepted by [`from_token`](Self::from_token).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Total => "total",
+            Self::FanIn => "fan_in",
+            Self::FanOut => "fan_out",
+        }
+    }
+
+    /// Parse an order token. `None` for anything else — callers surface an error
+    /// rather than silently ranking by something the caller did not ask for.
+    #[must_use]
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s {
+            "total" => Some(Self::Total),
+            "fan_in" => Some(Self::FanIn),
+            "fan_out" => Some(Self::FanOut),
+            _ => None,
+        }
+    }
+
+    /// The tokens [`from_token`](Self::from_token) accepts, for error messages
+    /// and argument schemas — so the accepted set is stated in exactly one place.
+    #[must_use]
+    pub fn tokens() -> [&'static str; 3] {
+        [
+            Self::Total.as_str(),
+            Self::FanIn.as_str(),
+            Self::FanOut.as_str(),
+        ]
+    }
+}
+
+/// One node's **directed** call coupling in a [`CouplingReport`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CouplingItem {
+    /// Natural key of the node.
+    pub key: String,
+    /// Kind token (e.g. `fn`).
+    pub kind: String,
+    /// Human-facing name.
+    pub name: String,
+    /// Repository-relative path, if any.
+    pub path: Option<String>,
+    /// How many **distinct** other nodes call this one.
+    pub fan_in: u32,
+    /// How many **distinct** other nodes this one calls.
+    pub fan_out: u32,
+    /// `fan_in + fan_out` — the directed equivalent of the undirected degree.
+    pub total: u32,
+    /// Martin's instability, `fan_out / (fan_in + fan_out)`, rounded to two
+    /// decimals. `0.0` = purely depended-on (stable); `1.0` = purely depending
+    /// (unstable). The denominator is never zero: an item exists only when it
+    /// has at least one non-self call edge.
+    pub instability: f64,
+}
+
+/// Directed call coupling: per-node fan-in and fan-out over `Calls` edges,
+/// ranked. The counterpart to an undirected degree ranking, which cannot tell
+/// "everything calls this" from "this calls everything".
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CouplingReport {
+    /// Stable schema tag ([`SCHEMA`]).
+    pub schema: &'static str,
+    /// The edge kind measured. Always `calls` — the only edge kind whose
+    /// direction carries a caller/callee meaning.
+    pub edge_kind: &'static str,
+    /// The ranking that produced `items` ([`CouplingOrder::as_str`]).
+    pub order: &'static str,
+    /// The requested cap on `items`; `0` means unlimited.
+    pub limit: usize,
+    /// Total `Calls` edges scanned, including duplicates and self-calls.
+    pub call_edges: usize,
+    /// Self-referential `Calls` edges (recursion), counted in `call_edges` but
+    /// excluded from every fan — see [`coupling`].
+    pub self_calls: usize,
+    /// Distinct nodes with at least one non-self `Calls` edge. `items` is the
+    /// top `limit` of these, so `coupled_nodes > items.len()` means truncation.
+    pub coupled_nodes: usize,
+    /// The ranked nodes: by `order` descending, ties broken by `key` ascending.
+    pub items: Vec<CouplingItem>,
+}
+
+/// Rank nodes by **directed** call coupling — fan-in (distinct callers) and
+/// fan-out (distinct callees) over `Calls` edges — most-coupled first by
+/// `order`, capped at `limit` (`0` = unlimited).
+///
+/// Two deliberate counting rules, both of which change the numbers:
+///
+/// - **Distinct counterparts, not edges.** Edges are a set per `(src, dst, kind,
+///   provenance)`, which still admits *parallel* `Calls` edges between one pair
+///   at different provenances — a `derived` extraction and an `inferred`
+///   suggestion of the same call. Counting distinct counterpart keys makes
+///   `fan_in` mean "how many things depend on this", which is the coupling
+///   question, rather than "how many layers asserted the dependency".
+/// - **Self-calls are excluded from both fans.** Recursion is a real edge but
+///   couples a node to nothing outside itself, and counting it would inflate
+///   `fan_in` *and* `fan_out` for the same node. It is reported separately as
+///   `self_calls` rather than silently dropped.
+///
+/// Ordering is total and deterministic: by the chosen metric descending, then by
+/// `key` ascending, so identical input yields byte-identical output.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure.
+pub fn coupling(
+    store: &Store,
+    order: CouplingOrder,
+    limit: usize,
+) -> Result<CouplingReport, StoreError> {
+    // dst key -> distinct src keys, and src key -> distinct dst keys.
+    let mut callers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut callees: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut call_edges = 0usize;
+    let mut self_calls = 0usize;
+    for edge in store.all_edges()? {
+        if edge.kind != EdgeKind::Calls {
+            continue;
+        }
+        call_edges += 1;
+        if edge.src == edge.dst {
+            self_calls += 1;
+            continue;
+        }
+        callers
+            .entry(edge.dst.clone())
+            .or_default()
+            .insert(edge.src.clone());
+        callees.entry(edge.src).or_default().insert(edge.dst);
+    }
+
+    // Rank on the counts alone, so only the nodes that survive the cap are read
+    // back from the store — a whole-graph node scan is not needed to answer a
+    // top-N question.
+    let keys: BTreeSet<&String> = callers.keys().chain(callees.keys()).collect();
+    let coupled_nodes = keys.len();
+    let mut ranked: Vec<(u32, u32, &String)> = keys
+        .into_iter()
+        .map(|key| {
+            let fan_in = count_of(&callers, key);
+            let fan_out = count_of(&callees, key);
+            (fan_in, fan_out, key)
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        let metric = |&(fan_in, fan_out, _): &(u32, u32, &String)| match order {
+            CouplingOrder::Total => fan_in + fan_out,
+            CouplingOrder::FanIn => fan_in,
+            CouplingOrder::FanOut => fan_out,
+        };
+        metric(b).cmp(&metric(a)).then_with(|| a.2.cmp(b.2))
+    });
+    if limit > 0 {
+        ranked.truncate(limit);
+    }
+
+    let mut items = Vec::with_capacity(ranked.len());
+    for (fan_in, fan_out, key) in ranked {
+        // `edges.src`/`edges.dst` are foreign keys into `nodes`, so a node behind
+        // a call edge always exists; the guard is defence in depth, not a case.
+        let Some(node) = store.get_node(key)? else {
+            continue;
+        };
+        let total = fan_in + fan_out;
+        items.push(CouplingItem {
+            key: node.key,
+            kind: node.kind.as_str().to_owned(),
+            name: node.name,
+            path: node.path,
+            fan_in,
+            fan_out,
+            total,
+            instability: round2(f64::from(fan_out) / f64::from(total)),
+        });
+    }
+
+    Ok(CouplingReport {
+        schema: SCHEMA,
+        edge_kind: EdgeKind::Calls.as_str(),
+        order: order.as_str(),
+        limit,
+        call_edges,
+        self_calls,
+        coupled_nodes,
+        items,
+    })
+}
+
+/// The size of `key`'s counterpart set, as a `u32` (a node cannot have more
+/// distinct counterparts than there are nodes, so the cast cannot realistically
+/// saturate; saturating beats wrapping if it ever did).
+fn count_of(map: &BTreeMap<String, BTreeSet<String>>, key: &str) -> u32 {
+    map.get(key)
+        .map_or(0, |set| u32::try_from(set.len()).unwrap_or(u32::MAX))
+}
+
+/// Round to two decimals, so the serialised ratio is short and stable rather
+/// than carrying the full binary expansion of a division.
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
 }
 
 /// One step along a [`Path`]: the edge traversed and the node it leads to.
@@ -1002,7 +1220,10 @@ fn placeholder_hop() -> PathHop {
 
 #[cfg(test)]
 mod tests {
-    use super::{SCHEMA, SNIPPET_MAX, explain, glob_match, list_kind, memory_score, path, search};
+    use super::{
+        CouplingItem, CouplingOrder, CouplingReport, SCHEMA, SNIPPET_MAX, coupling, explain,
+        glob_match, list_kind, memory_score, path, search,
+    };
     use crate::{AnchorState, Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
     fn seeded() -> Store {
@@ -1370,5 +1591,196 @@ mod tests {
         // confidence cannot manufacture a score above the honest ceiling.
         assert_eq!(score(2.0), full, "clamped at the top");
         assert_eq!(score(-1.0), 0, "and at the bottom");
+    }
+
+    // -- coupling (Q3) -----------------------------------------------------
+
+    /// A graph whose two most-coupled nodes have the **same undirected degree**
+    /// but opposite direction: `hub` is called by two callers and calls nothing;
+    /// `spread` calls two callees and is called by nothing. An undirected degree
+    /// ranking cannot tell them apart, which is the whole point of this lens.
+    fn coupled() -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        let mut facts = FactSet::new();
+        for name in ["hub", "spread", "a", "b", "x", "y"] {
+            facts = facts.with_node(Node::new(
+                format!("sym:rust:a.rs#{name}"),
+                NodeKind::Fn,
+                name,
+            ));
+        }
+        for (src, dst) in [("a", "hub"), ("b", "hub"), ("spread", "x"), ("spread", "y")] {
+            facts = facts.with_edge(Edge::derived(
+                format!("sym:rust:a.rs#{src}"),
+                format!("sym:rust:a.rs#{dst}"),
+                EdgeKind::Calls,
+            ));
+        }
+        store.apply_factset(&facts).expect("apply");
+        store
+    }
+
+    /// Find an item by symbol name, so assertions read by name not by index.
+    fn item<'a>(report: &'a CouplingReport, name: &str) -> &'a CouplingItem {
+        report
+            .items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("`{name}` missing from {:?}", report.items))
+    }
+
+    #[test]
+    fn coupling_keeps_the_direction_an_undirected_degree_discards() {
+        let report = coupling(&coupled(), CouplingOrder::Total, 0).expect("coupling");
+        let hub = item(&report, "hub");
+        let spread = item(&report, "spread");
+
+        // Identical undirected degree — what a both-ends-incremented ranking sees.
+        assert_eq!(hub.total, spread.total, "same total coupling");
+
+        // …and opposite direction, which is what this lens exists to report.
+        assert_eq!((hub.fan_in, hub.fan_out), (2, 0), "hub is depended upon");
+        assert_eq!(
+            (spread.fan_in, spread.fan_out),
+            (0, 2),
+            "spread depends on others"
+        );
+        assert!(
+            (hub.instability - 0.0).abs() < f64::EPSILON,
+            "a purely called node is maximally stable: {}",
+            hub.instability
+        );
+        assert!(
+            (spread.instability - 1.0).abs() < f64::EPSILON,
+            "a purely calling node is maximally unstable: {}",
+            spread.instability
+        );
+
+        assert_eq!(report.edge_kind, "calls");
+        assert_eq!(report.coupled_nodes, 6);
+        assert_eq!(report.call_edges, 4);
+        assert_eq!(report.self_calls, 0);
+    }
+
+    #[test]
+    fn coupling_counts_distinct_callers_not_parallel_edges() {
+        // Migration 3 makes edges a set per `(src, dst, kind, provenance)` — so
+        // the way one caller contributes two `Calls` rows is by **provenance**:
+        // an extractor's `derived` call and an inference layer's `inferred` one.
+        // Two rows, one dependant.
+        let mut store = coupled();
+        let inferred = Edge::inferred("sym:rust:a.rs#a", "sym:rust:a.rs#hub", EdgeKind::Calls, 0.9);
+        store
+            .apply_factset(&FactSet::new().with_edge(inferred))
+            .expect("apply");
+
+        let report = coupling(&store, CouplingOrder::Total, 0).expect("coupling");
+        assert_eq!(
+            item(&report, "hub").fan_in,
+            2,
+            "the same caller at two provenances is one dependant, not two"
+        );
+        // The raw edge is still counted, so the parallel edge stays visible
+        // rather than being silently normalised away.
+        assert_eq!(
+            report.call_edges, 5,
+            "the extra edge is reported as scanned"
+        );
+    }
+
+    #[test]
+    fn coupling_excludes_self_calls_from_both_fans() {
+        // Recursion is a real edge that couples a node to nothing outside itself;
+        // counting it would inflate `fan_in` AND `fan_out` for the same node.
+        let mut store = coupled();
+        let recursive = Edge::derived("sym:rust:a.rs#hub", "sym:rust:a.rs#hub", EdgeKind::Calls);
+        store
+            .apply_factset(&FactSet::new().with_edge(recursive))
+            .expect("apply");
+
+        let report = coupling(&store, CouplingOrder::Total, 0).expect("coupling");
+        let hub = item(&report, "hub");
+        assert_eq!(
+            (hub.fan_in, hub.fan_out),
+            (2, 0),
+            "recursion changes neither fan"
+        );
+        assert_eq!(report.self_calls, 1, "but it is reported, not dropped");
+    }
+
+    #[test]
+    fn coupling_order_picks_the_question_being_asked() {
+        let store = coupled();
+        let top = |order| {
+            coupling(&store, order, 1).expect("coupling").items[0]
+                .name
+                .clone()
+        };
+        assert_eq!(top(CouplingOrder::FanIn), "hub", "most depended-on");
+        assert_eq!(top(CouplingOrder::FanOut), "spread", "reaches furthest");
+
+        // `total` cannot separate the two, so the tie must break on `key` —
+        // a stable order rather than whatever the map iteration yields.
+        let by_total = coupling(&store, CouplingOrder::Total, 2).expect("coupling");
+        assert_eq!(
+            by_total.items.iter().map(|i| &i.name).collect::<Vec<_>>(),
+            ["hub", "spread"],
+            "ties break by key ascending"
+        );
+    }
+
+    #[test]
+    fn coupling_reports_truncation_and_is_deterministic() {
+        let store = coupled();
+        let capped = coupling(&store, CouplingOrder::Total, 2).expect("coupling");
+        assert_eq!(capped.items.len(), 2);
+        assert_eq!(
+            capped.coupled_nodes, 6,
+            "the population is reported, so a capped list cannot read as the whole graph"
+        );
+        assert_eq!(capped.limit, 2);
+
+        // Identical input → byte-identical output, including the ratio's rendering.
+        let a = serde_json::to_string(&capped).expect("json");
+        let b =
+            serde_json::to_string(&coupling(&store, CouplingOrder::Total, 2).expect("coupling"))
+                .expect("json");
+        assert_eq!(a, b, "deterministic serialisation");
+    }
+
+    #[test]
+    fn coupling_ignores_edge_kinds_whose_direction_is_not_a_call() {
+        // `references` is directed too, but an ADR referencing a symbol is not a
+        // caller. Only `Calls` may move these numbers.
+        let mut store = coupled();
+        let mut facts = FactSet::new().with_node(Node::new("adr:0001", NodeKind::Adr, "A"));
+        facts = facts.with_edge(Edge::authored(
+            "adr:0001",
+            "sym:rust:a.rs#hub",
+            EdgeKind::References,
+        ));
+        store.apply_factset(&facts).expect("apply");
+
+        let report = coupling(&store, CouplingOrder::Total, 0).expect("coupling");
+        assert_eq!(item(&report, "hub").fan_in, 2, "a reference is not a call");
+        assert!(
+            !report.items.iter().any(|i| i.key == "adr:0001"),
+            "a node with no call edges is not in the population: {:?}",
+            report.items
+        );
+        assert_eq!(report.call_edges, 4);
+    }
+
+    #[test]
+    fn coupling_order_tokens_round_trip() {
+        for token in CouplingOrder::tokens() {
+            let order = CouplingOrder::from_token(token)
+                .unwrap_or_else(|| panic!("`{token}` is advertised but not accepted"));
+            assert_eq!(order.as_str(), token);
+        }
+        assert!(
+            CouplingOrder::from_token("degree").is_none(),
+            "an unknown order is rejected, not silently defaulted"
+        );
     }
 }
