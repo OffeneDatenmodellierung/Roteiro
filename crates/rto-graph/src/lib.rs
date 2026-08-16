@@ -100,9 +100,11 @@ pub use memory::{
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
 pub use models::{
-    DownloadError, ModelFile, ModelKind, ModelRole, ModelSpec, ModelVariant, Platform, REGISTRY,
-    ResourceTier, download_verified, ensure_model_dir, find as find_model, is_installed, model_dir,
-    set_model_store, sha256_hex, store_root, verify_sha256,
+    DownloadError, DownloadEvent, ModelFile, ModelKind, ModelRole, ModelSpec, ModelVariant,
+    Platform, REGISTRY, RangeKind, RangeReply, Removal, ResourceTier, discard_partial,
+    download_resumable, download_verified, ensure_model_dir, find as find_model, installed_size,
+    interpret_range_response, is_installed, model_dir, partial_meta_path, partial_path,
+    remove_model, set_model_store, sha256_hex, store_root, verify_sha256,
 };
 pub use provenance::Provenance;
 pub use query::{

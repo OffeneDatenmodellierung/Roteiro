@@ -615,15 +615,44 @@ enum SpecAction {
 #[cfg(feature = "models")]
 #[derive(Subcommand)]
 enum ModelAction {
-    /// List registry models and which are installed for this platform.
+    /// List registry models, which are installed for this platform, and how much
+    /// disk each installed one occupies.
     List,
     /// Download a model into `~/.roteiro/models` (asks before fetching).
+    ///
+    /// An interrupted download is **resumed** on the next run: the partial file
+    /// is kept and continued with an HTTP range request. A partial that cannot
+    /// be shown to still match the remote — different checksum, size or URL — is
+    /// discarded and refetched rather than trusted.
     Pull {
         /// Registry model name (see `roteiro model list`).
         name: String,
         /// Skip the confirmation prompt and download immediately.
         #[arg(long)]
         yes: bool,
+    },
+    /// Remove an installed model's files from the store, reporting what was
+    /// freed.
+    ///
+    /// Deletes the model's whole directory, including any `.partial` left by an
+    /// abandoned pull. The registry entry is untouched, so `model pull` can
+    /// fetch it again.
+    ///
+    /// **This cannot tell whether a running `roteiro serve` is using the model.**
+    /// Roteiro keeps no lock or pid file over the store, so there is nothing to
+    /// check. On Unix a server that already has the file open keeps working from
+    /// its open handle until it restarts; on Windows the removal fails while the
+    /// file is held. Stop the server first if you are unsure.
+    #[command(visible_alias = "remove")]
+    Rm {
+        /// Registry model name (see `roteiro model list`).
+        name: String,
+        /// Skip the confirmation prompt and remove immediately.
+        #[arg(long)]
+        yes: bool,
+        /// Emit the removal report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1987,7 +2016,8 @@ impl rto_graph::Embedder for LlamaEmbedder {
     }
 }
 
-/// Manage pluggable local embedding models: list the registry or pull a model.
+/// Manage pluggable local embedding models: list the registry, pull a model, or
+/// remove one to reclaim its disk.
 #[cfg(feature = "models")]
 fn run_model(action: ModelAction) -> anyhow::Result<()> {
     match action {
@@ -1996,7 +2026,87 @@ fn run_model(action: ModelAction) -> anyhow::Result<()> {
             Ok(())
         }
         ModelAction::Pull { name, yes } => run_model_pull(&name, yes),
+        ModelAction::Rm { name, yes, json } => run_model_rm(&name, yes, json),
     }
+}
+
+/// The `--json` shape of `roteiro model rm`.
+#[cfg(feature = "models")]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct ModelRmReport {
+    /// The model removed.
+    model: String,
+    /// The directory that was removed.
+    dir: String,
+    /// The files removed, sorted.
+    files: Vec<String>,
+    /// Bytes reclaimed.
+    freed_bytes: u64,
+    /// The same figure for humans (e.g. `17.3 GiB`).
+    freed: String,
+}
+
+/// Remove an installed model's files, reporting what was freed.
+///
+/// Refuses — non-zero, with the command that would install it — when the model
+/// is not on disk, rather than reporting a cheerful zero-byte success.
+#[cfg(feature = "models")]
+fn run_model_rm(name: &str, yes: bool, json: bool) -> anyhow::Result<()> {
+    use rto_graph::{find_model, installed_size, model_dir, remove_model};
+    use std::io::Write as _;
+
+    // An unknown name and an uninstalled model are different mistakes and get
+    // different advice.
+    if find_model(name).is_none() {
+        anyhow::bail!("unknown model `{name}` (see `roteiro model list`)");
+    }
+    let dir = model_dir(name);
+    let size = installed_size(name);
+    if !dir.exists() || size == 0 {
+        anyhow::bail!(
+            "`{name}` is not installed — nothing to remove (install it with `roteiro model pull {name}`)"
+        );
+    }
+
+    if !yes {
+        eprintln!(
+            "roteiro would remove `{name}` from {}, freeing {}",
+            dir.display(),
+            human_bytes(size)
+        );
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            anyhow::bail!("removal declined (non-interactive; re-run with `--yes`)");
+        }
+        eprint!("Remove now? [y/N] ");
+        std::io::stderr().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+            anyhow::bail!("removal declined");
+        }
+    }
+
+    let removed = remove_model(name)
+        .map_err(|e| anyhow::anyhow!("removing `{name}` from {}: {e}", dir.display()))?;
+    if json {
+        emit_json(&ModelRmReport {
+            model: name.to_owned(),
+            dir: removed.dir.display().to_string(),
+            files: removed.files.clone(),
+            freed_bytes: removed.bytes,
+            freed: human_bytes(removed.bytes),
+        })?;
+    } else {
+        println!(
+            "removed `{name}` from {} — freed {} ({} file(s))",
+            removed.dir.display(),
+            human_bytes(removed.bytes),
+            removed.files.len()
+        );
+        println!("re-install it with `roteiro model pull {name}`");
+    }
+    Ok(())
 }
 
 /// Print the registry, marking which models are installed for this host.
@@ -2070,6 +2180,18 @@ fn run_model_list() {
                 } else {
                     MARK_AVAILABLE
                 };
+                // For an installed model report what it actually occupies (which
+                // is what `model rm` would reclaim), not the registry's estimate
+                // of the download. They differ: the store may also hold a
+                // `.partial` from an abandoned pull.
+                let on_disk = if installed {
+                    format!(
+                        ", {} on disk",
+                        human_bytes(rto_graph::installed_size(spec.name))
+                    )
+                } else {
+                    String::new()
+                };
                 let dim = if spec.dim > 0 {
                     format!(", dim {}", spec.dim)
                 } else {
@@ -2082,7 +2204,7 @@ fn run_model_list() {
                     .map(|r| format!(", {r}"))
                     .unwrap_or_default();
                 println!(
-                    "    {mark} {name:<name_w$}  {licence}{role}{dim}, ~{size} MiB",
+                    "    {mark} {name:<name_w$}  {licence}{role}{dim}, ~{size} MiB{on_disk}",
                     name = spec.name,
                     licence = spec.licence,
                     size = spec.size_mib,
@@ -2146,10 +2268,16 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
             );
         }
         // Stream the response straight to disk, hashing as it writes and
-        // installing atomically — so a 20 GiB model never buffers in memory.
-        let reader = http_reader(f.url)?;
-        rto_graph::download_verified(reader, &dest, f.sha256)
-            .map_err(|e| anyhow::anyhow!("downloading {}: {e}", f.name))?;
+        // installing atomically — so a 20 GiB model never buffers in memory —
+        // and resume from whatever an interrupted earlier attempt left behind.
+        rto_graph::download_resumable(
+            &dest,
+            f.url,
+            f.sha256,
+            |from| http_range_reader(f.url, from),
+            report_download_event,
+        )
+        .map_err(|e| anyhow::anyhow!("downloading {}: {e}", f.name))?;
     }
     let use_hint = match spec.kind {
         rto_graph::ModelKind::Embedding => format!("roteiro infer --model {name}"),
@@ -2171,14 +2299,124 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Open a streaming HTTPS reader for `url` (the body is not buffered whole).
+/// Open a streaming HTTPS reader for `url` starting at byte `from` (the body is
+/// never buffered whole).
+///
+/// A non-zero `from` sends `Range: bytes=<from>-`, so an interrupted pull
+/// continues instead of restarting. What comes back is classified by
+/// [`rto_graph::interpret_range_response`]: a `206` is the requested tail, a
+/// `200` is the whole file however it was asked for — and the caller must not
+/// confuse the two.
 #[cfg(feature = "models")]
-fn http_reader(url: &str) -> anyhow::Result<impl std::io::Read> {
-    Ok(ureq::get(url)
+fn http_range_reader(
+    url: &str,
+    from: u64,
+) -> Result<rto_graph::RangeReply<impl std::io::Read>, rto_graph::DownloadError> {
+    let mut req = ureq::get(url);
+    if from > 0 {
+        req = req.header("Range", format!("bytes={from}-"));
+    }
+    // `ureq` turns 4xx/5xx into errors; 200 and 206 both arrive here as `Ok`.
+    let resp = req
         .call()
-        .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?
-        .into_body()
-        .into_reader())
+        .map_err(|e| rto_graph::DownloadError::Transport(format!("GET {url}: {e}").into()))?;
+
+    // Copy the headers out before `into_body` consumes the response.
+    let status = resp.status().as_u16();
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let accept_ranges = header("accept-ranges");
+    let content_range = header("content-range");
+    let content_length = header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
+
+    let (kind, total) = rto_graph::interpret_range_response(
+        status,
+        accept_ranges.as_deref(),
+        content_range.as_deref(),
+        content_length,
+        from,
+    )?;
+    let reader = resp.into_body().into_reader();
+    Ok(match kind {
+        rto_graph::RangeKind::Partial => rto_graph::RangeReply::Partial { reader, total },
+        rto_graph::RangeKind::Full { detail } => rto_graph::RangeReply::Full {
+            reader,
+            total,
+            detail,
+        },
+    })
+}
+
+/// Narrate a download's notable moments on stderr — resumption, a discarded
+/// partial and why, a server that will not do ranges.
+///
+/// These are exactly the things that would otherwise look like the command
+/// silently doing the wrong amount of work.
+#[cfg(feature = "models")]
+fn report_download_event(event: rto_graph::DownloadEvent) {
+    use rto_graph::DownloadEvent as E;
+    match event {
+        E::DiscardedPartial { bytes, reason } => {
+            eprintln!("  discarding the {} partial: {reason}", human_bytes(bytes));
+        }
+        E::Resuming { offset, total } => match total {
+            Some(t) => eprintln!(
+                "  resuming from {} of {} ({} to go)",
+                human_bytes(offset),
+                human_bytes(t),
+                human_bytes(t.saturating_sub(offset))
+            ),
+            None => eprintln!("  resuming from {}", human_bytes(offset)),
+        },
+        E::AlreadyComplete { bytes } => {
+            eprintln!("  {} already downloaded — verifying", human_bytes(bytes));
+        }
+        E::RangeUnsupported { discarded, detail } => {
+            eprintln!(
+                "  the server will not resume ({detail}); restarting from zero and discarding {}",
+                human_bytes(discarded)
+            );
+        }
+        E::KeptPartial { bytes } => {
+            eprintln!(
+                "  transfer failed; keeping {} for a later `roteiro model pull` to resume from",
+                human_bytes(bytes)
+            );
+        }
+        E::PoisonedPartial { bytes } => {
+            eprintln!(
+                "  checksum failed; discarding all {} — those bytes cannot be resumed from",
+                human_bytes(bytes)
+            );
+        }
+    }
+}
+
+/// Format a byte count for a human: `1.4 GiB`, `812.0 MiB`, `947 B`.
+#[cfg(feature = "models")]
+fn human_bytes(bytes: u64) -> String {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a display string; f64 is exact well past any plausible model size"
+    )]
+    let mut value = bytes as f64;
+    let mut unit = "B";
+    for next in ["KiB", "MiB", "GiB", "TiB"] {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next;
+    }
+    if unit == "B" {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {unit}")
+    }
 }
 
 /// Import an external knowledge graph into the store (or, for codegraph, compare
