@@ -712,8 +712,40 @@ fn search_memory(store: &Store, query: &str, limit: usize) -> Result<Vec<MemoryH
 /// The `evidence` factor is `base_confidence × anchor_penalty` from
 /// [`crate::Store::recall_memory`] — so a lesson whose anchor still resolves in
 /// this tree outranks an equally-worded one whose code has moved on, which is the
-/// whole depreciation model showing up in search. It is a weight in `(0, 1]`, so
-/// it can demote a hit and can never silence one.
+/// whole depreciation model showing up in search.
+///
+/// # The weight is in `[0, 1]`, and zero is reachable — deliberately
+///
+/// An earlier version of this comment said `(0, 1]`. That was wrong, and the
+/// half-open interval hid a decision rather than describing one. The two factors
+/// are not alike and the difference is the point:
+///
+/// - **[`crate::anchor_penalty`] can never be zero.** Its floor is `0.25`
+///   ([`crate::AnchorState::Drifted`]), and
+///   `memory::tests::anchor_penalty_demotes_without_ever_silencing` pins that
+///   every state is `> 0`. So **drift can never drive evidence to zero** — which
+///   is ADR-0013's "demote, never delete" rule holding *structurally*, not by
+///   convention. Roteiro's own inference about a record is never allowed to
+///   reduce it to nothing.
+/// - **`base_confidence` can be exactly `0.0`**, because the writer can say so.
+///   `roteiro memory add --confidence 0` is an operator stating "I am recording
+///   this and I give it no credence." Flooring that would silently overrule an
+///   explicit statement — and the value is a probability, where `0.0` is
+///   legitimate rather than a boundary error.
+///
+/// So the asymmetry is exactly the right way round: **what Roteiro infers never
+/// silences a record; what the operator explicitly states is honoured.**
+///
+/// # Zero relevance is not zero visibility
+///
+/// A zero score does **not** remove a hit. Nothing in this module or in
+/// [`crate::Store::recall_memory`] filters on the score — it orders, and the
+/// record comes back, is printed, and is labelled exactly as any other.
+/// `a_zero_confidence_memory_is_ranked_last_and_still_returned` enforces that in
+/// both surfaces, so the claim is a tested property rather than something this
+/// comment asserts and nothing checks. (A limit can still truncate a
+/// bottom-ranked hit — that is what a limit means, and it applies to every hit
+/// regardless of score.)
 ///
 /// The omissions are the point, and each is deliberate:
 ///
@@ -740,6 +772,9 @@ fn memory_score(q: &str, tokens: &[&str], body: &str, anchor: &str, evidence: f6
             relevance += 3;
         }
     }
+    // `[0.0, 1.0]`, closed at both ends: zero is reachable, and only ever because
+    // a writer stated it. See the header — `anchor_penalty` cannot contribute a
+    // zero, so drift can never land here.
     let weighted = f64::from(relevance.max(0)) * evidence.clamp(0.0, 1.0);
     #[expect(
         clippy::cast_possible_truncation,
@@ -967,8 +1002,8 @@ fn placeholder_hop() -> PathHop {
 
 #[cfg(test)]
 mod tests {
-    use super::{SCHEMA, SNIPPET_MAX, explain, glob_match, list_kind, path, search};
-    use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
+    use super::{SCHEMA, SNIPPET_MAX, explain, glob_match, list_kind, memory_score, path, search};
+    use crate::{AnchorState, Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
     fn seeded() -> Store {
         let mut store = Store::open_in_memory().expect("store");
@@ -1292,5 +1327,48 @@ mod tests {
         // Anchored: a bare name does not match a nested path.
         assert!(!glob_match("generated", "src/generated"));
         assert!(!glob_match("vendor/**", "third_party/vendor/a.rs"));
+    }
+
+    /// **The evidence weight is closed at both ends**, and the two ends mean
+    /// different things.
+    ///
+    /// The boundary the doc comment used to get wrong: it claimed `(0, 1]`, which
+    /// would have made a zero unreachable. It is reachable, from a writer stating
+    /// `--confidence 0` and from nowhere else — the lowest weight Roteiro can
+    /// *infer* is `anchor_penalty(Drifted)`, and that still leaves a score
+    /// standing, which is checked here against the real constant rather than a
+    /// number copied from it.
+    #[test]
+    fn the_evidence_weight_is_closed_at_both_ends() {
+        let score = |evidence| memory_score("batch", &["batch"], "a batch cursor", "", evidence);
+        let full = score(1.0);
+        assert!(full > 0, "a fully-evidenced hit scores");
+        assert_eq!(score(0.0), 0, "and a zero weight takes it to zero");
+        assert!(
+            score(0.5) < full && score(0.5) > 0,
+            "in between, in between"
+        );
+
+        // The worst Roteiro can infer about a record still leaves it scoring —
+        // "demote, never delete", holding as arithmetic.
+        let worst_inferable = [
+            AnchorState::Valid,
+            AnchorState::Unanchored,
+            AnchorState::Unverifiable,
+            AnchorState::Vanished,
+            AnchorState::Drifted,
+        ]
+        .into_iter()
+        .map(crate::anchor_penalty)
+        .fold(f64::INFINITY, f64::min);
+        assert!(
+            score(worst_inferable) > 0,
+            "the most demoted anchor state ({worst_inferable}) must not silence a hit",
+        );
+
+        // Out-of-range input is clamped rather than trusted, so a corrupt stored
+        // confidence cannot manufacture a score above the honest ceiling.
+        assert_eq!(score(2.0), full, "clamped at the top");
+        assert_eq!(score(-1.0), 0, "and at the bottom");
     }
 }

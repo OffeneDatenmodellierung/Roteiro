@@ -14,8 +14,8 @@
 
 use rto_graph::{
     AnchorState, DEFAULT_MEMORY_SCOPE, Edge, EdgeKind, FactSet, GraphArtifact, MemoryFilter,
-    MemoryKind, MemoryWrite, Node, NodeKind, Provenance, SearchOptions, Store, search,
-    search_channels,
+    MemoryKind, MemoryWrite, Node, NodeKind, Provenance, RecallOptions, SearchOptions, Store,
+    anchor_penalty, search, search_channels,
 };
 
 /// A lesson with a phrase in it that appears nowhere in the seeded graph, so a
@@ -1103,4 +1103,139 @@ fn an_invalid_write_stores_nothing() {
         assert!(store.record_memory(&bad).is_err());
     }
     assert_eq!(store.memory_counts().expect("counts"), (0, 0));
+}
+
+/// Two blob-carrying nodes, so one anchor can be drifted while the other stays
+/// valid. `moving_blob` is what `shift` carries this time round.
+fn two_anchored_nodes(store: &mut Store, moving_blob: &str) {
+    let mut facts = FactSet::new();
+    let mut stable = Node::new("sym:rust:src/stable.rs#keep", NodeKind::Fn, "keep");
+    stable.blob_hash = Some("blob-stable-v1".into());
+    let mut moving = Node::new("sym:rust:src/moving.rs#shift", NodeKind::Fn, "shift");
+    moving.blob_hash = Some(moving_blob.into());
+    facts.nodes = vec![stable, moving];
+    store.rebuild(&facts, Some("tree-two")).expect("rebuild");
+}
+
+/// **A zero-confidence memory ranks last and is still returned** — in recall and
+/// in the search channel both.
+///
+/// This pins the decision behind `memory_score`'s weight being `[0, 1]` rather
+/// than `(0, 1]`, and it exists because the doc comment used to claim "can never
+/// silence one" with nothing enforcing it. The two ways evidence can fall are not
+/// alike, and the asymmetry is the whole point:
+///
+/// * **Roteiro's own inference can never zero a record.** `anchor_penalty` floors
+///   at `0.25`, so even the most demoted anchor state leaves a positive weight —
+///   ADR-0013's "demote, never delete" holding structurally rather than by
+///   convention.
+/// * **The operator can.** `--confidence 0` is an explicit statement, and
+///   honouring it is not the same act as the store deciding on its own that
+///   something is worthless.
+///
+/// And zero relevance is not zero visibility: nothing filters on the score, so
+/// the record comes back, ranked last, fully labelled.
+#[test]
+fn a_zero_confidence_memory_is_ranked_last_and_still_returned() {
+    let mut store = Store::open_in_memory().expect("store");
+    two_anchored_nodes(&mut store, "blob-moving-v1");
+
+    // Stated as worthless by its writer, but anchored to code that has not moved:
+    // the *best* possible anchor, so nothing but the stated confidence can be
+    // what drives this to zero.
+    store
+        .record_memory(&MemoryWrite {
+            anchor: Some("sym:rust:src/stable.rs#keep"),
+            confidence: Some(0.0),
+            ..lesson("A batch cursor dedup note its writer gave no credence.")
+        })
+        .expect("write");
+    // No stated confidence, and about to be given the *worst* possible anchor
+    // state — the case that must still score above zero.
+    store
+        .record_memory(&MemoryWrite {
+            anchor: Some("sym:rust:src/moving.rs#shift"),
+            ..lesson("A batch cursor dedup note whose code moved underneath it.")
+        })
+        .expect("write");
+    two_anchored_nodes(&mut store, "blob-moving-v2");
+
+    let recall = store
+        .recall_memory(&RecallOptions::default())
+        .expect("recall");
+    assert_eq!(recall.results.len(), 2, "both records are recalled");
+    let zero = recall
+        .results
+        .iter()
+        .find(|r| r.record.body.contains("no credence"))
+        .expect("a zero-confidence record is still recalled, not dropped");
+    let drifted = recall
+        .results
+        .iter()
+        .find(|r| r.record.body.contains("moved underneath"))
+        .expect("present");
+
+    // The zero really is the writer's, not the anchor's.
+    assert!(zero.score.abs() < f64::EPSILON, "the score is exactly zero");
+    assert!(zero.base_confidence.abs() < f64::EPSILON);
+    assert_eq!(zero.record.anchor_state, AnchorState::Valid);
+    assert!(
+        (zero.anchor_penalty - 1.0).abs() < f64::EPSILON,
+        "its anchor is perfect: only the stated confidence zeroed it",
+    );
+    assert!(zero.record.applies, "and it still applies to this tree");
+
+    // Drift, at its most punishing, still leaves something.
+    assert_eq!(drifted.record.anchor_state, AnchorState::Drifted);
+    assert!((drifted.anchor_penalty - anchor_penalty(AnchorState::Drifted)).abs() < f64::EPSILON,);
+    assert!(
+        drifted.score > 0.0,
+        "the worst anchor state must not silence a record: {}",
+        drifted.score,
+    );
+
+    // Ranked last, not withheld.
+    assert_eq!(
+        recall.results.last().expect("non-empty").record.id,
+        zero.record.id,
+        "a zero-evidence record sorts last",
+    );
+
+    // The same in the search channel, which is where `memory_score` runs.
+    let results = search_channels(
+        &store,
+        "batch cursor dedup",
+        SearchOptions {
+            limit: 10,
+            include_memory: true,
+            ..SearchOptions::default()
+        },
+    )
+    .expect("search");
+    assert_eq!(results.memory.len(), 2, "both reach the memory channel");
+    let hit = results
+        .memory
+        .iter()
+        .find(|h| {
+            h.snippet
+                .as_deref()
+                .is_some_and(|s| s.contains("no credence"))
+        })
+        .expect("a zero-confidence memory is still a search hit");
+    assert_eq!(hit.score, 0, "scored zero…");
+    assert!(hit.evidence.abs() < f64::EPSILON);
+    // …and still fully labelled, which is what makes returning it useful rather
+    // than merely honest.
+    assert_eq!(hit.anchor_state, "valid");
+    assert!(hit.applies);
+    assert!(hit.snippet.is_some(), "with its prose readable");
+    assert_eq!(
+        results.memory.last().expect("non-empty").score,
+        0,
+        "and ranked last",
+    );
+    assert!(
+        results.memory.iter().any(|h| h.score > 0),
+        "the drifted record still scores, so zero is not simply what this query gives",
+    );
 }
