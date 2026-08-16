@@ -2202,6 +2202,151 @@ mod tests {
         .expect("the seeded clock row must exist")
     }
 
+    /// Record `version` in `store`'s migration table as though a build that knew
+    /// that migration had run it — the only way to manufacture a store from the
+    /// future without a time machine.
+    ///
+    /// Only the *record* is written, not any schema the migration would have
+    /// added. That is exactly the position an older binary is in: it can see the
+    /// stamp and cannot see, or reason about, the shape.
+    fn stamp_version(store: &Store, version: u32) {
+        store
+            .conn
+            .execute("INSERT INTO schema_migrations (version) VALUES (?1)", [
+                version,
+            ])
+            .expect("stamp a version this build does not know");
+    }
+
+    #[test]
+    fn a_store_this_build_wrote_is_not_ahead_of_it() {
+        let store = Store::open_in_memory().expect("open");
+        assert_eq!(
+            store.schema_ahead().expect("schema_ahead"),
+            None,
+            "a store this very build just migrated cannot be ahead of it"
+        );
+    }
+
+    /// A store carrying migrations this build has never heard of is reported
+    /// ahead, and the report names **both** sides plus what to do about it.
+    ///
+    /// Versions are `latest_version() + n` rather than literals: the property is
+    /// "beyond what this build knows", and a literal would silently stop testing
+    /// that the day a real migration reached the same number.
+    #[test]
+    fn a_store_stamped_beyond_this_build_is_reported_ahead() {
+        let build = Store::build_schema_version();
+        let store = Store::open_in_memory().expect("open");
+        stamp_version(&store, build + 1);
+        stamp_version(&store, build + 2);
+
+        let ahead = store
+            .schema_ahead()
+            .expect("schema_ahead")
+            .expect("a store two migrations beyond this build must be reported");
+        assert_eq!(ahead.build_version(), build);
+        assert_eq!(
+            ahead.store_version(),
+            build + 2,
+            "the store's version is the highest it records, not the first \
+             unknown one"
+        );
+        assert_eq!(ahead.unknown_versions(), [build + 1, build + 2]);
+
+        // The message has to be actionable, not merely correct: both versions by
+        // number, and the fix (upgrade the binary — never "delete the store").
+        let message = ahead.to_string();
+        for expected in [
+            &format!("{}", build + 2),
+            &format!("{build}"),
+            &"pgrade".to_owned(),
+        ] {
+            assert!(
+                message.contains(expected.as_str()),
+                "the refusal must name `{expected}`: {message}"
+            );
+        }
+    }
+
+    /// A **gap** — a store missing a lower migration while carrying a higher one
+    /// this build knows — is not a store from the future, and must not be
+    /// reported as one. Conflating them would name a version the store is not
+    /// at, in a message telling the reader to upgrade a binary that is already
+    /// new enough.
+    ///
+    /// This is the shape `main` itself carried (see
+    /// `reopening_repairs_a_skipped_migration`, which proves `Store::open`
+    /// repairs it), so it is a live case, not a hypothetical.
+    ///
+    /// The second half is the one that matters: a store that is *both* gapped
+    /// and from the future must be described only by the half the reader can act
+    /// on. Naming the gap would tell someone to upgrade a binary that is already
+    /// new enough for it.
+    #[test]
+    fn a_gap_below_this_build_is_not_a_store_from_the_future() {
+        let build = Store::build_schema_version();
+
+        // A gap and nothing else: behind this build, so never ahead of it.
+        let gapped = Store::open_in_memory().expect("open");
+        gapped
+            .conn
+            .execute("DELETE FROM schema_migrations WHERE version = ?1", [build])
+            .expect("open a gap");
+        assert!(
+            gapped.schema_version().expect("version") < build,
+            "the gapped store must under-report, or this test proves nothing"
+        );
+        assert_eq!(
+            gapped.schema_ahead().expect("schema_ahead"),
+            None,
+            "a store *missing* a migration is behind this build, never ahead"
+        );
+
+        // A gap *and* a version from the future: reported ahead, and reported
+        // only in terms of the future version.
+        stamp_version(&gapped, build + 1);
+        let ahead = gapped
+            .schema_ahead()
+            .expect("schema_ahead")
+            .expect("the unknown migration is still unknown, gap or no gap");
+        assert_eq!(ahead.unknown_versions(), [build + 1]);
+        assert_eq!(
+            ahead.store_version(),
+            build + 1,
+            "the gap is a separate condition and must not colour this report"
+        );
+    }
+
+    /// The reason the guard compares the recorded **set** and not
+    /// [`Store::schema_version`].
+    ///
+    /// `schema_version` is the highest *gap-free* version — a floor for readers.
+    /// A store recorded `1..=build, build + 2` therefore reports `build`, and a
+    /// `schema_version() > build` test sees a perfectly ordinary store, while
+    /// migration `build + 2`'s schema is in the file and a newer binary plainly
+    /// assembled the graph. That is issue #342 surviving the check written to
+    /// catch it, so it is asserted directly rather than trusted.
+    #[test]
+    fn the_gap_free_version_alone_would_miss_a_store_from_the_future() {
+        let build = Store::build_schema_version();
+        let store = Store::open_in_memory().expect("open");
+        stamp_version(&store, build + 2); // note: `build + 1` deliberately absent
+
+        assert_eq!(
+            store.schema_version().expect("version"),
+            build,
+            "the gap-free version stops at the last contiguous migration, so it \
+             cannot see the one above the hole"
+        );
+        let ahead = store
+            .schema_ahead()
+            .expect("schema_ahead")
+            .expect("the set difference sees what the contiguity walk cannot");
+        assert_eq!(ahead.store_version(), build + 2);
+        assert_eq!(ahead.unknown_versions(), [build + 2]);
+    }
+
     #[test]
     fn upsert_and_get_round_trips_all_fields() {
         let store = Store::open_in_memory().expect("open");
