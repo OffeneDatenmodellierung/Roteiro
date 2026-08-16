@@ -8,6 +8,7 @@ use crate::findings::{self, AnalysisRun, Finding, FindingsApplied, FindingsLayer
 use crate::media::{self, MediaFilter, MediaKind, MediaRecord, MediaWrite, ProducerSummary};
 use crate::memory::{
     self, MemoryError, MemoryFilter, MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite,
+    Recall, RecallOptions,
 };
 use crate::migrations;
 use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
@@ -1106,6 +1107,38 @@ impl Store {
     /// Returns [`StoreError::Sqlite`] on query failure.
     pub fn memory_counts(&self) -> Result<(u64, u64), StoreError> {
         memory::counts(&self.conn)
+    }
+
+    /// **Ranked recall**: the live records that match `opts`, scored
+    /// `base_confidence × anchor_penalty × decay(age)` and ordered best first.
+    ///
+    /// Every term is computed **here, at retrieval time, and written to no
+    /// column** (ADR-0013). A stored score that decayed would rewrite the store on
+    /// every read and would be wrong in between, making recall depend on when you
+    /// last looked. Three consequences follow, and each is a promise:
+    ///
+    /// - **This call mutates nothing.** Recall over an unchanged store and an
+    ///   unchanged tree is idempotent, which is what makes
+    ///   [`crate::Decay::None`] byte-identical across runs.
+    /// - **A superseded record is never returned**, immediately and regardless of
+    ///   age: the test is a recorded pointer, not a clock.
+    /// - **A record whose anchor no longer resolves is still returned**, demoted
+    ///   and labelled. Drift ranks it down; nothing deletes it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or [`StoreError::Corrupt`]
+    /// if a row carries an unknown kind token.
+    pub fn recall_memory(&self, opts: &RecallOptions<'_>) -> Result<Recall, StoreError> {
+        let (live, superseded) = memory::counts(&self.conn)?;
+        Ok(Recall {
+            schema: memory::RECALL_SCHEMA,
+            generation: memory::generation(&self.conn)?,
+            decay: opts.decay,
+            reproducible: opts.decay.is_reproducible(),
+            results: memory::recall(&self.conn, opts)?,
+            live,
+            superseded,
+        })
     }
 
     /// Findings whose owning run no longer exists. Always `0` in a healthy store;

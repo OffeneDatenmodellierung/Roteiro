@@ -122,6 +122,38 @@
 //! the enum but is produced by nothing. Per the standing decision it stays
 //! **inside the artifact store and never becomes a graph edge**.
 //!
+//! # Recall: ranked at retrieval, stored nowhere
+//!
+//! [`crate::Store::recall_memory`] ranks the live records by
+//!
+//! ```text
+//! score = base_confidence × anchor_penalty × decay(current_generation − row.generation)
+//! ```
+//!
+//! and every one of those terms is computed **on the read** and written to no
+//! column. A stored score that decayed would have to be rewritten on every read
+//! and would be wrong in between, so recall would depend on when you last looked
+//! — the one kind of non-determinism this project keeps out of the graph, and
+//! there is no reason to let it in through the side door.
+//!
+//! The order of the terms is the depreciation model, in order: **evidence first,
+//! clock last.**
+//!
+//! 1. **Supersession is not in the formula at all.** A superseded record is
+//!    excluded in SQL, by a recorded pointer with no clock in it, so it leaves
+//!    recall the moment its successor is written — immediately, regardless of age,
+//!    and regardless of how well it would otherwise have scored.
+//! 2. **[`anchor_penalty`] dominates**, and it is built on [`AnchorState`] and
+//!    nothing else. There is deliberately no branch term and no scope term: the
+//!    anchor *is* the scope test, and a second rule would give two answers to one
+//!    question.
+//! 3. **[`Decay`] is last**, and defaults to [`Decay::None`] — no age term, and
+//!    therefore byte-identical recall for a fixed store and a fixed tree. Pricing
+//!    age at all is opt-in.
+//!
+//! Nothing in that list can remove a record. Drift demotes, decay ranks to zero
+//! at worst, and only [`crate::Store::forget_memory`] deletes.
+//!
 //! # Ordering is a generation, not a clock
 //!
 //! `id` is `INTEGER PRIMARY KEY AUTOINCREMENT` and is the ordering key.
@@ -567,6 +599,297 @@ pub struct MemoryListing {
     pub superseded: u64,
 }
 
+// --- Recall: ranking computed at retrieval time, and stored nowhere ----------
+
+/// Stable schema tag on [`Recall`].
+pub const RECALL_SCHEMA: &str = "roteiro.recall/v1";
+
+/// The `base_confidence` used for a record whose writer offered none — the
+/// **midpoint** of the range a writer can state.
+///
+/// Not `1.0`, which would let every record that claimed nothing outrank every
+/// record that honestly claimed `0.9`, and so would price honesty. Not `0.0`,
+/// which would make the common case (the CLI writes no confidence unless asked)
+/// unrecallable. At the midpoint, stating a high confidence promotes a record and
+/// stating a low one demotes it, both *relative to silence*, which is the only
+/// behaviour that makes the field worth filling in.
+pub const DEFAULT_BASE_CONFIDENCE: f64 = 0.5;
+
+/// Default span for [`Decay::Linear`], in generations — one generation per record
+/// written, never a second of wall-clock.
+pub const DEFAULT_DECAY_SPAN: u64 = 200;
+
+/// Default half-life for [`Decay::Exponential`], in generations.
+pub const DEFAULT_HALF_LIFE: u64 = 50;
+
+/// How a record's age is priced into its recall score.
+///
+/// The age term is the **last** term, deliberately: ADR-0013 depreciates by
+/// evidence first and clock last, so an anchor that no longer resolves and an
+/// explicit supersession both outrank age. Age is the tiebreak between records
+/// that are otherwise equally valid.
+///
+/// **Age is measured in generations, not time.** A generation is one written
+/// record ([`MemoryRecord::id`], `AUTOINCREMENT`), so "old" means *a lot has been
+/// learned since*, not *a while has passed*. That is what makes it skew-proof: the
+/// store is shared across worktrees and branches, where wall-clock is not
+/// monotone and `datetime('now')` ties on intra-second writes.
+///
+/// **The factor is computed on every read and never stored.** A stored score that
+/// ticked down would rewrite the store on every read and would be wrong in
+/// between, making recall depend on when you last looked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Decay {
+    /// No age term at all: every record's factor is exactly `1.0`.
+    ///
+    /// **This is the reproducible mode, and it is the default.** With no age term
+    /// the score depends only on what is stored and on the tree the anchors are
+    /// resolved against, so the same store and the same tree recall the same
+    /// records in the same order with the same scores — byte-identically, across
+    /// runs and across machines. Every other mode is a deliberate trade of that
+    /// property for recency.
+    None,
+    /// Falls linearly to zero over `span` generations.
+    ///
+    /// A record older than `span` scores `0.0` in the age term and therefore sorts
+    /// last — it is **still returned and still labelled**. Decay ranks; it never
+    /// filters and never deletes.
+    Linear {
+        /// Generations over which the factor reaches zero. Clamped to at least 1.
+        span: u64,
+    },
+    /// Halves every `half_life` generations, and never reaches zero.
+    Exponential {
+        /// Generations per halving. Clamped to at least 1.
+        half_life: u64,
+    },
+}
+
+impl Default for Decay {
+    /// [`Decay::None`] — the reproducible answer is the default answer, on the
+    /// same terms as [`crate::SearchOptions`] defaulting generated content off.
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl Decay {
+    /// The age factor for a record `age` generations old, always in `[0.0, 1.0]`.
+    ///
+    /// A pure function of `(self, age)`: no clock, no store state, no I/O.
+    #[must_use]
+    pub fn factor(self, age: u64) -> f64 {
+        match self {
+            Self::None => 1.0,
+            // `max(1)` rather than a divide-by-zero: a span of zero is a caller
+            // asking for "everything old at once", and the honest reading of that
+            // is a one-generation span, not NaN.
+            Self::Linear { span } => {
+                let span = span.max(1);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "generation counts are small; the ratio is a ranking weight"
+                )]
+                let ratio = age as f64 / span as f64;
+                (1.0 - ratio).max(0.0)
+            }
+            Self::Exponential { half_life } => {
+                let half_life = half_life.max(1);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "generation counts are small; the ratio is a ranking weight"
+                )]
+                let ratio = age as f64 / half_life as f64;
+                0.5_f64.powf(ratio)
+            }
+        }
+    }
+
+    /// Stable token naming the mode, without its parameter.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Linear { .. } => "linear",
+            Self::Exponential { .. } => "exponential",
+        }
+    }
+
+    /// Whether this mode guarantees reproducible recall — true only for
+    /// [`Decay::None`].
+    #[must_use]
+    pub fn is_reproducible(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+impl std::fmt::Display for Decay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Linear { span } => write!(f, "linear:{span}"),
+            Self::Exponential { half_life } => write!(f, "exponential:{half_life}"),
+        }
+    }
+}
+
+impl std::str::FromStr for Decay {
+    type Err = String;
+
+    /// `none` | `linear[:span]` | `exponential[:half-life]`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (mode, param) = match s.split_once(':') {
+            Some((mode, param)) => {
+                let n = param.parse::<u64>().map_err(|_| {
+                    format!("decay parameter {param:?} is not a whole number of generations")
+                })?;
+                (mode, Some(n))
+            }
+            None => (s, None),
+        };
+        match mode {
+            "none" => {
+                if param.is_some() {
+                    return Err("decay `none` takes no parameter: it has no age term".to_owned());
+                }
+                Ok(Self::None)
+            }
+            "linear" => Ok(Self::Linear {
+                span: param.unwrap_or(DEFAULT_DECAY_SPAN),
+            }),
+            "exponential" => Ok(Self::Exponential {
+                half_life: param.unwrap_or(DEFAULT_HALF_LIFE),
+            }),
+            other => Err(format!(
+                "unknown decay mode {other:?} (expected one of: none, linear[:span], \
+                 exponential[:half-life])"
+            )),
+        }
+    }
+}
+
+/// What a record's anchor is worth as a **ranking multiplier**, in `[0.0, 1.0]`.
+///
+/// This is the whole of ADR-0013's `anchor_penalty`, and it is built on
+/// [`AnchorState`] and on nothing else — no branch term, no scope term. `scope` is
+/// a namespace and the anchor is the validity test; a second rule would give two
+/// answers to one question.
+///
+/// Two properties are load-bearing and are asserted by tests rather than left to
+/// the reader:
+///
+/// - **Nothing is zero.** Anchor drift demotes; it never deletes and never
+///   silences. A record about deleted code still comes back, ranked lower and
+///   labelled — that is the whole reason memory cannot live in the graph, whose
+///   authored layer prunes links to vanished symbols.
+/// - **Every state that [`AnchorState::applies`] ranks above every state that does
+///   not.** The applicability rule and the ranking cannot disagree.
+///
+/// The ordering *within* the two groups is a judgement, and it is this one:
+///
+/// | State | Penalty | Why |
+/// |---|---|---|
+/// | [`AnchorState::Valid`] | `1.00` | the association is in this tree in the same format — the strongest evidence there is |
+/// | [`AnchorState::Unanchored`] | `0.90` | true wherever the repository is, but it never claimed to be about *this* code |
+/// | [`AnchorState::Unverifiable`] | `0.50` | the node is here and the blob could not be compared: nothing was measured either way |
+/// | [`AnchorState::Vanished`] | `0.35` | the thing is gone — history, and often the most valuable record in the store |
+/// | [`AnchorState::Drifted`] | `0.25` | the code moved *underneath a key that still resolves*, so this is the one state that can actively mislead about code someone is looking at now |
+///
+/// Drifted below vanished is the deliberate part. A vanished record can mislead
+/// nobody — the code it describes is not there to be confused with anything — while
+/// a drifted one sits under a live key describing a version of it that no longer
+/// exists. Ranking vanished lowest would also punish exactly the records ADR-0013
+/// says are worth keeping most.
+#[must_use]
+pub fn anchor_penalty(state: AnchorState) -> f64 {
+    match state {
+        AnchorState::Valid => 1.0,
+        AnchorState::Unanchored => 0.90,
+        AnchorState::Unverifiable => 0.50,
+        AnchorState::Vanished => 0.35,
+        AnchorState::Drifted => 0.25,
+    }
+}
+
+/// How to recall.
+///
+/// [`RecallOptions::default`] is **every live record, ranked, with no age term** —
+/// the reproducible answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecallOptions<'a> {
+    /// Only records recorded in this namespace, matched exactly.
+    pub scope: Option<&'a str>,
+    /// Only records of this kind.
+    pub kind: Option<MemoryKind>,
+    /// Only records anchored to this node key.
+    pub anchor_key: Option<&'a str>,
+    /// Every whitespace-separated token must appear in the record's body, its
+    /// anchor key or its anchor path (case-insensitively). A **filter, not a
+    /// scorer**: the ranking formula has no lexical term, so which records come
+    /// back can depend on the query while how they are ranked cannot.
+    pub query: Option<&'a str>,
+    /// How age is priced in. Defaults to [`Decay::None`] — reproducible recall.
+    pub decay: Decay,
+    /// Drop records that do not apply to this tree. **Off by default**: an
+    /// unanchored or drifted record is demoted and labelled, not withheld, and a
+    /// lesson about deleted code is often the one worth reading.
+    pub applicable_only: bool,
+    /// At most this many records, applied **after** ranking so a limit returns the
+    /// best matches rather than the newest ones.
+    pub limit: Option<usize>,
+}
+
+/// One recalled record and the arithmetic that ranked it.
+///
+/// Every term is reported, not just the product: a ranking an agent cannot take
+/// apart is a ranking it has to trust, and the whole point of depreciating by
+/// evidence is that the evidence can be inspected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Recalled {
+    /// `base_confidence × anchor_penalty × decay_factor`, in `[0.0, 1.0]`.
+    /// **Computed here and stored in no column.**
+    pub score: f64,
+    /// The writer's stated confidence, or [`DEFAULT_BASE_CONFIDENCE`] when it
+    /// stated none.
+    pub base_confidence: f64,
+    /// [`anchor_penalty`] for this record's [`AnchorState`] against the current
+    /// tree.
+    pub anchor_penalty: f64,
+    /// [`Decay::factor`] for this record's age.
+    pub decay_factor: f64,
+    /// Generations between this record and the newest one in the store. `0` for
+    /// the newest record itself.
+    pub age: u64,
+    /// The record, with its anchor state and applicability resolved against the
+    /// tree this recall ran on.
+    pub record: MemoryRecord,
+}
+
+/// A ranked recall, with the state it was computed against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Recall {
+    /// Stable schema tag ([`RECALL_SCHEMA`]).
+    pub schema: &'static str,
+    /// The generation this recall was computed at — the newest record's id.
+    /// Reported because every `age` is relative to it.
+    pub generation: i64,
+    /// The decay mode used.
+    pub decay: Decay,
+    /// Whether that mode guarantees reproducible recall
+    /// ([`Decay::is_reproducible`]). Surfaced so a consumer that is depending on
+    /// reproducibility does not have to infer it from the mode token.
+    pub reproducible: bool,
+    /// The ranked records, best score first, ties broken by newest generation.
+    pub results: Vec<Recalled>,
+    /// Live records in the whole store, ignoring the options.
+    pub live: u64,
+    /// Superseded records in the whole store. **None of them is in `results`**:
+    /// supersession drops a record out of recall immediately and regardless of
+    /// age, because the test is a recorded pointer and not a clock.
+    pub superseded: u64,
+}
+
 /// What one [`crate::Store::forget_memory`] removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryForgotten {
@@ -721,6 +1044,118 @@ pub(crate) fn records(
     Ok(out)
 }
 
+/// The generation recall is computed against: the newest record's id, or `0` in
+/// an empty store.
+///
+/// Read from the store rather than counted, because `AUTOINCREMENT` ids are not
+/// dense — forgetting records leaves gaps, and a gap is still a generation that
+/// happened.
+pub(crate) fn generation(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(
+        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM agent_memory", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// Rank the live records, computing every term at retrieval time.
+///
+/// Three things this deliberately does not do, each of which would break
+/// something ADR-0013 promises:
+///
+/// * **It writes nothing.** No score, no hit counter, no touch. Recall over an
+///   unchanged store and an unchanged tree is therefore idempotent, which is what
+///   makes `decay = none` byte-identical across runs.
+/// * **It never sees a superseded record.** They are excluded in SQL, by a
+///   recorded pointer with no clock in it, so a superseded record leaves recall
+///   the moment its successor is written regardless of its age or score.
+/// * **It consults no branch and no clock.** Applicability is
+///   [`AnchorState::applies`], resolved against the tree in front of you.
+pub(crate) fn recall(
+    conn: &Connection,
+    opts: &RecallOptions<'_>,
+) -> Result<Vec<Recalled>, StoreError> {
+    let generation = generation(conn)?;
+    // No SQL limit: the limit is applied after ranking, so it returns the best
+    // matches rather than the newest ones.
+    let rows = records(
+        conn,
+        &MemoryFilter {
+            scope: opts.scope,
+            kind: opts.kind,
+            anchor_key: opts.anchor_key,
+            include_superseded: false,
+            limit: None,
+        },
+    )?;
+
+    let query = opts.query.map(|q| q.trim().to_lowercase());
+    let tokens: Vec<&str> = query
+        .as_deref()
+        .map(|q| q.split("::").flat_map(str::split_whitespace).collect())
+        .unwrap_or_default();
+
+    let mut out: Vec<Recalled> = Vec::new();
+    for record in rows {
+        if opts.applicable_only && !record.applies {
+            continue;
+        }
+        if !tokens.is_empty() && !matches_tokens(&record, &tokens) {
+            continue;
+        }
+        let base_confidence = record.confidence.unwrap_or(DEFAULT_BASE_CONFIDENCE);
+        let anchor_penalty = anchor_penalty(record.anchor_state);
+        // `saturating_sub`: a record can never be newer than the newest one, but
+        // an underflow here would be a silently enormous age rather than an error.
+        let age = u64::try_from(generation.saturating_sub(record.id)).unwrap_or(0);
+        let decay_factor = opts.decay.factor(age);
+        out.push(Recalled {
+            score: base_confidence * anchor_penalty * decay_factor,
+            base_confidence,
+            anchor_penalty,
+            decay_factor,
+            age,
+            record,
+        });
+    }
+    // `total_cmp`, not `partial_cmp`: every term is finite by construction, and a
+    // comparator that can return `None` is one that can silently stop sorting.
+    // Ties break by newest generation, so the order is total and reproducible.
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.record.id.cmp(&a.record.id))
+    });
+    if let Some(limit) = opts.limit {
+        out.truncate(limit);
+    }
+    Ok(out)
+}
+
+/// Whether every token appears in the record's body, anchor key or anchor path.
+///
+/// The anchor is searchable so a symbol name recalls what was learned about it;
+/// `scope` is not, because it is a namespace with an exact-match filter of its own
+/// and matching it loosely here would be the second applicability rule ADR-0013
+/// refuses.
+fn matches_tokens(record: &MemoryRecord, tokens: &[&str]) -> bool {
+    let body = record.body.to_lowercase();
+    let anchor_key = record
+        .anchor
+        .as_ref()
+        .map(|a| a.key.to_lowercase())
+        .unwrap_or_default();
+    let anchor_path = record
+        .anchor
+        .as_ref()
+        .and_then(|a| a.path.as_deref())
+        .unwrap_or_default()
+        .to_lowercase();
+    tokens
+        .iter()
+        .all(|t| body.contains(t) || anchor_key.contains(t) || anchor_path.contains(t))
+}
+
 /// One record by id, or `None` if it is not there.
 pub(crate) fn get(conn: &Connection, id: i64) -> Result<Option<MemoryRecord>, StoreError> {
     let sql = format!("SELECT {RECORD_COLS}{RECORD_FROM} WHERE m.id = ?1");
@@ -829,8 +1264,8 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorState, DEFAULT_MEMORY_SCOPE, MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind,
-        MemoryWrite,
+        AnchorState, DEFAULT_DECAY_SPAN, DEFAULT_HALF_LIFE, DEFAULT_MEMORY_SCOPE, Decay,
+        MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind, MemoryWrite, anchor_penalty,
     };
 
     fn write(body: &str) -> MemoryWrite<'_> {
@@ -927,5 +1362,157 @@ mod tests {
                 "{confidence} is not a probability and must be refused"
             );
         }
+    }
+
+    // --- Ranking: the two pure functions the recall score is built from --------
+
+    /// **`none` has no age term at all.** This is the property the whole
+    /// reproducibility claim rests on: if the factor varied with age under `none`,
+    /// recall would depend on how much had been written since, and "byte-identical
+    /// across runs for a fixed repo state" would be false the moment anything else
+    /// was recorded.
+    #[test]
+    fn decay_none_is_exactly_one_at_every_age() {
+        for age in [0, 1, 7, 1_000, u64::from(u32::MAX)] {
+            assert!(
+                (Decay::None.factor(age) - 1.0).abs() < f64::EPSILON,
+                "none must not price age at all, but age {age} moved it",
+            );
+        }
+        assert!(Decay::None.is_reproducible());
+        assert!(!Decay::Linear { span: 10 }.is_reproducible());
+        assert!(!Decay::Exponential { half_life: 10 }.is_reproducible());
+    }
+
+    /// Both age modes start at `1.0`, never leave `[0.0, 1.0]`, and never increase
+    /// with age. Monotonicity is the part worth pinning: a decay that rose
+    /// anywhere would rank an older record above a newer identical one.
+    #[test]
+    fn decay_modes_start_at_one_and_never_rise() {
+        for decay in [
+            Decay::Linear { span: 8 },
+            Decay::Linear {
+                span: DEFAULT_DECAY_SPAN,
+            },
+            Decay::Exponential { half_life: 4 },
+            Decay::Exponential {
+                half_life: DEFAULT_HALF_LIFE,
+            },
+        ] {
+            assert!(
+                (decay.factor(0) - 1.0).abs() < f64::EPSILON,
+                "{decay} must not discount the newest record",
+            );
+            let mut previous = f64::INFINITY;
+            for age in 0..64_u64 {
+                let f = decay.factor(age);
+                assert!((0.0..=1.0).contains(&f), "{decay} at age {age} gave {f}");
+                assert!(f <= previous, "{decay} rose at age {age}");
+                previous = f;
+            }
+        }
+        // The shapes themselves, at the points that name them.
+        assert!((Decay::Linear { span: 10 }.factor(5) - 0.5).abs() < 1e-12);
+        assert!((Decay::Exponential { half_life: 10 }.factor(10) - 0.5).abs() < 1e-12);
+        assert!(
+            (Decay::Exponential { half_life: 10 }.factor(20) - 0.25).abs() < 1e-12,
+            "two half-lives is a quarter",
+        );
+    }
+
+    /// Linear reaches zero and stays there; exponential never does. Both are
+    /// **rankings, not filters** — a zero factor sorts a record last and returns
+    /// it, which is asserted where recall is (`tests/agent_memory.rs`).
+    #[test]
+    fn linear_bottoms_out_and_exponential_does_not() {
+        let linear = Decay::Linear { span: 10 };
+        assert!(linear.factor(10).abs() < f64::EPSILON);
+        assert!(
+            linear.factor(10_000).abs() < f64::EPSILON,
+            "and stays there"
+        );
+        let exponential = Decay::Exponential { half_life: 10 };
+        assert!(
+            exponential.factor(10_000) > 0.0,
+            "an exponential is never quite zero",
+        );
+        // A degenerate parameter is clamped rather than dividing by zero.
+        assert!((Decay::Linear { span: 0 }.factor(0) - 1.0).abs() < f64::EPSILON);
+        assert!(Decay::Linear { span: 0 }.factor(1).abs() < f64::EPSILON);
+        assert!((Decay::Exponential { half_life: 0 }.factor(0) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn decay_tokens_round_trip_and_reject_the_unknown() {
+        for decay in [
+            Decay::None,
+            Decay::Linear { span: 7 },
+            Decay::Exponential { half_life: 9 },
+        ] {
+            assert_eq!(
+                decay.to_string().parse::<Decay>(),
+                Ok(decay),
+                "{decay} must round-trip through its token",
+            );
+        }
+        assert_eq!(
+            "linear".parse::<Decay>(),
+            Ok(Decay::Linear {
+                span: DEFAULT_DECAY_SPAN
+            }),
+            "a bare mode takes its documented default span",
+        );
+        assert_eq!(
+            "exponential".parse::<Decay>(),
+            Ok(Decay::Exponential {
+                half_life: DEFAULT_HALF_LIFE
+            })
+        );
+        assert_eq!(Decay::default(), Decay::None, "reproducible by default");
+        for bad in ["clock", "none:5", "linear:soon", ""] {
+            assert!(bad.parse::<Decay>().is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// **The ranking and the applicability rule cannot disagree.** Every state
+    /// that [`AnchorState::applies`] must outrank every state that does not, and
+    /// **nothing may be zero** — drift demotes, it never deletes, and a penalty of
+    /// zero is deletion wearing a ranking's clothes.
+    #[test]
+    fn anchor_penalty_demotes_without_ever_silencing() {
+        let states = [
+            AnchorState::Unanchored,
+            AnchorState::Valid,
+            AnchorState::Drifted,
+            AnchorState::Vanished,
+            AnchorState::Unverifiable,
+        ];
+        for state in states {
+            let p = anchor_penalty(state);
+            assert!(p > 0.0, "{state} was silenced, not demoted");
+            assert!(p <= 1.0, "{state} scored above the maximum");
+        }
+        let worst_applying = states
+            .into_iter()
+            .filter(|s| s.applies())
+            .map(anchor_penalty)
+            .fold(f64::INFINITY, f64::min);
+        let best_not_applying = states
+            .into_iter()
+            .filter(|s| !s.applies())
+            .map(anchor_penalty)
+            .fold(0.0, f64::max);
+        assert!(
+            worst_applying > best_not_applying,
+            "a record that applies here must outrank every record that does not \
+             ({worst_applying} vs {best_not_applying})",
+        );
+        // Drifted is the one state that can mislead about code still under its
+        // key, so it — not vanished — is ranked lowest. A lesson about deleted
+        // code is often the most valuable record in the store.
+        assert!(
+            anchor_penalty(AnchorState::Vanished) > anchor_penalty(AnchorState::Drifted),
+            "a record about deleted code must not be the most demoted of all",
+        );
     }
 }
