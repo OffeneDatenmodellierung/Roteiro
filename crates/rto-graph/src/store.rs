@@ -34,6 +34,86 @@ pub enum StoreError {
     Corrupt(String),
 }
 
+/// A store written by a build **newer** than this one: it records migrations
+/// this binary has never heard of. Produced by [`Store::schema_ahead`].
+///
+/// # Why this is its own type, and not a `StoreError` variant
+///
+/// Opening such a store is not an error and reading it is provably sound —
+/// migrations are additive in effect, so every column an older build selects is
+/// still there (the one `DROP TABLE` in [`crate::migrations`] is a table rebuild
+/// that re-selects every prior column). What is *not* sound is **rewriting** the
+/// graph: this build would re-extract every file with its older extractor and
+/// replace the newer build's content with worse content, silently. So the
+/// refusal belongs on the write paths, and the carrier of that refusal has no
+/// business in the type every `Store` call returns.
+///
+/// The second reason is semver, and it is the binding one. `StoreError` is a
+/// public enum on a published 1.x crate and is not `#[non_exhaustive]`, so
+/// adding a variant would stop a downstream exhaustive `match` from compiling —
+/// a breaking change, which in this workspace means a major bump of all seven
+/// crates. A new type is purely additive. Its fields are private and read
+/// through accessors for the same reason: adding one later stays non-breaking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaAhead {
+    store: u32,
+    build: u32,
+    unknown: Vec<u32>,
+}
+
+impl SchemaAhead {
+    /// The highest schema version this store records — necessarily one this
+    /// build does not know.
+    #[must_use]
+    pub fn store_version(&self) -> u32 {
+        self.store
+    }
+
+    /// The highest schema version this build knows how to apply.
+    #[must_use]
+    pub fn build_version(&self) -> u32 {
+        self.build
+    }
+
+    /// Every recorded version this build has never heard of, ascending. Never
+    /// empty. More than one means the store ran several unknown migrations, not
+    /// that anything is inconsistent.
+    #[must_use]
+    pub fn unknown_versions(&self) -> &[u32] {
+        &self.unknown
+    }
+}
+
+impl std::fmt::Display for SchemaAhead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let unknown = self
+            .unknown
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Both versions, and what to do about it. A bare "schema mismatch" would
+        // leave the reader with nothing to act on: the useful facts are *which*
+        // side is behind (this binary) and that the fix is upgrading it, not
+        // deleting the store.
+        write!(
+            f,
+            "this graph store was written by a newer Roteiro: it is at schema \
+             version {store}, and this build knows only up to {build} \
+             (unrecognised migration(s): {unknown}). Refusing to rewrite the \
+             graph — this build would re-extract every file with its older \
+             extractor and replace the newer build's graph with worse content, \
+             silently. Upgrade the `roteiro` binary to one that knows schema \
+             version {store} or later, then retry. Reading this store is \
+             unaffected and needs no upgrade.",
+            store = self.store,
+            build = self.build,
+        )
+    }
+}
+
+impl std::error::Error for SchemaAhead {}
+
 /// A summary of applying/re-applying import layers (see
 /// [`Store::apply_import_layer`] and [`Store::reapply_imports`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -115,6 +195,52 @@ impl Store {
     /// Returns [`StoreError::Sqlite`] on query failure.
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         Ok(migrations::store_version(&self.conn)?)
+    }
+
+    /// The highest schema version **this build** knows how to apply — the
+    /// binary's half of the comparison [`Store::schema_ahead`] makes.
+    #[must_use]
+    pub fn build_schema_version() -> u32 {
+        migrations::latest_version()
+    }
+
+    /// `Some` when this store was written by a **newer** build: it records
+    /// migrations this binary has never heard of. `None` — the ordinary case —
+    /// when the store is level with this build or behind it.
+    ///
+    /// Call this before **rewriting** a graph (sync, reconcile, rebuild). Do not
+    /// call it to gate reads: an older binary's reads are sound, which is the
+    /// whole reason this is not checked in [`Store::open`] (issue #342).
+    ///
+    /// # Which version this compares, and why it is not [`Store::schema_version`]
+    ///
+    /// It compares the **set** of recorded versions against the migrations this
+    /// build carries, so it answers *has anything newer than me written here?*
+    /// [`Store::schema_version`] answers a different question — the highest
+    /// **gap-free** version, a floor describing what a reader may rely on — and
+    /// using it here would let the bug through: a store recorded `1..=13, 15`,
+    /// read by a build that knows 13, has a gap-free version of 13, so
+    /// `schema_version() > build` is false while migration 15's schema sits in
+    /// the file and a newer build plainly assembled the graph.
+    ///
+    /// Conflating the two situations would also misreport both, so it does not.
+    /// A **gap** — a store missing a lower migration this build knows — is not
+    /// a store from the future, and [`Store::open`] has already repaired it by
+    /// applying the missing migration before this can be called. What is left is
+    /// only ever a version no build of this vintage could have written.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn schema_ahead(&self) -> Result<Option<SchemaAhead>, StoreError> {
+        let unknown = migrations::versions_ahead_of_build(&self.conn)?;
+        let Some(&store) = unknown.last() else {
+            return Ok(None);
+        };
+        Ok(Some(SchemaAhead {
+            store,
+            build: Self::build_schema_version(),
+            unknown,
+        }))
     }
 
     /// Number of nodes currently in the store.
