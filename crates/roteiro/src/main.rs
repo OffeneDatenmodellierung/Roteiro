@@ -7864,6 +7864,7 @@ mod memory_cli {
 mod security_cli {
     use super::{
         Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, report_analyzer,
+        security_cross_reference,
     };
     use clap::Parser as _;
 
@@ -8025,6 +8026,66 @@ mod security_cli {
         // Nothing to cross-reference is an absent section, not an empty one:
         // a consumer must not have to tell "no duplicates" from "not computed".
         assert!(value.get("cross_reference").is_none());
+    }
+
+    /// The cross-reference is suppressed below two dependency analyzers, and
+    /// present at two.
+    ///
+    /// With one analyzer every row would read "confirmed by 1", which is noise
+    /// dressed as information: a single source carries no signal about agreement
+    /// in either direction. With two it is exactly the evidence ADR-0018 v1.1
+    /// decided to keep.
+    #[test]
+    fn the_cross_reference_appears_only_once_there_is_something_to_compare() {
+        fn layer(analyzer: &str, rule: &str, package: &str) -> rto_graph::FindingsLayer {
+            rto_graph::FindingsLayer {
+                run: rto_graph::AnalysisRun {
+                    layer: format!("security:{analyzer}:ab12cd34"),
+                    analyzer: analyzer.to_owned(),
+                    analyzer_version: "1.0.0".to_owned(),
+                    runner: rto_graph::RunnerKind::Ingested,
+                    isolation: rto_graph::Isolation::Ingested,
+                    image_digest: None,
+                    rules_digest: None,
+                    advisory_db: None,
+                    command_policy: rto_graph::CommandPolicy {
+                        network: rto_graph::NetworkPolicy::Deny,
+                        worktree: rto_graph::WorktreeAccess::ReadOnly,
+                        environment: rto_graph::EnvironmentPolicy::Scrubbed,
+                    },
+                    source: rto_graph::SourceIdentity::default(),
+                    started_at: "2026-08-16T09:00:00Z".to_owned(),
+                    ended_at: "2026-08-16T09:00:01Z".to_owned(),
+                    exit_status: 1,
+                    report_digest: "0".repeat(64),
+                },
+                findings: vec![rto_graph::Finding {
+                    key: rto_graph::FindingKey::new(analyzer, &[rule.to_owned()]).expect("key"),
+                    rule: rule.to_owned(),
+                    severity: rto_graph::Severity::High,
+                    title: format!("{package} is affected"),
+                    message: String::new(),
+                    path: None,
+                    span: None,
+                    meta: serde_json::json!({"package": package, "version": "1.0.0"}),
+                }],
+            }
+        }
+
+        let one = vec![layer("cargo-audit", "RUSTSEC-2026-0001", "widget")];
+        assert!(
+            security_cross_reference(&one).is_empty(),
+            "one analyzer has nothing to be cross-referenced against"
+        );
+
+        let two = vec![
+            layer("cargo-audit", "RUSTSEC-2026-0001", "widget"),
+            layer("osv-scanner", "RUSTSEC-2026-0001", "widget"),
+        ];
+        let crossref = security_cross_reference(&two);
+        assert_eq!(crossref.len(), 1, "one advisory, not two problems");
+        assert_eq!(crossref[0].confirmed_by, 2);
+        assert_eq!(crossref[0].reports.len(), 2, "both keys stay addressable");
     }
 
     /// The flag that accepts an unsandboxed run is required, and it is a flag

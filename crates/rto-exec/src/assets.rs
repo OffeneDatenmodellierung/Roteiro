@@ -1081,6 +1081,42 @@ mod tests {
         assert!(status(&cache.0, Some("no-such-analyzer")).is_empty());
     }
 
+    /// The install paths of a downloadable asset name where bytes from the
+    /// network are written, so a `..` in one would write outside the asset
+    /// cache. They are compiled in today, which is exactly why the check is
+    /// worth having: nothing else would notice a typo that escaped.
+    #[test]
+    fn a_download_path_that_escapes_the_asset_directory_is_refused() {
+        static ESCAPING: &[super::DownloadFile] = &[super::DownloadFile {
+            path: "../../outside.zip",
+            url: "https://example.invalid/outside.zip",
+        }];
+        let cache = Cache::new("escape");
+        let spec = super::AssetSpec {
+            id: "escaping-asset",
+            analyzer: "osv-scanner",
+            kind: AssetKind::AdvisoryDb,
+            source: AssetSource::Download { files: ESCAPING },
+            file: "",
+            licence: "n/a",
+        };
+        let fetched = std::cell::Cell::new(false);
+        let fetch = |_: &str, _: &std::path::Path| {
+            fetched.set(true);
+            Ok(())
+        };
+        let err = super::provision_with(&cache.0, &spec, Some(&fetch))
+            .expect_err("an escaping path must be refused");
+        assert!(
+            matches!(err, AssetError::UnsafeInstallPath { .. }),
+            "{err:?}"
+        );
+        assert!(
+            !fetched.get(),
+            "the path is checked before anything is fetched"
+        );
+    }
+
     /// An analyzer this build cannot run has no assets, and asking for them is
     /// not an error — it is simply an empty answer.
     #[test]
