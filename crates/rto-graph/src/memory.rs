@@ -849,13 +849,32 @@ mod tests {
     /// can contain it. This is a stage-scoped guard on a shared constant, and it
     /// lives here rather than in an integration test because the constant is
     /// crate-private.
+    ///
+    /// The expected base is the version *someone else* is entitled to move: this
+    /// guard asserts that **memory** did not move it, not that it never moves.
+    /// It must therefore be updated whenever a change to extraction output
+    /// legitimately bumps the base, or adds a feature namespace — subtracting
+    /// every namespace is what isolates the base from the feature matrix.
+    ///
+    /// Base 10 → 11 and the `audio-metadata` (+400) namespace both arrived with
+    /// ADR-0016 (`audio_stream` nodes genuinely change extraction output, which
+    /// is exactly what the constant is for). This guard shipped one minute later
+    /// in a PR whose CI had never seen them, so for 57 seconds' worth of merge
+    /// ordering it asserted against a constant that had already moved, and `main`
+    /// went red under *every* feature combination — 11 ≠ 10 by default, 411 ≠ 10
+    /// under `--all-features`.
     #[test]
     fn agent_memory_does_not_bump_the_extraction_version() {
         assert_eq!(
             crate::extract::EXTRACT_VERSION
                 - if cfg!(feature = "pdf-text") { 100 } else { 0 }
-                - if cfg!(feature = "image-ocr") { 200 } else { 0 },
-            10,
+                - if cfg!(feature = "image-ocr") { 200 } else { 0 }
+                - if cfg!(feature = "audio-metadata") {
+                    400
+                } else {
+                    0
+                },
+            11,
             "memory is not extraction output; nothing here may invalidate the fact cache",
         );
     }

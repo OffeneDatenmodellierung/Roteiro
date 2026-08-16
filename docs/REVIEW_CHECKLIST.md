@@ -27,8 +27,17 @@ blast radius) rather than the diff alone.
 - [ ] `cargo test --workspace --all-features` green; new behaviour has a test.
 - [ ] `cargo run -p roteiro -- check` green — ADR `[[…]]` links and `// @rto:`
       annotations resolve (CI dogfoods this).
-- [ ] `cargo deny check` + `cargo audit` clean; any new dependency's licence is
-      on the allow-list.
+- [ ] `cargo deny --all-features check` + `cargo audit` clean; any new
+      dependency's licence is on the allow-list — and if it is a *new* licence,
+      it is admitted with its reasoning recorded beside the `deny.toml` entry,
+      not added to turn CI green (ADR-0017).
+- [ ] A new `[advisories] ignore` entry states all four of: why it is tolerable,
+      how the crate enters the tree, what would trigger a revisit, and whether
+      the rationale is feature-scoped — which `cargo deny` cannot enforce, so it
+      must say so (ADR-0017).
+- [ ] A dependency that vendors or links non-Rust code has a row in
+      [`VENDORED_DEPENDENCIES.md`](VENDORED_DEPENDENCIES.md) — `cargo audit`
+      cannot see it.
 
 ## Design & scope
 
