@@ -620,7 +620,7 @@ count and tags, from a **format read with no decoding and no model** (measured
   `export_factset` unchanged in shape; tests need **no model**, so they run on CI
   rather than self-skipping.
 
-### Stage 30 — Model lifecycle: resumable pulls, removal, high tier ([ADR-0003](adr/0003-pluggable-embedding-models.md)) → **v1.10.x** · effort **M** *(independent track)*
+### Stage 31 — Model lifecycle: resumable pulls, removal, high tier ([ADR-0003](adr/0003-pluggable-embedding-models.md)) → **v1.10.x** · effort **M** *(independent track)*
 
 **Goal:** make a multi-gigabyte model store survivable. Nothing here touches the
 graph, the schema or `EXTRACT_VERSION` — it is the store and its CLI only, which
@@ -691,7 +691,7 @@ is why it rides an independent track.
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | — | Stage 29 — audio metadata as `derived` facts | *in progress* |
-| v1.10.x | Stage 30 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
+| v1.10.x | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
