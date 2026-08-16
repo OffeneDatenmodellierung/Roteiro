@@ -59,15 +59,26 @@ defects: code that worked but did not mean what it said.
 
 But adjudicate before acting, and one rule pays for itself:
 
-- [ ] **A comment claiming the code will not compile is refuted by a green
-      build, not by an investigation.** In that sample every false positive was
-      a compile-error claim (a move out of a borrow, three times), and *every*
-      compile-error claim was a false positive — 3 for 3, with no real defect in
-      that class. The CI `msrv` job is `cargo check --workspace --all-features`
-      and finishes in about 40 seconds; in each case it had already gone green
-      at that commit roughly a minute **before** the comment was posted. So the
-      refutation exists before anyone reads the comment: check the status,
-      reply, move on. Do not dispatch work to "fix" it.
+- [ ] **A comment claiming the code will not compile is refuted by the CI
+      `msrv` job at that commit, not by an investigation.** In that sample every
+      false positive was a compile-error claim (a move out of a borrow, three
+      times), and *every* compile-error claim was a false positive — 3 for 3,
+      with no real defect in that class. `msrv` is
+      `cargo check --workspace --all-features` and finishes in about 40 seconds;
+      in each case it had already gone green **at the commit the comment was
+      left on**, roughly a minute before the comment was posted. So the
+      refutation exists before anyone reads the comment: check that job, reply,
+      move on. Do not dispatch work to "fix" it.
+- [ ] **But green refutes only what it compiled.** `msrv` and `checks` both run
+      on `ubuntu-latest` with the pinned MSRV toolchain, over
+      `--all-features`. So a green run says nothing about a
+      `--no-default-features` build, a different toolchain, or — the one that
+      matters most here — **code behind `cfg(target_os = "macos")`**, which this
+      repo has a good deal of (Metal, the engine teardown path, the sandbox
+      backend). The `GGML_ASSERT` teardown abort was macOS-only and Ubuntu CI
+      was structurally blind to it. So: confirm the relevant job actually ran at
+      that sha, and that it covers the configuration the comment is about. If it
+      does not, the claim is unrefuted and you owe it a real look.
 - [ ] Every other class in that sample was real. Treat a non-compile finding as
       probably correct and verify it against the code, rather than assuming the
       reviewer is noisy.
