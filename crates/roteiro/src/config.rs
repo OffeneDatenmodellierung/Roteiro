@@ -33,6 +33,66 @@ pub struct Loaded {
     pub project_path: Option<PathBuf>,
 }
 
+impl Loaded {
+    /// The effective `[debt] ignore` patterns, each tagged with the layer it came
+    /// from (`"project"`, `"user"`, or `"project, user"` when both name it).
+    ///
+    /// Because this list **merges** across layers ([`merge_ignore`]), one label
+    /// per key would be a lie — the effective list can hold patterns from both
+    /// layers at once — so provenance is reported per *pattern*. `roteiro config`
+    /// prints this, which is what makes the merge legible instead of magic.
+    #[must_use]
+    pub fn debt_ignore_sources(&self) -> Vec<(&str, &'static str)> {
+        let contains = |c: &Config, pattern: &str| {
+            c.debt
+                .ignore
+                .as_deref()
+                .is_some_and(|ps| ps.iter().any(|p| p == pattern))
+        };
+        self.effective
+            .debt
+            .ignore
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|pattern| {
+                let layer = match (
+                    contains(&self.project, pattern),
+                    contains(&self.user, pattern),
+                ) {
+                    (true, true) => "project, user",
+                    (true, false) => "project",
+                    (false, true) => "user",
+                    // Unreachable while the effective list is built from the two
+                    // layers; reported honestly rather than asserted away.
+                    (false, false) => "unknown",
+                };
+                (pattern.as_str(), layer)
+            })
+            .collect()
+    }
+
+    /// The user-layer `[debt] ignore` patterns that `ignore_reset` discarded, so
+    /// the reset is *visible* rather than merely effective. Empty when no reset is
+    /// in force.
+    #[must_use]
+    pub fn debt_ignore_discarded(&self) -> Vec<&str> {
+        if self.effective.debt.ignore_reset != Some(true) {
+            return Vec::new();
+        }
+        let kept = self.effective.debt.ignore.as_deref().unwrap_or_default();
+        self.user
+            .debt
+            .ignore
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| !kept.iter().any(|k| k == *p))
+            .map(String::as_str)
+            .collect()
+    }
+}
+
 /// Roteiro configuration. All fields optional; see the module docs.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -86,7 +146,40 @@ pub struct DebtConfig {
     /// report (e.g. `["vendor/**", "**/generated/*"]`). Patterns are matched
     /// anchored end-to-end against the whole repo-relative path (not a substring
     /// match): `*`/`?` match within a path segment, `**` matches across segments.
+    ///
+    /// **This list is additive across layers**: the project's patterns are
+    /// appended to the user's rather than replacing them (see
+    /// [`Config::overlaid_with`]). To start from nothing instead, set
+    /// [`DebtConfig::ignore_reset`].
     pub ignore: Option<Vec<String>>,
+    /// Drop every [`DebtConfig::ignore`] pattern inherited from a lower layer,
+    /// so this layer's list stands alone.
+    ///
+    /// This is the deliberate answer to "if lists merge, how does a user *remove*
+    /// an inherited pattern?" — an explicit, all-or-nothing reset rather than a
+    /// per-pattern negation prefix such as `!vendor/**`. Two reasons, both about
+    /// keeping failure loud:
+    ///
+    /// 1. **A reset cannot fail quietly; a negation can.** Mistype
+    ///    `!vendour/**` and it matches no inherited pattern, removes nothing, and
+    ///    says nothing — a wrong-but-quiet answer, the exact failure this key
+    ///    exists to prevent. A reset is present or absent, with no third silent
+    ///    state, and `roteiro config` prints the patterns it discarded.
+    /// 2. **`!` already means something else.** In `.gitignore` — the syntax
+    ///    every reader of a glob-exclusion list has in mind — a leading `!`
+    ///    *re-includes a matching file*; it does not delete an inherited rule.
+    ///    Borrowing a familiar sigil for an unfamiliar operation is worse than an
+    ///    unfamiliar key that means exactly what it says.
+    ///
+    /// The cost is coarseness: you cannot drop one inherited pattern and keep the
+    /// rest — you restate the ones you want. Exclusion lists are short, so that is
+    /// cheap, and restating them is visible in review, which subtracting one
+    /// invisibly would not be.
+    ///
+    /// Accepted as `ignore_reset` (canonical, matching every other key in this
+    /// file) or `ignore-reset`.
+    #[serde(alias = "ignore-reset")]
+    pub ignore_reset: Option<bool>,
 }
 
 /// `[paths]` — filesystem locations.
@@ -335,9 +428,94 @@ pub struct DuplicatesConfig {
     pub limit: Option<usize>,
 }
 
+/// The `[debt] ignore` exclusion globs that govern `project` within `ws` — read
+/// from **that project's own repository**, not from the repo the process was
+/// started in.
+///
+/// This is ADR-0009's per-repo config resolution applied to scanning: *a
+/// repository's own configuration governs how it is scanned, whoever is asking.*
+/// `roteiro links` already reads each spoke's config with a per-repo
+/// [`load`]; a multi-repo server that skips it scans repo B from repo A under
+/// A's exclusions, so B's own `[debt] ignore` never applies and B's operators
+/// cannot explain the number they are shown.
+///
+/// Returns no exclusions when the project has no repository on disk to consult —
+/// a pre-opened store ([`rto_graph::Workspace::from_stores`], the in-memory
+/// tests). Substituting the invoking repo's config there would be precisely the
+/// mix-up this function exists to prevent.
+///
+/// # Errors
+/// The project name not resolving in `ws`, or that repository's `roteiro.toml`
+/// being unreadable or malformed. Both are surfaced rather than swallowed: a
+/// fallback to "no exclusions" answers with a silently different number, which is
+/// the defect, not a graceful degradation.
+pub fn debt_ignore_for(
+    ws: &rto_graph::Workspace,
+    project: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(root) = ws.project_root(project)? else {
+        return Ok(Vec::new());
+    };
+    let loaded = load(&root).map_err(|e| {
+        anyhow::anyhow!(
+            "reading the configuration of the repository at {}: {e}",
+            root.display()
+        )
+    })?;
+    Ok(loaded.effective.debt.ignore.unwrap_or_default())
+}
+
+/// Overlay the `[debt] ignore` **exclusion list**: `over`'s patterns are
+/// *appended* to `base`'s (de-duplicated, inherited first), unless `over` sets
+/// `ignore_reset`, in which case `base` is dropped entirely.
+///
+/// Replace is right for a scalar — one `model`, one `addr`, and the nearer layer
+/// names it. It is wrong for an exclusion list, where the intent is nearly always
+/// additive: a user who globally ignores `vendor/**` and then adds one
+/// project-specific `thirdparty/**` wants both, and getting the union silently
+/// narrowed to one pattern is a trap that reports debt the user believed excluded
+/// — or, worse, hides it.
+///
+/// Only this list merges. The other list-valued keys stay replace-wins, and that
+/// is a decision rather than an oversight:
+///
+/// - `[workspace]`/`[standalone]` `roots`/`repos` are **discovery** lists: a
+///   merge would silently serve repos the project never named, which is a
+///   surprise with a security surface, not a convenience.
+/// - `[serve] models` is a **selection** ("serve exactly these"), where the
+///   nearer layer narrowing the set is the whole point.
+/// - `[[links]]`/`[[workspaces]]` are already whole-entry overlays with their own
+///   documented rule, and `[pins]` already merges per key.
+///
+/// The distinguishing question is whether adding an entry *widens* something
+/// harmless (an exclusion) or *changes what is reached* (discovery, selection).
+fn merge_ignore(base: Option<&[String]>, over: &DebtConfig) -> Option<Vec<String>> {
+    if over.ignore_reset == Some(true) {
+        return over.ignore.clone();
+    }
+    match (base, over.ignore.as_deref()) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only.to_vec()),
+        (Some(base), Some(over)) => {
+            // Inherited first, then the nearer layer's, each pattern once — the
+            // order `roteiro config` prints them in.
+            let mut merged: Vec<String> = base.to_vec();
+            for pattern in over {
+                if !merged.iter().any(|p| p == pattern) {
+                    merged.push(pattern.clone());
+                }
+            }
+            Some(merged)
+        }
+    }
+}
+
 impl Config {
     /// Overlay `over` on top of `self`, taking `over`'s value wherever set — used
     /// to apply the project layer on top of the user layer.
+    ///
+    /// Scalars replace; the `[debt] ignore` exclusion list **merges** (see
+    /// [`merge_ignore`]).
     fn overlaid_with(&self, over: &Config) -> Config {
         Config {
             models: ModelsConfig {
@@ -383,8 +561,12 @@ impl Config {
                 tls_cert: over.serve.tls_cert.clone().or(self.serve.tls_cert.clone()),
                 tls_key: over.serve.tls_key.clone().or(self.serve.tls_key.clone()),
             },
+            // `[debt] ignore` is the one list-valued key that **merges** rather
+            // than replaces; see `merge_ignore` for why, and why the other lists
+            // deliberately do not.
             debt: DebtConfig {
-                ignore: over.debt.ignore.clone().or(self.debt.ignore.clone()),
+                ignore: merge_ignore(self.debt.ignore.as_deref(), &over.debt),
+                ignore_reset: over.debt.ignore_reset.or(self.debt.ignore_reset),
             },
             paths: PathsConfig {
                 model_store: over
@@ -796,6 +978,197 @@ mod tests {
             Some("user-{tag}")
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `[debt] ignore` is the one list-valued key that **merges** across layers
+    /// (issue #321c): a project pattern must not silently discard every global
+    /// one, because the user then sees debt they believed excluded — or misses
+    /// debt they believed counted — with nothing to indicate why.
+    #[test]
+    fn debt_ignore_merges_across_layers_instead_of_replacing() {
+        let dir = std::env::temp_dir().join(format!("roteiro-cfg-debt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+
+        std::fs::write(&user, "[debt]\nignore = [\"vendor/**\", \"target/**\"]\n").expect("user");
+        std::fs::write(&project, "[debt]\nignore = [\"thirdparty/**\"]\n").expect("project");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+
+        // The union, inherited first — NOT just the project's one pattern.
+        assert_eq!(
+            loaded.effective.debt.ignore.as_deref(),
+            Some(
+                [
+                    "vendor/**".to_owned(),
+                    "target/**".to_owned(),
+                    "thirdparty/**".to_owned()
+                ]
+                .as_slice()
+            ),
+        );
+
+        // Every pattern reports the layer it came from, so the merge is legible.
+        assert_eq!(
+            loaded.debt_ignore_sources(),
+            vec![
+                ("vendor/**", "user"),
+                ("target/**", "user"),
+                ("thirdparty/**", "project"),
+            ]
+        );
+        assert!(loaded.debt_ignore_discarded().is_empty(), "nothing dropped");
+
+        // A pattern named by both layers appears once, tagged with both.
+        std::fs::write(
+            &project,
+            "[debt]\nignore = [\"vendor/**\", \"thirdparty/**\"]\n",
+        )
+        .expect("project");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(
+            loaded.effective.debt.ignore.as_deref(),
+            Some(
+                [
+                    "vendor/**".to_owned(),
+                    "target/**".to_owned(),
+                    "thirdparty/**".to_owned()
+                ]
+                .as_slice()
+            ),
+            "a duplicate pattern is not listed twice"
+        );
+        assert_eq!(
+            loaded.debt_ignore_sources()[0],
+            ("vendor/**", "project, user")
+        );
+
+        // One layer alone still works, in both directions.
+        let only_user = load_from(Some(user.clone()), None).expect("load");
+        assert_eq!(
+            only_user.effective.debt.ignore.as_deref(),
+            Some(["vendor/**".to_owned(), "target/**".to_owned()].as_slice())
+        );
+        let only_project = load_from(None, Some(project.clone())).expect("load");
+        assert_eq!(
+            only_project.effective.debt.ignore.as_deref(),
+            Some(["vendor/**".to_owned(), "thirdparty/**".to_owned()].as_slice())
+        );
+        // Neither layer ⇒ unset, as before.
+        assert!(
+            load_from(None, None)
+                .expect("load")
+                .effective
+                .debt
+                .ignore
+                .is_none()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The answer to "how do I remove an inherited pattern?": `ignore_reset`
+    /// drops the inherited list wholesale, and `roteiro config` can name what it
+    /// dropped — an explicit reset rather than a `!pattern` negation that would
+    /// fail silently on a typo (see [`super::DebtConfig::ignore_reset`]).
+    #[test]
+    fn debt_ignore_reset_drops_the_inherited_list_visibly() {
+        let dir = std::env::temp_dir().join(format!("roteiro-cfg-reset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+        std::fs::write(&user, "[debt]\nignore = [\"vendor/**\", \"target/**\"]\n").expect("user");
+
+        // With the reset, only the project's own patterns remain…
+        std::fs::write(
+            &project,
+            "[debt]\nignore_reset = true\nignore = [\"thirdparty/**\"]\n",
+        )
+        .expect("project");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(
+            loaded.effective.debt.ignore.as_deref(),
+            Some(["thirdparty/**".to_owned()].as_slice())
+        );
+        // …and the drop is reportable, not merely effective.
+        assert_eq!(
+            loaded.debt_ignore_discarded(),
+            vec!["vendor/**", "target/**"]
+        );
+
+        // The kebab-case spelling is accepted too.
+        std::fs::write(
+            &project,
+            "[debt]\nignore-reset = true\nignore = [\"thirdparty/**\"]\n",
+        )
+        .expect("project");
+        let kebab = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(kebab.effective.debt.ignore_reset, Some(true));
+        assert_eq!(
+            kebab.effective.debt.ignore.as_deref(),
+            Some(["thirdparty/**".to_owned()].as_slice())
+        );
+
+        // A reset with no list of its own excludes nothing at all.
+        std::fs::write(&project, "[debt]\nignore_reset = true\n").expect("project");
+        let bare = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert!(bare.effective.debt.ignore.is_none(), "inherits nothing");
+        assert_eq!(bare.debt_ignore_discarded(), vec!["vendor/**", "target/**"]);
+
+        // `ignore_reset = false` is not a reset: the merge stands.
+        std::fs::write(
+            &project,
+            "[debt]\nignore_reset = false\nignore = [\"thirdparty/**\"]\n",
+        )
+        .expect("project");
+        let off = load_from(Some(user), Some(project)).expect("load");
+        assert_eq!(
+            off.effective.debt.ignore.as_deref(),
+            Some(
+                [
+                    "vendor/**".to_owned(),
+                    "target/**".to_owned(),
+                    "thirdparty/**".to_owned()
+                ]
+                .as_slice()
+            )
+        );
+        assert!(off.debt_ignore_discarded().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Merging is scoped to the **exclusion** list. Discovery and selection lists
+    /// stay replace-wins, so a global `[workspace] roots` cannot silently add
+    /// repos a project never named.
+    #[test]
+    fn other_list_keys_still_replace_rather_than_merge() {
+        let dir = std::env::temp_dir().join(format!("roteiro-cfg-lists-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+        std::fs::write(
+            &user,
+            "[workspace]\nroots = [\"/u/one\"]\n[serve]\nmodels = [\"a\"]\n",
+        )
+        .expect("user");
+        std::fs::write(
+            &project,
+            "[workspace]\nroots = [\"/p/two\"]\n[serve]\nmodels = [\"b\"]\n",
+        )
+        .expect("project");
+        let loaded = load_from(Some(user), Some(project)).expect("load");
+        assert_eq!(
+            loaded.effective.workspace.roots.as_deref(),
+            Some(["/p/two".to_owned()].as_slice()),
+            "discovery roots replace"
+        );
+        assert_eq!(
+            loaded.effective.serve.models.as_deref(),
+            Some(["b".to_owned()].as_slice()),
+            "model selection replaces"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

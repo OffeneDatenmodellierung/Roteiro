@@ -1295,8 +1295,39 @@ fn print_config_sections(loaded: &config::Loaded) {
         e.serve.tools,
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
     );
+    print_debt_section(loaded);
     print_telemetry_section(e, p, u);
     print_workspace_section(e, p, u);
+}
+
+/// Print `[debt]` with **per-pattern** provenance.
+///
+/// `ignore` merges across layers rather than replacing, so one
+/// `(project)`/`(user)` label for the whole key would misreport a list holding
+/// patterns from both. Each pattern therefore carries its own origin, and an
+/// `ignore_reset` prints the inherited patterns it discarded — silently dropping
+/// the user layer is the bug the merge exists to fix, so the escape hatch must
+/// not reintroduce it.
+fn print_debt_section(loaded: &config::Loaded) {
+    println!("[debt]");
+    let sources = loaded.debt_ignore_sources();
+    if sources.is_empty() {
+        println!("  ignore = []  (default)");
+    } else {
+        println!(
+            "  ignore = ({} pattern(s), merged across layers)",
+            sources.len()
+        );
+        for (pattern, layer) in sources {
+            println!("    {pattern:?}  ({layer})");
+        }
+    }
+    if loaded.effective.debt.ignore_reset == Some(true) {
+        println!("  ignore_reset = true  (inherited patterns dropped)");
+        for pattern in loaded.debt_ignore_discarded() {
+            println!("    {pattern:?}  (discarded from user)");
+        }
+    }
 }
 
 /// Print the `[telemetry]` config section (ADR-0011), with each value's
@@ -6792,7 +6823,15 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.run(project, |store| rto_graph::debt(store, &categories, &[]))
+                // Same rule as the CLI and the graph API: the *target* project's
+                // own `[debt] ignore` governs its scan. A model that is told a
+                // different number than `roteiro debt` prints has no way to tell
+                // which one is the repository's actual debt.
+                let ignore =
+                    config::debt_ignore_for(&self.workspace, project).map_err(|e| e.to_string())?;
+                self.run(project, |store| {
+                    rto_graph::debt(store, &categories, &ignore)
+                })
             }
             other => Err(format!("unknown tool `{other}`")),
         }

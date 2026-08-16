@@ -65,3 +65,77 @@ fn config_reflects_project_toml_and_rejects_malformed() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `roteiro config` must show **which layer each `[debt] ignore` pattern came
+/// from** (issue #321c). The list merges across layers, so one `(project)` label
+/// for the whole key would misreport a list holding patterns from both — and the
+/// merge is only safe if it is legible.
+#[test]
+fn config_shows_per_pattern_debt_ignore_provenance() {
+    let dir = std::env::temp_dir().join(format!("roteiro-config-debt-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
+    // `ROTEIRO_HOME` is `dir`, so `dir/config.toml` is the *user* layer.
+    std::fs::write(
+        dir.join("config.toml"),
+        "[debt]\nignore = [\"vendor/**\", \"target/**\"]\n",
+    )
+    .expect("write user config");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[debt]\nignore = [\"thirdparty/**\"]\n",
+    )
+    .expect("write project config");
+
+    let out = roteiro(&dir, &["config"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "config failed: {out:?}");
+    assert!(
+        text.contains("[debt]"),
+        "a [debt] section is printed: {text}"
+    );
+    // Every pattern survives the merge, each tagged with its own origin.
+    assert!(
+        text.contains("\"vendor/**\"  (user)"),
+        "user pattern kept and labelled: {text}"
+    );
+    assert!(
+        text.contains("\"target/**\"  (user)"),
+        "second user pattern kept: {text}"
+    );
+    assert!(
+        text.contains("\"thirdparty/**\"  (project)"),
+        "project pattern labelled: {text}"
+    );
+
+    // `--json` carries the merged effective list.
+    let json = roteiro(&dir, &["config", "--json"]);
+    let cfg: serde_json::Value = serde_json::from_slice(&json.stdout).expect("valid JSON");
+    assert_eq!(cfg["debt"]["ignore"][0], "vendor/**");
+    assert_eq!(cfg["debt"]["ignore"][1], "target/**");
+    assert_eq!(cfg["debt"]["ignore"][2], "thirdparty/**");
+
+    // With `ignore_reset`, the inherited patterns are dropped *and named*.
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[debt]\nignore_reset = true\nignore = [\"thirdparty/**\"]\n",
+    )
+    .expect("write project config");
+    let reset = roteiro(&dir, &["config"]);
+    let text = String::from_utf8_lossy(&reset.stdout).into_owned();
+    assert!(
+        text.contains("ignore_reset = true"),
+        "the reset is shown: {text}"
+    );
+    assert!(
+        text.contains("\"vendor/**\"  (discarded from user)"),
+        "what the reset dropped is named, not silently gone: {text}"
+    );
+    assert!(
+        !text.contains("\"vendor/**\"  (user)"),
+        "and it is no longer in the effective list: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

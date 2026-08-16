@@ -109,8 +109,23 @@ pub enum WorkspaceError {
 /// already-open store (the single-repo default and tests).
 #[derive(Clone)]
 enum Source {
-    /// Open this `graph.db` path on first use.
-    Path(PathBuf),
+    /// Open this `graph.db` path on first use, for the repository whose working
+    /// tree is rooted at `root`.
+    ///
+    /// `root` is *carried* rather than derived from `db`, because a
+    /// repository's own configuration governs how it is scanned, whoever is
+    /// asking ([`Workspace::project_root`]) — and the "repo dir is the store's
+    /// grandparent" shortcut is wrong for a **linked worktree**, whose git dir
+    /// is `<main>/.git/worktrees/<name>`, not `<repo>/.git`. [`build_registry`]
+    /// already holds the true working-tree root, so it is recorded here instead
+    /// of guessed later. `None` where the caller supplied only a `graph.db`
+    /// path ([`Workspace::from_named_dbs`]).
+    Path {
+        /// The `graph.db` to open.
+        db: PathBuf,
+        /// The repository's working-tree root, when known.
+        root: Option<PathBuf>,
+    },
     /// A pre-opened store, shared directly.
     Open(Arc<Mutex<Store>>),
 }
@@ -133,10 +148,11 @@ struct Inner {
 }
 
 /// Whether two sources denote the same store: the same `graph.db` path, or the
-/// very same pre-opened handle.
+/// very same pre-opened handle. The `graph.db` path *is* the store's identity,
+/// so the recorded working-tree root does not enter the comparison.
 fn source_eq(a: &Source, b: &Source) -> bool {
     match (a, b) {
-        (Source::Path(x), Source::Path(y)) => x == y,
+        (Source::Path { db: x, .. }, Source::Path { db: y, .. }) => x == y,
         (Source::Open(x), Source::Open(y)) => Arc::ptr_eq(x, y),
         _ => false,
     }
@@ -250,7 +266,7 @@ impl Workspace {
     {
         let projects: BTreeMap<String, Source> = dbs
             .into_iter()
-            .map(|(n, db)| (n, Source::Path(db)))
+            .map(|(n, db)| (n, Source::Path { db, root: None }))
             .collect();
         let default = (projects.len() == 1)
             .then(|| projects.keys().next().cloned())
@@ -276,12 +292,41 @@ impl Workspace {
                 i.projects
                     .values()
                     .filter_map(|s| match s {
-                        Source::Path(p) => Some(p.clone()),
+                        Source::Path { db, .. } => Some(db.clone()),
                         Source::Open(_) => None,
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The **working-tree root** of `project`'s repository, resolving `project`
+    /// the same way [`Workspace::with_store`] does (so `None` means the default
+    /// project).
+    ///
+    /// This exists so a caller can read *that repository's own* configuration
+    /// rather than the invoking process's. The rule, following ADR-0009's
+    /// per-repo `[[links]]` resolution: **a repository's own config governs how
+    /// it is scanned, whoever is asking.** Without it, a server started in repo
+    /// A answers questions about repo B using A's settings — and B's own
+    /// `[debt] ignore` never applies, so the API and B's CLI disagree about B.
+    ///
+    /// Returns `Ok(None)` when the project's store was handed over pre-opened
+    /// ([`Workspace::single`] / [`Workspace::from_stores`]) or registered by
+    /// `graph.db` path alone ([`Workspace::from_named_dbs`]): there is no
+    /// repository on disk to consult, and the caller falls back to its own
+    /// configuration.
+    ///
+    /// # Errors
+    /// [`WorkspaceError::UnknownProject`] / [`WorkspaceError::AmbiguousProject`]
+    /// as [`Workspace::resolve`], or [`WorkspaceError::Poisoned`].
+    pub fn project_root(&self, project: Option<&str>) -> Result<Option<PathBuf>, WorkspaceError> {
+        let name = self.resolve(project)?;
+        let inner = self.lock()?;
+        Ok(match inner.projects.get(&name) {
+            Some(Source::Path { root, .. }) => root.clone(),
+            _ => None,
+        })
     }
 
     /// Set a first-open hook (`serve --sync-on-access`): before a project's store
@@ -502,7 +547,7 @@ impl Workspace {
     /// blocks other projects' queries.
     fn handle(&self, name: &str) -> Result<Arc<Mutex<Store>>, WorkspaceError> {
         // Fast path and pre-opened sources resolve under a single short lock.
-        let db = {
+        let (db, root) = {
             let mut inner = self.lock()?;
             if let Some((_, handle)) = inner.cache.get(name) {
                 return Ok(handle.clone());
@@ -516,7 +561,7 @@ impl Workspace {
                     );
                     return Ok(handle);
                 }
-                Some(Source::Path(db)) => db.clone(),
+                Some(Source::Path { db, root }) => (db.clone(), root.clone()),
                 None => {
                     return Err(WorkspaceError::UnknownProject {
                         name: name.to_owned(),
@@ -547,7 +592,10 @@ impl Workspace {
             });
         }
         let handle = Arc::new(Mutex::new(Store::open(&db)?));
-        let opened = Source::Path(db.clone());
+        let opened = Source::Path {
+            db: db.clone(),
+            root,
+        };
         let mut inner = self.lock()?;
         // Another thread may have opened it while we were; prefer the existing.
         if let Some((_, existing)) = inner.cache.get(name) {
@@ -758,7 +806,14 @@ where
             .and_then(Path::file_name)
             .map_or_else(|| "repo".to_owned(), |s| s.to_string_lossy().into_owned());
         let name = dedupe_name(&projects, base);
-        projects.insert(name, Source::Path(db));
+        projects.insert(
+            name,
+            Source::Path {
+                db,
+                // The repository's own root, so its own config can be read later.
+                root: repo.workdir().map(Path::to_path_buf),
+            },
+        );
     }
     if projects.is_empty() {
         return Err(WorkspaceError::Empty);

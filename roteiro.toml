@@ -20,6 +20,12 @@ audio = false
 # content, not as real code debt: planning docs record postponed work by design
 # (the Build Plan/ADRs), while changelogs, the website, and Cargo manifests name
 # the marker categories in prose. Code debt is what `roteiro debt` should surface.
+#
+# This list is *additive* across layers: these patterns are appended to whatever
+# `~/.roteiro/config.toml` sets rather than replacing it (ADR-0007 v1.1), and
+# `roteiro config` prints each pattern with the layer it came from. To inherit
+# nothing, add `ignore_reset = true` — deliberately all-or-nothing, so it cannot
+# half-apply the way a mistyped `!pattern` negation silently would.
 ignore = ["docs/**", "website/**", "**/CHANGELOG.md", "**/Cargo.toml"]
 
 # [media]

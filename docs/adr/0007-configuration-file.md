@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
-last-modified: 2026-08-09
+version: "1.1"
+last-modified: 2026-08-16
 confluence-url:
 ---
 
@@ -93,6 +93,8 @@ model_store = "~/.roteiro/models"   # today only the ROTEIRO_HOME env var
 ```
 
 - **Loading:** parse user file, then project file, then apply CLI flags — each layer overriding the previous; a missing file is simply skipped; a present-but-malformed file is a hard error naming the offending key/line.
+- **Scalars replace; the `[debt] ignore` exclusion list merges** (v1.1). Replace is right for a scalar — there is one `model`, one `addr`, and the nearer layer names it. It is wrong for an *exclusion* list, where the intent is nearly always additive: a user who globally ignores `vendor/**` and then adds one project-specific `thirdparty/**` wants both, and silently narrowing the union to the project's single pattern makes the tool report debt the user believed excluded, with nothing to indicate why. To inherit nothing instead, set `[debt] ignore_reset = true` — an explicit, all-or-nothing reset rather than a `!pattern` negation, because a mistyped negation removes nothing and says nothing, which is the same silent-wrong-answer failure the merge exists to fix. Only the exclusion list merges: `[workspace]`/`[standalone]` `roots`/`repos` are *discovery* lists (a merge would silently serve repos the project never named) and `[serve] models` is a *selection*, so both stay replace-wins.
+- **A repository's own config governs how it is scanned, whoever is asking** (v1.1). When one process serves several repos (ADR-0008), each repo's settings are read from *that repo's* root — the same per-repo resolution ADR-0009 already uses for `[[links]]`. Otherwise repo B, scanned from repo A, is measured under A's exclusions and B's operators cannot explain the number they are shown.
 - **Discovery:** project file is `roteiro.toml` at the repo root (found alongside the git dir); user file is `~/.roteiro/config.toml` (honouring `ROTEIRO_HOME`, consistent with the model store).
 - **Feature-availability honesty:** a config key for an opt-in feature (e.g. `ingest.image_vision`) that the running binary was not built with produces a *warning*, not a silent no-op or a hard error — the setting is valid, the binary just can't honour it.
 
@@ -113,7 +115,7 @@ model_store = "~/.roteiro/models"   # today only the ROTEIRO_HOME env var
 ## Consequences
 
 - A new optional `roteiro.toml` (project, committed) and `~/.roteiro/config.toml` (user); zero-config still works — the file only overrides defaults. Adds the `toml` crate (permissive licence, `cargo deny`-clean) to the binary.
-- Precedence is fixed and documented: **CLI > project > user > default**. A `roteiro config` command prints the effective merged configuration and its provenance (which layer set each value), so "why did it use that model?" is answerable.
+- Precedence is fixed and documented: **CLI > project > user > default**. A `roteiro config` command prints the effective merged configuration and its provenance (which layer set each value), so "why did it use that model?" is answerable. For the merging `[debt] ignore` list, provenance is reported **per pattern** rather than per key — a single label would misreport a list holding patterns from both layers — and an `ignore_reset` prints the inherited patterns it discarded, so the reset cannot hide what the merge was added to reveal.
 - Settings currently only reachable by flag/env gain a persistent home: model picks (ADR-0003), ingestion toggles + caps (ADR-0005), inference/dedup thresholds, intent-debt ignore paths, the `[serve]` table (ADR-0006), and the model-store path (today only `ROTEIRO_HOME`).
 - Forward-compatible: unknown keys are ignored; a malformed file fails loudly (never a silent partial parse). A key for a feature the binary lacks warns rather than errors.
 
@@ -125,4 +127,5 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 
 | Version | Date | Notes |
 |---------|------|-------|
+| 1.1 | 2026-08-16 | Amended (issue #321). Two refinements to layering, neither changing the CLI > project > user > default order: (a) **list-valued exclusion keys merge** — `[debt] ignore` unions the layers instead of the project layer discarding the user layer, with a new `ignore_reset` key as the explicit way to inherit nothing, and per-pattern provenance in `roteiro config`; discovery/selection lists deliberately still replace. (b) **Per-repo resolution**: in a multi-repo process each repository is scanned under its *own* config, extending ADR-0009's per-repo `[[links]]` rule. Motivation: the graph API applied no exclusions at all, so the explorer UI and the CLI reported different intent debt for the same repository. |
 | 1.0 | 2026-08-09 | Accepted. Optional `roteiro.toml` (project, committed) + `~/.roteiro/config.toml` (user), TOML-only (YAML rejected — `serde_yaml` unmaintained), precedence CLI > project > user > default. Initial schema: `[models]`/`[ingest]`/`[infer]` first, then `[duplicates]`/`[debt]`/`[serve]`/`[paths]`. Fully defaulted (zero-config works); unknown keys ignored; malformed = hard error; missing-feature keys warn. |
