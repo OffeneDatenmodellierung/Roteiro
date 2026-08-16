@@ -345,7 +345,7 @@ and because the SAST half is independently useful and independently reviewable.
   with a pinned database succeeds; the Rust overlap with `cargo-audit` is
   explicitly resolved and recorded, rather than left to chance.
 
-### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.12.0** · effort **M**
+### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.11.0** · effort **M** ✅ *delivered*
 
 **Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
 no graph integration.
@@ -731,7 +731,7 @@ is why it rides an independent track.
 | v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
 | v1.11.0 ✅ | Stage 22 — semgrep + cargo-audit (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure — **met** |
 | v1.11.x | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved |
-| v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
+| v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
@@ -761,9 +761,23 @@ is why it rides an independent track.
 
 ## 9. Open questions (decide before the stage that needs them)
 
-1. **Cache bound value** (Stage 25): the *unit* is settled — a byte budget,
-   following `ModelCache`. The *number* is a judgement about tolerable
-   `.git/roteiro/` growth and still needs deciding.
+1. ~~**Cache bound value** (Stage 25)~~ — **answered: 256 MB by default,
+   configurable** (decided by the owner). The unit was already settled as a byte
+   budget following `ModelCache`; this fixes the number and makes it raisable for
+   larger repositories.
+
+   The scale that justifies it, measured on this repository: `.git/roteiro` is
+   **49 MB** (44 MB object cache over 2,395 entries, 4.6 MB `graph.db`) against a
+   **91 MB** `.git`. Roteiro's sidecar is already ~54% of the repository it
+   describes, so a cache tier is not a new cost category — it is a bound on one
+   that is currently unbounded in every direction. 256 MB is small against `.git`,
+   trivial against an 18 GB model store, and large enough that an ordinary session
+   never evicts.
+
+   Erring small is deliberate and cheap: `build_context` is *proven* to reconstruct
+   identically (`context.rs` asserts `built == cached`), so **eviction costs cycles,
+   never information**. Erring large only costs disk. Neither error is expensive,
+   which is precisely why this did not warrant more analysis than a measurement.
 2. ~~**Memory scope** (Stage 23)~~ — **answered**, ADR-0013 v1.1 §*Scope*. A lesson
    is valid in a tree only if the relevant association is present there **in the
    same format**, so the **anchor is the scope test** and `scope` is a coarse
