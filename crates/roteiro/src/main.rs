@@ -289,7 +289,7 @@ enum Command {
     /// ranking, it separates "everything calls this" from "this calls
     /// everything" — the two have identical degree and opposite meaning.
     Coupling {
-        /// Rank by: total | fan_in | fan_out. Defaults to `total`.
+        /// Rank by: `total` | `fan_in` | `fan_out`. Defaults to `total`.
         #[arg(long, value_name = "ORDER", default_value = "total")]
         order: String,
         /// Max rows to show; `0` shows every coupled node.
@@ -7468,6 +7468,40 @@ impl GraphToolRegistry {
     }
 }
 
+/// The served-chat `coupling` tool definition. Lifted out of
+/// [`GraphToolRegistry::tools`] to keep that function readable, not because it
+/// is shared: the MCP server declares its own (see `rto_render::mcp`).
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(feature = "serve")]
+fn coupling_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "coupling".to_owned(),
+        description: "Rank symbols by DIRECTED call coupling over `calls` edges: \
+                      `fan_in` (how many distinct symbols call this one), `fan_out` \
+                      (how many it calls), `instability` = fan_out/(fan_in+fan_out). \
+                      `order`=fan_in finds what the codebase most depends on, \
+                      `order`=fan_out the symbols that reach furthest. Call edges \
+                      are resolved by simple name, so a short generically-named \
+                      function can absorb every call to that name — say so if you \
+                      report a high `fan_in` on one."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({
+                "order": {
+                    "type": "string",
+                    "enum": rto_graph::CouplingOrder::tokens(),
+                },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+            })),
+        }),
+    }
+}
+
 #[cfg(feature = "serve")]
 impl rto_serve::ToolRegistry for GraphToolRegistry {
     fn tools(&self) -> Vec<rto_serve::ToolDef> {
@@ -7550,28 +7584,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     })),
                 }),
             },
-            rto_serve::ToolDef {
-                name: "coupling".to_owned(),
-                description: "Rank symbols by DIRECTED call coupling over `calls` edges: \
-                              `fan_in` (how many distinct symbols call this one), `fan_out` \
-                              (how many it calls), `instability` = fan_out/(fan_in+fan_out). \
-                              `order`=fan_in finds what the codebase most depends on, \
-                              `order`=fan_out the symbols that reach furthest. Call edges \
-                              are resolved by simple name, so a short generically-named \
-                              function can absorb every call to that name — say so if you \
-                              report a high `fan_in` on one."
-                    .to_owned(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": with_project(json!({
-                        "order": {
-                            "type": "string",
-                            "enum": rto_graph::CouplingOrder::tokens(),
-                        },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
-                    })),
-                }),
-            },
+            coupling_tool_def(&with_project),
         ];
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
@@ -7896,6 +7909,24 @@ fn vault_summary(
         .into_iter()
         .collect();
 
+    // Directed call coupling, ranked by fan-in — "what does this codebase most
+    // depend on". Capped, because `_Home` is an overview, not the report; the
+    // full ranking is `roteiro coupling` / `GET .../coupling`.
+    let most_called =
+        rto_graph::coupling(store, rto_graph::CouplingOrder::FanIn, HOME_COUPLING_ROWS)?
+            .items
+            .into_iter()
+            // A node with no callers is not "depended on"; with a short graph the
+            // fan-in ranking's tail is all zeroes and would pad the table with noise.
+            .filter(|i| i.fan_in > 0)
+            .map(|i| rto_render::CouplingEntry {
+                key: i.key,
+                name: i.name,
+                fan_in: i.fan_in,
+                fan_out: i.fan_out,
+            })
+            .collect();
+
     Ok(rto_render::VaultSummary {
         project,
         total_nodes: usize::try_from(store.node_count()?)?,
@@ -7904,10 +7935,15 @@ fn vault_summary(
         edge_provenance,
         adrs,
         debt,
+        most_called,
         repo_url,
         commit,
     })
 }
+
+/// Rows in the vault `_Home` note's directed-coupling table. An overview figure:
+/// enough to see the shape of the codebase, not the whole ranking.
+const HOME_COUPLING_ROWS: usize = 10;
 
 /// Web root for a git remote URL (`https://<host>/<owner>/<repo>`), or `None` if
 /// it isn't a URL shape we can map. Handles `git@host:owner/repo(.git)`,

@@ -365,9 +365,10 @@ pub fn coupling(
     order: CouplingOrder,
     limit: usize,
 ) -> Result<CouplingReport, StoreError> {
-    // dst key -> distinct src keys, and src key -> distinct dst keys.
-    let mut callers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut callees: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // `inbound`: dst key -> distinct src keys. `outbound`: src key -> distinct dst
+    // keys. Named for the direction rather than caller/callee, which read alike.
+    let mut inbound: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut outbound: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut call_edges = 0usize;
     let mut self_calls = 0usize;
     let mut cross_language_calls = 0usize;
@@ -384,23 +385,23 @@ pub fn coupling(
             cross_language_calls += 1;
             continue;
         }
-        callers
+        inbound
             .entry(edge.dst.clone())
             .or_default()
             .insert(edge.src.clone());
-        callees.entry(edge.src).or_default().insert(edge.dst);
+        outbound.entry(edge.src).or_default().insert(edge.dst);
     }
 
     // Rank on the counts alone, so only the nodes that survive the cap are read
     // back from the store — a whole-graph node scan is not needed to answer a
     // top-N question.
-    let keys: BTreeSet<&String> = callers.keys().chain(callees.keys()).collect();
+    let keys: BTreeSet<&String> = inbound.keys().chain(outbound.keys()).collect();
     let coupled_nodes = keys.len();
     let mut ranked: Vec<(u32, u32, &String)> = keys
         .into_iter()
         .map(|key| {
-            let fan_in = count_of(&callers, key);
-            let fan_out = count_of(&callees, key);
+            let fan_in = count_of(&inbound, key);
+            let fan_out = count_of(&outbound, key);
             (fan_in, fan_out, key)
         })
         .collect();
