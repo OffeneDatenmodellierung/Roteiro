@@ -698,18 +698,41 @@ fn a_changed_extraction_identity_re_extracts_at_an_unchanged_tree() {
 
 /// Every cache entry as `(path relative to the cache root, bytes)`, sorted — the
 /// whole fact cache, in a form two snapshots can be compared on.
+///
+/// **Every failure here panics rather than being skipped.** This helper exists to
+/// prove a cache is *unchanged*, and an empty snapshot compares equal to another
+/// empty snapshot — so a swallowed `read_dir` error, a skipped unreadable entry
+/// or a silently absent root would let the comparison pass having checked
+/// nothing. Vacuous success is the one failure mode a same-value assertion cannot
+/// detect on its own, so the reads are `expect`ed, the entry results are
+/// propagated rather than `flatten`ed away, and `strip_prefix` must succeed —
+/// there is no absolute-path fallback, because a path outside the root means the
+/// walk is not reading the cache it was pointed at. The caller additionally
+/// asserts the snapshot is non-empty.
 fn cache_entries(cache: &ObjectCache) -> Vec<(PathBuf, Vec<u8>)> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("cache entry under {}: {e}", dir.display()))
+                .path();
             if path.is_dir() {
                 walk(&path, root, out);
             } else {
-                let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-                out.push((rel, std::fs::read(&path).expect("read cache entry")));
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "cache entry {} is not under the cache root {}",
+                            path.display(),
+                            root.display(),
+                        )
+                    })
+                    .to_path_buf();
+                let bytes = std::fs::read(&path)
+                    .unwrap_or_else(|e| panic!("read cache entry {}: {e}", path.display()));
+                out.push((rel, bytes));
             }
         }
     }
