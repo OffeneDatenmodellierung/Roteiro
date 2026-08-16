@@ -281,6 +281,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rank nodes by **directed** call coupling: fan-in (how many distinct
+    /// symbols call this one) and fan-out (how many it calls), over `calls`
+    /// edges only.
+    ///
+    /// A report, not a gate: it always exits zero. Unlike an undirected degree
+    /// ranking, it separates "everything calls this" from "this calls
+    /// everything" — the two have identical degree and opposite meaning.
+    Coupling {
+        /// Rank by: `total` | `fan_in` | `fan_out`. Defaults to `total`.
+        #[arg(long, value_name = "ORDER", default_value = "total")]
+        order: String,
+        /// Max rows to show; `0` shows every coupled node.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Find a shortest path between two nodes (edges followed either direction).
     Path {
         /// Start node key.
@@ -1151,6 +1169,7 @@ fn main() -> anyhow::Result<()> {
         Command::Memory { action } => run_memory(action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
+        Command::Coupling { order, limit, json } => run_coupling(ingest, &order, limit, json),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Links {
             workspace,
@@ -4238,6 +4257,78 @@ fn debt_summary(report: &rto_graph::DebtReport) -> String {
         "intent debt: {} marker(s) ({})",
         report.total,
         breakdown.join(", ")
+    )
+}
+
+/// Parse a `--order` token into a [`rto_graph::CouplingOrder`], naming the
+/// accepted set from the type itself so the CLI and the tool schemas cannot
+/// drift apart.
+fn parse_coupling_order(token: &str) -> anyhow::Result<rto_graph::CouplingOrder> {
+    rto_graph::CouplingOrder::from_token(token).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown --order `{token}` (expected: {})",
+            rto_graph::CouplingOrder::tokens().join(" | ")
+        )
+    })
+}
+
+/// Rank nodes by directed call coupling. A report, not a gate: it always exits
+/// zero.
+fn run_coupling(
+    ingest: rto_graph::IngestConfig,
+    order: &str,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let order = parse_coupling_order(order)?;
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+
+    let report = rto_graph::coupling(&store, order, limit)?;
+    if json {
+        emit_json(&report)?;
+    } else {
+        for item in &report.items {
+            let loc = item.path.as_deref().unwrap_or(&item.key);
+            println!(
+                "  in {:>4}  out {:>4}  I={:.2}  {}  ({loc})",
+                item.fan_in, item.fan_out, item.instability, item.name
+            );
+        }
+        println!("{}", coupling_summary(&report));
+    }
+    Ok(())
+}
+
+/// A one-line summary of a [`rto_graph::CouplingReport`]. States the population
+/// as well as the shown rows, so a capped list cannot be read as the whole
+/// graph, and names the edge kind, so the number is never mistaken for a degree
+/// over every edge.
+fn coupling_summary(report: &rto_graph::CouplingReport) -> String {
+    if report.coupled_nodes == 0 {
+        return "call coupling: no `calls` edges in this graph".to_owned();
+    }
+    let mut excluded = Vec::new();
+    if report.self_calls > 0 {
+        excluded.push(format!("{} self-call(s)", report.self_calls));
+    }
+    if report.cross_language_calls > 0 {
+        excluded.push(format!(
+            "{} cross-language name collision(s)",
+            report.cross_language_calls
+        ));
+    }
+    let excluded = if excluded.is_empty() {
+        String::new()
+    } else {
+        format!(", excluding {}", excluded.join(" and "))
+    };
+    format!(
+        "call coupling: {} of {} coupled node(s) shown, by {}; {} `calls` edge(s){excluded}",
+        report.items.len(),
+        report.coupled_nodes,
+        report.order,
+        report.call_edges,
     )
 }
 
@@ -7377,6 +7468,40 @@ impl GraphToolRegistry {
     }
 }
 
+/// The served-chat `coupling` tool definition. Lifted out of
+/// [`GraphToolRegistry::tools`] to keep that function readable, not because it
+/// is shared: the MCP server declares its own (see `rto_render::mcp`).
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(feature = "serve")]
+fn coupling_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "coupling".to_owned(),
+        description: "Rank symbols by DIRECTED call coupling over `calls` edges: \
+                      `fan_in` (how many distinct symbols call this one), `fan_out` \
+                      (how many it calls), `instability` = fan_out/(fan_in+fan_out). \
+                      `order`=fan_in finds what the codebase most depends on, \
+                      `order`=fan_out the symbols that reach furthest. Call edges \
+                      are resolved by simple name, so a short generically-named \
+                      function can absorb every call to that name — say so if you \
+                      report a high `fan_in` on one."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({
+                "order": {
+                    "type": "string",
+                    "enum": rto_graph::CouplingOrder::tokens(),
+                },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+            })),
+        }),
+    }
+}
+
 #[cfg(feature = "serve")]
 impl rto_serve::ToolRegistry for GraphToolRegistry {
     fn tools(&self) -> Vec<rto_serve::ToolDef> {
@@ -7459,6 +7584,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     })),
                 }),
             },
+            coupling_tool_def(&with_project),
         ];
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
@@ -7538,6 +7664,31 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 self.run(project, |store| {
                     rto_graph::debt(store, &categories, &ignore)
                 })
+            }
+            "coupling" => {
+                // An unrecognised `order` is an error rather than a silent fall
+                // back to `total`: a model told it ranked by `fan_in` when it did
+                // not will state that as fact to the user.
+                let order = match str_arg("order") {
+                    None => rto_graph::CouplingOrder::default(),
+                    Some(token) => {
+                        rto_graph::CouplingOrder::from_token(token).ok_or_else(|| {
+                            format!(
+                                "unknown order `{token}` (expected {})",
+                                rto_graph::CouplingOrder::tokens().join("|")
+                            )
+                        })?
+                    }
+                };
+                // `limit` is model-controlled: clamp to the advertised bound so a
+                // huge value cannot make the server do pointless work.
+                let limit = args
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                self.run(project, |store| rto_graph::coupling(store, order, limit))
             }
             other => Err(format!("unknown tool `{other}`")),
         }
@@ -7758,6 +7909,24 @@ fn vault_summary(
         .into_iter()
         .collect();
 
+    // Directed call coupling, ranked by fan-in — "what does this codebase most
+    // depend on". Capped, because `_Home` is an overview, not the report; the
+    // full ranking is `roteiro coupling` / `GET .../coupling`.
+    let most_called =
+        rto_graph::coupling(store, rto_graph::CouplingOrder::FanIn, HOME_COUPLING_ROWS)?
+            .items
+            .into_iter()
+            // A node with no callers is not "depended on"; with a short graph the
+            // fan-in ranking's tail is all zeroes and would pad the table with noise.
+            .filter(|i| i.fan_in > 0)
+            .map(|i| rto_render::CouplingEntry {
+                key: i.key,
+                name: i.name,
+                fan_in: i.fan_in,
+                fan_out: i.fan_out,
+            })
+            .collect();
+
     Ok(rto_render::VaultSummary {
         project,
         total_nodes: usize::try_from(store.node_count()?)?,
@@ -7766,10 +7935,15 @@ fn vault_summary(
         edge_provenance,
         adrs,
         debt,
+        most_called,
         repo_url,
         commit,
     })
 }
+
+/// Rows in the vault `_Home` note's directed-coupling table. An overview figure:
+/// enough to see the shape of the codebase, not the whole ranking.
+const HOME_COUPLING_ROWS: usize = 10;
 
 /// Web root for a git remote URL (`https://<host>/<owner>/<repo>`), or `None` if
 /// it isn't a URL shape we can map. Handles `git@host:owner/repo(.git)`,
@@ -9387,6 +9561,69 @@ mod workspace_scoped_tools {
             ok.is_ok(),
             "the workspace's own project must still resolve: {ok:?}"
         );
+    }
+
+    /// A one-project registry whose graph is `main` → `helper`: identical
+    /// undirected degree, opposite direction.
+    fn called_registry() -> GraphToolRegistry {
+        use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
+        let mut store = rto_graph::Store::open_in_memory().expect("store");
+        store
+            .apply_factset(
+                &FactSet::new()
+                    .with_node(Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"))
+                    .with_node(Node::new("sym:rust:a.rs#helper", NodeKind::Fn, "helper"))
+                    .with_edge(Edge::derived(
+                        "sym:rust:a.rs#main",
+                        "sym:rust:a.rs#helper",
+                        EdgeKind::Calls,
+                    )),
+            )
+            .expect("apply");
+        GraphToolRegistry::new(std::sync::Arc::new(rto_graph::Workspace::single(
+            "api", store,
+        )))
+    }
+
+    /// The served-chat registry is a **separate** registry from the MCP server's,
+    /// so a lens reaching MCP proves nothing about the chat surface. This is the
+    /// chat side.
+    #[test]
+    fn coupling_is_advertised_and_answers_directionally() {
+        use rto_serve::ToolRegistry as _;
+        let reg = called_registry();
+
+        let advertised = reg.tools();
+        let def = advertised
+            .iter()
+            .find(|t| t.name == "coupling")
+            .expect("`coupling` advertised to the served model");
+        assert_eq!(
+            def.parameters["properties"]["order"]["enum"],
+            serde_json::json!(rto_graph::CouplingOrder::tokens()),
+            "the schema's accepted orders come from the type, so they cannot drift"
+        );
+
+        let out = reg
+            .call("coupling", &serde_json::json!({ "order": "fan_in" }))
+            .expect("coupling");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["items"][0]["key"], "sym:rust:a.rs#helper", "{json}");
+
+        let out = reg
+            .call("coupling", &serde_json::json!({ "order": "fan_out" }))
+            .expect("coupling");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["items"][0]["key"], "sym:rust:a.rs#main", "{json}");
+    }
+
+    #[test]
+    fn coupling_refuses_an_unknown_order_rather_than_reordering_silently() {
+        use rto_serve::ToolRegistry as _;
+        let err = called_registry()
+            .call("coupling", &serde_json::json!({ "order": "degree" }))
+            .expect_err("an unknown order must be refused");
+        assert!(err.contains("unknown order `degree`"), "was: {err}");
     }
 }
 

@@ -6,7 +6,8 @@
 //! `meta.content` (doc comments, prose, PDF/image text) as the knowledge base,
 //! show an ADR's status, and (when the repository's web host is known) a
 //! clickable **Source** link to the file. A generated `_Home` note is the overview: what was
-//! scanned, counts by kind, provenance breakdown, ADR statuses, and intent-debt.
+//! scanned, counts by kind, provenance breakdown, ADR statuses, intent-debt, and
+//! the most depended-on symbols by directed call fan-in.
 //! Built from the same [`Explanation`] the query surface returns, so the vault
 //! and the CLI agree.
 
@@ -192,6 +193,19 @@ pub struct AdrEntry {
     pub status: Option<String>,
 }
 
+/// One node in the `_Home` overview's directed-coupling table.
+#[derive(Debug, Clone)]
+pub struct CouplingEntry {
+    /// The node key, for the wikilink.
+    pub key: String,
+    /// The symbol name.
+    pub name: String,
+    /// Distinct callers.
+    pub fan_in: u32,
+    /// Distinct callees.
+    pub fan_out: u32,
+}
+
 /// Aggregate figures for the vault's `_Home` overview note.
 #[derive(Debug, Clone, Default)]
 pub struct VaultSummary {
@@ -209,6 +223,9 @@ pub struct VaultSummary {
     pub adrs: Vec<AdrEntry>,
     /// `(category, count)` of intent-debt markers.
     pub debt: Vec<(String, usize)>,
+    /// The most depended-on symbols by **directed** call fan-in, already ranked
+    /// and capped by the caller. Empty when the graph has no `calls` edges.
+    pub most_called: Vec<CouplingEntry>,
     /// Web root of the repository (`https://host/owner/repo`), if derivable from
     /// the git remote — for a "Repository" link in the overview.
     pub repo_url: Option<String>,
@@ -289,6 +306,28 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
         }
     }
 
+    if !s.most_called.is_empty() {
+        c.push_str(
+            "\n## Most depended-on (call fan-in)\n\n\
+             *Distinct callers and callees over `calls` edges — direction kept, so \
+             \"everything calls this\" and \"this calls everything\" are not the same \
+             row. Call targets are resolved by simple name, so a short, generically-\
+             named function can absorb every call to that name: read a large fan-in on \
+             one as a question, not a finding.*\n\n",
+        );
+        c.push_str("| Symbol | Called by | Calls |\n| --- | --- | --- |\n");
+        for e in &s.most_called {
+            let _ = writeln!(
+                c,
+                "| [[{}\\|{}]] | {} | {} |",
+                note_name(&e.key),
+                e.name,
+                e.fan_in,
+                e.fan_out
+            );
+        }
+    }
+
     c.push_str(
         "\n## Navigating this vault\n\n\
          - Open the **graph view** to see the whole codebase; notes are coloured/\
@@ -307,7 +346,9 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdrEntry, HOME_NOTE, VaultSummary, note_name, render_home, render_note};
+    use super::{
+        AdrEntry, CouplingEntry, HOME_NOTE, VaultSummary, note_name, render_home, render_note,
+    };
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
 
     #[test]
@@ -455,6 +496,12 @@ mod tests {
                 status: Some("Accepted".into()),
             }],
             debt: vec![("todo".into(), 4)], // roteiro:ignore
+            most_called: vec![CouplingEntry {
+                key: "sym:rust:a.rs#helper".into(),
+                name: "helper".into(),
+                fan_in: 7,
+                fan_out: 1,
+            }],
             repo_url: Some("https://github.com/org/repo".into()),
             commit: Some("abcdef0123456789".into()),
         };
@@ -466,6 +513,18 @@ mod tests {
         assert!(note.content.contains("| derived | 1 |"));
         assert!(note.content.contains("**Accepted** — [[adr-0001|First]]"));
         assert!(note.content.contains("| todo | 4 |")); // roteiro:ignore
+        // Directed coupling: the two fans are separate columns, and the wikilink's
+        // own `|` is escaped so it cannot break the table it sits in.
+        assert!(
+            note.content
+                .contains("| [[sym-rust-a.rs-helper\\|helper]] | 7 | 1 |"),
+            "{}",
+            note.content
+        );
+        assert!(
+            note.content.contains("resolved by simple name"),
+            "the precision caveat travels with the figures"
+        );
         // A repository link + short-commit permalink note.
         assert!(
             note.content
@@ -473,5 +532,23 @@ mod tests {
             "{}",
             note.content
         );
+    }
+
+    #[test]
+    fn render_home_omits_coupling_for_a_graph_with_no_calls() {
+        // A prose-only vault has no `calls` edges. An empty table under a heading
+        // reads as "measured, and there is nothing" — the section is absent instead.
+        let note = render_home(&VaultSummary {
+            project: "docs".into(),
+            total_nodes: 1,
+            ..VaultSummary::default()
+        });
+        assert!(
+            !note.content.contains("Most depended-on"),
+            "no heading without rows: {}",
+            note.content
+        );
+        // The rest of the overview is unaffected.
+        assert!(note.content.contains("# docs — knowledge graph"));
     }
 }
