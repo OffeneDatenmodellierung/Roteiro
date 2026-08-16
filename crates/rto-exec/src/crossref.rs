@@ -225,7 +225,7 @@ fn assemble(package: &str, version: &str, group: &[&Candidate<'_>]) -> Correspon
     reports.sort_by(|a, b| (&a.analyzer, &a.key).cmp(&(&b.analyzer, &b.key)));
 
     Correspondence {
-        advisory: canonical(&aliases),
+        advisory: canonical(&reports),
         aliases,
         package: package.to_owned(),
         version: version.to_owned(),
@@ -233,18 +233,28 @@ fn assemble(package: &str, version: &str, group: &[&Candidate<'_>]) -> Correspon
     }
 }
 
-/// The identifier to name an advisory by: the RUSTSEC id where there is one,
-/// otherwise the lowest.
+/// The identifier to name an advisory by: the RUSTSEC id an analyzer actually
+/// fired, otherwise the lowest id an analyzer fired.
+///
+/// **Only ids that were fired, never merely aliased**, and that restriction was
+/// put here by real fixture data rather than by taste. `cargo-audit` reports
+/// `chrono 0.4.19` as `RUSTSEC-2020-0159` and lists `RUSTSEC-2020-0071` under
+/// `related`; that alias sorts *first*, so naming the group from the alias set
+/// would label chrono's advisory with the id of the unrelated `time` one. An id
+/// no analyzer fired is not a name for what they found.
 ///
 /// Preferring RUSTSEC is not favouritism towards Rust — it is that ADR-0018
 /// names it as *the* join key, and that where both analyzers report a Rust
 /// advisory it is the one identifier both of them publish.
-fn canonical(aliases: &[String]) -> String {
-    aliases
+fn canonical(reports: &[Report]) -> String {
+    let mut fired: Vec<&str> = reports.iter().map(|r| r.rule.as_str()).collect();
+    fired.sort_unstable();
+    fired.dedup();
+    fired
         .iter()
         .find(|id| id.starts_with("RUSTSEC-"))
-        .or_else(|| aliases.first())
-        .cloned()
+        .or_else(|| fired.first())
+        .map(|id| (*id).to_owned())
         .unwrap_or_default()
 }
 
