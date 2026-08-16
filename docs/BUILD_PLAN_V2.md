@@ -328,19 +328,27 @@ and because the SAST half is independently useful and independently reviewable.
   (`https://osv-vulnerabilities.storage.googleapis.com/<ECOSYSTEM>/all.zip`) are
   single files at stable URLs, so they are the first asset that genuinely wants a
   download-by-URL source. `AssetSource` is `#[non_exhaustive]` for that.
-- **Inherited open question — resolve it here, do not rediscover it.**
-  `osv-scanner` also reads `Cargo.lock`, and OSV.dev ingests the `RustSec`
-  advisory database, so **the same Rust vulnerability will be reported twice**
-  under two different finding keys (`finding:osv-scanner:…` and
-  `finding:cargo-audit:…`). Stage 22 deliberately did not decide what to do about
-  that, because deduplication *across* analyzers is a new concept the findings
-  schema has no notion of: a layer is keyed `security:<analyzer>:<worktree-id>`
-  and is replaced wholesale per analyzer. The options are (a) keep both and
-  cross-reference them at the reporting layer, (b) drop `cargo-audit`'s
-  vulnerability findings and keep only its informational kinds
-  (`unmaintained`/`unsound`/`yanked`, which OSV does not carry — and which this
-  repository's own `deny.toml` already relies on), or (c) leave both and say so.
-  Whichever is chosen, the reasoning belongs in ADR-0018 as a version bump.
+- **The Rust overlap is now DECIDED — implement it, do not re-open it.**
+  `osv-scanner` also reads `Cargo.lock` and OSV ingests RustSec, so the same Rust
+  advisory arrives twice under two finding keys. [ADR-0018](adr/0018-analyzer-coverage-matrix.md)
+  **v1.1** resolves it: **keep both findings and cross-reference them at the
+  reporting layer.** Neither layer is filtered or made conditional on the other.
+  The join key needs no invention — OSV keys a RustSec-derived record by the
+  RUSTSEC id itself and carries `aliases` (`RUSTSEC-2020-0071` →
+  `CVE-2020-26235`, `GHSA-wcg3-cvx6-7396`), and `cargo-audit`'s adapter already
+  stores `aliases` verbatim in `meta` (`crates/rto-exec/src/adapter/cargo_audit.rs:225`).
+  Join on the RUSTSEC id, fall back to alias-set intersection. Render a duplicate
+  pair as **one advisory confirmed by two analyzers**, with both finding keys
+  still addressable — never a merged super-finding, and never a count that
+  silently halves.
+- **Two things to MEASURE here, not assume.** (1) OSV.dev the *database* does
+  carry RustSec informational advisories — `RUSTSEC-2024-0388`,
+  `RUSTSEC-2021-0139` and `RUSTSEC-2026-0192` all resolve, each with
+  `aliases: null` — but whether `osv-scanner` the *tool* surfaces them by default
+  is unestablished, and ADR-0018 v1.0 conflated the two. Measure it and correct
+  the ADR. (2) RustSec→OSV ingestion lag: if it can trail by days the analyzers
+  will legitimately disagree for a window, and "present in one, absent in the
+  other" must render as a real state rather than a defect.
 - **DoD:** a Python, a Java and a Node lockfile each produce findings; offline
   with a pinned database succeeds; the Rust overlap with `cargo-audit` is
   explicitly resolved and recorded, rather than left to chance.
