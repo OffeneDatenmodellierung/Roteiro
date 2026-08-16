@@ -1385,6 +1385,26 @@ fn print_workspace_section(e: &config::Config, p: &config::Config, u: &config::C
     }
 }
 
+/// Say so, on stderr, when the graph store was holding a **different** working
+/// tree and was therefore rebuilt rather than trusted (issue #330).
+///
+/// `graph.db` is an assembled view of one tree. A store that has come to describe
+/// another one — restored from a backup, copied with a `.git` directory, or
+/// reached after a layout change that put it under the shared common git dir —
+/// would otherwise let `sync` answer "up to date" about a graph nobody is looking
+/// at. The sync engine corrects that automatically; this makes the correction
+/// *visible*, so the answer is never a confident wrong one, and so the one slow
+/// run it causes has a stated reason instead of looking like a hang.
+fn report_foreign_worktree(report: &rto_graph::SyncReport) {
+    if let Some(previous) = &report.rebuilt_from_foreign_worktree {
+        eprintln!(
+            "note: this graph store was assembled from a different working tree \
+             ({previous}); it has been rebuilt for this one rather than reused. \
+             The extraction cache is shared across worktrees, so this costs little."
+        );
+    }
+}
+
 /// Sync the graph for the current repository, optionally including uncommitted
 /// edits to tracked files.
 fn run_sync(
@@ -1414,6 +1434,7 @@ fn run_sync(
     if json {
         emit_json(&report)?;
     } else {
+        report_foreign_worktree(&report);
         let tree = &report.tree[..report.tree.len().min(12)];
         let dirty = if report.blobs_dirty > 0 {
             format!(" +{} uncommitted", report.blobs_dirty)
@@ -1505,17 +1526,51 @@ fn build_graph(
 ) -> anyhow::Result<rto_spec::CheckReport> {
     use rto_graph::{Registry, sync, sync_index, sync_worktree};
     let registry = Registry::new(ingest);
-    match source {
+    let sync_report = match source {
         GraphSource::Committed => sync(store, repo, cache, &registry)?,
         GraphSource::Worktree => sync_worktree(store, repo, cache, &registry)?,
         GraphSource::Index => sync_index(store, repo, cache, &registry)?,
     };
+    // `check` and `review` gate on this graph, so if it had been assembled from
+    // another working tree the rebuild that just happened is the difference
+    // between a correct verdict and a confident wrong one. Say so (issue #330).
+    report_foreign_worktree(&sync_report);
 
     // The authored-layer file set must match the derived tree: the staged files
-    // in Index mode (so a staged-new ADR is seen), else the `HEAD` tree.
+    // in Index mode (so a staged-new ADR is seen), the `HEAD` tree in Committed
+    // mode, and in Worktree mode `HEAD` **plus untracked files** — because that
+    // is precisely what `sync_worktree` overlaid into the derived layer.
+    //
+    // Getting this wrong is issue #330's observed symptom, and it is a *silent*
+    // wrong answer rather than a loud one. `sync_worktree` walks untracked files
+    // deliberately, "so the working-tree `sync`/`check`/`review` see new work
+    // that isn't staged yet" — but the authored set here read only `HEAD`, so a
+    // brand-new ADR had its symbols extracted while the file was never parsed as
+    // an ADR. `check` then reported 17 ADRs with 18 on disk, `sync` said "up to
+    // date", and nothing indicated that the newest decision was missing. The two
+    // layers disagreed about which tree they were describing, in one worktree,
+    // with no second worktree involved.
     let blobs = match source {
         GraphSource::Index => repo.index_files()?,
-        GraphSource::Committed | GraphSource::Worktree => repo.walk_blobs()?,
+        GraphSource::Committed => repo.walk_blobs()?,
+        GraphSource::Worktree => {
+            let mut blobs = repo.walk_blobs()?;
+            // `untracked_files` is defined against the index, so it cannot
+            // return a path already in `blobs`. The synthesized oid is unused:
+            // `read_source` reads Worktree content from disk by path, and an
+            // untracked file has no git object to read anyway. (A bare repo has
+            // no working tree, and `untracked_files` returns nothing there, so
+            // the oid-reading fallback is never reached with one of these.)
+            blobs.extend(
+                repo.untracked_files()?
+                    .into_iter()
+                    .map(|path| rto_graph::BlobRef {
+                        path,
+                        oid: String::new(),
+                    }),
+            );
+            blobs
+        }
     };
     let mut docs = Vec::new();
     let mut blueprints = Vec::new();

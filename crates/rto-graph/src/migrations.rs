@@ -431,6 +431,41 @@ CREATE INDEX idx_mem_anchor ON agent_memory(anchor_key);
 CREATE INDEX idx_mem_live ON agent_memory(scope, superseded_by, id DESC);
 ";
 
+/// Migration 12: record **which working tree** the graph was assembled from
+/// (issue #330).
+///
+/// `graph.db` is an assembled view of *one* tree. Nothing in the store said which
+/// one, so a store that came to describe a different tree — restored from a
+/// backup, copied with a `.git` directory, or reached after a layout change that
+/// moved it under the shared common git dir — would answer confidently about the
+/// wrong tree. `sync` would report "up to date" against a state id it had no
+/// business trusting, and `check` would validate a tree nobody was looking at.
+/// Stamping the tree lets the sync engine notice and rebuild instead of guessing.
+///
+/// **Why this is a stamp and not a split.** The obvious alternative — give every
+/// worktree its own database — is deliberately *not* what happens, and must not
+/// be introduced later by accident. `findings`, `media_content`, `agent_memory`
+/// and `imports` all live inside this same `graph.db`, and ADR-0013 v1.1 depends
+/// on that store being **shared**: the scope rule (a memory applies wherever its
+/// anchor resolves, with no branch bookkeeping) was demonstrated with ONE row in
+/// ONE store giving opposite verdicts on two branches. Splitting the database per
+/// worktree would silently reintroduce exactly the branch-scoping that ADR
+/// rejected — a change that needs the ADR **amended**, not merely extended.
+///
+/// Note the distinction the codebase already draws and this preserves:
+/// [`crate::ObjectCache`] is content-addressed by blob id, so sharing it across
+/// worktrees under the *common* git dir is correct and valuable — extraction done
+/// in one worktree is reusable in all of them. The assembled graph is not
+/// content-addressed, so sharing *it* would mean last-writer-wins. The two are
+/// stored differently on purpose.
+///
+/// Nullable, following the `env` precedent (migration 7): a legacy row reads as
+/// "unknown", which is adopted rather than treated as a mismatch — an existing
+/// store is not rebuilt merely for predating this column.
+const M0012_SYNC_WORKTREE: &str = "
+ALTER TABLE sync_state ADD COLUMN worktree TEXT;
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -476,6 +511,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 11,
         sql: M0011_AGENT_MEMORY,
+    },
+    Migration {
+        version: 12,
+        sql: M0012_SYNC_WORKTREE,
     },
 ];
 

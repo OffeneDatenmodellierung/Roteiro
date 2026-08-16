@@ -206,6 +206,48 @@ impl Store {
         Ok(())
     }
 
+    /// Which working tree this graph was assembled from, or `None` when the store
+    /// has never been synced or predates the column (issue #330).
+    ///
+    /// `graph.db` is an assembled view of **one** tree, so a store that came to
+    /// describe a different tree — restored from a backup, copied along with a
+    /// `.git` directory, or reached after a layout change — would otherwise
+    /// answer confidently about the wrong one: `sync` reporting "up to date"
+    /// against a state id belonging to someone else's tree, `check` validating a
+    /// tree nobody is looking at. `None` reads as "unknown" and is *adopted*
+    /// rather than treated as a mismatch, so an existing store is never rebuilt
+    /// merely for predating the stamp.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn synced_worktree(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT worktree FROM sync_state WHERE id = 0", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten())
+    }
+
+    /// Stamp this graph as assembled from `worktree`. Called by every sync entry
+    /// point right after it writes the tree state, so the two always agree about
+    /// whose tree the state describes. A no-op if no tree is recorded.
+    ///
+    /// Unlike [`Store::set_sync_env`]'s value, this survives a tree write: it
+    /// identifies the *store*, not the tree, and a new commit does not move the
+    /// graph to a different working tree.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn set_synced_worktree(&self, worktree: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE sync_state SET worktree = ?1 WHERE id = 0",
+            [worktree],
+        )?;
+        Ok(())
+    }
+
     /// Atomically replace the entire graph with `facts`, recording `tree` as the
     /// synced state (or clearing it when `tree` is `None`). All existing nodes
     /// and edges are deleted first, so the store reflects exactly the given fact
@@ -1476,6 +1518,56 @@ mod tests {
         );
     }
 
+    /// The worktree stamp (issue #330) identifies the *store*, not the tree: an
+    /// unstamped store reads as "unknown" and is adopted rather than rebuilt, and
+    /// a new tree state must not clear the stamp the way it clears `env`.
+    #[test]
+    fn the_worktree_stamp_survives_tree_writes_and_starts_unknown() {
+        let mut store = Store::open_in_memory().expect("open");
+        let facts = FactSet::new().with_node(sample_node("sym:a"));
+
+        // Never synced ⇒ no stamp. A legacy store reads the same way, which is
+        // why "unknown" must mean adopt, not mismatch.
+        assert_eq!(store.synced_worktree().expect("stamp"), None);
+
+        store.reconcile(&facts, Some("t1")).expect("reconcile");
+        assert_eq!(
+            store.synced_worktree().expect("stamp"),
+            None,
+            "writing a tree does not invent a stamp; the sync engine records it"
+        );
+
+        store.set_synced_worktree("/w/one").expect("stamp");
+        store.set_sync_env("env-1").expect("env");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/one")
+        );
+
+        // A later tree write clears `env` (it is only valid for one tree) but must
+        // KEEP the stamp: a new commit does not move the graph to another tree.
+        store.reconcile(&facts, Some("t2")).expect("reconcile");
+        assert_eq!(store.sync_env().expect("env"), None, "env is tree-scoped");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/one"),
+            "the stamp identifies the store, not the tree, so it must survive"
+        );
+
+        // Re-stamping replaces it (the store was adopted by another tree).
+        store.set_synced_worktree("/w/two").expect("restamp");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/two")
+        );
+
+        // Clearing the synced state clears the stamp with it: a store with no
+        // recorded tree describes no working tree either.
+        store.rebuild(&facts, None).expect("rebuild unstated");
+        assert_eq!(store.sync_state().expect("state"), None);
+        assert_eq!(store.synced_worktree().expect("stamp"), None);
+    }
+
     #[test]
     fn reconcile_writes_only_the_edge_delta() {
         // An unchanged edge must keep its row (proving reconcile does not wipe and
@@ -1700,13 +1792,21 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        // Bumped to 8 by the analyzer-findings tables (ADR-0012), then to 9 by
-        // the generated-media-content table (ADR-0015), then to 10 by that
-        // table's rebuild for the pre-generation gate's skip records, then to 11
-        // by the episodic agent-memory table (ADR-0013). The literal is
-        // deliberate: a new migration should make someone confirm it is meant to
-        // apply on open, rather than passing silently.
-        assert_eq!(store.schema_version().expect("version"), 11);
+        // The property, not a literal: opening applies **every** migration this
+        // build knows, whatever the newest one happens to be.
+        //
+        // This used to pin the number (8, then 9, 10, 11 …), on the theory that a
+        // new migration should make someone confirm it is meant to apply on open.
+        // In practice it only ever failed *after* a migration had been
+        // deliberately added, so it confirmed nothing and cost a red build — the
+        // brittleness #329 replaced with a property test elsewhere. What is worth
+        // asserting is that `open` leaves no migration unapplied; one that should
+        // not run on open would not be in `MIGRATIONS` at all.
+        assert_eq!(
+            store.schema_version().expect("version"),
+            crate::migrations::latest_version(),
+            "opening a store must apply every known migration"
+        );
     }
 
     #[test]
@@ -1877,7 +1977,12 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 11);
+            // A property, not a pinned number — see `open_in_memory_applies_schema`.
+            assert_eq!(
+                store.schema_version().expect("version"),
+                crate::migrations::latest_version(),
+                "reopening applies any migration added since the file was written"
+            );
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

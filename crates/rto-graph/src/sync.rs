@@ -55,6 +55,47 @@ pub struct SyncReport {
     pub nodes: u64,
     /// Edges in the store after syncing.
     pub edges: u64,
+    /// The working tree this graph previously described, when it was a
+    /// **different** one and the sync therefore rebuilt from scratch rather than
+    /// trusting the recorded state (issue #330).
+    ///
+    /// `None` on every ordinary sync. `Some(path)` is the loud half of the
+    /// guarantee: the answer was corrected rather than served, and the caller can
+    /// say *which* tree the store had been holding, so a stale store is never a
+    /// silent wrong answer nor an unexplained slow one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuilt_from_foreign_worktree: Option<String>,
+}
+
+/// A stable identity for the working tree a graph is assembled from: the
+/// working-tree root, or the git dir for a bare repository.
+///
+/// The *path* is used rather than an opaque id because its whole job is to appear
+/// in a message naming the tree the store actually holds — an id the reader
+/// cannot act on would defeat the point. Linked worktrees have distinct roots, so
+/// this separates them; a plain branch switch within one tree does not change it,
+/// which is correct (the tree is the same, its content moved).
+#[must_use]
+pub fn worktree_id(repo: &Repo) -> String {
+    repo.workdir()
+        .unwrap_or_else(|| repo.git_dir())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Decide whether `store`'s recorded sync state may be trusted for *this* tree.
+///
+/// Returns `Some(previous)` when the store was last assembled from a **different**
+/// working tree: its tree id, dirty-set hash and extraction env all describe
+/// someone else's tree, so no fast path may consult them and the caller must
+/// rebuild in full. `None` when the store belongs here or has never been stamped
+/// (unknown is adopted, not rebuilt — see [`Store::synced_worktree`]).
+///
+/// Rebuilding is cheap relative to being wrong: the object cache is shared across
+/// worktrees and already warm, so the re-extraction mostly hits it.
+fn foreign_worktree(store: &Store, repo: &Repo) -> Result<Option<String>, SyncError> {
+    let here = worktree_id(repo);
+    Ok(store.synced_worktree()?.filter(|prior| *prior != here))
 }
 
 /// Sync `store` to the repository's `HEAD` tree, extracting changed blobs with
@@ -99,7 +140,15 @@ pub fn sync(
     //
     // A store with no recorded identity (`None`) does not match, which is the safe
     // direction: it re-extracts once and records one.
-    if store.sync_state()?.as_deref() == Some(tree.as_str())
+    // …and only when the recorded state describes *this* working tree. A store
+    // assembled from another tree has a tree id, dirty hash and env that are all
+    // someone else's, so neither the no-op below nor the incremental diff may
+    // consult them: that is how a stale store reports "up to date" while holding
+    // a graph nobody is looking at (issue #330).
+    let foreign = foreign_worktree(store, repo)?;
+
+    if foreign.is_none()
+        && store.sync_state()?.as_deref() == Some(tree.as_str())
         && store.sync_env()?.as_deref() == Some(env.as_str())
     {
         return Ok(SyncReport {
@@ -113,9 +162,11 @@ pub fn sync(
 
     // Fast path: if the last sync was a committed one at a known tree with the
     // same extraction identity, update only the paths that changed. Falls back to
-    // a full re-extraction on any doubt (no prior tree, identity changed, or an
-    // unavailable diff).
-    if let Some(report) = try_incremental(store, repo, cache, extractor, &tree, &env)? {
+    // a full re-extraction on any doubt (no prior tree, identity changed, an
+    // unavailable diff, or a tree that is not ours).
+    if foreign.is_none()
+        && let Some(report) = try_incremental(store, repo, cache, extractor, &tree, &env)?
+    {
         return Ok(report);
     }
 
@@ -126,6 +177,7 @@ pub fn sync(
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(&tree))?;
     store.set_sync_env(&env)?;
+    store.set_synced_worktree(&worktree_id(repo))?;
 
     Ok(SyncReport {
         no_op: false,
@@ -136,6 +188,7 @@ pub fn sync(
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree,
+        rebuilt_from_foreign_worktree: foreign,
     })
 }
 
@@ -237,6 +290,9 @@ fn try_incremental(
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(head_tree))?;
     store.set_sync_env(env)?;
+    // The caller only reaches here for a store that is ours, but it may predate
+    // the stamp — record it, or this path would leave it unstamped forever.
+    store.set_synced_worktree(&worktree_id(repo))?;
 
     Ok(Some(SyncReport {
         no_op: false,
@@ -247,6 +303,8 @@ fn try_incremental(
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: head_tree.to_owned(),
+        // Unreachable with a foreign store: the caller skips this path entirely.
+        rebuilt_from_foreign_worktree: None,
     }))
 }
 
@@ -339,7 +397,10 @@ pub fn sync_worktree(
     };
     let dirty_count = dirty.len();
 
-    if store.sync_state()?.as_deref() == Some(state.as_str()) {
+    // A dirty-set hash computed for another tree says nothing about this one, so
+    // a foreign store may never no-op here (issue #330).
+    let foreign = foreign_worktree(store, repo)?;
+    if foreign.is_none() && store.sync_state()?.as_deref() == Some(state.as_str()) {
         return Ok(SyncReport {
             no_op: true,
             blobs_total: total,
@@ -355,6 +416,7 @@ pub fn sync_worktree(
     resolve_calls(&mut assembled);
     append_submodule_nodes(repo.submodules()?, &mut assembled);
     store.reconcile(&assembled, Some(&state))?;
+    store.set_synced_worktree(&worktree_id(repo))?;
 
     Ok(SyncReport {
         no_op: false,
@@ -365,6 +427,7 @@ pub fn sync_worktree(
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree,
+        rebuilt_from_foreign_worktree: foreign,
     })
 }
 
@@ -397,7 +460,9 @@ pub fn sync_index(
     }
     let state = format!("index:{:016x}", fnv1a64(buf.as_bytes()));
 
-    if store.sync_state()?.as_deref() == Some(state.as_str()) {
+    // An index hash from another tree describes another index (issue #330).
+    let foreign = foreign_worktree(store, repo)?;
+    if foreign.is_none() && store.sync_state()?.as_deref() == Some(state.as_str()) {
         return Ok(SyncReport {
             no_op: true,
             blobs_total: staged.len(),
@@ -416,6 +481,7 @@ pub fn sync_index(
     // from the *staged* gitlinks, not `HEAD` — a staged bump is reflected.
     append_submodule_nodes(repo.index_submodules()?, &mut assembled);
     store.reconcile(&assembled, Some(&state))?;
+    store.set_synced_worktree(&worktree_id(repo))?;
 
     Ok(SyncReport {
         no_op: false,
@@ -426,6 +492,7 @@ pub fn sync_index(
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: state,
+        rebuilt_from_foreign_worktree: foreign,
     })
 }
 
@@ -467,6 +534,10 @@ pub fn sync_tree(
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: rev.to_owned(),
+        // A historical-rev store deliberately records no synced state at all
+        // (`rebuild(.., None)` clears the row), so it is stamped with no tree
+        // either — it is a scratch view of a commit, not of a working tree.
+        rebuilt_from_foreign_worktree: None,
     })
 }
 

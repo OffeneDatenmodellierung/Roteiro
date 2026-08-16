@@ -449,6 +449,9 @@ pub struct DuplicatesConfig {
 /// being unreadable or malformed. Both are surfaced rather than swallowed: a
 /// fallback to "no exclusions" answers with a silently different number, which is
 /// the defect, not a graceful degradation.
+// The two callers are the graph API (`explorer`) and the MCP `debt` tool
+// (`serve`); a default build has neither, so gate it or dead-code warns.
+#[cfg(any(feature = "explorer", feature = "serve"))]
 pub fn debt_ignore_for(
     ws: &rto_graph::Workspace,
     project: Option<&str>,
