@@ -125,9 +125,12 @@ fn decay_none_recalls_byte_identically_across_runs() {
                 ..lesson("Removed because the batch cursor had no dedup key.")
             })
             .expect("write");
-        // Twice within one session, first of all.
-        let once = serde_json::to_vec(&recall(&store)).expect("serialize");
-        let twice = serde_json::to_vec(&recall(&store)).expect("serialize");
+        // Twice within one session, first of all. Compared as `String` rather
+        // than `Vec<u8>` — the same bytes either way, since a Rust `String` is
+        // UTF-8 and compares bytewise, but a failure prints the JSON instead of
+        // two thousand byte codes.
+        let once = serde_json::to_string(&recall(&store)).expect("serialize");
+        let twice = serde_json::to_string(&recall(&store)).expect("serialize");
         assert_eq!(once, twice, "recall is not even stable within one session");
         once
     };
@@ -136,7 +139,7 @@ fn decay_none_recalls_byte_identically_across_runs() {
     // process-worth of state, nothing carried over but the file.
     let second = {
         let store = Store::open(&path).expect("reopen");
-        serde_json::to_vec(&recall(&store)).expect("serialize")
+        serde_json::to_string(&recall(&store)).expect("serialize")
     };
     assert_eq!(
         first, second,

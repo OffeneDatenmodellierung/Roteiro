@@ -365,6 +365,22 @@ fn the_memory_channel_scores_without_the_authored_boost() {
         remembered.score,
         authored.score,
     );
+
+    // Sharper, because the comparison above only catches a leak large enough to
+    // overturn the ranking, and +40 is not always that large. The memory scorer's
+    // *own* terms are a whole-query match and a per-token match, so its ceiling is
+    // `25 + 8 × tokens` — before the evidence weight, which only ever multiplies
+    // down. A score above that ceiling is a term from somewhere else, and there is
+    // exactly one term it could be.
+    let tokens = shared.split_whitespace().count();
+    let ceiling = u32::try_from(25 + 8 * tokens).expect("small");
+    assert!(
+        remembered.score <= ceiling,
+        "a memory hit scored {} against a lexical ceiling of {ceiling} — the score \
+         carries a term that is not its own, and the only such term is the +40 \
+         `authored` boost",
+        remembered.score,
+    );
     // The two channels are separate lists, so no consumer can merge them by
     // accident and no ranking puts them side by side.
     assert!(
