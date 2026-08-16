@@ -65,8 +65,13 @@ But adjudicate before acting, and one rule pays for itself:
 - [ ] **A comment claiming the code will not compile is refuted by the CI
       `msrv` job at that commit, not by an investigation.** In that sample every
       false positive was a compile-error claim (a move out of a borrow, three
-      times), and *every* compile-error claim was a false positive — 3 for 3,
-      with no real defect in that class. `msrv` is
+      times), and *every* compile-error claim was a false positive. A fourth has
+      since joined them on #352 — `Duration::from_mins` called "not on MSRV
+      1.94", though it is stable since 1.91.0 — so the count now stands at
+      **4 for 4**, with no real defect in that class. The adjudicated corpus
+      behind these numbers is
+      [`crates/rto-graph/tests/fixtures/review/`](../crates/rto-graph/tests/fixtures/review/README.md);
+      record a newly adjudicated comment there. `msrv` is
       `cargo check --workspace --all-features` and finishes in about 40 seconds;
       in each case it had already gone green **at the commit the comment was
       left on**, roughly a minute before the comment was posted. So the
