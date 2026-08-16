@@ -907,6 +907,17 @@ enum SecurityAction {
         /// Only this analyzer's assets. Default: all of them.
         #[arg(long, value_name = "NAME")]
         analyzer: Option<String>,
+        /// Allow downloading the assets that are fetched by URL — today that is
+        /// `osv-scanner`'s per-ecosystem OSV databases, roughly **260 MB**.
+        ///
+        /// Without it a downloadable asset that is not already present is
+        /// refused with the command that obtains it, exactly as the
+        /// operator-provisioned `RustSec` checkout is. Provisioning is the only
+        /// thing that may fetch, and even here it is asked for rather than
+        /// assumed: `prefetch` is a command people run when unsure, and a
+        /// quarter-gigabyte download is not a reasonable answer to that.
+        #[arg(long)]
+        allow_download: bool,
         /// Emit the result as JSON.
         #[arg(long)]
         json: bool,
@@ -4775,9 +4786,11 @@ fn run_security(action: SecurityAction) -> anyhow::Result<()> {
             json,
         } => run_security_run(&analyzer, allow_unsandboxed, json),
         #[cfg(feature = "exec-subprocess")]
-        SecurityAction::Prefetch { analyzer, json } => {
-            run_security_prefetch(analyzer.as_deref(), json)
-        }
+        SecurityAction::Prefetch {
+            analyzer,
+            allow_download,
+            json,
+        } => run_security_prefetch(analyzer.as_deref(), allow_download, json),
         #[cfg(feature = "exec-subprocess")]
         SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
     }
@@ -4810,8 +4823,96 @@ struct SecurityIngestReport {
 struct SecurityListing {
     /// Every live layer with its run evidence and findings.
     layers: Vec<rto_graph::FindingsLayer>,
-    /// Total findings across those layers.
+    /// Total findings across those layers. **Unchanged** by the cross-reference
+    /// below — see [`SecurityCrossReference`].
     findings: usize,
+    /// Dependency advisories seen across analyzers, where more than one
+    /// dependency analyzer has a live layer. Empty otherwise, because there is
+    /// nothing to cross-reference against.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cross_reference: Vec<SecurityCrossReference>,
+}
+
+/// One advisory in the `--json` cross-reference (ADR-0018 v1.1).
+///
+/// A **view**, not a record: every finding it names is still in its own layer
+/// under its own key, and `findings` above still counts them all. This is what
+/// makes a duplicate pair read as one advisory confirmed by two analyzers rather
+/// than as a count that silently halved.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityCrossReference {
+    /// The advisory's canonical id — the RUSTSEC id where both sides publish one.
+    advisory: String,
+    /// Every identifier it is published under.
+    aliases: Vec<String>,
+    /// The package and resolved version it is about.
+    package: String,
+    version: String,
+    /// How many distinct analyzers reported it. `1` is a normal state, not a
+    /// discrepancy: the two databases are pinned independently, and `yanked` is
+    /// not an advisory kind OSV can carry at all.
+    confirmed_by: usize,
+    /// Which analyzers, and the still-addressable finding key each one wrote.
+    reports: Vec<SecurityCrossReferenceReport>,
+}
+
+/// One analyzer's report inside a [`SecurityCrossReference`].
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityCrossReferenceReport {
+    analyzer: String,
+    /// The finding key, unchanged and still addressable.
+    key: String,
+    /// The id *this* analyzer fired, which need not be the canonical one.
+    rule: String,
+    severity: rto_graph::Severity,
+}
+
+/// The cross-reference for a listing, or empty when there is nothing to cross-
+/// reference.
+///
+/// Below two dependency analyzers the section is suppressed rather than shown
+/// with every row reading "confirmed by 1" — that would be noise dressed as
+/// information, and it is exactly the case where a single source carries no
+/// signal about agreement either way.
+#[cfg(feature = "execution")]
+fn security_cross_reference(layers: &[rto_graph::FindingsLayer]) -> Vec<SecurityCrossReference> {
+    let correspondences = rto_exec::cross_reference(layers);
+    let mut analyzers: Vec<&str> = correspondences
+        .iter()
+        .flat_map(|c| c.analyzers())
+        .collect::<Vec<_>>();
+    analyzers.sort_unstable();
+    analyzers.dedup();
+    if analyzers.len() < 2 {
+        return Vec::new();
+    }
+    correspondences
+        .into_iter()
+        .map(|c| SecurityCrossReference {
+            advisory: c.advisory,
+            aliases: c.aliases,
+            package: c.package,
+            version: c.version,
+            confirmed_by: c
+                .reports
+                .iter()
+                .map(|r| &r.analyzer)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            reports: c
+                .reports
+                .into_iter()
+                .map(|r| SecurityCrossReferenceReport {
+                    analyzer: r.analyzer,
+                    key: r.key,
+                    rule: r.rule,
+                    severity: r.severity,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Just enough of a normalized report to learn which analyzer it claims to be
@@ -5046,10 +5147,13 @@ fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
     let layers = store.findings_layers(analyzer)?;
     let total: usize = layers.iter().map(|l| l.findings.len()).sum();
 
+    let cross_reference = security_cross_reference(&layers);
+
     if json {
         emit_json(&SecurityListing {
             layers,
             findings: total,
+            cross_reference,
         })?;
         return Ok(());
     }
@@ -5082,7 +5186,76 @@ fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
         }
     }
     println!("{total} finding(s) across {} layer(s)", layers.len());
+    print_cross_reference(&cross_reference);
     Ok(())
+}
+
+/// Render the cross-reference block beneath a listing (ADR-0018 v1.1).
+///
+/// The total above is printed **before** this and is not adjusted by it: a
+/// duplicate pair is two findings and one advisory, and both numbers are true.
+/// Advisories two analyzers agree on come first, because agreement between
+/// independent sources is the evidence this decision exists to keep; the
+/// single-source ones follow, counted rather than listed, and labelled as the
+/// ordinary state they are.
+#[cfg(feature = "execution")]
+fn print_cross_reference(cross_reference: &[SecurityCrossReference]) {
+    if cross_reference.is_empty() {
+        return;
+    }
+    let (confirmed, single): (Vec<_>, Vec<_>) =
+        cross_reference.iter().partition(|c| c.confirmed_by > 1);
+
+    println!();
+    println!(
+        "cross-reference: {} advisory/advisories across analyzers",
+        cross_reference.len()
+    );
+    for entry in &confirmed {
+        let analyzers: Vec<&str> = entry
+            .reports
+            .iter()
+            .map(|r| r.analyzer.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        println!(
+            "  {} — {} {} — confirmed by {} ({})",
+            entry.advisory,
+            entry.package,
+            entry.version,
+            entry.confirmed_by,
+            analyzers.join(", ")
+        );
+        // Both keys stay addressable: a reader who fixes the advisory must see
+        // both of these disappear, and cannot do that without being told them.
+        for report in &entry.reports {
+            println!("      {}", report.key);
+        }
+    }
+    if !single.is_empty() {
+        let mut by_analyzer: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for entry in &single {
+            for report in &entry.reports {
+                *by_analyzer.entry(report.analyzer.as_str()).or_default() += 1;
+            }
+        }
+        let breakdown: Vec<String> = by_analyzer
+            .iter()
+            .map(|(analyzer, count)| format!("{count} only in {analyzer}"))
+            .collect();
+        // Not a discrepancy. The two databases are pinned and prefetched
+        // independently, so they legitimately differ for a window; and `yanked`
+        // comes from the crates.io index rather than from an advisory, so OSV
+        // cannot carry it at all.
+        println!(
+            "  {} reported by one analyzer ({}) — expected: the databases are pinned separately, \
+             and some kinds only one of them carries",
+            single.len(),
+            breakdown.join(", ")
+        );
+    }
 }
 
 /// The `--json` shape of `roteiro security run`.
@@ -5245,14 +5418,47 @@ struct SecurityPrefetchReport {
     provisioned: Vec<rto_exec::InstalledAsset>,
 }
 
+/// Stream `url` into `path`, for the one asset kind that is fetched by URL.
+///
+/// The transport lives here rather than in `rto-exec` on purpose: that crate
+/// has no network dependency and does not acquire one to provision an asset.
+/// It takes this as a function, so the code that *could* fetch is reachable
+/// only from `prefetch` — see [`rto_exec::provision_with`].
+///
+/// The body is streamed to disk rather than buffered: `npm/all.zip` alone is
+/// around 210 MB, and reading that into a `Vec` to write it straight back out
+/// would be a needless spike.
+#[cfg(feature = "exec-subprocess")]
+fn download_asset_file(url: &str, path: &std::path::Path) -> Result<(), String> {
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let mut reader = response.into_body().into_reader();
+    let mut file =
+        std::fs::File::create(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
+    // A short write is an error, not a smaller asset: a truncated database that
+    // returned `Ok` here would be digested and pinned as if it were complete,
+    // and would then quietly under-report findings on every run.
+    std::io::copy(&mut reader, &mut file)
+        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    std::io::Write::flush(&mut file).map_err(|e| format!("flushing {}: {e}", path.display()))?;
+    Ok(())
+}
+
 /// Install and verify every pinned asset, recording each digest.
 ///
-/// This is the only command that writes to the asset cache. It fetches nothing
-/// over the network: the rule set is compiled into this binary, and the advisory
-/// database is a directory the operator provides — if it is absent, this says
-/// where it looked and which command obtains it, and does not go and get it.
+/// This is the only command that writes to the asset cache, and the only one
+/// that can reach the network at all — and only with `--allow-download`. The
+/// rule set is compiled into this binary; the `RustSec` advisory database is a
+/// directory the operator provides, and if it is absent this says where it
+/// looked and which command obtains it rather than going and getting it; the
+/// OSV databases are fetched by URL, which is what `--allow-download` is for.
 #[cfg(feature = "exec-subprocess")]
-fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
+fn run_security_prefetch(
+    analyzer: Option<&str>,
+    allow_download: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let specs: Vec<&rto_exec::AssetSpec> = match analyzer {
         Some(name) => {
@@ -5268,6 +5474,7 @@ fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<(
         None => rto_exec::ASSETS.iter().collect(),
     };
 
+    let fetcher: &rto_exec::Fetcher<'_> = &download_asset_file;
     let mut provisioned = Vec::with_capacity(specs.len());
     let mut failures = Vec::new();
     for spec in specs {
@@ -5281,8 +5488,21 @@ fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<(
                 spec.kind.as_str(),
                 spec.licence
             );
+            if allow_download && let rto_exec::AssetSource::Download { files } = spec.source {
+                // Name every URL before opening a socket to any of them. What
+                // this command talks to is the operator's business, and a
+                // quarter-gigabyte transfer should not be a surprise.
+                eprintln!("  downloading {} file(s):", files.len());
+                for file in files {
+                    eprintln!("    {}", file.url);
+                }
+            }
         }
-        match rto_exec::provision(&root, spec) {
+        // The fetcher is passed only when the operator asked for downloads. A
+        // downloadable asset that is already present still provisions without
+        // it, so re-running `prefetch` over a warm cache needs no flag and no
+        // network.
+        match rto_exec::provision_with(&root, spec, allow_download.then_some(fetcher)) {
             Ok(record) => provisioned.push(record),
             // One unprovisionable asset must not hide the others: report it and
             // carry on, then fail at the end with everything that went wrong.
@@ -7797,10 +8017,14 @@ mod security_cli {
         let listing = SecurityListing {
             layers: Vec::new(),
             findings: 0,
+            cross_reference: Vec::new(),
         };
         let value = serde_json::to_value(&listing).expect("serialize");
         assert_eq!(value["findings"], 0);
         assert!(value["layers"].as_array().expect("array").is_empty());
+        // Nothing to cross-reference is an absent section, not an empty one:
+        // a consumer must not have to tell "no duplicates" from "not computed".
+        assert!(value.get("cross_reference").is_none());
     }
 
     /// The flag that accepts an unsandboxed run is required, and it is a flag
@@ -7848,13 +8072,19 @@ mod security_cli {
     #[cfg(feature = "exec-subprocess")]
     #[test]
     fn prefetch_and_status_default_to_every_analyzer() {
-        let SecurityAction::Prefetch { analyzer, json } =
-            action(["roteiro", "security", "prefetch"])
+        let SecurityAction::Prefetch {
+            analyzer,
+            allow_download,
+            json,
+        } = action(["roteiro", "security", "prefetch"])
         else {
             panic!("expected Prefetch");
         };
         assert_eq!(analyzer, None);
         assert!(!json);
+        // Downloading is asked for, never assumed: a bare `prefetch` must not
+        // start a quarter-gigabyte transfer.
+        assert!(!allow_download);
 
         let SecurityAction::Status { analyzer, json } = action([
             "roteiro",
