@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
-last-modified: 2026-08-07
+version: "1.2"
+last-modified: 2026-08-16
 confluence-url:
 ---
 
@@ -93,7 +93,7 @@ Operational model: git hooks (`post-checkout`/`post-merge`) compare local store 
 **Consequences:**
 - Pros: one query surface ends agent tool-routing ambiguity; precise-where-known, fuzzy-where-suggested with explicit labelling; house ADR style becomes the intent layer rather than competing with it; docs site, vault, and agent context are guaranteed-consistent build outputs; branch/worktree correctness via content addressing; offline; interview flow preserved; clean migration path from all three incumbents.
 - Cons: build and ongoing maintenance effort is ours; tree-sitter grammar breadth must be tracked over time; supersedes spec-store (migration for its existing registry required); fuzzy-extraction quality is our problem once Graphify is dropped; dual MIT/Apache-2.0 licensing requires vendored code and grammars to be licence-compatible (`cargo deny` licence gate enforces this).
-- Quality bar: 85% per-file coverage ratchet, clippy/fmt/audit/deny gates from day one, dogfooded on its own repository; this ADR is authored and checked by the tool once bootstrapped.
+- Quality bar: clippy/fmt/audit/deny gates from day one, dogfooded on its own repository; this ADR is authored and checked by the tool once bootstrapped. An 85% per-file coverage ratchet was intended as part of this bar — it is an **aspiration that was never wired into CI**, and coverage is now measured non-blocking instead (issue #319). Stated here as intent, not as an enforced gate.
 
 Cost is engineering time only in all options (all tools open source, local-first); no vendor rack rates apply.
 
@@ -129,3 +129,4 @@ Accepted by the project team without external advisory review — single-team op
 | 0.1 | 2026-08-07 | Initial draft: consolidation rationale, four options, Roteiro architecture (provenance model, three crates + CLI, content-addressed cache, CI-canonical artifacts, importers, MCP-optional). |
 | 1.0 | 2026-08-07 | Accepted. Naming secured (roteiro.dev, crates.io, OffeneDatenmodellierung/Roteiro); MIT OR Apache-2.0; attribution to The Roteiro Project Team. Stage 1 bootstrap started. |
 | 1.1 | 2026-08-10 | Added an **Implementation** section linking the ADR's decisions into the code (`[[path#Symbol]]`), so `roteiro check` validates this ADR against the implementation (Stage 14 self-check). |
+| 1.2 | 2026-08-16 | Corrected the quality bar (issue #319): the 85% per-file coverage ratchet named here was an **aspiration that was never wired into CI** — `.github/workflows/ci.yml` contained no coverage tooling at all, so every stage DoD citing it was unverifiable. Coverage is now measured non-blocking; the decision to enforce a floor is deferred until the real numbers are in hand. No architectural decision in this ADR changes. (Frontmatter `version` also brought up to date — it still read 1.0 after the 1.1 amendment.) |

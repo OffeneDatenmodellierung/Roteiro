@@ -1,0 +1,136 @@
+//! Guard: the documented coverage story must match the pipeline (issue #319).
+//!
+//! `BUILD_PLAN.md` asserted for a long time that `cargo-llvm-cov` ran in CI with
+//! an 85% per-file floor while `.github/workflows/ci.yml` contained no coverage
+//! tooling at all. That is a false statement about the pipeline, not an
+//! aspiration: it made every stage's definition of done citing "85% coverage"
+//! unverifiable, and
+//! three separate agents reported it independently while trying to comply.
+//!
+//! Nothing in the build could notice, because a claim about CI is not code. This
+//! test makes it noticeable. It does not check coverage — it checks that the
+//! *description* of coverage stays true:
+//!
+//! 1. CI still measures coverage (so the docs' "measured in CI" stays true), and
+//! 2. that job is still non-blocking (so the docs' "not gated" stays true), and
+//! 3. no document reinstates the claim that the floor is enforced.
+//!
+//! Making the coverage job blocking is a fine thing to do — but it has to happen
+//! in the same change that rewrites §11, and this test is what forces the pair.
+
+use std::path::{Path, PathBuf};
+
+/// The repository root, from this crate's manifest directory (`crates/roteiro`).
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repo root is two levels above crates/roteiro")
+        .to_path_buf()
+}
+
+/// Read a repo file, or `None` when it is absent — a packaged crate has no
+/// `.github/` or `docs/`, and this guard is about *this repository*.
+fn repo_file(rel: &str) -> Option<String> {
+    std::fs::read_to_string(repo_root().join(rel)).ok()
+}
+
+/// `ci.yml` with every comment line dropped.
+///
+/// The comments in the coverage job discuss `cargo llvm-cov` and
+/// `continue-on-error` at length — deliberately, since the reasoning is the point
+/// — so a naive `contains` would keep passing after the *actual* step was
+/// deleted, and this guard would be decorative. Fault injection caught exactly
+/// that: replacing the run step with `cargo test` left the test green.
+fn ci_without_comments() -> Option<String> {
+    Some(
+        repo_file(".github/workflows/ci.yml")?
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+#[test]
+fn ci_measures_coverage_without_gating_it() {
+    let Some(ci) = ci_without_comments() else {
+        return; // not a source checkout
+    };
+
+    assert!(
+        ci.contains("cargo llvm-cov"),
+        "CI must still measure coverage: the docs say it does, and the whole \
+         point of #319 is that the docs stopped being true. If coverage \
+         measurement is being removed, remove the claim in \
+         docs/BUILD_PLAN.md §11 in the same change."
+    );
+    assert!(
+        ci.contains("continue-on-error: true"),
+        "the coverage job must stay non-blocking while the docs say the 85% \
+         floor is NOT enforced. Making it blocking is fine — but rewrite \
+         docs/BUILD_PLAN.md §11 in the same change, or the docs go back to \
+         describing a pipeline that does not exist."
+    );
+}
+
+#[test]
+fn no_document_claims_the_coverage_floor_is_enforced() {
+    // The exact sentences that were false, plus the shapes they are most likely
+    // to come back as. Each is only a lie while the job carries
+    // `continue-on-error`.
+    //
+    // These match the *assertion* form, not the phrase: §11 now quotes the old
+    // wording while explaining that it was untrue, and a needle that fired on the
+    // quotation would make the honest correction unwritable.
+    const FALSE_CLAIMS: &[&str] = &[
+        "**Coverage ratchet:** `cargo-llvm-cov` in CI, 85% per-file floor",
+        "85% per-file coverage ratchet, clippy",
+        "Coverage ratchet held at 85%",
+        "| Coverage | 85% per-file ratchet |",
+    ];
+    const DOCS: &[&str] = &[
+        "docs/BUILD_PLAN.md",
+        "docs/BUILD_PLAN_V2.md",
+        "docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md",
+    ];
+
+    for doc in DOCS {
+        let Some(text) = repo_file(doc) else { continue };
+        for claim in FALSE_CLAIMS {
+            assert!(
+                !text.contains(claim),
+                "{doc} states {claim:?}, which asserts an enforced coverage gate. \
+                 CI measures coverage and does not enforce a floor — say that, or \
+                 make the gate real first."
+            );
+        }
+    }
+}
+
+#[test]
+fn the_build_plan_records_what_is_actually_enforced() {
+    let Some(plan) = repo_file("docs/BUILD_PLAN.md") else {
+        return;
+    };
+    // The corrected §11 must name the real gates, so a reader comparing the doc
+    // to ci.yml finds them equal rather than nearly equal.
+    for gate in [
+        "cargo fmt --check",
+        "cargo clippy",
+        "cargo test --workspace",
+        "roteiro check",
+        "cargo audit",
+        "cargo deny",
+    ] {
+        assert!(
+            plan.contains(gate),
+            "docs/BUILD_PLAN.md must list `{gate}` among the enforcing gates"
+        );
+    }
+    assert!(
+        plan.contains("87.51%"),
+        "the measured workspace baseline belongs in the plan — it is the input \
+         to deciding whether to switch a floor on"
+    );
+}

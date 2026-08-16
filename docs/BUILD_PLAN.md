@@ -57,7 +57,9 @@ These come from ADR-0001 and must hold at every release, not just at v1.0:
 6. **Dogfooded.** Roteiro runs on its own repo in CI; `roteiro check` gates the
    build from the first stage it exists.
 7. **Quality gates from day one.** fmt, clippy (`-D warnings`, pedantic), audit,
-   deny, and an 85% per-file coverage ratchet. `unsafe_code = "forbid"`.
+   deny, and `roteiro check`. `unsafe_code = "forbid"`. Coverage is **measured**
+   in CI but not gated; the 85% per-file floor is an aspiration, not a check
+   that runs (issue #319, §11).
 
 ---
 
@@ -137,7 +139,8 @@ Each stage is independently shippable and leaves `main` green + dogfoodable.
 - New deps: none beyond current (rusqlite, serde). Add `serde_json` for `meta`.
 - CLI: none yet (library milestone), but add `roteiro --version`/help polish.
 - **DoD:** round-trip property test (insert arbitrary FactSet → query → equal);
-  migration idempotency test; 85% coverage; docs on every public item.
+  migration idempotency test; high coverage (measured, not gated — §11); docs on
+  every public item.
 - **Status: delivered.** `rto-graph` now has `NodeKind`/`EdgeKind` (open sets),
   `Node`/`Edge`/`Span`/`FactSet`, an append-only migrations framework, and the
   full insert/query API (`upsert_node`, `insert_edge`, `apply_factset`,
@@ -1076,8 +1079,54 @@ Tracked here so they don't hide in per-stage footnotes. None gate v1.0.
 - **Dogfood test:** CI runs `roteiro sync && roteiro check` on this repo from
   Stage 4 onward; a failure blocks merge.
 
-**Coverage ratchet:** `cargo-llvm-cov` in CI, 85% per-file floor (ADR bar).
-Ratchet up, never down; new files land with tests.
+**Coverage: measured in CI, not gated (issue #319).** For a long time this line
+read "`cargo-llvm-cov` in CI, 85% per-file floor" while
+`.github/workflows/ci.yml` contained no coverage tooling of any kind — a false
+statement about the pipeline, which made every stage DoD below that cites "85%
+coverage" unverifiable. Three separate agents reported it independently, which is
+the tell: the docs were actively misleading people trying to comply.
+
+What is true now: a **non-blocking** `coverage` job runs
+`cargo llvm-cov --workspace --all-features` and publishes the per-file table and
+the workspace total to the run summary. **No threshold is enforced.** The 85%
+per-file floor remains the *aspiration* recorded in ADR-0001, not a gate — and a
+per-file floor is stricter than most projects run, so switching one on blind
+would fail thin wiring files nobody wants to pad with ceremonial tests. Measure
+first; turning the floor on is a separate, deliberate change with the real
+numbers in hand.
+
+The enforcing gates are, exactly and only: `cargo fmt --check`, `cargo clippy
+--workspace --all-targets --all-features -D warnings`, `cargo test --workspace
+--all-features`, `roteiro check` (dogfood), `cargo audit`, and `cargo deny
+--all-features check`.
+
+**Measured baseline** (`cargo llvm-cov --workspace --all-features`, tests
+excluded from the denominator, at the commit that added the job):
+
+| Metric | Value |
+|---|---|
+| Workspace total, **lines** | **87.51%** |
+| Workspace total, regions | 86.96% |
+| Workspace total, functions | 86.55% |
+| Files measured | 64 |
+| **Files below 85% lines** | **7** |
+
+The seven: `roteiro/src/main.rs` (60.08%), `rto-llama/src/speculative.rs`
+(34.77%), `rto-graph/src/media/producers.rs` (49.26%),
+`rto-exec/src/subprocess.rs` (56.55%), `rto-llama/src/engine.rs` (68.18%),
+`rto-llama/src/llama.rs` (74.20%), `rto-exec/src/assets.rs` (81.53%).
+
+These numbers are why the floor is not switched on in the same change that
+started measuring. The **workspace already clears 85%** — a workspace-level gate
+would pass today. A **per-file** gate would fail seven files, and the reason each
+one is low is a fact about what the code does, not a gap someone forgot: `main.rs`
+is CLI wiring driven through integration tests that llvm-cov attributes to the
+binary unevenly, and `speculative.rs`, `llama.rs`, `engine.rs`, `producers.rs` and
+`subprocess.rs` need a loaded model, a GPU, or a sandboxed subprocess to exercise
+their real paths. Padding them with ceremonial tests would move the number without
+moving the risk. Deciding the threshold — workspace-level now, per-file later, or
+per-file with a documented exemption list — is the follow-up this measurement
+exists to inform.
 
 **Dependency & licence policy:** every new crate (esp. tree-sitter grammars and
 inference/PDF crates) must pass `cargo deny` (licence MIT/Apache-compatible,

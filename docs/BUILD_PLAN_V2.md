@@ -79,7 +79,7 @@ Verified against `main` at the time of writing:
 | Released | **v1.10.1** on crates.io; workspace at **1.11.0**, publish in flight (only `rto-llama-v1.11.0` tagged so far) | V2 work is post-1.0 — semver is now real. |
 | MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
-| Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
+| Coverage | **measured in CI, not gated** — `cargo llvm-cov` runs non-blocking; the 85% per-file floor is an aspiration (ADR-0001), never an enforced check (issue #319) | Every stage below still carries test cost, but a DoD may not cite "85% coverage" as if something verified it. |
 | CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
 | Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | **`11`** (`crates/rto-graph/src/extract.rs`) — the Stage 28 bump landed in #316 | Bumping it forces full re-extraction for every user. No test pins the value. |
@@ -719,8 +719,9 @@ is why it rides an independent track.
 - Docs: blueprint updated, `docs/JSON_SCHEMA.md` extended for findings + memory,
   every "offline" claim re-audited to say **offline-capable once provisioned**
   where that is the truth.
-- Coverage ratchet held at 85% across all new crates; `cargo deny` clean with
-  `--all-features` on the resolved native closure.
+- Coverage **measured** across all new crates and the numbers reviewed before
+  release (there is no ratchet enforcing 85% — issue #319); `cargo deny` clean
+  with `--all-features` on the resolved native closure.
 
 ---
 
