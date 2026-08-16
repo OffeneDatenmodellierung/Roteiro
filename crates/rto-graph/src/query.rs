@@ -328,7 +328,7 @@ pub struct CouplingReport {
 /// fan-out (distinct callees) over `Calls` edges — most-coupled first by
 /// `order`, capped at `limit` (`0` = unlimited).
 ///
-/// Two deliberate counting rules, both of which change the numbers:
+/// Three deliberate counting rules, all of which change the numbers:
 ///
 /// - **Distinct counterparts, not edges.** Edges are a set per `(src, dst, kind,
 ///   provenance)`, which still admits *parallel* `Calls` edges between one pair
