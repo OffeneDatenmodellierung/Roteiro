@@ -61,14 +61,12 @@
 //! when that model is evicted or when the engine is dropped, and always before the
 //! backend. Nothing new has to be released, and nothing new can be forgotten.
 
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use llama_cpp_2::ChatTemplateError;
 use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -562,11 +560,14 @@ impl LlamaEngine {
     }
 
     /// A fresh context sized to `self.n_ctx`, borrowing `model`.
+    ///
+    /// The parameters come from [`crate::speculative::base_params`] — the one
+    /// place a generative context's shape is written down — so a plain context
+    /// and the two a speculative generation builds cannot disagree about the
+    /// window or the batch width they accept.
     fn new_context<'m>(&self, model: &'m LlamaModel) -> Result<LlamaContext<'m>, EngineError> {
-        let n_ctx = NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::MIN);
-        let params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
         model
-            .new_context(&self.backend, params)
+            .new_context(&self.backend, crate::speculative::base_params(self.n_ctx))
             .map_err(|e| EngineError::Inference(format!("context: {e}")))
     }
 
@@ -627,9 +628,26 @@ impl LlamaEngine {
             .map_err(|e| EngineError::Inference(format!("tokenize: {e}")))?;
         let prompt_tokens = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
 
-        // Prime the batch with the prompt; only the last token needs logits. Size
-        // the batch to the prompt; whether it fits the context is enforced by the
-        // decode call.
+        // The context comes first, and the prompt is measured against it before a
+        // single token is batched (issue #346). This used to run the other way
+        // round — batch the whole prompt, then "let the decode call enforce it" —
+        // but the decode call does not *enforce* anything a caller can catch: an
+        // over-long batch trips a `GGML_ASSERT` inside llama.cpp and aborts the
+        // process. The bound is a property of the context, so the context (plain
+        // or speculative) is built first and asked what it will accept.
+        let mut decoder = match self.speculative_decoder(model, resolved.draft.as_deref()) {
+            Some(mtp) => Decoder::Speculative(Box::new(mtp)),
+            None => Decoder::Plain(self.new_context(model)?),
+        };
+        // Encoder-only models never reach here — `chat_stream` rejects them
+        // earlier — so this is the causal bound, `n_batch`.
+        check_batch_capacity(
+            tokens.len(),
+            batch_capacity(decoder.context(), false),
+            "prompt",
+        )?;
+
+        // Prime the batch with the prompt; only the last token needs logits.
         let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
         let last = tokens.len().saturating_sub(1);
         for (i, token) in tokens.iter().enumerate() {
@@ -647,32 +665,26 @@ impl LlamaEngine {
         // `<tool_call>` emission and `spec draft`. A model with no draft head —
         // or a `ROTEIRO_SPECULATIVE=0` — simply gets the loop it always had, with
         // the same sampler and the same seed.
-        let (completion_tokens, finish_reason) =
-            if let Some(mut mtp) = self.speculative_decoder(model, resolved.draft.as_deref()) {
+        let (completion_tokens, finish_reason) = match &mut decoder {
+            Decoder::Speculative(mtp) => {
                 mtp.prime(&mut batch, &tokens)?;
                 self.speculative.activate();
                 crate::speculative::run_generation(
                     model,
-                    &mut mtp,
+                    mtp,
                     start,
                     &mut sampler,
                     req.max_tokens,
                     &self.speculative,
                     on_token,
                 )?
-            } else {
-                let mut ctx = self.new_context(model)?;
+            }
+            Decoder::Plain(ctx) => {
                 ctx.decode(&mut batch)
                     .map_err(|e| EngineError::Inference(format!("prompt decode: {e}")))?;
-                run_generation(
-                    model,
-                    &mut ctx,
-                    start,
-                    &mut sampler,
-                    req.max_tokens,
-                    on_token,
-                )?
-            };
+                run_generation(model, ctx, start, &mut sampler, req.max_tokens, on_token)?
+            }
+        };
         Ok(CompletionStats {
             prompt_tokens,
             completion_tokens,
@@ -757,6 +769,35 @@ impl LlamaEngine {
             completion_tokens,
             finish_reason,
         })
+    }
+}
+
+/// How one text generation will be decoded: the plain context, or the
+/// target+draft pair a speculative generation runs on (issue #320).
+///
+/// This exists so that the choice — which is made per request, from the model's
+/// own metadata — happens *before* the prompt is batched. Both variants own a
+/// context whose batch capacity has to be honoured, and asking each for that
+/// capacity through one accessor is what lets [`LlamaEngine::chat_text`] check
+/// the prompt once instead of once per branch, and stops a future branch from
+/// quietly being added without a check (issue #346).
+enum Decoder<'m> {
+    /// A single context: the plain decode loop.
+    Plain(LlamaContext<'m>),
+    /// An MTP target/draft pair. Boxed because [`Mtp`] is much the larger of the
+    /// two and an unboxed enum would round every plain generation up to its size.
+    Speculative(Box<Mtp<'m>>),
+}
+
+impl<'m> Decoder<'m> {
+    /// The context the prompt batch is submitted to — the target context in the
+    /// speculative case, which is the one that decodes the prompt in
+    /// [`Mtp::prime`] and therefore the one whose bound applies.
+    fn context(&self) -> &LlamaContext<'m> {
+        match self {
+            Self::Plain(ctx) => ctx,
+            Self::Speculative(mtp) => mtp.target(),
+        }
     }
 }
 
@@ -905,6 +946,65 @@ fn fallback_template_name(arch: Option<&str>) -> &'static str {
         // most of this engine's install set. Also covers unknown or absent
         // architectures (e.g. `moondream2`, which records none).
         _ => "chatml",
+    }
+}
+
+/// Refuse `n_tokens` when a single llama.cpp batch cannot hold that many, naming
+/// both the count and the limit (issue #346).
+///
+/// **This is the guard that has to exist whatever else is done about batch
+/// width.** llama.cpp checks the batch against the context's capacity with a
+/// `GGML_ASSERT`, which calls `ggml_abort` — it terminates the *process*, so no
+/// Rust error handling anywhere upstream can turn it back into a failed request.
+/// A `roteiro serve` that reaches it takes the graph API and the web UI down with
+/// it, and an ordinary over-long chat message is enough to do it. So the count is
+/// checked here, before any token reaches llama.cpp, and refused as an
+/// [`EngineError::InvalidRequest`] — which `rto-serve` already maps to a 400.
+/// Raising the capacity moves the bound; it cannot remove it, because some input
+/// will always exceed whatever the bound is.
+///
+/// `limit` is read back from the built [`LlamaContext`] rather than recomputed
+/// here, because llama.cpp derives it from the requested parameters by rules of
+/// its own (it clamps `n_batch` to `n_ctx` for a causal model, and does not for a
+/// non-causal one). Asking the context what it will accept cannot drift from what
+/// it then asserts; a constant restated on this side could.
+///
+/// # Errors
+/// [`EngineError::InvalidRequest`] when `n_tokens` exceeds `limit`.
+fn check_batch_capacity(n_tokens: usize, limit: u32, what: &str) -> Result<(), EngineError> {
+    let n_tokens = u64::try_from(n_tokens).unwrap_or(u64::MAX);
+    if n_tokens <= u64::from(limit) {
+        return Ok(());
+    }
+    Err(EngineError::InvalidRequest(format!(
+        "{what} is {n_tokens} tokens, over the {limit}-token limit this model \
+         accepts in one request — send less text (shorten or split it)"
+    )))
+}
+
+/// The largest single batch `ctx` will accept, in tokens.
+///
+/// Two different llama.cpp asserts are in play and they do not agree, which is
+/// why `encoder_only` has to be passed in — the distinction is a property of the
+/// *model*, and llama.cpp does not expose the resulting `causal_attn` through the
+/// Rust binding:
+///
+/// * a **causal** (generative) model decodes through `llama_context::decode`,
+///   which splits the logical batch into `n_ubatch`-sized physical pieces itself.
+///   Its bound is the *logical* batch, `n_batch`
+///   (`GGML_ASSERT(n_tokens_all <= cparams.n_batch)`).
+/// * an **encoder-only** model is routed to `llama_context::encode`, where
+///   llama.cpp's own comment reads "micro-batching is not possible for non-causal
+///   encoding, so we process the batch in a single shot". Its bound is therefore
+///   the *physical* batch, `n_ubatch`
+///   (`GGML_ASSERT(cparams.n_ubatch >= n_tokens)`) — and that is 512 by default,
+///   four times tighter than the generative one. That difference is why one
+///   number would have been wrong for both paths.
+fn batch_capacity(ctx: &LlamaContext, encoder_only: bool) -> u32 {
+    if encoder_only {
+        ctx.n_ubatch().min(ctx.n_batch())
+    } else {
+        ctx.n_batch()
     }
 }
 
@@ -1086,18 +1186,26 @@ impl Engine for LlamaEngine {
             .lock()
             .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
 
-        let n_ctx = NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::MIN);
         // One embeddings-enabled context, reused across all inputs — creating a
         // fresh context per input (re-allocating the KV cache each time) dominated
         // the cost of embedding a whole repo. The KV cache is cleared between
         // inputs so each is pooled independently. Pooling defaults to the model's
         // own type (CLS for BGE), giving one sentence vector per input.
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(Some(n_ctx))
-            .with_embeddings(true);
+        let ctx_params = crate::speculative::base_params(self.n_ctx).with_embeddings(true);
         let mut ctx = model_ref
             .new_context(&self.backend, ctx_params)
             .map_err(|e| EngineError::Inference(format!("embedding context: {e}")))?;
+
+        // The embedding models this serves are the BERT family, and llama.cpp
+        // routes those through `llama_context::encode`, whose bound is the
+        // *physical* batch and is four times tighter than the generative one — so
+        // which bound applies has to be settled from the architecture, per model
+        // (issue #346). A generative model asked for embeddings decodes normally
+        // and gets the wider bound.
+        let encoder_only = model_ref
+            .meta_val_str("general.architecture")
+            .is_ok_and(|arch| is_encoder_only_arch(&arch));
+        let capacity = batch_capacity(&ctx, encoder_only);
 
         let mut out = Vec::with_capacity(inputs.len());
         for input in inputs {
@@ -1111,6 +1219,9 @@ impl Engine for LlamaEngine {
                     "empty input tokenizes to nothing".to_owned(),
                 ));
             }
+            // Per input, not per request: one over-long string in a batch of
+            // otherwise fine ones is still the one that would abort the process.
+            check_batch_capacity(tokens.len(), capacity, "embedding input")?;
 
             let mut batch = LlamaBatch::new(tokens.len(), 1);
             for (i, token) in tokens.iter().enumerate() {
@@ -1147,10 +1258,61 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatTemplateError, EngineError, LlamaChatTemplate, fallback_template_name,
-        install_native_log_bridge, is_encoder_only_arch, lru_evict_count,
+        ChatTemplateError, EngineError, LlamaChatTemplate, check_batch_capacity,
+        fallback_template_name, install_native_log_bridge, is_encoder_only_arch, lru_evict_count,
         resolve_chat_template_from,
     };
+
+    /// A prompt the size of the limit is the largest one llama.cpp accepts —
+    /// `GGML_ASSERT(n_tokens_all <= cparams.n_batch)` is `<=`, not `<`. Pinning
+    /// the boundary from both sides is what makes an off-by-one here (a `>=`
+    /// where the code says `>`) a test failure rather than a silent 400 on
+    /// perfectly valid input.
+    #[test]
+    fn a_prompt_exactly_at_the_limit_is_accepted() {
+        assert!(check_batch_capacity(2048, 2048, "prompt").is_ok());
+        assert!(check_batch_capacity(2047, 2048, "prompt").is_ok());
+        assert!(check_batch_capacity(0, 2048, "prompt").is_ok());
+        // A limit of zero can only accept an empty batch, and llama.cpp rejects
+        // those separately — but it must not be read as "no limit".
+        assert!(check_batch_capacity(1, 0, "prompt").is_err());
+    }
+
+    /// One token over is refused, as a *client* error — the variant `rto-serve`
+    /// maps to 400. If this ever came back as `Inference` it would be reported as
+    /// a 500, telling the caller the server broke when in fact their input was
+    /// too long.
+    #[test]
+    fn a_prompt_over_the_limit_is_an_invalid_request_naming_both_numbers() {
+        let err = check_batch_capacity(2049, 2048, "prompt")
+            .expect_err("2049 tokens must not be accepted by a 2048-token batch");
+        assert!(
+            matches!(err, EngineError::InvalidRequest(_)),
+            "over-long input is a client error, not an inference failure: {err:?}"
+        );
+        // The message has to carry both numbers: a caller who cannot see the
+        // server's configuration has no other way to learn how much to cut.
+        let msg = err.to_string();
+        assert!(msg.contains("2049"), "message must name the size: {msg}");
+        assert!(msg.contains("2048"), "message must name the limit: {msg}");
+        assert!(
+            msg.contains("prompt"),
+            "message must name what was too long: {msg}"
+        );
+    }
+
+    /// The embedding path passes a different noun and a different (tighter)
+    /// limit, and the message follows both — one shared helper, two call sites,
+    /// no second wording to keep in step.
+    #[test]
+    fn the_embedding_bound_reports_its_own_noun_and_limit() {
+        assert!(check_batch_capacity(512, 512, "embedding input").is_ok());
+        let msg = check_batch_capacity(513, 512, "embedding input")
+            .expect_err("513 tokens must not be accepted by a 512-token batch")
+            .to_string();
+        assert!(msg.contains("embedding input"), "{msg}");
+        assert!(msg.contains("513") && msg.contains("512"), "{msg}");
+    }
 
     #[test]
     fn encoder_only_arch_is_detected() {
