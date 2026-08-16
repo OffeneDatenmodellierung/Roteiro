@@ -473,6 +473,11 @@ mod tests {
     }
 
     /// The same package at two versions is two advisories to fix, not one.
+    ///
+    /// The two findings deliberately share an advisory id: without that, they
+    /// would stay apart because nothing joins them, and this test would pass
+    /// whether or not the version were part of the bucket. A monorepo pinning
+    /// one library at two versions is the real case, and each pin is its own fix.
     #[test]
     fn the_same_advisory_at_two_versions_does_not_merge() {
         let layers = vec![layer(
@@ -481,16 +486,23 @@ mod tests {
                 finding(
                     "osv-scanner",
                     "GHSA-1",
-                    serde_json::json!({"package": "lodash", "version": "4.17.15"}),
+                    serde_json::json!({
+                        "package": "lodash", "version": "4.17.15", "aliases": ["CVE-2020-8203"]
+                    }),
                 ),
                 finding(
                     "osv-scanner",
                     "GHSA-1b",
-                    serde_json::json!({"package": "lodash", "version": "4.17.20"}),
+                    serde_json::json!({
+                        "package": "lodash", "version": "4.17.20", "aliases": ["CVE-2020-8203"]
+                    }),
                 ),
             ],
         )];
-        assert_eq!(cross_reference(&layers).len(), 2);
+        let crossref = cross_reference(&layers);
+        assert_eq!(crossref.len(), 2, "each pinned version is its own fix");
+        assert_eq!(crossref[0].version, "4.17.15");
+        assert_eq!(crossref[1].version, "4.17.20");
     }
 
     /// "Present in one, absent in the other" is a real state, not a defect: the
