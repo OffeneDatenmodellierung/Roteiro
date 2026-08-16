@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.11.0...rto-graph-v1.12.0) - 2026-08-16
+
+### Fixed
+
+- *(migrations)* select by set membership, not > MAX(version)
+- *(check)* see new ADRs on disk; stamp the tree a graph holds ([#330](https://github.com/OffeneDatenmodellierung/Roteiro/pull/330))
+- *(debt)* apply each repo's own exclusions in the graph API ([#321](https://github.com/OffeneDatenmodellierung/Roteiro/pull/321))
+
+### Other
+
+- Merge origin/main (migrations 13 + osv-scanner) into fix/guardrails-319-321-324-330
+
 ## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.1...rto-graph-v1.11.0) - 2026-08-16
 
 ### Added
