@@ -81,6 +81,7 @@ use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
 use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo};
 use crate::slot::KeyedSlot;
+use crate::speculative::{Mtp, SpecCounters, SpeculativeStats, draft_head_layers};
 
 /// Default context window when the caller does not set one.
 const DEFAULT_N_CTX: u32 = 4096;
@@ -161,6 +162,17 @@ pub struct LlamaEngine {
     /// see [`LlamaEngine::projector_inits`]. Not native state — a counter, so its
     /// position among the fields carries no teardown meaning.
     projector_inits: AtomicUsize,
+    /// Whether this engine may pair a model with its MTP draft head (issue
+    /// #320). Resolved once from `ROTEIRO_SPECULATIVE` at construction — reading
+    /// it per request would let a long-lived `roteiro serve` change decode
+    /// strategy underneath itself — and overridable with
+    /// [`LlamaEngine::with_speculative`].
+    speculative_enabled: bool,
+    /// What MTP speculative decoding has done on this engine (issue #320): also
+    /// plain counters, and also carrying no teardown meaning. The draft head's
+    /// own native state is *not* here — it is created and dropped inside a single
+    /// generation, which is the whole of how it fits the ordering above.
+    speculative: SpecCounters,
     backend: Arc<LlamaBackend>,
 }
 
@@ -175,8 +187,29 @@ pub struct LlamaEngine {
 struct Loaded {
     name: String,
     /// On-disk GGUF size, used as a proxy for the model's memory footprint when
-    /// deciding what to evict (the real RSS is not cheaply available).
+    /// deciding what to evict (the real RSS is not cheaply available). Includes
+    /// `draft`'s file when there is one, so a split draft head is **charged to
+    /// the residency budget** rather than being memory the cache cannot see —
+    /// which is how issue #320's cost is surfaced instead of hidden.
     bytes: u64,
+    /// The **split** MTP draft head for this model (issue #320), when one is
+    /// installed beside its GGUF: `ggml-org`'s `mtp-*.gguf`, a whole model file
+    /// carrying only the head's tensors. `None` both for a model with no head at
+    /// all and for one that *bundles* its head in the main GGUF, where the head
+    /// is already resident and no second load exists.
+    ///
+    /// Resident rather than per-request, because every completion needs it and
+    /// the alternative is re-reading 1.7 GB per request — the same reasoning that
+    /// put [`Projector`] here.
+    ///
+    /// **Field order carries no meaning for this one**, unusually for this
+    /// struct, and that is worth saying rather than leaving to be inferred: a
+    /// draft model is an independent `LlamaModel`, not something built *over*
+    /// `model` the way a projector is, so nothing requires it to be freed before
+    /// or after its target. What it does share is the rule that binds every model
+    /// here — gone before the backend — and living in this entry is what gives it
+    /// that by construction, with nothing new for a caller to release.
+    draft: Option<Arc<LlamaModel>>,
     /// The multimodal projectors built over *this* loaded model, one per `mmproj`
     /// path (issue #301). Living in the model's own cache entry is what keys the
     /// cache by the model as well as by the projector: a different model — or the
@@ -249,6 +282,8 @@ impl Projector {
 /// eviction nor a concurrent release can pull them away mid-generation.
 struct Resolved {
     model: Arc<LlamaModel>,
+    /// The split MTP draft head, if this model has one; see [`Loaded::draft`].
+    draft: Option<Arc<LlamaModel>>,
     gen_lock: Arc<Mutex<()>>,
     projectors: Arc<KeyedSlot<PathBuf, Projector>>,
 }
@@ -318,11 +353,28 @@ impl LlamaEngine {
             served,
             n_ctx: if n_ctx == 0 { DEFAULT_N_CTX } else { n_ctx },
             projector_inits: AtomicUsize::new(0),
+            speculative_enabled: crate::speculative::speculative_enabled(),
+            speculative: SpecCounters::default(),
             cache: Mutex::new(ModelCache {
                 budget_bytes,
                 loaded: Vec::new(),
             }),
         })
+    }
+
+    /// Turn MTP speculative decoding (issue #320) on or off for this engine,
+    /// overriding the `ROTEIRO_SPECULATIVE` default.
+    ///
+    /// There is no quality trade-off to make here — the output is identical
+    /// either way — so this exists for the two cases where the *path* matters
+    /// rather than the result: measuring one against the other, and pinning a
+    /// process to the plain loop while a suspected llama.cpp bug is investigated.
+    /// Turning it **on** cannot force speculation onto a model with no draft
+    /// head; that still falls back.
+    #[must_use]
+    pub fn with_speculative(mut self, enabled: bool) -> Self {
+        self.speculative_enabled = enabled;
+        self
     }
 
     /// How many multimodal projectors this engine has loaded since it was built.
@@ -336,6 +388,19 @@ impl LlamaEngine {
     #[must_use]
     pub fn projector_inits(&self) -> usize {
         self.projector_inits.load(Ordering::Relaxed)
+    }
+
+    /// What MTP speculative decoding has done on this engine since it was built
+    /// (issue #320): how many generations used a draft head, how many tokens it
+    /// proposed, and how many of those the target model agreed with.
+    ///
+    /// Exposed because the speedup is not a single number — acceptance is high
+    /// on code and `<tool_call>` emission and low on prose — and because
+    /// `activations == 0` is how a caller confirms a model fell back to plain
+    /// decoding rather than silently doing something else.
+    #[must_use]
+    pub fn speculative_stats(&self) -> SpeculativeStats {
+        self.speculative.snapshot()
     }
 
     /// Ensure the model named `name` (GGUF at `path`) is resident in `cache`,
@@ -363,9 +428,18 @@ impl LlamaEngine {
             let params = LlamaModelParams::default();
             let model = LlamaModel::load_from_file(&self.backend, path, &params)
                 .map_err(|e| EngineError::Inference(format!("load `{name}`: {e}")))?;
+            // A split MTP draft head installed beside the GGUF (issue #320). A
+            // head that will not load is not a failed model load: the request
+            // still has a perfectly good target model and decodes without one.
+            let draft = self.load_draft_head(path);
+            let draft_bytes = draft.as_ref().map_or(0, |(_, draft_bytes)| *draft_bytes);
             cache.loaded.push(Loaded {
                 name: name.to_owned(),
-                bytes,
+                // The head is charged to the residency budget with the target it
+                // belongs to: it is loaded and freed with that entry, so the two
+                // are one footprint as far as eviction is concerned.
+                bytes: bytes.saturating_add(draft_bytes),
+                draft: draft.map(|(model, _)| Arc::new(model)),
                 // A freshly loaded model has no projectors yet: the first media
                 // request builds one, and it is bound to *this* model instance.
                 projectors: Arc::new(KeyedSlot::new()),
@@ -395,9 +469,39 @@ impl LlamaEngine {
         let l = &cache.loaded[idx];
         Ok(Resolved {
             model: Arc::clone(&l.model),
+            draft: l.draft.clone(),
             gen_lock: Arc::clone(&l.gen_lock),
             projectors: Arc::clone(&l.projectors),
         })
+    }
+
+    /// Load the split MTP draft head installed beside `path`, with its file size,
+    /// or `None` when there is none to load.
+    ///
+    /// Every way this can go wrong returns `None`: no `mtp.gguf` beside the
+    /// model, a file that will not load, or one that loads but turns out not to
+    /// carry a draft head after all. None of those is a reason to fail the
+    /// model load — the target model is fine and decoding without a head is
+    /// exactly what Roteiro did before issue #320.
+    ///
+    /// Runs under the cache lock, like the target model's own load.
+    fn load_draft_head(&self, path: &Path) -> Option<(LlamaModel, u64)> {
+        if !self.speculative_enabled {
+            return None;
+        }
+        let draft_path = crate::speculative::draft_gguf_beside(path)?;
+        let bytes = std::fs::metadata(&draft_path).ok()?.len();
+        let model =
+            LlamaModel::load_from_file(&self.backend, &draft_path, &LlamaModelParams::default())
+                .ok()?;
+        // Confirm rather than assume: the file is named by convention, so it has
+        // to say for itself that it is a draft head before it is treated as one.
+        // A `0` here means `mtp.gguf` is some other model, and keeping it
+        // resident would be pure waste.
+        if draft_head_layers(&model) == 0 {
+            return None;
+        }
+        Some((model, bytes))
     }
 
     /// The projector `mmproj` describes, over the model `resolved` names —
@@ -466,13 +570,47 @@ impl LlamaEngine {
             .map_err(|e| EngineError::Inference(format!("context: {e}")))
     }
 
+    /// A context paired with `model`'s own MTP draft head (issue #320), or
+    /// `None` when this generation should decode the plain way.
+    ///
+    /// **`None` is never a failure**, which is the point: absence of a draft head
+    /// is the common case (every model Roteiro served before Qwen3.5), and the
+    /// three ways speculation can be unavailable — switched off, no head in the
+    /// GGUF, llama.cpp declining to build the context — all land here and all
+    /// mean "decode as before". Nothing about the request changes; the output is
+    /// identical either way (see [`crate::speculative`]), so there is nothing for
+    /// a caller to be told and nothing to configure.
+    ///
+    /// The metadata probe runs before the context is built so that a model
+    /// without a head does not make llama.cpp log its "context type MTP
+    /// requested but model doesn't contain MTP layers" warning once per request.
+    fn speculative_decoder<'m>(
+        &self,
+        model: &'m LlamaModel,
+        draft: Option<&'m LlamaModel>,
+    ) -> Option<Mtp<'m>> {
+        // The head is in whichever file has one: the target GGUF for a bundled
+        // model, the sibling `mtp.gguf` for a split one. A model with neither
+        // takes the plain path.
+        let head = draft.unwrap_or(model);
+        if !self.speculative_enabled || draft_head_layers(head) == 0 {
+            return None;
+        }
+        Mtp::try_new(&self.backend, model, draft, self.n_ctx)
+    }
+
     /// Text-only chat: apply the chat template, prime the prompt, and generate.
+    ///
+    /// Takes the whole [`Resolved`] rather than just its model, because this is
+    /// the path that may pair the model with a draft head (issue #320) and the
+    /// head is resolved from the cache alongside it.
     fn chat_text(
         &self,
-        model: &LlamaModel,
+        resolved: &Resolved,
         req: &ChatRequest,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<CompletionStats, EngineError> {
+        let model = &resolved.model;
         let messages = req
             .messages
             .iter()
@@ -489,8 +627,6 @@ impl LlamaEngine {
             .map_err(|e| EngineError::Inference(format!("tokenize: {e}")))?;
         let prompt_tokens = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
 
-        let mut ctx = self.new_context(model)?;
-
         // Prime the batch with the prompt; only the last token needs logits. Size
         // the batch to the prompt; whether it fits the context is enforced by the
         // decode call.
@@ -502,18 +638,41 @@ impl LlamaEngine {
                 .add(*token, pos, &[0], i == last)
                 .map_err(|e| EngineError::Inference(format!("prompt batch: {e}")))?;
         }
-        ctx.decode(&mut batch)
-            .map_err(|e| EngineError::Inference(format!("prompt decode: {e}")))?;
 
         let start = i32::try_from(tokens.len()).unwrap_or(i32::MAX);
-        let (completion_tokens, finish_reason) = run_generation(
-            model,
-            &mut ctx,
-            start,
-            req.temperature,
-            req.max_tokens,
-            on_token,
-        )?;
+        let mut sampler = new_sampler(req.temperature);
+
+        // Text generation is the path MTP speculative decoding applies to
+        // (issue #320), and the one Roteiro's served workload lives on: graph
+        // `<tool_call>` emission and `spec draft`. A model with no draft head —
+        // or a `ROTEIRO_SPECULATIVE=0` — simply gets the loop it always had, with
+        // the same sampler and the same seed.
+        let (completion_tokens, finish_reason) =
+            if let Some(mut mtp) = self.speculative_decoder(model, resolved.draft.as_deref()) {
+                mtp.prime(&mut batch, &tokens)?;
+                self.speculative.activate();
+                crate::speculative::run_generation(
+                    model,
+                    &mut mtp,
+                    start,
+                    &mut sampler,
+                    req.max_tokens,
+                    &self.speculative,
+                    on_token,
+                )?
+            } else {
+                let mut ctx = self.new_context(model)?;
+                ctx.decode(&mut batch)
+                    .map_err(|e| EngineError::Inference(format!("prompt decode: {e}")))?;
+                run_generation(
+                    model,
+                    &mut ctx,
+                    start,
+                    &mut sampler,
+                    req.max_tokens,
+                    on_token,
+                )?
+            };
         Ok(CompletionStats {
             prompt_tokens,
             completion_tokens,
@@ -580,11 +739,16 @@ impl LlamaEngine {
             .eval_chunks(mtmd, &ctx, 0, 0, 512, true)
             .map_err(|e| EngineError::Inference(format!("mtmd eval: {e}")))?;
 
+        // No speculation here: `mtmd_eval_chunks` decodes the prompt itself, so
+        // the draft head never sees those batches — and llama.cpp's MTP drafter
+        // ignores embedding batches in any case. Media requests keep the plain
+        // loop, and say so rather than appearing to have been left out.
+        let mut sampler = new_sampler(req.temperature);
         let (completion_tokens, finish_reason) = run_generation(
             model,
             &mut ctx,
             n_past,
-            req.temperature,
+            &mut sampler,
             req.max_tokens,
             on_token,
         )?;
@@ -757,23 +921,35 @@ fn is_encoder_only_arch(arch: &str) -> bool {
     arch.to_ascii_lowercase().contains("bert")
 }
 
+/// The sampler for a request: greedy when temperature is 0 (deterministic);
+/// otherwise temp + dist on a fixed seed.
+///
+/// Built by the caller rather than inside the decode loop so that the plain and
+/// the speculative loops provably share one — which is what makes "same seed,
+/// same output with and without speculation" a claim about *one* sampler rather
+/// than about two that happen to be configured alike.
+fn new_sampler(temperature: f32) -> LlamaSampler {
+    if temperature <= 0.0 {
+        LlamaSampler::greedy()
+    } else {
+        LlamaSampler::chain_simple([LlamaSampler::temp(temperature), LlamaSampler::dist(1234)])
+    }
+}
+
 /// The shared sampling loop: from `start_pos`, sample → emit → decode until an
 /// end-of-generation token or `max_tokens`. Returns `(completion_tokens, reason)`.
+///
+/// The speculative counterpart is [`crate::speculative::run_generation`], which
+/// is written to the same shape on purpose: it drives `sampler` with exactly the
+/// call sequence this loop does, so the two produce the same tokens.
 fn run_generation(
     model: &LlamaModel,
     ctx: &mut LlamaContext,
     start_pos: i32,
-    temperature: f32,
+    sampler: &mut LlamaSampler,
     max_tokens: u32,
     on_token: &mut dyn FnMut(&str),
 ) -> Result<(u32, FinishReason), EngineError> {
-    // Greedy when temperature is 0 (deterministic); otherwise temp + dist.
-    let mut sampler = if temperature <= 0.0 {
-        LlamaSampler::greedy()
-    } else {
-        LlamaSampler::chain_simple([LlamaSampler::temp(temperature), LlamaSampler::dist(1234)])
-    };
-
     let mut completion_tokens = 0u32;
     let mut finish_reason = FinishReason::Length;
     let mut n_cur = start_pos;
@@ -882,7 +1058,7 @@ impl Engine for LlamaEngine {
         }
 
         match (modality, mmproj.as_deref()) {
-            (None, _) => self.chat_text(model, req, on_token),
+            (None, _) => self.chat_text(&resolved, req, on_token),
             (Some(m), Some(mmproj)) => {
                 // Built on the first media blob for this (model, mmproj) pair and
                 // reused by every one after it (issue #301).
