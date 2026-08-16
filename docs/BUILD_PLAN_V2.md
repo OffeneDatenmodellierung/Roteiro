@@ -666,6 +666,50 @@ them, so the memory is already paid for.
 - **Not shippable as a default** until either llama.cpp's cross-batch-width numerics
   tighten or the divergence is judged acceptable as a product decision. That is an
   open question, not a task — see §9.
+### Stage 31 — Model lifecycle: resumable pulls, removal, high tier ([ADR-0003](adr/0003-pluggable-embedding-models.md)) → **v1.10.x** · effort **M** *(independent track)*
+
+**Goal:** make a multi-gigabyte model store survivable. Nothing here touches the
+graph, the schema or `EXTRACT_VERSION` — it is the store and its CLI only, which
+is why it rides an independent track.
+
+- **Resumable downloads.** `download_verified` deleted its temp file on *any*
+  early return, so a transport failure at 90% of an 18 GiB pull threw away every
+  byte. On an imperfect connection that is not "slow", it is *never finishes*:
+  each attempt must win the whole race from zero. `download_resumable` keeps the
+  partial and continues it with an HTTP `Range` request; the transport stays in
+  the `roteiro` binary, so `rto-graph` still never touches the network.
+- **The failure modes are deliberately not alike.** Transport failure keeps the
+  bytes; a **checksum** failure discards them loudly (known-wrong bytes are not a
+  prefix of anything); a server answering `200` where `206` was asked restarts
+  rather than appending a whole-file body onto a prefix — which would corrupt the
+  file and surface only as a checksum failure after another full transfer. A
+  `.partial.json` sidecar records the URL, pinned digest and total size the bytes
+  were started against, because anonymous bytes cannot be trusted as a prefix.
+- **The non-obvious bug this class invites:** a dropped connection closes
+  *cleanly*, so `io::copy` returns `Ok` having moved less than the whole file.
+  Diagnosed naively that is a checksum failure — which discards the partial, and
+  so defeats resumption for the commonest failure there is. The transferred
+  length is checked explicitly.
+- **`roteiro model rm`.** There was no supported way to remove a model; files
+  accumulated with nothing but `rm -rf`. Removal reports what it freed, takes the
+  whole directory (a model's file set changes between releases, and bytes
+  `model list` no longer mentions are exactly the accumulation this stops), and
+  clears orphaned partials. `model list` gained measured on-disk size, so "what
+  would this reclaim?" is answerable before removing.
+- **No in-use detection, stated rather than implied.** Roteiro keeps no lock or
+  pid file over the model store, so a running `serve` holding a model is not
+  something `rm` can discover. The help says so instead of implying a check.
+- **Registry addition, not a replacement:** `ggml-org/Qwen3.8-27B-GGUF` Q4_K_M as
+  the high generative tier. `ggml-org` over `unsloth` because the latter bundles
+  MTP tensors into the main GGUF (allocated whether or not the head runs);
+  Q4_K_M over Q5_K_M because generation on Metal is bandwidth-bound. The tiered
+  matrix is not a leaderboard — `qwen2.5-coder-3b` and the rest stay for slower
+  hardware.
+- **DoD:** resume proved over a local socket (interrupted transfer re-requests
+  only the remainder) *and* against the live host; the pinned SHA-256 measured
+  from the downloaded file rather than quoted, since Hugging Face publishes none;
+  the model shown to load on the pinned engine **and** to emit a `<tool_call>`,
+  because a served model that cannot reach the graph tools is much less useful.
 
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
 
@@ -694,6 +738,7 @@ them, so the memory is already paid for.
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | — | Stage 29 — audio metadata as `derived` facts | *in progress* |
 | — | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
+| v1.10.x | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
