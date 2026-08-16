@@ -31,6 +31,11 @@ roteiro sync                   # build the graph
 roteiro review                 # graph-grounded review of your change
 ```
 
+Planning to work on a train or a plane? Models and analyzer databases must be
+fetched once, deliberately, before you disconnect —
+[`docs/OFFLINE_SETUP.md`](docs/OFFLINE_SETUP.md) is that one-time preparation,
+including the air-gapped route.
+
 See <https://roteiro.dev> for the full guide (modes, local models, languages,
 config), and [ADR-0001](docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
 plus [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) for the design and roadmap.
