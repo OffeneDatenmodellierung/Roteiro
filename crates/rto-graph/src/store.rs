@@ -2212,9 +2212,10 @@ mod tests {
     fn stamp_version(store: &Store, version: u32) {
         store
             .conn
-            .execute("INSERT INTO schema_migrations (version) VALUES (?1)", [
-                version,
-            ])
+            .execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [version],
+            )
             .expect("stamp a version this build does not know");
     }
 

@@ -74,9 +74,10 @@ fn stamp_from_the_future(dir: &Path) -> (u32, u32) {
         })
         .expect("a synced store records its migrations");
     let store = build + 1;
-    conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [
-        store,
-    ])
+    conn.execute(
+        "INSERT INTO schema_migrations (version) VALUES (?1)",
+        [store],
+    )
     .expect("stamp a version this build does not know");
     (store, build)
 }
@@ -88,12 +89,10 @@ fn node_keys(dir: &Path) -> Vec<String> {
     let mut stmt = conn
         .prepare("SELECT key FROM nodes ORDER BY key")
         .expect("prepare");
-    let keys = stmt
-        .query_map([], |r| r.get::<_, String>(0))
+    stmt.query_map([], |r| r.get::<_, String>(0))
         .expect("query")
         .collect::<Result<Vec<_>, _>>()
-        .expect("collect");
-    keys
+        .expect("collect")
 }
 
 #[test]
@@ -206,9 +205,10 @@ fn a_store_from_the_future_refuses_writes_and_still_serves_reads() {
     // graph. Without this the refusal above could be any old failure.
     {
         let conn = rusqlite::Connection::open(graph_db(&dir)).expect("open the store directly");
-        conn.execute("DELETE FROM schema_migrations WHERE version = ?1", [
-            store_version,
-        ])
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = ?1",
+            [store_version],
+        )
         .expect("unstamp");
     }
     let out = roteiro(&dir, &["sync", "--committed"]);
