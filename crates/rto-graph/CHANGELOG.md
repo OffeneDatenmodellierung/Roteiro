@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.12.0...rto-graph-v1.13.0) - 2026-08-16
+
+### Added
+
+- *(render)* coupling in the Obsidian `_Home` overview
+- *(cli)* `roteiro coupling`, and exclude cross-language call edges
+- *(graph)* directed call coupling query (Q3)
+
+### Other
+
+- Merge pull request #348 from OffeneDatenmodellierung/fix/store-newer-than-binary
+- Potential fix for pull request finding
+
 ## [1.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.11.0...rto-graph-v1.12.0) - 2026-08-16
 
 ### Fixed

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.12.0...roteiro-v1.13.0) - 2026-08-16
+
+### Fixed
+
+- *(sync)* refuse to rewrite a graph store written by a newer build
+
+### Other
+
+- Merge pull request #348 from OffeneDatenmodellierung/fix/store-newer-than-binary
+- rustfmt and clippy on the store-guard test
+- *(cli)* cover the gate chokepoint the write guard also protects
+- *(store)* cover the store-from-the-future write guard
+
 ## [1.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.11.0...roteiro-v1.12.0) - 2026-08-16
 
 ### Added

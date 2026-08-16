@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.12.0...rto-render-v1.13.0) - 2026-08-16
+
+### Added
+
+- *(render)* coupling in the Obsidian `_Home` overview
+- *(surfaces)* coupling on the graph API and both tool registries
+
 ## [1.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.0.0...rto-render-v1.1.0) - 2026-08-13
 
 ### Added
