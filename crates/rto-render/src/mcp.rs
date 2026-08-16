@@ -6,8 +6,8 @@
 //! Two transports are offered (see [`serve_stdio`] / [`serve_http`]): stdio for
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
-//! same tools — `search`, `explain`, `list_kind`, `path`, `debt`, and
-//! `list_projects` — as thin wrappers over the matching [`rto_graph`] query
+//! same tools — `search`, `explain`, `list_kind`, `path`, `debt`, `coupling`,
+//! and `list_projects` — as thin wrappers over the matching [`rto_graph`] query
 //! primitives, so agents and the CLI see the same graph. Each tool takes an
 //! optional `project` selector for a multi-repo workspace (ADR-0008). See
 //! ADR-0002 for the decision to adopt `rmcp`.
@@ -94,6 +94,21 @@ struct DebtArgs {
     /// deferred.
     #[serde(default)]
     kind: Vec<String>,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Arguments for the `coupling` tool.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct CouplingArgs {
+    /// Rank by `total` (default), `fan_in` (most depended-on) or `fan_out`
+    /// (reaches furthest).
+    #[serde(default)]
+    order: Option<String>,
+    /// Max nodes to return (default 20, capped at 100).
+    #[serde(default)]
+    limit: Option<u32>,
     /// Which hosted project to query (see `list_projects`); omit if single.
     #[serde(default)]
     project: Option<String>,
@@ -235,6 +250,40 @@ impl GraphServer {
         }))
     }
 
+    /// Rank nodes by directed call coupling (fan-in / fan-out).
+    #[tool(
+        description = "Rank symbols by DIRECTED call coupling over `calls` edges: `fan_in` \
+                          (how many distinct symbols call this one), `fan_out` (how many it \
+                          calls), and `instability` = fan_out/(fan_in+fan_out). Use \
+                          `order`=fan_in to find what the codebase most depends on, \
+                          `order`=fan_out for the symbols that reach furthest, `total` \
+                          (default) for overall coupling. Args: order, limit. \
+                          Caveat worth passing on to the user: call edges are resolved by \
+                          simple name, so a short generically-named function can absorb \
+                          every call to that name and show an inflated `fan_in`. Treat a \
+                          high figure on such a symbol as a question, not a finding."
+    )]
+    async fn coupling(&self, Parameters(args): Parameters<CouplingArgs>) -> CallToolResult {
+        let limit = usize::try_from(args.limit.unwrap_or(20).clamp(1, 100)).unwrap_or(20);
+        // An unrecognised `order` is an error, not a silent fall back to `total`:
+        // a model told it ranked by `fan_in` when it did not will report that.
+        let order = match args.order.as_deref() {
+            None => rto_graph::CouplingOrder::default(),
+            Some(token) => match rto_graph::CouplingOrder::from_token(token) {
+                Some(order) => order,
+                None => {
+                    return tool_error(&format!(
+                        "unknown order `{token}` (expected {})",
+                        rto_graph::CouplingOrder::tokens().join("|")
+                    ));
+                }
+            },
+        };
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            rto_graph::coupling(store, order, limit)
+        }))
+    }
+
     /// List the projects this server hosts (ADR-0008).
     #[tool(
         description = "List the projects this server hosts. Pass one as `project` to the \
@@ -258,8 +307,9 @@ impl ServerHandler for GraphServer {
              text (it searches captured content too — README/ADR/blueprint prose — \
              and ranks curated docs first, so it answers \"what is X / why\"); then \
              `explain` a key for its provenance-labelled neighbourhood. `list_kind` \
-             enumerates a kind, `path` finds how two nodes connect, and `debt` lists \
-             intent-debt markers."
+             enumerates a kind, `path` finds how two nodes connect, `debt` lists \
+             intent-debt markers, and `coupling` ranks symbols by directed call \
+             fan-in/fan-out."
                 .into(),
         );
         info
@@ -335,7 +385,9 @@ pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), Mcp
 
 #[cfg(test)]
 mod tests {
-    use super::{DebtArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs, SearchArgs};
+    use super::{
+        CouplingArgs, DebtArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs, SearchArgs,
+    };
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
     use std::sync::Arc;
@@ -469,6 +521,51 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&none).expect("json");
         assert_eq!(json["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn coupling_tool_separates_the_two_directions() {
+        let server = seeded();
+        // The seed is `main` → `helper`: identical degree, opposite direction.
+        let by_in = text_of(
+            &server
+                .coupling(Parameters(CouplingArgs {
+                    order: Some("fan_in".into()),
+                    limit: Some(1),
+                    project: None,
+                }))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&by_in).expect("json");
+        assert_eq!(json["order"], "fan_in");
+        assert_eq!(json["items"][0]["key"], "sym:rust:a.rs#helper");
+
+        let by_out = text_of(
+            &server
+                .coupling(Parameters(CouplingArgs {
+                    order: Some("fan_out".into()),
+                    limit: Some(1),
+                    project: None,
+                }))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&by_out).expect("json");
+        assert_eq!(json["items"][0]["key"], "sym:rust:a.rs#main");
+    }
+
+    #[tokio::test]
+    async fn coupling_tool_errors_rather_than_silently_reordering() {
+        // A model told it got `fan_in` when it got `total` would report that as
+        // fact, so an unknown order must surface as a tool error.
+        let out = seeded()
+            .coupling(Parameters(CouplingArgs {
+                order: Some("degree".into()),
+                limit: None,
+                project: None,
+            }))
+            .await;
+        assert_eq!(out.is_error, Some(true), "{out:?}");
+        assert!(text_of(&out).contains("unknown order `degree`"), "{out:?}");
     }
 
     #[test]

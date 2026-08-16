@@ -7550,6 +7550,28 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     })),
                 }),
             },
+            rto_serve::ToolDef {
+                name: "coupling".to_owned(),
+                description: "Rank symbols by DIRECTED call coupling over `calls` edges: \
+                              `fan_in` (how many distinct symbols call this one), `fan_out` \
+                              (how many it calls), `instability` = fan_out/(fan_in+fan_out). \
+                              `order`=fan_in finds what the codebase most depends on, \
+                              `order`=fan_out the symbols that reach furthest. Call edges \
+                              are resolved by simple name, so a short generically-named \
+                              function can absorb every call to that name — say so if you \
+                              report a high `fan_in` on one."
+                    .to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": with_project(json!({
+                        "order": {
+                            "type": "string",
+                            "enum": rto_graph::CouplingOrder::tokens(),
+                        },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+                    })),
+                }),
+            },
         ];
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
@@ -7629,6 +7651,31 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 self.run(project, |store| {
                     rto_graph::debt(store, &categories, &ignore)
                 })
+            }
+            "coupling" => {
+                // An unrecognised `order` is an error rather than a silent fall
+                // back to `total`: a model told it ranked by `fan_in` when it did
+                // not will state that as fact to the user.
+                let order = match str_arg("order") {
+                    None => rto_graph::CouplingOrder::default(),
+                    Some(token) => {
+                        rto_graph::CouplingOrder::from_token(token).ok_or_else(|| {
+                            format!(
+                                "unknown order `{token}` (expected {})",
+                                rto_graph::CouplingOrder::tokens().join("|")
+                            )
+                        })?
+                    }
+                };
+                // `limit` is model-controlled: clamp to the advertised bound so a
+                // huge value cannot make the server do pointless work.
+                let limit = args
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                self.run(project, |store| rto_graph::coupling(store, order, limit))
             }
             other => Err(format!("unknown tool `{other}`")),
         }
@@ -9478,6 +9525,69 @@ mod workspace_scoped_tools {
             ok.is_ok(),
             "the workspace's own project must still resolve: {ok:?}"
         );
+    }
+
+    /// A one-project registry whose graph is `main` → `helper`: identical
+    /// undirected degree, opposite direction.
+    fn called_registry() -> GraphToolRegistry {
+        use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind};
+        let mut store = rto_graph::Store::open_in_memory().expect("store");
+        store
+            .apply_factset(
+                &FactSet::new()
+                    .with_node(Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"))
+                    .with_node(Node::new("sym:rust:a.rs#helper", NodeKind::Fn, "helper"))
+                    .with_edge(Edge::derived(
+                        "sym:rust:a.rs#main",
+                        "sym:rust:a.rs#helper",
+                        EdgeKind::Calls,
+                    )),
+            )
+            .expect("apply");
+        GraphToolRegistry::new(std::sync::Arc::new(rto_graph::Workspace::single(
+            "api", store,
+        )))
+    }
+
+    /// The served-chat registry is a **separate** registry from the MCP server's,
+    /// so a lens reaching MCP proves nothing about the chat surface. This is the
+    /// chat side.
+    #[test]
+    fn coupling_is_advertised_and_answers_directionally() {
+        use rto_serve::ToolRegistry as _;
+        let reg = called_registry();
+
+        let advertised = reg.tools();
+        let def = advertised
+            .iter()
+            .find(|t| t.name == "coupling")
+            .expect("`coupling` advertised to the served model");
+        assert_eq!(
+            def.parameters["properties"]["order"]["enum"],
+            serde_json::json!(rto_graph::CouplingOrder::tokens()),
+            "the schema's accepted orders come from the type, so they cannot drift"
+        );
+
+        let out = reg
+            .call("coupling", &serde_json::json!({ "order": "fan_in" }))
+            .expect("coupling");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["items"][0]["key"], "sym:rust:a.rs#helper", "{json}");
+
+        let out = reg
+            .call("coupling", &serde_json::json!({ "order": "fan_out" }))
+            .expect("coupling");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["items"][0]["key"], "sym:rust:a.rs#main", "{json}");
+    }
+
+    #[test]
+    fn coupling_refuses_an_unknown_order_rather_than_reordering_silently() {
+        use rto_serve::ToolRegistry as _;
+        let err = called_registry()
+            .call("coupling", &serde_json::json!({ "order": "degree" }))
+            .expect_err("an unknown order must be refused");
+        assert!(err.contains("unknown order `degree`"), "was: {err}");
     }
 }
 
