@@ -2061,13 +2061,18 @@ fn run_model_rm(name: &str, yes: bool, json: bool) -> anyhow::Result<()> {
     if find_model(name).is_none() {
         anyhow::bail!("unknown model `{name}` (see `roteiro model list`)");
     }
+    // "Installed" means the directory is **there**, not that it has bytes in it.
+    // An abandoned pull leaves an empty directory (or one whose size cannot be
+    // read), and refusing to remove those would strand the exact debris this
+    // command exists to clear. Size is for reporting and the prompt only — never
+    // for deciding whether there is anything to remove.
     let dir = model_dir(name);
-    let size = installed_size(name);
-    if !dir.exists() || size == 0 {
+    if !dir.exists() {
         anyhow::bail!(
             "`{name}` is not installed — nothing to remove (install it with `roteiro model pull {name}`)"
         );
     }
+    let size = installed_size(name);
 
     if !yes {
         eprintln!(

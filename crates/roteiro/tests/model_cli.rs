@@ -121,6 +121,30 @@ fn rm_rejects_unknown_model() {
 }
 
 #[test]
+fn rm_clears_an_empty_directory_left_by_an_abandoned_pull() {
+    let home = fresh_home("rm-empty");
+    // Exactly what a pull that died before writing its first byte leaves behind:
+    // the directory exists but holds nothing. Removal must still clear it —
+    // "installed" is about the directory being there, not about it having bytes,
+    // and this is the debris the command exists to clean up.
+    let dir = home.join("models/qwen3-0.6b");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    let out = roteiro(&home, &["model", "rm", "qwen3-0.6b", "--yes", "--json"]);
+    assert!(out.status.success(), "empty dir must be removable: {out:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("json report on stdout");
+    assert_eq!(report["freed_bytes"], 0, "nothing to free, but it is gone");
+    assert_eq!(report["freed"], "0 B");
+    assert!(
+        report["files"].as_array().expect("files").is_empty(),
+        "no files to list: {report}"
+    );
+    assert!(!dir.exists(), "the empty directory is gone");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
 fn rm_frees_the_files_and_reports_what_it_reclaimed() {
     let home = fresh_home("rm-frees");
     let dir = home.join("models/qwen3-0.6b");
