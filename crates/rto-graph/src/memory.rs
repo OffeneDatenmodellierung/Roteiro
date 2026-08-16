@@ -30,14 +30,30 @@
 //! `sync` is still a no-op — by `memory_writes_do_not_invalidate_the_fact_cache`
 //! in `tests/sync.rs`, where the cache it is about lives.
 //!
-//! # This is the episodic tier only
+//! # Two tiers, opposite rules
 //!
 //! ADR-0013 describes two tiers with **opposite rules**, because they have
-//! opposite recovery costs: re-derivable knowledge is evictable, episodic
-//! knowledge is not. This module is the episodic half — **unbounded, never
-//! auto-evicted, removed only by an explicit [`crate::Store::forget_memory`]**.
-//! Bounding it would be data loss, not cache management. The bounded cache tier
-//! is a separate table with its own eviction policy and is not implemented here.
+//! opposite recovery costs, and both live here in separate tables:
+//!
+//! | | [`MemoryRecord`] — episodic | [`CacheEntry`] — transient |
+//! |---|---|---|
+//! | Table | `agent_memory` (migration 11) | `agent_cache` (migration 13) |
+//! | Re-derivable | **no** — there is no generating function | **yes**, by definition |
+//! | Bounded | never | by a byte budget ([`DEFAULT_CACHE_BUDGET_BYTES`]) |
+//! | Removed by | an explicit [`crate::Store::forget_memory`], and nothing else | that, or a sweep |
+//! | Cost of losing one | the knowledge, permanently | some cycles |
+//!
+//! **The rule: re-derivable ⇒ evictable; episodic ⇒ never silently evicted.**
+//! Bounding the episodic tier would be data loss wearing cache management's
+//! clothes; leaving the cache tier unbounded is the growth ADR-0013 exists to
+//! stop. What licenses the asymmetry is that `build_context` is *proven* to
+//! reconstruct identically (`context.rs` asserts `built == cached`), so evicting a
+//! cache entry costs cycles and never information.
+//!
+//! [`crate::Store::sweep_agent_cache`] is the only thing here that deletes without
+//! being asked, and it **cannot** reach the episodic tier: that table has no
+//! `bytes`, no `last_used` and no `hits`, so there is no column for a capacity
+//! policy to grip it by. The separation is structural rather than careful.
 //!
 //! # Anchoring: a node key and a blob, never a span
 //!
@@ -121,6 +137,38 @@
 //! This is the live analogue of [`crate::EdgeKind::Supersedes`], which exists in
 //! the enum but is produced by nothing. Per the standing decision it stays
 //! **inside the artifact store and never becomes a graph edge**.
+//!
+//! # Recall: ranked at retrieval, stored nowhere
+//!
+//! [`crate::Store::recall_memory`] ranks the live records by
+//!
+//! ```text
+//! score = base_confidence × anchor_penalty × decay(current_generation − row.generation)
+//! ```
+//!
+//! and every one of those terms is computed **on the read** and written to no
+//! column. A stored score that decayed would have to be rewritten on every read
+//! and would be wrong in between, so recall would depend on when you last looked
+//! — the one kind of non-determinism this project keeps out of the graph, and
+//! there is no reason to let it in through the side door.
+//!
+//! The order of the terms is the depreciation model, in order: **evidence first,
+//! clock last.**
+//!
+//! 1. **Supersession is not in the formula at all.** A superseded record is
+//!    excluded in SQL, by a recorded pointer with no clock in it, so it leaves
+//!    recall the moment its successor is written — immediately, regardless of age,
+//!    and regardless of how well it would otherwise have scored.
+//! 2. **[`anchor_penalty`] dominates**, and it is built on [`AnchorState`] and
+//!    nothing else. There is deliberately no branch term and no scope term: the
+//!    anchor *is* the scope test, and a second rule would give two answers to one
+//!    question.
+//! 3. **[`Decay`] is last**, and defaults to [`Decay::None`] — no age term, and
+//!    therefore byte-identical recall for a fixed store and a fixed tree. Pricing
+//!    age at all is opt-in.
+//!
+//! Nothing in that list can remove a record. Drift demotes, decay ranks to zero
+//! at worst, and only [`crate::Store::forget_memory`] deletes.
 //!
 //! # Ordering is a generation, not a clock
 //!
@@ -211,6 +259,15 @@ pub enum MemoryError {
     /// A stored row could not be interpreted (database corruption).
     #[error("corrupt memory record: {0}")]
     Corrupt(String),
+    /// [`CACHE_BUDGET_ENV`] was set to something that is not a budget. Refused
+    /// rather than ignored: running the default under a name that says otherwise
+    /// is how an operator ends up believing in a bound that was never applied.
+    #[error(
+        "invalid {CACHE_BUDGET_ENV}={0:?}: expected a whole number of megabytes (the default is \
+         {default} MB)",
+        default = DEFAULT_CACHE_BUDGET_BYTES / (1024 * 1024)
+    )]
+    InvalidBudget(String),
 }
 
 impl From<rusqlite::Error> for MemoryError {
@@ -567,6 +624,297 @@ pub struct MemoryListing {
     pub superseded: u64,
 }
 
+// --- Recall: ranking computed at retrieval time, and stored nowhere ----------
+
+/// Stable schema tag on [`Recall`].
+pub const RECALL_SCHEMA: &str = "roteiro.recall/v1";
+
+/// The `base_confidence` used for a record whose writer offered none — the
+/// **midpoint** of the range a writer can state.
+///
+/// Not `1.0`, which would let every record that claimed nothing outrank every
+/// record that honestly claimed `0.9`, and so would price honesty. Not `0.0`,
+/// which would make the common case (the CLI writes no confidence unless asked)
+/// unrecallable. At the midpoint, stating a high confidence promotes a record and
+/// stating a low one demotes it, both *relative to silence*, which is the only
+/// behaviour that makes the field worth filling in.
+pub const DEFAULT_BASE_CONFIDENCE: f64 = 0.5;
+
+/// Default span for [`Decay::Linear`], in generations — one generation per record
+/// written, never a second of wall-clock.
+pub const DEFAULT_DECAY_SPAN: u64 = 200;
+
+/// Default half-life for [`Decay::Exponential`], in generations.
+pub const DEFAULT_HALF_LIFE: u64 = 50;
+
+/// How a record's age is priced into its recall score.
+///
+/// The age term is the **last** term, deliberately: ADR-0013 depreciates by
+/// evidence first and clock last, so an anchor that no longer resolves and an
+/// explicit supersession both outrank age. Age is the tiebreak between records
+/// that are otherwise equally valid.
+///
+/// **Age is measured in generations, not time.** A generation is one written
+/// record ([`MemoryRecord::id`], `AUTOINCREMENT`), so "old" means *a lot has been
+/// learned since*, not *a while has passed*. That is what makes it skew-proof: the
+/// store is shared across worktrees and branches, where wall-clock is not
+/// monotone and `datetime('now')` ties on intra-second writes.
+///
+/// **The factor is computed on every read and never stored.** A stored score that
+/// ticked down would rewrite the store on every read and would be wrong in
+/// between, making recall depend on when you last looked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Decay {
+    /// No age term at all: every record's factor is exactly `1.0`.
+    ///
+    /// **This is the reproducible mode, and it is the default.** With no age term
+    /// the score depends only on what is stored and on the tree the anchors are
+    /// resolved against, so the same store and the same tree recall the same
+    /// records in the same order with the same scores — byte-identically, across
+    /// runs and across machines. Every other mode is a deliberate trade of that
+    /// property for recency.
+    None,
+    /// Falls linearly to zero over `span` generations.
+    ///
+    /// A record older than `span` scores `0.0` in the age term and therefore sorts
+    /// last — it is **still returned and still labelled**. Decay ranks; it never
+    /// filters and never deletes.
+    Linear {
+        /// Generations over which the factor reaches zero. Clamped to at least 1.
+        span: u64,
+    },
+    /// Halves every `half_life` generations, and never reaches zero.
+    Exponential {
+        /// Generations per halving. Clamped to at least 1.
+        half_life: u64,
+    },
+}
+
+impl Default for Decay {
+    /// [`Decay::None`] — the reproducible answer is the default answer, on the
+    /// same terms as [`crate::SearchOptions`] defaulting generated content off.
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl Decay {
+    /// The age factor for a record `age` generations old, always in `[0.0, 1.0]`.
+    ///
+    /// A pure function of `(self, age)`: no clock, no store state, no I/O.
+    #[must_use]
+    pub fn factor(self, age: u64) -> f64 {
+        match self {
+            Self::None => 1.0,
+            // `max(1)` rather than a divide-by-zero: a span of zero is a caller
+            // asking for "everything old at once", and the honest reading of that
+            // is a one-generation span, not NaN.
+            Self::Linear { span } => {
+                let span = span.max(1);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "generation counts are small; the ratio is a ranking weight"
+                )]
+                let ratio = age as f64 / span as f64;
+                (1.0 - ratio).max(0.0)
+            }
+            Self::Exponential { half_life } => {
+                let half_life = half_life.max(1);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "generation counts are small; the ratio is a ranking weight"
+                )]
+                let ratio = age as f64 / half_life as f64;
+                0.5_f64.powf(ratio)
+            }
+        }
+    }
+
+    /// Stable token naming the mode, without its parameter.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Linear { .. } => "linear",
+            Self::Exponential { .. } => "exponential",
+        }
+    }
+
+    /// Whether this mode guarantees reproducible recall — true only for
+    /// [`Decay::None`].
+    #[must_use]
+    pub fn is_reproducible(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+impl std::fmt::Display for Decay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Linear { span } => write!(f, "linear:{span}"),
+            Self::Exponential { half_life } => write!(f, "exponential:{half_life}"),
+        }
+    }
+}
+
+impl std::str::FromStr for Decay {
+    type Err = String;
+
+    /// `none` | `linear[:span]` | `exponential[:half-life]`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (mode, param) = match s.split_once(':') {
+            Some((mode, param)) => {
+                let n = param.parse::<u64>().map_err(|_| {
+                    format!("decay parameter {param:?} is not a whole number of generations")
+                })?;
+                (mode, Some(n))
+            }
+            None => (s, None),
+        };
+        match mode {
+            "none" => {
+                if param.is_some() {
+                    return Err("decay `none` takes no parameter: it has no age term".to_owned());
+                }
+                Ok(Self::None)
+            }
+            "linear" => Ok(Self::Linear {
+                span: param.unwrap_or(DEFAULT_DECAY_SPAN),
+            }),
+            "exponential" => Ok(Self::Exponential {
+                half_life: param.unwrap_or(DEFAULT_HALF_LIFE),
+            }),
+            other => Err(format!(
+                "unknown decay mode {other:?} (expected one of: none, linear[:span], \
+                 exponential[:half-life])"
+            )),
+        }
+    }
+}
+
+/// What a record's anchor is worth as a **ranking multiplier**, in `[0.0, 1.0]`.
+///
+/// This is the whole of ADR-0013's `anchor_penalty`, and it is built on
+/// [`AnchorState`] and on nothing else — no branch term, no scope term. `scope` is
+/// a namespace and the anchor is the validity test; a second rule would give two
+/// answers to one question.
+///
+/// Two properties are load-bearing and are asserted by tests rather than left to
+/// the reader:
+///
+/// - **Nothing is zero.** Anchor drift demotes; it never deletes and never
+///   silences. A record about deleted code still comes back, ranked lower and
+///   labelled — that is the whole reason memory cannot live in the graph, whose
+///   authored layer prunes links to vanished symbols.
+/// - **Every state that [`AnchorState::applies`] ranks above every state that does
+///   not.** The applicability rule and the ranking cannot disagree.
+///
+/// The ordering *within* the two groups is a judgement, and it is this one:
+///
+/// | State | Penalty | Why |
+/// |---|---|---|
+/// | [`AnchorState::Valid`] | `1.00` | the association is in this tree in the same format — the strongest evidence there is |
+/// | [`AnchorState::Unanchored`] | `0.90` | true wherever the repository is, but it never claimed to be about *this* code |
+/// | [`AnchorState::Unverifiable`] | `0.50` | the node is here and the blob could not be compared: nothing was measured either way |
+/// | [`AnchorState::Vanished`] | `0.35` | the thing is gone — history, and often the most valuable record in the store |
+/// | [`AnchorState::Drifted`] | `0.25` | the code moved *underneath a key that still resolves*, so this is the one state that can actively mislead about code someone is looking at now |
+///
+/// Drifted below vanished is the deliberate part. A vanished record can mislead
+/// nobody — the code it describes is not there to be confused with anything — while
+/// a drifted one sits under a live key describing a version of it that no longer
+/// exists. Ranking vanished lowest would also punish exactly the records ADR-0013
+/// says are worth keeping most.
+#[must_use]
+pub fn anchor_penalty(state: AnchorState) -> f64 {
+    match state {
+        AnchorState::Valid => 1.0,
+        AnchorState::Unanchored => 0.90,
+        AnchorState::Unverifiable => 0.50,
+        AnchorState::Vanished => 0.35,
+        AnchorState::Drifted => 0.25,
+    }
+}
+
+/// How to recall.
+///
+/// [`RecallOptions::default`] is **every live record, ranked, with no age term** —
+/// the reproducible answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecallOptions<'a> {
+    /// Only records recorded in this namespace, matched exactly.
+    pub scope: Option<&'a str>,
+    /// Only records of this kind.
+    pub kind: Option<MemoryKind>,
+    /// Only records anchored to this node key.
+    pub anchor_key: Option<&'a str>,
+    /// Every whitespace-separated token must appear in the record's body, its
+    /// anchor key or its anchor path (case-insensitively). A **filter, not a
+    /// scorer**: the ranking formula has no lexical term, so which records come
+    /// back can depend on the query while how they are ranked cannot.
+    pub query: Option<&'a str>,
+    /// How age is priced in. Defaults to [`Decay::None`] — reproducible recall.
+    pub decay: Decay,
+    /// Drop records that do not apply to this tree. **Off by default**: an
+    /// unanchored or drifted record is demoted and labelled, not withheld, and a
+    /// lesson about deleted code is often the one worth reading.
+    pub applicable_only: bool,
+    /// At most this many records, applied **after** ranking so a limit returns the
+    /// best matches rather than the newest ones.
+    pub limit: Option<usize>,
+}
+
+/// One recalled record and the arithmetic that ranked it.
+///
+/// Every term is reported, not just the product: a ranking an agent cannot take
+/// apart is a ranking it has to trust, and the whole point of depreciating by
+/// evidence is that the evidence can be inspected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Recalled {
+    /// `base_confidence × anchor_penalty × decay_factor`, in `[0.0, 1.0]`.
+    /// **Computed here and stored in no column.**
+    pub score: f64,
+    /// The writer's stated confidence, or [`DEFAULT_BASE_CONFIDENCE`] when it
+    /// stated none.
+    pub base_confidence: f64,
+    /// [`anchor_penalty`] for this record's [`AnchorState`] against the current
+    /// tree.
+    pub anchor_penalty: f64,
+    /// [`Decay::factor`] for this record's age.
+    pub decay_factor: f64,
+    /// Generations between this record and the newest one in the store. `0` for
+    /// the newest record itself.
+    pub age: u64,
+    /// The record, with its anchor state and applicability resolved against the
+    /// tree this recall ran on.
+    pub record: MemoryRecord,
+}
+
+/// A ranked recall, with the state it was computed against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Recall {
+    /// Stable schema tag ([`RECALL_SCHEMA`]).
+    pub schema: &'static str,
+    /// The generation this recall was computed at — the newest record's id.
+    /// Reported because every `age` is relative to it.
+    pub generation: i64,
+    /// The decay mode used.
+    pub decay: Decay,
+    /// Whether that mode guarantees reproducible recall
+    /// ([`Decay::is_reproducible`]). Surfaced so a consumer that is depending on
+    /// reproducibility does not have to infer it from the mode token.
+    pub reproducible: bool,
+    /// The ranked records, best score first, ties broken by newest generation.
+    pub results: Vec<Recalled>,
+    /// Live records in the whole store, ignoring the options.
+    pub live: u64,
+    /// Superseded records in the whole store. **None of them is in `results`**:
+    /// supersession drops a record out of recall immediately and regardless of
+    /// age, because the test is a recorded pointer and not a clock.
+    pub superseded: u64,
+}
+
 /// What one [`crate::Store::forget_memory`] removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryForgotten {
@@ -582,6 +930,149 @@ pub struct MemoryForgotten {
     /// failure the explicit pointer exists to prevent. So the pointer is cleared
     /// and the predecessor returns, reported here rather than silently.
     pub restored: Vec<i64>,
+}
+
+// --- Tier 2: the bounded, evictable cache ------------------------------------
+
+/// Stable schema tag on [`CacheSweep`] and [`CacheStats`].
+pub const CACHE_SCHEMA: &str = "roteiro.cache/v1";
+
+/// The default byte budget for the cache tier: **256 MB**, and raisable.
+///
+/// The number is a measurement, not a guess. On this repository `.git/roteiro/`
+/// is 49 MB against a 91 MB `.git` — the sidecar is already ~54% of the
+/// repository it describes — so a cache tier is not a new cost category, it is a
+/// bound on one that is currently unbounded in every direction. 256 MB is small
+/// against `.git`, trivial against a model store, and large enough that an
+/// ordinary session never evicts.
+///
+/// Erring small is deliberate and cheap: everything in this tier is re-derivable,
+/// and `build_context` is *proven* to reconstruct identically, so eviction costs
+/// cycles and never information. Erring large only costs disk. Neither error is
+/// expensive, which is why this is a default rather than a policy.
+pub const DEFAULT_CACHE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Environment variable that raises or lowers [`DEFAULT_CACHE_BUDGET_BYTES`], in
+/// **whole megabytes** — so a large repository can hold more without a rebuild.
+pub const CACHE_BUDGET_ENV: &str = "ROTEIRO_CACHE_BUDGET_MB";
+
+/// The configured cache budget in bytes: [`CACHE_BUDGET_ENV`] megabytes if it is
+/// set, otherwise [`DEFAULT_CACHE_BUDGET_BYTES`].
+///
+/// A value that cannot be read is an **error, not a fallback**. Silently ignoring
+/// it would run the default under a name that says otherwise, and an operator who
+/// asked for a bound has to be told the ask did not land.
+///
+/// # Errors
+/// Returns [`MemoryError::InvalidBudget`] if the variable is set to something
+/// that is not a whole number of megabytes, or to a number of megabytes that does
+/// not fit in bytes.
+pub fn cache_budget_bytes() -> Result<u64, MemoryError> {
+    let Some(raw) = std::env::var_os(CACHE_BUDGET_ENV) else {
+        return Ok(DEFAULT_CACHE_BUDGET_BYTES);
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    let megabytes: u64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| MemoryError::InvalidBudget(raw.clone()))?;
+    megabytes
+        .checked_mul(1024 * 1024)
+        .ok_or(MemoryError::InvalidBudget(raw))
+}
+
+/// The values [`crate::Store::agent_cache_put`] writes.
+///
+/// `anchor` is a **node key**; the blob stored beside it is captured by the store
+/// from the graph at write time, exactly as [`MemoryWrite`]'s is, so there is one
+/// place that decides what an anchor's evidence is.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheWrite<'a> {
+    /// The cache key. Content-addressed by the caller; nothing here interprets it.
+    pub key: &'a str,
+    /// The freshness witness. A reader compares it with the fingerprint the
+    /// current graph yields and treats a mismatch as a miss — capacity eviction is
+    /// a separate, orthogonal policy.
+    pub fingerprint: &'a str,
+    /// The cached payload.
+    pub json: &'a str,
+    /// The node key this entry is derived from, if any. Supplies the
+    /// `anchor_valid` half of the eviction order.
+    pub anchor: Option<&'a str>,
+}
+
+/// One entry in the cache tier, with its anchor resolved against the current
+/// graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheEntry {
+    /// The cache key.
+    pub key: String,
+    /// The freshness witness stored with the payload.
+    pub fingerprint: String,
+    /// The cached payload.
+    pub json: String,
+    /// The entry's payload size — what the byte budget is spent on.
+    pub bytes: u64,
+    /// The sweep generation this entry was written in.
+    pub generation: i64,
+    /// The access tick it was last read or written at. A logical counter, never a
+    /// clock.
+    pub last_used: i64,
+    /// How many times it has been read back.
+    pub hits: u64,
+    /// The node key it is derived from, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// What that anchor is worth against the **current** graph. Computed on read;
+    /// no column holds it.
+    pub anchor_state: AnchorState,
+}
+
+/// What the cache tier currently holds, against what it is allowed to hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheStats {
+    /// Stable schema tag ([`CACHE_SCHEMA`]).
+    pub schema: &'static str,
+    /// Entries in the tier.
+    pub entries: u64,
+    /// Bytes they occupy.
+    pub bytes: u64,
+    /// The budget those bytes are measured against.
+    pub budget_bytes: u64,
+    /// The current sweep generation.
+    pub generation: i64,
+}
+
+/// What one sweep of the cache tier did.
+///
+/// Reported in full — including what was **kept** and whether the tier is still
+/// over budget — because a sweep that silently declined to free anything and a
+/// sweep that had nothing to free look identical from the outside, and they mean
+/// opposite things.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheSweep {
+    /// Stable schema tag ([`CACHE_SCHEMA`]).
+    pub schema: &'static str,
+    /// The budget this sweep enforced.
+    pub budget_bytes: u64,
+    /// Entries considered.
+    pub scanned: u64,
+    /// Entries that could not be evicted: written in the current generation with
+    /// a valid anchor, or the most-recently-used entry, which is always kept.
+    pub pinned: u64,
+    /// Entries deleted.
+    pub evicted: u64,
+    /// Bytes their deletion freed.
+    pub freed_bytes: u64,
+    /// Bytes still held after the sweep.
+    pub retained_bytes: u64,
+    /// **Whether the tier is still over budget** after the sweep — which happens
+    /// when what remains is all pinned. Reported rather than hidden: a bound that
+    /// silently fails to bind is worse than one that says so.
+    pub over_budget: bool,
+    /// The generation the tier advanced to. Entries written before it are
+    /// evictable by the next sweep.
+    pub generation: i64,
 }
 
 // --- Persistence. Free helpers over a `Connection` (a `Transaction` derefs to
@@ -721,6 +1212,118 @@ pub(crate) fn records(
     Ok(out)
 }
 
+/// The generation recall is computed against: the newest record's id, or `0` in
+/// an empty store.
+///
+/// Read from the store rather than counted, because `AUTOINCREMENT` ids are not
+/// dense — forgetting records leaves gaps, and a gap is still a generation that
+/// happened.
+pub(crate) fn generation(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(
+        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM agent_memory", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// Rank the live records, computing every term at retrieval time.
+///
+/// Three things this deliberately does not do, each of which would break
+/// something ADR-0013 promises:
+///
+/// * **It writes nothing.** No score, no hit counter, no touch. Recall over an
+///   unchanged store and an unchanged tree is therefore idempotent, which is what
+///   makes `decay = none` byte-identical across runs.
+/// * **It never sees a superseded record.** They are excluded in SQL, by a
+///   recorded pointer with no clock in it, so a superseded record leaves recall
+///   the moment its successor is written regardless of its age or score.
+/// * **It consults no branch and no clock.** Applicability is
+///   [`AnchorState::applies`], resolved against the tree in front of you.
+pub(crate) fn recall(
+    conn: &Connection,
+    opts: &RecallOptions<'_>,
+) -> Result<Vec<Recalled>, StoreError> {
+    let generation = generation(conn)?;
+    // No SQL limit: the limit is applied after ranking, so it returns the best
+    // matches rather than the newest ones.
+    let rows = records(
+        conn,
+        &MemoryFilter {
+            scope: opts.scope,
+            kind: opts.kind,
+            anchor_key: opts.anchor_key,
+            include_superseded: false,
+            limit: None,
+        },
+    )?;
+
+    let query = opts.query.map(|q| q.trim().to_lowercase());
+    let tokens: Vec<&str> = query
+        .as_deref()
+        .map(|q| q.split("::").flat_map(str::split_whitespace).collect())
+        .unwrap_or_default();
+
+    let mut out: Vec<Recalled> = Vec::new();
+    for record in rows {
+        if opts.applicable_only && !record.applies {
+            continue;
+        }
+        if !tokens.is_empty() && !matches_tokens(&record, &tokens) {
+            continue;
+        }
+        let base_confidence = record.confidence.unwrap_or(DEFAULT_BASE_CONFIDENCE);
+        let anchor_penalty = anchor_penalty(record.anchor_state);
+        // `saturating_sub`: a record can never be newer than the newest one, but
+        // an underflow here would be a silently enormous age rather than an error.
+        let age = u64::try_from(generation.saturating_sub(record.id)).unwrap_or(0);
+        let decay_factor = opts.decay.factor(age);
+        out.push(Recalled {
+            score: base_confidence * anchor_penalty * decay_factor,
+            base_confidence,
+            anchor_penalty,
+            decay_factor,
+            age,
+            record,
+        });
+    }
+    // `total_cmp`, not `partial_cmp`: every term is finite by construction, and a
+    // comparator that can return `None` is one that can silently stop sorting.
+    // Ties break by newest generation, so the order is total and reproducible.
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.record.id.cmp(&a.record.id))
+    });
+    if let Some(limit) = opts.limit {
+        out.truncate(limit);
+    }
+    Ok(out)
+}
+
+/// Whether every token appears in the record's body, anchor key or anchor path.
+///
+/// The anchor is searchable so a symbol name recalls what was learned about it;
+/// `scope` is not, because it is a namespace with an exact-match filter of its own
+/// and matching it loosely here would be the second applicability rule ADR-0013
+/// refuses.
+fn matches_tokens(record: &MemoryRecord, tokens: &[&str]) -> bool {
+    let body = record.body.to_lowercase();
+    let anchor_key = record
+        .anchor
+        .as_ref()
+        .map(|a| a.key.to_lowercase())
+        .unwrap_or_default();
+    let anchor_path = record
+        .anchor
+        .as_ref()
+        .and_then(|a| a.path.as_deref())
+        .unwrap_or_default()
+        .to_lowercase();
+    tokens
+        .iter()
+        .all(|t| body.contains(t) || anchor_key.contains(t) || anchor_path.contains(t))
+}
+
 /// One record by id, or `None` if it is not there.
 pub(crate) fn get(conn: &Connection, id: i64) -> Result<Option<MemoryRecord>, StoreError> {
     let sql = format!("SELECT {RECORD_COLS}{RECORD_FROM} WHERE m.id = ?1");
@@ -777,6 +1380,393 @@ pub(crate) fn counts(conn: &Connection) -> Result<(u64, u64), StoreError> {
     ))
 }
 
+// --- Tier 2 persistence: the bounded cache and its sweep ---------------------
+
+/// Advance the access tick and return the new value.
+///
+/// The durable equivalent of `ModelCache`'s position in its `Vec`: strictly
+/// increasing, unique per access, and **not a clock** — the store is shared across
+/// worktrees, where wall-clock is not monotone and second granularity ties.
+fn next_tick(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(conn.query_row(
+        "UPDATE agent_cache_clock SET ticks = ticks + 1 WHERE id = 0 RETURNING ticks",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// The current sweep generation.
+fn cache_generation(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(conn.query_row(
+        "SELECT generation FROM agent_cache_clock WHERE id = 0",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Write (or replace) one cache entry.
+///
+/// `bytes` is the payload's own size, computed here so the sweep can total and
+/// order the tier without reading every `json` in it. `hits` survives a
+/// replacement: the counter is about how often this *key* is worth having, and the
+/// value under it is re-derivable by definition.
+pub(crate) fn cache_put(conn: &Connection, write: &CacheWrite<'_>) -> Result<(), StoreError> {
+    let bytes = u64::try_from(write.key.len() + write.fingerprint.len() + write.json.len())
+        .unwrap_or(u64::MAX);
+    // Anchor evidence, captured from the graph as it stands — the same capture
+    // the episodic tier does, so the two agree about what an anchor was worth.
+    let anchor_blob: Option<String> = match write.anchor {
+        Some(key) => conn
+            .query_row("SELECT blob_hash FROM nodes WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten(),
+        None => None,
+    };
+    let tick = next_tick(conn)?;
+    let generation = cache_generation(conn)?;
+    conn.execute(
+        "INSERT INTO agent_cache
+             (key, fingerprint, json, bytes, generation, last_used, hits, anchor_key, anchor_blob)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
+         ON CONFLICT(key) DO UPDATE SET
+             fingerprint = excluded.fingerprint,
+             json        = excluded.json,
+             bytes       = excluded.bytes,
+             generation  = excluded.generation,
+             last_used   = excluded.last_used,
+             anchor_key  = excluded.anchor_key,
+             anchor_blob = excluded.anchor_blob",
+        params![
+            write.key,
+            write.fingerprint,
+            write.json,
+            i64::try_from(bytes).unwrap_or(i64::MAX),
+            generation,
+            tick,
+            write.anchor,
+            anchor_blob,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Columns of `agent_cache` plus the joined anchor evidence, in the order
+/// [`cache_entry_from_row`] decodes them.
+///
+/// The **full** row, payload included — for the paths that actually hand an entry
+/// back to a caller. The sweep deliberately does not use this; see [`SWEEP_COLS`].
+const CACHE_COLS: &str = "c.key, c.fingerprint, c.json, c.bytes, c.generation, c.last_used, \
+     c.hits, c.anchor_key, c.anchor_blob, n.key, n.blob_hash";
+
+/// The columns the **sweep** needs, which is every column eviction is decided by
+/// and **not one byte of payload**.
+///
+/// This is the whole reason `agent_cache.bytes` exists. A sweep has to order and
+/// total the tier, and if it did that by measuring payloads it would have to read
+/// them — so a maintenance pass over a full tier would pull up to the entire
+/// budget into memory, and the budget now defaults to 256 MB. Storing the size at
+/// write time means the sweep can do its arithmetic from a handful of integers.
+///
+/// So: `json`, `fingerprint` and `hits` are absent, and their absence is the
+/// point. `hits` is not a policy input either — eviction orders by
+/// `(anchor_valid, last_used)`, never by popularity — so selecting it would be
+/// reading a column the policy is not allowed to consult.
+/// `the_sweep_query_names_no_payload_column` fails if any of the three comes back.
+const SWEEP_COLS: &str = "c.key, c.bytes, c.generation, c.last_used, c.anchor_key, \
+     c.anchor_blob, n.key, n.blob_hash";
+
+/// The `LEFT JOIN` resolving a cache entry's anchor against the current graph.
+///
+/// **Shared by both column sets above**, which is what stops the sweep and the
+/// inspection path from disagreeing about which rows exist or how an anchor
+/// resolves. Neither adds a `WHERE`, so both see exactly the tier; both decode the
+/// anchor through [`resolve_anchor`]. `the_sweep_and_the_full_read_agree_row_for_row`
+/// pins that they do.
+const CACHE_FROM: &str = " FROM agent_cache c LEFT JOIN nodes n ON n.key = c.anchor_key";
+
+/// Read one entry back, **recording the access**: `hits` increments and
+/// `last_used` advances.
+///
+/// This is the one read in this module that writes, and the write is the cache's
+/// own bookkeeping — `hits` and `last_used` exist to be moved by exactly this, and
+/// a hit counter nothing increments is a column that lies. It touches nothing
+/// outside `agent_cache`, so the *ranked* read this module is really about
+/// ([`recall`]) stays free of it and stays reproducible.
+pub(crate) fn cache_get(conn: &Connection, key: &str) -> Result<Option<CacheEntry>, StoreError> {
+    let sql = format!("SELECT {CACHE_COLS}{CACHE_FROM} WHERE c.key = ?1");
+    let entry = conn
+        .query_row(&sql, [key], |row| Ok(cache_entry_from_row(row)))
+        .optional()?
+        .transpose()?;
+    if entry.is_some() {
+        let tick = next_tick(conn)?;
+        conn.execute(
+            "UPDATE agent_cache SET hits = hits + 1, last_used = ?1 WHERE key = ?2",
+            params![tick, key],
+        )?;
+    }
+    Ok(entry)
+}
+
+/// Every entry, ordered by key. Does **not** record an access — this is the
+/// inspection path (stats, the sweep, tests), and inspecting a cache is not using
+/// it.
+pub(crate) fn cache_entries(conn: &Connection) -> Result<Vec<CacheEntry>, StoreError> {
+    let sql = format!("SELECT {CACHE_COLS}{CACHE_FROM} ORDER BY c.key");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(cache_entry_from_row(row)?);
+    }
+    Ok(out)
+}
+
+/// One entry as the **sweep** sees it: what eviction is decided by, and nothing
+/// else.
+///
+/// Deliberately not a [`CacheEntry`]. A `CacheEntry` carries the payload, and a
+/// sweep that held one per row would defeat the purpose of storing `bytes` at
+/// all — the type is the guard, because there is no field here for a payload to
+/// arrive in.
+#[derive(Debug, Clone)]
+struct SweepRow {
+    key: String,
+    /// The size recorded at write time. **The authority for every byte the sweep
+    /// totals or compares** — never `length(json)`, which is what reading the
+    /// payload would amount to.
+    bytes: u64,
+    generation: i64,
+    last_used: i64,
+    anchor_state: AnchorState,
+}
+
+/// Every entry, as [`SweepRow`]s — the narrow read the sweep runs.
+///
+/// Same table and same join as [`cache_entries`] ([`CACHE_FROM`]), same anchor
+/// rule ([`resolve_anchor`]), neither with a `WHERE`: the two cannot disagree
+/// about which rows exist or what an anchor is worth. They differ in exactly one
+/// respect, which is that this one does not read the payload.
+fn sweep_rows(conn: &Connection) -> Result<Vec<SweepRow>, StoreError> {
+    let sql = format!("SELECT {SWEEP_COLS}{CACHE_FROM} ORDER BY c.key");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let bytes: i64 = row.get(1)?;
+        let anchor_key: Option<String> = row.get(4)?;
+        let anchor_blob: Option<String> = row.get(5)?;
+        let node_key: Option<String> = row.get(6)?;
+        let node_blob: Option<String> = row.get(7)?;
+        out.push(SweepRow {
+            key: row.get(0)?,
+            bytes: u64::try_from(bytes).unwrap_or(0),
+            generation: row.get(2)?,
+            last_used: row.get(3)?,
+            anchor_state: resolve_anchor(
+                anchor_key.as_deref(),
+                anchor_blob.as_deref(),
+                node_key.as_deref(),
+                node_blob.as_deref(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+/// Delete one entry, returning whether there was one.
+pub(crate) fn cache_forget(conn: &Connection, key: &str) -> Result<bool, StoreError> {
+    Ok(conn.execute("DELETE FROM agent_cache WHERE key = ?1", [key])? > 0)
+}
+
+/// What the tier holds against `budget_bytes`.
+pub(crate) fn cache_stats(conn: &Connection, budget_bytes: u64) -> Result<CacheStats, StoreError> {
+    let (entries, bytes): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM agent_cache",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(CacheStats {
+        schema: CACHE_SCHEMA,
+        entries: u64::try_from(entries).unwrap_or(0),
+        bytes: u64::try_from(bytes).unwrap_or(0),
+        budget_bytes,
+        generation: cache_generation(conn)?,
+    })
+}
+
+/// **How many of the evictable entries must go**, given their sizes in eviction
+/// order (first to go first), the bytes held by entries that cannot be evicted,
+/// and the budget.
+///
+/// A pure function, and a deliberate port of `rto-llama`'s `lru_evict_count`
+/// (`llama.rs:120-137`, pinned by `budget_evicts_oldest_until_it_fits`) rather
+/// than a new policy: drop the oldest until the remainder fits. The one structural
+/// difference is where "always keep the most-recently-used entry" lives — there it
+/// is a `len - evict > 1` guard, here the caller has already moved that entry into
+/// `pinned_bytes`, because this tier pins other rows too and one rule for all of
+/// them is simpler than two.
+///
+/// Consequently this **can** return short of the budget: when everything left is
+/// pinned, the tier stays over. That is the ADR's rule, not a bug — a session's
+/// own just-written work is not thrown away by the maintenance pass behind it —
+/// and [`CacheSweep::over_budget`] says so out loud.
+fn evict_count(evictable_lru_first: &[u64], pinned_bytes: u64, budget_bytes: u64) -> usize {
+    let mut total: u64 = pinned_bytes.saturating_add(evictable_lru_first.iter().sum());
+    let mut evict = 0;
+    while evict < evictable_lru_first.len() && total > budget_bytes {
+        total = total.saturating_sub(evictable_lru_first[evict]);
+        evict += 1;
+    }
+    evict
+}
+
+/// Sweep the cache tier down to `budget_bytes`, oldest-first on
+/// `(anchor_valid ASC, last_used ASC)`, and advance the generation.
+///
+/// **Nothing episodic is reachable from here.** Every statement names
+/// `agent_cache`; `agent_memory` has no `bytes`, no `last_used` and no `hits`, so
+/// there is no column for this policy to grip it by even by mistake. That is the
+/// two-tier split doing its job: re-derivable ⇒ evictable, episodic ⇒ never
+/// silently evicted.
+///
+/// Three classes of entry are never evicted:
+///
+/// * anything in the episodic tier, as above;
+/// * an entry written in the **current generation** whose anchor still applies —
+///   the session's own work, which the maintenance pass that follows it must not
+///   undo;
+/// * the **most-recently-used** entry, always, even if it alone exceeds the budget
+///   — `ModelCache`'s rule, for `ModelCache`'s reason: what was just asked for has
+///   to be there.
+///
+/// **This reads no payloads.** It runs the narrow [`sweep_rows`] query, so
+/// deciding what to evict costs a few integers per entry rather than the tier's
+/// contents — which is what `agent_cache.bytes` is *for*, and what makes a
+/// maintenance pass over a full 256 MB tier affordable.
+pub(crate) fn cache_sweep(conn: &Connection, budget_bytes: u64) -> Result<CacheSweep, StoreError> {
+    let generation = cache_generation(conn)?;
+    let entries = sweep_rows(conn)?;
+    let scanned = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+
+    // The most-recently-used entry, by the tick counter: always kept.
+    let mru = entries.iter().max_by_key(|e| e.last_used).map(|e| &e.key);
+
+    let mut pinned_bytes: u64 = 0;
+    let mut candidates: Vec<&SweepRow> = Vec::new();
+    for entry in &entries {
+        let is_mru = mru.is_some_and(|k| *k == entry.key);
+        let own_work = entry.generation >= generation && entry.anchor_state.applies();
+        if is_mru || own_work {
+            pinned_bytes = pinned_bytes.saturating_add(entry.bytes);
+        } else {
+            candidates.push(entry);
+        }
+    }
+    // The eviction order, exactly as ADR-0013 states it: entries whose anchor no
+    // longer applies go before entries that still describe this tree, and within
+    // each group the least recently used goes first. `key` breaks the last tie so
+    // a sweep is deterministic even on a store where two entries somehow share a
+    // tick.
+    candidates.sort_by(|a, b| {
+        a.anchor_state
+            .applies()
+            .cmp(&b.anchor_state.applies())
+            .then_with(|| a.last_used.cmp(&b.last_used))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    let sizes: Vec<u64> = candidates.iter().map(|e| e.bytes).collect();
+    let evict = evict_count(&sizes, pinned_bytes, budget_bytes);
+    let mut freed_bytes: u64 = 0;
+    for entry in candidates.iter().take(evict) {
+        conn.execute("DELETE FROM agent_cache WHERE key = ?1", [&entry.key])?;
+        freed_bytes = freed_bytes.saturating_add(entry.bytes);
+    }
+
+    let held: u64 = entries.iter().map(|e| e.bytes).sum();
+    let retained_bytes = held.saturating_sub(freed_bytes);
+    // The generation advances *after* the sweep, so what this session wrote is
+    // pinned for this pass and evictable by the next one. Without the advance the
+    // pin would be permanent and the budget would never bind.
+    let generation: i64 = conn.query_row(
+        "UPDATE agent_cache_clock SET generation = generation + 1 WHERE id = 0
+         RETURNING generation",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(CacheSweep {
+        schema: CACHE_SCHEMA,
+        budget_bytes,
+        scanned,
+        pinned: u64::try_from(entries.len().saturating_sub(candidates.len())).unwrap_or(0),
+        evicted: u64::try_from(evict).unwrap_or(0),
+        freed_bytes,
+        retained_bytes,
+        over_budget: retained_bytes > budget_bytes,
+        generation,
+    })
+}
+
+/// Decode an `agent_cache` row joined against `nodes`.
+fn cache_entry_from_row(row: &rusqlite::Row<'_>) -> Result<CacheEntry, StoreError> {
+    let anchor_key: Option<String> = row.get(7)?;
+    let anchor_blob: Option<String> = row.get(8)?;
+    let node_key: Option<String> = row.get(9)?;
+    let node_blob: Option<String> = row.get(10)?;
+    let bytes: i64 = row.get(3)?;
+    let hits: i64 = row.get(6)?;
+    Ok(CacheEntry {
+        key: row.get(0)?,
+        fingerprint: row.get(1)?,
+        json: row.get(2)?,
+        bytes: u64::try_from(bytes).unwrap_or(0),
+        generation: row.get(4)?,
+        last_used: row.get(5)?,
+        hits: u64::try_from(hits).unwrap_or(0),
+        // The same rule the episodic tier reads by — one implementation, so the
+        // two tiers can never disagree about what an anchor is worth.
+        anchor_state: resolve_anchor(
+            anchor_key.as_deref(),
+            anchor_blob.as_deref(),
+            node_key.as_deref(),
+            node_blob.as_deref(),
+        ),
+        anchor: anchor_key,
+    })
+}
+
+/// **The anchor rule, in one place.** What a recorded anchor is worth against the
+/// node the `LEFT JOIN` resolved it to — `node_key` of `None` meaning there is no
+/// such node now, which is the vanished case rather than a missing column.
+///
+/// Both tiers call this and neither has a copy: the episodic tier ranks on it and
+/// the cache tier orders eviction by it, and two implementations of one rule is
+/// how they would come to disagree about what "applies here" means.
+fn resolve_anchor(
+    anchor_key: Option<&str>,
+    anchor_blob: Option<&str>,
+    node_key: Option<&str>,
+    node_blob: Option<&str>,
+) -> AnchorState {
+    match (anchor_key, node_key) {
+        (None, _) => AnchorState::Unanchored,
+        (Some(_), None) => AnchorState::Vanished,
+        (Some(_), Some(_)) => match (anchor_blob, node_blob) {
+            // Both halves of the stable pair are present, so drift is a real
+            // comparison rather than an assumption.
+            (Some(captured), Some(current)) if captured == current => AnchorState::Valid,
+            (Some(_), Some(_)) => AnchorState::Drifted,
+            // One side has no blob: the node is there, but nothing can be
+            // concluded about the code under it. Said plainly rather than
+            // rounded up to `Valid`.
+            _ => AnchorState::Unverifiable,
+        },
+    }
+}
+
 /// Decode an `agent_memory` row joined against `nodes`.
 fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> {
     let kind_token: String = row.get(2)?;
@@ -789,20 +1779,12 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> 
     let node_key: Option<String> = row.get(12)?;
     let node_blob: Option<String> = row.get(13)?;
 
-    let anchor_state = match (&anchor_key, &node_key) {
-        (None, _) => AnchorState::Unanchored,
-        (Some(_), None) => AnchorState::Vanished,
-        (Some(_), Some(_)) => match (&anchor_blob, &node_blob) {
-            // Both halves of the stable pair are present, so drift is a real
-            // comparison rather than an assumption.
-            (Some(captured), Some(current)) if captured == current => AnchorState::Valid,
-            (Some(_), Some(_)) => AnchorState::Drifted,
-            // One side has no blob: the node is there, but nothing can be
-            // concluded about the code under it. Said plainly rather than
-            // rounded up to `Valid`.
-            _ => AnchorState::Unverifiable,
-        },
-    };
+    let anchor_state = resolve_anchor(
+        anchor_key.as_deref(),
+        anchor_blob.as_deref(),
+        node_key.as_deref(),
+        node_blob.as_deref(),
+    );
     let anchor = anchor_key.map(|key| MemoryAnchor {
         key,
         blob: anchor_blob,
@@ -829,8 +1811,9 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorState, DEFAULT_MEMORY_SCOPE, MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind,
-        MemoryWrite,
+        AnchorState, CACHE_COLS, DEFAULT_DECAY_SPAN, DEFAULT_HALF_LIFE, DEFAULT_MEMORY_SCOPE,
+        Decay, MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind, MemoryWrite, SWEEP_COLS,
+        anchor_penalty, cache_entries, cache_sweep, evict_count, sweep_rows,
     };
 
     fn write(body: &str) -> MemoryWrite<'_> {
@@ -927,5 +1910,393 @@ mod tests {
                 "{confidence} is not a probability and must be refused"
             );
         }
+    }
+
+    // --- Ranking: the two pure functions the recall score is built from --------
+
+    /// **`none` has no age term at all.** This is the property the whole
+    /// reproducibility claim rests on: if the factor varied with age under `none`,
+    /// recall would depend on how much had been written since, and "byte-identical
+    /// across runs for a fixed repo state" would be false the moment anything else
+    /// was recorded.
+    #[test]
+    fn decay_none_is_exactly_one_at_every_age() {
+        for age in [0, 1, 7, 1_000, u64::from(u32::MAX)] {
+            assert!(
+                (Decay::None.factor(age) - 1.0).abs() < f64::EPSILON,
+                "none must not price age at all, but age {age} moved it",
+            );
+        }
+        assert!(Decay::None.is_reproducible());
+        assert!(!Decay::Linear { span: 10 }.is_reproducible());
+        assert!(!Decay::Exponential { half_life: 10 }.is_reproducible());
+    }
+
+    /// Both age modes start at `1.0`, never leave `[0.0, 1.0]`, and never increase
+    /// with age. Monotonicity is the part worth pinning: a decay that rose
+    /// anywhere would rank an older record above a newer identical one.
+    #[test]
+    fn decay_modes_start_at_one_and_never_rise() {
+        for decay in [
+            Decay::Linear { span: 8 },
+            Decay::Linear {
+                span: DEFAULT_DECAY_SPAN,
+            },
+            Decay::Exponential { half_life: 4 },
+            Decay::Exponential {
+                half_life: DEFAULT_HALF_LIFE,
+            },
+        ] {
+            assert!(
+                (decay.factor(0) - 1.0).abs() < f64::EPSILON,
+                "{decay} must not discount the newest record",
+            );
+            let mut previous = f64::INFINITY;
+            for age in 0..64_u64 {
+                let f = decay.factor(age);
+                assert!((0.0..=1.0).contains(&f), "{decay} at age {age} gave {f}");
+                assert!(f <= previous, "{decay} rose at age {age}");
+                previous = f;
+            }
+        }
+        // The shapes themselves, at the points that name them.
+        assert!((Decay::Linear { span: 10 }.factor(5) - 0.5).abs() < 1e-12);
+        assert!((Decay::Exponential { half_life: 10 }.factor(10) - 0.5).abs() < 1e-12);
+        assert!(
+            (Decay::Exponential { half_life: 10 }.factor(20) - 0.25).abs() < 1e-12,
+            "two half-lives is a quarter",
+        );
+    }
+
+    /// Linear reaches zero and stays there; exponential never does. Both are
+    /// **rankings, not filters** — a zero factor sorts a record last and returns
+    /// it, which is asserted where recall is (`tests/agent_memory.rs`).
+    #[test]
+    fn linear_bottoms_out_and_exponential_does_not() {
+        let linear = Decay::Linear { span: 10 };
+        assert!(linear.factor(10).abs() < f64::EPSILON);
+        assert!(
+            linear.factor(10_000).abs() < f64::EPSILON,
+            "and stays there"
+        );
+        let exponential = Decay::Exponential { half_life: 10 };
+        assert!(
+            exponential.factor(10_000) > 0.0,
+            "an exponential is never quite zero",
+        );
+        // A degenerate parameter is clamped rather than dividing by zero.
+        assert!((Decay::Linear { span: 0 }.factor(0) - 1.0).abs() < f64::EPSILON);
+        assert!(Decay::Linear { span: 0 }.factor(1).abs() < f64::EPSILON);
+        assert!((Decay::Exponential { half_life: 0 }.factor(0) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn decay_tokens_round_trip_and_reject_the_unknown() {
+        for decay in [
+            Decay::None,
+            Decay::Linear { span: 7 },
+            Decay::Exponential { half_life: 9 },
+        ] {
+            assert_eq!(
+                decay.to_string().parse::<Decay>(),
+                Ok(decay),
+                "{decay} must round-trip through its token",
+            );
+        }
+        assert_eq!(
+            "linear".parse::<Decay>(),
+            Ok(Decay::Linear {
+                span: DEFAULT_DECAY_SPAN
+            }),
+            "a bare mode takes its documented default span",
+        );
+        assert_eq!(
+            "exponential".parse::<Decay>(),
+            Ok(Decay::Exponential {
+                half_life: DEFAULT_HALF_LIFE
+            })
+        );
+        assert_eq!(Decay::default(), Decay::None, "reproducible by default");
+        for bad in ["clock", "none:5", "linear:soon", ""] {
+            assert!(bad.parse::<Decay>().is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// **The ranking and the applicability rule cannot disagree.** Every state
+    /// that [`AnchorState::applies`] must outrank every state that does not, and
+    /// **nothing may be zero** — drift demotes, it never deletes, and a penalty of
+    /// zero is deletion wearing a ranking's clothes.
+    #[test]
+    fn anchor_penalty_demotes_without_ever_silencing() {
+        let states = [
+            AnchorState::Unanchored,
+            AnchorState::Valid,
+            AnchorState::Drifted,
+            AnchorState::Vanished,
+            AnchorState::Unverifiable,
+        ];
+        for state in states {
+            let p = anchor_penalty(state);
+            assert!(p > 0.0, "{state} was silenced, not demoted");
+            assert!(p <= 1.0, "{state} scored above the maximum");
+        }
+        let worst_applying = states
+            .into_iter()
+            .filter(|s| s.applies())
+            .map(anchor_penalty)
+            .fold(f64::INFINITY, f64::min);
+        let best_not_applying = states
+            .into_iter()
+            .filter(|s| !s.applies())
+            .map(anchor_penalty)
+            .fold(0.0, f64::max);
+        assert!(
+            worst_applying > best_not_applying,
+            "a record that applies here must outrank every record that does not \
+             ({worst_applying} vs {best_not_applying})",
+        );
+        // Drifted is the one state that can mislead about code still under its
+        // key, so it — not vanished — is ranked lowest. A lesson about deleted
+        // code is often the most valuable record in the store.
+        assert!(
+            anchor_penalty(AnchorState::Vanished) > anchor_penalty(AnchorState::Drifted),
+            "a record about deleted code must not be the most demoted of all",
+        );
+    }
+
+    // --- The eviction policy, as a pure function ------------------------------
+
+    /// **Parity with the policy this ports.** `rto-llama`'s `lru_evict_count`
+    /// (`llama.rs:120-137`) is pinned by `tests::budget_evicts_oldest_until_it_
+    /// fits`, and these are that test's cases restated on this signature: three
+    /// 100-byte entries, the newest of which is pinned by the caller as
+    /// `pinned_bytes` rather than by a `len - evict > 1` guard.
+    ///
+    /// Stated as parity on purpose. The value of porting an existing policy
+    /// instead of inventing one is entirely lost if the port quietly behaves
+    /// differently, so the numbers are the same numbers.
+    #[test]
+    fn eviction_matches_the_model_cache_policy_it_ports() {
+        // `lru_evict_count(&[100, 100, 100], 250) == 1`
+        assert_eq!(evict_count(&[100, 100], 100, 250), 1);
+        // `… == 2` at a budget of zero: everything goes but the pinned entry.
+        assert_eq!(evict_count(&[100, 100], 100, 0), 2);
+        // `… == 0` when it already fits.
+        assert_eq!(evict_count(&[100, 100], 100, 1000), 0);
+        // Exactly at the budget is not over it.
+        assert_eq!(evict_count(&[100, 100], 100, 300), 0);
+    }
+
+    /// **Always keep at least one entry, even one that alone blows the budget.**
+    /// `ModelCache`'s rule, for `ModelCache`'s reason: what was just asked for has
+    /// to be there. Here the caller pins it, so this function's job is only to
+    /// never evict what it was not given.
+    #[test]
+    fn nothing_evictable_means_nothing_evicted_however_small_the_budget() {
+        assert_eq!(evict_count(&[], 500, 10), 0, "the sole entry survives");
+        assert_eq!(evict_count(&[], 0, 0), 0, "an empty tier sweeps to nothing");
+        assert_eq!(
+            evict_count(&[100], 500, 10),
+            1,
+            "and everything else still goes",
+        );
+    }
+
+    /// Eviction stops the moment the remainder fits — it does not keep going to
+    /// make room it was not asked for. A cache that over-evicts pays the recompute
+    /// cost of entries it had no reason to drop.
+    #[test]
+    fn eviction_stops_as_soon_as_the_remainder_fits() {
+        // Three evictable entries of 10, 20 and 30 in eviction order, plus 40
+        // pinned: 100 bytes held. At a budget of 70, dropping the 10 leaves 90 and
+        // dropping the 20 leaves 70 — which fits, so the 30 stays put.
+        assert_eq!(evict_count(&[10, 20, 30], 40, 70), 2);
+        assert_eq!(evict_count(&[10, 20, 30], 40, 90), 1);
+        assert_eq!(evict_count(&[10, 20, 30], 40, 100), 0, "it already fits");
+        // Down at the pinned set's own size, everything evictable goes — and no
+        // further, because there is nothing further to go.
+        assert_eq!(evict_count(&[10, 20, 30], 40, 40), 3);
+    }
+
+    /// Pinned bytes count against the budget even though they cannot be freed, so
+    /// a tier full of pinned entries evicts everything else and then legitimately
+    /// stays over — which `CacheSweep::over_budget` is there to say.
+    #[test]
+    fn pinned_bytes_are_counted_but_never_freed() {
+        assert_eq!(
+            evict_count(&[10, 10], 1000, 100),
+            2,
+            "everything evictable goes when the pinned set alone exceeds the budget",
+        );
+    }
+
+    // --- The sweep reads sizes, never payloads -------------------------------
+
+    /// A store with the cache schema applied and the clock advanced past the
+    /// generation test rows are written in, so nothing is pinned as "this
+    /// session's own work" and the byte policy is what decides.
+    fn cache_store() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        crate::migrations::apply(&mut conn).expect("apply");
+        conn.execute("UPDATE agent_cache_clock SET generation = 5", [])
+            .expect("advance the clock");
+        conn
+    }
+
+    /// Insert one entry with the stored size given **independently of the
+    /// payload**, which is the divergence
+    /// `the_sweep_totals_the_bytes_column_and_never_the_payload` turns on.
+    fn raw_put(conn: &rusqlite::Connection, key: &str, bytes: i64, payload: usize, last_used: i64) {
+        conn.execute(
+            "INSERT INTO agent_cache (key, fingerprint, json, bytes, generation, last_used, hits)
+             VALUES (?1, 'fp', ?2, ?3, 0, ?4, 0)",
+            rusqlite::params![key, "x".repeat(payload), bytes, last_used],
+        )
+        .expect("insert");
+    }
+
+    /// **The sweep query names no payload column.** The direct guard on the
+    /// regression this test exists for: re-adding `c.json` to the sweep's SELECT
+    /// makes it red.
+    ///
+    /// Stated on the query text rather than on behaviour, deliberately and with
+    /// its limits understood. `SELECT key, json` and `SELECT key` return the same
+    /// *answers* — the difference is only how much `SQLite` materialises on the way,
+    /// which no assertion over results can see. The thing that would actually
+    /// regress here is the column list, so the column list is what is pinned.
+    ///
+    /// `hits` is absent for a second reason worth keeping separate: it is not a
+    /// policy input at all. Eviction orders by `(anchor_valid, last_used)` and
+    /// never by popularity, so selecting `hits` would hand the sweep a column it
+    /// is not allowed to consult.
+    #[test]
+    fn the_sweep_query_names_no_payload_column() {
+        for forbidden in ["json", "fingerprint", "hits"] {
+            assert!(
+                !SWEEP_COLS.contains(forbidden),
+                "the sweep must not read {forbidden}: it decides by the stored size, \
+                 and reading payloads to decide what to evict is what `bytes` exists \
+                 to avoid — on a full tier that is the whole budget in memory",
+            );
+        }
+        // And it does still select everything eviction is decided by, so the
+        // assertion above cannot be satisfied by selecting too little.
+        for required in [
+            "c.key",
+            "c.bytes",
+            "c.generation",
+            "c.last_used",
+            "c.anchor_key",
+            "c.anchor_blob",
+        ] {
+            assert!(SWEEP_COLS.contains(required), "the sweep needs {required}");
+        }
+        // The full read is the one that *may* carry the payload — otherwise the
+        // check above could be met by emptying both.
+        assert!(
+            CACHE_COLS.contains("c.json"),
+            "the inspection path returns it"
+        );
+    }
+
+    /// **The two reads cannot disagree.** They share the table, the join and the
+    /// anchor rule, and neither adds a `WHERE`, so the sweep sees exactly the rows
+    /// the inspection path sees — with exactly the same sizes and anchor verdicts.
+    ///
+    /// The failure this prevents is a sweep that evicts by one view of the tier
+    /// while every report describes another: an entry missing from one side would
+    /// be evicted without being counted, or counted without being evictable.
+    #[test]
+    fn the_sweep_and_the_full_read_agree_row_for_row() {
+        let conn = cache_store();
+        conn.execute(
+            "INSERT INTO nodes (key, kind, name, blob_hash) VALUES ('sym:a', 'fn', 'a', 'blob1')",
+            [],
+        )
+        .expect("node");
+        // One of every anchor shape, so the shared `resolve_anchor` is exercised
+        // rather than just the easy case.
+        raw_put(&conn, "unanchored", 10, 4, 1);
+        conn.execute(
+            "INSERT INTO agent_cache
+                 (key, fingerprint, json, bytes, generation, last_used, hits, anchor_key, anchor_blob)
+             VALUES ('valid', 'fp', '{}', 20, 0, 2, 0, 'sym:a', 'blob1'),
+                    ('drifted', 'fp', '{}', 30, 0, 3, 0, 'sym:a', 'blob-old'),
+                    ('vanished', 'fp', '{}', 40, 0, 4, 0, 'sym:gone', 'blob1'),
+                    ('unverifiable', 'fp', '{}', 50, 0, 5, 0, 'sym:a', NULL)",
+            [],
+        )
+        .expect("anchored entries");
+
+        let narrow = sweep_rows(&conn).expect("sweep rows");
+        let full = cache_entries(&conn).expect("entries");
+        assert_eq!(narrow.len(), full.len(), "the same rows, or one is blind");
+        assert_eq!(narrow.len(), 5);
+        for (n, f) in narrow.iter().zip(full.iter()) {
+            assert_eq!(n.key, f.key, "same order, same rows");
+            assert_eq!(n.bytes, f.bytes, "{}: the size must not differ", n.key);
+            assert_eq!(n.generation, f.generation, "{}", n.key);
+            assert_eq!(n.last_used, f.last_used, "{}", n.key);
+            assert_eq!(
+                n.anchor_state, f.anchor_state,
+                "{}: both must resolve the anchor identically",
+                n.key,
+            );
+        }
+        // Every anchor shape really was covered, so the agreement above is not
+        // agreement about one trivial case.
+        let states: Vec<AnchorState> = narrow.iter().map(|r| r.anchor_state).collect();
+        for expected in [
+            AnchorState::Unanchored,
+            AnchorState::Valid,
+            AnchorState::Drifted,
+            AnchorState::Vanished,
+            AnchorState::Unverifiable,
+        ] {
+            assert!(states.contains(&expected), "{expected} was not exercised");
+        }
+    }
+
+    /// **The `bytes` column is the authority, not the payload's length.**
+    ///
+    /// The behavioural half of the guard above. Two entries are written whose
+    /// stored size and actual payload disagree in opposite directions, so the two
+    /// possible implementations reach *different eviction sets* rather than merely
+    /// different arithmetic:
+    ///
+    /// | | `heavy` | `light` | held | evicted at budget 500 |
+    /// |---|---|---|---|---|
+    /// | by the `bytes` column | 1000 | 10 | 1010 | `heavy` only |
+    /// | by payload length | 1 | 1000 | 1001 | `heavy` **and** `light` |
+    ///
+    /// So a sweep that measured payloads would take `light` too, and this test
+    /// says which one ran.
+    #[test]
+    fn the_sweep_totals_the_bytes_column_and_never_the_payload() {
+        let conn = cache_store();
+        raw_put(&conn, "heavy", 1000, 1, 1);
+        raw_put(&conn, "light", 10, 1000, 2);
+        raw_put(&conn, "mru", 0, 0, 3);
+
+        let swept = cache_sweep(&conn, 500).expect("sweep");
+
+        assert_eq!(
+            swept.evicted, 1,
+            "a payload-measuring sweep would have taken `light` as well",
+        );
+        assert_eq!(
+            swept.freed_bytes, 1000,
+            "the freed total is the stored size, not the 1 byte `heavy` holds",
+        );
+        assert_eq!(
+            swept.retained_bytes, 10,
+            "and what remains is counted the same way",
+        );
+        let survivors: Vec<String> = sweep_rows(&conn)
+            .expect("rows")
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(survivors, vec!["light".to_owned(), "mru".to_owned()]);
     }
 }

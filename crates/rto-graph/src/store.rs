@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::findings::{self, AnalysisRun, Finding, FindingsApplied, FindingsLayer};
 use crate::media::{self, MediaFilter, MediaKind, MediaRecord, MediaWrite, ProducerSummary};
 use crate::memory::{
-    self, MemoryError, MemoryFilter, MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite,
+    self, CacheEntry, CacheStats, CacheSweep, CacheWrite, MemoryError, MemoryFilter,
+    MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite, Recall, RecallOptions,
 };
 use crate::migrations;
 use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
@@ -1108,6 +1109,119 @@ impl Store {
         memory::counts(&self.conn)
     }
 
+    /// **Ranked recall**: the live records that match `opts`, scored
+    /// `base_confidence × anchor_penalty × decay(age)` and ordered best first.
+    ///
+    /// Every term is computed **here, at retrieval time, and written to no
+    /// column** (ADR-0013). A stored score that decayed would rewrite the store on
+    /// every read and would be wrong in between, making recall depend on when you
+    /// last looked. Three consequences follow, and each is a promise:
+    ///
+    /// - **This call mutates nothing.** Recall over an unchanged store and an
+    ///   unchanged tree is idempotent, which is what makes
+    ///   [`crate::Decay::None`] byte-identical across runs.
+    /// - **A superseded record is never returned**, immediately and regardless of
+    ///   age: the test is a recorded pointer, not a clock.
+    /// - **A record whose anchor no longer resolves is still returned**, demoted
+    ///   and labelled. Drift ranks it down; nothing deletes it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or [`StoreError::Corrupt`]
+    /// if a row carries an unknown kind token.
+    pub fn recall_memory(&self, opts: &RecallOptions<'_>) -> Result<Recall, StoreError> {
+        let (live, superseded) = memory::counts(&self.conn)?;
+        Ok(Recall {
+            schema: memory::RECALL_SCHEMA,
+            generation: memory::generation(&self.conn)?,
+            decay: opts.decay,
+            reproducible: opts.decay.is_reproducible(),
+            results: memory::recall(&self.conn, opts)?,
+            live,
+            superseded,
+        })
+    }
+
+    // --- The bounded cache tier (ADR-0013, Tier 2). The *opposite* rules to the
+    // episodic tier above, because it holds the opposite kind of knowledge:
+    // everything here is re-derivable, so eviction costs cycles and never
+    // information. Nothing in this section can reach `agent_memory` — it has no
+    // `bytes`, no `last_used` and no `hits` for a capacity policy to grip. ---
+
+    /// Write (or replace) one cache entry.
+    ///
+    /// The payload size is computed here and the anchor's blob is captured from
+    /// the graph here, so the sweep can order and total the tier without reading
+    /// it, and a caller cannot record evidence a node never carried.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn agent_cache_put(&self, write: &CacheWrite<'_>) -> Result<(), StoreError> {
+        memory::cache_put(&self.conn, write)
+    }
+
+    /// Read one cache entry back, **recording the access** — `hits` increments and
+    /// `last_used` advances.
+    ///
+    /// This is the one read in the memory store that writes, and what it writes is
+    /// the cache's own bookkeeping: those two columns exist to be moved by exactly
+    /// this, and a hit counter nothing increments is a column that lies. It
+    /// touches nothing outside `agent_cache`, so [`Store::recall_memory`] — the
+    /// read whose reproducibility is promised — stays free of it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_get(&self, key: &str) -> Result<Option<CacheEntry>, StoreError> {
+        memory::cache_get(&self.conn, key)
+    }
+
+    /// Every cache entry, ordered by key, **without** recording an access:
+    /// inspecting a cache is not using it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_entries(&self) -> Result<Vec<CacheEntry>, StoreError> {
+        memory::cache_entries(&self.conn)
+    }
+
+    /// Delete one cache entry, returning whether there was one.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn agent_cache_forget(&self, key: &str) -> Result<bool, StoreError> {
+        memory::cache_forget(&self.conn, key)
+    }
+
+    /// What the cache tier holds, against `budget_bytes`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_stats(&self, budget_bytes: u64) -> Result<CacheStats, StoreError> {
+        memory::cache_stats(&self.conn, budget_bytes)
+    }
+
+    /// **Sweep the cache tier down to `budget_bytes`**, evicting oldest-first on
+    /// `(anchor_valid ASC, last_used ASC)`, and advance the generation.
+    ///
+    /// Called at the maintenance seam (beside `refresh_contexts`) and **never on
+    /// the read path**, so an ordinary query never mutates the store. Three things
+    /// are never evicted: anything episodic — structurally, there is no column to
+    /// grip it by; an entry written in the current generation whose anchor still
+    /// applies, which is the session's own work; and the most-recently-used entry,
+    /// always, even if it alone exceeds the budget.
+    ///
+    /// That last pair means a sweep can legitimately finish still over budget.
+    /// [`CacheSweep::over_budget`] reports it rather than leaving a bound that
+    /// silently failed to bind.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on failure; the transaction is rolled back.
+    pub fn sweep_agent_cache(&mut self, budget_bytes: u64) -> Result<CacheSweep, StoreError> {
+        let tx = self.conn.transaction()?;
+        let swept = memory::cache_sweep(&tx, budget_bytes)?;
+        tx.commit()?;
+        Ok(swept)
+    }
+
     /// Findings whose owning run no longer exists. Always `0` in a healthy store;
     /// exposed so layer replacement can be asserted to clean up its own records
     /// rather than orphaning them.
@@ -1700,13 +1814,22 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        // Bumped to 8 by the analyzer-findings tables (ADR-0012), then to 9 by
-        // the generated-media-content table (ADR-0015), then to 10 by that
-        // table's rebuild for the pre-generation gate's skip records, then to 11
-        // by the episodic agent-memory table (ADR-0013). The literal is
-        // deliberate: a new migration should make someone confirm it is meant to
-        // apply on open, rather than passing silently.
-        assert_eq!(store.schema_version().expect("version"), 11);
+        // Written against `latest_version()` rather than the literal that stood
+        // here (8 for analyzer findings, then 9, 10, 11 as the media and
+        // agent-memory tables landed). The literal was defended as making someone
+        // confirm a new migration is meant to apply on open — but it could not do
+        // that job: `apply` runs *every* migration newer than the recorded
+        // version, so "applies on open" is not a per-migration choice there is
+        // anything to confirm. What the literal actually asserted was the value of
+        // a shared constant, which every future migration then has to come here
+        // and edit, in a file it otherwise has no business in. This is the idiom
+        // `migrations::tests::a_later_migration_is_additive_on_a_populated_store`
+        // already uses, for the same reason.
+        assert_eq!(
+            store.schema_version().expect("version"),
+            crate::migrations::latest_version(),
+            "opening a store applies the whole migration set",
+        );
     }
 
     #[test]
@@ -1877,7 +2000,13 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 11);
+            // The subject here is that a *reopen* is at the same schema as a
+            // fresh open — not what number that happens to be. See
+            // `open_in_memory_applies_schema` on why the literal went.
+            assert_eq!(
+                store.schema_version().expect("version"),
+                crate::migrations::latest_version(),
+            );
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

@@ -196,10 +196,22 @@ enum Command {
         /// displaces a graph hit.
         #[arg(long)]
         include_generated: bool,
-        /// Emit the results as JSON. Without `--include-generated` this is the
-        /// long-standing array of hits; with it, the two-channel object
-        /// (`{schema, hits, generated}`) — so only a caller that opted in sees a
-        /// different shape.
+        /// Also search episodic agent memory — what earlier sessions learned
+        /// (`roteiro memory add`). **Off by default**: memory is accumulated,
+        /// unreviewed and unredacted, so it is asked for rather than delivered
+        /// (ADR-0013).
+        ///
+        /// When on, memory hits come back in their **own channel**, each marked
+        /// `[memory]` with the anchor state that says whether it applies to this
+        /// tree, ranked by a scorer that has no `authored` boost — the +40 is for
+        /// intent someone deliberately wrote into a reviewed file, which this is
+        /// not. Superseded records never appear; drifted ones do, marked.
+        #[arg(long)]
+        include_memory: bool,
+        /// Emit the results as JSON. Without `--include-generated` or
+        /// `--include-memory` this is the long-standing array of hits; with
+        /// either, the multi-channel object (`{schema, hits, generated, memory}`)
+        /// — so only a caller that opted in sees a different shape.
         #[arg(long)]
         json: bool,
     },
@@ -827,6 +839,80 @@ enum MemoryAction {
         #[arg(long)]
         json: bool,
     },
+    /// Recall what is worth reading first: the live records, **ranked by
+    /// evidence**.
+    ///
+    /// `score = confidence × anchor_penalty × decay(age)`, computed on every read
+    /// and stored nowhere. A stored score that ticked down would rewrite the store
+    /// every time you looked at it, and recall would depend on when you last did.
+    ///
+    /// The order of the terms is the model, and it is **evidence first, clock
+    /// last**:
+    ///
+    /// * a **superseded** record is not ranked at all — it left the moment its
+    ///   successor was written, regardless of age or score;
+    /// * the **anchor** dominates: a record whose anchor still resolves here in
+    ///   the same format outranks one whose code has moved, which outranks one
+    ///   whose code is gone. None of them is dropped — drift demotes, and
+    ///   `--applicable-only` is the caller's choice, never the store's;
+    /// * **age** is last, and by default is not priced at all: `--decay none`
+    ///   means the same store and the same tree recall the same records in the
+    ///   same order every time. Age is counted in records written since, never in
+    ///   wall-clock, because the store is shared across worktrees.
+    Recall {
+        /// Free-text query. Every word must appear in the body, the anchor key or
+        /// the anchor path. A **filter, not a scorer**: narrowing the query
+        /// changes which records come back, never how they are ranked.
+        query: Option<String>,
+        /// How age is priced: `none` (default, reproducible) | `linear[:span]` |
+        /// `exponential[:half-life]`, in generations.
+        #[arg(long, value_name = "MODE", default_value_t = rto_graph::Decay::default())]
+        decay: rto_graph::Decay,
+        /// Only this namespace, matched exactly. Not a branch filter.
+        #[arg(long, value_name = "SCOPE")]
+        scope: Option<String>,
+        /// Only this kind: lesson | attempt | decision | pattern | outcome.
+        #[arg(long, value_name = "KIND")]
+        kind: Option<rto_graph::MemoryKind>,
+        /// Only records anchored to this node key.
+        #[arg(long, value_name = "KEY")]
+        anchor: Option<String>,
+        /// Withhold records that do not apply to this tree. Off by default: a
+        /// lesson about code that has moved or gone is demoted and labelled, not
+        /// hidden, and is often the one worth reading.
+        #[arg(long)]
+        applicable_only: bool,
+        /// At most this many records — the best-ranked, not the newest.
+        #[arg(long, value_name = "N", default_value_t = 10)]
+        limit: usize,
+        /// Emit the ranking as JSON, every term included.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report on, or sweep, the **bounded cache tier** — the other half of the
+    /// two-tier store (ADR-0013).
+    ///
+    /// Everything in that tier is re-derivable by definition, so evicting it costs
+    /// cycles and never information. That is exactly why it can be bounded and
+    /// episodic memory cannot: `roteiro memory forget` remains the only thing that
+    /// removes a *remembered* record, and no sweep can reach one.
+    ///
+    /// Without `--sweep` this only reports. The sweep also runs as part of
+    /// `roteiro context --refresh`, which is the maintenance seam it belongs to —
+    /// never on a read path, so an ordinary query never mutates the store.
+    Cache {
+        /// Evict oldest-first until the tier fits the budget, rather than only
+        /// reporting.
+        #[arg(long)]
+        sweep: bool,
+        /// Budget in whole megabytes for this run, overriding the default (256)
+        /// and `ROTEIRO_CACHE_BUDGET_MB`.
+        #[arg(long, value_name = "MB")]
+        budget_mb: Option<u64>,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete one record. **The only way anything leaves this store.**
     ///
     /// Episodic memory is unbounded and never auto-evicted — no sweep, no TTL, no
@@ -1051,8 +1137,16 @@ fn main() -> anyhow::Result<()> {
             query,
             limit,
             include_generated,
+            include_memory,
             json,
-        } => run_search(ingest, &query, limit, include_generated, json),
+        } => run_search(
+            ingest,
+            &query,
+            limit,
+            include_generated,
+            include_memory,
+            json,
+        ),
         Command::Media { action } => run_media(ingest, gate, action),
         Command::Memory { action } => run_memory(action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
@@ -3153,15 +3247,21 @@ fn audio_stream_lines(ex: &rto_graph::Explanation) -> Vec<String> {
 ///
 /// With `--include-generated`, model-generated media content is searched too and
 /// printed **under its own heading, after the graph hits**, each line prefixed
-/// `[generated]` and tagged with the producer that wrote it (ADR-0015). The two
-/// channels are ranked separately and limited separately: opting in cannot
-/// displace a graph hit, and a generated hit can never be read as an extracted
-/// fact.
+/// `[generated]` and tagged with the producer that wrote it (ADR-0015).
+/// `--include-memory` does the same for episodic agent memory (ADR-0013), under a
+/// heading of its own, each line prefixed `[memory]` and carrying the anchor state
+/// that says whether the record applies to this tree.
+///
+/// The channels are ranked separately and limited separately: opting in cannot
+/// displace a graph hit, and neither a generated nor a remembered hit can ever be
+/// read as an extracted fact.
+#[allow(clippy::fn_params_excessive_bools)]
 fn run_search(
     ingest: rto_graph::IngestConfig,
     query: &str,
     limit: usize,
     include_generated: bool,
+    include_memory: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
@@ -3170,20 +3270,21 @@ fn run_search(
     let opts = rto_graph::SearchOptions {
         limit,
         include_generated,
+        include_memory,
     };
     let results = rto_graph::search_channels(&store, query, opts)?;
     if json {
-        // Without the opt-in, emit exactly the shape callers already parse: the
+        // Without an opt-in, emit exactly the shape callers already parse: the
         // bare array of graph hits. Adding a wrapper for everyone would be a
         // breaking change to pay for a feature they did not ask for.
-        if include_generated {
+        if include_generated || include_memory {
             emit_json(&results)?;
         } else {
             emit_json(&results.hits)?;
         }
         return Ok(());
     }
-    if results.hits.is_empty() && results.generated.is_empty() {
+    if results.hits.is_empty() && results.generated.is_empty() && results.memory.is_empty() {
         // Keep stdout empty on a miss; report to stderr.
         eprintln!("no matches for `{query}`");
         return Ok(());
@@ -3202,6 +3303,33 @@ fn run_search(
             );
         }
         println!("{} generated hit(s)", results.generated.len());
+    }
+    if !results.memory.is_empty() {
+        println!();
+        println!(
+            "agent memory — what earlier sessions learned; unreviewed, unredacted, and not \
+             a graph fact:"
+        );
+        for hit in &results.memory {
+            // The anchor state is on the line rather than in a footnote: a lesson
+            // about code that has moved is worth reading *and* worth labelling,
+            // and the label is the difference between the two.
+            println!(
+                "  {:>4}  [memory:{}]  #{}  ({})",
+                hit.score, hit.kind, hit.id, hit.anchor_state,
+            );
+            if let Some(snippet) = &hit.snippet {
+                println!("        {snippet}");
+            }
+        }
+        let inapplicable = results.memory.iter().filter(|h| !h.applies).count();
+        println!("{} memory hit(s)", results.memory.len());
+        if inapplicable > 0 {
+            println!(
+                "{inapplicable} of them do not apply to this tree — their anchors do not \
+                 resolve here in the same form. Ranked lower, never withheld."
+            );
+        }
     }
     Ok(())
 }
@@ -3495,7 +3623,44 @@ fn run_memory(action: MemoryAction) -> anyhow::Result<()> {
             limit,
             json,
         ),
+        MemoryAction::Recall {
+            query,
+            decay,
+            scope,
+            kind,
+            anchor,
+            applicable_only,
+            limit,
+            json,
+        } => run_memory_recall(
+            &rto_graph::RecallOptions {
+                scope: scope.as_deref(),
+                kind,
+                anchor_key: anchor.as_deref(),
+                query: query.as_deref(),
+                decay,
+                applicable_only,
+                limit: Some(limit),
+            },
+            json,
+        ),
+        MemoryAction::Cache {
+            sweep,
+            budget_mb,
+            json,
+        } => run_memory_cache(sweep, budget_mb, json),
         MemoryAction::Forget { id, json } => run_memory_forget(id, json),
+    }
+}
+
+/// The cache budget for this run: an explicit `--budget-mb` if one was given,
+/// otherwise whatever `ROTEIRO_CACHE_BUDGET_MB` or the 256 MB default says.
+fn resolve_cache_budget(budget_mb: Option<u64>) -> anyhow::Result<u64> {
+    match budget_mb {
+        Some(mb) => mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| anyhow::anyhow!("--budget-mb {mb} is more megabytes than there are")),
+        None => Ok(rto_graph::cache_budget_bytes()?),
     }
 }
 
@@ -3648,6 +3813,117 @@ fn run_memory_list(
     Ok(())
 }
 
+/// Recall the live records, ranked by evidence.
+fn run_memory_recall(opts: &rto_graph::RecallOptions<'_>, json: bool) -> anyhow::Result<()> {
+    let (_repo, store, _cache) = open_graph()?;
+    let recall = store.recall_memory(opts)?;
+
+    if json {
+        emit_json(&recall)?;
+        return Ok(());
+    }
+    if recall.results.is_empty() {
+        if recall.live == 0 && recall.superseded == 0 {
+            println!("nothing remembered yet (`roteiro memory add \"<what you learned>\"`)");
+        } else {
+            println!(
+                "nothing matched; {} live and {} superseded record(s) are stored",
+                recall.live, recall.superseded
+            );
+        }
+        return Ok(());
+    }
+    for recalled in &recall.results {
+        let record = &recalled.record;
+        println!(
+            "{:>5.3}  #{:<4} {:<8} {}",
+            recalled.score,
+            record.id,
+            record.kind.as_str(),
+            applicability(record),
+        );
+        // The terms, not just the product: a ranking that cannot be taken apart
+        // is a ranking the reader has to take on trust, and depreciating by
+        // evidence is worth nothing if the evidence is not visible.
+        println!(
+            "        confidence {:.2} × anchor {:.2} × decay {:.2}  (age {} generation(s))",
+            recalled.base_confidence, recalled.anchor_penalty, recalled.decay_factor, recalled.age,
+        );
+        println!("        {}", first_line(&record.body, 96));
+    }
+    println!(
+        "{} of {} live record(s), ranked at generation {} with decay {}{}",
+        recall.results.len(),
+        recall.live,
+        recall.generation,
+        recall.decay,
+        if recall.reproducible {
+            " (reproducible: the same store and tree recall this exactly)"
+        } else {
+            " (not reproducible: the ranking moves as records are written)"
+        },
+    );
+    if recall.superseded > 0 {
+        println!(
+            "{} superseded record(s) are stored and never recalled — regardless of age. \
+             `roteiro memory list --include-superseded` is the audit view.",
+            recall.superseded,
+        );
+    }
+    Ok(())
+}
+
+/// Report on — or sweep — the bounded cache tier.
+fn run_memory_cache(sweep: bool, budget_mb: Option<u64>, json: bool) -> anyhow::Result<()> {
+    let budget = resolve_cache_budget(budget_mb)?;
+    let (_repo, mut store, _cache) = open_graph()?;
+
+    if sweep {
+        let swept = store.sweep_agent_cache(budget)?;
+        if json {
+            emit_json(&swept)?;
+            return Ok(());
+        }
+        println!(
+            "swept {} cache entr(ies): {} evicted, {} pinned, {} bytes freed",
+            swept.scanned, swept.evicted, swept.pinned, swept.freed_bytes,
+        );
+        println!(
+            "  {} of {} bytes retained (generation {})",
+            swept.retained_bytes, swept.budget_bytes, swept.generation,
+        );
+        if swept.over_budget {
+            // Never silent: a bound that failed to bind and a bound with nothing
+            // to do look identical from the outside and mean opposite things.
+            println!(
+                "  still over budget — what remains is pinned: this generation's own work \
+                 with a valid anchor, plus the most-recently-used entry, which is always kept"
+            );
+        }
+        println!("episodic memory is untouched: no sweep can reach it");
+        return Ok(());
+    }
+
+    let stats = store.agent_cache_stats(budget)?;
+    if json {
+        emit_json(&stats)?;
+        return Ok(());
+    }
+    println!(
+        "cache tier: {} entr(ies), {} of {} bytes (generation {})",
+        stats.entries, stats.bytes, stats.budget_bytes, stats.generation,
+    );
+    if stats.bytes > stats.budget_bytes {
+        println!("  over budget — `roteiro memory cache --sweep` reclaims it");
+    }
+    let (live, superseded) = store.memory_counts()?;
+    println!(
+        "episodic memory: {live} live, {superseded} superseded — unbounded by design, and \
+         removed only by `roteiro memory forget`",
+    );
+    Ok(())
+}
+
 /// Delete one record — the only path by which anything leaves this store.
 fn run_memory_forget(id: i64, json: bool) -> anyhow::Result<()> {
     let (_repo, mut store, _cache) = open_graph()?;
@@ -3738,13 +4014,49 @@ fn run_context(
 
     if refresh {
         let report = refresh_contexts(&store)?;
+        // **The maintenance seam.** The bounded cache tier is swept here and
+        // nowhere else — never on a read path, so an ordinary query never mutates
+        // the store (ADR-0013). Nothing episodic is reachable from this call:
+        // `agent_memory` carries no size or recency column for a capacity policy
+        // to grip it by, so `roteiro memory forget` stays the only thing that
+        // removes a remembered record.
+        let swept = store.sweep_agent_cache(resolve_cache_budget(None)?)?;
         if json {
+            // The long-standing shape, unchanged: callers already parse this
+            // object, and wrapping it for everyone would be a breaking change to
+            // pay for maintenance they did not ask about. The machine-readable
+            // sweep is `roteiro memory cache --sweep --json`. What a sweep
+            // *did* is still never silent — it goes to stderr, where it cannot
+            // corrupt the parsed stdout, and only when there is something to say.
             emit_json(&report)?;
+            if swept.evicted > 0 || swept.over_budget {
+                eprintln!(
+                    "cache tier swept: {} evicted, {} of {} bytes retained{}",
+                    swept.evicted,
+                    swept.retained_bytes,
+                    swept.budget_bytes,
+                    if swept.over_budget {
+                        " (still over budget: what remains is pinned)"
+                    } else {
+                        ""
+                    },
+                );
+            }
         } else {
             println!(
                 "context cache refreshed: {} rebuilt, {} reused, {} pruned",
                 report.rebuilt, report.reused, report.pruned
             );
+            println!(
+                "cache tier swept: {} evicted, {} pinned, {} of {} bytes retained",
+                swept.evicted, swept.pinned, swept.retained_bytes, swept.budget_bytes,
+            );
+            if swept.over_budget {
+                println!(
+                    "  still over budget — what remains is pinned (this generation's own \
+                     work, and the most-recently-used entry, which is always kept)"
+                );
+            }
         }
         return Ok(());
     }
@@ -7945,6 +8257,183 @@ mod memory_cli {
             assert!(line.starts_with(token), "{state}: {line}");
             assert!(line.ends_with("sym:rust:a.rs#f"), "{state}: {line}");
         }
+    }
+
+    // --- `memory recall` and `memory cache` (Stage 25) ------------------------
+
+    /// **`recall` defaults to the reproducible answer.** No query, no filters, and
+    /// `decay none` — so the same store and the same tree recall the same records
+    /// in the same order, and pricing age at all is something a caller asks for.
+    #[test]
+    fn recall_defaults_to_no_query_and_no_decay() {
+        let MemoryAction::Recall {
+            query,
+            decay,
+            scope,
+            kind,
+            anchor,
+            applicable_only,
+            limit,
+            json,
+        } = action(["roteiro", "memory", "recall"])
+        else {
+            panic!("expected Recall");
+        };
+        assert_eq!(query, None, "a bare recall ranks everything live");
+        assert_eq!(decay, rto_graph::Decay::None);
+        assert!(decay.is_reproducible(), "and says so");
+        assert_eq!((scope, kind, anchor), (None, None, None));
+        assert!(
+            !applicable_only,
+            "a drifted record is demoted and labelled, not withheld by default",
+        );
+        assert_eq!(limit, 10);
+        assert!(!json);
+    }
+
+    #[test]
+    fn recall_accepts_every_flag_and_both_decay_shapes() {
+        let MemoryAction::Recall {
+            query,
+            decay,
+            scope,
+            kind,
+            anchor,
+            applicable_only,
+            limit,
+            json,
+        } = action([
+            "roteiro",
+            "memory",
+            "recall",
+            "retry loop",
+            "--decay",
+            "exponential:25",
+            "--scope",
+            "repo",
+            "--kind",
+            "attempt",
+            "--anchor",
+            "sym:rust:src/a.rs#f",
+            "--applicable-only",
+            "--limit",
+            "3",
+            "--json",
+        ])
+        else {
+            panic!("expected Recall");
+        };
+        assert_eq!(query.as_deref(), Some("retry loop"));
+        assert_eq!(decay, rto_graph::Decay::Exponential { half_life: 25 });
+        assert_eq!(scope.as_deref(), Some("repo"));
+        assert_eq!(kind, Some(rto_graph::MemoryKind::Attempt));
+        assert_eq!(anchor.as_deref(), Some("sym:rust:src/a.rs#f"));
+        assert!(applicable_only);
+        assert_eq!(limit, 3);
+        assert!(json);
+
+        // A bare mode takes its documented default parameter.
+        let MemoryAction::Recall { decay, .. } =
+            action(["roteiro", "memory", "recall", "--decay", "linear"])
+        else {
+            panic!("expected Recall");
+        };
+        assert_eq!(
+            decay,
+            rto_graph::Decay::Linear {
+                span: rto_graph::DEFAULT_DECAY_SPAN
+            }
+        );
+
+        // And an unknown mode is refused rather than silently treated as `none`,
+        // which would promise reproducibility nobody asked for.
+        assert!(
+            Cli::try_parse_from(["roteiro", "memory", "recall", "--decay", "clock"]).is_err(),
+            "an unrecognised decay mode is not consent to any other one",
+        );
+    }
+
+    /// `memory cache` **reports** by default: sweeping is something you ask for,
+    /// even though everything it can evict is re-derivable.
+    #[test]
+    fn cache_reports_unless_asked_to_sweep() {
+        let MemoryAction::Cache {
+            sweep,
+            budget_mb,
+            json,
+        } = action(["roteiro", "memory", "cache"])
+        else {
+            panic!("expected Cache");
+        };
+        assert!(!sweep);
+        assert_eq!(budget_mb, None, "the default budget is the configured one");
+        assert!(!json);
+
+        let MemoryAction::Cache {
+            sweep, budget_mb, ..
+        } = action([
+            "roteiro",
+            "memory",
+            "cache",
+            "--sweep",
+            "--budget-mb",
+            "512",
+        ])
+        else {
+            panic!("expected Cache");
+        };
+        assert!(sweep);
+        assert_eq!(budget_mb, Some(512));
+    }
+
+    /// The budget resolves to megabytes of bytes, an explicit flag wins over the
+    /// environment and the default, and an unrepresentable one is refused rather
+    /// than wrapped into a small number.
+    #[test]
+    fn the_cache_budget_resolves_from_the_flag_then_the_default() {
+        assert_eq!(
+            super::resolve_cache_budget(Some(512)).expect("budget"),
+            512 * 1024 * 1024,
+        );
+        assert_eq!(
+            super::resolve_cache_budget(None).expect("budget"),
+            rto_graph::DEFAULT_CACHE_BUDGET_BYTES,
+            "and with no flag and no environment override, the documented 256 MB",
+        );
+        assert!(
+            super::resolve_cache_budget(Some(u64::MAX)).is_err(),
+            "a budget that cannot be expressed in bytes is refused, not wrapped",
+        );
+    }
+
+    /// **Memory is opt-in on `search`, exactly as generated content is**, and the
+    /// two opt-ins are independent: neither implies the other.
+    #[test]
+    fn search_keeps_memory_behind_its_own_opt_in() {
+        let Command::Search {
+            include_generated,
+            include_memory,
+            ..
+        } = parse(["roteiro", "search", "retry loop"])
+        else {
+            panic!("expected Search");
+        };
+        assert!(!include_generated, "and generated content stays opt-in too");
+        assert!(!include_memory);
+
+        let Command::Search {
+            include_generated,
+            include_memory,
+            ..
+        } = parse(["roteiro", "search", "retry loop", "--include-memory"])
+        else {
+            panic!("expected Search");
+        };
+        assert!(
+            !include_generated,
+            "asking for memory must not also turn on another store's channel",
+        );
+        assert!(include_memory);
     }
 }
 
