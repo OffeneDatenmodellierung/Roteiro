@@ -5,15 +5,20 @@
 //! enforces that bound with a `GGML_ASSERT` — which calls `ggml_abort` and
 //! terminates the process. There is no Rust error to catch: a `roteiro serve`
 //! that reaches it dies mid-request, taking the graph API and the web UI with it,
-//! and an ordinary long chat message was enough to do it. Before the fix, driving
-//! a ~2600-token prompt at a server with a 4096-token context produced
+//! and an ordinary long chat message was enough to do it.
+//!
+//! Before the fix, a **2608-token** prompt — comfortably inside the 4096-token
+//! context the engine advertises, but past llama.cpp's default 2048-token logical
+//! batch — produced
 //!
 //! ```text
 //! llama-context.cpp:1768: GGML_ASSERT(n_tokens_all <= cparams.n_batch) failed
 //! ```
 //!
 //! and exit status 134, with the HTTP client seeing a dropped connection rather
-//! than a response.
+//! than a response. That gap — input the server accepts by its own advertised
+//! limit and then dies on — is the defect; a prompt that overran the *context*
+//! would not have shown it.
 //!
 //! Two bounds are checked here, because llama.cpp has two and they are not the
 //! same number:
@@ -51,10 +56,18 @@ const TEXT_MODEL: &str = "smolvlm-500m-gguf";
 /// A BERT-family embedding model, for the tighter encoder bound.
 const EMBED_MODEL: &str = "bge-large-en-v1.5";
 
-/// More tokens than any default batch this could be run against, and still
-/// inside the 4096-token context the engine advertises — which is the whole
-/// point: this is input the server claims to accept.
-const OVERLONG_WORDS: usize = 3000;
+/// Words in the prompt that must be *refused*: past the 4096-token context, so
+/// it is over the bound on any reasonable configuration.
+const OVERLONG_WORDS: usize = 6000;
+
+/// Words in the prompt that must be *served*: past llama.cpp's default
+/// 2048-token logical batch — the width that used to abort — and inside the
+/// 4096-token context, with room left to generate.
+///
+/// [`filler`] emits one common word per token, so this is close to a token
+/// count; the test asserts on the engine's own reported `prompt_tokens` rather
+/// than trusting the estimate.
+const SERVED_WORDS: usize = 2600;
 
 /// The default model store (`~/.roteiro/models/<name>/model.gguf`).
 fn model_gguf(name: &str) -> Option<PathBuf> {
@@ -85,11 +98,20 @@ fn engine_for(name: &str) -> Option<LlamaEngine> {
     .ok()
 }
 
-/// `n` plain words — one token or so each, and no special tokens to complicate
-/// the count.
-fn long_text(n: usize) -> String {
+/// `n` words of ordinary English filler.
+///
+/// The words are deliberately short and common — every one of them is a single
+/// token in the BPE vocabularies these models ship, so the word count and the
+/// token count stay within a few percent of each other. An earlier version of
+/// this file generated `word0 word1 word2 …`, which looks like one token per word
+/// and is in fact about four and a half: digits tokenize separately. That
+/// mistake matters here, because the whole claim being tested is that a prompt
+/// *inside* the advertised context used to abort — a prompt that also overran the
+/// context would not have shown that.
+fn filler(n: usize) -> String {
+    const WORDS: [&str; 8] = ["the", "and", "for", "with", "that", "from", "this", "have"];
     (0..n)
-        .map(|i| format!("word{i}"))
+        .map(|i| WORDS[i % WORDS.len()])
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -117,7 +139,7 @@ fn an_overlong_chat_prompt_is_refused_and_the_process_survives() {
     };
 
     let err = engine
-        .chat(&request(long_text(OVERLONG_WORDS)))
+        .chat(&request(filler(OVERLONG_WORDS)))
         .expect_err("a prompt past the batch bound must be refused, not decoded");
     assert!(
         matches!(err, EngineError::InvalidRequest(_)),
@@ -149,7 +171,7 @@ fn an_overlong_embedding_input_is_refused_and_the_process_survives() {
     // 700 words is far below the generative bound and far above the encoder one,
     // so this fails only if the *right* bound is being applied.
     let err = engine
-        .embed(EMBED_MODEL, &[long_text(700)])
+        .embed(EMBED_MODEL, &[filler(700)])
         .expect_err("an input past the encoder bound must be refused, not encoded");
     assert!(
         matches!(err, EngineError::InvalidRequest(_)),
@@ -173,14 +195,14 @@ fn a_prompt_past_the_old_2048_token_bound_now_succeeds() {
     let Some(engine) = engine_for(TEXT_MODEL) else {
         return;
     };
-    // ~2600 words: over llama.cpp's default 2048-token logical batch, under the
-    // 4096-token context. This is the exact input that used to abort.
+    // Over llama.cpp's default 2048-token logical batch, under the 4096-token
+    // context. This is the band that used to abort.
     let completion = engine
         .chat(&ChatRequest {
             model: TEXT_MODEL.to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),
-                content: long_text(2600),
+                content: filler(SERVED_WORDS),
             }],
             images: vec![],
             audio: vec![],
@@ -196,5 +218,127 @@ fn a_prompt_past_the_old_2048_token_bound_now_succeeds() {
         completion.prompt_tokens > 2048,
         "this test is only meaningful past the old bound, got {}",
         completion.prompt_tokens
+    );
+}
+
+/// What raising `n_batch` from llama.cpp's default to `n_ctx` actually costs, in
+/// memory. **Prints rather than asserting a threshold** — the numbers are a
+/// property of llama.cpp, the backend and the model, and a limit baked in here
+/// would be a claim about all three that this file cannot make. What it does
+/// assert is that the two configurations really differed, so a silent no-op
+/// cannot be read as "free".
+///
+/// The reason the answer is small is structural, and worth stating because it is
+/// what makes the change defensible rather than merely convenient:
+///
+/// * `n_ubatch` — the *physical* batch — is what sizes the compute graph, and it
+///   is left at llama.cpp's 512. The graph does not grow.
+/// * the logits/embeddings output buffer is reserved from the number of tokens
+///   actually flagged for output (`output_reserve(n_outputs_all)`), not from
+///   `n_batch`. Generation flags one token, so it does not grow either.
+/// * what does scale with `n_batch` is the batch allocator's per-token
+///   bookkeeping, including `output_ids`, at a handful of bytes per token.
+///
+/// ```text
+/// cargo test -p rto-llama --features llama --test batch_capacity -- --ignored --nocapture measure
+/// ```
+#[test]
+#[ignore = "needs a GGUF under ~/.roteiro/models; prints a measurement"]
+fn measure_what_a_wider_batch_costs() {
+    use std::num::NonZeroU32;
+
+    use llama_cpp_2::context::params::LlamaContextParams;
+    use llama_cpp_2::llama_backend::LlamaBackend;
+    use llama_cpp_2::model::LlamaModel;
+    use llama_cpp_2::model::params::LlamaModelParams;
+
+    const N_CTX: u32 = 4096;
+
+    let Some(path) = model_gguf(TEXT_MODEL) else {
+        eprintln!("SKIP: need `{TEXT_MODEL}` under ~/.roteiro/models");
+        return;
+    };
+    let backend = LlamaBackend::init().expect("backend");
+    let model = LlamaModel::load_from_file(&backend, &path, &LlamaModelParams::default())
+        .expect("model loads");
+
+    // Resident-set size of this process, in KiB, via `ps` — the workspace forbids
+    // `unsafe_code`, which rules out asking the kernel directly.
+    let rss_kib = || -> u64 {
+        std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    };
+
+    let ctx_of = |n_batch: Option<u32>| {
+        let base = LlamaContextParams::default()
+            .with_n_ctx(Some(NonZeroU32::new(N_CTX).expect("nonzero")));
+        let params = match n_batch {
+            Some(n) => base.with_n_batch(n),
+            None => base,
+        };
+        model.new_context(&backend, params).expect("context builds")
+    };
+
+    // One arm: build a context, note what llama.cpp settled on, and how much
+    // resident memory appeared while it existed. Repeated, because a single
+    // reading of a ~160 MiB allocation cannot resolve a difference of tens of
+    // KiB, and the spread is the evidence for saying so.
+    const REPS: usize = 5;
+    let arm = |n_batch: Option<u32>| -> (u32, u32, Vec<i64>) {
+        let (mut widths, mut costs) = ((0, 0), Vec::with_capacity(REPS));
+        for _ in 0..REPS {
+            let before = rss_kib();
+            let ctx = ctx_of(n_batch);
+            widths = (ctx.n_batch(), ctx.n_ubatch());
+            let after = rss_kib();
+            drop(ctx);
+            costs.push(
+                i64::try_from(after).unwrap_or(i64::MAX) - i64::try_from(before).unwrap_or(0),
+            );
+        }
+        costs.sort_unstable();
+        (widths.0, widths.1, costs)
+    };
+
+    // Before: `n_batch` unset, so llama.cpp's 2048 default, clamped to n_ctx.
+    let (b_batch, b_ubatch, b_costs) = arm(None);
+    // After: `n_batch` asked for as the full context, as `base_params` now does.
+    let (a_batch, a_ubatch, a_costs) = arm(Some(N_CTX));
+
+    let median = |v: &[i64]| v[v.len() / 2];
+    let spread = |v: &[i64]| v[v.len() - 1] - v[0];
+    eprintln!(
+        "n_ctx={N_CTX}, {REPS} repeats per arm, RSS in KiB\n\
+         before: n_batch={b_batch} n_ubatch={b_ubatch}  median +{}  spread {}  {b_costs:?}\n\
+         after:  n_batch={a_batch} n_ubatch={a_ubatch}  median +{}  spread {}  {a_costs:?}\n\
+         median delta: {:+} KiB, against a within-arm spread of {} KiB",
+        median(&b_costs),
+        spread(&b_costs),
+        median(&a_costs),
+        spread(&a_costs),
+        median(&a_costs) - median(&b_costs),
+        spread(&b_costs).max(spread(&a_costs)),
+    );
+
+    // The point of the change: the batch is now as wide as the advertised window.
+    assert_eq!(
+        a_batch, N_CTX,
+        "the wider context must accept a full window"
+    );
+    assert!(
+        b_batch < a_batch,
+        "nothing was measured — the default was already {b_batch}"
+    );
+    // And the physical batch — the one that sizes the compute graph, and so the
+    // one that would have made this expensive — did not move. This is the real
+    // assertion of the test; the RSS figures above are context for reading it.
+    assert_eq!(
+        b_ubatch, a_ubatch,
+        "n_ubatch must be untouched; it is what would make this expensive"
     );
 }
