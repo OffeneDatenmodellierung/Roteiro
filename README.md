@@ -41,6 +41,53 @@ config), and [ADR-0001](docs/adr/0001-build-roteiro-unified-codebase-knowledge-g
 plus [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) for the design and roadmap.
 Contribution + review standards live in [`AGENTS.md`](AGENTS.md).
 
+### Sandboxed analyzers (`--features exec-boxlite`)
+
+Optional, off by default, and the only feature with build requirements the
+default install does not have. It runs `semgrep` inside a digest-pinned OCI image
+in a microVM — read-only worktree, no egress, no ambient credentials
+([ADR-0014](docs/adr/0014-sandboxed-analyzer-execution.md)).
+
+**1. `protoc >= 3.12` must be on the build host.** `boxlite-shared`'s build
+script requires it unconditionally, and without it the failure is a build-script
+error rather than a missing-feature message:
+
+```sh
+sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
+brew install protobuf                       # macOS
+```
+
+**2. The sandbox runtime must be provisioned and verified before you build.**
+`boxlite` embeds a prebuilt runtime archive into the compiled library, which its
+own build script would otherwise fetch with an unverified `curl`. Roteiro fetches
+it through the digest-pinned asset machinery instead, then points `boxlite` at
+the local copy so its fetch never reaches the network:
+
+```sh
+# A build that can already provision — the subprocess feature is enough:
+cargo install roteiro --features exec-subprocess
+roteiro security prefetch --analyzer sandbox --allow-download
+
+# Then build the sandboxed backend against the verified archive:
+BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz" \
+  cargo install roteiro --features exec-boxlite
+```
+
+The build **fails with the exact recipe** if `BOXLITE_RUNTIME_URL` is unset,
+names a remote URL, or points at bytes that do not match the pin. That is
+deliberate: it is the only point at which anything verifies what gets embedded.
+
+**3. It embeds third-party binaries, some of them GPL-2.0 and LGPL-2.0**, and
+distributing a binary built this way carries source-offer duties. `prefetch`
+prints the full notice before installing anything; it is also at
+[`crates/rto-exec/NOTICE-boxlite-runtime.md`](crates/rto-exec/NOTICE-boxlite-runtime.md).
+A default build embeds none of it.
+
+Platforms: `darwin-arm64`, `linux-x64-gnu`, `linux-arm64-gnu`. Running a scan
+also needs a usable hypervisor (`/dev/kvm` on Linux, `Hypervisor.framework` on
+Apple Silicon); where there is none, the run says so by name and the sandbox
+tests skip with a visible message.
+
 ## Logging
 
 By default Roteiro logs human-readable text to **stdout**, unchanged. You can

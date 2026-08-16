@@ -12,6 +12,23 @@ authors.workspace = true
 
 [dependencies]
 rto-graph = { workspace = true }
+# `exec-boxlite` only: OCI images in microVMs (ADR-0014). **Pinned exactly**, per
+# the ADR's maturity duties — this is pre-1.0 code with two critical advisories
+# fixed in 0.9.0, and a caret range on it would be a floating security boundary.
+#
+# Default features on purpose. The `krun` feature does not work from crates.io:
+# `libkrun-sys` excludes its vendored sources from the published package, so
+# enabling it compiles the FFI declarations and then fails to link with 26
+# undefined symbols. What actually executes is the prebuilt runtime — see
+# `src/runtime_pins.rs` — which `build.rs` refuses to build against unless it has
+# been provisioned and verified against a pinned digest.
+boxlite = { version = "=0.9.7", optional = true }
+# `exec-boxlite` only: `AnalyzerRunner::run` is synchronous and boxlite's API is
+# async, so the runner drives a current-thread runtime it owns. No reactor is
+# shared with the CLI, and nothing here spawns a background thread.
+tokio = { version = "1", features = ["rt"], optional = true }
+# `exec-boxlite` only: boxlite streams a command's stdout/stderr as `Stream`s.
+futures = { version = "0.3", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -30,6 +47,21 @@ default = []
 # to at run time with `--allow-unsandboxed`. Adds no third-party dependency —
 # `std::process` and the crates already here.
 exec-subprocess = []
+# The sandboxed backend (ADR-0014's reproducible local path): a digest-pinned OCI
+# image in a microVM, a read-only worktree mount, a scrubbed environment and no
+# egress. Off by default — it pulls a large native dependency closure and needs
+# `protoc >= 3.12` on the build host.
+#
+# It does **not** imply `exec-subprocess`: the sandboxed and unsandboxed backends
+# are independent choices, and enabling a boundary must never switch on the
+# escape hatch that has none. It does share `assets`, which both gate on.
+exec-boxlite = ["dep:boxlite", "dep:tokio", "dep:futures"]
+
+[build-dependencies]
+# `build.rs` verifies the provisioned sandbox runtime against the digest pinned
+# in `src/runtime_pins.rs` before anything is built against it. Same crate and
+# pin as the main dependency; adds no new crate to the lockfile.
+sha2 = "0.11"
 
 [lints]
 workspace = true

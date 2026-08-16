@@ -62,12 +62,27 @@
 //! ```
 
 pub mod adapter;
-#[cfg(feature = "exec-subprocess")]
+// Asset provisioning serves both execution backends. It is deliberately *not*
+// gated on `exec-boxlite` alone: a build with only `exec-subprocess` can still
+// `prefetch` the sandbox runtime, which is how you obtain the verified archive
+// that an `exec-boxlite` build then requires at compile time. Bootstrapping the
+// stricter feature from the looser one is the point.
+#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
 pub mod assets;
+#[cfg(feature = "exec-boxlite")]
+pub mod boxlite;
 mod clock;
 pub mod crossref;
 mod ingest;
 mod runner;
+/// The pinned sandbox-runtime archives, and the host-platform selection.
+///
+/// Its source carries no `//!` header because `build.rs` pulls the same file in
+/// with `include!`, where an inner doc comment is a syntax error — so the module
+/// documentation lives here instead. Read the file's own comments for what is
+/// pinned and why it has to be.
+#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
+pub mod runtime_pins;
 pub mod snippet;
 #[cfg(feature = "exec-subprocess")]
 pub mod subprocess;
@@ -76,12 +91,14 @@ pub use adapter::{
     ADAPTERS, Adapter, AssetPaths, Invocation, NO_SNIPPET, NativeContext, UNKNOWN_VERSION,
     adapter_for, known_analyzers, snippet_hash, snippet_hash_at,
 };
-#[cfg(feature = "exec-subprocess")]
+#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
 pub use assets::{
     ASSETS, AssetKind, AssetSource, AssetSpec, AssetStatus, DownloadFile, Fetcher, InstalledAsset,
-    MissingAsset, asset, asset_path, asset_root, assets_for, provision, provision_with, resolve,
-    status,
+    MissingAsset, SANDBOX, asset, asset_path, asset_root, assets_for, provision, provision_with,
+    resolve, status,
 };
+#[cfg(feature = "exec-boxlite")]
+pub use boxlite::{BoxliteRunner, SandboxError, SandboxProbe, sandbox_probe};
 pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 pub use crossref::{Correspondence, Report, cross_reference};
 pub use ingest::{
@@ -92,9 +109,26 @@ pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,
     check_reported_path, check_request, worktree_id,
 };
+#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
+pub use runtime_pins::{
+    PinnedArchive, RUNTIME_ARCHIVES, RUNTIME_ASSET, RUNTIME_FILE, RUNTIME_VERSION, archive_for,
+    runtime_target,
+};
 pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
 #[cfg(feature = "exec-subprocess")]
 pub use subprocess::{SubprocessError, SubprocessRunner};
+
+/// The licence notice for the third-party binaries an `exec-boxlite` build
+/// embeds, compiled in so it cannot be separated from what it describes.
+///
+/// `roteiro security prefetch` prints it before installing the sandbox runtime,
+/// which is the same disclose-then-consent shape `roteiro model pull` uses. It
+/// is compiled into every build that can provision the runtime — including an
+/// `exec-subprocess`-only one, which can prefetch it for a later `exec-boxlite`
+/// build — so the obligations travel with the artifact rather than living only
+/// in the repository.
+#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
+pub const SANDBOX_RUNTIME_NOTICE: &str = include_str!("../NOTICE-boxlite-runtime.md");
 
 /// Lowercase hex SHA-256 of `bytes`.
 ///
