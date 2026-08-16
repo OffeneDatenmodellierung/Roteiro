@@ -38,14 +38,19 @@
 //! tokens and four batches of one token do not produce bit-identical logits on a
 //! GPU, because the kernels differ — a matrix-vector product and a matrix-matrix
 //! product accumulate in a different order. `tests/batch_numerics.rs` measures
-//! that gap directly, and it is **not zero**. On the hybrid Qwen3.5 family it is
-//! large enough to flip a greedy argmax where the top two candidates are near a
-//! tie, and `tests/speculative.rs` catches those flips against a real model.
+//! that gap directly, and it is **not zero**: max |Δlogit| of 0.115–0.282 on
+//! hybrid Qwen3.5 (0.8B and 9B) against 0.002–0.003 on a dense llama model — two
+//! orders of magnitude — and at one sampled position the gap exceeded the top-two
+//! margin separating the greedy pick from the runner-up, which is all a flip
+//! needs. That probe saw no flip in its own four-token sample; the flips were
+//! observed end to end instead, by `tests/speculative.rs`, which found the text
+//! differing on real models on every run it has ever made.
 //!
 //! So the honest statement of the invariant is: speculative decoding does not
 //! change the *distribution* being sampled — the sampler is driven identically,
-//! token for token — but it **can** change the *tokens*, because the floats it
-//! samples from came out of a differently-shaped batch. Fixing the seed does not
+//! token for token — but it **does** change the *tokens*, in practice and not
+//! merely in principle, because the floats it samples from came out of a
+//! differently-shaped batch. Fixing the seed does not
 //! reveal this and cannot prevent it; the divergence is in the backend's
 //! arithmetic, below the sampler entirely. Every claim here is measured, not
 //! argued: see [`switch_enables`] for what the measurement decided.
@@ -185,9 +190,10 @@ pub(crate) fn speculative_enabled() -> bool {
 /// exact arithmetic, so "on by default" would have been right — but llama.cpp's
 /// logits for a token are not identical at batch width 1 and width 4, and on the
 /// hybrid Qwen3.5 family the gap is large enough to flip a greedy argmax at a
-/// near-tie. `tests/batch_numerics.rs` measures the gap and
-/// `tests/speculative.rs` catches the flips. So turning it on can change a
-/// completion, and *that* is a decision to be taken deliberately rather than
+/// near-tie. `tests/batch_numerics.rs` measures the gap; `tests/speculative.rs`
+/// reports the divergence it produces, and has found the text differing on every
+/// run against a real model. So turning it on **does** change some completions,
+/// and *that* is a decision to be taken deliberately rather than
 /// inherited by upgrading.
 ///
 /// Only an explicit, recognised "on" enables it: an unrecognised value is not
