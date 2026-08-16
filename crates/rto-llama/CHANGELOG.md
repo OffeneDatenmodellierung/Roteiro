@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.10.1...rto-llama-v1.11.0) - 2026-08-16
+
+### Added
+
+- *(llama)* use a split MTP draft head installed beside the model
+- *(llama)* MTP speculative decoding over a model's own draft head
+
+### Other
+
+- Potential fix for pull request finding
+- *(speculative)* attribute the argmax flips to the test that actually saw them
+- *(speculative)* stop asserting an identity the feature does not have
+- *(speculative)* checkpoint the draft-head skip guard — NOT reviewed, amend freely
+- *(speculative)* the module header claimed an invariant the measurements refute
+- *(llama)* cargo fmt --all
+- *(speculative)* checkpoint after transport drop — NOT reviewed, amend freely
+- *(llama)* measure llama.cpp's batch-width numerics, and probe MTP end to end
+- *(llama)* cache the mtmd projector per model, not per blob
+
 ## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.10.0...rto-llama-v1.10.1) - 2026-08-15
 
 ### Fixed
