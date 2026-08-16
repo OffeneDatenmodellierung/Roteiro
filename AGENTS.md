@@ -116,6 +116,27 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   with `adr-id`, `## ` sections, `[[path#Symbol]]` links, a version-history row).
   See `docs/BUILD_PLAN.md` for the staged roadmap.
 - Commit messages and PR descriptions explain the **why**, not just the what.
+- **`!` is a release instruction, not a severity marker.** A `!` after the type
+  (`fix(schema)!:`) or a `BREAKING CHANGE:` footer tells release-plz to bump the
+  **major version of all seven crates** — they share one
+  `[workspace.package] version`, so one `!` in one crate relabels the whole
+  workspace, and crates with nothing breaking in them get the new major anyway.
+  Use it only when something a consumer of a **published** crate depends on has
+  changed: a public Rust API, a CLI flag or its output contract, a config key, or
+  an on-disk format some released version actually wrote.
+
+  Do **not** use it for unreleased work. A migration renumbered before it ever
+  shipped, an internal type, a test helper, a field no released binary has
+  written — none of these are breaking, however invasive the diff looks. The
+  question is not "was this a big change?" but "can a user who upgrades notice?"
+
+  Getting this wrong is expensive and cannot be undone by closing the release PR:
+  release-plz computes the bump from every unreleased commit relative to the
+  **registry**, so a stray `!` re-proposes the major bump on every push until a
+  release is actually published. Recovering means pinning the intended version by
+  hand. If you are unsure, leave the `!` off and say what changed in the body —
+  an under-marked commit is a changelog omission, an over-marked one is a version
+  the project cannot walk back.
 
 ## Reviewing a change
 
