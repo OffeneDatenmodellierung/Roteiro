@@ -518,13 +518,55 @@ pub struct GeneratedHit {
     pub snippet: Option<String>,
 }
 
-/// The two channels a search returns.
+/// A hit in the **memory** channel: something a session learned, never a graph
+/// fact and never a re-derivable one.
+///
+/// Deliberately *not* a [`SearchHit`], for the reason [`GeneratedHit`] is not: a
+/// memory record has no node, no provenance and no key, and giving it a
+/// [`NodeSummary`] would be the first step towards its being treated like one.
+/// Unlike either of the other channels, it also carries **what the tree thinks of
+/// it** — [`MemoryHit::applies`] and [`MemoryHit::anchor_state`] — because a
+/// lesson about code that has since moved is worth reading and worth labelling,
+/// and returning it unlabelled would be the worse of the two mistakes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemoryHit {
+    /// Relevance within the memory channel. Not comparable with a
+    /// [`SearchHit::score`] or a [`GeneratedHit::score`]: three channels, three
+    /// scorers, on purpose.
+    pub score: u32,
+    /// Always `true`. A marker a consumer cannot miss or forget to check.
+    pub memory: bool,
+    /// The record's id — its generation, and what `roteiro memory forget` takes.
+    pub id: i64,
+    /// What kind of knowledge it is (`lesson` | `attempt` | …).
+    pub kind: &'static str,
+    /// The namespace it was recorded in. **Not a branch label.**
+    pub scope: String,
+    /// The node key it is anchored to, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// What that anchor is worth against the current tree (`valid` | `drifted` |
+    /// `vanished` | `unverifiable` | `unanchored`).
+    pub anchor_state: &'static str,
+    /// **Whether this record applies to the tree being searched.** A `false` here
+    /// is a label, never a reason to have withheld the hit.
+    pub applies: bool,
+    /// The evidence multiplier the record's own ranking gave it
+    /// (`base_confidence × anchor_penalty`), reported so the channel's score can
+    /// be taken apart.
+    pub evidence: f64,
+    /// A bounded, whitespace-collapsed excerpt of the body, on the same terms as
+    /// [`SearchHit::snippet`].
+    pub snippet: Option<String>,
+}
+
+/// The three channels a search returns.
 ///
 /// They are separate fields rather than one merged list because merging is
-/// precisely what must not happen: generated text may be *retrievable*, but it
-/// may never be *indistinguishable* from a derived or authored fact, and a single
-/// ranked list would make the distinction a matter of reading each element
-/// carefully.
+/// precisely what must not happen: generated text and remembered prose may both
+/// be *retrievable*, but neither may ever be *indistinguishable* from a derived or
+/// authored fact, and a single ranked list would make the distinction a matter of
+/// reading each element carefully.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchResults {
     /// Stable schema tag ([`SCHEMA`]).
@@ -535,39 +577,52 @@ pub struct SearchResults {
     /// [`SearchOptions::include_generated`] was set** — off by default, so a
     /// silent clip's confabulated prose cannot reach a default search.
     pub generated: Vec<GeneratedHit>,
+    /// The memory channel. **Empty unless [`SearchOptions::include_memory`] was
+    /// set** — off by default, so unreviewed accumulated prose cannot reach a
+    /// default search either.
+    pub memory: Vec<MemoryHit>,
 }
 
 /// How to search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchOptions {
     /// Maximum hits **per channel**. Each channel is ranked and truncated
-    /// independently, so opting in to generated content never displaces a graph
-    /// hit, and never silently returns fewer of them.
+    /// independently, so opting in to another one never displaces a graph hit,
+    /// and never silently returns fewer of them.
     pub limit: usize,
     /// Fold in the generated channel. Off by default (see
     /// [`SearchOptions::default`]).
     pub include_generated: bool,
+    /// Fold in the memory channel. Off by default, for the same reason: what an
+    /// agent remembers is unreviewed, unredacted and accumulated, so it is
+    /// something a caller asks for rather than something that arrives.
+    pub include_memory: bool,
 }
 
 impl Default for SearchOptions {
-    /// Ten hits, graph channel only. The default is the safe answer: generated
-    /// content is opt-in, always.
+    /// Ten hits, graph channel only. The default is the safe answer: everything
+    /// that is not an extracted or authored fact is opt-in, always.
     fn default() -> Self {
         Self {
             limit: 10,
             include_generated: false,
+            include_memory: false,
         }
     }
 }
 
-/// Search both channels: the graph, and — only when
-/// [`SearchOptions::include_generated`] is set — model-generated media content.
+/// Search every channel: the graph, and — each only when asked for —
+/// model-generated media content and episodic agent memory.
 ///
-/// The graph channel is exactly [`search`]. The generated channel is ranked by
-/// [a scorer of its own](generated_score) which has **no provenance term at
-/// all**, so generated text cannot acquire the `authored` boost that curated
-/// intent gets. It could not do so even by accident: a generated record is not a
-/// node, so it never reaches the code that applies that boost.
+/// The graph channel is exactly [`search`]. The other two are ranked by scorers of
+/// their own ([`generated_score`], [`memory_score`]) which have **no provenance
+/// term at all**, so neither can acquire the `authored` boost that curated intent
+/// gets. Neither could do so even by accident: neither record is a node, so
+/// neither ever reaches the code that applies that boost.
+///
+/// The memory channel is scored with **no decay** regardless of what a caller
+/// might prefer elsewhere, so a search is reproducible for a fixed store and a
+/// fixed tree.
 ///
 /// # Errors
 /// Returns [`StoreError`] on query failure.
@@ -582,11 +637,117 @@ pub fn search_channels(
     } else {
         Vec::new()
     };
+    let memory = if opts.include_memory {
+        search_memory(store, query, opts.limit)?
+    } else {
+        Vec::new()
+    };
     Ok(SearchResults {
         schema: SCHEMA,
         hits,
         generated,
+        memory,
     })
+}
+
+/// Rank the memory channel alone.
+///
+/// Built on [`Store::recall_memory`] rather than on a query of its own, so the
+/// channel inherits every promise recall makes without restating any of them: a
+/// superseded record is already gone, an unanchored one is already labelled, and
+/// nothing here writes anything. Decay is fixed at [`crate::Decay::None`] so a
+/// search over an unchanged store and tree is reproducible.
+///
+/// Ties break by newest generation, so the order is total.
+fn search_memory(store: &Store, query: &str, limit: usize) -> Result<Vec<MemoryHit>, StoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let q = query.trim().to_lowercase();
+    let tokens: Vec<&str> = q.split("::").flat_map(str::split_whitespace).collect();
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Recall does the filtering, the anchor resolution and the evidence
+    // weighting; this function only adds the lexical relevance a search wants.
+    let recalled = store.recall_memory(&crate::RecallOptions {
+        query: Some(query),
+        decay: crate::Decay::None,
+        ..crate::RecallOptions::default()
+    })?;
+
+    let mut hits: Vec<MemoryHit> = recalled
+        .results
+        .into_iter()
+        .map(|r| {
+            let body = r.record.body.to_lowercase();
+            let anchor = r
+                .record
+                .anchor
+                .as_ref()
+                .map(|a| a.key.to_lowercase())
+                .unwrap_or_default();
+            MemoryHit {
+                score: memory_score(&q, &tokens, &body, &anchor, r.score),
+                memory: true,
+                id: r.record.id,
+                kind: r.record.kind.as_str(),
+                scope: r.record.scope.clone(),
+                anchor: r.record.anchor.as_ref().map(|a| a.key.clone()),
+                anchor_state: r.record.anchor_state.as_str(),
+                applies: r.record.applies,
+                evidence: r.score,
+                snippet: content_snippet(&serde_json::json!({ "content": r.record.body })),
+            }
+        })
+        .collect();
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| b.id.cmp(&a.id)));
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+/// Relevance of one memory record: **lexical match, weighted by the record's own
+/// evidence**, and nothing else.
+///
+/// The `evidence` factor is `base_confidence × anchor_penalty` from
+/// [`crate::Store::recall_memory`] — so a lesson whose anchor still resolves in
+/// this tree outranks an equally-worded one whose code has moved on, which is the
+/// whole depreciation model showing up in search. It is a weight in `(0, 1]`, so
+/// it can demote a hit and can never silence one.
+///
+/// The omissions are the point, and each is deliberate:
+///
+/// - **no `authored` boost** — this is the whole reason the channel exists. That
+///   +40 is for intent a human deliberately wrote into a reviewed file;
+///   accumulated, unreviewed, unredacted prose riding it would be trust-model
+///   contamination by construction.
+/// - **no overview boost** — a README's landing-page privilege is about authored
+///   documentation.
+/// - **no name or key term** — a memory record has neither.
+///
+/// Because this scorer shares no branch with the node scorer, "memory never
+/// acquires the authored boost" is a structural fact rather than a condition to be
+/// maintained.
+fn memory_score(q: &str, tokens: &[&str], body: &str, anchor: &str, evidence: f64) -> u32 {
+    let mut relevance: i32 = 0;
+    if body.contains(q) {
+        relevance += 25;
+    }
+    for t in tokens {
+        if body.contains(t) {
+            relevance += 8;
+        } else if anchor.contains(t) {
+            relevance += 3;
+        }
+    }
+    let weighted = f64::from(relevance.max(0)) * evidence.clamp(0.0, 1.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the product of a small non-negative relevance and a weight in [0, 1]"
+    )]
+    let score = weighted.round() as u32;
+    score
 }
 
 /// Rank the generated channel alone. Ties break by `(producer, blob)` so results

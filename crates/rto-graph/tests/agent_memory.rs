@@ -212,17 +212,23 @@ fn a_memory_record_is_not_a_node_under_any_provenance() {
     );
 }
 
-/// **Memory does not enter `search` at all, through any channel.**
+/// **Memory reaches `search` through its own opt-in channel and no other.**
 ///
-/// Later stages may give recall its own visually distinct channel and its own
-/// score. What must never happen — and what this test pins for this stage — is
-/// unreviewed accumulated prose riding the `authored` +40 boost that `search`
-/// reserves for intent someone deliberately wrote into a reviewed file. The
-/// strongest form of that guarantee is total absence, so that is what is checked:
-/// both channels, with the opt-in for generated content turned *on*, so a memory
-/// record cannot quietly arrive through the door ADR-0015 opened for transcripts.
+/// Stage 23 pinned this as *total absence*, which was the strongest available
+/// form of the guarantee while there was no memory channel to speak of. Stage 25
+/// adds one, so the invariant is restated rather than relaxed — and the part that
+/// actually matters is unchanged and now checked more sharply than absence could
+/// check it:
+///
+/// - the **graph channel** never contains a memory record, so unreviewed
+///   accumulated prose cannot ride the `authored` +40 boost that `search` reserves
+///   for intent someone deliberately wrote into a reviewed file;
+/// - the **default** search does not return memory at all, so nothing arrives
+///   unasked-for;
+/// - opting in to *generated* content does not open the memory door either — one
+///   opt-in does not imply another.
 #[test]
-fn memory_never_reaches_search_or_the_authored_boost() {
+fn memory_reaches_search_only_through_its_own_channel() {
     let mut store = Store::open_in_memory().expect("store");
     seed_graph(&mut store);
     store
@@ -240,9 +246,15 @@ fn memory_never_reaches_search_or_the_authored_boost() {
     ] {
         assert!(
             search(&store, query, 10).expect("search").is_empty(),
-            "a memory body reached default search via {query:?}",
+            "a memory body reached the graph channel via {query:?}",
         );
-        let channels = search_channels(
+        let default = search_channels(&store, query, SearchOptions::default()).expect("search");
+        assert!(
+            default.hits.is_empty() && default.generated.is_empty() && default.memory.is_empty(),
+            "{query:?} reached a default search, which asks for none of this",
+        );
+
+        let generated_only = search_channels(
             &store,
             query,
             SearchOptions {
@@ -250,16 +262,43 @@ fn memory_never_reaches_search_or_the_authored_boost() {
                 // Opted in to *generated* content, which memory is not: a record
                 // must not arrive through another store's channel either.
                 include_generated: true,
+                ..SearchOptions::default()
             },
         )
         .expect("search");
         assert!(
-            channels.hits.is_empty(),
-            "{query:?} reached the graph channel"
+            generated_only.hits.is_empty(),
+            "{query:?} reached the graph channel",
         );
         assert!(
-            channels.generated.is_empty(),
+            generated_only.generated.is_empty(),
             "{query:?} reached the generated-content channel",
+        );
+        assert!(
+            generated_only.memory.is_empty(),
+            "one opt-in must not imply another",
+        );
+
+        // And with the memory channel asked for: found there, and *only* there.
+        let opted = search_channels(
+            &store,
+            query,
+            SearchOptions {
+                limit: 10,
+                include_memory: true,
+                ..SearchOptions::default()
+            },
+        )
+        .expect("search");
+        assert_eq!(
+            opted.memory.len(),
+            1,
+            "{query:?} must find the record in the memory channel",
+        );
+        assert!(opted.memory[0].memory, "and it is marked as memory");
+        assert!(
+            opted.hits.is_empty(),
+            "{query:?} still must not be a graph hit",
         );
     }
 
@@ -270,6 +309,67 @@ fn memory_never_reaches_search_or_the_authored_boost() {
             .expect("search")
             .is_empty(),
         "the authored ADR must still be findable",
+    );
+}
+
+/// **Memory never takes the `authored` +40 boost**, stated as a comparison rather
+/// than as an absence: an ADR node and a memory record are given the *same* words,
+/// and the memory hit's score is nowhere near the node's.
+///
+/// The boost is what this whole separation exists to prevent — `authored` means a
+/// human or agent deliberately wrote this in a reviewed file, and accumulated,
+/// unredacted, unreviewed prose inheriting that trust is contamination by
+/// construction. It cannot happen here even by accident: a memory record is not a
+/// node, so it never reaches the code that applies the boost, and the memory
+/// channel's scorer shares no branch with the node scorer.
+#[test]
+fn the_memory_channel_scores_without_the_authored_boost() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+    // The authored ADR's own words, recorded as a memory as well.
+    let shared = "durable agent-learned knowledge";
+    store
+        .record_memory(&MemoryWrite {
+            confidence: Some(1.0),
+            ..lesson(
+                "Durable agent-learned knowledge lives in its own artifact store and never \
+                 borrows the graph's trust.",
+            )
+        })
+        .expect("write");
+
+    let results = search_channels(
+        &store,
+        shared,
+        SearchOptions {
+            limit: 10,
+            include_memory: true,
+            ..SearchOptions::default()
+        },
+    )
+    .expect("search");
+    let authored = results
+        .hits
+        .iter()
+        .find(|h| h.node.key == "adr:0013")
+        .expect("the authored ADR is a graph hit");
+    let remembered = results
+        .memory
+        .first()
+        .expect("and the memory record is a memory hit");
+
+    assert!(
+        authored.score > remembered.score,
+        "the same words scored {} as memory against {} as authored intent — the +40 \
+         boost has leaked",
+        remembered.score,
+        authored.score,
+    );
+    // The two channels are separate lists, so no consumer can merge them by
+    // accident and no ranking puts them side by side.
+    assert!(
+        !results.hits.iter().any(|h| h.node.key.contains("memory:")),
+        "nothing memory-shaped is in the graph channel",
     );
 }
 

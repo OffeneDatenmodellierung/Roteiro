@@ -111,9 +111,9 @@ pub use models::{
 };
 pub use provenance::Provenance;
 pub use query::{
-    DebtItem, DebtReport, EdgeRef, Explanation, GeneratedHit, Listing, NodeSummary, Path, PathHop,
-    SCHEMA, SearchHit, SearchOptions, SearchResults, debt, explain, list_kind, path, search,
-    search_channels,
+    DebtItem, DebtReport, EdgeRef, Explanation, GeneratedHit, Listing, MemoryHit, NodeSummary,
+    Path, PathHop, SCHEMA, SearchHit, SearchOptions, SearchResults, debt, explain, list_kind, path,
+    search, search_channels,
 };
 pub use store::{ImportApplied, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_tree, sync_worktree};
