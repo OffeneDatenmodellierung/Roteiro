@@ -90,9 +90,16 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   the binary. Once, before your first `--all-features` build:
 
   ```sh
-  roteiro security prefetch --allow-download   # verifies against a pinned digest
-  export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
+  # Prints the file:// URL, having verified the archive against the digest in
+  # crates/rto-exec/src/runtime_pins.rs. This is what CI runs.
+  export BOXLITE_RUNTIME_URL="$(python3 scripts/provision-sandbox-runtime.py)"
   ```
+
+  Use the script, not `roteiro security prefetch`. The runtime is a *build*
+  input, not an analyzer asset, and obtaining it through the binary is circular:
+  a `roteiro` that could prefetch it is a `roteiro` you already built. The script
+  reads its digests straight out of `runtime_pins.rs`, so it cannot drift from
+  what the build script verifies a moment later.
 
   The build script fails loudly — with this recipe and the expected digest — if
   the variable is unset, points at a remote URL, or the bytes do not match. Build
