@@ -122,6 +122,23 @@ impl Repo {
             .to_string())
     }
 
+    /// Seconds since the Unix epoch of the `HEAD` commit's commit time, in UTC.
+    ///
+    /// Added for analyzer-asset provisioning: an advisory database that is a git
+    /// checkout has no publication date of its own, and `cargo audit` reports
+    /// none at all when it is pointed at a database with `--db` rather than
+    /// resolving one itself. The commit time is the publication date, and it is
+    /// what lets a result be labelled *possibly stale* with a number attached
+    /// (ADR-0012).
+    ///
+    /// # Errors
+    /// Returns [`GitError::Git`] if `HEAD` cannot be resolved to a commit or the
+    /// commit carries no readable time.
+    pub fn head_commit_time(&self) -> Result<i64, GitError> {
+        let commit = self.inner.head_commit().map_err(ge)?;
+        Ok(commit.time().map_err(ge)?.seconds)
+    }
+
     /// The `origin` remote's fetch URL, if one is configured — e.g. to derive a
     /// web "blob" base for source links. `None` when there is no `origin` remote.
     #[must_use]

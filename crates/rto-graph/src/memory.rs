@@ -844,19 +844,18 @@ mod tests {
         }
     }
 
-    // The invariant that used to be asserted here — *memory must not invalidate
-    // the fact cache* — now lives in `tests/sync.rs` as
+    // `agent_memory_does_not_bump_the_extraction_version` stood here. The
+    // invariant it was named for — *memory must not invalidate the fact cache* —
+    // now lives in `tests/sync.rs` as
     // `memory_writes_do_not_invalidate_the_fact_cache`, stated as a property of
-    // memory writes rather than as an equality on `EXTRACT_VERSION`.
+    // memory writes rather than as an equality on `EXTRACT_VERSION`. The history
+    // that argues for the change is recorded on that test.
     //
-    // The equality could not express it. `EXTRACT_VERSION` is global, so pinning
-    // its value here asserted the whole crate's extraction work, not memory's
-    // share of it: the guard fired on ADR-0016's legitimate audio bump, in which
-    // memory played no part, and it would have fired again on every later one —
-    // each time asking the tripper to decide whether they had broken an invariant
-    // or merely renumbered a constant. It also could not catch what it was named
-    // for, because a memory change that *did* reach extraction would show up as a
-    // stale-facts bug, not as an unexpected number.
+    // In short: `EXTRACT_VERSION` is global, so pinning its value here asserted
+    // the whole crate's extraction work rather than memory's share of it, and it
+    // could not catch what it was named for — a memory write that really did
+    // reach extraction surfaces as stale cached facts, not as an unexpected
+    // number.
 
     #[test]
     fn kind_tokens_round_trip_and_reject_the_unknown() {

@@ -22,5 +22,14 @@ thiserror = { workspace = true }
 # Pure Rust, MIT OR Apache-2.0, on the `cargo deny` allow-list.
 sha2 = "0.11"
 
+[features]
+default = []
+# The subprocess backend (ADR-0014's explicit escape hatch) plus the asset
+# provisioning it needs. Off by default: it executes third-party binaries on the
+# host with no isolation, so it must be asked for at build time *and* consented
+# to at run time with `--allow-unsandboxed`. Adds no third-party dependency —
+# `std::process` and the crates already here.
+exec-subprocess = []
+
 [lints]
 workspace = true

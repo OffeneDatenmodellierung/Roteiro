@@ -747,12 +747,41 @@ fn lesson(body: &str) -> MemoryWrite<'_> {
 /// its declaration in `src/extract.rs`); both snapshots here are taken from the
 /// same binary, so a legitimate bump by unrelated work cannot trip it.
 ///
-/// This replaces an equality assertion on `EXTRACT_VERSION` that lived in
-/// `src/memory.rs`. That form fired on ADR-0016's audio bump — work memory had no
-/// part in — because a global constant cannot express a claim about one module's
-/// share of it. The property can, and it is also strictly stronger: pinning the
-/// number would still have passed if a memory write had cleared the recorded
-/// identity or retired a cached fact set.
+/// # Why no test pins `EXTRACT_VERSION`'s value
+///
+/// This replaces `agent_memory_does_not_bump_the_extraction_version` in
+/// `src/memory.rs`, which asserted the constant's literal value, and the history
+/// of that test is the argument for this one.
+///
+/// ADR-0016 (#316) bumped the base 10 → 11 and added the `audio-metadata` (+400)
+/// namespace, legitimately: `audio_stream` nodes genuinely change extraction
+/// output, which is exactly what the constant is for. ADR-0013 (#317) added the
+/// guard, asserting the base it saw — 10, less the two namespaces that existed
+/// when it was written. The two merged **57 seconds apart**, so #317's CI had
+/// never seen #316. Each was green alone; the trunk was not, under *every*
+/// feature combination — 11 ≠ 10 by default, 411 ≠ 10 under `--all-features`,
+/// the second because the subtraction list had silently gone stale too.
+///
+/// Nobody did anything wrong, and that is the point: the failure was a property
+/// of the *form* of the assertion. A literal value of a shared global constant
+/// cannot express a claim about one module's share of it, so it fires on work
+/// that module had no part in — and it fires at merge time, on whoever is
+/// unlucky with ordering, who must then work out whether they have broken an
+/// invariant or merely renumbered a constant. Re-pinning it to 11 would restore
+/// green and re-arm exactly the same trap for the next parallel merge; Stage
+/// 26's lenses are expected to bump the constant again.
+///
+/// So **no test pins this constant's value, deliberately** (see the note on its
+/// declaration in `src/extract.rs`). Bumping it for a real change in extraction
+/// output should never be a test failure — that is what a bump is *for*. Tests
+/// assert what the version is *for* instead: that it is folded into the cache key,
+/// that a changed identity re-extracts at an unchanged tree, and — here — that
+/// work which is not extraction cannot perturb it. **If a test does fail when you
+/// bump it, it is reporting a real coupling, not a literal that needs updating.**
+///
+/// The property is also strictly stronger than the number it replaces: pinning
+/// the integer would still have passed if a memory write had cleared the recorded
+/// extraction identity or retired a cached fact set.
 #[test]
 fn memory_writes_do_not_invalidate_the_fact_cache() {
     let dir = fresh_dir("memory-cache");

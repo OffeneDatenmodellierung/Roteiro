@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-15
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Security Tooling |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -154,7 +154,16 @@ model-pull UX (`roteiro model list/pull`), which already discloses source, licen
 and size, requires consent, and verifies hashes atomically:
 
 - **`roteiro security prefetch`** — fetch and verify all pinned assets by digest:
-  OCI image, analyzer versions, rule sets, advisory DB.
+  OCI image, analyzer versions, rule sets, advisory DB. **"Fetch" is what the
+  asset needs, not a promise that every asset is downloaded**: as Stage 22
+  shipped it, `prefetch` verifies and pins but fetches nothing, because the rule
+  set is vendored into the binary and the `RustSec` advisory database is a git
+  checkout with no digest-stable URL. Shelling out to `git` to obtain the latter
+  would be the host-tool fallback forbidden two bullets below, so it is refused
+  with the exact clone command instead. The obligations that matter — pinned
+  before use, never implicit, never a host fallback — are unaffected. See
+  [[docs/adr/0018-analyzer-coverage-matrix.md]]; the first genuinely downloadable
+  asset arrives with `osv-scanner` in Stage 22b.
 - **`roteiro security status`** — report each digest, fetch time, and advisory-DB
   age.
 - **Cold cache, no network** — fail with a distinct `assets-unavailable-offline`
@@ -213,3 +222,10 @@ For Review. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md): the seam and inge
 land in Stage 21 (no boxlite), analyzers in Stage 22, and the boxlite backend in
 Stage 24 — which, since publication was verified, is a dependency addition rather
 than a packaging problem.
+
+## Version history
+
+| Version | Date | Change |
+|---|---|---|
+| 1.0 | 2026-08-15 | Initial: the seam, the three backends, boxlite chosen, the provisioning and degradation contract. |
+| 1.1 | 2026-08-15 | Clarified what `prefetch` "fetches": as Stage 22 shipped it, it verifies and pins but downloads nothing, because neither shipped asset is a digest-stable download. The pinned-before-use, never-implicit and no-host-fallback obligations are unchanged. See [[docs/adr/0018-analyzer-coverage-matrix.md]]. |

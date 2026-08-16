@@ -30,14 +30,31 @@ jobs:
         run: cargo test --workspace --all-features
       - name: Dogfood (roteiro check)
         run: cargo run -p roteiro -- check
+      # DO NOT "fix" this to match the deny step below. `cargo audit` reads
+      # **Cargo.lock**, which lists every optional dependency regardless of which
+      # features are on, so it already sees the whole feature matrix — it is
+      # `cargo deny` that did not (#318). Measured: audit reports `ttf-parser`
+      # (reachable only under the opt-in `pdf-text` feature) while `cargo deny
+      # check` without `--all-features` said "no crate matched advisory criteria"
+      # for the same crate. There is no `--all-features` to add here and it would
+      # mean nothing if there were; ADR-0017 §3 records the measurement.
+      # Kept as the RustSec-native second opinion. Note it exits 0 on
+      # `unmaintained` advisories, so `cargo deny check advisories` — which exits
+      # 1 on them — is the enforcing gate of the two.
       - name: Audit
         run: |
           cargo install cargo-audit --locked
           cargo audit
-      - name: Deny (licenses, bans, advisories)
+      # `--all-features` is what closes #318: without it the licence and advisory
+      # checks only saw the default build, and everything behind `models`,
+      # `serve`, `pdf-text`, `image-vision`, `audio-transcribe` … was unchecked.
+      # It is a *metadata* resolution, not a build — cargo-deny never compiles
+      # anything — so this does **not** build llama.cpp or the tree-sitter
+      # grammars and costs under a second on top of the install (ADR-0017).
+      - name: Deny (licenses, bans, advisories) across the feature matrix
         run: |
           cargo install cargo-deny --locked
-          cargo deny check
+          cargo deny --all-features check
 
   msrv:
     runs-on: ubuntu-latest

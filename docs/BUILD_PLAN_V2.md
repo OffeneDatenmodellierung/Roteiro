@@ -4,7 +4,8 @@ Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-15
 Governing decisions: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md),
 [ADR-0012](adr/0012-analyzer-findings-artifact-model.md),
 [ADR-0013](adr/0013-agent-memory-artifact-store.md),
-[ADR-0014](adr/0014-sandboxed-analyzer-execution.md)
+[ADR-0014](adr/0014-sandboxed-analyzer-execution.md),
+[ADR-0018](adr/0018-analyzer-coverage-matrix.md)
 
 This plan succeeds [BUILD_PLAN.md](BUILD_PLAN.md), which took Roteiro from the
 v0.0.1 scaffold through Stage 20 to the released v1.9.0. V2 covers the next arc:
@@ -120,7 +121,10 @@ across two migrations is intentional: different lifetimes and guarantees, so the
 eviction tier can later be altered without touching durable memory.
 
 **Stages 22 and 24 need no migration** — `RunnerKind` shipped in migration 8 already
-naming all three backends, with the schema CHECK accepting them.
+naming all three backends, with the schema CHECK accepting them. Stage 22 confirmed
+this: two analyzers landed with no schema change at all, because `FindingKey`
+takes each analyzer's own ordered identity components. Stage 22b adds a third the
+same way.
 
 **`EXTRACT_VERSION` does not change in Stages 21–25.** None of that work is
 extraction output (Stage 21 shipped without touching it, as required). It *does*
@@ -133,15 +137,17 @@ change in Stage 26, once — see the note there.
 Dependency shape — four tracks, only one hard chain:
 
 ```
-Track A (findings):  21 ✅ ──► 22 ──► 24
-Track B (memory):    23 ✅ ──────────► 25
-Track C (lenses):    26      (independent of A and B throughout)
+Track A (findings):  21 ✅ ──► 22 ✅ ──► 22b ──► 24
+Track B (memory):    23 ✅ ──────────────► 25
+Track C (lenses):    26         (independent of A and B throughout)
 Track D (media):     28 ✅ ──► 29
-                                       └──► 27 (v2.0 hardening)
+                                          └──► 27 (v2.0 hardening)
 ```
 
-Stages 21, 23 and 26 can start in parallel. Nothing in Track C touches the artifact
-stores; nothing in Track B blocks Track A.
+Stages 21, 23 and 26 were the parallel-startable set; 21, 22, 23 and 28 have now
+landed, leaving 22b, 24, 25, 26 and 29 open. Nothing in Track C touches the artifact
+stores; nothing in Track B blocks Track A. **22b is sequenced after 22 but does not
+block 24**: it adds one adapter behind a seam 24 does not touch.
 
 ---
 
@@ -193,7 +199,7 @@ stages:
   verified end-to-end through the CLI (ingest → list → re-ingest → removal), with
   `nodes`/`edges` counts and the exported artifact digest unchanged throughout.
 
-### Stage 22 — First analyzers: `cargo-audit`, then `semgrep` → **v1.11.0** · effort **M + M**
+### Stage 22 — First analyzers: `semgrep` + `cargo-audit` → **v1.11.0** · effort **M + M** ✅ *delivered*
 
 **Goal:** two real analyzers behind the Stage 21 contract, via the subprocess
 runner, honestly labelled.
@@ -212,7 +218,134 @@ runner, honestly labelled.
   succeeds; offline with a cold cache fails with the named error and the exact
   prefetch command; `cargo deny` clean.
 
-### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.10.x** ✅ *delivered*
+**Delivered in v1.11.0** (PR #322). What shipped, and what it changes for later
+stages:
+
+**Coverage is a matrix, not an analyzer list**
+([ADR-0018](adr/0018-analyzer-coverage-matrix.md)). The requirement is findings
+for Rust, Python, SQL, Java and Node, and the two named analyzers deliver that
+**on the SAST axis only**:
+
+| Language | SAST | Dependency vulnerabilities |
+|---|---|---|
+| Rust | semgrep (GA) | cargo-audit (RustSec) |
+| Python | semgrep (GA) | *gap* → `osv-scanner` (22b) |
+| Java | semgrep (GA) | *gap* → `osv-scanner` (22b) |
+| Node (JS/TS) | semgrep (GA) | *gap* → `osv-scanner` (22b) |
+| SQL | semgrep `generic` — token matching, no parser | n/a — no dependency ecosystem |
+
+- Semgrep's published language list has **no SQL entry at any maturity level** —
+  not GA, not beta, not experimental. SQL is therefore matched by semgrep's
+  `generic` (token) engine: no AST, no dataflow, no types. It can say *this
+  statement grants ALL PRIVILEGES*; it cannot say *this value reaches a query
+  unsanitised*. The qualification is carried in the adapter's declared language
+  list (`sql (generic mode)`), in every SQL rule's `engine-note` metadata, and in
+  a test that asserts the note is present on every SQL finding.
+- Semgrep's dependency scanning (Supply Chain) is a **hosted product feature**,
+  not something `semgrep scan` does against a lockfile, so it contributes nothing
+  to the second column.
+
+**The adapter is the seam, so ingest and execution agree by construction.** One
+conversion (`rto_exec::normalize_native`) turns an analyzer's *native* output
+into the normalized report Stage 21 already validates, and both paths call it: a
+subprocess run hands it the analyzer's stdout, `roteiro security ingest
+--analyzer <name>` hands it a report file CI produced. Equality of `Finding`
+values is a property of the code, not something a test establishes afterwards.
+**A new analyzer is a file in `adapter/` and a row in `ADAPTERS` — no migration**,
+because `FindingKey` takes each analyzer's own ordered identity components.
+
+**Three tool behaviours found by running the tools, not by reading their docs.**
+Each is a trap the next analyzer author would otherwise re-discover:
+
+1. **Semgrep path-prefixes rule ids.** With `--config <file>` it renames every
+   rule to `<config.path.components>.<id>`. The rule id is the first component of
+   a `FindingKey`, so this puts the local asset-cache directory into every stored
+   key — user-identifying data in a persisted record, and keys that differ
+   between two machines running the identical scan. **`--no-rewrite-rule-ids` is
+   mandatory**, and a test asserts no key contains a local path.
+2. **Semgrep redacts the matched source.** In the open-source CLI `extra.lines`
+   and `extra.fingerprint` are the literal string `"requires login"` unless the
+   caller is authenticated to Semgrep's hosted platform. ADR-0012's identity
+   recipe ends in a snippet hash, so hashing that field makes the component a
+   constant *and* changes every stored key the day someone logs in. **Snippets
+   are read from the worktree instead** (`rto_exec::snippet`), which is a
+   function of the source rather than of the analyzer's auth state.
+3. **`cargo audit` reports no advisory-database identity when you pin one.**
+   Given `--db <path>` it returns `last-commit: null` and `last-updated: null` —
+   at a shallow clone and at its own managed checkout alike (0.22.2). Only the
+   unpinned, self-resolving configuration populates them, so the reproducible
+   offline configuration was the one losing its staleness evidence. **Provisioning
+   records the publication date from the database's `HEAD` commit time** and the
+   adapter falls back to it; the tool's own account still wins where it has one.
+
+**Provisioning: writing and running are separate.** `prefetch` is the only thing
+that writes to the asset cache; a run never provisions, so "did this machine have
+the pinned rules?" always has an answer. As shipped, `prefetch` **verifies and
+pins but fetches nothing** — the rule set is vendored into the binary and the
+`RustSec` advisory database is a git checkout with no digest-stable URL, so it is
+refused with the exact clone command rather than obtained by shelling out to
+`git` (which would be the host-tool fallback ADR-0014 forbids). ADR-0014 v1.1
+records that clarification. An asset whose bytes change after provisioning is
+**refused, not warned about**: a run would otherwise stamp a digest that does not
+describe what it read.
+
+**Rules are ours, vendored and pinned.** `semgrep --config p/default` resolves
+against a network service, which makes an "offline" analyzer network-dependent
+and its results irreproducible. Every shipped rule was written for this
+repository under its own licence; **no Semgrep Registry rule is vendored**,
+because those carry the *Semgrep Rules License v1.0*, which is not on
+`deny.toml`'s allow-list — and `cargo deny` governs crates, so it would never
+have caught a rule file. The position is stated in the rule header, the adapter
+docs and ADR-0018 rather than assumed.
+
+**Accepted gaps, recorded so they are decisions rather than oversights:**
+
+- Semgrep's `errors` array is **not** converted to findings. A scan that failed
+  to parse some files reports fewer findings; only a fatal exit (≥2) is caught.
+- **No CVSS base score is computed** from RustSec's vector. The advisory kind is
+  mapped to a severity and the raw vector, aliases, `related` CVEs and categories
+  are preserved verbatim in `meta`; a number disagreeing with `cargo audit`'s own
+  would be worse than carrying the vector unchanged.
+- **Windows is untested.** Paths and `PATH` splitting are written for it; nothing
+  has run on it.
+- Semgrep's default ignore list skips `tests/`, `fixtures/` and similar, so a
+  user's repository is scanned with those excluded. That is semgrep's normal
+  behaviour, and it is why the live test copies the fixture tree somewhere
+  neutral first.
+
+**No new dependencies** — `Cargo.lock` is untouched; `exec-subprocess` is
+`std::process` over the crates already present, and is **off by default**.
+
+### Stage 22b — `osv-scanner`: the dependency axis for Python, Java and Node → effort **M**
+
+Split out of Stage 22 because it is a different axis, not more of the same one,
+and because the SAST half is independently useful and independently reviewable.
+
+- **Rust surface:** one more adapter behind the existing seam. The subprocess
+  runner, the asset cache, `prefetch`/`status` and the finding schema are all
+  reused unchanged — which is the seam doing its job.
+- **Provisioning:** OSV's per-ecosystem databases
+  (`https://osv-vulnerabilities.storage.googleapis.com/<ECOSYSTEM>/all.zip`) are
+  single files at stable URLs, so they are the first asset that genuinely wants a
+  download-by-URL source. `AssetSource` is `#[non_exhaustive]` for that.
+- **Inherited open question — resolve it here, do not rediscover it.**
+  `osv-scanner` also reads `Cargo.lock`, and OSV.dev ingests the `RustSec`
+  advisory database, so **the same Rust vulnerability will be reported twice**
+  under two different finding keys (`finding:osv-scanner:…` and
+  `finding:cargo-audit:…`). Stage 22 deliberately did not decide what to do about
+  that, because deduplication *across* analyzers is a new concept the findings
+  schema has no notion of: a layer is keyed `security:<analyzer>:<worktree-id>`
+  and is replaced wholesale per analyzer. The options are (a) keep both and
+  cross-reference them at the reporting layer, (b) drop `cargo-audit`'s
+  vulnerability findings and keep only its informational kinds
+  (`unmaintained`/`unsound`/`yanked`, which OSV does not carry — and which this
+  repository's own `deny.toml` already relies on), or (c) leave both and say so.
+  Whichever is chosen, the reasoning belongs in ADR-0018 as a version bump.
+- **DoD:** a Python, a Java and a Node lockfile each produce findings; offline
+  with a pinned database succeeds; the Rust overlap with `cargo-audit` is
+  explicitly resolved and recorded, rather than left to chance.
+
+### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.12.0** · effort **M**
 
 **Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
 no graph integration.
@@ -506,8 +639,9 @@ count and tags, from a **format read with no decoding and no model** (measured
 | Release | Contains | Gate |
 |---|---|---|
 | v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
-| v1.11.0 | Stage 22 — cargo-audit + semgrep | Offline warm-cache run; named cold-cache failure |
-| v1.10.x ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met**; scope settled (the anchor is the scope test) |
+| v1.11.0 ✅ | Stage 22 — semgrep + cargo-audit (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure — **met** |
+| v1.11.x | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved |
+| v1.12.0 | Stage 23 — episodic memory | Survives rebuild; graph untouched |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
