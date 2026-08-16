@@ -79,6 +79,41 @@ pub const GUEST_ASSETS: &str = "/assets";
 /// asserts the two agree rather than trusting this comment.
 pub const MAX_OUTPUT_BYTES: usize = 256 << 20;
 
+/// The guest's init process: something that does nothing, slowly.
+///
+/// **This is load-bearing, and the reason is not obvious.** A box lives exactly
+/// as long as its init process, and the init process is the image's own
+/// `ENTRYPOINT`. An analyzer image's entrypoint *is* the analyzer — so left
+/// alone, `semgrep` runs with no arguments, prints its usage, exits, and takes
+/// the box down with it. Any `exec` in flight at that moment is killed by
+/// `SIGKILL` and reports `-9` with empty stderr, which reads exactly like an
+/// out-of-memory kill and is not one.
+///
+/// So the entrypoint is replaced with a shell that waits, and the analyzer runs
+/// as an `exec` inside the box that is then guaranteed to outlive it. `sh` is the
+/// one binary every analyzer image can be relied on to have; the loop is used
+/// rather than `sleep infinity` because busybox's `sleep` does not always accept
+/// it.
+pub const GUEST_INIT: &[&str] = &["sh", "-c", "while : ; do sleep 86400 ; done"];
+
+/// Memory given to the guest, in MiB.
+///
+/// boxlite's default is 2048, and `semgrep` is killed by the guest OOM killer at
+/// that size — it exits `-9` with **empty stderr**, because the process that
+/// would have written the message is the one that was killed. That failure is
+/// indistinguishable from a crash unless you already know to look for it, which
+/// is why the number is named here with its reason rather than tuned silently.
+///
+/// A scan of a large tree is the memory-hungry case; this is sized for it.
+pub const GUEST_MEMORY_MIB: u32 = 4096;
+
+/// Virtual CPUs given to the guest.
+///
+/// boxlite's default is 1. Two, because `semgrep` parallelises across files and
+/// a single core turns a large scan into a timeout — while more would start
+/// competing with whatever else the developer is running.
+pub const GUEST_CPUS: u8 = 2;
+
 /// How long an analyzer may run inside the guest before it is killed.
 ///
 /// A microVM that wedges has no terminal to interrupt, so an unbounded wait
@@ -238,6 +273,28 @@ pub enum SandboxError {
         expected: String,
         /// The tail of its standard error, prefixed for display.
         stderr: String,
+    },
+    /// The analyzer was killed by a signal inside the guest, saying nothing.
+    ///
+    /// Its own diagnostic variant because the shape is deeply misleading: an
+    /// out-of-memory kill inside a microVM surfaces as a negative status with
+    /// **empty stderr**, since the process that would have explained itself is
+    /// the one that was killed. Reported as `UnexpectedStatus` it reads as "the
+    /// analyzer failed for unknown reasons", and the actual cause — a guest
+    /// sized too small for the scan — never occurs to the reader.
+    #[error(
+        "`{program}` was killed by signal {signal} inside the sandbox and wrote nothing to \
+         stderr.\n  The usual cause is the guest running out of memory: it is given \
+         {memory_mib} MiB, and a large tree can need more.\n  This is not a finding — nothing \
+         was stored, because a scan that was killed is not a clean result."
+    )]
+    Killed {
+        /// The program that ran.
+        program: String,
+        /// The signal number it was killed by.
+        signal: i32,
+        /// How much memory the guest had.
+        memory_mib: u32,
     },
     /// The analyzer produced more output than will be read.
     #[error("`{program}` produced more than {max} bytes of output in the sandbox; refusing to read it")]
@@ -455,6 +512,8 @@ impl BoxliteRunner {
         self.require_image(&runtime).await?;
 
         let options = BoxOptions {
+            cpus: Some(GUEST_CPUS),
+            memory_mib: Some(GUEST_MEMORY_MIB),
             rootfs: RootfsSpec::Image(self.image.reference.to_owned()),
             // The boundary, not a configuration flag: no interface is created.
             network: NetworkSpec::Disabled,
@@ -472,6 +531,11 @@ impl BoxliteRunner {
             ],
             env: guest_environment(),
             working_dir: Some(GUEST_WORKTREE.to_owned()),
+            // Replace the image's entrypoint so the box outlives the scan — see
+            // `GUEST_INIT`. `cmd` is cleared for the same reason: the image's
+            // own `CMD` is arguments for an entrypoint that is no longer there.
+            entrypoint: Some(GUEST_INIT.iter().map(|s| (*s).to_owned()).collect()),
+            cmd: Some(Vec::new()),
             // Nothing survives the scan. A box left behind would be a second
             // copy of the worktree's mount configuration lying around.
             auto_remove: true,
@@ -586,6 +650,15 @@ impl BoxliteRunner {
         }
 
         if !invocation.success_statuses.contains(&status.exit_code) {
+            // A negative status is a signal, and a signal with nothing on stderr
+            // is almost always the guest OOM killer. Say so.
+            if status.exit_code < 0 && stderr.trim().is_empty() {
+                return Err(SandboxError::Killed {
+                    program: invocation.program.clone(),
+                    signal: -status.exit_code,
+                    memory_mib: GUEST_MEMORY_MIB,
+                });
+            }
             return Err(SandboxError::UnexpectedStatus {
                 program: invocation.program.clone(),
                 status: status.exit_code,

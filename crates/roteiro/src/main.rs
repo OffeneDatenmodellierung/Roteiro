@@ -5973,11 +5973,23 @@ fn run_security_prefetch(
     let root = rto_exec::asset_root();
     let specs: Vec<&rto_exec::AssetSpec> = match analyzer {
         Some(name) => {
-            let specs = rto_exec::assets_for(name);
+            let mut specs = rto_exec::assets_for(name);
+            if specs.is_empty() {
+                // Some assets belong to no single analyzer — the sandbox runtime
+                // is shared by every analyzer that runs in one — so fall back to
+                // selecting by the spec's own owner. That is what makes
+                // `--analyzer sandbox` provision the runtime without also
+                // fetching a quarter-gigabyte of advisory databases.
+                specs = rto_exec::ASSETS
+                    .iter()
+                    .filter(|s| s.analyzer == name)
+                    .collect();
+            }
             if specs.is_empty() {
                 anyhow::bail!(
-                    "no assets for analyzer `{name}` in this build (known: {})",
-                    rto_exec::known_analyzers().join(", ")
+                    "no assets for `{name}` in this build (analyzers: {}; shared: {})",
+                    rto_exec::known_analyzers().join(", "),
+                    rto_exec::SANDBOX
                 );
             }
             specs
@@ -6008,6 +6020,16 @@ fn run_security_prefetch(
                     eprintln!("    {}", file.url);
                 }
             }
+            if let rto_exec::AssetSource::PinnedArchive { archives } = spec.source {
+                // This one embeds third-party executables into any binary built
+                // against it, some of them GPL-2.0 and LGPL-2.0. The full record
+                // is printed before installation rather than linked, because a
+                // licence obligation nobody read is how it gets breached.
+                for archive in archives {
+                    eprintln!("    {} → sha256 {}", archive.target, archive.sha256);
+                }
+                eprintln!("\n{}\n", rto_exec::SANDBOX_RUNTIME_NOTICE);
+            }
         }
         // The fetcher is passed only when the operator asked for downloads. A
         // downloadable asset that is already present still provisions without
@@ -6018,6 +6040,28 @@ fn run_security_prefetch(
             // One unprovisionable asset must not hide the others: report it and
             // carry on, then fail at the end with everything that went wrong.
             Err(e) => failures.push(format!("{e}")),
+        }
+    }
+
+    // The pinned analyzer images live in boxlite's own store rather than the
+    // asset cache, so they are provisioned alongside it rather than by it. Same
+    // rule as everything else here: only with `--allow-download`, and a run
+    // never does it.
+    #[cfg(feature = "exec-boxlite")]
+    if allow_download {
+        for image in rto_exec::boxlite::SANDBOX_IMAGES {
+            if analyzer.is_some_and(|name| name != image.analyzer) {
+                continue;
+            }
+            if !json {
+                eprintln!(
+                    "pulling sandbox image for {} ({})",
+                    image.analyzer, image.reference
+                );
+            }
+            if let Err(e) = rto_exec::boxlite::provision_image(image.analyzer, &root) {
+                failures.push(format!("{e}"));
+            }
         }
     }
 
