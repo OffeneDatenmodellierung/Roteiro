@@ -95,6 +95,24 @@ execution = ["dep:rto-exec"]
 # argument, so the code that can open a socket lives in the CLI and is reachable
 # only from `prefetch`.
 exec-subprocess = ["execution", "rto-exec/exec-subprocess", "dep:ureq"]
+# The sandboxed analyzer backend: `roteiro security run` inside a digest-pinned
+# OCI image in a microVM (ADR-0014). **Off by default.**
+#
+# Build requirements, which are real and not optional: `protoc >= 3.12` on the
+# host, and a sandbox runtime provisioned and verified beforehand —
+# `roteiro security prefetch --analyzer sandbox --allow-download`, then build
+# with `BOXLITE_RUNTIME_URL` pointing at the verified copy. `rto-exec`'s build
+# script refuses to proceed otherwise, and prints exactly what to run. See
+# `crates/rto-exec/NOTICE-boxlite-runtime.md` for the third-party binaries this
+# embeds and the licence duties they carry.
+#
+# It pulls in `exec-subprocess` for a reason that is CLI plumbing, not policy:
+# `security prefetch|status|run` are all gated on that feature today, and the
+# sandboxed backend needs the same provisioning surface. Enabling it does **not**
+# enable unsandboxed runs — those still require `--allow-unsandboxed` per
+# invocation, and still record `isolation=none`. Worth untangling when the
+# `security` command's feature gates are next revisited.
+exec-boxlite = ["exec-subprocess", "rto-exec/exec-boxlite"]
 mcp = ["rto-render/mcp", "dep:tokio"]
 # The interactive workspace explorer's read-only `/v1/graph/*` JSON API, off by
 # default. Pure Rust: adds only axum + tokio, never `rto-serve`/llama.cpp, so it

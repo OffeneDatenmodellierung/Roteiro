@@ -83,7 +83,20 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — clean
   (pedantic). Prefer fixing over `#[allow(...)]`; when an allow is right, justify
   it in a comment.
-- `cargo test --workspace --all-features` — green.
+- `cargo test --workspace --all-features` — green. **`--all-features` now
+  includes `exec-boxlite`, which will not build until the sandbox runtime is
+  provisioned** — deliberately, because otherwise boxlite's own build script
+  downloads a 25 MB archive with no digest check of any kind and embeds it in
+  the binary. Once, before your first `--all-features` build:
+
+  ```sh
+  roteiro security prefetch --allow-download   # verifies against a pinned digest
+  export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
+  ```
+
+  The build script fails loudly — with this recipe and the expected digest — if
+  the variable is unset, points at a remote URL, or the bytes do not match. Build
+  without `exec-boxlite` if you would rather not provision.
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny --all-features check` and `cargo audit` — clean. **Every new

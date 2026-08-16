@@ -22,6 +22,22 @@ jobs:
       # the compiled artefacts are cached by rust-cache across runs.
       - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+      # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
+      # brings two build requirements that are real and not optional.
+      #
+      # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
+      # there is no stub path around it.
+      #
+      # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
+      # would otherwise fetch with an unverified `curl` and embed in the binary.
+      # This provisions it from the digests pinned in
+      # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
+      # boxlite's own fetch resolves to a local, verified file and never reaches
+      # the network. `rto-exec/build.rs` refuses to build without it.
+      - name: Install protoc (`exec-boxlite` feature)
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
+        run: python3 scripts/provision-sandbox-runtime.py --github-env
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -92,6 +108,22 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+      # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
+      # brings two build requirements that are real and not optional.
+      #
+      # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
+      # there is no stub path around it.
+      #
+      # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
+      # would otherwise fetch with an unverified `curl` and embed in the binary.
+      # This provisions it from the digests pinned in
+      # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
+      # boxlite's own fetch resolves to a local, verified file and never reaches
+      # the network. `rto-exec/build.rs` refuses to build without it.
+      - name: Install protoc (`exec-boxlite` feature)
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
+        run: python3 scripts/provision-sandbox-runtime.py --github-env
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
@@ -132,6 +164,22 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+      # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
+      # brings two build requirements that are real and not optional.
+      #
+      # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
+      # there is no stub path around it.
+      #
+      # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
+      # would otherwise fetch with an unverified `curl` and embed in the binary.
+      # This provisions it from the digests pinned in
+      # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
+      # boxlite's own fetch resolves to a local, verified file and never reaches
+      # the network. `rto-exec/build.rs` refuses to build without it.
+      - name: Install protoc (`exec-boxlite` feature)
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
+        run: python3 scripts/provision-sandbox-runtime.py --github-env
       - name: Build on MSRV
         run: cargo check --workspace --all-features
       - name: Audit on MSRV lockfile
