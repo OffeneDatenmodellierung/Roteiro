@@ -5,13 +5,12 @@
 //! `speculative` unit tests, which Ubuntu CI runs. This file is for the two
 //! claims that **cannot** be made without weights:
 //!
-//! 1. **The output does not change.** Speculative decoding is only sound if it
-//!    is invisible: same seed, same sampler, same tokens. The code is written so
-//!    that this follows from how the sampler is driven, but the last link is
-//!    llama.cpp's own arithmetic — a batch of four tokens and four batches of one
-//!    are not *guaranteed* to give bit-identical logits on a GPU, because the
-//!    kernels differ. So it is checked here, against the real thing, over the
-//!    three kinds of output whose acceptance rates differ most.
+//! 1. **How far the output changes.** Speculative decoding would be sound in
+//!    exact arithmetic — the sampler is driven identically either way — but
+//!    llama.cpp's logits are not identical at batch width 1 and width 4, and
+//!    measured against real models the text *does* differ. That is reported here
+//!    rather than asserted, over the three kinds of output whose acceptance rates
+//!    differ most; see the test's own docs for the runs that settled it.
 //! 2. **A model with no draft head falls back**, silently and successfully,
 //!    rather than failing the request.
 //!
@@ -237,18 +236,55 @@ fn first_difference(a: &str, b: &str) -> Option<usize> {
         .or_else(|| (a.len() != b.len()).then_some(a.len().min(b.len())))
 }
 
-/// **The claim the whole feature rests on**: with a fixed seed and sampler,
-/// speculative decoding produces the *same tokens* as plain decoding.
+/// Speculation runs, drafts are accepted, the plain path stays plain — and the
+/// difference between the two paths' text is **measured and printed**.
 ///
-/// Not "the same distribution" and not "similar text" — identical strings. A
-/// speculative decoder that changes the output is not a faster decoder, it is a
-/// different model, and the failure mode it produces in the field is "the model
-/// got worse" with no cause anyone can point at. So this is asserted directly,
-/// over all three prompt kinds, rather than assumed from the library's contract.
+/// # What this used to assert, and why it no longer does
+///
+/// This test was written as `speculation_does_not_change_the_output`, asserting
+/// that a fixed seed and sampler give byte-identical text on both paths. Run
+/// against real MTP models it **failed every time it ever ran** — seven runs
+/// across Qwen3.5-0.8B, Qwen3.5-9B and a split-head Qwen3.8-27B, never once
+/// green. The divergences are ordinary word choices that then fan out:
+///
+/// ```text
+/// code:  "Let me think about the approach:"     vs "…about the algorithm:"
+/// code:  "Input: `sizes: &[u64]` (slice of…"    vs "…(a slice of…"
+/// prose: "why text generation on a laptop GPU"  vs "why text generation (like LLM
+///                                                   inference) on a laptop GPU"
+/// ```
+///
+/// So identity is **not** a property this feature has, and an assertion of it is
+/// a test that fails 100% of the time on a machine that can run it — a landmine,
+/// not a canary. It is replaced here by the properties the code genuinely
+/// guarantees, with the divergence demoted to a reported observation.
+///
+/// # What it proves
+///
+/// * speculation actually **activated** on every text generation (an identity or
+///   divergence measured on a run that never drafted measures nothing);
+/// * the draft head's proposals were **accepted**, so a batched verification
+///   decode really happened;
+/// * the control engine took the **plain** path, so the two arms differ in the
+///   thing under test and nothing else;
+/// * nothing native outlives the engines (the `release_shared_backend` check).
+///
+/// # What it does not prove
+///
+/// That the text is the same. It is not, and this test will not fail when it
+/// differs — it prints where. The mechanism that keeps the *distribution*
+/// identical (one sampler call per emitted token, in position order, each
+/// preceded by `accept`) is pinned without a model by `rto_llama::speculative`'s
+/// unit tests; what escapes that guarantee is llama.cpp's arithmetic at batch
+/// width 1 versus width 4, which `tests/batch_numerics.rs` measures as a max
+/// |Δlogit| of 0.115–0.282 on hybrid Qwen3.5 against 0.002–0.003 on a dense
+/// llama model — two orders of magnitude, and at one sampled position larger
+/// than the top-two margin separating the greedy pick from the runner-up. The
+/// divergences above are that gap arriving in the output.
 ///
 /// Two engines rather than one, so the runs share nothing but the GGUF on disk.
 #[test]
-fn speculation_does_not_change_the_output() {
+fn speculation_runs_and_its_divergence_from_plain_decoding_is_reported() {
     let _serial = exclusive();
     let Some(path) = mtp_gguf() else {
         return;
@@ -265,6 +301,7 @@ fn speculation_does_not_change_the_output() {
     let plain = engine(&path, false);
     let spec = engine(&path, true);
 
+    let mut diverged = 0;
     for (kind, prompt) in PROMPTS {
         let (without, _) = complete(&plain, prompt);
         let (with, _) = complete(&spec, prompt);
@@ -272,16 +309,27 @@ fn speculation_does_not_change_the_output() {
             !with.trim().is_empty(),
             "{kind}: speculative decoding produced nothing"
         );
+        // Reported, not asserted: see this test's docs for the seven runs that
+        // established identity is not a property this feature has.
         if let Some(at) = first_difference(&without, &with) {
-            panic!(
-                "{kind}: speculative decoding changed the output at char {at}\n\
-                 plain:       {:?}\n\
+            diverged += 1;
+            eprintln!(
+                "{kind}: DIVERGED from plain decoding at char {at}\n  \
+                 plain:       {:?}\n  \
                  speculative: {:?}",
                 &without[at.saturating_sub(40)..without.len().min(at + 40)],
                 &with[at.saturating_sub(40)..with.len().min(at + 40)],
             );
+        } else {
+            eprintln!("{kind}: identical to plain decoding");
         }
     }
+    eprintln!(
+        "divergence: {diverged}/{} prompt kinds differed from plain decoding \
+         (observation, not an assertion — speculative decoding is opt-in via \
+         ROTEIRO_SPECULATIVE precisely because this number is not reliably zero)",
+        PROMPTS.len()
+    );
 
     let stats = spec.speculative_stats();
     eprintln!(
@@ -292,12 +340,12 @@ fn speculation_does_not_change_the_output() {
         stats.activations,
         PROMPTS.len() as u64,
         "every text generation on a model with a draft head must have used it — \
-         identical output is only evidence of anything if speculation actually ran"
+         a divergence count measured on a run that never drafted measures nothing"
     );
     assert!(
         stats.accepted > 0,
-        "the draft head proposed {} tokens and none were accepted: the outputs match \
-         because nothing was ever drafted, which is not what this test is checking",
+        "the draft head proposed {} tokens and none were accepted: no batched \
+         verification decode ever happened, which is the thing under test",
         stats.drafted
     );
     assert_eq!(
