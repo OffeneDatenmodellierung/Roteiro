@@ -82,7 +82,7 @@ pub enum ExecError {
     /// and the exact `prefetch` invocation. The `assets-unavailable-offline`
     /// token is part of the message so the failure is greppable and scriptable
     /// rather than merely readable.
-    #[cfg(feature = "exec-subprocess")]
+    #[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
     #[error(
         "assets-unavailable-offline: {analyzer} cannot run because its pinned inputs are not \
          provisioned\n  missing: {}\n  fix it with: {command}\n  \
@@ -105,9 +105,13 @@ pub enum ExecError {
     #[error(transparent)]
     Subprocess(#[from] crate::subprocess::SubprocessError),
     /// Provisioning an asset failed.
-    #[cfg(feature = "exec-subprocess")]
+    #[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
     #[error(transparent)]
     Asset(#[from] crate::assets::AssetError),
+    /// The sandboxed backend could not run the analyzer.
+    #[cfg(feature = "exec-boxlite")]
+    #[error(transparent)]
+    Sandbox(#[from] crate::boxlite::SandboxError),
     /// This build has no adapter for the requested analyzer, so it can neither
     /// run it nor read its native output.
     #[error("no adapter for analyzer {requested:?} in this build (known: {known})")]

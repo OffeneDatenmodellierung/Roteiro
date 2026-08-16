@@ -33,7 +33,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 # newer than our 1.94 MSRV, which breaks the `bundled` feature's build.rs on
 # our MSRV toolchain. Revisit this pin if/when the project MSRV moves to
 # 1.95+ (see ADR-0001 for MSRV policy).
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"

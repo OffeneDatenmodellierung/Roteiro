@@ -20,7 +20,7 @@
 //! after the fact — and the whole point of stamping `rules_digest` onto an
 //! [`rto_graph::AnalysisRun`] is that the question has an answer.
 //!
-//! # Three kinds of asset
+//! # Four kinds of asset
 //!
 //! [`AssetSource::Vendored`] is compiled into the binary — the baseline semgrep
 //! rule set. Installing it needs no network at all, which is what makes a fresh
@@ -40,6 +40,19 @@
 //! stable URLs — exactly what a digest pin wants, and what the `RustSec` git
 //! checkout could never be. The enum being `#[non_exhaustive]` is what made
 //! adding it a non-breaking change.
+//!
+//! [`AssetSource::PinnedArchive`] is the one with a **compile-time digest**, and
+//! it exists for the sandbox runtime (Stage 24). The difference from `Download`
+//! is not the transport but the target: OSV rebuilds its databases daily, so the
+//! only pin that can be honoured there is the snapshot this machine provisioned.
+//! A published release artifact is immutable, so its correct bytes are knowable
+//! in advance — and where they are knowable, they are checked.
+//!
+//! That closes the gap the [`Fetcher`] contract has to leave open elsewhere. A
+//! fetcher that reports success over a truncated body can defeat a `Download`
+//! asset's pin, because there is nothing to contradict it; it cannot defeat a
+//! `PinnedArchive`, because the expected digest is compiled in and the archive
+//! is verified here, in this crate, before it is installed.
 //!
 //! **Fetching is still confined to provisioning.** The transport is not in this
 //! crate at all: [`provision_with`] takes the fetcher as an argument, and the
@@ -98,6 +111,18 @@ pub enum AssetSource {
         /// sequence.
         files: &'static [DownloadFile],
     },
+    /// A single published release artifact with a **compile-time SHA-256**,
+    /// installed as one file and selected by host platform.
+    ///
+    /// Verified in this crate, before installation and again by `build.rs`
+    /// before anything is built against it — so neither a lying fetcher nor a
+    /// redirected URL can substitute different bytes. See
+    /// [`crate::runtime_pins`] for what is pinned and why it has to be.
+    PinnedArchive {
+        /// One entry per supported host platform. A host not listed here cannot
+        /// be provisioned, and is told which platforms are.
+        archives: &'static [crate::runtime_pins::PinnedArchive],
+    },
 }
 
 /// One file of an [`AssetSource::Download`] asset.
@@ -121,6 +146,12 @@ pub enum AssetKind {
     /// source tree, which is why results derived from it are labelled *possibly
     /// stale* rather than *current*.
     AdvisoryDb,
+    /// The prebuilt sandbox runtime an analyzer is executed inside.
+    ///
+    /// Unlike the other two it is **immutable for a given release**: one
+    /// published artifact with one correct digest, which is why it is the only
+    /// kind carrying a compile-time pin.
+    SandboxRuntime,
 }
 
 impl AssetKind {
@@ -130,6 +161,7 @@ impl AssetKind {
         match self {
             Self::Rules => "rules",
             Self::AdvisoryDb => "advisory-db",
+            Self::SandboxRuntime => "sandbox-runtime",
         }
     }
 }
@@ -191,7 +223,34 @@ pub static ASSETS: &[AssetSpec] = &[
         licence: "per-record, as published by OSV.dev \
                   (CC0-1.0 for RustSec, CC-BY-4.0 for the GitHub Advisory Database)",
     },
+    AssetSpec {
+        id: crate::runtime_pins::RUNTIME_ASSET,
+        // Not an analyzer's asset: every analyzer run under the sandboxed
+        // backend needs the same one. No adapter declares it, so `assets_for`
+        // never returns it and `prefetch --analyzer <name>` never selects it;
+        // it is provisioned by a plain `prefetch`, and resolved directly by id.
+        analyzer: SANDBOX,
+        kind: AssetKind::SandboxRuntime,
+        source: AssetSource::PinnedArchive {
+            archives: crate::runtime_pins::RUNTIME_ARCHIVES,
+        },
+        file: crate::runtime_pins::RUNTIME_FILE,
+        // The archive is a bundle of separately-licensed executables, and
+        // flattening them into one claim is exactly what let 25 MB of GPL
+        // binaries through a licence gate unnoticed. Each is named, and the
+        // full record — including the source-offer duty this creates — is in
+        // `crates/rto-exec/NOTICE-boxlite-runtime.md`, disclosed before install.
+        licence: "mixed: Apache-2.0 (boxlite-shim, boxlite-guest), \
+                  GPL-2.0 (mke2fs, debugfs, libkrunfw), \
+                  LGPL-2.0-or-later (bwrap) — see NOTICE-boxlite-runtime.md",
+    },
 ];
+
+/// The `analyzer` field for an asset that belongs to no single analyzer.
+///
+/// A sentinel rather than an empty string, so `status` prints something a reader
+/// can act on and `--analyzer <name>` cannot accidentally match it.
+pub const SANDBOX: &str = "sandbox";
 
 /// The OSV per-ecosystem databases this build provisions.
 ///
@@ -351,7 +410,7 @@ pub fn asset_dir(root: &Path, spec: &AssetSpec) -> PathBuf {
 pub fn asset_path(root: &Path, spec: &AssetSpec) -> PathBuf {
     let dir = asset_dir(root, spec);
     match spec.source {
-        AssetSource::Vendored(_) => dir.join(spec.file),
+        AssetSource::Vendored(_) | AssetSource::PinnedArchive { .. } => dir.join(spec.file),
         AssetSource::External { .. } | AssetSource::Download { .. } => dir.join("db"),
     }
 }
@@ -428,6 +487,68 @@ pub enum AssetError {
         id: &'static str,
         /// The offending path.
         path: &'static str,
+    },
+    /// No sandbox runtime is pinned for this host platform.
+    ///
+    /// Refused by name rather than left to fail as a link error later: a
+    /// platform Roteiro has not pinned is a platform whose runtime bytes nobody
+    /// has verified, and building against unverified bytes is the thing this
+    /// whole path exists to prevent.
+    #[error(
+        "asset {id:?} has no pinned archive for this host ({os}/{arch}); \
+         pinned platforms are: {supported}"
+    )]
+    UnsupportedPlatform {
+        /// The asset id.
+        id: &'static str,
+        /// `std::env::consts::OS` for the host.
+        os: &'static str,
+        /// `std::env::consts::ARCH` for the host.
+        arch: &'static str,
+        /// The platforms that do have a pin, comma-separated.
+        supported: String,
+    },
+    /// A pinned archive is not provisioned, and this code path does not
+    /// download.
+    #[error(
+        "asset {id:?} ({target}) is not provisioned and this code path does not download\n  \
+         expected at: {path}\n  \
+         fetch it with: roteiro security prefetch --allow-download"
+    )]
+    ArchiveMissing {
+        /// The asset id.
+        id: &'static str,
+        /// The host platform it would be fetched for.
+        target: &'static str,
+        /// Where it was expected.
+        path: String,
+    },
+    /// A pinned archive's bytes are not the bytes that were pinned.
+    ///
+    /// This is the check that makes the sandbox runtime reproducible, so it is a
+    /// hard failure with no override: a mismatch is either a truncated download,
+    /// a redirected URL, or a substituted artifact, and none of those is
+    /// something to carry on from. The size is reported alongside because a
+    /// short body is the common case and two unequal digests do not say so.
+    #[error(
+        "asset {id:?} does not match its pinned digest — refusing it\n  \
+         from:     {url}\n  \
+         expected: {expected} ({expected_bytes} bytes)\n  \
+         actual:   {actual} ({actual_bytes} bytes)"
+    )]
+    DigestMismatch {
+        /// The asset id.
+        id: &'static str,
+        /// Where the bytes came from.
+        url: String,
+        /// The digest that was pinned.
+        expected: &'static str,
+        /// The size that was pinned.
+        expected_bytes: u64,
+        /// The digest of what arrived.
+        actual: String,
+        /// The size of what arrived.
+        actual_bytes: u64,
     },
     /// Reading or writing the cache failed.
     #[error("asset cache I/O at {path}: {source}")]
@@ -529,6 +650,10 @@ pub fn provision_with(
             let (digest, count) = digest_tree(&target)?;
             (digest, Some(count))
         }
+        AssetSource::PinnedArchive { archives } => {
+            let digest = provision_archive(spec, archives, &target, fetch)?;
+            (digest, None)
+        }
     };
     let published_at = published_at(&target);
 
@@ -622,6 +747,131 @@ fn download_all(
         })?;
     }
     Ok(())
+}
+
+/// The pinned archive for the host this is running on.
+///
+/// # Errors
+/// Returns [`AssetError::UnsupportedPlatform`] naming the platforms that are
+/// pinned, for a host that is not one of them.
+pub fn archive_for_host(
+    spec: &AssetSpec,
+    archives: &'static [crate::runtime_pins::PinnedArchive],
+) -> Result<&'static crate::runtime_pins::PinnedArchive, AssetError> {
+    crate::runtime_pins::archive_for(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(
+        || AssetError::UnsupportedPlatform {
+            id: spec.id,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            supported: archives
+                .iter()
+                .map(|a| a.target)
+                .collect::<Vec<_>>()
+                .join(", "),
+        },
+    )
+}
+
+/// Install the host's pinned archive, verifying its digest before it counts.
+///
+/// Idempotent and offline over a warm cache: an archive already present *and
+/// matching its pin* is accepted without a fetcher, which is what lets a machine
+/// with no network re-run `prefetch` and get a clean bill rather than a refusal.
+/// An archive present but **not** matching is refused rather than re-fetched —
+/// silently replacing bytes that failed verification would turn a tamper signal
+/// into a retry.
+fn provision_archive(
+    spec: &AssetSpec,
+    archives: &'static [crate::runtime_pins::PinnedArchive],
+    target: &Path,
+    fetch: Option<&Fetcher<'_>>,
+) -> Result<String, AssetError> {
+    let archive = archive_for_host(spec, archives)?;
+
+    if target.is_file() {
+        // Present already: verify, and take it or refuse it. Either way no
+        // network is touched, which is the whole point of a warm cache.
+        return verify_archive(spec, archive, target, &target.display().to_string());
+    }
+
+    let Some(fetch) = fetch else {
+        return Err(AssetError::ArchiveMissing {
+            id: spec.id,
+            target: archive.target,
+            path: target.display().to_string(),
+        });
+    };
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| AssetError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+
+    // Stage beside the destination, verify, and only then rename. A body that
+    // fails its pin never appears at the path anything reads — so a failed
+    // provision leaves a cold cache rather than a poisoned one.
+    let partial = target.with_extension("partial");
+    std::fs::remove_file(&partial).ok();
+    fetch(archive.url, &partial).map_err(|message| {
+        std::fs::remove_file(&partial).ok();
+        AssetError::Fetch {
+            id: spec.id,
+            url: archive.url,
+            message,
+        }
+    })?;
+
+    let digest = match verify_archive(spec, archive, &partial, archive.url) {
+        Ok(digest) => digest,
+        Err(e) => {
+            std::fs::remove_file(&partial).ok();
+            return Err(e);
+        }
+    };
+
+    std::fs::rename(&partial, target).map_err(|source| {
+        std::fs::remove_file(&partial).ok();
+        AssetError::Io {
+            path: target.display().to_string(),
+            source,
+        }
+    })?;
+    Ok(digest)
+}
+
+/// Check a file against a pinned archive, returning its digest when it matches.
+///
+/// `origin` is what the failure message blames — a URL when the bytes just
+/// arrived from one, a path when they were already on disk.
+///
+/// # Errors
+/// Returns [`AssetError::DigestMismatch`] when the bytes are not the pinned
+/// bytes, or [`AssetError::Io`] when the file cannot be read.
+pub fn verify_archive(
+    spec: &AssetSpec,
+    archive: &crate::runtime_pins::PinnedArchive,
+    path: &Path,
+    origin: &str,
+) -> Result<String, AssetError> {
+    let bytes = std::fs::read(path).map_err(|source| AssetError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let digest = sha256_hex(&bytes);
+    let actual_bytes = bytes.len() as u64;
+    if digest != archive.sha256 || actual_bytes != archive.bytes {
+        return Err(AssetError::DigestMismatch {
+            id: spec.id,
+            url: origin.to_owned(),
+            expected: archive.sha256,
+            expected_bytes: archive.bytes,
+            actual: digest,
+            actual_bytes,
+        });
+    }
+    Ok(digest)
 }
 
 /// Whether a declared install path stays inside the asset directory.
@@ -723,7 +973,9 @@ pub fn advisory_db_evidence(root: &Path, analyzer: &str) -> Option<rto_graph::Ad
 fn current_digest(root: &Path, spec: &AssetSpec) -> Option<String> {
     let target = asset_path(root, spec);
     match spec.source {
-        AssetSource::Vendored(_) => Some(sha256_hex(&std::fs::read(target).ok()?)),
+        AssetSource::Vendored(_) | AssetSource::PinnedArchive { .. } => {
+            Some(sha256_hex(&std::fs::read(target).ok()?))
+        }
         AssetSource::External { .. } | AssetSource::Download { .. } => {
             digest_tree(&target).ok().map(|(digest, _)| digest)
         }
