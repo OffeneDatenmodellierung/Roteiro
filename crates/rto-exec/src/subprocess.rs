@@ -233,6 +233,9 @@ impl AnalyzerRunner for SubprocessRunner {
             source: &request.source,
             rules_digest: self.rules_digest(&self.assets_root),
             advisory_db: assets::advisory_db_evidence(&self.assets_root, &request.analyzer),
+            // The tree the analyzer was pointed at, so an adapter whose analyzer
+            // reports absolute paths can place them back inside it.
+            worktree: Some(&request.worktree.path),
             snippets: &snippets,
         };
 

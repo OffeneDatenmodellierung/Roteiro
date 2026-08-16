@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::findings::{self, AnalysisRun, Finding, FindingsApplied, FindingsLayer};
 use crate::media::{self, MediaFilter, MediaKind, MediaRecord, MediaWrite, ProducerSummary};
 use crate::memory::{
-    self, MemoryError, MemoryFilter, MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite,
+    self, CacheEntry, CacheStats, CacheSweep, CacheWrite, MemoryError, MemoryFilter,
+    MemoryForgotten, MemoryListing, MemoryRecord, MemoryWrite, Recall, RecallOptions,
 };
 use crate::migrations;
 use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
@@ -1158,6 +1159,119 @@ impl Store {
         memory::counts(&self.conn)
     }
 
+    /// **Ranked recall**: the live records that match `opts`, scored
+    /// `base_confidence × anchor_penalty × decay(age)` and ordered best first.
+    ///
+    /// Every term is computed **here, at retrieval time, and written to no
+    /// column** (ADR-0013). A stored score that decayed would rewrite the store on
+    /// every read and would be wrong in between, making recall depend on when you
+    /// last looked. Three consequences follow, and each is a promise:
+    ///
+    /// - **This call mutates nothing.** Recall over an unchanged store and an
+    ///   unchanged tree is idempotent, which is what makes
+    ///   [`crate::Decay::None`] byte-identical across runs.
+    /// - **A superseded record is never returned**, immediately and regardless of
+    ///   age: the test is a recorded pointer, not a clock.
+    /// - **A record whose anchor no longer resolves is still returned**, demoted
+    ///   and labelled. Drift ranks it down; nothing deletes it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure, or [`StoreError::Corrupt`]
+    /// if a row carries an unknown kind token.
+    pub fn recall_memory(&self, opts: &RecallOptions<'_>) -> Result<Recall, StoreError> {
+        let (live, superseded) = memory::counts(&self.conn)?;
+        Ok(Recall {
+            schema: memory::RECALL_SCHEMA,
+            generation: memory::generation(&self.conn)?,
+            decay: opts.decay,
+            reproducible: opts.decay.is_reproducible(),
+            results: memory::recall(&self.conn, opts)?,
+            live,
+            superseded,
+        })
+    }
+
+    // --- The bounded cache tier (ADR-0013, Tier 2). The *opposite* rules to the
+    // episodic tier above, because it holds the opposite kind of knowledge:
+    // everything here is re-derivable, so eviction costs cycles and never
+    // information. Nothing in this section can reach `agent_memory` — it has no
+    // `bytes`, no `last_used` and no `hits` for a capacity policy to grip. ---
+
+    /// Write (or replace) one cache entry.
+    ///
+    /// The payload size is computed here and the anchor's blob is captured from
+    /// the graph here, so the sweep can order and total the tier without reading
+    /// it, and a caller cannot record evidence a node never carried.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn agent_cache_put(&self, write: &CacheWrite<'_>) -> Result<(), StoreError> {
+        memory::cache_put(&self.conn, write)
+    }
+
+    /// Read one cache entry back, **recording the access** — `hits` increments and
+    /// `last_used` advances.
+    ///
+    /// This is the one read in the memory store that writes, and what it writes is
+    /// the cache's own bookkeeping: those two columns exist to be moved by exactly
+    /// this, and a hit counter nothing increments is a column that lies. It
+    /// touches nothing outside `agent_cache`, so [`Store::recall_memory`] — the
+    /// read whose reproducibility is promised — stays free of it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_get(&self, key: &str) -> Result<Option<CacheEntry>, StoreError> {
+        memory::cache_get(&self.conn, key)
+    }
+
+    /// Every cache entry, ordered by key, **without** recording an access:
+    /// inspecting a cache is not using it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_entries(&self) -> Result<Vec<CacheEntry>, StoreError> {
+        memory::cache_entries(&self.conn)
+    }
+
+    /// Delete one cache entry, returning whether there was one.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn agent_cache_forget(&self, key: &str) -> Result<bool, StoreError> {
+        memory::cache_forget(&self.conn, key)
+    }
+
+    /// What the cache tier holds, against `budget_bytes`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn agent_cache_stats(&self, budget_bytes: u64) -> Result<CacheStats, StoreError> {
+        memory::cache_stats(&self.conn, budget_bytes)
+    }
+
+    /// **Sweep the cache tier down to `budget_bytes`**, evicting oldest-first on
+    /// `(anchor_valid ASC, last_used ASC)`, and advance the generation.
+    ///
+    /// Called at the maintenance seam (beside `refresh_contexts`) and **never on
+    /// the read path**, so an ordinary query never mutates the store. Three things
+    /// are never evicted: anything episodic — structurally, there is no column to
+    /// grip it by; an entry written in the current generation whose anchor still
+    /// applies, which is the session's own work; and the most-recently-used entry,
+    /// always, even if it alone exceeds the budget.
+    ///
+    /// That last pair means a sweep can legitimately finish still over budget.
+    /// [`CacheSweep::over_budget`] reports it rather than leaving a bound that
+    /// silently failed to bind.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on failure; the transaction is rolled back.
+    pub fn sweep_agent_cache(&mut self, budget_bytes: u64) -> Result<CacheSweep, StoreError> {
+        let tx = self.conn.transaction()?;
+        let swept = memory::cache_sweep(&tx, budget_bytes)?;
+        tx.commit()?;
+        Ok(swept)
+    }
+
     /// Findings whose owning run no longer exists. Always `0` in a healthy store;
     /// exposed so layer replacement can be asserted to clean up its own records
     /// rather than orphaning them.
@@ -1800,20 +1914,23 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        // The property, not a literal: opening applies **every** migration this
-        // build knows, whatever the newest one happens to be.
+        // Written against `latest_version()` rather than the literal that stood
+        // here (8 for analyzer findings, then 9, 10, 11 as the media and
+        // agent-memory tables landed). The literal was defended as making someone
+        // confirm a new migration is meant to apply on open — but it could not do
+        // that job: `apply` applies every migration not already recorded, so
+        // "applies on open" is not a per-migration choice there is anything to
+        // confirm. What the literal actually asserted was the value of a shared
+        // constant, which every future migration then has to come here and edit,
+        // in a file it otherwise has no business in — the brittleness #329
+        // replaced with a property test elsewhere. This is the idiom
+        // `migrations::tests::a_later_migration_is_additive_on_a_populated_store`
+        // already uses, for the same reason.
         //
-        // This used to pin the number (8, then 9, 10, 11 …), on the theory that a
-        // new migration should make someone confirm it is meant to apply on open.
-        // In practice it only ever failed *after* a migration had been
-        // deliberately added, so it confirmed nothing and cost a red build — the
-        // brittleness #329 replaced with a property test elsewhere. What is worth
-        // asserting is that `open` leaves no migration unapplied; one that should
-        // not run on open would not be in `MIGRATIONS` at all.
-        // Since migrations are selected by set membership, this now asserts
-        // something strictly stronger than "the biggest recorded number is N":
+        // Since migrations are selected by set membership, the property is now
+        // strictly stronger than "the biggest recorded number is N":
         // `schema_version` is the highest **gap-free** version, so equality with
-        // `latest_version` rules out a store that skipped one and stamped a
+        // `latest_version` also rules out a store that skipped one and stamped a
         // higher one. A fresh store cannot exhibit that gap, so
         // `reopening_repairs_a_skipped_migration` exercises it directly.
         assert_eq!(
@@ -1827,15 +1944,28 @@ mod tests {
     /// carrying a higher one** repairs it — through the real public API, which
     /// is where it matters to callers.
     ///
-    /// This is the on-disk shape left when two branches each add a migration and
-    /// a store meets them in the wrong order: the build that knew migration 13
-    /// stamped it, and the build that knows 12 must still apply 12. Under the old
-    /// `version > MAX(recorded)` rule it never would, and the store would report a
-    /// schema it does not have while every query on the missing column failed.
-    /// Reproduced against a copy of this repository's real `graph.db`, where it
-    /// surfaced as `no such column: worktree` — the issue #330 tree stamp.
+    /// This is not a hypothetical: it is the shape `main` itself carries.
+    /// `feat/stage25-memory-recall` merged migration **13** while migration
+    /// **12** was still on this branch, so every store opened by a current-`main`
+    /// build — including this repository's own `.git/roteiro/graph.db` and each
+    /// linked worktree's — records `1..11, 13`. Under the old
+    /// `version > MAX(recorded)` rule, `12 > 13` is false and migration 12 would
+    /// never be applied to any of them, permanently: the store opens cleanly,
+    /// reports a schema it does not have, and `synced_worktree()` fails with
+    /// `no such column: worktree` — the issue #330 tree stamp, silently absent.
+    ///
+    /// The two migrations are deliberately named by number rather than derived
+    /// from `latest_version()`. Which one is missing and which is present is the
+    /// specific historical fact being tested; arithmetic on the newest version
+    /// would quietly re-aim the test at whatever lands next and stop covering
+    /// this.
     #[test]
     fn reopening_repairs_a_skipped_migration() {
+        /// The migration this branch adds — absent from a current-`main` store.
+        const SKIPPED: u32 = 12;
+        /// The migration `main` added in parallel — present, and stamped higher.
+        const AHEAD: u32 = 13;
+
         let path = std::env::temp_dir().join(format!(
             "roteiro-migration-gap-{}-{:?}.db",
             std::process::id(),
@@ -1843,38 +1973,51 @@ mod tests {
         ));
         std::fs::remove_file(&path).ok();
 
-        let known = crate::migrations::latest_version();
         {
-            let store = Store::open(&path).expect("open");
-            store.upsert_node(&sample_node("kept")).expect("upsert");
+            let mut store = Store::open(&path).expect("open");
+            // Reconcile rather than a bare upsert: it records a synced tree, so
+            // `sync_state` has the row the worktree stamp updates. Without one,
+            // `set_synced_worktree` is a documented no-op and would prove nothing.
+            let facts = FactSet::new().with_node(sample_node("kept"));
+            store
+                .reconcile(&facts, Some("t1"))
+                .expect("seed graph and sync state");
         }
-        // Damage it exactly as the wrong merge order would: drop the newest
-        // migration's schema and its record, and stamp a higher version as though
-        // another branch's build had opened it.
+        // Rewind to exactly what a current-`main` build leaves behind: migration
+        // 12's column and record gone, 13's schema and record intact.
         {
             let conn = rusqlite::Connection::open(&path).expect("reopen raw");
             conn.execute_batch("ALTER TABLE sync_state DROP COLUMN worktree;")
                 .expect("undo migration 12");
-            conn.execute("DELETE FROM schema_migrations WHERE version = ?1", [known])
-                .expect("unrecord");
             conn.execute(
-                "INSERT INTO schema_migrations (version) VALUES (?1)",
-                [known + 1],
+                "DELETE FROM schema_migrations WHERE version = ?1",
+                [SKIPPED],
             )
-            .expect("stamp a higher version");
+            .expect("unrecord 12");
+            // Sanity: the store really is in the damaged shape, 13 and all.
+            let recorded: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                    [AHEAD],
+                    |r| r.get(0),
+                )
+                .expect("count 13");
+            assert_eq!(recorded, 1, "migration {AHEAD} must still be recorded");
         }
+        // Migration 13's own state, captured before the repair so it can be shown
+        // untouched afterwards — a repair that healed the gap by disturbing the
+        // other branch's tables would be no better than the bug.
+        let clock_before = cache_clock(&path);
 
         // Before the repair the store under-reports rather than over-reports: it
         // claims the last gap-free version, never the higher stamped one.
         {
             let damaged = rusqlite::Connection::open(&path).expect("reopen raw");
-            let reported = crate::migrations::store_version(&damaged).expect("version");
             assert_eq!(
-                reported,
-                known - 1,
+                crate::migrations::store_version(&damaged).expect("version"),
+                SKIPPED - 1,
                 "a gapped store must report the version it actually provides, \
-                 not the maximum recorded ({})",
-                known + 1
+                 not the maximum recorded ({AHEAD})"
             );
         }
 
@@ -1882,18 +2025,55 @@ mod tests {
         let store = Store::open(&path).expect("reopen");
         assert_eq!(
             store.schema_version().expect("version"),
-            known + 1,
-            "1..=known+1 is contiguous once the skipped migration is applied"
+            crate::migrations::latest_version(),
+            "1..={AHEAD} is contiguous once the skipped migration is applied"
         );
-        // …the schema is really back, which is what the caller depends on…
+        // …migration 12's schema is really back, which is what the caller
+        // depends on — recorded-but-absent would be the same bug in a new
+        // costume…
         assert!(
             store.synced_worktree().is_ok(),
             "the repaired migration's column must exist, not merely be recorded"
         );
-        // …and the repair did not disturb the data.
+        store
+            .set_synced_worktree("/w/repaired")
+            .expect("the stamp must be writable, not just readable");
+        assert_eq!(
+            store.synced_worktree().expect("stamp").as_deref(),
+            Some("/w/repaired")
+        );
+        // …migration 13's tables are untouched, clock row and all…
+        assert_eq!(
+            cache_clock(&path),
+            clock_before,
+            "the other branch's seeded `agent_cache_clock` row must survive the \
+             repair unchanged"
+        );
+        {
+            let conn = rusqlite::Connection::open(&path).expect("reopen raw");
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM agent_cache", [], |r| r.get(0))
+                .expect("agent_cache must still exist");
+            assert_eq!(rows, 0, "`agent_cache` is present and empty, not recreated");
+        }
+        // …and no data was lost.
         assert!(store.get_node("kept").expect("get").is_some());
+        assert_eq!(store.node_count().expect("count"), 1);
 
         std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    /// Migration 13's single `agent_cache_clock` row as `(ticks, generation)`,
+    /// read raw so this test does not depend on the recall API another branch
+    /// owns.
+    fn cache_clock(path: &std::path::Path) -> (i64, i64) {
+        let conn = rusqlite::Connection::open(path).expect("open raw");
+        conn.query_row(
+            "SELECT ticks, generation FROM agent_cache_clock WHERE id = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the seeded clock row must exist")
     }
 
     #[test]
@@ -2064,7 +2244,9 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            // A property, not a pinned number — see `open_in_memory_applies_schema`.
+            // The subject here is that a *reopen* is at the same schema as a
+            // fresh open — not what number that happens to be. See
+            // `open_in_memory_applies_schema` on why the literal went.
             assert_eq!(
                 store.schema_version().expect("version"),
                 crate::migrations::latest_version(),

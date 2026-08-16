@@ -14,8 +14,8 @@
 
 use rto_graph::{
     AnchorState, DEFAULT_MEMORY_SCOPE, Edge, EdgeKind, FactSet, GraphArtifact, MemoryFilter,
-    MemoryKind, MemoryWrite, Node, NodeKind, Provenance, SearchOptions, Store, search,
-    search_channels,
+    MemoryKind, MemoryWrite, Node, NodeKind, Provenance, RecallOptions, SearchOptions, Store,
+    anchor_penalty, search, search_channels,
 };
 
 /// A lesson with a phrase in it that appears nowhere in the seeded graph, so a
@@ -212,17 +212,23 @@ fn a_memory_record_is_not_a_node_under_any_provenance() {
     );
 }
 
-/// **Memory does not enter `search` at all, through any channel.**
+/// **Memory reaches `search` through its own opt-in channel and no other.**
 ///
-/// Later stages may give recall its own visually distinct channel and its own
-/// score. What must never happen — and what this test pins for this stage — is
-/// unreviewed accumulated prose riding the `authored` +40 boost that `search`
-/// reserves for intent someone deliberately wrote into a reviewed file. The
-/// strongest form of that guarantee is total absence, so that is what is checked:
-/// both channels, with the opt-in for generated content turned *on*, so a memory
-/// record cannot quietly arrive through the door ADR-0015 opened for transcripts.
+/// Stage 23 pinned this as *total absence*, which was the strongest available
+/// form of the guarantee while there was no memory channel to speak of. Stage 25
+/// adds one, so the invariant is restated rather than relaxed — and the part that
+/// actually matters is unchanged and now checked more sharply than absence could
+/// check it:
+///
+/// - the **graph channel** never contains a memory record, so unreviewed
+///   accumulated prose cannot ride the `authored` +40 boost that `search` reserves
+///   for intent someone deliberately wrote into a reviewed file;
+/// - the **default** search does not return memory at all, so nothing arrives
+///   unasked-for;
+/// - opting in to *generated* content does not open the memory door either — one
+///   opt-in does not imply another.
 #[test]
-fn memory_never_reaches_search_or_the_authored_boost() {
+fn memory_reaches_search_only_through_its_own_channel() {
     let mut store = Store::open_in_memory().expect("store");
     seed_graph(&mut store);
     store
@@ -240,9 +246,15 @@ fn memory_never_reaches_search_or_the_authored_boost() {
     ] {
         assert!(
             search(&store, query, 10).expect("search").is_empty(),
-            "a memory body reached default search via {query:?}",
+            "a memory body reached the graph channel via {query:?}",
         );
-        let channels = search_channels(
+        let default = search_channels(&store, query, SearchOptions::default()).expect("search");
+        assert!(
+            default.hits.is_empty() && default.generated.is_empty() && default.memory.is_empty(),
+            "{query:?} reached a default search, which asks for none of this",
+        );
+
+        let generated_only = search_channels(
             &store,
             query,
             SearchOptions {
@@ -250,16 +262,43 @@ fn memory_never_reaches_search_or_the_authored_boost() {
                 // Opted in to *generated* content, which memory is not: a record
                 // must not arrive through another store's channel either.
                 include_generated: true,
+                ..SearchOptions::default()
             },
         )
         .expect("search");
         assert!(
-            channels.hits.is_empty(),
-            "{query:?} reached the graph channel"
+            generated_only.hits.is_empty(),
+            "{query:?} reached the graph channel",
         );
         assert!(
-            channels.generated.is_empty(),
+            generated_only.generated.is_empty(),
             "{query:?} reached the generated-content channel",
+        );
+        assert!(
+            generated_only.memory.is_empty(),
+            "one opt-in must not imply another",
+        );
+
+        // And with the memory channel asked for: found there, and *only* there.
+        let opted = search_channels(
+            &store,
+            query,
+            SearchOptions {
+                limit: 10,
+                include_memory: true,
+                ..SearchOptions::default()
+            },
+        )
+        .expect("search");
+        assert_eq!(
+            opted.memory.len(),
+            1,
+            "{query:?} must find the record in the memory channel",
+        );
+        assert!(opted.memory[0].memory, "and it is marked as memory");
+        assert!(
+            opted.hits.is_empty(),
+            "{query:?} still must not be a graph hit",
         );
     }
 
@@ -270,6 +309,83 @@ fn memory_never_reaches_search_or_the_authored_boost() {
             .expect("search")
             .is_empty(),
         "the authored ADR must still be findable",
+    );
+}
+
+/// **Memory never takes the `authored` +40 boost**, stated as a comparison rather
+/// than as an absence: an ADR node and a memory record are given the *same* words,
+/// and the memory hit's score is nowhere near the node's.
+///
+/// The boost is what this whole separation exists to prevent — `authored` means a
+/// human or agent deliberately wrote this in a reviewed file, and accumulated,
+/// unredacted, unreviewed prose inheriting that trust is contamination by
+/// construction. It cannot happen here even by accident: a memory record is not a
+/// node, so it never reaches the code that applies the boost, and the memory
+/// channel's scorer shares no branch with the node scorer.
+#[test]
+fn the_memory_channel_scores_without_the_authored_boost() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+    // The authored ADR's own words, recorded as a memory as well.
+    let shared = "durable agent-learned knowledge";
+    store
+        .record_memory(&MemoryWrite {
+            confidence: Some(1.0),
+            ..lesson(
+                "Durable agent-learned knowledge lives in its own artifact store and never \
+                 borrows the graph's trust.",
+            )
+        })
+        .expect("write");
+
+    let results = search_channels(
+        &store,
+        shared,
+        SearchOptions {
+            limit: 10,
+            include_memory: true,
+            ..SearchOptions::default()
+        },
+    )
+    .expect("search");
+    let authored = results
+        .hits
+        .iter()
+        .find(|h| h.node.key == "adr:0013")
+        .expect("the authored ADR is a graph hit");
+    let remembered = results
+        .memory
+        .first()
+        .expect("and the memory record is a memory hit");
+
+    assert!(
+        authored.score > remembered.score,
+        "the same words scored {} as memory against {} as authored intent — the +40 \
+         boost has leaked",
+        remembered.score,
+        authored.score,
+    );
+
+    // Sharper, because the comparison above only catches a leak large enough to
+    // overturn the ranking, and +40 is not always that large. The memory scorer's
+    // *own* terms are a whole-query match and a per-token match, so its ceiling is
+    // `25 + 8 × tokens` — before the evidence weight, which only ever multiplies
+    // down. A score above that ceiling is a term from somewhere else, and there is
+    // exactly one term it could be.
+    let tokens = shared.split_whitespace().count();
+    let ceiling = u32::try_from(25 + 8 * tokens).expect("small");
+    assert!(
+        remembered.score <= ceiling,
+        "a memory hit scored {} against a lexical ceiling of {ceiling} — the score \
+         carries a term that is not its own, and the only such term is the +40 \
+         `authored` boost",
+        remembered.score,
+    );
+    // The two channels are separate lists, so no consumer can merge them by
+    // accident and no ranking puts them side by side.
+    assert!(
+        !results.hits.iter().any(|h| h.node.key.contains("memory:")),
+        "nothing memory-shaped is in the graph channel",
     );
 }
 
@@ -987,4 +1103,139 @@ fn an_invalid_write_stores_nothing() {
         assert!(store.record_memory(&bad).is_err());
     }
     assert_eq!(store.memory_counts().expect("counts"), (0, 0));
+}
+
+/// Two blob-carrying nodes, so one anchor can be drifted while the other stays
+/// valid. `moving_blob` is what `shift` carries this time round.
+fn two_anchored_nodes(store: &mut Store, moving_blob: &str) {
+    let mut facts = FactSet::new();
+    let mut stable = Node::new("sym:rust:src/stable.rs#keep", NodeKind::Fn, "keep");
+    stable.blob_hash = Some("blob-stable-v1".into());
+    let mut moving = Node::new("sym:rust:src/moving.rs#shift", NodeKind::Fn, "shift");
+    moving.blob_hash = Some(moving_blob.into());
+    facts.nodes = vec![stable, moving];
+    store.rebuild(&facts, Some("tree-two")).expect("rebuild");
+}
+
+/// **A zero-confidence memory ranks last and is still returned** — in recall and
+/// in the search channel both.
+///
+/// This pins the decision behind `memory_score`'s weight being `[0, 1]` rather
+/// than `(0, 1]`, and it exists because the doc comment used to claim "can never
+/// silence one" with nothing enforcing it. The two ways evidence can fall are not
+/// alike, and the asymmetry is the whole point:
+///
+/// * **Roteiro's own inference can never zero a record.** `anchor_penalty` floors
+///   at `0.25`, so even the most demoted anchor state leaves a positive weight —
+///   ADR-0013's "demote, never delete" holding structurally rather than by
+///   convention.
+/// * **The operator can.** `--confidence 0` is an explicit statement, and
+///   honouring it is not the same act as the store deciding on its own that
+///   something is worthless.
+///
+/// And zero relevance is not zero visibility: nothing filters on the score, so
+/// the record comes back, ranked last, fully labelled.
+#[test]
+fn a_zero_confidence_memory_is_ranked_last_and_still_returned() {
+    let mut store = Store::open_in_memory().expect("store");
+    two_anchored_nodes(&mut store, "blob-moving-v1");
+
+    // Stated as worthless by its writer, but anchored to code that has not moved:
+    // the *best* possible anchor, so nothing but the stated confidence can be
+    // what drives this to zero.
+    store
+        .record_memory(&MemoryWrite {
+            anchor: Some("sym:rust:src/stable.rs#keep"),
+            confidence: Some(0.0),
+            ..lesson("A batch cursor dedup note its writer gave no credence.")
+        })
+        .expect("write");
+    // No stated confidence, and about to be given the *worst* possible anchor
+    // state — the case that must still score above zero.
+    store
+        .record_memory(&MemoryWrite {
+            anchor: Some("sym:rust:src/moving.rs#shift"),
+            ..lesson("A batch cursor dedup note whose code moved underneath it.")
+        })
+        .expect("write");
+    two_anchored_nodes(&mut store, "blob-moving-v2");
+
+    let recall = store
+        .recall_memory(&RecallOptions::default())
+        .expect("recall");
+    assert_eq!(recall.results.len(), 2, "both records are recalled");
+    let zero = recall
+        .results
+        .iter()
+        .find(|r| r.record.body.contains("no credence"))
+        .expect("a zero-confidence record is still recalled, not dropped");
+    let drifted = recall
+        .results
+        .iter()
+        .find(|r| r.record.body.contains("moved underneath"))
+        .expect("present");
+
+    // The zero really is the writer's, not the anchor's.
+    assert!(zero.score.abs() < f64::EPSILON, "the score is exactly zero");
+    assert!(zero.base_confidence.abs() < f64::EPSILON);
+    assert_eq!(zero.record.anchor_state, AnchorState::Valid);
+    assert!(
+        (zero.anchor_penalty - 1.0).abs() < f64::EPSILON,
+        "its anchor is perfect: only the stated confidence zeroed it",
+    );
+    assert!(zero.record.applies, "and it still applies to this tree");
+
+    // Drift, at its most punishing, still leaves something.
+    assert_eq!(drifted.record.anchor_state, AnchorState::Drifted);
+    assert!((drifted.anchor_penalty - anchor_penalty(AnchorState::Drifted)).abs() < f64::EPSILON,);
+    assert!(
+        drifted.score > 0.0,
+        "the worst anchor state must not silence a record: {}",
+        drifted.score,
+    );
+
+    // Ranked last, not withheld.
+    assert_eq!(
+        recall.results.last().expect("non-empty").record.id,
+        zero.record.id,
+        "a zero-evidence record sorts last",
+    );
+
+    // The same in the search channel, which is where `memory_score` runs.
+    let results = search_channels(
+        &store,
+        "batch cursor dedup",
+        SearchOptions {
+            limit: 10,
+            include_memory: true,
+            ..SearchOptions::default()
+        },
+    )
+    .expect("search");
+    assert_eq!(results.memory.len(), 2, "both reach the memory channel");
+    let hit = results
+        .memory
+        .iter()
+        .find(|h| {
+            h.snippet
+                .as_deref()
+                .is_some_and(|s| s.contains("no credence"))
+        })
+        .expect("a zero-confidence memory is still a search hit");
+    assert_eq!(hit.score, 0, "scored zero…");
+    assert!(hit.evidence.abs() < f64::EPSILON);
+    // …and still fully labelled, which is what makes returning it useful rather
+    // than merely honest.
+    assert_eq!(hit.anchor_state, "valid");
+    assert!(hit.applies);
+    assert!(hit.snippet.is_some(), "with its prose readable");
+    assert_eq!(
+        results.memory.last().expect("non-empty").score,
+        0,
+        "and ranked last",
+    );
+    assert!(
+        results.memory.iter().any(|h| h.score > 0),
+        "the drifted record still scores, so zero is not simply what this query gives",
+    );
 }

@@ -43,6 +43,10 @@ fn both_paths(
         source,
         rules_digest: Some("deadbeef".to_owned()),
         advisory_db: None,
+        // These fixtures report worktree-relative paths already; the field
+        // exists for an analyzer that does not, and `None` is the honest answer
+        // for a report about no particular checkout.
+        worktree: None,
         snippets,
     };
 
@@ -110,6 +114,7 @@ fn the_two_paths_agree_on_findings_and_disagree_on_isolation() {
         source: &SourceIdentity::default(),
         rules_digest: Some("deadbeef".to_owned()),
         advisory_db: None,
+        worktree: None,
         snippets: &snippets,
     };
     let report = normalize_native("semgrep", &native, &ctx).expect("normalise");
@@ -153,6 +158,7 @@ fn the_report_digest_is_a_function_of_the_bytes_alone() {
         source: &SourceIdentity::default(),
         rules_digest: None,
         advisory_db: None,
+        worktree: None,
         snippets: &snippets,
     };
     let wire = serde_json::to_vec(&normalize_native("semgrep", &native, &ctx).expect("normalise"))

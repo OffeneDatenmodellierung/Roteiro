@@ -245,6 +245,7 @@ fn generated_content_is_absent_from_default_search_and_marked_when_opted_in() {
         SearchOptions {
             limit: 10,
             include_generated: true,
+            ..SearchOptions::default()
         },
     )
     .expect("search");
@@ -290,6 +291,7 @@ fn generated_content_never_gets_the_authored_boost() {
         SearchOptions {
             limit: 10,
             include_generated: true,
+            ..SearchOptions::default()
         },
     )
     .expect("search");
@@ -1067,6 +1069,7 @@ fn a_gated_skip_writes_no_generated_text_anywhere() {
             SearchOptions {
                 limit: 10,
                 include_generated: true,
+                ..SearchOptions::default()
             },
         )
         .expect("search");

@@ -629,6 +629,7 @@ mod placement {
             rto_graph::SearchOptions {
                 limit: 10,
                 include_generated: true,
+                ..rto_graph::SearchOptions::default()
             },
         )
         .expect("search");

@@ -84,7 +84,7 @@ Verified against `main` at the time of writing:
 | Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | **`11`** (`crates/rto-graph/src/extract.rs`) — the Stage 28 bump landed in #316 | Bumping it forces full re-extraction for every user. No test pins the value. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
-| Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one. |
+| Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one — **done**, and tested against `lru_evict_count`'s own numbers. |
 
 ---
 
@@ -112,19 +112,37 @@ feature-gated and off by default.
 |---|---|---|---|
 | **8** ✅ | analysis runs + findings (ADR-0012) | replaceable layer per `(analyzer, worktree)` | replaced wholesale, not aged out |
 | **11** ✅ | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
-| N | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
+| **13** ✅ | `agent_cache` + `agent_cache_clock` (ADR-0013 transient) | bounded | yes, by capacity |
 
 **Numbers are assigned in landing order, not reserved in advance.** Stage 21 landed
-first and took **8**; Stage 28 took **9** and **10**; episodic memory took **11**,
-and the cache tier takes the next free number whenever it merges. Splitting memory
-across two migrations is intentional: different lifetimes and guarantees, so the
-eviction tier can later be altered without touching durable memory.
+first and took **8**; Stage 28 took **9** and **10**; episodic memory took **11**;
+**12** is `sync_worktree`, from the guardrails branch; and the cache tier took
+**13**. Splitting memory across two migrations is intentional: different lifetimes
+and guarantees, so the eviction tier can later be altered without touching durable
+memory.
+
+**Check the other worktrees, not just the refs.** Stage 25 was dispatched with
+"12 is free" after `git grep` over every local *and* remote branch found nothing
+claiming it — which was true of the refs and false of the tree, because the
+guardrails work was sitting in an unpushed worktree. That is the third numbering
+collision of the day and all three had the same cause, so the check that actually
+works is:
+
+```sh
+git worktree list | awk '{print $1}' | xargs -I{} grep -ho 'version: [0-9]*' {}/crates/rto-graph/src/migrations.rs | sort -u
+```
+
+Two constants both declaring the same `version` **merge cleanly in git** and break
+at runtime on whichever store applies them second, so this is not a conflict the
+tooling will catch for you. `migration_versions_are_unique_and_ascending` now
+fails the build if a merge ever produces one.
 
 **Stages 22 and 24 need no migration** — `RunnerKind` shipped in migration 8 already
 naming all three backends, with the schema CHECK accepting them. Stage 22 confirmed
 this: two analyzers landed with no schema change at all, because `FindingKey`
-takes each analyzer's own ordered identity components. Stage 22b adds a third the
-same way.
+takes each analyzer's own ordered identity components. **Stage 22b confirmed it
+again**: `osv-scanner` landed with a five-component identity and no schema change,
+and a test asserts exactly that.
 
 **`EXTRACT_VERSION` does not change in Stages 21–25.** None of that work is
 extraction output (Stage 21 shipped without touching it, as required). It *does*
@@ -137,17 +155,18 @@ change in Stage 26, once — see the note there.
 Dependency shape — four tracks, only one hard chain:
 
 ```
-Track A (findings):  21 ✅ ──► 22 ✅ ──► 22b ──► 24
+Track A (findings):  21 ✅ ──► 22 ✅ ──► 22b ✅ ──► 24
 Track B (memory):    23 ✅ ──────────────► 25
 Track C (lenses):    26         (independent of A and B throughout)
 Track D (media):     28 ✅ ──► 29
                                           └──► 27 (v2.0 hardening)
 ```
 
-Stages 21, 23 and 26 were the parallel-startable set; 21, 22, 23 and 28 have now
-landed, leaving 22b, 24, 25, 26 and 29 open. Nothing in Track C touches the artifact
-stores; nothing in Track B blocks Track A. **22b is sequenced after 22 but does not
-block 24**: it adds one adapter behind a seam 24 does not touch.
+Stages 21, 23 and 26 were the parallel-startable set; 21, 22, 22b, 23 and 28 have
+now landed, leaving 24, 25, 26 and 29 open. Nothing in Track C touches the artifact
+stores; nothing in Track B blocks Track A. **22b was sequenced after 22 and did not
+block 24**: it added one adapter behind a seam 24 does not touch, and needed no
+migration.
 
 ---
 
@@ -223,15 +242,15 @@ stages:
 
 **Coverage is a matrix, not an analyzer list**
 ([ADR-0018](adr/0018-analyzer-coverage-matrix.md)). The requirement is findings
-for Rust, Python, SQL, Java and Node, and the two named analyzers deliver that
-**on the SAST axis only**:
+for Rust, Python, SQL, Java and Node. The two analyzers named in Stage 22 deliver
+that **on the SAST axis only**; Stage 22b closed the dependency axis:
 
 | Language | SAST | Dependency vulnerabilities |
 |---|---|---|
-| Rust | semgrep (GA) | cargo-audit (RustSec) |
-| Python | semgrep (GA) | *gap* → `osv-scanner` (22b) |
-| Java | semgrep (GA) | *gap* → `osv-scanner` (22b) |
-| Node (JS/TS) | semgrep (GA) | *gap* → `osv-scanner` (22b) |
+| Rust | semgrep (GA) | cargo-audit (RustSec) **+ `osv-scanner`** — both kept, cross-referenced (22b) |
+| Python | semgrep (GA) | `osv-scanner` (OSV `PyPI`) ✅ 22b |
+| Java | semgrep (GA) | `osv-scanner` (OSV `Maven`) ✅ 22b |
+| Node (JS/TS) | semgrep (GA) | `osv-scanner` (OSV `npm`) ✅ 22b |
 | SQL | semgrep `generic` — token matching, no parser | n/a — no dependency ecosystem |
 
 - Semgrep's published language list has **no SQL entry at any maturity level** —
@@ -316,7 +335,7 @@ docs and ADR-0018 rather than assumed.
 **No new dependencies** — `Cargo.lock` is untouched; `exec-subprocess` is
 `std::process` over the crates already present, and is **off by default**.
 
-### Stage 22b — `osv-scanner`: the dependency axis for Python, Java and Node → effort **M**
+### Stage 22b — `osv-scanner`: the dependency axis for Python, Java and Node → effort **M** ✅ *delivered*
 
 Split out of Stage 22 because it is a different axis, not more of the same one,
 and because the SAST half is independently useful and independently reviewable.
@@ -352,6 +371,51 @@ and because the SAST half is independently useful and independently reviewable.
 - **DoD:** a Python, a Java and a Node lockfile each produce findings; offline
   with a pinned database succeeds; the Rust overlap with `cargo-audit` is
   explicitly resolved and recorded, rather than left to chance.
+
+**Delivered.** What shipped, and what it changes for later stages:
+
+- **The `osv-scanner` adapter**, behind the Stage 21 seam. The subprocess runner,
+  asset cache, `prefetch`/`status` and finding schema were reused **unchanged**,
+  and — as Stage 21 predicted — it needed **no migration**: `FindingKey` already
+  takes each analyzer's own ordered identity components (`advisory, ecosystem,
+  package, version, manifest`), and `RunnerKind` already names the backends. A
+  test asserts the new analyzer's keys are valid with no schema change.
+- **`AssetSource::Download`**, the first asset fetched by URL — OSV's
+  per-ecosystem `all.zip` databases. `rto-exec` gained **no network dependency**:
+  it takes the fetcher as a function argument, so the code that can open a socket
+  lives in the CLI and is reachable only from `prefetch`. That flag is new and
+  required: `roteiro security prefetch --analyzer osv-scanner --allow-download`,
+  because the four databases are roughly **260 MB** (`npm` alone is ~210 MB) and
+  that is not a reasonable surprise. The stale comment in `assets.rs` claiming an
+  unused fetch path is a security surface with no user was updated, not left to
+  contradict the code.
+- **The Rust overlap is implemented as ADR-0018 v1.1 decided**: both analyzers'
+  findings are kept, and `rto_exec::cross_reference` joins them at the reporting
+  layer on identifiers both upstreams publish. `security list` renders a
+  duplicate pair as one advisory confirmed by two analyzers with both finding
+  keys still addressable, and prints the finding total **unchanged** above it.
+  Real fixture data added a constraint the decision did not state: `chrono`'s
+  `cargo-audit` advisory lists `time`'s CVE under `related`, so the join also
+  requires the same package at the same version, and names a correspondence only
+  by an id an analyzer actually fired.
+- **Both open items were measured, and ADR-0018 is at v1.2 in this PR.**
+  (1) `osv-scanner` 2.5.0 **does** report `RustSec`'s `unmaintained` and
+  `unsound` by default — v1.0's options table conflated the database with the
+  tool. Only `yanked` is unavailable, and structurally: it is not an advisory,
+  `cargo audit` reads it from the crates.io index. (2) RustSec→OSV ingestion lag
+  is **~2.5 minutes**, not days; what actually makes the two analyzers differ is
+  **pin age**, since each database is provisioned separately. "Present in one" is
+  rendered as a normal single-source row with its cause named.
+- **Three more undocumented tool behaviours**, each of which would have been a
+  silent defect and all three now recorded in ADR-0018: `--offline-vulnerabilities`
+  alone consults no database and reports a clean scan (`--offline` is what loads
+  it); reported paths are absolute even when the target is `.`, which would have
+  put the scanning machine's home directory into a persisted finding key; and the
+  same advisory is listed twice under its RUSTSEC and GHSA ids, with `groups`
+  already saying so.
+- Fixtures are **real captured output** from osv-scanner 2.5.0 over a committed
+  four-ecosystem lockfile tree, taken fully offline against pinned databases. The
+  tool-dependent test self-skips visibly when no `osv-scanner` is on `PATH`.
 
 ### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.11.0** · effort **M** ✅ *delivered*
 
@@ -480,6 +544,88 @@ cache that stops sessions re-deriving what they already know.
   runs; eviction never removes an episodic row; a superseded memory drops out of
   recall immediately regardless of age; an unanchored memory is still retrievable
   and clearly labelled.
+
+**Delivered.** Migration **13** (`agent_cache` + `agent_cache_clock`),
+retrieval-time ranking in `rto_graph::memory`, the byte-budget sweep, and the
+`search` memory channel. All four DoD items have a test, and each was
+**fault-injected**: the guarded behaviour was broken, the guard watched go red,
+and the source reverted byte-identically (15 injections, all red — two of them
+only after the tests they exposed as weak were strengthened).
+
+**What shipped, and where it deviated:**
+
+1. **`Decay` is `none | linear[:span] | exponential[:half-life]`, and `none` is
+   the default.** ADR-0013 offered the three modes without saying which one leads;
+   the reproducible answer is the default here, on the same terms as
+   `SearchOptions` defaulting generated content off. Age is counted in
+   **generations** — one per record written — so ranking never touches a clock.
+2. **`base_confidence` defaults to `0.5`** when a writer states none. Not in the
+   ADR. `1.0` would let every record that claimed nothing outrank one that
+   honestly claimed `0.9`, pricing honesty; `0.0` would make the common case (the
+   CLI states no confidence unless asked) unrecallable. The midpoint is the only
+   value that makes stating one worth the trouble in both directions.
+3. **`anchor_penalty` ranks `drifted` *below* `vanished`** (`valid` 1.0,
+   `unanchored` 0.9, `unverifiable` 0.5, `vanished` 0.35, `drifted` 0.25). Drift
+   is the one state that can actively mislead about code still sitting under the
+   same key; a vanished anchor can mislead nobody, and ranking it lowest would
+   punish exactly the records the ADR says are worth keeping most. Two properties
+   are asserted rather than assumed: nothing is ever zero, and every state that
+   `AnchorState::applies` outranks every state that does not.
+4. **The eviction counters needed a logical clock**, so migration 13 adds a
+   single-row `agent_cache_clock` beside the table (on `sync_state`'s precedent).
+   ADR-0013 §3 rules out wall-clock and the ADR's proposed `agent_cache` names
+   `generation`/`last_used` without saying where the values come from. `ticks`
+   advances per access — `ModelCache`'s list position, made durable, with no ties
+   for the sweep to break arbitrarily — and `generation` advances once per sweep,
+   which is what makes "written in the current generation" a window rather than a
+   single row, and what makes the pin lapse instead of becoming permanent.
+5. **`evict_count` is a pure function tested against `lru_evict_count`'s own
+   numbers.** Porting an existing policy is worth nothing if the port quietly
+   behaves differently. The always-keep-the-MRU rule moved from a
+   `len - evict > 1` guard into the caller's pinned set, because this tier pins
+   other rows too and one rule beats two. A sweep can therefore finish **still
+   over budget** when everything left is pinned; `CacheSweep::over_budget` says so
+   rather than leaving a bound that silently failed to bind.
+6. **Memory reaches `search` through a third channel, `--include-memory`, off by
+   default** — beside the graph and generated channels, never merged with either.
+   Its scorer shares no branch with the node scorer, so "memory never takes the
+   `authored` +40" is structural. Stage 23's *total absence* assertion is restated
+   rather than relaxed, and is now checked more sharply than absence could check
+   it: a memory hit's score must not exceed the ceiling its own lexical terms can
+   produce, which is what a leaked +40 would breach.
+7. **CLI:** `roteiro memory recall [query] [--decay …] [--applicable-only] …`,
+   which prints every term of the ranking and not just the product, and
+   `roteiro memory cache [--sweep] [--budget-mb]`. The sweep also runs at the
+   maintenance seam in `roteiro context --refresh`, never on a read path.
+   `context --refresh --json` keeps its long-standing shape: wrapping it would
+   break callers to pay for maintenance they did not ask about, so the sweep is
+   reported on stderr there and has its own `--json` under `memory cache`.
+8. **Budget:** `--budget-mb`, else `ROTEIRO_CACHE_BUDGET_MB`, else the 256 MB of
+   §9.1. An unreadable value is an **error, not a fallback** — running the default
+   under a name that says otherwise is how an operator ends up believing in a
+   bound that was never applied. The config-file layer was deliberately not
+   touched.
+
+**Two absolute assertions on a shared constant disarmed**, at `store.rs:1709` and
+`:1880` — `assert_eq!(store.schema_version()?, 11)`, which migration 13 breaks.
+Both now read `migrations::latest_version()`, the idiom
+`a_later_migration_is_additive_on_a_populated_store` already uses. The literal was
+defended in a comment as making someone confirm a new migration is meant to apply
+on open, but `apply` runs *every* migration newer than the recorded version, so
+there was never a per-migration choice there to confirm — the literal asserted the
+value of a shared constant and nothing else. Fault injection confirmed the
+rewritten assertions still catch the thing they are for: an `apply` that stops one
+migration short of `latest_version()` fails both.
+
+**`EXTRACT_VERSION` is unchanged**, and
+`tests/sync.rs::memory_writes_do_not_invalidate_the_fact_cache` still passes —
+also fault-injected, by making a memory write clear `sync_env`.
+
+**Not in this stage, deliberately:** the cache tier ships with its policy, its
+seam and its API, but **no producer** — `node_context` is still the context cache.
+Moving a live cache onto the bounded tier is a data migration, not a policy
+change, and bundling it would have put a schema move and an eviction policy in one
+reviewable unit.
 
 ### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)*
 
@@ -834,10 +980,10 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 |---|---|---|
 | v1.10.0 ✅ | Stage 21 — analyzer contract + ingest | Artifact byte-identical; ingest idempotent — **met** |
 | v1.11.0 ✅ | Stage 22 — semgrep + cargo-audit (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure — **met** |
-| v1.11.x | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved |
+| v1.11.x ✅ | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved — **met** |
 | v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
-| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
+| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction — **met** |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | v1.11.0 ✅ | Stage 29 — audio metadata as `derived` facts | Format read costs 1–100 µs and instantiates no decoder; duration exact/estimated/absent never guessed — **met** |

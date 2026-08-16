@@ -489,6 +489,94 @@ const M0012_SYNC_WORKTREE: &str = "
 ALTER TABLE sync_state ADD COLUMN worktree TEXT;
 ";
 
+/// Migration 13: the **transient cache tier** (ADR-0013, the second half of the
+/// two-tier store; build plan Stage 25) — the opposite of migration 11 in every
+/// rule, because it holds the opposite kind of knowledge.
+///
+/// `agent_memory` above is episodic: it has **no generating function**, so
+/// evicting it is data loss and it is never swept. Everything in `agent_cache` is
+/// **re-derivable by definition** — a context bundle, an embedding, a query result
+/// over current code — and `build_context` is *proven* to reconstruct identically
+/// (`context.rs` asserts `built == cached`). So eviction here costs cycles, never
+/// information, which is exactly what licenses a bound on this table and forbids
+/// one on that one.
+///
+/// **Bounded by bytes, not by rows**, porting `rto-llama`'s in-memory `ModelCache`
+/// (`llama.rs:120-137`, pinned by `budget_evicts_oldest_until_it_fits`) to disk
+/// rather than inventing a policy: entries vary hugely in size, and bytes are what
+/// actually constrain `.git/roteiro/`. `bytes` is the row's own payload size,
+/// computed at write, so the sweep can order and total without reading `json`.
+///
+/// **`generation`, `last_used` and `hits` are the persisted access tracking that
+/// no table in this schema has ever carried.** `ModelCache` tracks recency by the
+/// order of an in-memory `Vec`, which does not survive a process; `node_context`
+/// (migration 5) has no timestamp, no hit counter and no TTL at all. So the signal
+/// has to be introduced here, with the table that needs it.
+///
+/// **Neither is a clock**, for the reason ADR-0013 §3 gives: the store is per-repo
+/// and shared across worktrees, so wall-clock is non-monotone across concurrent
+/// checkouts and `datetime('now')` ties on intra-second writes. Both are logical
+/// counters drawn from `agent_cache_clock` below, which is the only reason that
+/// single-row table exists:
+///
+/// * `ticks` advances on **every cache access**, so `last_used` is a strict total
+///   order over accesses — the durable equivalent of `ModelCache`'s list position,
+///   with no ties for the sweep to break arbitrarily.
+/// * `generation` advances **once per sweep**. A row written since the last sweep
+///   is in the current generation, and — if its anchor is still valid — is never
+///   evicted by that sweep, so a session's own just-written work cannot be thrown
+///   away by the maintenance pass that follows it.
+///
+/// **The anchor is the same anchor, and the same rule.** `(anchor_key,
+/// anchor_blob)` resolves against `nodes` on read exactly as `agent_memory`'s does,
+/// yielding the same `AnchorState`, and `AnchorState::applies` is the whole
+/// validity test — here it supplies the `anchor_valid ASC` half of the eviction
+/// order, so a row whose code moved out from under it goes before a row that still
+/// describes the tree. There is deliberately no second rule and no scope term.
+const M0013_AGENT_CACHE: &str = "
+CREATE TABLE agent_cache (
+    key         TEXT PRIMARY KEY,
+    -- The content-addressed freshness witness, on `node_context`'s terms: a
+    -- reader compares it with the fingerprint the current graph yields and treats
+    -- a mismatch as a miss. Eviction is a *capacity* policy and is orthogonal to
+    -- this one — the house idiom for staleness stays key/fingerprint invalidation.
+    fingerprint TEXT NOT NULL,
+    json        TEXT NOT NULL,
+    -- The row's own payload size, so the sweep can order and total by bytes
+    -- without reading every `json` in the tier.
+    bytes       INTEGER NOT NULL,
+    -- The sweep generation this row was written in (see `agent_cache_clock`).
+    generation  INTEGER NOT NULL,
+    -- The access tick this row was last read or written at. Strictly increasing,
+    -- never a wall-clock: this is `ModelCache`'s list position, made durable.
+    last_used   INTEGER NOT NULL,
+    hits        INTEGER NOT NULL DEFAULT 0,
+    anchor_key  TEXT,
+    anchor_blob TEXT,
+    -- Half-states, refused on migration 10's and 11's precedent.
+    CHECK (key <> ''),
+    CHECK (bytes >= 0),
+    CHECK (generation >= 0),
+    CHECK (last_used >= 0),
+    CHECK (hits >= 0),
+    -- Anchor evidence without an anchor key names nothing and can never be
+    -- checked for drift — the same constraint `agent_memory` carries.
+    CHECK (anchor_blob IS NULL OR anchor_key IS NOT NULL)
+);
+-- The eviction order, as an index: least-recently-used first.
+CREATE INDEX idx_cache_evict ON agent_cache(last_used);
+CREATE INDEX idx_cache_anchor ON agent_cache(anchor_key);
+
+-- The logical clock the two counters above are drawn from. A single row, on
+-- `sync_state`'s precedent (migration 2), because there is exactly one of it.
+CREATE TABLE agent_cache_clock (
+    id         INTEGER PRIMARY KEY CHECK (id = 0),
+    ticks      INTEGER NOT NULL DEFAULT 0 CHECK (ticks >= 0),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)
+);
+INSERT INTO agent_cache_clock (id) VALUES (0);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -538,6 +626,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 12,
         sql: M0012_SYNC_WORKTREE,
+    },
+    Migration {
+        version: 13,
+        sql: M0013_AGENT_CACHE,
     },
 ];
 
@@ -695,7 +787,13 @@ mod tests {
     /// 7 and 12 then `ALTER`, so "everything except 2" is not a state that can
     /// exist. That is the honest boundary of the scenario: a store can only lack
     /// a migration whose *successors it applied* did not depend on it.
-    fn store_missing_migration(skip: u32, future: u32) -> Option<Connection> {
+    /// `future` records a version this build does *not* carry, for gaps where no
+    /// real higher migration exists above `skip`; pass `None` when [`MIGRATIONS`]
+    /// already supplies one, which since migration 13 landed it does for the case
+    /// that actually matters. It must not name a version in [`MIGRATIONS`] — that
+    /// one is applied and recorded by the loop above, and re-recording it would
+    /// collide on the primary key.
+    fn store_missing_migration(skip: u32, future: Option<u32>) -> Option<Connection> {
         let conn = Connection::open_in_memory().expect("open");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -714,12 +812,19 @@ mod tests {
             )
             .expect("record");
         }
-        // The other branch's migration: recorded, its SQL unknown to this build.
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [future],
-        )
-        .expect("record future");
+        if let Some(future) = future {
+            assert!(
+                !MIGRATIONS.iter().any(|m| m.version == future),
+                "`future` must be a version this build does not carry; {future} is \
+                 in MIGRATIONS and was already recorded above"
+            );
+            // Another branch's migration: recorded, its SQL unknown to this build.
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [future],
+            )
+            .expect("record future");
+        }
         Some(conn)
     }
 
@@ -743,12 +848,19 @@ mod tests {
     /// again. Reproduced against a real `graph.db`, where it surfaced as `sync`
     /// failing on `no such column: worktree` while the store reported a schema it
     /// did not have. No gate could see it, because CI always starts fresh.
+    ///
+    /// Both migrations here are **real**: 12 is this branch's tree stamp and 13
+    /// is `feat/stage25-memory-recall`'s cache tier, merged into `main` while 12
+    /// was still outstanding. Every store a current-`main` build has opened is in
+    /// exactly this state, so nothing about the scenario is simulated.
     #[test]
     fn a_migration_skipped_below_a_higher_one_is_still_applied() {
-        // Migration 12 added `sync_state.worktree` (the issue #330 tree stamp);
-        // 13 stands for the next branch's migration, recorded but not ours.
+        // Migration 12 added `sync_state.worktree` (the issue #330 tree stamp).
+        // No synthetic `future` is needed: MIGRATIONS itself now carries 13,
+        // which the seed applies and records while leaving 12 out.
         let skipped = 12;
-        let mut conn = store_missing_migration(skipped, 13).expect("12 is omissible");
+        let higher = 13;
+        let mut conn = store_missing_migration(skipped, None).expect("12 is omissible");
 
         // Precondition: exactly the damaged state, and the column really is gone.
         assert!(
@@ -756,7 +868,7 @@ mod tests {
             "seeded store must be missing migration {skipped}"
         );
         assert!(
-            recorded_versions(&conn).contains(&13),
+            recorded_versions(&conn).contains(&higher),
             "seeded store must carry the other branch's higher version"
         );
         assert!(
@@ -778,11 +890,21 @@ mod tests {
             "the repaired migration's column must exist — a recorded version \
              without its schema is the same silent wrong answer in a new costume"
         );
-        // The unknown future version is preserved, never re-run or discarded.
+        // The other branch's migration is preserved, never re-run or discarded —
+        // and its tables are intact, clock row and all, so the repair healed the
+        // gap without disturbing what stage25 put there.
         assert!(
-            recorded_versions(&conn).contains(&13),
+            recorded_versions(&conn).contains(&higher),
             "another branch's recorded migration must survive the repair"
         );
+        let clock: (i64, i64) = conn
+            .query_row(
+                "SELECT ticks, generation FROM agent_cache_clock WHERE id = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("migration 13's seeded clock row must survive");
+        assert_eq!(clock, (0, 0), "the seeded clock row is untouched");
         // Repairing twice changes nothing.
         let after = recorded_versions(&conn);
         apply(&mut conn).expect("second apply");
@@ -801,7 +923,8 @@ mod tests {
     fn every_reachable_gap_is_repaired_wherever_it_sits() {
         let mut repaired = 0;
         for m in MIGRATIONS {
-            let Some(mut conn) = store_missing_migration(m.version, latest_version() + 1) else {
+            let Some(mut conn) = store_missing_migration(m.version, Some(latest_version() + 1))
+            else {
                 continue; // a later migration depends on this one
             };
             apply(&mut conn).unwrap_or_else(|e| panic!("repair {}: {e}", m.version));
@@ -823,7 +946,7 @@ mod tests {
     /// claim a schema the store does not have while a gap exists.
     #[test]
     fn the_reported_version_stops_below_a_gap_rather_than_overstating_it() {
-        let conn = store_missing_migration(12, 13).expect("12 is omissible");
+        let conn = store_missing_migration(12, None).expect("12 is omissible");
         assert_eq!(
             super::store_version(&conn).expect("version"),
             11,
@@ -1370,6 +1493,8 @@ mod tests {
             "findings",
             "media_content",
             "agent_memory",
+            "agent_cache",
+            "agent_cache_clock",
             "schema_migrations",
         ] {
             let count: i64 = conn
@@ -1380,6 +1505,144 @@ mod tests {
                 )
                 .expect("query");
             assert_eq!(count, 1, "table {table} should exist");
+        }
+    }
+
+    /// **Every migration has its own version, and the list is in order.**
+    ///
+    /// This exists because of the one failure mode append-only numbering has that
+    /// the tooling cannot catch: two branches each append a migration, each picks
+    /// the same next number, and the two constants **merge cleanly in git** — they
+    /// touch different lines of a growing array and different lines of the file.
+    /// Nothing goes red. The breakage arrives later, at runtime, on whichever store
+    /// applies them second, because `apply` records `version` as a primary key and
+    /// the second insert violates it. Migration 13 was migration 12 for exactly one
+    /// day, for exactly this reason.
+    ///
+    /// Ascending order is checked too. `apply` reads the recorded version **once**
+    /// and then walks the array, so an out-of-order entry is applied out of order —
+    /// harmless while migrations are independent, and silently wrong the first time
+    /// one depends on an earlier one. A merge that interleaves two branches'
+    /// appends can produce exactly that, so it is worth a test rather than a habit.
+    ///
+    /// Gaps are **not** checked, and are legitimate: a number can be claimed by a
+    /// branch that never merges.
+    #[test]
+    fn migration_versions_are_unique_and_ascending() {
+        let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            versions.len(),
+            sorted.len(),
+            "two migrations share a version — which is exactly what a same-number \
+             collision between two branches looks like after a clean merge: {versions:?}",
+        );
+        assert_eq!(
+            versions, sorted,
+            "the migration list is out of order, so `apply` would run them out of \
+             order: {versions:?}",
+        );
+        assert!(
+            versions.first().is_some_and(|&v| v >= 1),
+            "version 0 is the `nothing applied yet` sentinel and cannot be a migration",
+        );
+    }
+
+    /// The cache tier refuses the same half-states the episodic tier does: a
+    /// negative size or counter is a corrupt write, not a small one, and anchor
+    /// evidence with no anchor key names nothing that could ever be checked for
+    /// drift — which is the `anchor_valid` half of the eviction order.
+    #[test]
+    fn agent_cache_refuses_negative_counters_and_orphan_anchor_evidence() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let insert = |key: &str, bytes: i64, generation: i64, last_used: i64, hits: i64| {
+            conn.execute(
+                "INSERT INTO agent_cache (key, fingerprint, json, bytes, generation, last_used, hits)
+                 VALUES (?1, 'fp', '{}', ?2, ?3, ?4, ?5)",
+                rusqlite::params![key, bytes, generation, last_used, hits],
+            )
+            .is_ok()
+        };
+        assert!(insert("ok", 0, 0, 0, 0), "a zero-size entry is legitimate");
+        assert!(!insert("", 1, 0, 0, 0), "an empty key names nothing");
+        assert!(!insert("neg-bytes", -1, 0, 0, 0));
+        assert!(!insert("neg-gen", 1, -1, 0, 0));
+        assert!(!insert("neg-used", 1, 0, -1, 0));
+        assert!(!insert("neg-hits", 1, 0, 0, -1));
+
+        let anchored = |key: &str, anchor: Option<&str>, blob: Option<&str>| {
+            conn.execute(
+                "INSERT INTO agent_cache
+                     (key, fingerprint, json, bytes, generation, last_used, anchor_key, anchor_blob)
+                 VALUES (?1, 'fp', '{}', 1, 0, 0, ?2, ?3)",
+                rusqlite::params![key, anchor, blob],
+            )
+            .is_ok()
+        };
+        assert!(anchored("unanchored", None, None));
+        assert!(anchored("anchored", Some("sym:rust:a.rs#f"), Some("blob1")));
+        assert!(
+            !anchored("orphan-blob", None, Some("blob1")),
+            "a blob naming no node",
+        );
+    }
+
+    /// The logical clock is a **single row**, on `sync_state`'s precedent, and the
+    /// migration seeds it — so the first cache write finds a counter to draw from
+    /// rather than having to create one. Nothing here is a wall-clock: ADR-0013 §3
+    /// rules that out, because the store is shared across worktrees.
+    #[test]
+    fn the_cache_clock_is_a_single_seeded_row() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let (ticks, generation): (i64, i64) = conn
+            .query_row(
+                "SELECT ticks, generation FROM agent_cache_clock WHERE id = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the migration seeds the clock");
+        assert_eq!((ticks, generation), (0, 0));
+        assert!(
+            conn.execute("INSERT INTO agent_cache_clock (id) VALUES (1)", [])
+                .is_err(),
+            "there is exactly one clock",
+        );
+    }
+
+    /// The two tiers are **separate tables with opposite rules**, which is the
+    /// whole design: bounding episodic memory would be data loss, and leaving the
+    /// cache unbounded is the growth ADR-0013 exists to stop. This pins the split
+    /// at the schema level — the cache carries the eviction signal, and the
+    /// episodic table carries none of it, so no sweep written against those column
+    /// names can reach `agent_memory` even by mistake.
+    #[test]
+    fn only_the_cache_tier_carries_the_eviction_signal() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let columns = |table: &str| -> Vec<String> {
+            let mut stmt = conn
+                .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .expect("prepare");
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect")
+        };
+        let cache = columns("agent_cache");
+        let memory = columns("agent_memory");
+        for signal in ["bytes", "generation", "last_used", "hits"] {
+            assert!(
+                cache.iter().any(|c| c == signal),
+                "the cache tier carries {signal}",
+            );
+            assert!(
+                !memory.iter().any(|c| c == signal),
+                "{signal} must not exist on the episodic tier: nothing sweeps it",
+            );
         }
     }
 }

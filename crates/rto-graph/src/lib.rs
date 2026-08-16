@@ -93,9 +93,12 @@ pub use media::{
     SkipEntry, build_media, is_valid_model_id, media_blobs, status as media_status,
 };
 pub use memory::{
-    AnchorState, DEFAULT_MEMORY_SCOPE, MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MEMORY_SCHEMA,
-    MemoryAnchor, MemoryError, MemoryFilter, MemoryForgotten, MemoryKind, MemoryListing,
-    MemoryRecord, MemoryWrite,
+    AnchorState, CACHE_BUDGET_ENV, CACHE_SCHEMA, CacheEntry, CacheStats, CacheSweep, CacheWrite,
+    DEFAULT_BASE_CONFIDENCE, DEFAULT_CACHE_BUDGET_BYTES, DEFAULT_DECAY_SPAN, DEFAULT_HALF_LIFE,
+    DEFAULT_MEMORY_SCOPE, Decay, MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MEMORY_SCHEMA, MemoryAnchor,
+    MemoryError, MemoryFilter, MemoryForgotten, MemoryKind, MemoryListing, MemoryRecord,
+    MemoryWrite, RECALL_SCHEMA, Recall, RecallOptions, Recalled, anchor_penalty,
+    cache_budget_bytes,
 };
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
@@ -108,9 +111,9 @@ pub use models::{
 };
 pub use provenance::Provenance;
 pub use query::{
-    DebtItem, DebtReport, EdgeRef, Explanation, GeneratedHit, Listing, NodeSummary, Path, PathHop,
-    SCHEMA, SearchHit, SearchOptions, SearchResults, debt, explain, list_kind, path, search,
-    search_channels,
+    DebtItem, DebtReport, EdgeRef, Explanation, GeneratedHit, Listing, MemoryHit, NodeSummary,
+    Path, PathHop, SCHEMA, SearchHit, SearchOptions, SearchResults, debt, explain, list_kind, path,
+    search, search_channels,
 };
 pub use store::{ImportApplied, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_tree, sync_worktree};

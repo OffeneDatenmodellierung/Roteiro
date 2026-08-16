@@ -196,10 +196,22 @@ enum Command {
         /// displaces a graph hit.
         #[arg(long)]
         include_generated: bool,
-        /// Emit the results as JSON. Without `--include-generated` this is the
-        /// long-standing array of hits; with it, the two-channel object
-        /// (`{schema, hits, generated}`) — so only a caller that opted in sees a
-        /// different shape.
+        /// Also search episodic agent memory — what earlier sessions learned
+        /// (`roteiro memory add`). **Off by default**: memory is accumulated,
+        /// unreviewed and unredacted, so it is asked for rather than delivered
+        /// (ADR-0013).
+        ///
+        /// When on, memory hits come back in their **own channel**, each marked
+        /// `[memory]` with the anchor state that says whether it applies to this
+        /// tree, ranked by a scorer that has no `authored` boost — the +40 is for
+        /// intent someone deliberately wrote into a reviewed file, which this is
+        /// not. Superseded records never appear; drifted ones do, marked.
+        #[arg(long)]
+        include_memory: bool,
+        /// Emit the results as JSON. Without `--include-generated` or
+        /// `--include-memory` this is the long-standing array of hits; with
+        /// either, the multi-channel object (`{schema, hits, generated, memory}`)
+        /// — so only a caller that opted in sees a different shape.
         #[arg(long)]
         json: bool,
     },
@@ -827,6 +839,80 @@ enum MemoryAction {
         #[arg(long)]
         json: bool,
     },
+    /// Recall what is worth reading first: the live records, **ranked by
+    /// evidence**.
+    ///
+    /// `score = confidence × anchor_penalty × decay(age)`, computed on every read
+    /// and stored nowhere. A stored score that ticked down would rewrite the store
+    /// every time you looked at it, and recall would depend on when you last did.
+    ///
+    /// The order of the terms is the model, and it is **evidence first, clock
+    /// last**:
+    ///
+    /// * a **superseded** record is not ranked at all — it left the moment its
+    ///   successor was written, regardless of age or score;
+    /// * the **anchor** dominates: a record whose anchor still resolves here in
+    ///   the same format outranks one whose code has moved, which outranks one
+    ///   whose code is gone. None of them is dropped — drift demotes, and
+    ///   `--applicable-only` is the caller's choice, never the store's;
+    /// * **age** is last, and by default is not priced at all: `--decay none`
+    ///   means the same store and the same tree recall the same records in the
+    ///   same order every time. Age is counted in records written since, never in
+    ///   wall-clock, because the store is shared across worktrees.
+    Recall {
+        /// Free-text query. Every word must appear in the body, the anchor key or
+        /// the anchor path. A **filter, not a scorer**: narrowing the query
+        /// changes which records come back, never how they are ranked.
+        query: Option<String>,
+        /// How age is priced: `none` (default, reproducible) | `linear[:span]` |
+        /// `exponential[:half-life]`, in generations.
+        #[arg(long, value_name = "MODE", default_value_t = rto_graph::Decay::default())]
+        decay: rto_graph::Decay,
+        /// Only this namespace, matched exactly. Not a branch filter.
+        #[arg(long, value_name = "SCOPE")]
+        scope: Option<String>,
+        /// Only this kind: lesson | attempt | decision | pattern | outcome.
+        #[arg(long, value_name = "KIND")]
+        kind: Option<rto_graph::MemoryKind>,
+        /// Only records anchored to this node key.
+        #[arg(long, value_name = "KEY")]
+        anchor: Option<String>,
+        /// Withhold records that do not apply to this tree. Off by default: a
+        /// lesson about code that has moved or gone is demoted and labelled, not
+        /// hidden, and is often the one worth reading.
+        #[arg(long)]
+        applicable_only: bool,
+        /// At most this many records — the best-ranked, not the newest.
+        #[arg(long, value_name = "N", default_value_t = 10)]
+        limit: usize,
+        /// Emit the ranking as JSON, every term included.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report on, or sweep, the **bounded cache tier** — the other half of the
+    /// two-tier store (ADR-0013).
+    ///
+    /// Everything in that tier is re-derivable by definition, so evicting it costs
+    /// cycles and never information. That is exactly why it can be bounded and
+    /// episodic memory cannot: `roteiro memory forget` remains the only thing that
+    /// removes a *remembered* record, and no sweep can reach one.
+    ///
+    /// Without `--sweep` this only reports. The sweep also runs as part of
+    /// `roteiro context --refresh`, which is the maintenance seam it belongs to —
+    /// never on a read path, so an ordinary query never mutates the store.
+    Cache {
+        /// Evict oldest-first until the tier fits the budget, rather than only
+        /// reporting.
+        #[arg(long)]
+        sweep: bool,
+        /// Budget in whole megabytes for this run, overriding the default (256)
+        /// and `ROTEIRO_CACHE_BUDGET_MB`.
+        #[arg(long, value_name = "MB")]
+        budget_mb: Option<u64>,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete one record. **The only way anything leaves this store.**
     ///
     /// Episodic memory is unbounded and never auto-evicted — no sweep, no TTL, no
@@ -907,6 +993,17 @@ enum SecurityAction {
         /// Only this analyzer's assets. Default: all of them.
         #[arg(long, value_name = "NAME")]
         analyzer: Option<String>,
+        /// Allow downloading the assets that are fetched by URL — today that is
+        /// `osv-scanner`'s per-ecosystem OSV databases, roughly **260 MB**.
+        ///
+        /// Without it a downloadable asset that is not already present is
+        /// refused with the command that obtains it, exactly as the
+        /// operator-provisioned `RustSec` checkout is. Provisioning is the only
+        /// thing that may fetch, and even here it is asked for rather than
+        /// assumed: `prefetch` is a command people run when unsure, and a
+        /// quarter-gigabyte download is not a reasonable answer to that.
+        #[arg(long)]
+        allow_download: bool,
         /// Emit the result as JSON.
         #[arg(long)]
         json: bool,
@@ -1040,8 +1137,16 @@ fn main() -> anyhow::Result<()> {
             query,
             limit,
             include_generated,
+            include_memory,
             json,
-        } => run_search(ingest, &query, limit, include_generated, json),
+        } => run_search(
+            ingest,
+            &query,
+            limit,
+            include_generated,
+            include_memory,
+            json,
+        ),
         Command::Media { action } => run_media(ingest, gate, action),
         Command::Memory { action } => run_memory(action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
@@ -3228,15 +3333,21 @@ fn audio_stream_lines(ex: &rto_graph::Explanation) -> Vec<String> {
 ///
 /// With `--include-generated`, model-generated media content is searched too and
 /// printed **under its own heading, after the graph hits**, each line prefixed
-/// `[generated]` and tagged with the producer that wrote it (ADR-0015). The two
-/// channels are ranked separately and limited separately: opting in cannot
-/// displace a graph hit, and a generated hit can never be read as an extracted
-/// fact.
+/// `[generated]` and tagged with the producer that wrote it (ADR-0015).
+/// `--include-memory` does the same for episodic agent memory (ADR-0013), under a
+/// heading of its own, each line prefixed `[memory]` and carrying the anchor state
+/// that says whether the record applies to this tree.
+///
+/// The channels are ranked separately and limited separately: opting in cannot
+/// displace a graph hit, and neither a generated nor a remembered hit can ever be
+/// read as an extracted fact.
+#[allow(clippy::fn_params_excessive_bools)]
 fn run_search(
     ingest: rto_graph::IngestConfig,
     query: &str,
     limit: usize,
     include_generated: bool,
+    include_memory: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
@@ -3245,20 +3356,21 @@ fn run_search(
     let opts = rto_graph::SearchOptions {
         limit,
         include_generated,
+        include_memory,
     };
     let results = rto_graph::search_channels(&store, query, opts)?;
     if json {
-        // Without the opt-in, emit exactly the shape callers already parse: the
+        // Without an opt-in, emit exactly the shape callers already parse: the
         // bare array of graph hits. Adding a wrapper for everyone would be a
         // breaking change to pay for a feature they did not ask for.
-        if include_generated {
+        if include_generated || include_memory {
             emit_json(&results)?;
         } else {
             emit_json(&results.hits)?;
         }
         return Ok(());
     }
-    if results.hits.is_empty() && results.generated.is_empty() {
+    if results.hits.is_empty() && results.generated.is_empty() && results.memory.is_empty() {
         // Keep stdout empty on a miss; report to stderr.
         eprintln!("no matches for `{query}`");
         return Ok(());
@@ -3277,6 +3389,33 @@ fn run_search(
             );
         }
         println!("{} generated hit(s)", results.generated.len());
+    }
+    if !results.memory.is_empty() {
+        println!();
+        println!(
+            "agent memory — what earlier sessions learned; unreviewed, unredacted, and not \
+             a graph fact:"
+        );
+        for hit in &results.memory {
+            // The anchor state is on the line rather than in a footnote: a lesson
+            // about code that has moved is worth reading *and* worth labelling,
+            // and the label is the difference between the two.
+            println!(
+                "  {:>4}  [memory:{}]  #{}  ({})",
+                hit.score, hit.kind, hit.id, hit.anchor_state,
+            );
+            if let Some(snippet) = &hit.snippet {
+                println!("        {snippet}");
+            }
+        }
+        let inapplicable = results.memory.iter().filter(|h| !h.applies).count();
+        println!("{} memory hit(s)", results.memory.len());
+        if inapplicable > 0 {
+            println!(
+                "{inapplicable} of them do not apply to this tree — their anchors do not \
+                 resolve here in the same form. Ranked lower, never withheld."
+            );
+        }
     }
     Ok(())
 }
@@ -3570,7 +3709,44 @@ fn run_memory(action: MemoryAction) -> anyhow::Result<()> {
             limit,
             json,
         ),
+        MemoryAction::Recall {
+            query,
+            decay,
+            scope,
+            kind,
+            anchor,
+            applicable_only,
+            limit,
+            json,
+        } => run_memory_recall(
+            &rto_graph::RecallOptions {
+                scope: scope.as_deref(),
+                kind,
+                anchor_key: anchor.as_deref(),
+                query: query.as_deref(),
+                decay,
+                applicable_only,
+                limit: Some(limit),
+            },
+            json,
+        ),
+        MemoryAction::Cache {
+            sweep,
+            budget_mb,
+            json,
+        } => run_memory_cache(sweep, budget_mb, json),
         MemoryAction::Forget { id, json } => run_memory_forget(id, json),
+    }
+}
+
+/// The cache budget for this run: an explicit `--budget-mb` if one was given,
+/// otherwise whatever `ROTEIRO_CACHE_BUDGET_MB` or the 256 MB default says.
+fn resolve_cache_budget(budget_mb: Option<u64>) -> anyhow::Result<u64> {
+    match budget_mb {
+        Some(mb) => mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| anyhow::anyhow!("--budget-mb {mb} is more megabytes than there are")),
+        None => Ok(rto_graph::cache_budget_bytes()?),
     }
 }
 
@@ -3723,6 +3899,117 @@ fn run_memory_list(
     Ok(())
 }
 
+/// Recall the live records, ranked by evidence.
+fn run_memory_recall(opts: &rto_graph::RecallOptions<'_>, json: bool) -> anyhow::Result<()> {
+    let (_repo, store, _cache) = open_graph()?;
+    let recall = store.recall_memory(opts)?;
+
+    if json {
+        emit_json(&recall)?;
+        return Ok(());
+    }
+    if recall.results.is_empty() {
+        if recall.live == 0 && recall.superseded == 0 {
+            println!("nothing remembered yet (`roteiro memory add \"<what you learned>\"`)");
+        } else {
+            println!(
+                "nothing matched; {} live and {} superseded record(s) are stored",
+                recall.live, recall.superseded
+            );
+        }
+        return Ok(());
+    }
+    for recalled in &recall.results {
+        let record = &recalled.record;
+        println!(
+            "{:>5.3}  #{:<4} {:<8} {}",
+            recalled.score,
+            record.id,
+            record.kind.as_str(),
+            applicability(record),
+        );
+        // The terms, not just the product: a ranking that cannot be taken apart
+        // is a ranking the reader has to take on trust, and depreciating by
+        // evidence is worth nothing if the evidence is not visible.
+        println!(
+            "        confidence {:.2} × anchor {:.2} × decay {:.2}  (age {} generation(s))",
+            recalled.base_confidence, recalled.anchor_penalty, recalled.decay_factor, recalled.age,
+        );
+        println!("        {}", first_line(&record.body, 96));
+    }
+    println!(
+        "{} of {} live record(s), ranked at generation {} with decay {}{}",
+        recall.results.len(),
+        recall.live,
+        recall.generation,
+        recall.decay,
+        if recall.reproducible {
+            " (reproducible: the same store and tree recall this exactly)"
+        } else {
+            " (not reproducible: the ranking moves as records are written)"
+        },
+    );
+    if recall.superseded > 0 {
+        println!(
+            "{} superseded record(s) are stored and never recalled — regardless of age. \
+             `roteiro memory list --include-superseded` is the audit view.",
+            recall.superseded,
+        );
+    }
+    Ok(())
+}
+
+/// Report on — or sweep — the bounded cache tier.
+fn run_memory_cache(sweep: bool, budget_mb: Option<u64>, json: bool) -> anyhow::Result<()> {
+    let budget = resolve_cache_budget(budget_mb)?;
+    let (_repo, mut store, _cache) = open_graph()?;
+
+    if sweep {
+        let swept = store.sweep_agent_cache(budget)?;
+        if json {
+            emit_json(&swept)?;
+            return Ok(());
+        }
+        println!(
+            "swept {} cache entr(ies): {} evicted, {} pinned, {} bytes freed",
+            swept.scanned, swept.evicted, swept.pinned, swept.freed_bytes,
+        );
+        println!(
+            "  {} of {} bytes retained (generation {})",
+            swept.retained_bytes, swept.budget_bytes, swept.generation,
+        );
+        if swept.over_budget {
+            // Never silent: a bound that failed to bind and a bound with nothing
+            // to do look identical from the outside and mean opposite things.
+            println!(
+                "  still over budget — what remains is pinned: this generation's own work \
+                 with a valid anchor, plus the most-recently-used entry, which is always kept"
+            );
+        }
+        println!("episodic memory is untouched: no sweep can reach it");
+        return Ok(());
+    }
+
+    let stats = store.agent_cache_stats(budget)?;
+    if json {
+        emit_json(&stats)?;
+        return Ok(());
+    }
+    println!(
+        "cache tier: {} entr(ies), {} of {} bytes (generation {})",
+        stats.entries, stats.bytes, stats.budget_bytes, stats.generation,
+    );
+    if stats.bytes > stats.budget_bytes {
+        println!("  over budget — `roteiro memory cache --sweep` reclaims it");
+    }
+    let (live, superseded) = store.memory_counts()?;
+    println!(
+        "episodic memory: {live} live, {superseded} superseded — unbounded by design, and \
+         removed only by `roteiro memory forget`",
+    );
+    Ok(())
+}
+
 /// Delete one record — the only path by which anything leaves this store.
 fn run_memory_forget(id: i64, json: bool) -> anyhow::Result<()> {
     let (_repo, mut store, _cache) = open_graph()?;
@@ -3813,13 +4100,49 @@ fn run_context(
 
     if refresh {
         let report = refresh_contexts(&store)?;
+        // **The maintenance seam.** The bounded cache tier is swept here and
+        // nowhere else — never on a read path, so an ordinary query never mutates
+        // the store (ADR-0013). Nothing episodic is reachable from this call:
+        // `agent_memory` carries no size or recency column for a capacity policy
+        // to grip it by, so `roteiro memory forget` stays the only thing that
+        // removes a remembered record.
+        let swept = store.sweep_agent_cache(resolve_cache_budget(None)?)?;
         if json {
+            // The long-standing shape, unchanged: callers already parse this
+            // object, and wrapping it for everyone would be a breaking change to
+            // pay for maintenance they did not ask about. The machine-readable
+            // sweep is `roteiro memory cache --sweep --json`. What a sweep
+            // *did* is still never silent — it goes to stderr, where it cannot
+            // corrupt the parsed stdout, and only when there is something to say.
             emit_json(&report)?;
+            if swept.evicted > 0 || swept.over_budget {
+                eprintln!(
+                    "cache tier swept: {} evicted, {} of {} bytes retained{}",
+                    swept.evicted,
+                    swept.retained_bytes,
+                    swept.budget_bytes,
+                    if swept.over_budget {
+                        " (still over budget: what remains is pinned)"
+                    } else {
+                        ""
+                    },
+                );
+            }
         } else {
             println!(
                 "context cache refreshed: {} rebuilt, {} reused, {} pruned",
                 report.rebuilt, report.reused, report.pruned
             );
+            println!(
+                "cache tier swept: {} evicted, {} pinned, {} of {} bytes retained",
+                swept.evicted, swept.pinned, swept.retained_bytes, swept.budget_bytes,
+            );
+            if swept.over_budget {
+                println!(
+                    "  still over budget — what remains is pinned (this generation's own \
+                     work, and the most-recently-used entry, which is always kept)"
+                );
+            }
         }
         return Ok(());
     }
@@ -4861,9 +5184,11 @@ fn run_security(action: SecurityAction) -> anyhow::Result<()> {
             json,
         } => run_security_run(&analyzer, allow_unsandboxed, json),
         #[cfg(feature = "exec-subprocess")]
-        SecurityAction::Prefetch { analyzer, json } => {
-            run_security_prefetch(analyzer.as_deref(), json)
-        }
+        SecurityAction::Prefetch {
+            analyzer,
+            allow_download,
+            json,
+        } => run_security_prefetch(analyzer.as_deref(), allow_download, json),
         #[cfg(feature = "exec-subprocess")]
         SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
     }
@@ -4896,8 +5221,96 @@ struct SecurityIngestReport {
 struct SecurityListing {
     /// Every live layer with its run evidence and findings.
     layers: Vec<rto_graph::FindingsLayer>,
-    /// Total findings across those layers.
+    /// Total findings across those layers. **Unchanged** by the cross-reference
+    /// below — see [`SecurityCrossReference`].
     findings: usize,
+    /// Dependency advisories seen across analyzers, where more than one
+    /// dependency analyzer has a live layer. Empty otherwise, because there is
+    /// nothing to cross-reference against.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cross_reference: Vec<SecurityCrossReference>,
+}
+
+/// One advisory in the `--json` cross-reference (ADR-0018 v1.1).
+///
+/// A **view**, not a record: every finding it names is still in its own layer
+/// under its own key, and `findings` above still counts them all. This is what
+/// makes a duplicate pair read as one advisory confirmed by two analyzers rather
+/// than as a count that silently halved.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityCrossReference {
+    /// The advisory's canonical id — the RUSTSEC id where both sides publish one.
+    advisory: String,
+    /// Every identifier it is published under.
+    aliases: Vec<String>,
+    /// The package and resolved version it is about.
+    package: String,
+    version: String,
+    /// How many distinct analyzers reported it. `1` is a normal state, not a
+    /// discrepancy: the two databases are pinned independently, and `yanked` is
+    /// not an advisory kind OSV can carry at all.
+    confirmed_by: usize,
+    /// Which analyzers, and the still-addressable finding key each one wrote.
+    reports: Vec<SecurityCrossReferenceReport>,
+}
+
+/// One analyzer's report inside a [`SecurityCrossReference`].
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct SecurityCrossReferenceReport {
+    analyzer: String,
+    /// The finding key, unchanged and still addressable.
+    key: String,
+    /// The id *this* analyzer fired, which need not be the canonical one.
+    rule: String,
+    severity: rto_graph::Severity,
+}
+
+/// The cross-reference for a listing, or empty when there is nothing to cross-
+/// reference.
+///
+/// Below two dependency analyzers the section is suppressed rather than shown
+/// with every row reading "confirmed by 1" — that would be noise dressed as
+/// information, and it is exactly the case where a single source carries no
+/// signal about agreement either way.
+#[cfg(feature = "execution")]
+fn security_cross_reference(layers: &[rto_graph::FindingsLayer]) -> Vec<SecurityCrossReference> {
+    let correspondences = rto_exec::cross_reference(layers);
+    let mut analyzers: Vec<&str> = correspondences
+        .iter()
+        .flat_map(|c| c.analyzers())
+        .collect::<Vec<_>>();
+    analyzers.sort_unstable();
+    analyzers.dedup();
+    if analyzers.len() < 2 {
+        return Vec::new();
+    }
+    correspondences
+        .into_iter()
+        .map(|c| SecurityCrossReference {
+            advisory: c.advisory,
+            aliases: c.aliases,
+            package: c.package,
+            version: c.version,
+            confirmed_by: c
+                .reports
+                .iter()
+                .map(|r| &r.analyzer)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            reports: c
+                .reports
+                .into_iter()
+                .map(|r| SecurityCrossReferenceReport {
+                    analyzer: r.analyzer,
+                    key: r.key,
+                    rule: r.rule,
+                    severity: r.severity,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Just enough of a normalized report to learn which analyzer it claims to be
@@ -5069,6 +5482,12 @@ fn run_security_ingest(file: &str, analyzer: Option<&str>, json: bool) -> anyhow
             // `None` when nothing is provisioned, which is honest: an ingested
             // report says nothing about what this machine has.
             advisory_db: advisory_db_evidence(&request.analyzer),
+            // The checkout we are standing in, so an analyzer that reports
+            // absolute paths — `osv-scanner` does — produces the same
+            // worktree-relative finding keys here as it does under `security
+            // run`. A report about some *other* tree simply will not relativise,
+            // and the adapter records that rather than guessing.
+            worktree: Some(&worktree_path),
             snippets: &snippets,
         };
         let report = rto_exec::normalize_native(&request.analyzer, &bytes, &ctx)?;
@@ -5126,10 +5545,13 @@ fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
     let layers = store.findings_layers(analyzer)?;
     let total: usize = layers.iter().map(|l| l.findings.len()).sum();
 
+    let cross_reference = security_cross_reference(&layers);
+
     if json {
         emit_json(&SecurityListing {
             layers,
             findings: total,
+            cross_reference,
         })?;
         return Ok(());
     }
@@ -5162,7 +5584,76 @@ fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
         }
     }
     println!("{total} finding(s) across {} layer(s)", layers.len());
+    print_cross_reference(&cross_reference);
     Ok(())
+}
+
+/// Render the cross-reference block beneath a listing (ADR-0018 v1.1).
+///
+/// The total above is printed **before** this and is not adjusted by it: a
+/// duplicate pair is two findings and one advisory, and both numbers are true.
+/// Advisories two analyzers agree on come first, because agreement between
+/// independent sources is the evidence this decision exists to keep; the
+/// single-source ones follow, counted rather than listed, and labelled as the
+/// ordinary state they are.
+#[cfg(feature = "execution")]
+fn print_cross_reference(cross_reference: &[SecurityCrossReference]) {
+    if cross_reference.is_empty() {
+        return;
+    }
+    let (confirmed, single): (Vec<_>, Vec<_>) =
+        cross_reference.iter().partition(|c| c.confirmed_by > 1);
+
+    println!();
+    println!(
+        "cross-reference: {} advisory/advisories across analyzers",
+        cross_reference.len()
+    );
+    for entry in &confirmed {
+        let analyzers: Vec<&str> = entry
+            .reports
+            .iter()
+            .map(|r| r.analyzer.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        println!(
+            "  {} — {} {} — confirmed by {} ({})",
+            entry.advisory,
+            entry.package,
+            entry.version,
+            entry.confirmed_by,
+            analyzers.join(", ")
+        );
+        // Both keys stay addressable: a reader who fixes the advisory must see
+        // both of these disappear, and cannot do that without being told them.
+        for report in &entry.reports {
+            println!("      {}", report.key);
+        }
+    }
+    if !single.is_empty() {
+        let mut by_analyzer: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for entry in &single {
+            for report in &entry.reports {
+                *by_analyzer.entry(report.analyzer.as_str()).or_default() += 1;
+            }
+        }
+        let breakdown: Vec<String> = by_analyzer
+            .iter()
+            .map(|(analyzer, count)| format!("{count} only in {analyzer}"))
+            .collect();
+        // Not a discrepancy. The two databases are pinned and prefetched
+        // independently, so they legitimately differ for a window; and `yanked`
+        // comes from the crates.io index rather than from an advisory, so OSV
+        // cannot carry it at all.
+        println!(
+            "  {} reported by one analyzer ({}) — expected: the databases are pinned separately, \
+             and some kinds only one of them carries",
+            single.len(),
+            breakdown.join(", ")
+        );
+    }
 }
 
 /// The `--json` shape of `roteiro security run`.
@@ -5325,14 +5816,139 @@ struct SecurityPrefetchReport {
     provisioned: Vec<rto_exec::InstalledAsset>,
 }
 
+/// Stream `url` into `path`, for the one asset kind that is fetched by URL.
+///
+/// The transport lives here rather than in `rto-exec` on purpose: that crate
+/// has no network dependency and does not acquire one to provision an asset.
+/// It takes this as a function, so the code that *could* fetch is reachable
+/// only from `prefetch` — see [`rto_exec::provision_with`].
+///
+/// The body is streamed to disk rather than buffered: `npm/all.zip` alone is
+/// around 210 MB, and reading that into a `Vec` to write it straight back out
+/// would be a needless spike.
+///
+/// # A body of unknown length is refused, because this is where the pin is set
+///
+/// [`rto_exec::AssetSource::Download`] has **no compile-time digest** — the
+/// upstream files are rebuilt daily, so what gets recorded as the asset's pin is
+/// the digest of whatever this function wrote. Bytes that arrive here are
+/// therefore self-certifying: nothing downstream can contradict them, and
+/// `security status` will report a truncated database as present and matching.
+///
+/// `std::io::copy` returns `Ok` on a clean early EOF, so completeness has to be
+/// established from the response's framing. Measured against **ureq 3.4.0**,
+/// four of the five framings detect a truncated transfer on their own:
+///
+/// | Framing | Truncation detected |
+/// |---|---|
+/// | `Content-Length`, short body | yes — `UnexpectedEof` |
+/// | `Content-Encoding: gzip` | yes — decode error |
+/// | chunked, dropped mid-chunk | yes — `UnexpectedEof` |
+/// | chunked, terminator missing | yes — `UnexpectedEof` |
+/// | **close-delimited** (neither header) | **no — `Ok`** |
+///
+/// The last row is the hole, and it is not fixable by counting: that framing
+/// *defines* the body as ending when the connection closes, so a mid-transfer
+/// drop is indistinguishable from a complete file. A length that cannot be
+/// established is not a length that checks out, so such a response is refused
+/// rather than pinned — the same rule this feature applies to a cold cache,
+/// which fails by name instead of quietly fetching.
+///
+/// `Accept-Encoding: identity` is sent to ask for the one framing that can be
+/// verified end to end. The shipped OSV URLs answer it with `Content-Length` and
+/// no transfer encoding, so this refuses nothing that works today. A mirror that
+/// can only serve close-delimited bodies is not supported by `--allow-download`;
+/// its files can still be placed in the documented cache layout by hand, which
+/// `prefetch` then digests and pins without fetching anything.
+///
+/// The payload is deliberately **not** parsed. These are zips, and a structural
+/// check would be redundant: `osv-scanner` 2.5.0 already refuses a truncated
+/// database loudly — exit `127`, *"zip: not a valid zip file"* — and `127` is not
+/// a declared success status, so a corrupt database fails a scan rather than
+/// silently shrinking it. Parsing here would duplicate that for one asset kind
+/// while doing nothing for a future non-zip one.
+#[cfg(feature = "exec-subprocess")]
+fn download_asset_file(url: &str, path: &std::path::Path) -> Result<(), String> {
+    let response = ureq::get(url)
+        // Ask for the framing whose completeness can be checked. ureq decodes a
+        // compressed body and then reports no `Content-Length` at all, which
+        // would leave nothing to verify against.
+        .header("Accept-Encoding", "identity")
+        .call()
+        .map_err(|e| format!("GET {url}: {e}"))?;
+
+    let declared = declared_body_length(
+        response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .ok_or_else(|| {
+        format!(
+            "GET {url}: the response declares no usable Content-Length, so a complete download \
+             cannot be told from a truncated one. Refusing rather than digesting bytes of unknown \
+             completeness and recording them as this asset's pin. If the server cannot send a \
+             Content-Length, place the file in the asset cache by hand — prefetch verifies and \
+             pins what is already there without fetching."
+        )
+    })?;
+
+    let mut reader = response.into_body().into_reader();
+    let mut file =
+        std::fs::File::create(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
+    // Names the URL as well as the path. The common failure here is the peer
+    // hanging up mid-body — ureq enforces the declared framing and surfaces that
+    // from this call — which is a fact about the transfer, not the local file.
+    let written = std::io::copy(&mut reader, &mut file)
+        .map_err(|e| format!("transferring {url} to {}: {e}", path.display()))?;
+    std::io::Write::flush(&mut file).map_err(|e| format!("flushing {}: {e}", path.display()))?;
+
+    verify_transferred(url, declared, written)
+}
+
+/// The body length the response declares, or `None` if it declares none usable.
+///
+/// Split out so the parsing has a test that does not need a socket. An empty,
+/// negative or non-numeric value is `None` rather than an error: the caller's
+/// answer to "no usable length" is the same refusal either way, and it says so
+/// in one place.
+#[cfg(feature = "exec-subprocess")]
+fn declared_body_length(header: Option<&str>) -> Option<u64> {
+    header?.trim().parse::<u64>().ok()
+}
+
+/// Check what was written against what the server said it was sending.
+///
+/// Belt and braces over ureq's own `Content-Length` enforcement, which was
+/// measured to catch this case already (see [`download_asset_file`]). It is kept
+/// because the guarantee belongs to this function rather than to a dependency's
+/// current behaviour: this is the only code that can put network bytes into a
+/// pinned asset, and a ureq upgrade must not be able to silently relax it.
+#[cfg(feature = "exec-subprocess")]
+fn verify_transferred(url: &str, declared: u64, written: u64) -> Result<(), String> {
+    if written == declared {
+        return Ok(());
+    }
+    Err(format!(
+        "GET {url}: the server declared {declared} byte(s) and the transfer produced {written}. \
+         A short asset must not be digested and pinned as a complete one, so nothing was installed."
+    ))
+}
+
 /// Install and verify every pinned asset, recording each digest.
 ///
-/// This is the only command that writes to the asset cache. It fetches nothing
-/// over the network: the rule set is compiled into this binary, and the advisory
-/// database is a directory the operator provides — if it is absent, this says
-/// where it looked and which command obtains it, and does not go and get it.
+/// This is the only command that writes to the asset cache, and the only one
+/// that can reach the network at all — and only with `--allow-download`. The
+/// rule set is compiled into this binary; the `RustSec` advisory database is a
+/// directory the operator provides, and if it is absent this says where it
+/// looked and which command obtains it rather than going and getting it; the
+/// OSV databases are fetched by URL, which is what `--allow-download` is for.
 #[cfg(feature = "exec-subprocess")]
-fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
+fn run_security_prefetch(
+    analyzer: Option<&str>,
+    allow_download: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let specs: Vec<&rto_exec::AssetSpec> = match analyzer {
         Some(name) => {
@@ -5348,6 +5964,7 @@ fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<(
         None => rto_exec::ASSETS.iter().collect(),
     };
 
+    let fetcher: &rto_exec::Fetcher<'_> = &download_asset_file;
     let mut provisioned = Vec::with_capacity(specs.len());
     let mut failures = Vec::new();
     for spec in specs {
@@ -5361,8 +5978,21 @@ fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<(
                 spec.kind.as_str(),
                 spec.licence
             );
+            if allow_download && let rto_exec::AssetSource::Download { files } = spec.source {
+                // Name every URL before opening a socket to any of them. What
+                // this command talks to is the operator's business, and a
+                // quarter-gigabyte transfer should not be a surprise.
+                eprintln!("  downloading {} file(s):", files.len());
+                for file in files {
+                    eprintln!("    {}", file.url);
+                }
+            }
         }
-        match rto_exec::provision(&root, spec) {
+        // The fetcher is passed only when the operator asked for downloads. A
+        // downloadable asset that is already present still provisions without
+        // it, so re-running `prefetch` over a warm cache needs no flag and no
+        // network.
+        match rto_exec::provision_with(&root, spec, allow_download.then_some(fetcher)) {
             Ok(record) => provisioned.push(record),
             // One unprovisionable asset must not hide the others: report it and
             // carry on, then fail at the end with everything that went wrong.
@@ -7722,6 +8352,439 @@ mod memory_cli {
             assert!(line.ends_with("sym:rust:a.rs#f"), "{state}: {line}");
         }
     }
+
+    // --- `memory recall` and `memory cache` (Stage 25) ------------------------
+
+    /// **`recall` defaults to the reproducible answer.** No query, no filters, and
+    /// `decay none` — so the same store and the same tree recall the same records
+    /// in the same order, and pricing age at all is something a caller asks for.
+    #[test]
+    fn recall_defaults_to_no_query_and_no_decay() {
+        let MemoryAction::Recall {
+            query,
+            decay,
+            scope,
+            kind,
+            anchor,
+            applicable_only,
+            limit,
+            json,
+        } = action(["roteiro", "memory", "recall"])
+        else {
+            panic!("expected Recall");
+        };
+        assert_eq!(query, None, "a bare recall ranks everything live");
+        assert_eq!(decay, rto_graph::Decay::None);
+        assert!(decay.is_reproducible(), "and says so");
+        assert_eq!((scope, kind, anchor), (None, None, None));
+        assert!(
+            !applicable_only,
+            "a drifted record is demoted and labelled, not withheld by default",
+        );
+        assert_eq!(limit, 10);
+        assert!(!json);
+    }
+
+    #[test]
+    fn recall_accepts_every_flag_and_both_decay_shapes() {
+        let MemoryAction::Recall {
+            query,
+            decay,
+            scope,
+            kind,
+            anchor,
+            applicable_only,
+            limit,
+            json,
+        } = action([
+            "roteiro",
+            "memory",
+            "recall",
+            "retry loop",
+            "--decay",
+            "exponential:25",
+            "--scope",
+            "repo",
+            "--kind",
+            "attempt",
+            "--anchor",
+            "sym:rust:src/a.rs#f",
+            "--applicable-only",
+            "--limit",
+            "3",
+            "--json",
+        ])
+        else {
+            panic!("expected Recall");
+        };
+        assert_eq!(query.as_deref(), Some("retry loop"));
+        assert_eq!(decay, rto_graph::Decay::Exponential { half_life: 25 });
+        assert_eq!(scope.as_deref(), Some("repo"));
+        assert_eq!(kind, Some(rto_graph::MemoryKind::Attempt));
+        assert_eq!(anchor.as_deref(), Some("sym:rust:src/a.rs#f"));
+        assert!(applicable_only);
+        assert_eq!(limit, 3);
+        assert!(json);
+
+        // A bare mode takes its documented default parameter.
+        let MemoryAction::Recall { decay, .. } =
+            action(["roteiro", "memory", "recall", "--decay", "linear"])
+        else {
+            panic!("expected Recall");
+        };
+        assert_eq!(
+            decay,
+            rto_graph::Decay::Linear {
+                span: rto_graph::DEFAULT_DECAY_SPAN
+            }
+        );
+
+        // And an unknown mode is refused rather than silently treated as `none`,
+        // which would promise reproducibility nobody asked for.
+        assert!(
+            Cli::try_parse_from(["roteiro", "memory", "recall", "--decay", "clock"]).is_err(),
+            "an unrecognised decay mode is not consent to any other one",
+        );
+    }
+
+    /// `memory cache` **reports** by default: sweeping is something you ask for,
+    /// even though everything it can evict is re-derivable.
+    #[test]
+    fn cache_reports_unless_asked_to_sweep() {
+        let MemoryAction::Cache {
+            sweep,
+            budget_mb,
+            json,
+        } = action(["roteiro", "memory", "cache"])
+        else {
+            panic!("expected Cache");
+        };
+        assert!(!sweep);
+        assert_eq!(budget_mb, None, "the default budget is the configured one");
+        assert!(!json);
+
+        let MemoryAction::Cache {
+            sweep, budget_mb, ..
+        } = action([
+            "roteiro",
+            "memory",
+            "cache",
+            "--sweep",
+            "--budget-mb",
+            "512",
+        ])
+        else {
+            panic!("expected Cache");
+        };
+        assert!(sweep);
+        assert_eq!(budget_mb, Some(512));
+    }
+
+    /// The budget resolves to megabytes of bytes, an explicit flag wins over the
+    /// environment and the default, and an unrepresentable one is refused rather
+    /// than wrapped into a small number.
+    #[test]
+    fn the_cache_budget_resolves_from_the_flag_then_the_default() {
+        assert_eq!(
+            super::resolve_cache_budget(Some(512)).expect("budget"),
+            512 * 1024 * 1024,
+        );
+        assert_eq!(
+            super::resolve_cache_budget(None).expect("budget"),
+            rto_graph::DEFAULT_CACHE_BUDGET_BYTES,
+            "and with no flag and no environment override, the documented 256 MB",
+        );
+        assert!(
+            super::resolve_cache_budget(Some(u64::MAX)).is_err(),
+            "a budget that cannot be expressed in bytes is refused, not wrapped",
+        );
+    }
+
+    /// **Memory is opt-in on `search`, exactly as generated content is**, and the
+    /// two opt-ins are independent: neither implies the other.
+    #[test]
+    fn search_keeps_memory_behind_its_own_opt_in() {
+        let Command::Search {
+            include_generated,
+            include_memory,
+            ..
+        } = parse(["roteiro", "search", "retry loop"])
+        else {
+            panic!("expected Search");
+        };
+        assert!(!include_generated, "and generated content stays opt-in too");
+        assert!(!include_memory);
+
+        let Command::Search {
+            include_generated,
+            include_memory,
+            ..
+        } = parse(["roteiro", "search", "retry loop", "--include-memory"])
+        else {
+            panic!("expected Search");
+        };
+        assert!(
+            !include_generated,
+            "asking for memory must not also turn on another store's channel",
+        );
+        assert!(include_memory);
+    }
+}
+
+// The one path that can put network bytes into the pinned asset cache.
+//
+// `AssetSource::Download` has no compile-time digest: whatever arrives here is
+// digested and recorded as the asset's own pin, so a truncated database would be
+// certified by `security status` as present and matching. These tests serve raw
+// HTTP over a loopback `TcpListener` — no external network, no fixtures — and
+// assert both that a bad transfer fails and that it leaves nothing a later
+// `prefetch` would treat as installed.
+#[cfg(all(test, feature = "exec-subprocess"))]
+mod asset_download {
+    use super::{declared_body_length, download_asset_file, verify_transferred};
+    use std::io::{Read as _, Write as _};
+
+    /// Serve `response` verbatim to exactly one client, then close.
+    ///
+    /// Raw bytes rather than a framework, because what is under test *is* the
+    /// framing: a declared length the body does not honour, or a body with no
+    /// declared length at all.
+    fn serve_once(response: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Read the request line so the client is not writing into a
+                // closed socket, then answer and hang up.
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/all.zip")
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("roteiro-dl-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// The positive control. Without it the refusals below could all be passing
+    /// because nothing ever succeeds.
+    #[test]
+    fn a_complete_download_succeeds_and_writes_every_byte() {
+        // 10 bytes: the 4-byte zip signature plus `hello!`.
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nPK\x03\x04hello!");
+        let dir = scratch("complete");
+        let path = dir.join("all.zip");
+        download_asset_file(&url, &path).expect("a complete transfer must install");
+        assert_eq!(std::fs::read(&path).expect("read"), b"PK\x03\x04hello!");
+    }
+
+    /// The reviewed defect: a server that declares a length and then closes
+    /// cleanly part-way through. This must fail rather than install a short
+    /// database that `status` would certify.
+    ///
+    /// **This test pins ureq, not this crate.** Measured against ureq 3.4.0, the
+    /// transport enforces `Content-Length` framing itself and raises
+    /// `UnexpectedEof` here, so reverting the guard in `download_asset_file`
+    /// does *not* turn this red — only a transport that stopped enforcing it
+    /// would. It is kept deliberately, as the regression pin on the dependency
+    /// behaviour the rest of this design now leans on.
+    #[test]
+    fn a_truncated_body_fails_and_leaves_nothing_installed() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nPK\x03\x04truncated");
+        let dir = scratch("truncated");
+        let path = dir.join("all.zip");
+
+        let err = download_asset_file(&url, &path).expect_err("a short body must not succeed");
+        // The refusal comes from the transport — ureq enforces `Content-Length`
+        // framing and reports the peer hanging up — so the assertion is that the
+        // failure is attributable, not that it carries this function's own
+        // mismatch wording.
+        assert!(err.contains(&url), "the failure must name the URL: {err}");
+
+        // Whatever bytes arrived must not survive as a usable asset. The
+        // fetcher writes to a staging path that `download_all` removes on
+        // failure; what must never exist is a complete-looking file.
+        let installed = std::fs::read(&path).unwrap_or_default();
+        assert_ne!(
+            installed.len(),
+            4096,
+            "a partial body must never look like the declared asset"
+        );
+    }
+
+    /// The framing that no byte count can rescue: neither `Content-Length` nor
+    /// chunked, so the body is defined as ending when the connection closes and
+    /// a mid-transfer drop is indistinguishable from a complete file.
+    ///
+    /// Measured against ureq 3.4.0, this is the one framing where a truncated
+    /// transfer reads as `Ok`. An unestablishable length is refused rather than
+    /// pinned.
+    #[test]
+    fn a_body_of_unknown_length_is_refused_rather_than_pinned() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\n\r\nPK\x03\x04could-be-half-a-database");
+        let dir = scratch("unframed");
+        let path = dir.join("all.zip");
+
+        let err =
+            download_asset_file(&url, &path).expect_err("an unverifiable length must be refused");
+        assert!(err.contains("Content-Length"), "{err}");
+        assert!(
+            err.contains("truncated") || err.contains("completeness"),
+            "the refusal must say what it could not establish: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "nothing may be written when the response cannot be verified"
+        );
+    }
+
+    /// End to end, through the code `prefetch` actually runs: a bad server must
+    /// leave the asset unprovisioned, with no record and no stray bytes for a
+    /// later `provision`/`status` to fold into a pin.
+    #[test]
+    fn a_failed_fetch_leaves_the_asset_unprovisioned_and_the_cache_clean() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\n\r\nhalf-a-database");
+        let root = scratch("provision");
+        // `DownloadFile` holds `&'static str`; a loopback URL has a fresh port
+        // each run, so it is leaked for the life of the test process.
+        let leaked: &'static str = Box::leak(url.into_boxed_str());
+        let files: &'static [rto_exec::DownloadFile] =
+            Box::leak(Box::new([rto_exec::DownloadFile {
+                path: "osv-scalibr/crates.io/all.zip",
+                url: leaked,
+            }]));
+        let spec = rto_exec::AssetSpec {
+            id: "osv-db",
+            analyzer: "osv-scanner",
+            kind: rto_exec::AssetKind::AdvisoryDb,
+            source: rto_exec::AssetSource::Download { files },
+            file: "",
+            licence: "test",
+        };
+
+        let fetcher: &rto_exec::Fetcher<'_> = &download_asset_file;
+        let err = rto_exec::provision_with(&root, &spec, Some(fetcher))
+            .expect_err("an unverifiable download must not provision");
+        assert!(
+            err.to_string().contains("Content-Length"),
+            "the provisioning failure must carry the fetcher's reason: {err}"
+        );
+
+        // Nothing recorded, and nothing left in the tree that a later successful
+        // provision would digest into the pin.
+        let status = rto_exec::status(&root, Some("osv-scanner"));
+        assert_eq!(status.len(), 1);
+        assert!(
+            status[0].installed.is_none(),
+            "a failed fetch must not read as provisioned"
+        );
+        assert_eq!(status[0].verified, None);
+
+        let strays: Vec<std::path::PathBuf> = walk(&root);
+        assert!(
+            strays.is_empty(),
+            "a failed fetch must leave no bytes behind: {strays:?}"
+        );
+    }
+
+    /// Every file under `dir`, recursively.
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// The request asks for the one framing whose completeness can be checked.
+    ///
+    /// Served by a listener that content-negotiates: it answers a request
+    /// carrying `Accept-Encoding: identity` with a length-framed body, and
+    /// anything else with a close-delimited one. Succeeding therefore proves the
+    /// header was sent — without it, this download would be refused as
+    /// unverifiable, which is the fail-closed direction but a needless one
+    /// against a server that would have obliged.
+    #[test]
+    fn the_request_asks_for_a_framing_it_can_verify() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+                let response: &[u8] = if request.contains("accept-encoding: identity") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nPK\x03\x04ok"
+                } else {
+                    b"HTTP/1.1 200 OK\r\n\r\nPK\x03\x04ok"
+                };
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        let url = format!("http://{addr}/all.zip");
+        let dir = scratch("negotiated");
+        let path = dir.join("all.zip");
+
+        download_asset_file(&url, &path)
+            .expect("a server offering a verifiable framing must be taken up on it");
+        assert_eq!(std::fs::read(&path).expect("read"), b"PK\x03\x04ok");
+    }
+
+    /// A length that cannot be parsed is the same answer as no length at all —
+    /// stated once, so a blank or malformed header cannot read as zero bytes.
+    #[test]
+    fn only_a_real_number_counts_as_a_declared_length() {
+        assert_eq!(declared_body_length(Some("3374965")), Some(3_374_965));
+        assert_eq!(declared_body_length(Some("  42 ")), Some(42));
+        assert_eq!(declared_body_length(Some("0")), Some(0));
+        assert_eq!(declared_body_length(None), None);
+        assert_eq!(declared_body_length(Some("")), None);
+        assert_eq!(declared_body_length(Some("lots")), None);
+        assert_eq!(declared_body_length(Some("-1")), None);
+        assert_eq!(declared_body_length(Some("1.5")), None);
+    }
+
+    /// The mismatch is reported with both counts, so the failure says how short
+    /// the transfer was rather than only that something went wrong.
+    ///
+    /// Exercised directly: ureq 3.4.0 enforces `Content-Length` framing itself
+    /// and errors before this branch is reached, so it is defence against a
+    /// dependency changing that — which is precisely why it is tested here
+    /// rather than assumed to be unreachable.
+    #[test]
+    fn a_short_transfer_is_reported_with_both_counts() {
+        verify_transferred("https://example.invalid/all.zip", 4096, 4096)
+            .expect("an exact transfer is fine");
+
+        let err = verify_transferred("https://example.invalid/all.zip", 4096, 1200)
+            .expect_err("a short transfer must fail");
+        assert!(err.contains("4096"), "{err}");
+        assert!(err.contains("1200"), "{err}");
+        assert!(err.contains("https://example.invalid/all.zip"), "{err}");
+        assert!(
+            err.contains("pinned"),
+            "the message must say why it matters: {err}"
+        );
+
+        // A body *longer* than declared is equally wrong: it is not the resource
+        // the server described.
+        assert!(verify_transferred("https://example.invalid/all.zip", 10, 11).is_err());
+    }
 }
 
 // The `roteiro security` surface: argument shapes, the analyzer peek that keeps
@@ -7732,6 +8795,7 @@ mod memory_cli {
 mod security_cli {
     use super::{
         Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, report_analyzer,
+        security_cross_reference,
     };
     use clap::Parser as _;
 
@@ -7885,10 +8949,74 @@ mod security_cli {
         let listing = SecurityListing {
             layers: Vec::new(),
             findings: 0,
+            cross_reference: Vec::new(),
         };
         let value = serde_json::to_value(&listing).expect("serialize");
         assert_eq!(value["findings"], 0);
         assert!(value["layers"].as_array().expect("array").is_empty());
+        // Nothing to cross-reference is an absent section, not an empty one:
+        // a consumer must not have to tell "no duplicates" from "not computed".
+        assert!(value.get("cross_reference").is_none());
+    }
+
+    /// The cross-reference is suppressed below two dependency analyzers, and
+    /// present at two.
+    ///
+    /// With one analyzer every row would read "confirmed by 1", which is noise
+    /// dressed as information: a single source carries no signal about agreement
+    /// in either direction. With two it is exactly the evidence ADR-0018 v1.1
+    /// decided to keep.
+    #[test]
+    fn the_cross_reference_appears_only_once_there_is_something_to_compare() {
+        fn layer(analyzer: &str, rule: &str, package: &str) -> rto_graph::FindingsLayer {
+            rto_graph::FindingsLayer {
+                run: rto_graph::AnalysisRun {
+                    layer: format!("security:{analyzer}:ab12cd34"),
+                    analyzer: analyzer.to_owned(),
+                    analyzer_version: "1.0.0".to_owned(),
+                    runner: rto_graph::RunnerKind::Ingested,
+                    isolation: rto_graph::Isolation::Ingested,
+                    image_digest: None,
+                    rules_digest: None,
+                    advisory_db: None,
+                    command_policy: rto_graph::CommandPolicy {
+                        network: rto_graph::NetworkPolicy::Deny,
+                        worktree: rto_graph::WorktreeAccess::ReadOnly,
+                        environment: rto_graph::EnvironmentPolicy::Scrubbed,
+                    },
+                    source: rto_graph::SourceIdentity::default(),
+                    started_at: "2026-08-16T09:00:00Z".to_owned(),
+                    ended_at: "2026-08-16T09:00:01Z".to_owned(),
+                    exit_status: 1,
+                    report_digest: "0".repeat(64),
+                },
+                findings: vec![rto_graph::Finding {
+                    key: rto_graph::FindingKey::new(analyzer, &[rule.to_owned()]).expect("key"),
+                    rule: rule.to_owned(),
+                    severity: rto_graph::Severity::High,
+                    title: format!("{package} is affected"),
+                    message: String::new(),
+                    path: None,
+                    span: None,
+                    meta: serde_json::json!({"package": package, "version": "1.0.0"}),
+                }],
+            }
+        }
+
+        let one = vec![layer("cargo-audit", "RUSTSEC-2026-0001", "widget")];
+        assert!(
+            security_cross_reference(&one).is_empty(),
+            "one analyzer has nothing to be cross-referenced against"
+        );
+
+        let two = vec![
+            layer("cargo-audit", "RUSTSEC-2026-0001", "widget"),
+            layer("osv-scanner", "RUSTSEC-2026-0001", "widget"),
+        ];
+        let crossref = security_cross_reference(&two);
+        assert_eq!(crossref.len(), 1, "one advisory, not two problems");
+        assert_eq!(crossref[0].confirmed_by, 2);
+        assert_eq!(crossref[0].reports.len(), 2, "both keys stay addressable");
     }
 
     /// The flag that accepts an unsandboxed run is required, and it is a flag
@@ -7936,13 +9064,19 @@ mod security_cli {
     #[cfg(feature = "exec-subprocess")]
     #[test]
     fn prefetch_and_status_default_to_every_analyzer() {
-        let SecurityAction::Prefetch { analyzer, json } =
-            action(["roteiro", "security", "prefetch"])
+        let SecurityAction::Prefetch {
+            analyzer,
+            allow_download,
+            json,
+        } = action(["roteiro", "security", "prefetch"])
         else {
             panic!("expected Prefetch");
         };
         assert_eq!(analyzer, None);
         assert!(!json);
+        // Downloading is asked for, never assumed: a bare `prefetch` must not
+        // start a quarter-gigabyte transfer.
+        assert!(!allow_download);
 
         let SecurityAction::Status { analyzer, json } = action([
             "roteiro",

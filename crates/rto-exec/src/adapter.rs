@@ -37,6 +37,7 @@ use crate::runner::ExecError;
 use crate::snippet::SnippetSource;
 
 pub mod cargo_audit;
+pub mod osv_scanner;
 pub mod semgrep;
 
 /// Everything an adapter may need that is *not* in the analyzer's own output.
@@ -74,6 +75,19 @@ pub struct NativeContext<'a> {
     /// a database with `--db`, which is every pinned run — so without this, the
     /// reproducible configuration would be the one with no staleness evidence.
     pub advisory_db: Option<rto_graph::AdvisoryDb>,
+    /// The checkout the report describes, where the caller knows it.
+    ///
+    /// Only an adapter whose analyzer reports **absolute** paths needs this, and
+    /// `osv-scanner` is that adapter: it returns a full filesystem path for every
+    /// manifest even when it is told to scan `.`. Without the worktree there is
+    /// nothing to relativise against, so an absolute path would be stored
+    /// verbatim — user-identifying data in a persisted finding key, and a key
+    /// that differs between two machines running the identical scan.
+    ///
+    /// `None` is the honest answer for a report about a tree this checkout does
+    /// not have; an adapter must then say the location is unknown rather than
+    /// guess at one.
+    pub worktree: Option<&'a std::path::Path>,
     /// Where to read the source a finding points at, for identity recipes that
     /// include a snippet hash.
     ///
@@ -97,6 +111,7 @@ impl std::fmt::Debug for NativeContext<'_> {
             .field("source", self.source)
             .field("rules_digest", &self.rules_digest)
             .field("advisory_db", &self.advisory_db)
+            .field("worktree", &self.worktree)
             .finish_non_exhaustive()
     }
 }
@@ -227,7 +242,11 @@ impl<'a> AssetPaths<'a> {
 /// Ingest consults this table, so a report from any of them can be read in from
 /// CI whether or not this build can *execute* the analyzer — which is the whole
 /// point of ADR-0014's "ingest is always available".
-pub static ADAPTERS: &[&dyn Adapter] = &[&semgrep::Semgrep, &cargo_audit::CargoAudit];
+pub static ADAPTERS: &[&dyn Adapter] = &[
+    &semgrep::Semgrep,
+    &cargo_audit::CargoAudit,
+    &osv_scanner::OsvScanner,
+];
 
 /// The adapter for `analyzer`, or `None` if this build has none.
 #[must_use]
@@ -292,6 +311,7 @@ mod tests {
             source: &SOURCE,
             rules_digest: None,
             advisory_db: None,
+            worktree: None,
             snippets: &crate::snippet::NoSnippets,
         }
     }
