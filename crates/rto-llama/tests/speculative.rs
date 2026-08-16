@@ -41,8 +41,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::model::LlamaModel;
+use llama_cpp_2::model::params::LlamaModelParams;
 use rto_llama::backend::release_shared_backend;
 use rto_llama::llama::{LlamaEngine, Served};
+use rto_llama::speculative::draft_head_layers;
 use rto_llama::{ChatRequest, Engine, Message};
 
 /// Registry names (`~/.roteiro/models/<name>/model.gguf`) that are known to ship
@@ -144,6 +148,50 @@ fn mtp_gguf() -> Option<PathBuf> {
     None
 }
 
+/// The file that would carry `path`'s draft head: the sibling `mtp.gguf` for a
+/// split model, the model's own GGUF for a bundled one. The same rule
+/// `LlamaEngine::speculative_decoder` applies, so this asks the question
+/// production asks rather than a lookalike.
+fn head_file(path: &Path) -> PathBuf {
+    let split = path.with_file_name("mtp.gguf");
+    if split.exists() {
+        split
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Whether a draft head is actually **installed** for `path`.
+///
+/// Being in [`MTP_MODELS`] means the model is MTP-*capable*, not that its head is
+/// on this disk: `ggml-org/Qwen3.8-27B-GGUF` ships the head as a separate
+/// `mtp-*.gguf` and records no `nextn_predict_layers` in its main file, so a
+/// registry install with no sibling `mtp.gguf` has nothing to draft with. Without
+/// this check the identity test picks that model up, decodes six completions on
+/// the plain path, and fails its "speculation actually ran" assertion — reporting
+/// a missing download as a broken decoder.
+///
+/// Loaded `vocab_only`, which reads the GGUF's metadata without paying for 19 GB
+/// of tensors.
+///
+/// A probe that cannot run answers **`true`**. The job of this function is to skip
+/// when the head is *known* absent; turning a real failure into a silent skip is
+/// the one thing it must never do.
+fn draft_head_installed(path: &Path) -> bool {
+    let Ok(backend) = LlamaBackend::init() else {
+        return true;
+    };
+    let params = LlamaModelParams::default().with_vocab_only(true);
+    let installed = match LlamaModel::load_from_file(&backend, head_file(path), &params) {
+        Ok(model) => draft_head_layers(&model) > 0,
+        Err(_) => true,
+    };
+    // Before any engine builds its own: this probe's backend must not be the one
+    // still standing when `release_shared_backend` is asserted at the end.
+    drop(backend);
+    installed
+}
+
 /// An engine over one GGUF, with speculation forced on or off.
 fn engine(path: &Path, speculative: bool) -> LlamaEngine {
     LlamaEngine::new(
@@ -205,6 +253,14 @@ fn speculation_does_not_change_the_output() {
     let Some(path) = mtp_gguf() else {
         return;
     };
+    if !draft_head_installed(&path) {
+        eprintln!(
+            "SKIP: {} ships no draft head on this disk — install the sibling `mtp.gguf` \
+             beside it, or point {GGUF_ENV} at a GGUF with a bundled head",
+            path.display()
+        );
+        return;
+    }
 
     let plain = engine(&path, false);
     let spec = engine(&path, true);
