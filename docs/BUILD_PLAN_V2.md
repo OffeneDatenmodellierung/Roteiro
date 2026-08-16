@@ -487,6 +487,52 @@ count and tags, from a **format read with no decoding and no model** (measured
   `export_factset` unchanged in shape; tests need **no model**, so they run on CI
   rather than self-skipping.
 
+### Stage 30 — MTP speculative decoding (issue #320) → *opt-in, unreleased* · effort **M** *(independent track)*
+
+**Goal:** spend the draft head a Qwen3.5+ GGUF already carries. Generation on Metal
+is memory-bandwidth bound, so a decode that *confirms* three proposed tokens costs
+about what a decode producing one costs. The drafter is the model's own `nextn`
+block — no second model to install or keep in step — and on the vendored llama.cpp
+(b10200, pre-upstream #26296) its tensors are loaded whether or not anything uses
+them, so the memory is already paid for.
+
+- **Measured** (split-head Qwen3.8-27B-Q4, 5 interleaved pairs, median of per-pair
+  ratios): draft width 1 → code **1.45×**, tool-call **1.22×**, prose **1.28×**;
+  width 3 → code **1.50×**, tool-call **1.35×**, prose **1.26×**. `DRAFT_MAX = 3`.
+  On Qwen3.5-9B the same sweep could not separate the widths from noise (0.86–1.14×,
+  both directions), so the win is size-dependent and the small-model case is honestly
+  *no win*.
+- **The finding that decided the default:** speculative decoding **changes some
+  completions**. Not in principle — measured. The sampler is driven identically
+  (one call per emitted token, in position order, `accept` between), so the
+  *distribution* is untouched; but llama.cpp's logits differ between batch width 1
+  and width 4, and that is enough. `tests/batch_numerics.rs` measures the gap at
+  max |Δlogit| **0.115–0.282** on hybrid Qwen3.5 against **0.002–0.003** on a dense
+  llama model, once exceeding the top-two margin outright; `tests/speculative.rs`
+  found the text differing on every run it ever made ("about the approach" vs "about
+  the algorithm", and so on). Fixing the seed neither reveals nor prevents this.
+- **Therefore opt-in**, `ROTEIRO_SPECULATIVE=1`, and *only* an explicit recognised
+  "on" — an unrecognised value is not consent. A completion that changes because the
+  decoder got faster must be asked for, not inherited by upgrading.
+- **Split heads:** `ggml-org/Qwen3.8-27B-GGUF` — the shape the registry installs —
+  ships its head as a separate file and records no `nextn_predict_layers` in its
+  main GGUF. Found by convention (`mtp.gguf` beside `model.gguf`, where `mmproj.gguf`
+  already sits), confirmed rather than trusted, and charged to the residency budget
+  alongside its target.
+- **Out of scope, deliberately:** multimodal requests (`mtmd_eval_chunks` decodes the
+  prompt itself, so the drafter never sees those batches), and shared-KV MTP
+  architectures (`new_context_with_ctx_other` would alias the target's memory across
+  a teardown order this deliberately declines).
+- **DoD:** no new link in the teardown chain — the draft context is a stack local
+  borrowing the model, so "drafts before engines before backend" is the borrow
+  checker's problem, not a discipline; a headless model falls back silently; and the
+  identity claim is **not** asserted, because it is false. `tests/speculative.rs`
+  asserts what holds (speculation activated, proposals accepted, control arm plain)
+  and *reports* the divergence.
+- **Not shippable as a default** until either llama.cpp's cross-batch-width numerics
+  tighten or the divergence is judged acceptable as a product decision. That is an
+  open question, not a task — see §9.
+
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
 
 - Semver review: query output is explicitly versioned, so new query shapes carry
@@ -512,6 +558,7 @@ count and tags, from a **format read with no decoding and no model** (measured
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | — | Stage 29 — audio metadata as `derived` facts | *in progress* |
+| — | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -528,6 +575,7 @@ count and tags, from a **format read with no decoding and no model** (measured
 | Unbounded episodic growth | Medium | Accepted by design; explicit user reclamation only. |
 | A single-vendor factual claim drives a design | Medium | This plan already survived one: a "boxlite is unpublished, therefore unmergeable" blocker was refuted by direct crates.io checking. Verify checkable externals independently. |
 | `EXTRACT_VERSION` bumped twice, forcing two full re-extractions | Low | Batch all extraction-touching lenses behind one bump (Stage 26). |
+| Speculative decoding silently changes a completion | **High** | Measured, not hypothetical (Stage 30). Off unless `ROTEIRO_SPECULATIVE` explicitly says on; unrecognised values are not consent. The risk is *acceptance by default*, so the mitigation is that there is no default. |
 
 ---
 
@@ -549,6 +597,11 @@ count and tags, from a **format read with no decoding and no model** (measured
    it — *is local code execution something Roteiro wants to be?* — is a product
    decision, not a backend one. If it ever becomes "yes", boxlite is the vehicle and
    Track A rides along; until then the answer stays "no".
-5. **Findings ↔ graph cross-surfacing**: joining findings to graph facts is
+6. **Is a faster decoder worth a different completion?** (Stage 30.) Speculative
+   decoding is measurably 1.22–1.50× on a 27B model and measurably does **not**
+   reproduce plain decoding's text. Those are both settled; what is not settled is
+   whether Roteiro will ever accept the second to get the first. Until it is, the
+   feature stays opt-in, which is a way of declining to answer rather than an answer.
+7. **Findings ↔ graph cross-surfacing**: joining findings to graph facts is
    deliberately not free in this design. When it is wanted, it needs a designed
    join, not an implicit one.
