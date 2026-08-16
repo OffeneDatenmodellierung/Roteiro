@@ -1247,11 +1247,19 @@ where
 /// library itself never prints.
 ///
 /// # Failure modes
-/// - **Transport failure** (connection dropped, disk full mid-write): the bytes
-///   on disk are **kept** along with their sidecar, and
-///   [`DownloadEvent::KeptPartial`] is emitted. The next call resumes from them.
-///   This is the whole point: a 19 GiB pull that dies at 90% costs the last 10%,
-///   not the whole thing.
+/// - **Transport failure** (the request never opens, the connection drops
+///   mid-body, the disk fills while writing): the bytes on disk are **kept**
+///   along with their sidecar, and [`DownloadEvent::KeptPartial`] is emitted.
+///   The next call resumes from them. This is the whole point: a 19 GiB pull
+///   that dies at 90% costs the last 10%, not the whole thing.
+///
+///   This holds for **every** failing return, not just the ones that happen
+///   mid-stream: whenever this function returns an error and a non-empty partial
+///   survives on disk, exactly one [`DownloadEvent::KeptPartial`] is emitted
+///   naming its size. An operator can therefore always tell "a prefix survived,
+///   the next pull will be shorter" from "nothing was kept" — which is the only
+///   reason resumable downloads are worth having, and is most needed on the
+///   failures that would otherwise return silently.
 /// - **Checksum failure**: the partial is **discarded**
 ///   ([`DownloadEvent::PoisonedPartial`]) and [`DownloadError::Checksum`]
 ///   returned. Those bytes are known-wrong; resuming from them is meaningless.
@@ -1282,6 +1290,38 @@ where
     F: FnMut(u64) -> Result<RangeReply<R>, DownloadError>,
     E: FnMut(DownloadEvent),
 {
+    let result = download_attempt(dest, url, expected_sha256, &mut open, &mut on_event);
+    if result.is_err() {
+        // One uniform rule for every failing path, rather than an emission at
+        // each `?` (which is how the early returns above the streaming loop —
+        // `open` failing outright, the sidecar or the file refusing to be
+        // written — came to return silently). Whatever went wrong, bytes still
+        // on disk are a resumable prefix and the operator is told so, exactly
+        // once. The paths that deliberately destroy the partial (poisoned
+        // checksum, an over-long body) have already deleted it, so this reports
+        // nothing for them — which is the distinction that matters.
+        let kept = existing_len(&partial_path(dest));
+        if kept > 0 {
+            on_event(DownloadEvent::KeptPartial { bytes: kept });
+        }
+    }
+    result
+}
+
+/// One attempt at [`download_resumable`], with no responsibility for announcing a
+/// surviving partial — its caller does that uniformly for every failure.
+fn download_attempt<R, F, E>(
+    dest: &Path,
+    url: &str,
+    expected_sha256: &str,
+    open: &mut F,
+    on_event: &mut E,
+) -> Result<(), DownloadError>
+where
+    R: std::io::Read,
+    F: FnMut(u64) -> Result<RangeReply<R>, DownloadError>,
+    E: FnMut(DownloadEvent),
+{
     use sha2::Digest as _;
 
     let tmp = partial_path(dest);
@@ -1289,8 +1329,7 @@ where
 
     // 1. Decide whether the bytes already on disk are a usable prefix of what we
     //    are about to fetch.
-    let (mut resume_from, mut known_total) =
-        plan_resume(dest, url, expected_sha256, &mut on_event)?;
+    let (mut resume_from, mut known_total) = plan_resume(dest, url, expected_sha256, on_event)?;
 
     // 2. A partial that already covers the whole resource needs no transfer at
     //    all — just verification. (A previous run died between the last write
@@ -1299,15 +1338,15 @@ where
         on_event(DownloadEvent::AlreadyComplete { bytes: resume_from });
         let mut hasher = sha2::Sha256::new();
         hash_prefix(&tmp, resume_from, &mut hasher)?;
-        return install_verified(dest, expected_sha256, hasher, &mut on_event);
+        return install_verified(dest, expected_sha256, hasher, on_event);
     }
 
     // 3. Open the transfer, folding any prefix already on disk into the hash.
     let mut hasher = sha2::Sha256::new();
     let (mut reader, append) = start_transfer(
         dest,
-        &mut open,
-        &mut on_event,
+        open,
+        on_event,
         &mut hasher,
         &mut resume_from,
         &mut known_total,
@@ -1349,9 +1388,6 @@ where
     drop(sink);
 
     if let Err(e) = streamed.and(durable) {
-        on_event(DownloadEvent::KeptPartial {
-            bytes: existing_len(&tmp),
-        });
         return Err(DownloadError::Io(e));
     }
 
@@ -1363,7 +1399,6 @@ where
     let on_disk = existing_len(&tmp);
     if let Some(total) = known_total {
         if on_disk < total {
-            on_event(DownloadEvent::KeptPartial { bytes: on_disk });
             return Err(DownloadError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!("connection closed after {on_disk} of {total} bytes"),
@@ -1381,7 +1416,7 @@ where
     }
 
     // 7. Verify and install atomically.
-    install_verified(dest, expected_sha256, hasher, &mut on_event)
+    install_verified(dest, expected_sha256, hasher, on_event)
 }
 
 /// A local HTTP/1.1 server for the download tests — enough of the protocol to
@@ -1606,9 +1641,10 @@ fn test_get_range(
 mod tests {
     use super::testserver::{Behaviour, TestServer};
     use super::{
-        DownloadError, DownloadEvent, ModelKind, Platform, REGISTRY, RangeKind, ResourceTier,
-        download_resumable, download_verified, find, installed_size, interpret_range_response,
-        partial_meta_path, partial_path, sha256_hex, store_root, test_get_range, verify_sha256,
+        DownloadError, DownloadEvent, ModelKind, Platform, REGISTRY, RangeKind, RangeReply,
+        ResourceTier, download_resumable, download_verified, find, installed_size,
+        interpret_range_response, partial_meta_path, partial_path, sha256_hex, store_root,
+        test_get_range, verify_sha256,
     };
     use std::path::{Path, PathBuf};
 
@@ -1871,6 +1907,68 @@ mod tests {
             ),
             "{events:?}"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_transport_that_never_opens_still_reports_the_partial_it_kept() {
+        let dir = scratch("openfail");
+        let dest = dir.join("model.bin");
+        let body = payload(30_000);
+        let sha = sha256_hex(&body);
+        let dead = "http://example.invalid/model.bin";
+
+        // A previous attempt left a valid, resumable prefix.
+        std::fs::write(partial_path(&dest), &body[..9_000]).expect("write");
+        std::fs::write(
+            partial_meta_path(&dest),
+            format!(r#"{{"version":1,"url":"{dead}","sha256":"{sha}","total":30000}}"#),
+        )
+        .expect("write meta");
+
+        // This attempt cannot even reach the server — it fails *before* a single
+        // byte moves, which is the path that used to return silently.
+        let mut events = Vec::new();
+        let result = download_resumable(
+            &dest,
+            dead,
+            &sha,
+            |_from| -> Result<RangeReply<std::io::Empty>, DownloadError> {
+                Err(DownloadError::Transport("connection refused".into()))
+            },
+            |e| events.push(e),
+        );
+        let err = result.expect_err("transport failure");
+        assert!(matches!(err, DownloadError::Transport(_)), "{err:?}");
+
+        // The operator must be able to tell "9 KB survived, the next pull is
+        // shorter" from "nothing was kept". That distinction is the whole reason
+        // resumable downloads are worth having, and this is when it is needed.
+        assert_eq!(events, vec![DownloadEvent::KeptPartial { bytes: 9_000 }]);
+        assert_eq!(
+            std::fs::metadata(partial_path(&dest)).expect("kept").len(),
+            9_000,
+            "the prefix itself must survive, not merely be announced"
+        );
+        assert!(partial_meta_path(&dest).exists(), "sidecar survives too");
+
+        // And it really is resumable: a working transport picks up from 9,000.
+        let server = TestServer::start(Behaviour {
+            body: body.clone(),
+            ranges: true,
+            limit: None,
+        });
+        let live = format!("http://{}/model.bin", server.addr);
+        std::fs::write(
+            partial_meta_path(&dest),
+            format!(r#"{{"version":1,"url":"{live}","sha256":"{sha}","total":30000}}"#),
+        )
+        .expect("rewrite meta");
+        let (result, _) = attempt(&server, &dest, &sha);
+        result.expect("resumed");
+        assert_eq!(std::fs::read(&dest).expect("installed"), body);
+        assert_eq!(server.hits(), vec![(9_000, 21_000)], "only the remainder");
 
         std::fs::remove_dir_all(&dir).ok();
     }
