@@ -509,8 +509,9 @@ digest-level evidence.
 the DoD executed rather than argued: real `semgrep` 1.173.0 over one tree, once
 as a host child process and once in a digest-pinned microVM, **4 identical
 findings** — `PARITY OK … subprocess isolation=none image=none, boxlite
-isolation=microvm image=sha256:67319956…`. 19 fault injections, 18 red on the
-right message; the nineteenth is recorded below because it did **not** go red.
+isolation=microvm image=sha256:67319956…`. 22 fault injections, 21 red on the
+right message; the one that was not is recorded below, because it did **not** go
+red and saying so is the point.
 
 **What the stage actually turned out to be about.** The plan said publication was
 verified "so this is a dependency addition, not a packaging problem". Publication
@@ -547,9 +548,15 @@ So the stage's real work was **governing that fetch**, not adding a dependency:
 **The gate that could not see any of this is now closed.**
 `crates/rto-exec/tests/build_script_fetch_audit.rs` reads the build script of
 every package in the `--all-features` graph and **fails** on anything that looks
-like it fetches without a recorded pin. Measured: 613 packages, 89 build scripts,
-2 flagged (both governed), 0 false positives, **1.62s** — the same order as the
-`cargo deny` step. Its module docs state what it does *not* cover (helper crates,
+like it fetches without a recorded pin. Measured: 613 packages, 89 of which have
+a build script (96 script files), **2 flagged (both governed), 0 false
+positives**, in **0.3s** — the audit prints those numbers on every run, so "it
+flagged nothing" stays checkable rather than trusted. Review asked whether the
+matcher was narrower than its docs claimed; it was, and the docs were the wrong
+half: widening to a bare `http(s)://` was measured at 29 flagged with **27 false
+positives** (`serde`, `quote`, `anyhow`, `winapi` … all citing a docs URL in a
+comment), so the claim was narrowed to what the code does and a test now pins the
+two together. Its module docs state what it does *not* cover (helper crates,
 `include!`d build modules, obfuscation, run-time fetches, already-vendored
 bytes); read them before trusting it. This hole was general, not boxlite's:
 `cargo deny --all-features check` reported `licenses ok` while 25 MB of GPL

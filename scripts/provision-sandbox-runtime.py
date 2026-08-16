@@ -26,11 +26,17 @@ import os
 import platform
 import re
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PINS = REPO_ROOT / "crates" / "rto-exec" / "src" / "runtime_pins.rs"
+
+# Per-socket-operation timeout for the download. Never `None`: this runs
+# unattended in CI, where "hangs until the job is killed" is strictly worse than
+# "fails in two minutes and says why".
+DOWNLOAD_TIMEOUT_SECONDS = 120
 
 # One `PinnedArchive { ... }` literal. Deliberately strict: a shape this does not
 # recognise is a parse failure, never a silently-skipped entry.
@@ -111,8 +117,25 @@ def main() -> None:
         print(f"already provisioned and matching: {dest}", file=sys.stderr)
     else:
         print(f"downloading {pin['url']}", file=sys.stderr)
-        with urllib.request.urlopen(pin["url"]) as response:  # noqa: S310
-            body = response.read()
+        try:
+            # An explicit timeout, because this runs in all three CI jobs and
+            # `urlopen`'s default is to wait forever. A stalled connection
+            # without one does not fail the job, it *hangs* it — burning the
+            # runner's whole time budget and reporting nothing useful when it is
+            # finally killed. Generous enough for ~27 MB on a slow link; the
+            # timeout is per socket operation, not for the transfer as a whole.
+            with urllib.request.urlopen(  # noqa: S310
+                pin["url"], timeout=DOWNLOAD_TIMEOUT_SECONDS
+            ) as response:
+                body = response.read()
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            sys.exit(
+                f"error: could not download the sandbox runtime: {e}\n"
+                f"  url:     {pin['url']}\n"
+                f"  timeout: {DOWNLOAD_TIMEOUT_SECONDS}s per socket operation\n"
+                "  Nothing was installed, so a later build will still refuse rather than "
+                "use unverified bytes."
+            )
         # Verify BEFORE writing to the destination: a body that fails its pin
         # must never appear at the path the build script will read.
         partial = dest.with_suffix(".partial")

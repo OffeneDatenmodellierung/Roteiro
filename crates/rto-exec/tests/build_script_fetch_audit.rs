@@ -38,14 +38,42 @@
 //!
 //! What it does guarantee is narrower and still worth having: **no package in
 //! this graph shells out to `curl`/`wget`, links an HTTP client, clones a git
-//! repository, or names a literal `http(s)://` URL in its build script without
-//! someone having written down why.** That is exactly the class `boxlite` is in,
-//! and it would have caught it before the lockfile did not.
+//! repository, or writes an `http(s)://` URL as a *string literal* in its build
+//! script without someone having written down why.** That is exactly the class
+//! `boxlite` is in, and it would have caught it before the lockfile did not.
 //!
-//! It errs toward over-triggering. A build script that merely mentions a URL in
-//! a comment will fail this test, and the fix is a one-line entry with a reason
-//! — which is the cost the project has decided to pay for not being surprised
-//! again.
+//! # A URL in a comment does **not** trip this, and that is deliberate
+//!
+//! An earlier revision of these docs claimed it did. That was wrong, and the
+//! matcher was the honest half: [`FETCH_MARKERS`] requires the quote that starts
+//! a string literal (`"https://`), so a bare URL in a `//` comment is not
+//! matched. Raw strings *are* — `r#"https://…` and `r"https://…` both contain
+//! that quote.
+//!
+//! Widening it to a bare `https://` was measured over this repository's real
+//! graph rather than argued about, and is the wrong trade:
+//!
+//! | matcher | script files | flagged | false positives |
+//! |---|---|---|---|
+//! | quote-anchored (this one) | 96 | 2 | 0 |
+//! | bare `http(s)://` | 96 | 29 | **27** |
+//!
+//! (613 packages, of which 89 have a build script; those 89 contain 96 script
+//! files, because a package may have both a `build.rs` and a `build/` directory.
+//! The audit prints these numbers on every run — a gate that says only "ok"
+//! cannot be told apart from one that looked at nothing.)
+//!
+//! The 27 are crates like `serde`, `quote`, `proc-macro2`, `anyhow`, `thiserror`
+//! and `winapi`, every one of which merely cites a documentation or issue URL in
+//! a comment. Twenty-seven allow-list entries of pure noise would not make this
+//! gate stronger; it would make it unread, and the next real fetch would hide in
+//! the list. **A gate nobody reads is the failure mode this file exists to
+//! prevent**, so the claim is narrowed to what the code actually does instead.
+//!
+//! The residual gap — a build script that fetches using a URL that is never a
+//! string literal, assembled from parts or read from the environment — is real,
+//! and is the "cannot see obfuscation" limitation above. Matching comments would
+//! not close it, because a comment cannot fetch anything.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -95,12 +123,27 @@ const REVIEWED: &[Reviewed] = &[
 /// fast, and the cost is only that it triggers slightly more eagerly, which is
 /// the direction to err in.
 const FETCH_MARKERS: &[&str] = &[
+    // Shelling out to a downloader. The quotes are part of the marker: this is
+    // the argv form, which is how `boxlite` does it.
     "\"curl\"",
     "\"wget\"",
+    "\"aria2c\"",
+    // Linking an HTTP client or opening a socket directly. Each of these was
+    // measured over this repository's real graph and adds nothing to the flagged
+    // count, so the extra coverage costs no noise.
     "reqwest",
     "ureq",
     "attohttpc",
     "isahc",
+    "minreq",
+    "curl::",
+    "hyper::",
+    "native_tls",
+    "TcpStream",
+    // A URL written as a string literal. The leading quote is load-bearing — see
+    // the module docs for what dropping it costs (2 flagged becomes 29, of which
+    // 27 are crates citing a docs URL in a comment). Raw strings are covered,
+    // because `r#"` and `r"` both end in the quote this matches.
     "\"https://",
     "\"http://",
 ];
@@ -166,6 +209,17 @@ fn no_dependency_build_script_fetches_anything_unpinned() {
          which would make it pass vacuously"
     );
 
+    // Report the coverage, always. A gate that says only "ok" cannot be told
+    // apart from a gate that looked at nothing, and the numbers are what makes
+    // a later "it flagged nothing" claim checkable rather than trusted.
+    eprintln!(
+        "build-script audit: {} packages, {scanned} build scripts, {} flagged, \
+         {} reviewed exception(s) matched",
+        packages.len(),
+        offenders.len() + matched_reviews.len(),
+        matched_reviews.len()
+    );
+
     assert!(
         offenders.is_empty(),
         "{} dependency build script(s) look like they fetch, and are not reviewed:\n\n{}\n\n\
@@ -190,6 +244,59 @@ fn no_dependency_build_script_fetches_anything_unpinned() {
             review.version
         );
     }
+}
+
+/// The matcher matches exactly what the module docs say it matches.
+///
+/// This test exists because the docs and the code had already drifted once: an
+/// earlier revision claimed a URL in a comment would trip the audit, and it
+/// never did. That is the worst kind of documentation on a security gate —
+/// it overstates the protection, so a reader stops looking for the hole.
+///
+/// Every case below is a line from the docs, turned into an assertion. If
+/// someone widens or narrows [`FETCH_MARKERS`], this fails until the prose is
+/// brought along with it.
+#[test]
+fn the_matcher_matches_exactly_what_the_docs_claim() {
+    // Caught: fetch primitives, and URLs written as string literals.
+    for caught in [
+        r#"Command::new("curl").arg("-fsSL")"#,
+        r#"Command::new("wget")"#,
+        r"let body = reqwest::blocking::get(url)",
+        r"ureq::get(&url).call()",
+        r#"let u = "https://example.com/x.tgz";"#,
+        r#"let u = "http://example.com/x.tgz";"#,
+        // Raw strings end in the same quote, so they are covered.
+        "let u = r#\"https://example.com/x.tgz\"#;",
+        "let u = r\"https://example.com/x.tgz\";",
+        // A remote git operation, but only alongside `git` itself.
+        r#"Command::new("git").args(["clone", url])"#,
+    ] {
+        assert!(
+            fetch_marker(caught).is_some(),
+            "should have been flagged: {caught}"
+        );
+    }
+
+    // Not caught, and the docs now say so rather than claiming otherwise.
+    for missed in [
+        "// see https://example.com/x.tgz for the artifact layout",
+        "/* fetched from http://example.com by CI, not here */",
+        "//! Upstream docs: https://example.com/",
+        // Assembled at run time — the documented obfuscation limitation.
+        r#"let u = format!("{HOST}/x.tgz");"#,
+        // A local git read is not a remote one.
+        r#"Command::new("git").args(["rev-parse", "HEAD"])"#,
+    ] {
+        assert!(
+            fetch_marker(missed).is_none(),
+            "should NOT have been flagged — the docs promise it is not: {missed}"
+        );
+    }
+
+    // And the specific claim the docs make about the quote being load-bearing.
+    assert!(fetch_marker(r#""https://x""#).is_some());
+    assert!(fetch_marker("https://x").is_none());
 }
 
 /// An exception must carry its reasoning, on the same terms `deny.toml` demands

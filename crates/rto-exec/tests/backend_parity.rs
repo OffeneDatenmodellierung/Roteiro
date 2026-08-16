@@ -259,8 +259,28 @@ impl Drop for FixtureTree {
     }
 }
 
+/// A fresh checkout of [`FIXTURES`], at a path no other test can be using.
+///
+/// **The uniqueness is the point, not tidiness.** Both tests in this file build
+/// a tree and `libtest` runs them on separate threads by default, so a shared
+/// fixed path meant one test's setup could `remove_dir_all` the tree the other
+/// was mid-scan on. The failure would have been intermittent and would have
+/// looked like a parity mismatch — a flake in exactly the assertion that is
+/// supposed to be the most trustworthy thing in this PR.
+///
+/// The suffix is the process id plus a per-process counter: unique across
+/// concurrent tests within a run, and across two runs happening at once, without
+/// pulling in a random-number generator for a directory name.
 fn fixture_tree() -> FixtureTree {
-    let dir = std::env::temp_dir().join("rto-exec-backend-parity");
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    let unique = format!(
+        "rto-exec-backend-parity-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let dir = std::env::temp_dir().join(unique);
     std::fs::remove_dir_all(&dir).ok();
     for (path, body) in FIXTURES {
         let full = dir.join(path);
@@ -268,6 +288,28 @@ fn fixture_tree() -> FixtureTree {
         std::fs::write(&full, body).expect("write fixture");
     }
     FixtureTree(dir)
+}
+
+/// Two fixture trees taken at once never share a path.
+///
+/// Cheap, and it is the property the parity tests silently depend on: if this
+/// ever stopped holding they would not fail here, they would fail
+/// intermittently over there, as a false parity mismatch.
+#[test]
+fn concurrent_fixture_trees_do_not_share_a_directory() {
+    let (a, b) = (fixture_tree(), fixture_tree());
+    assert_ne!(a.path(), b.path());
+    assert!(a.path().join("src/shell.rs").is_file());
+    assert!(b.path().join("src/shell.rs").is_file());
+
+    // And dropping one leaves the other intact — the exact interference the
+    // shared path allowed.
+    let surviving = b.path().to_path_buf();
+    drop(a);
+    assert!(
+        surviving.join("src/shell.rs").is_file(),
+        "one tree's teardown removed another's fixture"
+    );
 }
 
 /// Where `name` is on `PATH`, if anywhere.
