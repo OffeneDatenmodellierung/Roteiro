@@ -1428,6 +1428,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_overlong_embedding_input_is_a_400_not_a_500() {
+        // llama.cpp bounds how many tokens one batch may carry and enforces it
+        // with a `GGML_ASSERT`, which aborts the *process* — so `rto-llama`
+        // refuses an over-long input up front as an `InvalidRequest` (issue
+        // #346). That variant reached `/v1/embeddings` for the first time with
+        // that guard: before it, `embed` could only fail as `UnknownModel`,
+        // `Unsupported` or `Inference`, so this arm of the match was unreachable
+        // and untested. It has to be a 400 — the caller sent too much text, which
+        // is something they can fix, and a 500 would tell them the opposite.
+        struct OverlongEngine;
+        impl Engine for OverlongEngine {
+            fn models(&self) -> Vec<ModelInfo> {
+                vec![ModelInfo {
+                    id: "bge-small-en-v1.5-gguf".to_owned(),
+                }]
+            }
+            fn chat_stream(
+                &self,
+                _req: &ChatRequest,
+                _on_token: &mut dyn FnMut(&str),
+            ) -> Result<CompletionStats, EngineError> {
+                unreachable!("this test only drives the embeddings route")
+            }
+            fn embed(
+                &self,
+                _model: &str,
+                _inputs: &[String],
+            ) -> Result<Vec<Vec<f32>>, EngineError> {
+                Err(EngineError::InvalidRequest(
+                    "embedding input is 702 tokens, over the 512-token limit this \
+                     model accepts in one request — send less text (shorten or split it)"
+                        .to_owned(),
+                ))
+            }
+        }
+
+        let body = serde_json::json!({
+            "model": "bge-small-en-v1.5-gguf",
+            "input": "…a very long document…",
+        });
+        let resp = app(std::sync::Arc::new(OverlongEngine))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["type"], "invalid_request_error");
+        // The limit and the actual size must survive the trip to the client:
+        // they are the only way a caller learns how much to cut.
+        let message = json["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("702") && message.contains("512"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
     async fn embedding_model_chat_is_a_clean_error_not_a_crash() {
         // The engine's chat guard rejects an encoder-only embedding model with a
         // typed `InvalidRequest` *before* the decode path that would abort the

@@ -157,12 +157,27 @@ fn draft_max_u32() -> u32 {
     u32::try_from(DRAFT_MAX).unwrap_or(0)
 }
 
-/// The context parameters a generation uses, speculative or not — the shape
-/// `LlamaEngine::new_context` builds, restated here because a speculative
-/// generation needs to derive two contexts from it rather than one.
-fn base_params(n_ctx: u32) -> llama_cpp_2::context::params::LlamaContextParams {
+/// The context parameters a generation uses, speculative or not — the single
+/// shape every generative context is built from. [`crate::llama::LlamaEngine`]'s
+/// `new_context` calls this too, so the plain and the speculative contexts cannot
+/// drift apart; a speculative generation just derives *two* contexts from it
+/// rather than one.
+///
+/// **`n_batch` is set here on purpose** (issue #346). Left unset it defaults to
+/// llama.cpp's 2048, which `llama_context` then clamps to `min(n_ctx, 2048)` —
+/// so a context advertising 4096 tokens would refuse, by `GGML_ASSERT` and a
+/// process abort rather than an error, any single `decode` of more than 2048.
+/// Asking for `n_ctx` makes the logical batch as wide as the window the engine
+/// advertises, so a prompt that fits the context can actually be submitted.
+/// `n_ubatch` is deliberately *not* raised: the physical batch is what sizes the
+/// compute graph, llama.cpp splits a logical batch into `n_ubatch`-sized pieces
+/// for causal models by itself, and leaving it at llama.cpp's 512 is what keeps
+/// this change close to free (see `tests/batch_capacity.rs` for the measurement).
+pub(crate) fn base_params(n_ctx: u32) -> llama_cpp_2::context::params::LlamaContextParams {
     let n_ctx = std::num::NonZeroU32::new(n_ctx).unwrap_or(std::num::NonZeroU32::MIN);
-    llama_cpp_2::context::params::LlamaContextParams::default().with_n_ctx(Some(n_ctx))
+    llama_cpp_2::context::params::LlamaContextParams::default()
+        .with_n_ctx(Some(n_ctx))
+        .with_n_batch(n_ctx.get())
 }
 
 /// The environment variable that turns speculative decoding on.
