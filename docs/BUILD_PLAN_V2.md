@@ -777,11 +777,23 @@ is why it rides an independent track.
    it — *is local code execution something Roteiro wants to be?* — is a product
    decision, not a backend one. If it ever becomes "yes", boxlite is the vehicle and
    Track A rides along; until then the answer stays "no".
-6. **Is a faster decoder worth a different completion?** (Stage 30.) Speculative
-   decoding is measurably 1.22–1.50× on a 27B model and measurably does **not**
-   reproduce plain decoding's text. Those are both settled; what is not settled is
-   whether Roteiro will ever accept the second to get the first. Until it is, the
-   feature stays opt-in, which is a way of declining to answer rather than an answer.
+6. ~~**Is a faster decoder worth a different completion?**~~ **Answered: yes**
+   (Stage 30, decided by the owner). Speculative decoding is measurably 1.22–1.50×
+   on a 27B model and measurably does **not** reproduce plain decoding's text. Both
+   halves are settled measurements; the judgement was whether Roteiro accepts the
+   second to get the first, and it does.
+
+   What that does **not** license is flipping the default. Generation was never a
+   reproducible surface — sampling, quantisation and the served model all move the
+   text already — so this changes how *fast* an already-variable answer arrives,
+   not whether Roteiro keeps a promise it was making. The graph is where
+   reproducibility is promised, and nothing in Stage 30 touches it. But the
+   remaining honest reasons to keep `ROTEIRO_SPECULATIVE` opt-in stand on their
+   own: the win is **size-dependent** (0.86–1.14× on a 9B — noise), it needs a
+   draft head that most installed models do not ship, and the identity claim has
+   never been observed to hold on any model. A default that helps one model class
+   and silently changes output on the rest is a worse default than none. Revisit
+   when a draft head is present on the common tier, not before.
 7. **Findings ↔ graph cross-surfacing**: joining findings to graph facts is
    deliberately not free in this design. When it is wanted, it needs a designed
    join, not an implicit one.
