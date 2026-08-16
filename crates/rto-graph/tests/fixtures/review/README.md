@@ -1,8 +1,17 @@
 # Review corpus
 
-`review-corpus.jsonl` — every inline review comment GitHub Copilot left on this
-repository over a single day, each one adjudicated against what the maintainer
-actually did about it. 26 rows: **22 real defects, 4 false positives.**
+`review-corpus.jsonl` — inline review comments GitHub Copilot left on this
+repository, each adjudicated against what the maintainer actually did about it.
+The class table below carries the counts, and a test asserts it against the data.
+
+**What the sample is, precisely**, because it decides what may be computed from
+it: rows for PRs #292–#343 are the *complete* set of Copilot comments on those
+twelve PRs over a single day — nothing filtered, so a precision figure over that
+subset is meaningful. The later row on #352 is **one selected comment** out of the
+eight that PR received; it was added because it extended the compile-failure
+class, not because #352 was adjudicated end to end. So a ratio computed over
+*all* rows is very slightly biased toward the false class, and anyone quoting one
+should either say so or restrict to the twelve-PR subset (`pr <= 343`).
 
 This exists so that "is an automated reviewer any good on *this* codebase?" is a
 question with an answer rather than an impression. A review tool is otherwise
@@ -10,7 +19,7 @@ unmeasurable: its output is prose, its mistakes are plausible, and nobody
 remembers last week's false positives well enough to count them. With a fixed
 corpus of known verdicts, any candidate reviewer — a different model, a changed
 prompt, a graph-grounded arm, a future `roteiro review` mode — is scored against
-the same 26 comments and the numbers are comparable across attempts.
+the same fixed set of comments, and the numbers are comparable across attempts.
 
 The corpus is a **historical record**, not a live view. It is deliberately not
 regenerated from the GitHub API: the rows describe what a reviewer said about a
@@ -31,7 +40,7 @@ One JSON object per line, exactly these eleven fields:
 | `path` | File the comment is anchored to |
 | `line` | Line in that file, new-side |
 | `verdict` | `real` or `false` |
-| `defect_class` | One of the fourteen classes below |
+| `defect_class` | One of the classes in the table below |
 | `fix_commit` | Short sha of the commit that fixed it, where one is identifiable |
 | `description` | One line stating the defect, or stating why the claim is wrong |
 | `comment_url` | Permalink to the original comment |
@@ -91,21 +100,22 @@ provenance is partly invented is worse than one that admits a gap.
 ## The result that gives the corpus its point
 
 **Every false positive is a compile-failure claim, and every compile-failure
-claim is a false positive — 4 of 4.** The other 22 comments span thirteen classes
-and every one was accepted and fixed.
+claim is a false positive.** Read that off the table above: the
+`false-compile-claim` row is the only one with a non-zero `false` column, and its
+`real` column is zero. Every other row is real and was accepted and fixed.
 
 That is not a curiosity; it is a suppression rule with a measured cost of zero.
 CI already computes the refutation: the `msrv` job is
 `cargo check --workspace --all-features` and finishes in well under a minute. On
-all four rows it had gone **green before the claim was posted** — by 65 seconds
-on `2b761ce`, and by 83 seconds on `c1481836`. So withholding a compile-failure
-claim while the build is green costs no extra compute and, on this evidence,
-discards nothing true. The four investigations those comments triggered were
-avoidable by reading a status that already existed.
+every one of those rows it had gone **green before the claim was posted** — by 65
+seconds on `2b761ce`, and by 83 seconds on `c1481836`. So withholding a
+compile-failure claim while the build is green costs no extra compute and, on
+this evidence, discards nothing true. Each investigation those comments triggered
+was avoidable by reading a status that already existed.
 
 The corollary is the more useful half: the *remaining* classes are where an
-automated reviewer earned its keep here. `contract-drift` alone is five real
-defects, and it is the class a diff-only reviewer is least equipped for, since
+automated reviewer earned its keep here. `contract-drift` is the largest of
+them, and it is the class a diff-only reviewer is least equipped for, since
 the doc making the claim and the code breaking it need not be adjacent.
 
 ## Keeping it honest
@@ -117,6 +127,14 @@ the doc making the claim and the code breaking it need not be adjacent.
 repeats. It reads only this file — **no network, no GitHub API, no model** — so
 it cannot flake on rate limits and cannot start failing because something changed
 upstream.
+
+It also asserts **the class table above against the data**, so a row added
+without updating the table fails the build. That check exists because this file's
+own review caught the table's totals disagreeing with the corpus — a
+`contract-drift` defect in the change that ships a catalogue of `contract-drift`.
+Only the table is parsed, never prose: counts therefore live in exactly one place
+here, and `docs/REVIEW_CHECKLIST.md` links to this file rather than restating
+them.
 
 One check is gated rather than skipped silently: `reviewed_shas_resolve_in_this_repository`
 confirms each `reviewed_sha` is a real object here, which catches a typo'd or

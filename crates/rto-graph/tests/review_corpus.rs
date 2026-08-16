@@ -14,7 +14,7 @@
 //! See `tests/fixtures/review/README.md` for what the fields mean and
 //! `docs/REVIEW_CHECKLIST.md` for the adjudication rule that decides `verdict`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -79,6 +79,29 @@ fn is_hex_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// A string field, or a panic that names the offending line.
+///
+/// Every read goes through this rather than `expect`: a row whose fields are all
+/// present but wrongly typed is exactly the failure a corpus maintainer hits, and
+/// "`defect_class` is a string" without a line number sends them looking by hand.
+fn str_field<'a>(row: &'a Value, field: &str, n: usize) -> &'a str {
+    row[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("line {n}: {field} must be a string, got {}", row[field]))
+}
+
+/// A positive-integer field, or a panic that names the offending line.
+fn u64_field(row: &Value, field: &str, n: usize) -> u64 {
+    let v = row[field].as_u64().unwrap_or_else(|| {
+        panic!(
+            "line {n}: {field} must be a non-negative integer, got {}",
+            row[field]
+        )
+    });
+    assert!(v > 0, "line {n}: {field} must be positive, got {v}");
+    v
+}
+
 #[test]
 fn the_corpus_is_not_empty_and_every_line_parses() {
     let rows = rows();
@@ -113,14 +136,12 @@ fn every_row_carries_exactly_the_documented_fields() {
 #[test]
 fn verdict_and_defect_class_come_from_the_documented_vocabularies() {
     for (n, row) in rows() {
-        let verdict = row["verdict"].as_str().expect("verdict is a string");
+        let verdict = str_field(&row, "verdict", n);
         assert!(
             VERDICTS.contains(&verdict),
             "line {n}: verdict {verdict:?} is not one of {VERDICTS:?}"
         );
-        let class = row["defect_class"]
-            .as_str()
-            .expect("defect_class is a string");
+        let class = str_field(&row, "defect_class", n);
         assert!(
             CLASSES.contains(&class),
             "line {n}: defect_class {class:?} is not a documented class; add it \
@@ -132,25 +153,11 @@ fn verdict_and_defect_class_come_from_the_documented_vocabularies() {
 #[test]
 fn identifiers_and_anchors_are_well_formed() {
     for (n, row) in rows() {
-        let id = row["id"].as_u64();
-        assert!(
-            id.is_some_and(|v| v > 0),
-            "line {n}: id must be a positive integer"
-        );
-        let pr = row["pr"].as_u64();
-        assert!(
-            pr.is_some_and(|v| v > 0),
-            "line {n}: pr must be a positive integer"
-        );
-        let line = row["line"].as_u64();
-        assert!(
-            line.is_some_and(|v| v > 0),
-            "line {n}: line must be a positive integer"
-        );
+        u64_field(&row, "id", n);
+        u64_field(&row, "pr", n);
+        u64_field(&row, "line", n);
 
-        let sha = row["reviewed_sha"]
-            .as_str()
-            .expect("reviewed_sha is a string");
+        let sha = str_field(&row, "reviewed_sha", n);
         assert!(
             is_hex_sha(sha),
             "line {n}: reviewed_sha {sha:?} is not a 40-character hex sha. It \
@@ -160,14 +167,14 @@ fn identifiers_and_anchors_are_well_formed() {
 
         // `fix_commit` is optional (three rows legitimately have none), but when
         // present it must look like a sha rather than a note to the reader.
-        let fix = row["fix_commit"].as_str().expect("fix_commit is a string");
+        let fix = str_field(&row, "fix_commit", n);
         assert!(
             fix.is_empty() || (fix.len() >= 7 && fix.chars().all(|c| c.is_ascii_hexdigit())),
             "line {n}: fix_commit {fix:?} is neither empty nor a hex sha"
         );
 
         for field in ["reviewer", "path", "description", "comment_url"] {
-            let v = row[field].as_str().expect("string field");
+            let v = str_field(&row, field, n);
             assert!(!v.trim().is_empty(), "line {n}: {field} must not be blank");
         }
     }
@@ -177,7 +184,7 @@ fn identifiers_and_anchors_are_well_formed() {
 fn no_comment_id_appears_twice() {
     let mut seen = BTreeSet::new();
     for (n, row) in rows() {
-        let id = row["id"].as_u64().expect("id is an integer");
+        let id = u64_field(&row, "id", n);
         assert!(
             seen.insert(id),
             "line {n}: duplicate comment id {id}; the id is the corpus's \
@@ -185,6 +192,83 @@ fn no_comment_id_appears_twice() {
              every score computed from the file"
         );
     }
+}
+
+/// The README's class table must agree with the file it describes.
+///
+/// This PR's own review caught the README and `docs/REVIEW_CHECKLIST.md`
+/// disagreeing about the row count — a `contract-drift` defect in the change
+/// that ships a corpus cataloguing `contract-drift`. Counts stated in prose drift
+/// from the data they describe; the cheapest fix is to make the drift fail a
+/// test.
+///
+/// Only the **table** is parsed, never the surrounding prose: its rows have a
+/// fixed shape (`| `class` — description | n | real | false |`), so this reads
+/// structure rather than English. Narrative totals elsewhere are deliberately not
+/// asserted — a test that greps sentences is more fragile than the staleness it
+/// prevents, which is why `docs/REVIEW_CHECKLIST.md` is left to link here rather
+/// than restate the numbers.
+#[test]
+fn the_readme_class_table_matches_the_corpus() {
+    let readme = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/review/README.md");
+    let text = std::fs::read_to_string(&readme)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", readme.display()));
+
+    // Actual counts, from the data.
+    let mut actual: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for (n, row) in rows() {
+        let class = str_field(&row, "defect_class", n).to_string();
+        let verdict = str_field(&row, "verdict", n);
+        let e = actual.entry(class).or_insert((0, 0));
+        if verdict == "real" {
+            e.0 += 1;
+        } else {
+            e.1 += 1;
+        }
+    }
+
+    // Stated counts, from the table. A row is `| `class` — … | n | real | false |`.
+    let mut stated: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("| `") {
+            continue;
+        }
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        let [head, total, real, fals] = cells.as_slice() else {
+            continue;
+        };
+        let Some(class) = head.trim_start_matches("| ").split('`').nth(1) else {
+            continue;
+        };
+        let nums: Vec<usize> = [total, real, fals]
+            .iter()
+            .filter_map(|c| c.parse().ok())
+            .collect();
+        let [total, real, fals] = nums.as_slice() else {
+            continue;
+        };
+        assert_eq!(
+            total,
+            &(real + fals),
+            "README class table row for `{class}`: {total} does not equal \
+             {real} real + {fals} false"
+        );
+        stated.insert(class.to_string(), (*real, *fals));
+    }
+
+    assert!(
+        !stated.is_empty(),
+        "no class-table rows parsed out of {}; if the table was reformatted, \
+         update this test with it",
+        readme.display()
+    );
+    assert_eq!(
+        stated, actual,
+        "the README class table disagrees with review-corpus.jsonl \
+         (left = stated in the README, right = counted from the data). Update \
+         the table — and any total quoted in prose — to match the file"
+    );
 }
 
 /// Confirms each `reviewed_sha` names a real object in this repository, which
@@ -222,7 +306,7 @@ fn reviewed_shas_resolve_in_this_repository() {
     }
 
     for (n, row) in rows() {
-        let sha = row["reviewed_sha"].as_str().expect("reviewed_sha");
+        let sha = str_field(&row, "reviewed_sha", n);
         let out = git(&["cat-file", "-t", sha]).expect("git cat-file runs");
         assert!(
             out.status.success(),
