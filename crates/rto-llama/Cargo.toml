@@ -19,6 +19,15 @@ thiserror = { workspace = true }
 llama-cpp-2 = { version = "0.1.154", optional = true }
 encoding_rs = { version = "0.8", optional = true }
 
+[dev-dependencies]
+# Not a new dependency: the same `llama-cpp-2` the `llama` feature already
+# pulls, at the same version, made visible to the integration tests — which are
+# separate crates and so cannot see the library's own dependencies. It is what
+# `tests/batch_numerics.rs` needs to compare llama.cpp's logits at two batch
+# widths, a question about llama.cpp that `LlamaEngine`'s API deliberately does
+# not expose. Inert unless a test that uses it is compiled.
+llama-cpp-2 = { version = "0.1.154" }
+
 [features]
 # The real llama.cpp-backed engine. Off by default so downstream default builds
 # stay pure-Rust; callers turn it on when they need local inference.

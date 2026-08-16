@@ -22,8 +22,13 @@
 //!   precedent — `rebuild` deletes only `edges` and `nodes`, and what cannot be
 //!   re-derived must not be destroyed by a re-derivation.
 //!
-//! Nothing here adds a [`crate::Provenance`] variant, and `EXTRACT_VERSION` does
-//! not change: memory is not extraction output.
+//! Nothing here adds a [`crate::Provenance`] variant, and no memory write may
+//! invalidate the content-addressed fact cache: memory is not extraction output,
+//! so it is not part of the extraction identity `EXTRACT_VERSION` belongs to.
+//! That is asserted as a property — a full spread of memory writes leaves the
+//! recorded extraction identity and every cached fact set untouched, and the next
+//! `sync` is still a no-op — by `memory_writes_do_not_invalidate_the_fact_cache`
+//! in `tests/sync.rs`, where the cache it is about lives.
 //!
 //! # This is the episodic tier only
 //!
@@ -839,45 +844,18 @@ mod tests {
         }
     }
 
-    /// **`EXTRACT_VERSION` does not change for agent memory.**
-    ///
-    /// It is folded into the content-addressed cache key, so bumping it discards
-    /// every cached fact set in every clone and forces a full re-extraction of
-    /// every repository. That cost is right when extraction *output* changes —
-    /// and memory is not extraction output at all. It is not derived from
-    /// `(path, blob id, bytes)`, no extractor emits it, and no cached fact set
-    /// can contain it. This is a stage-scoped guard on a shared constant, and it
-    /// lives here rather than in an integration test because the constant is
-    /// crate-private.
-    ///
-    /// The expected base is the version *someone else* is entitled to move: this
-    /// guard asserts that **memory** did not move it, not that it never moves.
-    /// It must therefore be updated whenever a change to extraction output
-    /// legitimately bumps the base, or adds a feature namespace — subtracting
-    /// every namespace is what isolates the base from the feature matrix.
-    ///
-    /// Base 10 → 11 and the `audio-metadata` (+400) namespace both arrived with
-    /// ADR-0016 (`audio_stream` nodes genuinely change extraction output, which
-    /// is exactly what the constant is for). This guard shipped one minute later
-    /// in a PR whose CI had never seen them, so for 57 seconds' worth of merge
-    /// ordering it asserted against a constant that had already moved, and `main`
-    /// went red under *every* feature combination — 11 ≠ 10 by default, 411 ≠ 10
-    /// under `--all-features`.
-    #[test]
-    fn agent_memory_does_not_bump_the_extraction_version() {
-        assert_eq!(
-            crate::extract::EXTRACT_VERSION
-                - if cfg!(feature = "pdf-text") { 100 } else { 0 }
-                - if cfg!(feature = "image-ocr") { 200 } else { 0 }
-                - if cfg!(feature = "audio-metadata") {
-                    400
-                } else {
-                    0
-                },
-            11,
-            "memory is not extraction output; nothing here may invalidate the fact cache",
-        );
-    }
+    // `agent_memory_does_not_bump_the_extraction_version` stood here. The
+    // invariant it was named for — *memory must not invalidate the fact cache* —
+    // now lives in `tests/sync.rs` as
+    // `memory_writes_do_not_invalidate_the_fact_cache`, stated as a property of
+    // memory writes rather than as an equality on `EXTRACT_VERSION`. The history
+    // that argues for the change is recorded on that test.
+    //
+    // In short: `EXTRACT_VERSION` is global, so pinning its value here asserted
+    // the whole crate's extraction work rather than memory's share of it, and it
+    // could not catch what it was named for — a memory write that really did
+    // reach extraction surfaces as stale cached facts, not as an unexpected
+    // number.
 
     #[test]
     fn kind_tokens_round_trip_and_reject_the_unknown() {
