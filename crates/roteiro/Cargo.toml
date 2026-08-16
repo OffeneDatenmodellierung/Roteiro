@@ -77,7 +77,39 @@ http-body-util = "0.1"
 # feature" — so `execution` is on by default. It stays a *named* feature because
 # the subprocess and sandboxed backends land behind subfeatures of it, and so
 # `--no-default-features` still yields a binary with no analyzer surface at all.
-default = ["execution"]
+#
+# `models` is on by default because `roteiro model pull` is the **prerequisite
+# for working offline**, and without it that command does not exist: the clap
+# variant is `#[cfg(feature = "models")]`, so a stock install answered
+# `unrecognized subcommand` rather than degrading gracefully. "Prepare once, then
+# work offline" — the story `docs/OFFLINE_SETUP.md` tells — was unreachable from
+# the shipped default. It is cheap to carry: measured on an unloaded 18-core
+# machine, a cold release build is within noise of the old default (28.0–30.5 s
+# before, 29.2–31.1 s after) and the binary grows 2.17 MiB over 20 extra crates
+# (209 → 229). It adds **no new host-toolchain class**: `ureq`'s rustls stack
+# does reach C and pregenerated assembly via `ring`, but the default build
+# already compiles C for bundled SQLite and 18 tree-sitter grammars, so this
+# needs the same `cc` and no more — never C++, cmake or libclang. Do not restate
+# this as "pure Rust"; it is one `cc` away from that and the distinction is the
+# whole point. `cargo deny check` is clean at this set; every licence it
+# moves into the default binary (`ISC`, `BSD-3-Clause`, and
+# `CDLA-Permissive-2.0` via `webpki-roots`) was already allow-listed with a
+# recorded rationale — see `deny.toml` and ADR-0017.
+#
+# **`serve` deliberately stays off**, and this is the record so that nobody
+# "completes" the job later:
+#   * it transitively builds llama.cpp from source — measured +24 s cold on 18
+#     cores, realistically **3–12 minutes on 2–4 cores**;
+#   * without `cmake` and `libclang` it does not degrade, it **panics in a build
+#     script** and `cargo install` fails. On Debian/Ubuntu `build-essential`
+#     supplies neither, so it turns zero extra packages into two;
+#   * `docs/VENDORED_DEPENDENCIES.md` records that the vendored llama.cpp has
+#     **13 published upstream advisories invisible to `cargo audit`**, which
+#     reads crate metadata and cannot see C++ vendored by a build script.
+#     Defaulting it on would ship that unmonitored surface to everyone rather
+#     than to the people who asked for inference.
+# The same reasoning keeps `exec-subprocess` off; its own comment below says why.
+default = ["execution", "models"]
 # The `AnalyzerRunner` seam and `roteiro security ingest|list` (ADR-0012,
 # ADR-0014). Adds no third-party dependency: `rto-exec` is a workspace crate over
 # serde plus the SHA-256 implementation already in the tree.
@@ -124,7 +156,11 @@ explorer = ["dep:axum", "dep:tokio"]
 inference = ["rto-graph/inference"]
 # The shared model machinery: the `roteiro model` list/pull commands and the
 # consent-gated downloader (`ureq`), over rto-graph's candle-free registry.
-# Enabled by every model tier so `roteiro model pull` works without candle.
+# Enabled by every model tier so `roteiro model pull` works without candle, and
+# **on by default** — see the `default` entry above for why. Being present is not
+# being active: `pull` still fetches nothing without an explicit `[y/N]` yes (or
+# `--yes`), and no other command opens a socket, so the default build remains
+# offline-by-default in behaviour as well as in name.
 models = ["rto-graph/models", "dep:ureq"]
 # Pluggable local embedding/generative models (`roteiro infer --model`, `spec
 # draft`) via the shared **llama.cpp** engine — GGUF embedding + generative

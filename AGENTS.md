@@ -116,10 +116,15 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   reach and is tracked by name in
   [`docs/VENDORED_DEPENDENCIES.md`](docs/VENDORED_DEPENDENCIES.md); a change that
   vendors non-Rust code adds its row in the same PR.
-- **Offline by default.** The default build needs no network and no model. Keep
-  heavy dependencies (llama.cpp, GGUF models, PDF/OCR/vision, the model server)
-  behind **feature flags** so the default build stays small, and never touch the
-  network without an explicit `[y/N]` consent.
+- **Offline by default.** The default build needs no model and makes no network
+  call of its own. It does ship `models` — `roteiro model pull` is the
+  prerequisite for *preparing* to work offline, so it must exist in a stock
+  install — which means "offline by default" is a claim about **behaviour**, not
+  about the absence of an HTTP client: the socket is compiled in, and only
+  `pull`, after an explicit `[y/N]` consent, may open it. Keep heavy
+  dependencies (llama.cpp, PDF/OCR/vision, the model server, analyzer execution)
+  behind **feature flags** so the default build stays small and needs no
+  toolchain class it does not already require.
 
 ## Pull requests
 

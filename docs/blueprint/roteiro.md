@@ -136,5 +136,8 @@ derived symbols against an external tool as a validation-only comparison.
   across branches, worktrees, and CI caches.
 - **Authored intent is CI-gated** (§5): this blueprint and the ADRs cannot drift
   from the code without failing `check`.
-- **Heavy dependencies stay opt-in** (§1): a default build is pure-Rust; llama.cpp
-  and the model tiers are behind feature flags.
+- **Heavy dependencies stay opt-in** (§1): llama.cpp and the model *execution*
+  tiers are behind feature flags. The default build needs no toolchain class
+  beyond the C compiler Rust already requires — it compiles C for bundled SQLite,
+  18 tree-sitter grammars, and (since `models` became a default feature) `ring`'s
+  crypto core — but never C++, cmake or libclang.

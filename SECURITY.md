@@ -22,10 +22,13 @@ Either way, do not post the details publicly first.
 
 Useful things to include, to the extent you have them: what you did, what
 happened, which version or commit, and which feature flags were enabled. Roteiro
-keeps most of its surface behind opt-in features (`serve`, `models`,
+keeps most of its surface behind opt-in features (`serve`,
 `inference-local-models`, `pdf-text`, `image-ocr`, `image-vision`,
-`audio-transcribe`, `execution`), so knowing whether a build was affected usually
-depends on knowing which of those were on.
+`audio-transcribe`, `exec-subprocess`, `exec-boxlite`), so knowing whether a
+build was affected usually depends on knowing which of those were on. `execution`
+and `models` are **on by default**, so assume both unless the reporter says
+otherwise — `models` means the consent-gated downloader (`ureq`/`rustls`) is
+compiled in on a stock `cargo install roteiro`.
 
 ## What you can expect
 

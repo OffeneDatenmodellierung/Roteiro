@@ -24,12 +24,20 @@ team.
 ## Getting started
 
 ```sh
-cargo install roteiro          # lean, fully-offline default build
+cargo install roteiro          # lean default build; offline unless you ask it to fetch
 cd your-repo
 roteiro init                   # store + git hooks + AGENTS.md
 roteiro sync                   # build the graph
 roteiro review                 # graph-grounded review of your change
 ```
+
+The default build needs no toolchain class beyond the C compiler Rust itself
+requires — no C++, no cmake, no libclang — and makes no network call on its own.
+It does include `roteiro model pull`, so the one-time model download is
+available without rebuilding — nothing is fetched until you say yes to it. Local
+*inference* and *serving* remain opt-in (`--features inference-local-models`,
+`--features serve`), as do the analyzer prefetch/run commands (`--features
+exec-subprocess`).
 
 Planning to work on a train or a plane? Models and analyzer databases must be
 fetched once, deliberately, before you disconnect —

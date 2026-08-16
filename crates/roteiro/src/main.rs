@@ -459,7 +459,7 @@ enum Command {
         json: bool,
     },
     /// Manage pluggable local models: list the registry, pull with consent
-    /// (`--features models`).
+    /// (default feature `models`; absent under `--no-default-features`).
     #[cfg(feature = "models")]
     Model {
         #[command(subcommand)]

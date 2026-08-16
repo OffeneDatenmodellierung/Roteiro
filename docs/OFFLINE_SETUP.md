@@ -25,8 +25,10 @@ implicit fallback and no phone-home. **Nothing Roteiro needs is unprefetchable.*
 ## Step 0 — host toolchain
 
 Before `cargo install`. A working C compiler and linker is a prerequisite of
-Rust itself, not of Roteiro; the default build additionally compiles SQLite and
-18 tree-sitter grammars from C.
+Rust itself, not of Roteiro; the default build additionally compiles SQLite, 18
+tree-sitter grammars, and `ring`'s crypto core (the TLS used by `model pull`)
+from C and pregenerated assembly. That is the *same* toolchain class, not an
+extra one — no C++, no cmake, no libclang.
 
 ```sh
 # macOS
@@ -48,14 +50,22 @@ fails outright. `protoc` is *not* required by any feature.
 A feature that is off is not "degraded", it is **absent**: the subcommand does
 not exist in the parser and you get `unrecognized subcommand`. Choose now.
 
+**Step 2 needs nothing extra.** `models` is a default feature, so `roteiro model
+pull` exists in a stock `cargo install roteiro` and the model half of this guide
+works out of the box. Its presence changes nothing about when bytes move:
+`pull` is still consent-gated, and no other command opens a socket.
+
 ```sh
-cargo install roteiro --features models                   # pull models
-cargo install roteiro --features models,exec-subprocess   # + analyzer prefetch/run/status
-cargo install roteiro --features serve                    # + local serving (implies models)
+cargo install roteiro                                     # pull models (default)
+cargo install roteiro --features exec-subprocess          # + analyzer prefetch/run/status
+cargo install roteiro --features serve                    # + local serving and inference
 ```
 
-Note that `exec-subprocess` is **not** implied by `models` or `serve`. If you
-want `roteiro security prefetch` to exist, ask for it explicitly.
+Note that `exec-subprocess` is **not** implied by the default build or by
+`serve`. If you want `roteiro security prefetch` to exist — Step 3 below — ask
+for it explicitly. That asymmetry is deliberate: `exec-subprocess` runs
+third-party analyzer binaries on the host with no isolation boundary, which is a
+larger thing to hand someone unasked than a consent-gated downloader.
 
 ## Step 2 — warm the model store
 

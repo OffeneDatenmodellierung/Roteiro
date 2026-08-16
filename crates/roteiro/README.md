@@ -23,9 +23,12 @@ roteiro check     # verify authored intent against the code (a drift gate)
 roteiro render …  # emit a docs site or an Obsidian vault
 ```
 
-Feature flags gate the heavier capabilities (`inference`, `models`,
+Feature flags gate the heavier capabilities (`inference`,
 `inference-local-models`, `pdf-text`, `image-ocr`, `image-vision`, `serve`,
-`mcp`); the default build is small and fully offline. See
+`mcp`, `exec-subprocess`, `exec-boxlite`); the default build is small, needs no
+C++/cmake/libclang, and makes no network call on its own. It does carry
+`models`, so `roteiro model pull` — the one-time preparation for working offline
+— exists without a rebuild; it fetches nothing until you consent. See
 `cargo install roteiro --all-features` for everything.
 
 - **Docs & guide:** <https://roteiro.dev>
