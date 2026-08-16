@@ -50,7 +50,7 @@
 //!
 //! An OSV record publishes a qualitative level only sometimes: GitHub-sourced
 //! records carry `database_specific.severity` (`LOW`/`MODERATE`/`HIGH`/
-//! `CRITICAL`), and RustSec-sourced records carry
+//! `CRITICAL`), and `RustSec`-sourced records carry
 //! `affected[].database_specific.informational` (`unmaintained`, `unsound`,
 //! `notice`). Both are mapped here, and the informational mapping is
 //! deliberately identical to [`crate::adapter::cargo_audit`]'s — so when the two
@@ -345,7 +345,7 @@ fn alias_set(group: &Group, members: &[&Vulnerability]) -> Vec<String> {
     all
 }
 
-/// The RustSec informational kind carried through by OSV, if any member has one.
+/// The `RustSec` informational kind carried through by OSV, if any member has one.
 fn informational(members: &[&Vulnerability]) -> Option<String> {
     members
         .iter()
@@ -428,7 +428,7 @@ fn from_github(token: &str) -> Severity {
     }
 }
 
-/// RustSec's informational kind — the same mapping `cargo-audit` uses.
+/// `RustSec`'s informational kind — the same mapping `cargo-audit` uses.
 fn from_informational(kind: &str) -> Severity {
     match kind {
         "unsound" => Severity::Medium,
@@ -821,7 +821,7 @@ mod tests {
 
     /// A record a curated database published with no qualitative level at all is
     /// still a vulnerability, and is graded on the same reasoning `cargo-audit`
-    /// grades RustSec's `vulnerability` kind high.
+    /// grades `RustSec`'s `vulnerability` kind high.
     #[test]
     fn an_advisory_with_no_published_level_is_graded_high() {
         let native = r#"{"results":[{"source":{"path":"/repo/Cargo.lock"},"packages":[

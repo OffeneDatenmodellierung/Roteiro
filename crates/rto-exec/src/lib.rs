@@ -65,6 +65,7 @@ pub mod adapter;
 #[cfg(feature = "exec-subprocess")]
 pub mod assets;
 mod clock;
+pub mod crossref;
 mod ingest;
 mod runner;
 pub mod snippet;
@@ -82,6 +83,7 @@ pub use assets::{
     status,
 };
 pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
+pub use crossref::{Correspondence, Report, cross_reference};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
     normalize_native,
