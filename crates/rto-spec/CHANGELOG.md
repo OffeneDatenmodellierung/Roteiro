@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.11.0...rto-spec-v1.12.0) - 2026-08-16
+
+### Fixed
+
+- *(check)* detect two ADRs sharing an adr-id ([#324](https://github.com/OffeneDatenmodellierung/Roteiro/pull/324))
+
 ## [1.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v0.0.19...rto-spec-v1.0.0) - 2026-08-11
 
 First stable release — the public API is now covered by SemVer; breaking changes will bump the major version.
