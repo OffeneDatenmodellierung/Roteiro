@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-08-16
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Security Tooling |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -46,11 +46,12 @@ project's languages was left open.
 - **semgrep** delivers the SAST axis for all five required languages, with SQL
   qualified: semgrep has **no SQL language support at any maturity level**, so
   SQL is matched by its `generic` (token) engine.
-- **cargo-audit** delivers the dependency axis for **Rust only**. Python, Java
-  and Node dependency vulnerabilities are **not covered by this stage**.
-- **`osv-scanner` is the recommended next analyzer** and closes the dependency
-  axis for Python, Java and Node in one tool with one output format — assessed
-  here, sequenced separately.
+- **cargo-audit** delivers the dependency axis for **Rust only**.
+- **`osv-scanner` closes the dependency axis for Python, Java and Node** in one
+  tool with one output format, against OSV.dev's per-ecosystem databases. Shipped
+  in Stage 22b (v1.2); assessed here before it was written.
+- **The two overlap on Rust, and both are kept**, cross-referenced at the
+  reporting layer on identifiers both upstreams publish (v1.1).
 - Rules are **vendored and pinned, not fetched**, and are the repository's own:
   Semgrep Registry rules carry the *Semgrep Rules License v1.0*, which is not on
   `deny.toml`'s allow-list — and `cargo deny` governs crates, so it would never
@@ -103,15 +104,16 @@ story than `cargo-audit`'s git checkout.
 
 | Language | SAST | Dependency vulnerabilities |
 |---|---|---|
-| Rust | **semgrep** (GA) | **cargo-audit** (RustSec) |
-| Python | **semgrep** (GA) | *not covered* → `osv-scanner` |
-| Java | **semgrep** (GA) | *not covered* → `osv-scanner` |
-| Node (JS/TS) | **semgrep** (GA) | *not covered* → `osv-scanner` |
+| Rust | **semgrep** (GA) | **cargo-audit** (`RustSec`) **+ `osv-scanner`** (OSV `crates.io`) — both kept, cross-referenced |
+| Python | **semgrep** (GA) | **`osv-scanner`** (OSV `PyPI`) |
+| Java | **semgrep** (GA) | **`osv-scanner`** (OSV `Maven`) |
+| Node (JS/TS) | **semgrep** (GA) | **`osv-scanner`** (OSV `npm`) |
 | SQL | **semgrep `generic`** — token matching, no parser | n/a — SQL has no dependency ecosystem |
 
-The five-language requirement is met **on the SAST axis**. On the dependency
-axis, only Rust is covered, and the table says so rather than leaving a reader to
-infer it from a tool list.
+Both axes are now covered for every language that has one. As of v1.0 the
+dependency column read *not covered* for three of the five rows; Stage 22b filled
+them, and every cell above is pinned by a test over real analyzer output rather
+than by this table.
 
 ## Decision makers
 
@@ -130,11 +132,15 @@ track. `osv-scanner` replaces three of them with one tool, one format and one
 offline database mechanism. Adding it *instead of* the three is the smaller
 change as well as the better one, which is why the three are not being written.
 
-`cargo-audit` is kept even though `osv-scanner` also reads `Cargo.lock`, because
-it reports RustSec's informational kinds — `unmaintained`, `unsound`, `yanked` —
-that a pure vulnerability database does not carry. `deny.toml` in this repository
-already ignores two `unmaintained` advisories by id, so those findings are
-demonstrably load-bearing here.
+`cargo-audit` is kept even though `osv-scanner` also reads `Cargo.lock`.
+**v1.0 gave the wrong reason for this and v1.2 corrects it**: the claim was that
+`osv-scanner` does not report `RustSec`'s informational kinds, and measurement
+shows it reports two of the three. The reason that survives is narrower and
+firmer — **`yanked` is not an advisory at all.** `cargo audit` learns it from the
+crates.io registry index, so no OSV consumer can ever carry it. `deny.toml` in
+this repository already ignores two `unmaintained` advisories by id, so
+informational findings are demonstrably load-bearing here; that they now arrive
+from *both* tools is what the cross-reference exists to render.
 
 ### SQL is a qualified answer, deliberately
 
@@ -198,13 +204,28 @@ a run consults inputs whose identity was pinned before it started, nothing is
 ever fetched implicitly, and no code path falls back to whatever the host
 happens to have installed. What is deferred is only the fetching.
 
-**The first genuinely downloadable asset arrives with `osv-scanner` in Stage
-22b.** Its per-ecosystem databases
+**The first genuinely downloadable asset arrived with `osv-scanner` in Stage
+22b (v1.2).** Its per-ecosystem databases
 (`https://osv-vulnerabilities.storage.googleapis.com/<ECOSYSTEM>/all.zip`) are
-single files at stable URLs — exactly what a digest pin wants. `AssetSource` is
-`#[non_exhaustive]` so that source can be added without a breaking change, and
-ADR-0014's wording becomes literally true at that point rather than
-aspirationally true now.
+single files at stable URLs — exactly what a digest pin wants. `AssetSource` was
+`#[non_exhaustive]` so that source could be added without a breaking change, and
+ADR-0014's wording is now literally true rather than aspirationally so.
+
+Three things were held constant while adding it:
+
+- **A run still never fetches.** The transport is not in `rto-exec` at all: the
+  provisioning function takes the fetcher as an argument, and the resolution path
+  a run uses has none to pass. "Provisioning writes, running reads" is a property
+  of the signatures rather than a rule to remember.
+- **Downloading is asked for, not implied.** `prefetch` needs `--allow-download`,
+  and prints every URL before opening a socket. The four databases are roughly
+  **260 MB** (`npm/all.zip` alone is about 210 MB), which is not a reasonable
+  surprise for a command people run when unsure.
+- **The pin is the provisioned snapshot, not a compile-time digest.** OSV
+  rebuilds these files daily, so a hard-coded `sha256` would be wrong within a
+  day. What is recorded is the digest of what *this machine* provisioned, and a
+  run is refused if the bytes have moved since — the same pin the `RustSec`
+  checkout gets, and the only one that can actually be honoured.
 
 ### Three things the tools do that their documentation does not say
 
@@ -233,6 +254,38 @@ defect:
    Provisioning records the database's publication date from its `HEAD` commit
    time, and the adapter uses that when the report says nothing; the tool's own
    account still wins where it has one.
+
+### Three more things `osv-scanner` does that its documentation does not say
+
+Found the same way — by running it — and each would have been a silent defect.
+Measured against **osv-scanner 2.5.0**.
+
+4. **`--offline-vulnerabilities` on its own consults no local database.** Its
+   help text reads "checks for vulnerabilities using local databases that are
+   already cached", but with only that flag the scanner reports **zero findings
+   and exits `0`**, even with the database sitting in the very cache it names.
+   The database is loaded only under `--offline` (or
+   `--download-offline-databases`). A clean bill of health produced by reading
+   nothing is the worst failure mode a security tool has, and the adapter passes
+   `--offline` for exactly that reason rather than as a matter of style. The
+   companion behaviour is the reassuring one: `--offline` with **no** database
+   present exits `127` with "no offline version of the OSV database is
+   available", and `127` is not a declared success status, so a failed scan
+   fails.
+5. **Reported paths are absolute even when the scan target is `.`.** Given
+   `scan source --recursive .` with the working directory set to the worktree,
+   every `results[].source.path` still comes back as a full filesystem path.
+   Since the manifest is part of the finding's identity, storing it verbatim
+   would put the scanning machine's home directory into a persisted record —
+   the same defect as semgrep's rule-id rewriting (1), reached by a different
+   route. The adapter makes the path worktree-relative, and records the location
+   as unknown rather than guessing when it cannot.
+6. **The same advisory is listed twice, and the tool already knows.**
+   `vulnerabilities` contains both the `RUSTSEC` record and its `GHSA` twin as
+   separate entries, while `groups` says which ids are one advisory. Converting
+   per `vulnerabilities` entry would double-count every advisory GitHub has also
+   assigned a GHSA id to — a count wrong in the direction that looks like more
+   work than there is. The adapter emits one finding per **group**.
 
 ### Severity is a mapping where the tool does not publish one
 
@@ -279,19 +332,48 @@ which *other* tools are installed, so a finding set stops being a property of th
 tool and the tree. Two analyzers that independently agree are **evidence**, and
 throwing one away to tidy a count discards it.
 
-**Two things Stage 22b must measure rather than assume.**
+**The two things v1.1 asked Stage 22b to measure, now measured (v1.2).**
 
-1. **The database is not the tool.** The v1.0 options table below says
-   *"`osv-scanner` does not report RustSec's `unmaintained`/`unsound`/`yanked`
-   kinds"*. OSV.dev **does carry** those records, as verified above; whether the
-   *scanner* surfaces them by default is a separate question and is **not
-   established here**. Measure it, and correct v1.0's row if the two turn out to
-   have been conflated.
-2. **Ingestion lag.** If RustSec→OSV ingestion can trail by days, the two
-   analyzers will legitimately disagree for a window. That is an argument *for*
-   this decision — a cross-reference shows one source has it and the other does
-   not — but the reporting layer must render "present in one" as a real state
-   rather than as a defect.
+**1. The database is not the tool — and v1.0 conflated them.** The v1.0 options
+table said *"`osv-scanner` does not report RustSec's
+`unmaintained`/`unsound`/`yanked` kinds"*. Measured against **osv-scanner 2.5.0**
+(osv-scalibr 0.4.5), fully offline against a pinned `crates.io` database, with
+**no extra flags**:
+
+| RustSec kind | Reported by `osv-scanner` by default? | Evidence |
+|---|---|---|
+| `unmaintained` | **Yes** | `RUSTSEC-2021-0139` (`ansi_term`) and `RUSTSEC-2024-0388` (`derivative`) both appear in a default-flag scan. |
+| `unsound` | **Yes** | `RUSTSEC-2023-0072` (`openssl` `X509StoreRef::objects`) appears the same way. |
+| `yanked` | **No, and it never can** | *Yanked* is not an advisory. `cargo audit` learns it from the crates.io registry index; there is no OSV record to carry, so no database snapshot can supply it. |
+
+The kind travels through OSV as `affected[].database_specific.informational`, and
+the adapter maps it with **the identical mapping `cargo-audit` uses**, so a
+cross-referenced pair does not read as two severities for one advisory.
+
+The `--all-vulns` flag ("show all vulnerabilities including unimportant and
+uncalled ones") was checked in case the default was hiding something: over the
+fixture tree it changed **nothing** — the same set of advisory groups either way.
+
+**So v1.0's row was wrong in its stated reason, and right in its conclusion for a
+different one.** `cargo-audit` is still kept, but not because it is the only
+source of informational advisories — two of the three kinds arrive from OSV too.
+It is kept because *yanked* is structurally unavailable to any OSV consumer, and
+because two independent sources agreeing is evidence worth keeping.
+
+**2. Ingestion lag is minutes, not days — but the *pin* is what actually
+diverges.** Measured on 2026-08-16: `RUSTSEC-2026-0257` was assigned in the
+`RustSec` repository at `2026-08-12T10:42:29Z`, and its OSV record's `modified`
+stamp is `2026-08-12T10:45:03Z` — **about two and a half minutes**. RustSec→OSV
+ingestion is therefore not a meaningful source of disagreement.
+
+What does diverge is the **pin**. Each analyzer's database is provisioned
+separately and held until the operator re-runs `prefetch`: `cargo-audit` reads a
+git checkout, `osv-scanner` reads a daily-rebuilt `all.zip` snapshot. Two
+machines, or one machine prefetched a week apart, will legitimately report
+different sets. The reporting layer therefore renders *present in one* as a
+normal single-source row with its cause named, never as a discrepancy — and the
+`age_days`/`published_at` evidence already on every run is what a reader uses to
+tell "the other tool has not caught up" from "the other tool disagrees".
 
 **What "cross-reference" must not become.** Not a merged super-finding, and not a
 count that silently halves. A duplicate pair should read as *one advisory,
@@ -305,8 +387,10 @@ must see both disappear.
 |---|---|
 | semgrep alone | **Rejected** — covers five languages on the SAST axis and zero on the dependency axis, while looking like full coverage. |
 | semgrep + four ecosystem dependency scanners | **Rejected** — four output formats, four provisioning stories, four upstreams; `osv-scanner` replaces three of them. |
-| semgrep + `osv-scanner` only | **Rejected as the whole answer** — `osv-scanner` does not report RustSec's `unmaintained`/`unsound`/`yanked` kinds, which this repository already relies on. |
-| **semgrep + cargo-audit now, `osv-scanner` next (chosen)** | Five languages covered on SAST immediately; the dependency axis closed by one further tool rather than three. |
+| semgrep + `osv-scanner` only | **Rejected as the whole answer, on a corrected reason (v1.2).** v1.0 said `osv-scanner` reports none of `RustSec`'s informational kinds; measurement shows it reports `unmaintained` and `unsound`. What it cannot report is **`yanked`**, which is not an advisory — `cargo audit` reads it from the crates.io registry index — so no OSV consumer can supply it. |
+| **semgrep + cargo-audit now, `osv-scanner` next (chosen)** | Five languages covered on SAST immediately; the dependency axis closed by one further tool rather than three. **Delivered:** `osv-scanner` shipped in Stage 22b. |
+| `osv-scanner`: one finding per `vulnerabilities` entry | **Rejected (v1.2)** — the tool lists a `RUSTSEC` record and its `GHSA` twin separately and resolves them itself in `groups`. Per-entry conversion doubles every dual-assigned advisory. One finding per group. |
+| `osv-scanner`: pass `--all-vulns` | **Rejected (v1.2)** — measured to change nothing over the fixture tree, and the informational kinds it might have been needed for already arrive by default. An unnecessary flag is a behaviour nobody can explain later. |
 | Rust overlap: keep both + cross-reference (chosen, v1.1) | Joins on the RUSTSEC id and alias sets, which both upstreams already publish. Agreement between two analyzers is kept as evidence. |
 | Rust overlap: suppress `cargo-audit`'s vulnerability findings | **Rejected** — rests on OSV lacking RustSec's informational kinds, which is false at the database level; and it makes a tool's output depend on which other tools are installed. |
 | Rust overlap: leave both, unlinked | **Rejected** — every Rust advisory then reads as two unrelated problems, and fixing one drops the count by two with no explanation. |
@@ -329,30 +413,50 @@ must see both disappear.
 
 **Negative / costs**
 
-- **Python, Java and Node dependency vulnerabilities are not covered.** This is
-  the headline gap, and it is a gap until `osv-scanner` lands.
+- ~~**Python, Java and Node dependency vulnerabilities are not covered.**~~
+  **Closed in Stage 22b (v1.2).** `osv-scanner` covers all three, and a test over
+  real output asserts each one still yields findings. What remains is the cost
+  that replaced it: those ecosystems' OSV databases are about **260 MB** to
+  provision, and they are only as current as the last `prefetch`.
 - SQL coverage is token matching, and always reads as weaker than the other four
   because it is.
 - The baseline rule set is small by design, so a clean scan means little until an
   operator pins a real one.
-- `cargo-audit` and `osv-scanner` overlap on Rust once both ship. **Decided in
-  v1.1:** both are kept and cross-referenced at the reporting layer, so the
-  reporting layer gains a join it did not have, and a duplicate pair must render
-  as one advisory confirmed twice rather than as two problems.
+- `cargo-audit` and `osv-scanner` overlap on Rust. **Decided in v1.1, shipped in
+  v1.2:** both are kept and cross-referenced at the reporting layer on
+  identifiers both upstreams publish, so a duplicate pair renders as one advisory
+  confirmed twice rather than as two problems, with both finding keys still
+  addressable.
+- **The join needed one constraint the decision did not state, and real data
+  found it.** Identifier intersection alone over-merges: in this repository's own
+  `cargo-audit` capture, `chrono`'s advisory lists `CVE-2020-26235` and
+  `RUSTSEC-2020-0071` under `related` — the identifiers `time`'s advisory is
+  published under. Correspondence therefore also requires the **same package at
+  the same version**, and a correspondence is named only by an id an analyzer
+  actually fired, never by one it merely aliased.
+- **Two analyzers on one axis means two databases to keep current.** A reader now
+  has to understand that *present in one, absent in the other* is ordinary — the
+  pins are independent — and the reporting layer has to say so, because a bare
+  asymmetry reads as a bug.
 
 ## Status
 
 For Review. The semgrep and `cargo-audit` adapters, the subprocess runner and the
-`prefetch`/`status` provisioning land in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md)
-Stage 22. **`osv-scanner` is the recommended immediate follow-up** and is the
-change that makes the dependency axis match the SAST axis; it reuses the adapter
-seam, the subprocess runner and the asset cache unchanged, and its per-ecosystem
-`all.zip` databases are the first asset that genuinely wants a download-by-URL
-source (`AssetSource` is `#[non_exhaustive]` for exactly that reason).
+`prefetch`/`status` provisioning landed in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md)
+Stage 22. **`osv-scanner` landed in Stage 22b**, and with it the dependency axis
+matches the SAST axis.
+
+It reused the adapter seam, the subprocess runner, the asset cache and
+`prefetch`/`status` unchanged — the seam doing its job — and needed **no
+migration**: `FindingKey` already takes each analyzer's own ordered identity
+components, and `RunnerKind` already names the backends. Two additions were
+genuinely new: `AssetSource::Download`, the first asset fetched by URL, and a
+cross-reference at the reporting layer for the Rust overlap.
 
 ## Version history
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-08-15 | Initial: the analyzer→language matrix with evidence, the SQL qualification, the rule-licence position, and the three verified tool behaviours. |
-| 1.1 | 2026-08-16 | Resolves the Rust overlap left open by v1.0: keep both `cargo-audit` and `osv-scanner` findings and cross-reference them on the RUSTSEC id / alias set. Records that OSV.dev *does* carry RustSec informational advisories, which refutes the premise of the suppression option, and flags the database-vs-scanner distinction for Stage 22b to measure. |
+| 1.1 | 2026-08-16 | Resolves the Rust overlap left open by v1.0: keep both `cargo-audit` and `osv-scanner` findings and cross-reference them on the RUSTSEC id / alias set. Records that OSV.dev *does* carry `RustSec` informational advisories, which refutes the premise of the suppression option, and flags the database-vs-scanner distinction for Stage 22b to measure. |
+| 1.2 | 2026-08-16 | `osv-scanner` shipped (Stage 22b); the dependency column of the matrix is filled. **Corrects v1.0's options-table row**, which conflated the database with the tool: measured against osv-scanner 2.5.0, the scanner *does* report `unmaintained` and `unsound` by default; only `yanked` is unavailable to it, and structurally so. Records the measured RustSec→OSV ingestion lag (~2.5 minutes, so pin age rather than ingestion is what makes the two analyzers differ), three further undocumented tool behaviours, and the package-and-version constraint the cross-reference join turned out to need. |
