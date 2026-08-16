@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
-last-modified: 2026-08-15
+version: "1.1"
+last-modified: 2026-08-16
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Security Tooling |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -245,6 +245,60 @@ vector is deliberately not done: it is a versioned scoring algorithm, and a
 number that disagreed with `cargo audit`'s own would be worse than carrying the
 vector unchanged.
 
+### The Rust overlap between `cargo-audit` and `osv-scanner` (v1.1)
+
+Once `osv-scanner` ships (Stage 22b) it will also read `Cargo.lock`, and OSV.dev
+ingests the RustSec database — so **the same Rust advisory arrives twice**, under
+`finding:osv-scanner:…` and `finding:cargo-audit:…`. The findings schema has no
+notion of cross-analyzer identity: a layer is keyed
+`security:<analyzer>:<worktree-id>` and replaced wholesale *per analyzer*, so
+nothing dedupes them on the way in.
+
+**Decision: keep both findings, and cross-reference them at the reporting layer.**
+Neither analyzer's layer is filtered, trimmed or made conditional on the other.
+
+**Why this is cheaper than it sounds — the join key already exists on both sides
+and needs no invention.** OSV keys a RustSec-derived record by *the RUSTSEC id
+itself*, so `GET /v1/vulns/RUSTSEC-2020-0071` resolves, and that record carries
+`aliases: ["CVE-2020-26235", "GHSA-wcg3-cvx6-7396"]`. On the other side,
+`cargo-audit`'s adapter already stores the advisory's `aliases` verbatim in
+`meta` (`crates/rto-exec/src/adapter/cargo_audit.rs:225`). So the reporting layer
+joins on the RUSTSEC id, falling back to **alias-set intersection** where the two
+sides name the same advisory by different ids. That is a deterministic join over
+identifiers both upstreams publish — not a similarity match, not a heuristic, and
+nothing that needs a confidence score.
+
+**Why not drop one side.** Suppressing `cargo-audit`'s vulnerability findings and
+keeping only its informational kinds was considered and rejected: it assumes OSV
+carries no `unmaintained`/`unsound`/`yanked`, and **that assumption is false at
+the database level** — `RUSTSEC-2024-0388` (`derivative` is unmaintained),
+`RUSTSEC-2021-0139` (`ansi_term` is Unmaintained) and `RUSTSEC-2026-0192`
+(`ttf-parser` is unmaintained) all resolve in OSV, each with `aliases: null`.
+Suppression also fails a subtler test: it makes each tool's output depend on
+which *other* tools are installed, so a finding set stops being a property of the
+tool and the tree. Two analyzers that independently agree are **evidence**, and
+throwing one away to tidy a count discards it.
+
+**Two things Stage 22b must measure rather than assume.**
+
+1. **The database is not the tool.** The v1.0 options table below says
+   *"`osv-scanner` does not report RustSec's `unmaintained`/`unsound`/`yanked`
+   kinds"*. OSV.dev **does carry** those records, as verified above; whether the
+   *scanner* surfaces them by default is a separate question and is **not
+   established here**. Measure it, and correct v1.0's row if the two turn out to
+   have been conflated.
+2. **Ingestion lag.** If RustSec→OSV ingestion can trail by days, the two
+   analyzers will legitimately disagree for a window. That is an argument *for*
+   this decision — a cross-reference shows one source has it and the other does
+   not — but the reporting layer must render "present in one" as a real state
+   rather than as a defect.
+
+**What "cross-reference" must not become.** Not a merged super-finding, and not a
+count that silently halves. A duplicate pair should read as *one advisory,
+confirmed by two analyzers*, with both finding keys still addressable — because
+each layer is still replaced per analyzer, and a reader who fixes the advisory
+must see both disappear.
+
 ## Options considered + consequences
 
 | Option | Verdict |
@@ -253,6 +307,9 @@ vector unchanged.
 | semgrep + four ecosystem dependency scanners | **Rejected** — four output formats, four provisioning stories, four upstreams; `osv-scanner` replaces three of them. |
 | semgrep + `osv-scanner` only | **Rejected as the whole answer** — `osv-scanner` does not report RustSec's `unmaintained`/`unsound`/`yanked` kinds, which this repository already relies on. |
 | **semgrep + cargo-audit now, `osv-scanner` next (chosen)** | Five languages covered on SAST immediately; the dependency axis closed by one further tool rather than three. |
+| Rust overlap: keep both + cross-reference (chosen, v1.1) | Joins on the RUSTSEC id and alias sets, which both upstreams already publish. Agreement between two analyzers is kept as evidence. |
+| Rust overlap: suppress `cargo-audit`'s vulnerability findings | **Rejected** — rests on OSV lacking RustSec's informational kinds, which is false at the database level; and it makes a tool's output depend on which other tools are installed. |
+| Rust overlap: leave both, unlinked | **Rejected** — every Rust advisory then reads as two unrelated problems, and fixing one drops the count by two with no explanation. |
 | Semgrep Registry rules, vendored | **Rejected** — Semgrep Rules License v1.0 is not on the `deny.toml` allow-list, and no existing gate would have caught it. |
 | Semgrep Registry rules, fetched per run | **Rejected** — a network service per run is neither offline-capable nor reproducible. |
 | A SQL-parsing analyzer for the SQL axis | **Deferred** — a real improvement over generic matching, and a separate decision. |
@@ -278,8 +335,10 @@ vector unchanged.
   because it is.
 - The baseline rule set is small by design, so a clean scan means little until an
   operator pins a real one.
-- `cargo-audit` and `osv-scanner` will overlap on Rust once both ship, and the
-  duplicate-finding question is left to that change.
+- `cargo-audit` and `osv-scanner` overlap on Rust once both ship. **Decided in
+  v1.1:** both are kept and cross-referenced at the reporting layer, so the
+  reporting layer gains a join it did not have, and a duplicate pair must render
+  as one advisory confirmed twice rather than as two problems.
 
 ## Status
 
@@ -296,3 +355,4 @@ source (`AssetSource` is `#[non_exhaustive]` for exactly that reason).
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-08-15 | Initial: the analyzer→language matrix with evidence, the SQL qualification, the rule-licence position, and the three verified tool behaviours. |
+| 1.1 | 2026-08-16 | Resolves the Rust overlap left open by v1.0: keep both `cargo-audit` and `osv-scanner` findings and cross-reference them on the RUSTSEC id / alias set. Records that OSV.dev *does* carry RustSec informational advisories, which refutes the premise of the suppression option, and flags the database-vs-scanner distinction for Stage 22b to measure. |
