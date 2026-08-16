@@ -1454,10 +1454,36 @@ pub(crate) fn cache_put(conn: &Connection, write: &CacheWrite<'_>) -> Result<(),
 
 /// Columns of `agent_cache` plus the joined anchor evidence, in the order
 /// [`cache_entry_from_row`] decodes them.
+///
+/// The **full** row, payload included — for the paths that actually hand an entry
+/// back to a caller. The sweep deliberately does not use this; see [`SWEEP_COLS`].
 const CACHE_COLS: &str = "c.key, c.fingerprint, c.json, c.bytes, c.generation, c.last_used, \
      c.hits, c.anchor_key, c.anchor_blob, n.key, n.blob_hash";
 
+/// The columns the **sweep** needs, which is every column eviction is decided by
+/// and **not one byte of payload**.
+///
+/// This is the whole reason `agent_cache.bytes` exists. A sweep has to order and
+/// total the tier, and if it did that by measuring payloads it would have to read
+/// them — so a maintenance pass over a full tier would pull up to the entire
+/// budget into memory, and the budget now defaults to 256 MB. Storing the size at
+/// write time means the sweep can do its arithmetic from a handful of integers.
+///
+/// So: `json`, `fingerprint` and `hits` are absent, and their absence is the
+/// point. `hits` is not a policy input either — eviction orders by
+/// `(anchor_valid, last_used)`, never by popularity — so selecting it would be
+/// reading a column the policy is not allowed to consult.
+/// `the_sweep_query_names_no_payload_column` fails if any of the three comes back.
+const SWEEP_COLS: &str = "c.key, c.bytes, c.generation, c.last_used, c.anchor_key, \
+     c.anchor_blob, n.key, n.blob_hash";
+
 /// The `LEFT JOIN` resolving a cache entry's anchor against the current graph.
+///
+/// **Shared by both column sets above**, which is what stops the sweep and the
+/// inspection path from disagreeing about which rows exist or how an anchor
+/// resolves. Neither adds a `WHERE`, so both see exactly the tier; both decode the
+/// anchor through [`resolve_anchor`]. `the_sweep_and_the_full_read_agree_row_for_row`
+/// pins that they do.
 const CACHE_FROM: &str = " FROM agent_cache c LEFT JOIN nodes n ON n.key = c.anchor_key";
 
 /// Read one entry back, **recording the access**: `hits` increments and
@@ -1494,6 +1520,58 @@ pub(crate) fn cache_entries(conn: &Connection) -> Result<Vec<CacheEntry>, StoreE
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         out.push(cache_entry_from_row(row)?);
+    }
+    Ok(out)
+}
+
+/// One entry as the **sweep** sees it: what eviction is decided by, and nothing
+/// else.
+///
+/// Deliberately not a [`CacheEntry`]. A `CacheEntry` carries the payload, and a
+/// sweep that held one per row would defeat the purpose of storing `bytes` at
+/// all — the type is the guard, because there is no field here for a payload to
+/// arrive in.
+#[derive(Debug, Clone)]
+struct SweepRow {
+    key: String,
+    /// The size recorded at write time. **The authority for every byte the sweep
+    /// totals or compares** — never `length(json)`, which is what reading the
+    /// payload would amount to.
+    bytes: u64,
+    generation: i64,
+    last_used: i64,
+    anchor_state: AnchorState,
+}
+
+/// Every entry, as [`SweepRow`]s — the narrow read the sweep runs.
+///
+/// Same table and same join as [`cache_entries`] ([`CACHE_FROM`]), same anchor
+/// rule ([`resolve_anchor`]), neither with a `WHERE`: the two cannot disagree
+/// about which rows exist or what an anchor is worth. They differ in exactly one
+/// respect, which is that this one does not read the payload.
+fn sweep_rows(conn: &Connection) -> Result<Vec<SweepRow>, StoreError> {
+    let sql = format!("SELECT {SWEEP_COLS}{CACHE_FROM} ORDER BY c.key");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let bytes: i64 = row.get(1)?;
+        let anchor_key: Option<String> = row.get(4)?;
+        let anchor_blob: Option<String> = row.get(5)?;
+        let node_key: Option<String> = row.get(6)?;
+        let node_blob: Option<String> = row.get(7)?;
+        out.push(SweepRow {
+            key: row.get(0)?,
+            bytes: u64::try_from(bytes).unwrap_or(0),
+            generation: row.get(2)?,
+            last_used: row.get(3)?,
+            anchor_state: resolve_anchor(
+                anchor_key.as_deref(),
+                anchor_blob.as_deref(),
+                node_key.as_deref(),
+                node_blob.as_deref(),
+            ),
+        });
     }
     Ok(out)
 }
@@ -1563,16 +1641,21 @@ fn evict_count(evictable_lru_first: &[u64], pinned_bytes: u64, budget_bytes: u64
 /// * the **most-recently-used** entry, always, even if it alone exceeds the budget
 ///   — `ModelCache`'s rule, for `ModelCache`'s reason: what was just asked for has
 ///   to be there.
+///
+/// **This reads no payloads.** It runs the narrow [`sweep_rows`] query, so
+/// deciding what to evict costs a few integers per entry rather than the tier's
+/// contents — which is what `agent_cache.bytes` is *for*, and what makes a
+/// maintenance pass over a full 256 MB tier affordable.
 pub(crate) fn cache_sweep(conn: &Connection, budget_bytes: u64) -> Result<CacheSweep, StoreError> {
     let generation = cache_generation(conn)?;
-    let entries = cache_entries(conn)?;
+    let entries = sweep_rows(conn)?;
     let scanned = u64::try_from(entries.len()).unwrap_or(u64::MAX);
 
     // The most-recently-used entry, by the tick counter: always kept.
     let mru = entries.iter().max_by_key(|e| e.last_used).map(|e| &e.key);
 
     let mut pinned_bytes: u64 = 0;
-    let mut candidates: Vec<&CacheEntry> = Vec::new();
+    let mut candidates: Vec<&SweepRow> = Vec::new();
     for entry in &entries {
         let is_mru = mru.is_some_and(|k| *k == entry.key);
         let own_work = entry.generation >= generation && entry.anchor_state.applies();
@@ -1728,8 +1811,9 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<MemoryRecord, StoreError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorState, DEFAULT_DECAY_SPAN, DEFAULT_HALF_LIFE, DEFAULT_MEMORY_SCOPE, Decay,
-        MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind, MemoryWrite, anchor_penalty, evict_count,
+        AnchorState, CACHE_COLS, DEFAULT_DECAY_SPAN, DEFAULT_HALF_LIFE, DEFAULT_MEMORY_SCOPE,
+        Decay, MAX_MEMORY_BODY, MAX_MEMORY_SCOPE, MemoryKind, MemoryWrite, SWEEP_COLS,
+        anchor_penalty, cache_entries, cache_sweep, evict_count, sweep_rows,
     };
 
     fn write(body: &str) -> MemoryWrite<'_> {
@@ -2044,5 +2128,175 @@ mod tests {
             2,
             "everything evictable goes when the pinned set alone exceeds the budget",
         );
+    }
+
+    // --- The sweep reads sizes, never payloads -------------------------------
+
+    /// A store with the cache schema applied and the clock advanced past the
+    /// generation test rows are written in, so nothing is pinned as "this
+    /// session's own work" and the byte policy is what decides.
+    fn cache_store() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        crate::migrations::apply(&mut conn).expect("apply");
+        conn.execute("UPDATE agent_cache_clock SET generation = 5", [])
+            .expect("advance the clock");
+        conn
+    }
+
+    /// Insert one entry with the stored size given **independently of the
+    /// payload**, which is the divergence
+    /// `the_sweep_totals_the_bytes_column_and_never_the_payload` turns on.
+    fn raw_put(conn: &rusqlite::Connection, key: &str, bytes: i64, payload: usize, last_used: i64) {
+        conn.execute(
+            "INSERT INTO agent_cache (key, fingerprint, json, bytes, generation, last_used, hits)
+             VALUES (?1, 'fp', ?2, ?3, 0, ?4, 0)",
+            rusqlite::params![key, "x".repeat(payload), bytes, last_used],
+        )
+        .expect("insert");
+    }
+
+    /// **The sweep query names no payload column.** The direct guard on the
+    /// regression this test exists for: re-adding `c.json` to the sweep's SELECT
+    /// makes it red.
+    ///
+    /// Stated on the query text rather than on behaviour, deliberately and with
+    /// its limits understood. `SELECT key, json` and `SELECT key` return the same
+    /// *answers* — the difference is only how much `SQLite` materialises on the way,
+    /// which no assertion over results can see. The thing that would actually
+    /// regress here is the column list, so the column list is what is pinned.
+    ///
+    /// `hits` is absent for a second reason worth keeping separate: it is not a
+    /// policy input at all. Eviction orders by `(anchor_valid, last_used)` and
+    /// never by popularity, so selecting `hits` would hand the sweep a column it
+    /// is not allowed to consult.
+    #[test]
+    fn the_sweep_query_names_no_payload_column() {
+        for forbidden in ["json", "fingerprint", "hits"] {
+            assert!(
+                !SWEEP_COLS.contains(forbidden),
+                "the sweep must not read {forbidden}: it decides by the stored size, \
+                 and reading payloads to decide what to evict is what `bytes` exists \
+                 to avoid — on a full tier that is the whole budget in memory",
+            );
+        }
+        // And it does still select everything eviction is decided by, so the
+        // assertion above cannot be satisfied by selecting too little.
+        for required in [
+            "c.key",
+            "c.bytes",
+            "c.generation",
+            "c.last_used",
+            "c.anchor_key",
+            "c.anchor_blob",
+        ] {
+            assert!(SWEEP_COLS.contains(required), "the sweep needs {required}");
+        }
+        // The full read is the one that *may* carry the payload — otherwise the
+        // check above could be met by emptying both.
+        assert!(
+            CACHE_COLS.contains("c.json"),
+            "the inspection path returns it"
+        );
+    }
+
+    /// **The two reads cannot disagree.** They share the table, the join and the
+    /// anchor rule, and neither adds a `WHERE`, so the sweep sees exactly the rows
+    /// the inspection path sees — with exactly the same sizes and anchor verdicts.
+    ///
+    /// The failure this prevents is a sweep that evicts by one view of the tier
+    /// while every report describes another: an entry missing from one side would
+    /// be evicted without being counted, or counted without being evictable.
+    #[test]
+    fn the_sweep_and_the_full_read_agree_row_for_row() {
+        let conn = cache_store();
+        conn.execute(
+            "INSERT INTO nodes (key, kind, name, blob_hash) VALUES ('sym:a', 'fn', 'a', 'blob1')",
+            [],
+        )
+        .expect("node");
+        // One of every anchor shape, so the shared `resolve_anchor` is exercised
+        // rather than just the easy case.
+        raw_put(&conn, "unanchored", 10, 4, 1);
+        conn.execute(
+            "INSERT INTO agent_cache
+                 (key, fingerprint, json, bytes, generation, last_used, hits, anchor_key, anchor_blob)
+             VALUES ('valid', 'fp', '{}', 20, 0, 2, 0, 'sym:a', 'blob1'),
+                    ('drifted', 'fp', '{}', 30, 0, 3, 0, 'sym:a', 'blob-old'),
+                    ('vanished', 'fp', '{}', 40, 0, 4, 0, 'sym:gone', 'blob1'),
+                    ('unverifiable', 'fp', '{}', 50, 0, 5, 0, 'sym:a', NULL)",
+            [],
+        )
+        .expect("anchored entries");
+
+        let narrow = sweep_rows(&conn).expect("sweep rows");
+        let full = cache_entries(&conn).expect("entries");
+        assert_eq!(narrow.len(), full.len(), "the same rows, or one is blind");
+        assert_eq!(narrow.len(), 5);
+        for (n, f) in narrow.iter().zip(full.iter()) {
+            assert_eq!(n.key, f.key, "same order, same rows");
+            assert_eq!(n.bytes, f.bytes, "{}: the size must not differ", n.key);
+            assert_eq!(n.generation, f.generation, "{}", n.key);
+            assert_eq!(n.last_used, f.last_used, "{}", n.key);
+            assert_eq!(
+                n.anchor_state, f.anchor_state,
+                "{}: both must resolve the anchor identically",
+                n.key,
+            );
+        }
+        // Every anchor shape really was covered, so the agreement above is not
+        // agreement about one trivial case.
+        let states: Vec<AnchorState> = narrow.iter().map(|r| r.anchor_state).collect();
+        for expected in [
+            AnchorState::Unanchored,
+            AnchorState::Valid,
+            AnchorState::Drifted,
+            AnchorState::Vanished,
+            AnchorState::Unverifiable,
+        ] {
+            assert!(states.contains(&expected), "{expected} was not exercised");
+        }
+    }
+
+    /// **The `bytes` column is the authority, not the payload's length.**
+    ///
+    /// The behavioural half of the guard above. Two entries are written whose
+    /// stored size and actual payload disagree in opposite directions, so the two
+    /// possible implementations reach *different eviction sets* rather than merely
+    /// different arithmetic:
+    ///
+    /// | | `heavy` | `light` | held | evicted at budget 500 |
+    /// |---|---|---|---|---|
+    /// | by the `bytes` column | 1000 | 10 | 1010 | `heavy` only |
+    /// | by payload length | 1 | 1000 | 1001 | `heavy` **and** `light` |
+    ///
+    /// So a sweep that measured payloads would take `light` too, and this test
+    /// says which one ran.
+    #[test]
+    fn the_sweep_totals_the_bytes_column_and_never_the_payload() {
+        let conn = cache_store();
+        raw_put(&conn, "heavy", 1000, 1, 1);
+        raw_put(&conn, "light", 10, 1000, 2);
+        raw_put(&conn, "mru", 0, 0, 3);
+
+        let swept = cache_sweep(&conn, 500).expect("sweep");
+
+        assert_eq!(
+            swept.evicted, 1,
+            "a payload-measuring sweep would have taken `light` as well",
+        );
+        assert_eq!(
+            swept.freed_bytes, 1000,
+            "the freed total is the stored size, not the 1 byte `heavy` holds",
+        );
+        assert_eq!(
+            swept.retained_bytes, 10,
+            "and what remains is counted the same way",
+        );
+        let survivors: Vec<String> = sweep_rows(&conn)
+            .expect("rows")
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(survivors, vec!["light".to_owned(), "mru".to_owned()]);
     }
 }
