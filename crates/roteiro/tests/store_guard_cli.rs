@@ -161,6 +161,28 @@ fn a_store_from_the_future_refuses_writes_and_still_serves_reads() {
         "the refused sync must not have touched the graph"
     );
 
+    // --- the gates refuse too ---------------------------------------------
+    // `check` reaches the graph through a different chokepoint than `sync` does,
+    // and it is a gate: serving it an unrefreshed graph would be a confident
+    // wrong verdict, so it refuses rather than falling back to a read the way
+    // `search` does below. Nineteen commands share that chokepoint; this is the
+    // one that proves it is guarded.
+    let out = roteiro(&dir, &["check", "--committed"]);
+    assert!(
+        !out.status.success(),
+        "a gate must refuse to rebuild a store from the future: {out:?}"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&store_version.to_string()) && err.to_lowercase().contains("upgrade"),
+        "the gate's refusal must be as actionable as the sync's: {err}"
+    );
+    assert_eq!(
+        node_keys(&dir),
+        before,
+        "the refused check must not have touched the graph"
+    );
+
     // --- the read path still answers, and leaves the store alone ----------
     let out = roteiro(&dir, &["search", "original", "--json"]);
     assert!(
