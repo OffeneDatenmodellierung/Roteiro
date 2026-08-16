@@ -1700,13 +1700,22 @@ mod tests {
     fn open_in_memory_applies_schema() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.node_count().expect("count"), 0);
-        // Bumped to 8 by the analyzer-findings tables (ADR-0012), then to 9 by
-        // the generated-media-content table (ADR-0015), then to 10 by that
-        // table's rebuild for the pre-generation gate's skip records, then to 11
-        // by the episodic agent-memory table (ADR-0013). The literal is
-        // deliberate: a new migration should make someone confirm it is meant to
-        // apply on open, rather than passing silently.
-        assert_eq!(store.schema_version().expect("version"), 11);
+        // Written against `latest_version()` rather than the literal that stood
+        // here (8 for analyzer findings, then 9, 10, 11 as the media and
+        // agent-memory tables landed). The literal was defended as making someone
+        // confirm a new migration is meant to apply on open — but it could not do
+        // that job: `apply` runs *every* migration newer than the recorded
+        // version, so "applies on open" is not a per-migration choice there is
+        // anything to confirm. What the literal actually asserted was the value of
+        // a shared constant, which every future migration then has to come here
+        // and edit, in a file it otherwise has no business in. This is the idiom
+        // `migrations::tests::a_later_migration_is_additive_on_a_populated_store`
+        // already uses, for the same reason.
+        assert_eq!(
+            store.schema_version().expect("version"),
+            crate::migrations::latest_version(),
+            "opening a store applies the whole migration set",
+        );
     }
 
     #[test]
@@ -1877,7 +1886,13 @@ mod tests {
         {
             let store = Store::open(&path).expect("reopen");
             assert_eq!(store.node_count().expect("count"), 1);
-            assert_eq!(store.schema_version().expect("version"), 11);
+            // The subject here is that a *reopen* is at the same schema as a
+            // fresh open — not what number that happens to be. See
+            // `open_in_memory_applies_schema` on why the literal went.
+            assert_eq!(
+                store.schema_version().expect("version"),
+                crate::migrations::latest_version(),
+            );
             assert!(store.get_node("persisted").expect("get").is_some());
         }
         std::fs::remove_file(&path).expect("cleanup");

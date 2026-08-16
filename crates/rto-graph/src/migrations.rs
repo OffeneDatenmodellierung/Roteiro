@@ -431,6 +431,94 @@ CREATE INDEX idx_mem_anchor ON agent_memory(anchor_key);
 CREATE INDEX idx_mem_live ON agent_memory(scope, superseded_by, id DESC);
 ";
 
+/// Migration 12: the **transient cache tier** (ADR-0013, the second half of the
+/// two-tier store; build plan Stage 25) — the opposite of migration 11 in every
+/// rule, because it holds the opposite kind of knowledge.
+///
+/// `agent_memory` above is episodic: it has **no generating function**, so
+/// evicting it is data loss and it is never swept. Everything in `agent_cache` is
+/// **re-derivable by definition** — a context bundle, an embedding, a query result
+/// over current code — and `build_context` is *proven* to reconstruct identically
+/// (`context.rs` asserts `built == cached`). So eviction here costs cycles, never
+/// information, which is exactly what licenses a bound on this table and forbids
+/// one on that one.
+///
+/// **Bounded by bytes, not by rows**, porting `rto-llama`'s in-memory `ModelCache`
+/// (`llama.rs:120-137`, pinned by `budget_evicts_oldest_until_it_fits`) to disk
+/// rather than inventing a policy: entries vary hugely in size, and bytes are what
+/// actually constrain `.git/roteiro/`. `bytes` is the row's own payload size,
+/// computed at write, so the sweep can order and total without reading `json`.
+///
+/// **`generation`, `last_used` and `hits` are the persisted access tracking that
+/// no table in this schema has ever carried.** `ModelCache` tracks recency by the
+/// order of an in-memory `Vec`, which does not survive a process; `node_context`
+/// (migration 5) has no timestamp, no hit counter and no TTL at all. So the signal
+/// has to be introduced here, with the table that needs it.
+///
+/// **Neither is a clock**, for the reason ADR-0013 §3 gives: the store is per-repo
+/// and shared across worktrees, so wall-clock is non-monotone across concurrent
+/// checkouts and `datetime('now')` ties on intra-second writes. Both are logical
+/// counters drawn from `agent_cache_clock` below, which is the only reason that
+/// single-row table exists:
+///
+/// * `ticks` advances on **every cache access**, so `last_used` is a strict total
+///   order over accesses — the durable equivalent of `ModelCache`'s list position,
+///   with no ties for the sweep to break arbitrarily.
+/// * `generation` advances **once per sweep**. A row written since the last sweep
+///   is in the current generation, and — if its anchor is still valid — is never
+///   evicted by that sweep, so a session's own just-written work cannot be thrown
+///   away by the maintenance pass that follows it.
+///
+/// **The anchor is the same anchor, and the same rule.** `(anchor_key,
+/// anchor_blob)` resolves against `nodes` on read exactly as `agent_memory`'s does,
+/// yielding the same `AnchorState`, and `AnchorState::applies` is the whole
+/// validity test — here it supplies the `anchor_valid ASC` half of the eviction
+/// order, so a row whose code moved out from under it goes before a row that still
+/// describes the tree. There is deliberately no second rule and no scope term.
+const M0012_AGENT_CACHE: &str = "
+CREATE TABLE agent_cache (
+    key         TEXT PRIMARY KEY,
+    -- The content-addressed freshness witness, on `node_context`'s terms: a
+    -- reader compares it with the fingerprint the current graph yields and treats
+    -- a mismatch as a miss. Eviction is a *capacity* policy and is orthogonal to
+    -- this one — the house idiom for staleness stays key/fingerprint invalidation.
+    fingerprint TEXT NOT NULL,
+    json        TEXT NOT NULL,
+    -- The row's own payload size, so the sweep can order and total by bytes
+    -- without reading every `json` in the tier.
+    bytes       INTEGER NOT NULL,
+    -- The sweep generation this row was written in (see `agent_cache_clock`).
+    generation  INTEGER NOT NULL,
+    -- The access tick this row was last read or written at. Strictly increasing,
+    -- never a wall-clock: this is `ModelCache`'s list position, made durable.
+    last_used   INTEGER NOT NULL,
+    hits        INTEGER NOT NULL DEFAULT 0,
+    anchor_key  TEXT,
+    anchor_blob TEXT,
+    -- Half-states, refused on migration 10's and 11's precedent.
+    CHECK (key <> ''),
+    CHECK (bytes >= 0),
+    CHECK (generation >= 0),
+    CHECK (last_used >= 0),
+    CHECK (hits >= 0),
+    -- Anchor evidence without an anchor key names nothing and can never be
+    -- checked for drift — the same constraint `agent_memory` carries.
+    CHECK (anchor_blob IS NULL OR anchor_key IS NOT NULL)
+);
+-- The eviction order, as an index: least-recently-used first.
+CREATE INDEX idx_cache_evict ON agent_cache(last_used);
+CREATE INDEX idx_cache_anchor ON agent_cache(anchor_key);
+
+-- The logical clock the two counters above are drawn from. A single row, on
+-- `sync_state`'s precedent (migration 2), because there is exactly one of it.
+CREATE TABLE agent_cache_clock (
+    id         INTEGER PRIMARY KEY CHECK (id = 0),
+    ticks      INTEGER NOT NULL DEFAULT 0 CHECK (ticks >= 0),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)
+);
+INSERT INTO agent_cache_clock (id) VALUES (0);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -476,6 +564,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 11,
         sql: M0011_AGENT_MEMORY,
+    },
+    Migration {
+        version: 12,
+        sql: M0012_AGENT_CACHE,
     },
 ];
 
@@ -1019,6 +1111,8 @@ mod tests {
             "findings",
             "media_content",
             "agent_memory",
+            "agent_cache",
+            "agent_cache_clock",
             "schema_migrations",
         ] {
             let count: i64 = conn
@@ -1029,6 +1123,102 @@ mod tests {
                 )
                 .expect("query");
             assert_eq!(count, 1, "table {table} should exist");
+        }
+    }
+
+    /// The cache tier refuses the same half-states the episodic tier does: a
+    /// negative size or counter is a corrupt write, not a small one, and anchor
+    /// evidence with no anchor key names nothing that could ever be checked for
+    /// drift — which is the `anchor_valid` half of the eviction order.
+    #[test]
+    fn agent_cache_refuses_negative_counters_and_orphan_anchor_evidence() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let insert = |key: &str, bytes: i64, generation: i64, last_used: i64, hits: i64| {
+            conn.execute(
+                "INSERT INTO agent_cache (key, fingerprint, json, bytes, generation, last_used, hits)
+                 VALUES (?1, 'fp', '{}', ?2, ?3, ?4, ?5)",
+                rusqlite::params![key, bytes, generation, last_used, hits],
+            )
+            .is_ok()
+        };
+        assert!(insert("ok", 0, 0, 0, 0), "a zero-size entry is legitimate");
+        assert!(!insert("", 1, 0, 0, 0), "an empty key names nothing");
+        assert!(!insert("neg-bytes", -1, 0, 0, 0));
+        assert!(!insert("neg-gen", 1, -1, 0, 0));
+        assert!(!insert("neg-used", 1, 0, -1, 0));
+        assert!(!insert("neg-hits", 1, 0, 0, -1));
+
+        let anchored = |key: &str, anchor: Option<&str>, blob: Option<&str>| {
+            conn.execute(
+                "INSERT INTO agent_cache
+                     (key, fingerprint, json, bytes, generation, last_used, anchor_key, anchor_blob)
+                 VALUES (?1, 'fp', '{}', 1, 0, 0, ?2, ?3)",
+                rusqlite::params![key, anchor, blob],
+            )
+            .is_ok()
+        };
+        assert!(anchored("unanchored", None, None));
+        assert!(anchored("anchored", Some("sym:rust:a.rs#f"), Some("blob1")));
+        assert!(
+            !anchored("orphan-blob", None, Some("blob1")),
+            "a blob naming no node",
+        );
+    }
+
+    /// The logical clock is a **single row**, on `sync_state`'s precedent, and the
+    /// migration seeds it — so the first cache write finds a counter to draw from
+    /// rather than having to create one. Nothing here is a wall-clock: ADR-0013 §3
+    /// rules that out, because the store is shared across worktrees.
+    #[test]
+    fn the_cache_clock_is_a_single_seeded_row() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let (ticks, generation): (i64, i64) = conn
+            .query_row(
+                "SELECT ticks, generation FROM agent_cache_clock WHERE id = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the migration seeds the clock");
+        assert_eq!((ticks, generation), (0, 0));
+        assert!(
+            conn.execute("INSERT INTO agent_cache_clock (id) VALUES (1)", [])
+                .is_err(),
+            "there is exactly one clock",
+        );
+    }
+
+    /// The two tiers are **separate tables with opposite rules**, which is the
+    /// whole design: bounding episodic memory would be data loss, and leaving the
+    /// cache unbounded is the growth ADR-0013 exists to stop. This pins the split
+    /// at the schema level — the cache carries the eviction signal, and the
+    /// episodic table carries none of it, so no sweep written against those column
+    /// names can reach `agent_memory` even by mistake.
+    #[test]
+    fn only_the_cache_tier_carries_the_eviction_signal() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let columns = |table: &str| -> Vec<String> {
+            let mut stmt = conn
+                .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .expect("prepare");
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect")
+        };
+        let cache = columns("agent_cache");
+        let memory = columns("agent_memory");
+        for signal in ["bytes", "generation", "last_used", "hits"] {
+            assert!(
+                cache.iter().any(|c| c == signal),
+                "the cache tier carries {signal}",
+            );
+            assert!(
+                !memory.iter().any(|c| c == signal),
+                "{signal} must not exist on the episodic tier: nothing sweeps it",
+            );
         }
     }
 }
