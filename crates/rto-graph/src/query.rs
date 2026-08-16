@@ -313,6 +313,10 @@ pub struct CouplingReport {
     /// Self-referential `Calls` edges (recursion), counted in `call_edges` but
     /// excluded from every fan — see [`coupling`].
     pub self_calls: usize,
+    /// `Calls` edges whose endpoints are in two different languages: name
+    /// collisions from simple-name call resolution, not calls. Counted in
+    /// `call_edges` but excluded from every fan — see [`coupling`].
+    pub cross_language_calls: usize,
     /// Distinct nodes with at least one non-self `Calls` edge. `items` is the
     /// top `limit` of these, so `coupled_nodes > items.len()` means truncation.
     pub coupled_nodes: usize,
@@ -336,9 +340,23 @@ pub struct CouplingReport {
 ///   couples a node to nothing outside itself, and counting it would inflate
 ///   `fan_in` *and* `fan_out` for the same node. It is reported separately as
 ///   `self_calls` rather than silently dropped.
+/// - **Cross-language call edges are excluded.** Roteiro extracts no FFI, so a
+///   `Calls` edge between two languages is never a call — see
+///   [`same_language`]. Reported as `cross_language_calls`.
 ///
 /// Ordering is total and deterministic: by the chosen metric descending, then by
 /// `key` ascending, so identical input yields byte-identical output.
+///
+/// # Precision
+///
+/// `fan_in` is exactly as precise as the `Calls` edges beneath it, and those are
+/// resolved by **simple name**: a callee that is unique by bare name anywhere in
+/// the repository binds to that definition, wherever it lives. So a single
+/// same-language helper with a very common name absorbs every call to that name,
+/// and its `fan_in` reads high for a reason that has nothing to do with design.
+/// Excluding cross-language edges removes the worst of this, but not all of it.
+/// Treat a large `fan_in` on a short, generically-named function as a question,
+/// not a finding — which is also why this lens offers no CI gate.
 ///
 /// # Errors
 /// Returns [`StoreError`] on query failure.
@@ -352,6 +370,7 @@ pub fn coupling(
     let mut callees: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut call_edges = 0usize;
     let mut self_calls = 0usize;
+    let mut cross_language_calls = 0usize;
     for edge in store.all_edges()? {
         if edge.kind != EdgeKind::Calls {
             continue;
@@ -359,6 +378,10 @@ pub fn coupling(
         call_edges += 1;
         if edge.src == edge.dst {
             self_calls += 1;
+            continue;
+        }
+        if !same_language(&edge.src, &edge.dst) {
+            cross_language_calls += 1;
             continue;
         }
         callers
@@ -420,9 +443,37 @@ pub fn coupling(
         limit,
         call_edges,
         self_calls,
+        cross_language_calls,
         coupled_nodes,
         items,
     })
+}
+
+/// The language token of a symbol key (`sym:<lang>:<path>#<name>` → `<lang>`),
+/// or `None` for any other key shape.
+fn sym_lang(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("sym:")?;
+    let (lang, _) = rest.split_once(':')?;
+    (!lang.is_empty()).then_some(lang)
+}
+
+/// Whether a call edge's two endpoints are in the same language — `true` unless
+/// both keys carry a language token and the tokens differ.
+///
+/// Cross-file call resolution binds a callee by **simple name** across every
+/// `Fn` node in the repository, language included. Roteiro extracts no FFI, so
+/// nothing in the graph can legitimately record a JavaScript function calling a
+/// Rust one; such an edge is a name collision — a lone Rust `join` helper
+/// absorbing every JavaScript `.join(…)` in the tree. Excluding them keeps a
+/// language's coupling figures about that language.
+///
+/// Unknown-shaped keys (anything that is not `sym:<lang>:…`) are **kept**: this
+/// filter removes edges it can prove span two languages, and never guesses.
+fn same_language(src: &str, dst: &str) -> bool {
+    match (sym_lang(src), sym_lang(dst)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
 }
 
 /// The size of `key`'s counterpart set, as a `u32` (a node cannot have more
@@ -1660,6 +1711,61 @@ mod tests {
         assert_eq!(report.coupled_nodes, 6);
         assert_eq!(report.call_edges, 4);
         assert_eq!(report.self_calls, 0);
+        assert_eq!(report.cross_language_calls, 0);
+    }
+
+    #[test]
+    fn coupling_excludes_cross_language_name_collisions() {
+        // Cross-file call resolution binds a callee by simple name across every
+        // `Fn` node regardless of language, and Roteiro extracts no FFI — so a
+        // JavaScript function "calling" a Rust one is a name collision. On this
+        // repository that single rule is the difference between a Rust helper
+        // reading as the most depended-on symbol in the tree and not appearing
+        // at all.
+        let mut store = coupled();
+        let mut facts = FactSet::new().with_node(Node::new(
+            "sym:javascript:app.js#render",
+            NodeKind::Fn,
+            "render",
+        ));
+        facts = facts.with_edge(Edge::derived(
+            "sym:javascript:app.js#render",
+            "sym:rust:a.rs#hub",
+            EdgeKind::Calls,
+        ));
+        store.apply_factset(&facts).expect("apply");
+
+        let report = coupling(&store, CouplingOrder::Total, 0).expect("coupling");
+        assert_eq!(
+            item(&report, "hub").fan_in,
+            2,
+            "a JavaScript caller is not a dependant of a Rust function"
+        );
+        assert_eq!(
+            report.cross_language_calls, 1,
+            "the excluded edge is reported, not silently dropped"
+        );
+        assert_eq!(report.call_edges, 5, "and still counted as scanned");
+    }
+
+    #[test]
+    fn same_language_never_guesses_about_unknown_key_shapes() {
+        assert!(super::same_language("sym:rust:a.rs#f", "sym:rust:b.rs#g"));
+        assert!(!super::same_language(
+            "sym:javascript:a.js#f",
+            "sym:rust:b.rs#g"
+        ));
+        // A key that is not `sym:<lang>:…` carries no language to compare, so the
+        // edge is kept: this filter drops only what it can prove spans languages.
+        assert!(super::same_language("file:a.md", "sym:rust:b.rs#g"));
+        assert!(super::same_language("sym:", "sym:rust:b.rs#g"));
+        assert_eq!(super::sym_lang("sym:rust:a.rs#f"), Some("rust"));
+        assert_eq!(
+            super::sym_lang("sym::a.rs#f"),
+            None,
+            "empty lang is no lang"
+        );
+        assert_eq!(super::sym_lang("marker:a.rs#7"), None);
     }
 
     #[test]

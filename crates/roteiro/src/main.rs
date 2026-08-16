@@ -281,6 +281,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rank nodes by **directed** call coupling: fan-in (how many distinct
+    /// symbols call this one) and fan-out (how many it calls), over `calls`
+    /// edges only.
+    ///
+    /// A report, not a gate: it always exits zero. Unlike an undirected degree
+    /// ranking, it separates "everything calls this" from "this calls
+    /// everything" — the two have identical degree and opposite meaning.
+    Coupling {
+        /// Rank by: total | fan_in | fan_out. Defaults to `total`.
+        #[arg(long, value_name = "ORDER", default_value = "total")]
+        order: String,
+        /// Max rows to show; `0` shows every coupled node.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Find a shortest path between two nodes (edges followed either direction).
     Path {
         /// Start node key.
@@ -1151,6 +1169,7 @@ fn main() -> anyhow::Result<()> {
         Command::Memory { action } => run_memory(action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
+        Command::Coupling { order, limit, json } => run_coupling(ingest, &order, limit, json),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Links {
             workspace,
@@ -4238,6 +4257,78 @@ fn debt_summary(report: &rto_graph::DebtReport) -> String {
         "intent debt: {} marker(s) ({})",
         report.total,
         breakdown.join(", ")
+    )
+}
+
+/// Parse a `--order` token into a [`rto_graph::CouplingOrder`], naming the
+/// accepted set from the type itself so the CLI and the tool schemas cannot
+/// drift apart.
+fn parse_coupling_order(token: &str) -> anyhow::Result<rto_graph::CouplingOrder> {
+    rto_graph::CouplingOrder::from_token(token).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown --order `{token}` (expected: {})",
+            rto_graph::CouplingOrder::tokens().join(" | ")
+        )
+    })
+}
+
+/// Rank nodes by directed call coupling. A report, not a gate: it always exits
+/// zero.
+fn run_coupling(
+    ingest: rto_graph::IngestConfig,
+    order: &str,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let order = parse_coupling_order(order)?;
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+
+    let report = rto_graph::coupling(&store, order, limit)?;
+    if json {
+        emit_json(&report)?;
+    } else {
+        for item in &report.items {
+            let loc = item.path.as_deref().unwrap_or(&item.key);
+            println!(
+                "  in {:>4}  out {:>4}  I={:.2}  {}  ({loc})",
+                item.fan_in, item.fan_out, item.instability, item.name
+            );
+        }
+        println!("{}", coupling_summary(&report));
+    }
+    Ok(())
+}
+
+/// A one-line summary of a [`rto_graph::CouplingReport`]. States the population
+/// as well as the shown rows, so a capped list cannot be read as the whole
+/// graph, and names the edge kind, so the number is never mistaken for a degree
+/// over every edge.
+fn coupling_summary(report: &rto_graph::CouplingReport) -> String {
+    if report.coupled_nodes == 0 {
+        return "call coupling: no `calls` edges in this graph".to_owned();
+    }
+    let mut excluded = Vec::new();
+    if report.self_calls > 0 {
+        excluded.push(format!("{} self-call(s)", report.self_calls));
+    }
+    if report.cross_language_calls > 0 {
+        excluded.push(format!(
+            "{} cross-language name collision(s)",
+            report.cross_language_calls
+        ));
+    }
+    let excluded = if excluded.is_empty() {
+        String::new()
+    } else {
+        format!(", excluding {}", excluded.join(" and "))
+    };
+    format!(
+        "call coupling: {} of {} coupled node(s) shown, by {}; {} `calls` edge(s){excluded}",
+        report.items.len(),
+        report.coupled_nodes,
+        report.order,
+        report.call_edges,
     )
 }
 
