@@ -71,11 +71,20 @@ roteiro security prefetch --analyzer sandbox --allow-download
 # Then build the sandboxed backend against the verified archive:
 BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz" \
   cargo install roteiro --features exec-boxlite
+
+# Finally, pull the pinned analyzer image. Only this build can: the image half
+# of `prefetch` is compiled out of any binary without `exec-boxlite`.
+roteiro security prefetch --analyzer semgrep --allow-download
 ```
 
 The build **fails with the exact recipe** if `BOXLITE_RUNTIME_URL` is unset,
 names a remote URL, or points at bytes that do not match the pin. That is
 deliberate: it is the only point at which anything verifies what gets embedded.
+
+The third step is separate for a reason of ordering rather than taste: the
+binary that can pull an image is the one the first two steps exist to produce.
+Because a run never pulls, skipping it means `roteiro security run` refuses with
+`ImageNotProvisioned` instead of fetching an image mid-scan.
 
 **3. It embeds third-party binaries, some of them GPL-2.0 and LGPL-2.0**, and
 distributing a binary built this way carries source-offer duties. `prefetch`

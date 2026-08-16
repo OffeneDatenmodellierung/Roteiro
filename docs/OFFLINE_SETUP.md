@@ -7,8 +7,8 @@ once, deliberately, while you still have one. This guide is the "once".
 The rule it follows: **offline is preferred for working, not for setup.** Prepare
 on a good connection, verify, then unplug.
 
-Everything here is verifiable. Roteiro contacts exactly **three hosts**, from
-exactly **two** call sites in the whole workspace:
+Everything here is verifiable. A **default build** contacts exactly **three
+hosts**, from exactly **two** call sites in the whole workspace:
 
 | Host | What | Reached by |
 | --- | --- | --- |
@@ -16,9 +16,26 @@ exactly **two** call sites in the whole workspace:
 | `ocrs-models.s3-accelerate.amazonaws.com` | the OCR model only | `roteiro model pull ocrs-text` |
 | `osv-vulnerabilities.storage.googleapis.com` | OSV databases | `roteiro security prefetch --allow-download` |
 
+**`exec-boxlite` adds two more hosts and a third call site** (ADR-0014,
+Stage 24). Leave the feature off and none of this applies:
+
+| Host | What | Reached by |
+| --- | --- | --- |
+| `github.com` | the boxlite sandbox runtime archive | `roteiro security prefetch --analyzer sandbox --allow-download` |
+| `docker.io` | the pinned analyzer image | `roteiro security prefetch --analyzer semgrep --allow-download` |
+
+The archive goes through the same `ureq` call site as everything above. The
+image does not: an OCI pull runs through `oci-client` inside the `boxlite`
+dependency, so it is the one egress path that is not first-party code. Both are
+pinned — the archive by SHA-256 in `crates/rto-exec/src/runtime_pins.rs`, the
+image by manifest digest in `SANDBOX_IMAGES` — so a registry serving different
+bytes fails the pin rather than being trusted.
+
 Everything else — the semgrep baseline rules, the explorer's JavaScript, every
 tree-sitter grammar — is compiled into the binary. There is no lazy fetch, no
-implicit fallback and no phone-home. **Nothing Roteiro needs is unprefetchable.**
+implicit fallback and no phone-home. **Nothing Roteiro needs is unprefetchable**,
+these two included: a sandboxed *run* never pulls, and refuses with
+`ImageNotProvisioned` if the image was not fetched ahead of time.
 
 ---
 
