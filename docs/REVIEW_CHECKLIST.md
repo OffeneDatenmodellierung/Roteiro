@@ -49,6 +49,36 @@ blast radius) rather than the diff alone.
 - [ ] **One concern** per PR; the commit/PR explains the *why*.
 - [ ] Docs/`AGENTS.md`/website updated if the change affects usage or standards.
 
+## Triaging an automated reviewer's comments
+
+Automated review is worth having — on one measured sample of 25 comments from
+GitHub Copilot across 12 PRs, **22 were real defects that were accepted and
+fixed**, and not one of them was caught by CI or by the author's own
+verification, because every one of them *passed*. They were contract-accuracy
+defects: code that worked but did not mean what it said.
+
+But adjudicate before acting, and one rule pays for itself:
+
+- [ ] **A comment claiming the code will not compile is refuted by a green
+      build, not by an investigation.** In that sample every false positive was
+      a compile-error claim (a move out of a borrow, three times), and *every*
+      compile-error claim was a false positive — 3 for 3, with no real defect in
+      that class. The CI `msrv` job is `cargo check --workspace --all-features`
+      and finishes in about 40 seconds; in each case it had already gone green
+      at that commit roughly a minute **before** the comment was posted. So the
+      refutation exists before anyone reads the comment: check the status,
+      reply, move on. Do not dispatch work to "fix" it.
+- [ ] Every other class in that sample was real. Treat a non-compile finding as
+      probably correct and verify it against the code, rather than assuming the
+      reviewer is noisy.
+- [ ] When a reviewer's cited line or mechanism is wrong but the underlying
+      point is right, **say so in the reply** and fix the substance. A reviewer
+      that is silently overruled teaches no one; one whose finding is confirmed
+      and sharpened tells the next reader where to look.
+- [ ] A fix that only makes the comment go away is not a fix. Prefer removing
+      the cause: several of these were one symptom of a rule stated in two
+      places that had drifted apart.
+
 ## Graph-grounded (from `roteiro review`)
 
 - [ ] Callers of changed symbols still hold (no silently broken contracts).
