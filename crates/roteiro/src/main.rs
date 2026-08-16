@@ -4983,6 +4983,12 @@ fn run_security_ingest(file: &str, analyzer: Option<&str>, json: bool) -> anyhow
             // `None` when nothing is provisioned, which is honest: an ingested
             // report says nothing about what this machine has.
             advisory_db: advisory_db_evidence(&request.analyzer),
+            // The checkout we are standing in, so an analyzer that reports
+            // absolute paths — `osv-scanner` does — produces the same
+            // worktree-relative finding keys here as it does under `security
+            // run`. A report about some *other* tree simply will not relativise,
+            // and the adapter records that rather than guessing.
+            worktree: Some(&worktree_path),
             snippets: &snippets,
         };
         let report = rto_exec::normalize_native(&request.analyzer, &bytes, &ctx)?;

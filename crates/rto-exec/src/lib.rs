@@ -77,8 +77,9 @@ pub use adapter::{
 };
 #[cfg(feature = "exec-subprocess")]
 pub use assets::{
-    ASSETS, AssetKind, AssetSpec, AssetStatus, InstalledAsset, MissingAsset, asset, asset_path,
-    asset_root, assets_for, provision, resolve, status,
+    ASSETS, AssetKind, AssetSource, AssetSpec, AssetStatus, DownloadFile, Fetcher, InstalledAsset,
+    MissingAsset, asset, asset_path, asset_root, assets_for, provision, provision_with, resolve,
+    status,
 };
 pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 pub use ingest::{

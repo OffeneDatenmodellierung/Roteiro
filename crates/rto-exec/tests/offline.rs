@@ -154,6 +154,7 @@ fn hostile_analyzer_output_is_refused_with_no_partial_result() {
         source: &source,
         rules_digest: None,
         advisory_db: None,
+        worktree: None,
         snippets: &NoSnippets,
     };
 
@@ -232,6 +233,7 @@ fn a_real_advisory_database_timestamp_yields_an_age() {
         source: &source,
         rules_digest: None,
         advisory_db: None,
+        worktree: None,
         snippets: &NoSnippets,
     };
     let report = normalize_native("cargo-audit", &fixture::cargo_audit_native(), &ctx)

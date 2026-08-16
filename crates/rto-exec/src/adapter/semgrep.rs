@@ -308,6 +308,9 @@ mod tests {
             source: &SOURCE,
             rules_digest: Some("cafe1234".to_owned()),
             advisory_db: None,
+            // Semgrep reports worktree-relative paths, so this adapter never
+            // consults the worktree.
+            worktree: None,
             // The unit tests here exercise the *parsing*; the snippet component
             // is covered by `tests/equivalence.rs`, which reads a real tree.
             snippets: &crate::snippet::NoSnippets,

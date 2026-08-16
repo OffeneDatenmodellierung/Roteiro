@@ -357,6 +357,7 @@ mod tests {
             source,
             rules_digest: None,
             advisory_db: None,
+            worktree: None,
             snippets: &crate::snippet::NoSnippets,
         }
     }

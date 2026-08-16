@@ -29,6 +29,7 @@ fn normalize_fixture() -> rto_exec::NormalizedReport {
         source: &source,
         rules_digest: Some("baseline".to_owned()),
         advisory_db: None,
+        worktree: None,
         snippets: &snippets,
     };
     normalize_native("semgrep", &fixture::semgrep_native(), &ctx).expect("normalise")
@@ -171,6 +172,7 @@ fn runs_the_real_analyzer_when_one_is_installed() {
         source: &source,
         rules_digest: Some("baseline".to_owned()),
         advisory_db: None,
+        worktree: None,
         snippets: &snippets,
     };
     let live = normalize_native("semgrep", &output.stdout, &ctx).expect("normalise live output");

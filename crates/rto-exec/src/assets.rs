@@ -20,7 +20,7 @@
 //! after the fact — and the whole point of stamping `rules_digest` onto an
 //! [`rto_graph::AnalysisRun`] is that the question has an answer.
 //!
-//! # Two kinds of asset, and why there is no third yet
+//! # Three kinds of asset
 //!
 //! [`AssetSource::Vendored`] is compiled into the binary — the baseline semgrep
 //! rule set. Installing it needs no network at all, which is what makes a fresh
@@ -33,9 +33,20 @@
 //! rather than whatever `~/.cargo/advisory-db` happened to contain. If it is
 //! absent, `prefetch` says exactly how to obtain it and refuses.
 //!
-//! There is deliberately no download-by-URL source yet: nothing shipped here
-//! needs one, and an unused fetch path is a security surface with no user. The
-//! enum is `#[non_exhaustive]`, so adding one later is not a breaking change.
+//! [`AssetSource::Download`] is fetched by URL, and arrived with `osv-scanner`
+//! in Stage 22b. Earlier revisions of this module said there was deliberately no
+//! such source because "an unused fetch path is a security surface with no
+//! user"; OSV's per-ecosystem databases are that user. They are single files at
+//! stable URLs — exactly what a digest pin wants, and what the `RustSec` git
+//! checkout could never be. The enum being `#[non_exhaustive]` is what made
+//! adding it a non-breaking change.
+//!
+//! **Fetching is still confined to provisioning.** The transport is not in this
+//! crate at all: [`provision_with`] takes the fetcher as an argument, and the
+//! plain [`provision`] passes one that refuses. A run resolves assets through
+//! [`resolve`], which has no fetcher to call even if it wanted one — so "a run
+//! never provisions" is a property of the signatures rather than a rule someone
+//! has to remember.
 //!
 //! @rto:0014
 
@@ -71,6 +82,33 @@ pub enum AssetSource {
         /// What to run to obtain it, quoted verbatim in every error.
         hint: &'static str,
     },
+    /// A set of files downloaded by URL into one directory, digest-pinned at
+    /// provisioning time.
+    ///
+    /// Downloading happens only in [`provision_with`], and only with a fetcher
+    /// the caller supplied. There is no compile-time digest because the upstream
+    /// files are republished continuously — OSV rebuilds its per-ecosystem
+    /// databases daily — so what is pinned is the snapshot this machine
+    /// provisioned, recorded in [`InstalledAsset::digest`] and re-checked on
+    /// every run. That is the same pin the `RustSec` checkout gets, and it is
+    /// the one that can actually be honoured.
+    Download {
+        /// Each file's path relative to the asset directory, and where it comes
+        /// from. Order is preserved so `prefetch` reports progress in a stable
+        /// sequence.
+        files: &'static [DownloadFile],
+    },
+}
+
+/// One file of an [`AssetSource::Download`] asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadFile {
+    /// Where it is installed, relative to the asset directory. Forward slashes;
+    /// never absolute and never containing `..`, which [`provision_with`]
+    /// enforces rather than trusts.
+    pub path: &'static str,
+    /// The URL it is fetched from.
+    pub url: &'static str,
 }
 
 /// What kind of input an asset is — the axis along which it goes stale.
@@ -137,6 +175,52 @@ pub static ASSETS: &[AssetSpec] = &[
         },
         file: "",
         licence: "CC0-1.0 (RustSec advisory database)",
+    },
+    AssetSpec {
+        id: crate::adapter::osv_scanner::DB_ASSET,
+        analyzer: crate::adapter::osv_scanner::ANALYZER,
+        kind: AssetKind::AdvisoryDb,
+        source: AssetSource::Download {
+            files: OSV_DATABASES,
+        },
+        file: "",
+        // OSV.dev aggregates upstream databases and does not relicense them; each
+        // record carries its own terms. The two that dominate this set are named
+        // rather than flattened into one claim, because `cargo deny` governs
+        // crates and would never have looked at an advisory file.
+        licence: "per-record, as published by OSV.dev \
+                  (CC0-1.0 for RustSec, CC-BY-4.0 for the GitHub Advisory Database)",
+    },
+];
+
+/// The OSV per-ecosystem databases this build provisions.
+///
+/// The layout is not ours to choose: `osv-scanner --local-db-path <dir>` looks
+/// for `<dir>/osv-scalibr/<ECOSYSTEM>/all.zip`, with the ecosystem spelled
+/// exactly as OSV spells it (`crates.io`, not `cargo`; `PyPI`, not `pypi`).
+///
+/// Four ecosystems, because that is what ADR-0018's matrix asks of this
+/// analyzer: Python, Java and Node are the gap it closes, and `crates.io` is
+/// what makes the Rust cross-reference with `cargo-audit` possible at all.
+/// **`npm/all.zip` alone is roughly 210 MB**, and the four together are around
+/// 260 MB — a real provisioning cost, disclosed by `prefetch` before it fetches
+/// anything.
+pub static OSV_DATABASES: &[DownloadFile] = &[
+    DownloadFile {
+        path: "osv-scalibr/crates.io/all.zip",
+        url: "https://osv-vulnerabilities.storage.googleapis.com/crates.io/all.zip",
+    },
+    DownloadFile {
+        path: "osv-scalibr/PyPI/all.zip",
+        url: "https://osv-vulnerabilities.storage.googleapis.com/PyPI/all.zip",
+    },
+    DownloadFile {
+        path: "osv-scalibr/Maven/all.zip",
+        url: "https://osv-vulnerabilities.storage.googleapis.com/Maven/all.zip",
+    },
+    DownloadFile {
+        path: "osv-scalibr/npm/all.zip",
+        url: "https://osv-vulnerabilities.storage.googleapis.com/npm/all.zip",
     },
 ];
 
@@ -268,7 +352,7 @@ pub fn asset_path(root: &Path, spec: &AssetSpec) -> PathBuf {
     let dir = asset_dir(root, spec);
     match spec.source {
         AssetSource::Vendored(_) => dir.join(spec.file),
-        AssetSource::External { .. } => dir.join("db"),
+        AssetSource::External { .. } | AssetSource::Download { .. } => dir.join("db"),
     }
 }
 
@@ -301,6 +385,50 @@ pub enum AssetError {
     /// This build has no such asset.
     #[error("unknown asset {0:?}")]
     Unknown(String),
+    /// A downloadable asset was asked for without a fetcher, which is what every
+    /// path except `roteiro security prefetch` does.
+    ///
+    /// This is the offline contract stated as an error rather than as a comment:
+    /// a run that finds a cold cache is told what to run, and is never quietly
+    /// given a network connection instead.
+    #[error(
+        "asset {id:?} is not provisioned and this code path does not download \
+         ({files} file(s), starting with {first})\n  \
+         fetch it with: roteiro security prefetch --analyzer {analyzer}"
+    )]
+    FetchNotPermitted {
+        /// The asset id.
+        id: &'static str,
+        /// How many files it is made of.
+        files: usize,
+        /// The first URL, so the message names something concrete.
+        first: &'static str,
+        /// The analyzer that needs it.
+        analyzer: &'static str,
+    },
+    /// A download failed. The message is the fetcher's, because it knows what
+    /// went wrong and this module deliberately knows no transport.
+    #[error("downloading {url} for asset {id:?}: {message}")]
+    Fetch {
+        /// The asset id.
+        id: &'static str,
+        /// The URL that failed.
+        url: &'static str,
+        /// What the fetcher reported.
+        message: String,
+    },
+    /// A [`DownloadFile::path`] is not a plain relative path.
+    ///
+    /// Checked rather than trusted: these paths are compiled in today, but they
+    /// name where bytes from the network are written, and a `..` in one would
+    /// write outside the asset cache.
+    #[error("asset {id:?} declares an unsafe install path {path:?}")]
+    UnsafeInstallPath {
+        /// The asset id.
+        id: &'static str,
+        /// The offending path.
+        path: &'static str,
+    },
     /// Reading or writing the cache failed.
     #[error("asset cache I/O at {path}: {source}")]
     Io {
@@ -314,17 +442,52 @@ pub enum AssetError {
     Record(#[from] serde_json::Error),
 }
 
-/// Install and verify one asset, returning what was recorded.
+/// How bytes at a URL are written to a local path.
 ///
-/// This is the **only** function that writes to the asset cache. It is
-/// idempotent: re-running it re-digests and re-stamps, which is what makes
+/// The transport is the caller's: this crate has no HTTP dependency and is not
+/// going to acquire one for a single asset kind. `roteiro security prefetch`
+/// supplies an implementation over the `ureq` client already in the tree; tests
+/// supply one that writes fixture bytes and never opens a socket, which is how
+/// the download path is exercised without a network.
+///
+/// An implementation must write the whole file or fail — a truncated download
+/// that returned `Ok` would be digested and pinned as if it were complete.
+pub type Fetcher<'a> = dyn Fn(&str, &Path) -> Result<(), String> + 'a;
+
+/// Install and verify one asset, without any ability to download.
+///
+/// This is what every path except `roteiro security prefetch` calls. A
+/// [`AssetSource::Download`] asset that is not already present therefore fails
+/// with [`AssetError::FetchNotPermitted`] naming the prefetch command, which is
+/// the offline contract expressed as a signature.
+///
+/// It is idempotent: re-running it re-digests and re-stamps, which is what makes
 /// `prefetch` a safe thing to run whenever you are unsure.
 ///
 /// # Errors
 /// Returns [`AssetError::ExternalMissing`] when an operator-provisioned asset is
-/// absent — never a fetch — or [`AssetError::Io`] if the cache cannot be
-/// written.
+/// absent, [`AssetError::FetchNotPermitted`] when a downloadable one is, or
+/// [`AssetError::Io`] if the cache cannot be written.
 pub fn provision(root: &Path, spec: &AssetSpec) -> Result<InstalledAsset, AssetError> {
+    provision_with(root, spec, None)
+}
+
+/// Install and verify one asset, downloading through `fetch` where the asset
+/// needs it.
+///
+/// This is the **only** function that writes to the asset cache, and the only
+/// one that can cause a network request. `fetch` is `None` for every caller that
+/// must not fetch; see [`provision`].
+///
+/// # Errors
+/// As [`provision`], plus [`AssetError::Fetch`] if a download fails and
+/// [`AssetError::UnsafeInstallPath`] if a declared install path could escape the
+/// asset directory.
+pub fn provision_with(
+    root: &Path,
+    spec: &AssetSpec,
+    fetch: Option<&Fetcher<'_>>,
+) -> Result<InstalledAsset, AssetError> {
     let dir = asset_dir(root, spec);
     std::fs::create_dir_all(&dir).map_err(|source| AssetError::Io {
         path: dir.display().to_string(),
@@ -349,6 +512,11 @@ pub fn provision(root: &Path, spec: &AssetSpec) -> Result<InstalledAsset, AssetE
             let (digest, count) = digest_tree(&target)?;
             (digest, Some(count))
         }
+        AssetSource::Download { files } => {
+            download_all(spec, files, &target, fetch)?;
+            let (digest, count) = digest_tree(&target)?;
+            (digest, Some(count))
+        }
     };
     let published_at = published_at(&target);
 
@@ -363,6 +531,87 @@ pub fn provision(root: &Path, spec: &AssetSpec) -> Result<InstalledAsset, AssetE
     let json = serde_json::to_vec_pretty(&record)?;
     write_atomically(&record_path(root, spec), &json)?;
     Ok(record)
+}
+
+/// Fetch every file of a [`AssetSource::Download`] asset into `target`.
+///
+/// With no fetcher this refuses unless the files are *already* all there, which
+/// is what makes `provision` idempotent for a downloadable asset without giving
+/// it a network: a second `prefetch --offline`-style call over a warm cache
+/// re-digests and re-stamps rather than failing.
+fn download_all(
+    spec: &AssetSpec,
+    files: &'static [DownloadFile],
+    target: &Path,
+    fetch: Option<&Fetcher<'_>>,
+) -> Result<(), AssetError> {
+    for file in files {
+        if !is_safe_relative(file.path) {
+            return Err(AssetError::UnsafeInstallPath {
+                id: spec.id,
+                path: file.path,
+            });
+        }
+    }
+
+    let missing: Vec<&DownloadFile> = files
+        .iter()
+        .filter(|file| !target.join(file.path).is_file())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let Some(fetch) = fetch else {
+        return Err(AssetError::FetchNotPermitted {
+            id: spec.id,
+            files: missing.len(),
+            first: missing[0].url,
+            analyzer: spec.analyzer,
+        });
+    };
+
+    for file in missing {
+        let destination = target.join(file.path);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| AssetError::Io {
+                path: parent.display().to_string(),
+                source,
+            })?;
+        }
+        // Fetch beside the destination and rename, so an interrupted download
+        // never leaves a half-file that the next run would digest and pin.
+        let partial = destination.with_extension("partial");
+        std::fs::remove_file(&partial).ok();
+        fetch(file.url, &partial).map_err(|message| AssetError::Fetch {
+            id: spec.id,
+            url: file.url,
+            message,
+        })?;
+        std::fs::rename(&partial, &destination).map_err(|source| {
+            std::fs::remove_file(&partial).ok();
+            AssetError::Io {
+                path: destination.display().to_string(),
+                source,
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Whether a declared install path stays inside the asset directory.
+///
+/// Compiled-in paths today, but they name where bytes from the network land, and
+/// the check costs nothing.
+fn is_safe_relative(path: &str) -> bool {
+    !path.is_empty()
+        && !Path::new(path).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::ParentDir
+            )
+        })
 }
 
 /// The provisioning record for an asset, or `None` if it was never provisioned
@@ -449,7 +698,9 @@ fn current_digest(root: &Path, spec: &AssetSpec) -> Option<String> {
     let target = asset_path(root, spec);
     match spec.source {
         AssetSource::Vendored(_) => Some(sha256_hex(&std::fs::read(target).ok()?)),
-        AssetSource::External { .. } => digest_tree(&target).ok().map(|(digest, _)| digest),
+        AssetSource::External { .. } | AssetSource::Download { .. } => {
+            digest_tree(&target).ok().map(|(digest, _)| digest)
+        }
     }
 }
 
