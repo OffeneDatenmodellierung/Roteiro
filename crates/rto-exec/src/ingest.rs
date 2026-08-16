@@ -16,6 +16,7 @@ use rto_graph::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::{NativeContext, adapter_for, known_analyzers};
 use crate::runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_reported_path,
     check_request,
@@ -141,37 +142,79 @@ impl AnalyzerRunner for IngestRunner {
     fn run(&self, request: &AnalysisRequest) -> Result<AnalysisResponse, ExecError> {
         check_request(request)?;
         let report: NormalizedReport = serde_json::from_slice(&self.report)?;
-        validate_report(&report, &request.analyzer)?;
-
-        let findings = normalize_findings(&report)?;
-        let layer = layer_key(&request.analyzer, &request.worktree.id)?;
-        let run = AnalysisRun {
-            layer,
-            analyzer: report.analyzer,
-            analyzer_version: report.analyzer_version,
-            runner: self.kind(),
-            isolation: self.isolation(),
-            image_digest: report.image_digest,
-            rules_digest: report.rules_digest,
-            advisory_db: report.advisory_db,
-            // The policy the ingest itself honoured: it opened no socket and did
-            // not write the tree. A backend that really executes something
-            // records the policy it enforced on that execution.
-            command_policy: CommandPolicy {
-                network: request.network,
-                worktree: request.worktree.access,
-                environment: EnvironmentPolicy::Scrubbed,
-            },
-            // The caller's knowledge of the source identity wins where it has
-            // any; otherwise the report's own record stands.
-            source: merge_source(&request.source, report.source),
-            started_at: report.started_at,
-            ended_at: report.ended_at,
-            exit_status: report.exit_status,
-            report_digest: sha256_hex(&self.report),
-        };
-        Ok(AnalysisResponse { run, findings })
+        assemble(report, request, self.kind(), self.isolation(), &self.report)
     }
+}
+
+/// Turn one analyzer's **native** output into a normalized report, using that
+/// analyzer's adapter.
+///
+/// This is the single conversion both execution paths go through: a subprocess
+/// run hands it the bytes it captured from the analyzer's stdout, and
+/// `roteiro security ingest` hands it the bytes of a report file produced by the
+/// same analyzer in CI. The resulting [`Finding`]s are equal because they came
+/// out of the same function, not because two implementations were checked
+/// against each other.
+///
+/// # Errors
+/// Returns [`ExecError::UnknownAnalyzer`] if this build has no adapter for
+/// `analyzer`, or whatever the adapter raises for output it cannot read.
+pub fn normalize_native(
+    analyzer: &str,
+    native: &[u8],
+    ctx: &NativeContext<'_>,
+) -> Result<NormalizedReport, ExecError> {
+    let adapter = adapter_for(analyzer).ok_or_else(|| ExecError::UnknownAnalyzer {
+        requested: analyzer.to_owned(),
+        known: known_analyzers().join(", "),
+    })?;
+    adapter.normalize(native, ctx)
+}
+
+/// Validate a normalized report and build the response a backend returns.
+///
+/// Shared by every backend so the validation, the identity keys, the ordering
+/// and the evidence chain are written once. `raw` is the exact bytes the report
+/// was derived from — the analyzer's stdout for a subprocess run, the file's
+/// contents for an ingest — because `report_digest` identifies *those bytes*,
+/// not the parsed value.
+pub(crate) fn assemble(
+    report: NormalizedReport,
+    request: &AnalysisRequest,
+    runner: RunnerKind,
+    isolation: Isolation,
+    raw: &[u8],
+) -> Result<AnalysisResponse, ExecError> {
+    validate_report(&report, &request.analyzer)?;
+    let findings = normalize_findings(&report)?;
+    let layer = layer_key(&request.analyzer, &request.worktree.id)?;
+    let run = AnalysisRun {
+        layer,
+        analyzer: report.analyzer,
+        analyzer_version: report.analyzer_version,
+        runner,
+        isolation,
+        image_digest: report.image_digest,
+        rules_digest: report.rules_digest,
+        advisory_db: report.advisory_db,
+        // The policy the run was executed under. For ingest that is trivially
+        // honoured — it opened no socket and did not write the tree. A backend
+        // that really executes something records what it enforced, and says so
+        // in its own documentation where "enforced" overstates the case.
+        command_policy: CommandPolicy {
+            network: request.network,
+            worktree: request.worktree.access,
+            environment: EnvironmentPolicy::Scrubbed,
+        },
+        // The caller's knowledge of the source identity wins where it has any;
+        // otherwise the report's own record stands.
+        source: merge_source(&request.source, report.source),
+        started_at: report.started_at,
+        ended_at: report.ended_at,
+        exit_status: report.exit_status,
+        report_digest: sha256_hex(raw),
+    };
+    Ok(AnalysisResponse { run, findings })
 }
 
 /// Prefer the caller's source identity component-by-component, falling back to

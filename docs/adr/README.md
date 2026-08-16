@@ -23,6 +23,12 @@
 | [0015](0015-generated-media-content-artifact-store.md) | Generated media content — its own artifact store, rebuildable on demand | For Review |
 | [0016](0016-audio-metadata-extraction.md) | Audio metadata as derived facts — symphonia for format reads, MPL-2.0 allowed | For Review |
 | [0017](0017-dependency-security-policy.md) | Dependency security — current by default, monitored, held for a minimum release age of at least 48 hours | For Review |
+| [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | For Review |
+
+> **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
+> stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
+> analyzers are shipped and what each one actually covers — with the evidence,
+> since 0012 and 0014 name `cargo-audit` and `semgrep` only as examples.
 
 > **ADRs 0012–0015 form one decision set** and are best read together. They share a
 > single structural rule: *knowledge that is not a derived/authored/inferred graph
