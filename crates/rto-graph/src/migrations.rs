@@ -656,7 +656,10 @@ const _: () = {
 };
 
 /// The highest migration version known to this build.
-#[cfg(test)]
+///
+/// This is the **binary's** half of the store/binary comparison that
+/// [`crate::Store::schema_ahead`] makes: a property of the compiled slice, never
+/// of any store.
 pub(crate) fn latest_version() -> u32 {
     // The slice is strictly ascending (checked above), so the last is the max.
     match MIGRATIONS.last() {
@@ -752,6 +755,42 @@ pub(crate) fn store_version(conn: &Connection) -> rusqlite::Result<u32> {
         Ok(applied) => Ok(contiguous_version(&applied)),
         Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
             Ok(0)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Every version recorded in `conn`'s store that this build has **never heard
+/// of** — ascending, and empty for any store this build is level with or ahead
+/// of. Backs [`crate::Store::schema_ahead`].
+///
+/// The predicate is set difference against [`MIGRATIONS`], deliberately *not* a
+/// comparison against [`store_version`]. Those differ, and only one of them
+/// answers the question a write guard is asking:
+///
+/// - [`store_version`] is the highest **gap-free** version — a floor, the schema
+///   a *reader* may rely on. For a store recorded `1..=13, 15` read by a build
+///   that knows 13, it reports 13, so a `> store_version` test sees nothing
+///   wrong even though migration 15's schema is sitting in the file and a newer
+///   build plainly wrote the graph. That is precisely the silent downgrade this
+///   exists to stop, surviving the check meant to catch it.
+/// - The set difference is a ceiling: *has anything newer than me touched this
+///   store?* It reports `[15]`, which is the truth.
+///
+/// The two situations stay separate, which is why neither message is confusing.
+/// A **gap** (a store missing a lower migration this build knows) is repaired by
+/// [`apply`] on the very same open, so it never reaches here. What remains can
+/// only be a version no build of this vintage could have written.
+///
+/// Returns an empty list when `schema_migrations` does not exist, matching
+/// [`store_version`]: a store with no migration table is behind every build, not
+/// ahead of one.
+pub(crate) fn versions_ahead_of_build(conn: &Connection) -> rusqlite::Result<Vec<u32>> {
+    let latest = latest_version();
+    match applied_versions(conn) {
+        Ok(applied) => Ok(applied.range(latest.saturating_add(1)..).copied().collect()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            Ok(Vec::new())
         }
         Err(e) => Err(e),
     }

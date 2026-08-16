@@ -1569,6 +1569,11 @@ fn run_sync(
     let mut store = Store::open(&store_dir.join("graph.db"))?;
     let cache = ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))?;
 
+    // `sync`'s whole contract is the rewrite, so there is no serve-as-is fallback
+    // here the way there is for a read: skipping the work and still printing
+    // "synced" would be the silent downgrade wearing a success message.
+    ensure_graph_writable(&store)?;
+
     let registry = Registry::new(ingest);
     let report = if committed_only {
         sync(&mut store, &repo, &cache, &registry)?
@@ -1659,6 +1664,63 @@ enum GraphSource {
     Index,
 }
 
+/// Refuse to **rewrite** a graph store that a newer Roteiro has already written
+/// (issue #342).
+///
+/// A store ahead of this build opens without complaint, and every path that
+/// reassembles the graph — `sync`, and the implicit refresh below — would then
+/// re-extract the whole tree under this build's older `EXTRACT_VERSION` and
+/// commit the result over the newer build's. Nothing fails and nothing warns;
+/// the graph simply gets worse. That is the entire bug, so this is the entire
+/// fix: the write stops, loudly, naming both versions.
+///
+/// It lives here rather than in `rto_graph` because the refusal is a policy the
+/// *caller* chooses — the library reports the condition ([`rto_graph::Store::schema_ahead`])
+/// and stays free of it. That also keeps the whole change additive on a
+/// published 1.x API; see [`rto_graph::SchemaAhead`] for why that mattered.
+fn ensure_graph_writable(store: &rto_graph::Store) -> anyhow::Result<()> {
+    match store.schema_ahead()? {
+        Some(ahead) => Err(anyhow::Error::new(ahead)),
+        None => Ok(()),
+    }
+}
+
+/// Refresh the graph for a **read** command (`query`/`explain`, `search`,
+/// `context`, `path`), and serve the store as-is when this build must not
+/// rewrite it.
+///
+/// These commands rebuild before reading so results reflect the current source.
+/// That refresh is a graph rewrite like any other, so on a store from the future
+/// it is the same silent downgrade — `roteiro search` alone destroys the newer
+/// build's content today. But refusing the *command* would be the wrong trade:
+/// reads against such a store are provably sound (migrations are additive in
+/// effect), and issue #342 is explicit that they must keep working. So the
+/// rewrite is skipped, the reason goes to stderr, and the question still gets an
+/// answer — from the graph the newer build left, which is better content than
+/// this build could produce anyway.
+///
+/// Gate and write commands (`sync`, `check`, `review`, the importers, `export`)
+/// deliberately do **not** come through here: for them a stale-but-unrefreshed
+/// graph would be a confident wrong verdict, and a hard refusal is the honest
+/// answer.
+fn refresh_for_read(
+    repo: &rto_graph::Repo,
+    store: &mut rto_graph::Store,
+    cache: &rto_graph::ObjectCache,
+    ingest: rto_graph::IngestConfig,
+    source: GraphSource,
+) -> anyhow::Result<()> {
+    if let Some(ahead) = store.schema_ahead()? {
+        eprintln!(
+            "note: {ahead}\n      Answering from the graph that newer build left; \
+             it has not been refreshed for the current source."
+        );
+        return Ok(());
+    }
+    build_graph(repo, store, cache, ingest, source)?;
+    Ok(())
+}
+
 /// Build the full graph into `store`: the derived code graph plus the authored
 /// ADR layer, both from the tree named by `source`. Returns the authored-layer
 /// check report (used by `check`; ignored by `query`).
@@ -1670,6 +1732,11 @@ fn build_graph(
     source: GraphSource,
 ) -> anyhow::Result<rto_spec::CheckReport> {
     use rto_graph::{Registry, sync, sync_index, sync_worktree};
+    // Every caller of this function reassembles the graph — derived layer,
+    // authored layer, and re-applied imports — so this is the one chokepoint the
+    // write guard needs (issue #342). `run_sync` carries its own; it does not
+    // come through here.
+    ensure_graph_writable(store)?;
     let registry = Registry::new(ingest);
     let sync_report = match source {
         GraphSource::Committed => sync(store, repo, cache, &registry)?,
@@ -3265,7 +3332,7 @@ fn run_query(
     use rto_graph::{NodeKind, explain, list_kind};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     match (key, kind) {
         (Some(key), _) => {
@@ -3391,7 +3458,7 @@ fn run_search(
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     let opts = rto_graph::SearchOptions {
         limit,
@@ -4136,7 +4203,7 @@ fn run_context(
     use rto_graph::{context, refresh_contexts};
 
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     if refresh {
         let report = refresh_contexts(&store)?;
@@ -4341,7 +4408,7 @@ fn run_path(
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
 
     let result = rto_graph::path(&store, from, to)?;
     if json {

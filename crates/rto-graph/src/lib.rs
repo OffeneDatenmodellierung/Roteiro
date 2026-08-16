@@ -115,7 +115,7 @@ pub use query::{
     GeneratedHit, Listing, MemoryHit, NodeSummary, Path, PathHop, SCHEMA, SearchHit, SearchOptions,
     SearchResults, coupling, debt, explain, list_kind, path, search, search_channels,
 };
-pub use store::{ImportApplied, Store, StoreError};
+pub use store::{ImportApplied, SchemaAhead, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_tree, sync_worktree};
 pub use workspace::{
     Follow, ResolvedWorkspace, Workspace, WorkspaceError, WorkspaceSet, discover_repos_under,
