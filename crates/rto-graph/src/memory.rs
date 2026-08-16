@@ -37,7 +37,7 @@
 //!
 //! | | [`MemoryRecord`] — episodic | [`CacheEntry`] — transient |
 //! |---|---|---|
-//! | Table | `agent_memory` (migration 11) | `agent_cache` (migration 12) |
+//! | Table | `agent_memory` (migration 11) | `agent_cache` (migration 13) |
 //! | Re-derivable | **no** — there is no generating function | **yes**, by definition |
 //! | Bounded | never | by a byte budget ([`DEFAULT_CACHE_BUDGET_BYTES`]) |
 //! | Removed by | an explicit [`crate::Store::forget_memory`], and nothing else | that, or a sweep |

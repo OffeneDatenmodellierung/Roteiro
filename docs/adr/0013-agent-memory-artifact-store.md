@@ -326,7 +326,7 @@ cheap `NodeKind::Other("memory")` shortcut that someone will otherwise take.
 
 **Both halves are now delivered.** Stage 23 shipped the episodic tier — migration
 11, the `agent_memory` store, `roteiro memory add|list|forget`. Stage 25 shipped
-the rest: migration **12** (`agent_cache`, plus the single-row `agent_cache_clock`
+the rest: migration **13** (`agent_cache`, plus the single-row `agent_cache_clock`
 its counters are drawn from), retrieval-time ranking, the byte-budget sweep at the
 `refresh_contexts` maintenance seam, and a **third `search` channel** for memory
 that is off by default and takes no `authored` boost.

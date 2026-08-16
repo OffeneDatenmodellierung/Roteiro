@@ -431,7 +431,7 @@ CREATE INDEX idx_mem_anchor ON agent_memory(anchor_key);
 CREATE INDEX idx_mem_live ON agent_memory(scope, superseded_by, id DESC);
 ";
 
-/// Migration 12: the **transient cache tier** (ADR-0013, the second half of the
+/// Migration 13: the **transient cache tier** (ADR-0013, the second half of the
 /// two-tier store; build plan Stage 25) — the opposite of migration 11 in every
 /// rule, because it holds the opposite kind of knowledge.
 ///
@@ -475,7 +475,7 @@ CREATE INDEX idx_mem_live ON agent_memory(scope, superseded_by, id DESC);
 /// validity test — here it supplies the `anchor_valid ASC` half of the eviction
 /// order, so a row whose code moved out from under it goes before a row that still
 /// describes the tree. There is deliberately no second rule and no scope term.
-const M0012_AGENT_CACHE: &str = "
+const M0013_AGENT_CACHE: &str = "
 CREATE TABLE agent_cache (
     key         TEXT PRIMARY KEY,
     -- The content-addressed freshness witness, on `node_context`'s terms: a
@@ -566,8 +566,8 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sql: M0011_AGENT_MEMORY,
     },
     Migration {
-        version: 12,
-        sql: M0012_AGENT_CACHE,
+        version: 13,
+        sql: M0013_AGENT_CACHE,
     },
 ];
 
@@ -1124,6 +1124,48 @@ mod tests {
                 .expect("query");
             assert_eq!(count, 1, "table {table} should exist");
         }
+    }
+
+    /// **Every migration has its own version, and the list is in order.**
+    ///
+    /// This exists because of the one failure mode append-only numbering has that
+    /// the tooling cannot catch: two branches each append a migration, each picks
+    /// the same next number, and the two constants **merge cleanly in git** — they
+    /// touch different lines of a growing array and different lines of the file.
+    /// Nothing goes red. The breakage arrives later, at runtime, on whichever store
+    /// applies them second, because `apply` records `version` as a primary key and
+    /// the second insert violates it. Migration 13 was migration 12 for exactly one
+    /// day, for exactly this reason.
+    ///
+    /// Ascending order is checked too. `apply` reads the recorded version **once**
+    /// and then walks the array, so an out-of-order entry is applied out of order —
+    /// harmless while migrations are independent, and silently wrong the first time
+    /// one depends on an earlier one. A merge that interleaves two branches'
+    /// appends can produce exactly that, so it is worth a test rather than a habit.
+    ///
+    /// Gaps are **not** checked, and are legitimate: a number can be claimed by a
+    /// branch that never merges.
+    #[test]
+    fn migration_versions_are_unique_and_ascending() {
+        let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            versions.len(),
+            sorted.len(),
+            "two migrations share a version — which is exactly what a same-number \
+             collision between two branches looks like after a clean merge: {versions:?}",
+        );
+        assert_eq!(
+            versions, sorted,
+            "the migration list is out of order, so `apply` would run them out of \
+             order: {versions:?}",
+        );
+        assert!(
+            versions.first().is_some_and(|&v| v >= 1),
+            "version 0 is the `nothing applied yet` sentinel and cannot be a migration",
+        );
     }
 
     /// The cache tier refuses the same half-states the episodic tier does: a

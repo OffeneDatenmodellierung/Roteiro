@@ -112,13 +112,30 @@ feature-gated and off by default.
 |---|---|---|---|
 | **8** ✅ | analysis runs + findings (ADR-0012) | replaceable layer per `(analyzer, worktree)` | replaced wholesale, not aged out |
 | **11** ✅ | `agent_memory` (ADR-0013 episodic) | durable, survives `rebuild` | **never** |
-| N | `agent_cache` (ADR-0013 transient) | bounded | yes, by capacity |
+| **13** ✅ | `agent_cache` + `agent_cache_clock` (ADR-0013 transient) | bounded | yes, by capacity |
 
 **Numbers are assigned in landing order, not reserved in advance.** Stage 21 landed
-first and took **8**; Stage 28 took **9** and **10**; episodic memory took **11**,
-and the cache tier takes the next free number whenever it merges. Splitting memory
-across two migrations is intentional: different lifetimes and guarantees, so the
-eviction tier can later be altered without touching durable memory.
+first and took **8**; Stage 28 took **9** and **10**; episodic memory took **11**;
+**12** is `sync_worktree`, from the guardrails branch; and the cache tier took
+**13**. Splitting memory across two migrations is intentional: different lifetimes
+and guarantees, so the eviction tier can later be altered without touching durable
+memory.
+
+**Check the other worktrees, not just the refs.** Stage 25 was dispatched with
+"12 is free" after `git grep` over every local *and* remote branch found nothing
+claiming it — which was true of the refs and false of the tree, because the
+guardrails work was sitting in an unpushed worktree. That is the third numbering
+collision of the day and all three had the same cause, so the check that actually
+works is:
+
+```sh
+git worktree list | awk '{print $1}' | xargs -I{} grep -ho 'version: [0-9]*' {}/crates/rto-graph/src/migrations.rs | sort -u
+```
+
+Two constants both declaring the same `version` **merge cleanly in git** and break
+at runtime on whichever store applies them second, so this is not a conflict the
+tooling will catch for you. `migration_versions_are_unique_and_ascending` now
+fails the build if a merge ever produces one.
 
 **Stages 22 and 24 need no migration** — `RunnerKind` shipped in migration 8 already
 naming all three backends, with the schema CHECK accepting them. Stage 22 confirmed
@@ -481,7 +498,7 @@ cache that stops sessions re-deriving what they already know.
   recall immediately regardless of age; an unanchored memory is still retrievable
   and clearly labelled.
 
-**Delivered.** Migration **12** (`agent_cache` + `agent_cache_clock`),
+**Delivered.** Migration **13** (`agent_cache` + `agent_cache_clock`),
 retrieval-time ranking in `rto_graph::memory`, the byte-budget sweep, and the
 `search` memory channel. All four DoD items have a test, and each was
 **fault-injected**: the guarded behaviour was broken, the guard watched go red,
@@ -507,7 +524,7 @@ only after the tests they exposed as weak were strengthened).
    punish exactly the records the ADR says are worth keeping most. Two properties
    are asserted rather than assumed: nothing is ever zero, and every state that
    `AnchorState::applies` outranks every state that does not.
-4. **The eviction counters needed a logical clock**, so migration 12 adds a
+4. **The eviction counters needed a logical clock**, so migration 13 adds a
    single-row `agent_cache_clock` beside the table (on `sync_state`'s precedent).
    ADR-0013 §3 rules out wall-clock and the ADR's proposed `agent_cache` names
    `generation`/`last_used` without saying where the values come from. `ticks`
@@ -543,7 +560,7 @@ only after the tests they exposed as weak were strengthened).
    touched.
 
 **Two absolute assertions on a shared constant disarmed**, at `store.rs:1709` and
-`:1880` — `assert_eq!(store.schema_version()?, 11)`, which migration 12 breaks.
+`:1880` — `assert_eq!(store.schema_version()?, 11)`, which migration 13 breaks.
 Both now read `migrations::latest_version()`, the idiom
 `a_later_migration_is_additive_on_a_populated_store` already uses. The literal was
 defended in a comment as making someone confirm a new migration is meant to apply
