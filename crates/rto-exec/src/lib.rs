@@ -99,11 +99,6 @@ pub use assets::{
 };
 #[cfg(feature = "exec-boxlite")]
 pub use boxlite::{BoxliteRunner, SandboxError, SandboxProbe, sandbox_probe};
-#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
-pub use runtime_pins::{
-    RUNTIME_ARCHIVES, RUNTIME_ASSET, RUNTIME_FILE, RUNTIME_VERSION, PinnedArchive, archive_for,
-    runtime_target,
-};
 pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 pub use crossref::{Correspondence, Report, cross_reference};
 pub use ingest::{
@@ -113,6 +108,11 @@ pub use ingest::{
 pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,
     check_reported_path, check_request, worktree_id,
+};
+#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
+pub use runtime_pins::{
+    PinnedArchive, RUNTIME_ARCHIVES, RUNTIME_ASSET, RUNTIME_FILE, RUNTIME_VERSION, archive_for,
+    runtime_target,
 };
 pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
 #[cfg(feature = "exec-subprocess")]

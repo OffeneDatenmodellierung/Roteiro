@@ -1235,11 +1235,18 @@ mod tests {
                 archive.target
             );
             assert!(
-                archive.sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+                archive
+                    .sha256
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
                 "{} digest must be lowercase hex",
                 archive.target
             );
-            assert!(archive.bytes > 1_000_000, "{} size looks wrong", archive.target);
+            assert!(
+                archive.bytes > 1_000_000,
+                "{} size looks wrong",
+                archive.target
+            );
             assert!(
                 archive.url.ends_with(".tar.gz") && archive.url.contains(archive.target),
                 "{} url does not name the target it is for: {}",
@@ -1247,7 +1254,11 @@ mod tests {
                 archive.url
             );
         }
-        for (os, arch) in [("macos", "aarch64"), ("linux", "x86_64"), ("linux", "aarch64")] {
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+        ] {
             let target = runtime_target(os, arch).expect("a pinned platform");
             let archive = archive_for(os, arch).expect("must resolve to an archive");
             assert_eq!(archive.target, target);
@@ -1312,10 +1323,8 @@ mod tests {
     /// few bytes per test process, and the alternative is either a fake entry in
     /// the real table or not exercising the pin at all.
     fn pinned_to(body: &[u8]) -> Option<&'static super::AssetSpec> {
-        let target = crate::runtime_pins::runtime_target(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-        )?;
+        let target =
+            crate::runtime_pins::runtime_target(std::env::consts::OS, std::env::consts::ARCH)?;
         let archives: &'static [crate::runtime_pins::PinnedArchive] =
             Box::leak(Box::new([crate::runtime_pins::PinnedArchive {
                 target,
@@ -1399,7 +1408,10 @@ mod tests {
         // file survived to be folded into a later digest.
         let target = asset_path(&cache.0, spec);
         assert!(!target.exists(), "a refused archive must not be installed");
-        assert!(!target.with_extension("partial").exists(), "staging file left behind");
+        assert!(
+            !target.with_extension("partial").exists(),
+            "staging file left behind"
+        );
 
         // An honest fetcher then provisions normally.
         let honest: &super::Fetcher<'_> = &|_url: &str, dest: &std::path::Path| {

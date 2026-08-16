@@ -505,6 +505,101 @@ digest-level evidence.
   no network but a warm cache produces a full run; `cargo deny` clean on the
   resolved tree.
 
+**Delivered.** `BoxliteRunner` behind `exec-boxlite`, `boxlite` pinned `=0.9.7`,
+the DoD executed rather than argued: real `semgrep` 1.173.0 over one tree, once
+as a host child process and once in a digest-pinned microVM, **4 identical
+findings** — `PARITY OK … subprocess isolation=none image=none, boxlite
+isolation=microvm image=sha256:67319956…`. 19 fault injections, 18 red on the
+right message; the nineteenth is recorded below because it did **not** go red.
+
+**What the stage actually turned out to be about.** The plan said publication was
+verified "so this is a dependency addition, not a packaging problem". Publication
+was real; the inference was not. **`boxlite` from crates.io ships no hypervisor**:
+its three `-sys` crates each detect a published package (`.cargo_vcs_info.json`)
+and disable themselves, and `libkrun-sys` excludes the sources they would build —
+enabling its `krun` feature compiles and then fails to link with 26 undefined
+symbols. What executes is a prebuilt runtime archive that `boxlite`'s own build
+script fetches with a bare `curl -fsSL`, `include_bytes!`s into the rlib, and
+extracts and execs at run time. That fetch has **no expected digest** (searched
+four ways, NOT FOUND) and an env-overridable URL, so two builds of the same
+pinned version could embed different bytes undetectably.
+
+So the stage's real work was **governing that fetch**, not adding a dependency:
+
+1. **`AssetSource::PinnedArchive`** — the first asset source with a *compile-time*
+   digest, in `runtime_pins.rs` and shared with `build.rs` by `include!` so the
+   two cannot drift. It closes the gap `Fetcher`'s contract has to leave open for
+   `Download` assets: a fetcher that reports success over a truncated body cannot
+   defeat a pin checked in-crate before install. Tested with a deliberately lying
+   fetcher.
+2. **`build.rs` refuses to build** unless `BOXLITE_RUNTIME_URL` names a local file
+   matching the pin. Unset, remote, or wrong bytes are hard failures with a
+   runnable recipe. `boxlite`'s `curl` then never reaches the network, because
+   what it is asked to fetch is already on disk.
+3. **The licence acceptance is recorded in `deny.toml`** and discharged by
+   `crates/rto-exec/NOTICE-boxlite-runtime.md`, which is `include_str!`d and
+   printed by `prefetch` before installing. The archive embeds GPL-2.0 (`mke2fs`,
+   `debugfs`, `libkrunfw`) and LGPL-2.0-or-later (`bwrap`) binaries; they are
+   exec'd as separate processes, so this is aggregation and Roteiro stays
+   `MIT OR Apache-2.0`, but distributing a binary built this way carries GPL-2.0
+   §3 source-offer and LGPL relinking duties.
+
+**The gate that could not see any of this is now closed.**
+`crates/rto-exec/tests/build_script_fetch_audit.rs` reads the build script of
+every package in the `--all-features` graph and **fails** on anything that looks
+like it fetches without a recorded pin. Measured: 613 packages, 89 build scripts,
+2 flagged (both governed), 0 false positives, **1.62s** — the same order as the
+`cargo deny` step. Its module docs state what it does *not* cover (helper crates,
+`include!`d build modules, obfuscation, run-time fetches, already-vendored
+bytes); read them before trusting it. This hole was general, not boxlite's:
+`cargo deny --all-features check` reported `licenses ok` while 25 MB of GPL
+binaries were being embedded, and was not wrong to — it governs crates.
+
+**Deviations and costs, stated rather than buried:**
+
+- **Workspace `rusqlite` moved `=0.40.2` → `0.39`.** Not a preference: `boxlite`
+  requires `rusqlite ^0.39`, `libsqlite3-sys` declares `links = "sqlite3"`, and
+  cargo forbids two versions of a `links` crate in one graph. It is a hard
+  resolution failure otherwise. It also restores what the pin's own comment
+  already described. **Coordinate with #342** (`store.rs`/`migrations.rs`); the
+  workspace compiles unchanged on 0.39, and MSRV 1.94 still builds `--all-features`.
+- **`protoc >= 3.12` is now a build requirement** for `exec-boxlite`
+  (`boxlite-shared`'s build script, no stub path around it). Documented in the
+  README before anyone meets it as a build failure; added to all three CI jobs.
+- **CI grew a provisioning step** (`scripts/provision-sandbox-runtime.py`, which
+  reads the digests out of `runtime_pins.rs` so it cannot drift). All three
+  `--all-features` jobs now also compile ~400 extra crates — a real cost on every
+  PR, in keeping with the llama.cpp build they already carry.
+- **Four `unmaintained` advisory ignores** (`term_size`, `bincode`, `adler`,
+  `atty`), all arriving through `boxlite`, none a vulnerability, each with the
+  four-part rationale `deny.toml` demands. They are global — cargo-deny cannot
+  scope an ignore to a feature — and say so.
+- **`roteiro/exec-boxlite` implies `exec-subprocess`**, because `security
+  prefetch|status|run` are all gated on that feature today. CLI plumbing, not
+  policy: unsandboxed *runs* still need `--allow-unsandboxed` per invocation.
+- **Only `semgrep` has a pinned image.** `cargo-audit` has no official one, and
+  publishing a security tool's container is not a job this project is taking on.
+- **Guest sizing is explicit** (2 vCPU / 4096 MiB) and the image entrypoint is
+  replaced with a waiting shell. Both were found the hard way: a box lives exactly
+  as long as its init process, and an analyzer image's entrypoint *is* the
+  analyzer, so it printed usage, exited, and SIGKILLed the in-flight scan — which
+  reads exactly like an OOM kill and is not one. `SandboxError::Killed` exists so
+  nobody diagnoses that twice.
+- **One claim is untested and labelled as such.** Guest-path relativisation is
+  never exercised, because `semgrep` reports relative paths; fault injection
+  confirmed setting it to `None` leaves the parity test green. It is there for
+  `osv-scanner`, the next image candidate.
+
+**What this settles for later stages.** Analyzer execution now has one
+provisioning contract with a real digest pin, so a future backend or analyzer
+image inherits verification rather than re-inventing it; and the build-script
+audit means the *next* dependency that fetches something is a failing test rather
+than a discovery. **Apple Silicon microVM execution remains untested in CI** — the
+parity proof above ran on Apple Silicon locally, and CI runners have no
+`/dev/kvm`, so the sandbox tests skip there with a visible message and the ingest
+and subprocess paths carry the functional coverage. That gap is unchanged and
+still accepted.
+
 ### Stage 25 — Memory recall: cache tier, decay, supersession → **v1.14.0** · effort **L**
 
 **Goal:** make memory *useful* — recall that ranks by evidence, plus the bounded

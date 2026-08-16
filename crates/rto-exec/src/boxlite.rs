@@ -35,6 +35,14 @@
 //!   `/work/src/tls.rs` here and `/home/you/repo/src/tls.rs` there. A finding key
 //!   that embedded either would differ between backends *and* between machines.
 //!
+//!   **This one is not currently exercised, and saying so is the point.** The
+//!   only analyzer with a pinned image is `semgrep`, which reports paths
+//!   relative to its working directory — so nothing consults `worktree` today.
+//!   Fault injection confirmed it: setting it to `None` leaves the parity test
+//!   green. It is here because `osv-scanner` reports absolute paths and is the
+//!   next candidate for an image, and it will be load-bearing the moment one
+//!   exists. Until then it is an untested claim, not a verified one.
+//!
 //! # What is not enforced here
 //!
 //! The image is pinned by digest, and this backend refuses to run against an
@@ -119,7 +127,7 @@ pub const GUEST_CPUS: u8 = 2;
 /// A microVM that wedges has no terminal to interrupt, so an unbounded wait
 /// would hang a CI job rather than fail it. Generous enough for a real scan of a
 /// large tree.
-pub const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+pub const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(30);
 
 /// A pinned OCI image an analyzer runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,8 +214,27 @@ impl SandboxProbe {
 pub fn sandbox_probe() -> SandboxProbe {
     match boxlite::system_check::SystemCheck::run() {
         Ok(_) => SandboxProbe::Available,
-        Err(e) => SandboxProbe::Unavailable(e.to_string()),
+        Err(e) => SandboxProbe::Unavailable(probe_reason(&e.to_string())),
     }
+}
+
+/// Normalise a probe failure into something worth printing.
+///
+/// Split out from [`sandbox_probe`] so it can be tested on **any** host. Testing
+/// it through the probe alone is untestable in the direction that matters: on a
+/// machine that *has* a hypervisor the failure branch never runs, so a
+/// regression that emptied the reason would sail past every developer with
+/// working virtualisation and only surface on the CI runner it was meant to
+/// serve. (Fault injection found exactly that: emptying the reason here left
+/// the original test green on this machine.)
+fn probe_reason(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        // An unavailable sandbox that will not say why is worse than useless: a
+        // skipped test would print nothing, and a skip with no reason is
+        // indistinguishable from a test that ran.
+        return "the hypervisor probe failed without giving a reason".to_owned();
+    }
+    raw.trim().to_owned()
 }
 
 /// Something went wrong running the analyzer in a sandbox, as opposed to
@@ -297,7 +324,9 @@ pub enum SandboxError {
         memory_mib: u32,
     },
     /// The analyzer produced more output than will be read.
-    #[error("`{program}` produced more than {max} bytes of output in the sandbox; refusing to read it")]
+    #[error(
+        "`{program}` produced more than {max} bytes of output in the sandbox; refusing to read it"
+    )]
     OutputTooLarge {
         /// The program that ran.
         program: String,
@@ -625,13 +654,10 @@ impl BoxliteRunner {
         let out = tokio::spawn(collect(stdout));
         let err = tokio::spawn(collect(stderr));
 
-        let status = execution
-            .wait()
-            .await
-            .map_err(|e| SandboxError::Runtime {
-                stage: "wait",
-                message: e.to_string(),
-            })?;
+        let status = execution.wait().await.map_err(|e| SandboxError::Runtime {
+            stage: "wait",
+            message: e.to_string(),
+        })?;
 
         let joined = |handle: tokio::task::JoinHandle<String>, what: &'static str| async move {
             handle.await.map_err(|e| SandboxError::Runtime {
@@ -915,6 +941,27 @@ mod tests {
                 assert!(!why.is_empty(), "an unavailable sandbox must say why");
                 assert_eq!(probe.reason(), Some(why.as_str()));
             }
+        }
+    }
+
+    /// An unavailable sandbox must always carry a printable reason — checked on
+    /// the normalisation directly, because the branch that produces one never
+    /// executes on a host that *has* a hypervisor.
+    ///
+    /// The skip message in the sandbox tests is the only thing standing between
+    /// "covered nothing" and "passed", so an empty reason is a real defect and
+    /// not a cosmetic one.
+    #[test]
+    fn an_unavailable_sandbox_always_gives_a_printable_reason() {
+        assert_eq!(super::probe_reason("no /dev/kvm"), "no /dev/kvm");
+        assert_eq!(super::probe_reason("  padded  "), "padded");
+        for empty in ["", "   ", "\n\t "] {
+            let reason = super::probe_reason(empty);
+            assert!(
+                !reason.trim().is_empty(),
+                "an empty probe failure must still print something"
+            );
+            assert!(reason.contains("without giving a reason"), "{reason}");
         }
     }
 }

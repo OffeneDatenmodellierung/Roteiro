@@ -51,7 +51,7 @@ pub fn home() -> String {
     ),
     (
         "tools/run.py",
-        r#"import subprocess
+        r"import subprocess
 
 
 def go(cmd):
@@ -60,7 +60,7 @@ def go(cmd):
 
 def evaluate(src):
     return eval(src)
-"#,
+",
     ),
 ];
 
@@ -83,7 +83,9 @@ fn the_same_analyzer_gives_the_same_findings_in_both_backends() {
     let sandbox = BoxliteRunner::new("semgrep", &root).expect("boxlite runner");
 
     let host_run = host.run(&request).expect("the host scan must succeed");
-    let sandbox_run = sandbox.run(&request).expect("the sandboxed scan must succeed");
+    let sandbox_run = sandbox
+        .run(&request)
+        .expect("the sandboxed scan must succeed");
 
     // The scan has to have found something, or "identical" is a claim about two
     // empty lists and this test would pass while proving nothing.

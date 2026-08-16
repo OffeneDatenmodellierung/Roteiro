@@ -217,8 +217,7 @@ fn every_reviewed_exception_states_what_pins_it() {
             names_a_pin,
             "REVIEWED entry for {} {} does not say what pins or neutralises the fetch. \
              An exception without one is an unsolved problem, not an exception.",
-            review.name,
-            review.version
+            review.name, review.version
         );
     }
 }

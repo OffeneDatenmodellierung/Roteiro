@@ -101,8 +101,14 @@ fn main() {
             println!("cargo:rerun-if-changed={}", path.display());
             // Recorded so the runner can stamp the runtime it was built against
             // onto a run's evidence, rather than asserting it separately.
-            println!("cargo:rustc-env=ROTEIRO_SANDBOX_RUNTIME_TARGET={}", archive.target);
-            println!("cargo:rustc-env=ROTEIRO_SANDBOX_RUNTIME_SHA256={}", archive.sha256);
+            println!(
+                "cargo:rustc-env=ROTEIRO_SANDBOX_RUNTIME_TARGET={}",
+                archive.target
+            );
+            println!(
+                "cargo:rustc-env=ROTEIRO_SANDBOX_RUNTIME_SHA256={}",
+                archive.sha256
+            );
             println!("cargo:rustc-env=ROTEIRO_SANDBOX_RUNTIME_VERSION={RUNTIME_VERSION}");
         }
         Err(why) => fail(&format!(
@@ -169,6 +175,9 @@ fn fail(message: &str) -> ! {
     eprintln!("\nerror: rto-exec/build.rs\n\n{message}\n");
     panic!(
         "{}",
-        message.lines().next().unwrap_or("sandbox runtime is not verified")
+        message
+            .lines()
+            .next()
+            .unwrap_or("sandbox runtime is not verified")
     );
 }
