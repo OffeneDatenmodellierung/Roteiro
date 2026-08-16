@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.11.0...rto-graph-v2.0.0) - 2026-08-16
+
+### Added
+
+- *(cli)* surface recall -- a memory search channel, `memory recall|cache`
+- *(memory)* the bounded cache tier and its byte-budget sweep
+- *(memory)* ranked recall -- decay, anchor penalty, supersession
+- *(schema)* migration 12 -- the bounded cache tier (ADR-0013 Tier 2)
+
+### Fixed
+
+- *(schema)* [**breaking**] renumber the cache tier from migration 12 to 13
+
+### Other
+
+- *(memory)* the evidence weight is `[0, 1]`, and zero is the writer's (PR #340)
+- *(memory)* the sweep reads sizes, never payloads (PR #340 review)
+- *(memory)* harden two guards that fault injection found weak
+
 ## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.1...rto-graph-v1.11.0) - 2026-08-16
 
 ### Added

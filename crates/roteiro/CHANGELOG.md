@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.11.0...roteiro-v2.0.0) - 2026-08-16
+
+### Added
+
+- *(cli)* prefetch the OSV databases, and render the cross-reference
+- *(rto-exec)* osv-scanner adapter and a download-by-URL asset source
+
+### Fixed
+
+- *(security)* refuse an asset body whose completeness cannot be established
+
+### Other
+
+- Merge pull request #340 from OffeneDatenmodellierung/feat/stage25-memory-recall
+- *(cli)* end-to-end security ingest and cross-reference
+- cover the two guarded behaviours that had no test
+
 ## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.10.1...roteiro-v1.11.0) - 2026-08-16
 
 ### Added
