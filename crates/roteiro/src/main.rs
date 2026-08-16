@@ -1413,6 +1413,15 @@ fn print_config_sections(loaded: &config::Loaded) {
 /// `ignore_reset` prints the inherited patterns it discarded — silently dropping
 /// the user layer is the bug the merge exists to fix, so the escape hatch must
 /// not reintroduce it.
+///
+/// A reset that did **not** happen is reported just as carefully. This section
+/// once announced "inherited patterns dropped" whenever the *effective* flag was
+/// set, and the effective flag inherited the user layer's — so a user-layer
+/// reset, which governs nothing, produced that headline directly above a list
+/// where every inherited pattern was still present. The claim, not the merge, was
+/// wrong; the flag now records the merge that actually ran
+/// ([`config::Config::overlaid_with`]) and an inert user-layer reset says so in
+/// its own words.
 fn print_debt_section(loaded: &config::Loaded) {
     println!("[debt]");
     let sources = loaded.debt_ignore_sources();
@@ -1432,6 +1441,18 @@ fn print_debt_section(loaded: &config::Loaded) {
         for pattern in loaded.debt_ignore_discarded() {
             println!("    {pattern:?}  (discarded from user)");
         }
+    } else if loaded.debt_ignore_reset_was_inert() {
+        // A reset drops what a layer inherits, and the user layer is the bottom
+        // one, so its flag never reaches the merge. Said out loud rather than left
+        // to the docs: a key argued for on the grounds that "a reset cannot fail
+        // quietly" must not quietly do nothing, least of all in the command whose
+        // job is explaining what the configuration did.
+        println!(
+            "  ignore_reset = true in the user config had NO EFFECT — a reset \
+             drops what a layer inherits, and the user layer is the lowest, so \
+             there is nothing beneath it to drop. Set it in the project's \
+             `roteiro.toml` to discard the user layer's patterns."
+        );
     }
 }
 

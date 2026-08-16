@@ -72,9 +72,35 @@ impl Loaded {
             .collect()
     }
 
+    /// Whether the **user** layer asked for an `ignore_reset` that did nothing.
+    ///
+    /// A reset drops what a layer inherits, and the user layer is the bottom of
+    /// the two ([`DebtConfig::ignore_reset`]), so its flag never reaches
+    /// [`merge_ignore`]. Reporting that is the point: a key whose whole argument
+    /// is "a reset cannot fail quietly" must not itself fail quietly, and
+    /// `roteiro config` is where a reader goes to find out what their
+    /// configuration did.
+    ///
+    /// False when a reset *is* in force, even though the user's own flag was
+    /// still individually inert: the project layer reset, patterns really were
+    /// dropped, and `roteiro config` says so. Adding "…and your reset did
+    /// nothing" beside that would be true but unreadable, and the user got the
+    /// behaviour they asked for either way.
+    #[must_use]
+    pub fn debt_ignore_reset_was_inert(&self) -> bool {
+        self.user.debt.ignore_reset == Some(true) && self.effective.debt.ignore_reset != Some(true)
+    }
+
     /// The user-layer `[debt] ignore` patterns that `ignore_reset` discarded, so
     /// the reset is *visible* rather than merely effective. Empty when no reset is
     /// in force.
+    ///
+    /// Empty in practice unless the project layer both reset **and** declined to
+    /// restate a user pattern, since the kept list is otherwise a superset of the
+    /// user's. That is why this could never have exposed the inherited-flag defect
+    /// on its own — with no reset in force the kept list is the union, so every
+    /// user pattern is present and the filter yields nothing. The false claim was
+    /// the unconditional headline in `roteiro config`, not this list.
     #[must_use]
     pub fn debt_ignore_discarded(&self) -> Vec<&str> {
         if self.effective.debt.ignore_reset != Some(true) {
@@ -175,6 +201,29 @@ pub struct DebtConfig {
     /// rest — you restate the ones you want. Exclusion lists are short, so that is
     /// cheap, and restating them is visible in review, which subtracting one
     /// invisibly would not be.
+    ///
+    /// # Effective in the project layer only (today)
+    ///
+    /// A reset drops what a layer **inherits**, so it means something only where
+    /// there is a layer beneath it. There are exactly two layers — user
+    /// (`~/.roteiro/config.toml`) then project (`roteiro.toml`), applied as
+    /// `user.overlaid_with(&project)` — so the user layer is the bottom, and
+    /// [`merge_ignore`] consults the *nearer* layer's flag and only that one.
+    /// Setting this in the user config therefore resets nothing.
+    ///
+    /// That is an uncomfortable shape for a key whose entire argument is "a reset
+    /// cannot fail quietly", so it is **not** left to this doc comment to carry.
+    /// `roteiro config` reports an inert user-layer reset in so many words
+    /// ([`Loaded::debt_ignore_reset_was_inert`]) — the same principle as the
+    /// merge itself: the surface whose job is explaining the configuration says
+    /// what happened, rather than expecting the reader to have found this
+    /// paragraph.
+    ///
+    /// It is deliberately **not** a hard error. The key is inert because of
+    /// today's layer *arrangement*, not because it is meaningless: add a built-in
+    /// defaults layer beneath `user` — a plausible future — and a user-layer reset
+    /// starts doing exactly what it says, with no config to migrate. Rejecting it
+    /// permanently would encode a temporary fact as a rule.
     ///
     /// Accepted as `ignore_reset` (canonical, matching every other key in this
     /// file) or `ignore-reset`.
@@ -569,7 +618,19 @@ impl Config {
             // deliberately do not.
             debt: DebtConfig {
                 ignore: merge_ignore(self.debt.ignore.as_deref(), &over.debt),
-                ignore_reset: over.debt.ignore_reset.or(self.debt.ignore_reset),
+                // NOT inherited with `.or(self.debt.ignore_reset)`, unlike every
+                // scalar above. Those are *values* the run consumes afterwards, so
+                // falling back to the lower layer is right. This is a **directive
+                // to the merge**, already consumed by `merge_ignore` — which reads
+                // `over`'s flag and only `over`'s. After the overlay it is no
+                // longer an input to anything; it is the *record* of what the
+                // merge did. Inheriting it made the record disagree with the
+                // event: a user-layer reset (inert, since `merge_ignore` never
+                // consults it) surfaced in `effective`, and `roteiro config` — the
+                // command whose whole job is explaining what the config did —
+                // announced "inherited patterns dropped" over a list where every
+                // inherited pattern was plainly still present.
+                ignore_reset: over.debt.ignore_reset,
             },
             paths: PathsConfig {
                 model_store: over
@@ -1138,6 +1199,95 @@ mod tests {
             )
         );
         assert!(off.debt_ignore_discarded().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A **user-layer** `ignore_reset` must not surface in the effective config
+    /// (PR #343 review). It governs nothing — [`super::merge_ignore`] reads only
+    /// the nearer (project) layer's flag, and the user layer is the bottom — so
+    /// inheriting it made `effective` claim a reset that never happened, and
+    /// `roteiro config` announce "inherited patterns dropped" over a list where
+    /// every inherited pattern was still present.
+    #[test]
+    fn an_inert_user_layer_reset_does_not_claim_a_reset_that_never_happened() {
+        let dir = std::env::temp_dir().join(format!("roteiro-cfg-inert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+
+        // The scenario: the user asks for a reset, the project does not.
+        std::fs::write(
+            &user,
+            "[debt]\nignore_reset = true\nignore = [\"vendor/**\", \"target/**\"]\n",
+        )
+        .expect("user");
+        std::fs::write(&project, "[debt]\nignore = [\"thirdparty/**\"]\n").expect("project");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+
+        // The effective flag records the merge that ran, which reset nothing.
+        assert_ne!(
+            loaded.effective.debt.ignore_reset,
+            Some(true),
+            "a user-layer reset governs nothing, so it must not appear as one in \
+             the effective config — that is the claim `roteiro config` prints"
+        );
+        // The inert request is still *visible*, since a silent no-op is exactly
+        // what this key was introduced to avoid.
+        assert!(
+            loaded.debt_ignore_reset_was_inert(),
+            "the user asked for a reset that did nothing; that must be reportable"
+        );
+
+        // Nothing was discarded, and nothing claims to have been. (This list could
+        // not have caught the defect on its own: with no reset in force the kept
+        // list is the union, so it is a superset of the user's and filters empty.)
+        assert!(
+            loaded.debt_ignore_discarded().is_empty(),
+            "no pattern was dropped, so none may be reported as dropped: {:?}",
+            loaded.debt_ignore_discarded()
+        );
+
+        // And the inert flag did not accidentally start *resetting* anything:
+        // both layers' patterns survive, in merge order.
+        assert_eq!(
+            loaded.effective.debt.ignore.as_deref(),
+            Some(
+                [
+                    "vendor/**".to_owned(),
+                    "target/**".to_owned(),
+                    "thirdparty/**".to_owned()
+                ]
+                .as_slice()
+            ),
+            "the merge is unaffected — this was only ever a reporting defect"
+        );
+
+        // The project layer's reset is unaffected by the change: it governs, so it
+        // is reported, and the user's flag is not what put it there.
+        std::fs::write(
+            &project,
+            "[debt]\nignore_reset = true\nignore = [\"thirdparty/**\"]\n",
+        )
+        .expect("project");
+        let both = load_from(Some(user.clone()), Some(project)).expect("load");
+        assert_eq!(both.effective.debt.ignore_reset, Some(true));
+        assert_eq!(both.debt_ignore_discarded(), vec!["vendor/**", "target/**"]);
+        assert!(
+            !both.debt_ignore_reset_was_inert(),
+            "a reset really happened, so `roteiro config` reports the drop rather \
+             than a second note saying the user's own flag was individually inert"
+        );
+
+        // With no project config at all, the user's reset is still inert.
+        let alone = load_from(Some(user), None).expect("load");
+        assert_ne!(alone.effective.debt.ignore_reset, Some(true));
+        assert!(alone.debt_ignore_reset_was_inert());
+        assert_eq!(
+            alone.effective.debt.ignore.as_deref(),
+            Some(["vendor/**".to_owned(), "target/**".to_owned()].as_slice()),
+            "and it resets none of the user's own patterns"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
