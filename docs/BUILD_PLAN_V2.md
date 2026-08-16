@@ -765,6 +765,35 @@ case is to make the failure **loud**, not merely to make the output correct.
   layers agree. The per-worktree layout is now pinned by a test, and a
   worktree stamp (migration 12) makes a store that *does* come to hold another
   tree rebuild loudly rather than answer "up to date".
+- **A migration could be skipped permanently.** `apply` ran migrations with
+  `version > MAX(recorded)`, so a store stamped by a build that knew migration
+  **13** but not **12** never got 12 — `12 > 13` is false, forever. The store
+  opened cleanly, reported a schema it did not have, and failed at run time on
+  the missing column. Reproduced against a copy of this repository's real
+  `graph.db`: `sync` died on `no such column: worktree`, i.e. **the #330 tree
+  stamp added above was itself the thing silently absent**. Selection is now by
+  **set membership**, so an unrecorded migration is repaired on the next open
+  wherever it sits; ordering comes from the migration list, which a `const`
+  assertion holds strictly ascending at **compile time**. `schema_version()` now
+  reports the highest *gap-free* version rather than the maximum, so it cannot
+  name a schema the store lacks. No gate could have caught this: CI always starts
+  from a fresh store, where both rules agree. It is the `EXTRACT_VERSION`
+  incident's shape exactly — two independently-correct branches, a failure that
+  exists only in the combination. **Consequence:** merging guardrails before
+  stage25 was load-bearing and a mistake would have been permanent for any store
+  that met stage25 first; it is now a preference.
+
+**Known gap, not fixed here (separate work).** The *other* direction is still
+silent: a store at migration 13 opened by a binary that knows only 1..12 opens
+without complaint. Reads stay sound — migrations are additive in effect, so the
+columns an older binary reads still exist — but `sync` would re-extract under an
+older `EXTRACT_VERSION` and **rewrite the graph with worse content**: a silent
+downgrade, not a crash. A hard error in `apply` was considered and rejected as
+the wrong granularity, since it would also block the reads that are provably
+safe. The fix belongs on the *write* paths (`sync`/`reconcile`/`rebuild`),
+refusing to rewrite a graph whose store is newer than the binary, and it needs a
+`StoreError` variant — a semver-visible addition on a 1.x crate. Filed rather
+than folded in.
 
 **Deliberately NOT done:** per-worktree databases. `findings`, `media_content`,
 `agent_memory` and `imports` all live inside `graph.db`, and [ADR-0013](adr/0013-agent-memory-artifact-store.md)

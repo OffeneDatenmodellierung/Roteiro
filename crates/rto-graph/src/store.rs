@@ -95,17 +95,25 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// The schema version this store has been migrated to.
+    /// The schema version this store has been migrated to: the highest `v` for
+    /// which every migration `1..=v` is recorded as applied.
+    ///
+    /// **Not the maximum recorded version.** Migrations are selected by set
+    /// membership rather than `> MAX(version)` (see [`crate::migrations`]), so a
+    /// store *can* hold a gap — one written by a build that knew a higher
+    /// migration but not a lower one. For a store recorded as `1..11, 13`, the
+    /// maximum is 13 while none of migration 12's schema is present; reporting 13
+    /// would be a higher number than the truth. The contiguous prefix reports 11,
+    /// which is the version the store can actually be relied on to provide.
+    ///
+    /// The gap is transient in practice — the next [`Store::open`] repairs it —
+    /// but this must not answer wrongly in the window where it exists, which is
+    /// exactly the window in which someone is debugging.
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] on query failure.
     pub fn schema_version(&self) -> Result<u32, StoreError> {
-        let v: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(u32::try_from(v).unwrap_or(0))
+        Ok(migrations::store_version(&self.conn)?)
     }
 
     /// Number of nodes currently in the store.
@@ -1802,11 +1810,90 @@ mod tests {
         // brittleness #329 replaced with a property test elsewhere. What is worth
         // asserting is that `open` leaves no migration unapplied; one that should
         // not run on open would not be in `MIGRATIONS` at all.
+        // Since migrations are selected by set membership, this now asserts
+        // something strictly stronger than "the biggest recorded number is N":
+        // `schema_version` is the highest **gap-free** version, so equality with
+        // `latest_version` rules out a store that skipped one and stamped a
+        // higher one. A fresh store cannot exhibit that gap, so
+        // `reopening_repairs_a_skipped_migration` exercises it directly.
         assert_eq!(
             store.schema_version().expect("version"),
             crate::migrations::latest_version(),
-            "opening a store must apply every known migration"
+            "opening a store must apply every known migration, with no gaps"
         );
+    }
+
+    /// Reopening a store that is **missing a lower-numbered migration while
+    /// carrying a higher one** repairs it — through the real public API, which
+    /// is where it matters to callers.
+    ///
+    /// This is the on-disk shape left when two branches each add a migration and
+    /// a store meets them in the wrong order: the build that knew migration 13
+    /// stamped it, and the build that knows 12 must still apply 12. Under the old
+    /// `version > MAX(recorded)` rule it never would, and the store would report a
+    /// schema it does not have while every query on the missing column failed.
+    /// Reproduced against a copy of this repository's real `graph.db`, where it
+    /// surfaced as `no such column: worktree` — the issue #330 tree stamp.
+    #[test]
+    fn reopening_repairs_a_skipped_migration() {
+        let path = std::env::temp_dir().join(format!(
+            "roteiro-migration-gap-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_file(&path).ok();
+
+        let known = crate::migrations::latest_version();
+        {
+            let store = Store::open(&path).expect("open");
+            store.upsert_node(&sample_node("kept")).expect("upsert");
+        }
+        // Damage it exactly as the wrong merge order would: drop the newest
+        // migration's schema and its record, and stamp a higher version as though
+        // another branch's build had opened it.
+        {
+            let conn = rusqlite::Connection::open(&path).expect("reopen raw");
+            conn.execute_batch("ALTER TABLE sync_state DROP COLUMN worktree;")
+                .expect("undo migration 12");
+            conn.execute("DELETE FROM schema_migrations WHERE version = ?1", [known])
+                .expect("unrecord");
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [known + 1],
+            )
+            .expect("stamp a higher version");
+        }
+
+        // Before the repair the store under-reports rather than over-reports: it
+        // claims the last gap-free version, never the higher stamped one.
+        {
+            let damaged = rusqlite::Connection::open(&path).expect("reopen raw");
+            let reported = crate::migrations::store_version(&damaged).expect("version");
+            assert_eq!(
+                reported,
+                known - 1,
+                "a gapped store must report the version it actually provides, \
+                 not the maximum recorded ({})",
+                known + 1
+            );
+        }
+
+        // Reopening through the public API repairs the gap…
+        let store = Store::open(&path).expect("reopen");
+        assert_eq!(
+            store.schema_version().expect("version"),
+            known + 1,
+            "1..=known+1 is contiguous once the skipped migration is applied"
+        );
+        // …the schema is really back, which is what the caller depends on…
+        assert!(
+            store.synced_worktree().is_ok(),
+            "the repaired migration's column must exist, not merely be recorded"
+        );
+        // …and the repair did not disturb the data.
+        assert!(store.get_node("kept").expect("get").is_some());
+
+        std::fs::remove_file(&path).expect("cleanup");
     }
 
     #[test]

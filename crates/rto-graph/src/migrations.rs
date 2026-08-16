@@ -1,11 +1,34 @@
 //! Ordered, append-only schema migrations.
 //!
 //! Each [`Migration`] has a monotonically increasing `version` and a body of
-//! SQL. On [`apply`], migrations with a version greater than the highest one
-//! recorded in `schema_migrations` are run — each in its own transaction — and
-//! then recorded. Applying twice is a no-op, so opening a store is idempotent.
+//! SQL. On [`apply`], every migration **not already recorded** in
+//! `schema_migrations` is run — in ascending version order, each in its own
+//! transaction — and then recorded. Applying twice is a no-op, so opening a
+//! store is idempotent.
+//!
+//! **The rule is set membership, not `> MAX(version)` — do not "optimise" it
+//! back.** Comparing against the highest recorded version silently skips a
+//! *lower*-numbered migration forever, and the store keeps opening cleanly while
+//! reporting a schema it does not have:
+//!
+//! Two branches develop in parallel. One adds migration 12, the other 13. A
+//! store opened by the migration-13 build is stamped 13. When the migration-12
+//! build later opens that same store, `12 > 13` is false, so **migration 12 is
+//! never applied — permanently**. The store opens happily, `schema_version()`
+//! answers, and every query touching migration 12's column fails at run time
+//! with `no such column`. Reproduced against a real `graph.db`: `sync` died on
+//! `no such column: worktree` while `schema_migrations` still read
+//! `1..11, 13` — the issue #330 tree stamp, silently absent forever.
+//!
+//! Nothing could catch it. CI always starts from a *fresh* store, where the two
+//! rules agree; the divergence exists only in a store that met the branches in
+//! the wrong order. Both branches were independently correct. Set membership
+//! removes the ordering dependency entirely, so the merge order of two branches
+//! that each add a migration is a preference rather than a permanent trap.
 //!
 //! **Never edit the SQL of a shipped migration; always append a new one.**
+
+use std::collections::BTreeSet;
 
 use rusqlite::Connection;
 
@@ -518,13 +541,69 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// [`MIGRATIONS`] is in **strictly ascending** version order, checked at compile
+/// time so a misordered or duplicated entry cannot be built, let alone shipped.
+///
+/// [`apply`] selects migrations by set membership, so it no longer *derives*
+/// ordering from a `>` comparison — it inherits it from this slice. That makes
+/// the slice's order load-bearing: a later migration may depend on an earlier
+/// one's tables, so running them out of order would fail (or, worse, succeed
+/// against a shape nobody intended). A `#[test]` would catch that too, but only
+/// if someone runs it; this fails the build.
+const _: () = {
+    let mut i = 1;
+    while i < MIGRATIONS.len() {
+        assert!(
+            MIGRATIONS[i - 1].version < MIGRATIONS[i].version,
+            "MIGRATIONS must be in strictly ascending version order, with no \
+             duplicates: `apply` runs them in slice order and a later migration \
+             may depend on an earlier one"
+        );
+        i += 1;
+    }
+};
+
 /// The highest migration version known to this build.
 #[cfg(test)]
 pub(crate) fn latest_version() -> u32 {
-    MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0)
+    // The slice is strictly ascending (checked above), so the last is the max.
+    match MIGRATIONS.last() {
+        Some(m) => m.version,
+        None => 0,
+    }
 }
 
-/// Apply every migration newer than the recorded schema version. Idempotent.
+/// Every migration version recorded as applied in `schema_migrations`.
+///
+/// A `BTreeSet` rather than a `HashSet`: membership is what [`apply`] needs, but
+/// an ordered set also makes [`crate::Store::schema_version`]'s contiguity walk
+/// and any debugging dump deterministic, at no cost for a set this small.
+fn applied_versions(conn: &Connection) -> rusqlite::Result<BTreeSet<u32>> {
+    let mut stmt = conn.prepare("SELECT version FROM schema_migrations")?;
+    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+    let mut applied = BTreeSet::new();
+    for row in rows {
+        // A negative or oversized version cannot match any `u32` migration, so
+        // it is simply not in the set — never a panic on a hand-edited store.
+        if let Ok(v) = u32::try_from(row?) {
+            applied.insert(v);
+        }
+    }
+    Ok(applied)
+}
+
+/// Apply every migration **not already recorded** as applied, in ascending
+/// version order. Idempotent.
+///
+/// Selection is by set membership, deliberately *not* `version > MAX(recorded)`
+/// — see the module documentation for the failure that rule causes and why no
+/// gate could see it. The practical consequence is that a store missing a
+/// lower-numbered migration is **repaired** on the next open rather than
+/// carrying the gap forever.
+///
+/// Ordering comes from [`MIGRATIONS`] itself, which is compile-time checked to
+/// be strictly ascending; the applied set is only ever consulted for membership,
+/// never iterated to drive the work.
 pub(crate) fn apply(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -532,13 +611,12 @@ pub(crate) fn apply(conn: &mut Connection) -> rusqlite::Result<()> {
             applied_at TEXT NOT NULL DEFAULT (datetime('now'))
         );",
     )?;
-    let current: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-        [],
-        |r| r.get(0),
-    )?;
+    let applied = applied_versions(conn)?;
+    // Iterating MIGRATIONS (ascending) rather than the set keeps ordering a
+    // property of the slice; each version appears once, so the set never needs
+    // re-reading mid-loop.
     for m in MIGRATIONS {
-        if i64::from(m.version) > current {
+        if !applied.contains(&m.version) {
             let tx = conn.transaction()?;
             tx.execute_batch(m.sql)?;
             tx.execute(
@@ -549,6 +627,42 @@ pub(crate) fn apply(conn: &mut Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The highest version `v` such that every migration `1..=v` is recorded as
+/// applied — the schema the store can actually be relied on to have.
+///
+/// **Not `MAX(version)`.** With gaps possible ([`apply`]), the maximum is
+/// precisely the wrong answer: a store recorded as `1..11, 13` has none of
+/// migration 12's schema, yet `MAX` would report 13 — a higher number than the
+/// truth, and the kind of confident wrong answer this whole area exists to stop.
+/// The contiguous prefix reports 11, which is what the store really provides.
+///
+/// A version *above* this build's newest is still counted when it is contiguous
+/// (a `1..=13` store reports 13 to a build that knows 12), because this describes
+/// the **store**, not the binary reading it.
+fn contiguous_version(applied: &BTreeSet<u32>) -> u32 {
+    let mut v = 0;
+    while applied.contains(&(v + 1)) {
+        v += 1;
+    }
+    v
+}
+
+/// The schema version `conn`'s store provides — see
+/// [`crate::Store::schema_version`], which this backs.
+///
+/// Returns 0 when `schema_migrations` does not exist yet (a database opened
+/// outside [`apply`]), rather than erroring: "no migrations applied" is the
+/// honest reading of a store with no migration table.
+pub(crate) fn store_version(conn: &Connection) -> rusqlite::Result<u32> {
+    match applied_versions(conn) {
+        Ok(applied) => Ok(contiguous_version(&applied)),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            Ok(0)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -564,6 +678,204 @@ mod tests {
             .expect("query")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect")
+    }
+
+    /// Seed a store as a build that knew `skip + 1 ..= through` — but **not**
+    /// `skip` — would have left it: every migration except `skip` applied and
+    /// recorded, plus a `future` version recorded as though a higher-numbered
+    /// migration from another branch had run.
+    ///
+    /// Written from the *store's* perspective rather than the list's: the
+    /// migrations are replayed as SQL against a real database, so this is what
+    /// is actually on disk after two branches meet in the wrong order, not a
+    /// rearrangement of the code's own data.
+    ///
+    /// Returns `None` when omitting `skip` leaves a store the remaining
+    /// migrations cannot be applied to — migration 2 creates `sync_state`, which
+    /// 7 and 12 then `ALTER`, so "everything except 2" is not a state that can
+    /// exist. That is the honest boundary of the scenario: a store can only lack
+    /// a migration whose *successors it applied* did not depend on it.
+    fn store_missing_migration(skip: u32, future: u32) -> Option<Connection> {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version    INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .expect("bootstrap");
+        for m in MIGRATIONS.iter().filter(|m| m.version != skip) {
+            // A failure here means a later migration depends on the skipped one,
+            // so this gap is unreachable rather than untested.
+            conn.execute_batch(m.sql).ok()?;
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [m.version],
+            )
+            .expect("record");
+        }
+        // The other branch's migration: recorded, its SQL unknown to this build.
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?1)",
+            [future],
+        )
+        .expect("record future");
+        Some(conn)
+    }
+
+    /// Whether `table` has a column named `column`.
+    fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare");
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .expect("query")
+            .filter_map(Result::ok)
+            .any(|c| c == column)
+    }
+
+    /// **The regression.** A store that met a higher-numbered migration from
+    /// another branch before a lower-numbered one from this branch must have the
+    /// missing migration applied on the next open — not skipped forever.
+    ///
+    /// Under the old `version > MAX(recorded)` rule this is unrecoverable: the
+    /// store is stamped 13, `12 > 13` is false, and migration 12 never runs
+    /// again. Reproduced against a real `graph.db`, where it surfaced as `sync`
+    /// failing on `no such column: worktree` while the store reported a schema it
+    /// did not have. No gate could see it, because CI always starts fresh.
+    #[test]
+    fn a_migration_skipped_below_a_higher_one_is_still_applied() {
+        // Migration 12 added `sync_state.worktree` (the issue #330 tree stamp);
+        // 13 stands for the next branch's migration, recorded but not ours.
+        let skipped = 12;
+        let mut conn = store_missing_migration(skipped, 13).expect("12 is omissible");
+
+        // Precondition: exactly the damaged state, and the column really is gone.
+        assert!(
+            !recorded_versions(&conn).contains(&skipped),
+            "seeded store must be missing migration {skipped}"
+        );
+        assert!(
+            recorded_versions(&conn).contains(&13),
+            "seeded store must carry the other branch's higher version"
+        );
+        assert!(
+            !has_column(&conn, "sync_state", "worktree"),
+            "the skipped migration's column must be absent to begin with"
+        );
+
+        apply(&mut conn).expect("apply must repair the gap");
+
+        // The missing migration ran…
+        assert!(
+            recorded_versions(&conn).contains(&skipped),
+            "migration {skipped} must be recorded after the repair, not skipped \
+             forever because a higher version was already stamped"
+        );
+        // …and its schema is really there, which is what the caller depends on.
+        assert!(
+            has_column(&conn, "sync_state", "worktree"),
+            "the repaired migration's column must exist — a recorded version \
+             without its schema is the same silent wrong answer in a new costume"
+        );
+        // The unknown future version is preserved, never re-run or discarded.
+        assert!(
+            recorded_versions(&conn).contains(&13),
+            "another branch's recorded migration must survive the repair"
+        );
+        // Repairing twice changes nothing.
+        let after = recorded_versions(&conn);
+        apply(&mut conn).expect("second apply");
+        assert_eq!(after, recorded_versions(&conn), "repair is idempotent");
+    }
+
+    /// The repair is not special-cased to the newest migration: **every** gap
+    /// that a store can actually hold is repaired, wherever it sits. Which
+    /// version is missing depends only on which branch a store met first, so
+    /// nothing may depend on it being the last one.
+    ///
+    /// Gaps the schema makes unreachable (a migration its successors `ALTER`)
+    /// are skipped rather than asserted, and the count of real cases is checked
+    /// so this cannot quietly degrade into a test that exercises nothing.
+    #[test]
+    fn every_reachable_gap_is_repaired_wherever_it_sits() {
+        let mut repaired = 0;
+        for m in MIGRATIONS {
+            let Some(mut conn) = store_missing_migration(m.version, latest_version() + 1) else {
+                continue; // a later migration depends on this one
+            };
+            apply(&mut conn).unwrap_or_else(|e| panic!("repair {}: {e}", m.version));
+            assert!(
+                recorded_versions(&conn).contains(&m.version),
+                "migration {} must be repaired, not skipped because a higher \
+                 version was already recorded",
+                m.version
+            );
+            repaired += 1;
+        }
+        assert!(
+            repaired >= 2,
+            "expected several omissible migrations, exercised {repaired}"
+        );
+    }
+
+    /// `schema_version()` reports the highest **gap-free** version, so it cannot
+    /// claim a schema the store does not have while a gap exists.
+    #[test]
+    fn the_reported_version_stops_below_a_gap_rather_than_overstating_it() {
+        let conn = store_missing_migration(12, 13).expect("12 is omissible");
+        assert_eq!(
+            super::store_version(&conn).expect("version"),
+            11,
+            "with 12 missing, the store provides 11 — reporting 13 (the maximum \
+             recorded) would name a schema that is not there"
+        );
+
+        // Once repaired, it reports the full contiguous run including the other
+        // branch's version: this describes the store, not the binary.
+        let mut conn = conn;
+        apply(&mut conn).expect("repair");
+        assert_eq!(
+            super::store_version(&conn).expect("version"),
+            13,
+            "1..=13 contiguous after the repair"
+        );
+
+        // A store with nothing recorded is version 0, not an error.
+        let empty = Connection::open_in_memory().expect("open");
+        empty
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now')));",
+            )
+            .expect("bootstrap");
+        assert_eq!(super::store_version(&empty).expect("version"), 0);
+
+        // So is a database that has never been through `apply` at all.
+        let bare = Connection::open_in_memory().expect("open");
+        assert_eq!(
+            super::store_version(&bare).expect("version"),
+            0,
+            "no migration table reads as `no migrations applied`, not an error"
+        );
+    }
+
+    /// `MIGRATIONS` is strictly ascending with no duplicates. The build already
+    /// enforces this (`const _`), so this test documents the invariant and keeps
+    /// it visible in the suite — `apply` inherits its ordering from the slice.
+    #[test]
+    fn migrations_are_strictly_ascending_and_unique() {
+        let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(versions, sorted, "must be ascending with no duplicates");
+        assert_eq!(
+            versions.first().copied(),
+            Some(1),
+            "versions start at 1, which `schema_version`'s contiguity walk assumes"
+        );
     }
 
     #[test]
