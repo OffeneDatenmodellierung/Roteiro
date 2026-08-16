@@ -677,6 +677,98 @@ it currently rests on no code or benchmark evidence.
   positives have a suppression story, a confidence signal and a baseline before any
   CI-gating is offered.
 
+#### Q3 — directed coupling ✅ *delivered*
+
+`rto_graph::coupling` reports, per node, **fan-in** (distinct callers) and
+**fan-out** (distinct callees) over `Calls` edges, plus Martin's instability
+`fan_out / (fan_in + fan_out)`. Ranked by `total` | `fan_in` | `fan_out`, ties
+broken by key, so identical input gives byte-identical output.
+
+**Surfaced on six of the seven stages; the seventh is a deliberate no-op.**
+
+| Stage | Q3 |
+| --- | --- |
+| Extraction (`scan_markers` + `augment`) | **Untouched by design** — Q3 adds no derived metadata, so `EXTRACT_VERSION` stays **11**. Confirmed live: `sync` after the change reported *237 of 239 blobs cached*. |
+| Query fn | `rto_graph::coupling` |
+| Query result types | `CouplingReport` / `CouplingItem` / `CouplingOrder` |
+| MCP (`GraphServer`) | `coupling` tool (`rto-render/src/mcp.rs`) |
+| Served-chat (`GraphToolRegistry`) | `coupling` tool — a **separate** registry, with its own test |
+| Obsidian render | `_Home` → "Most depended-on (call fan-in)" |
+| CLI-side aggregation | `roteiro coupling [--order] [--limit] [--json]`, `GET /v1/graph/{project}/coupling` |
+
+**Not surfaced:** the explorer web app has no coupling panel. The `/coupling`
+endpoint serves the data; wiring `assets/app.js` is follow-up, tracked here rather
+than left to be discovered.
+
+**`/hotspots` is deliberately unchanged.** Undirected degree over *every* edge kind
+is a different, still-useful question; the explorer depends on its shape. Its doc
+comment now says so and points at `/coupling`, rather than the discarded direction
+being an unremarked accident.
+
+**Two counting rules that change the numbers**, both reported rather than silent:
+
+- **Distinct counterparts, not edges.** Edges are a set per
+  `(src, dst, kind, provenance)`, which still admits *parallel* `Calls` edges at
+  two provenances. `fan_in` counts dependants, not layers that asserted a
+  dependency.
+- **Self-calls and cross-language edges excluded.** Recursion couples a node to
+  nothing outside itself. Cross-language edges are never calls: cross-file
+  resolution (`sync.rs`) binds a callee by **simple name** across every `Fn` node
+  regardless of language, and Roteiro extracts no FFI. On this repo that is
+  **615 of 6553** call edges (9.4%) — enough that excluding them removes a
+  JavaScript `clone` from second place in the ranking.
+
+**Confidence signal, and why there is no CI gate.** `fan_in` is exactly as precise
+as the edges beneath it, and the residual same-language case is not fixable here: a
+lone Rust `join` helper still absorbs every `.join(…)` in the workspace, reading as
+**232 callers**. That is a limit of call resolution — fixing it is extraction work,
+and extraction work means bumping `EXTRACT_VERSION`. So the lens **offers no CI
+gate**, says so, and carries the caveat on every surface including both tool
+descriptions, so a model reporting a high `fan_in` passes it on. No suppression
+mechanism was added: coupling is a *measurement*, not a finding, so there is
+nothing to suppress — and a second exclusion vocabulary beside `[debt] ignore`
+would not have helped anyway (this repo's `[debt] ignore` does not cover the
+vendored `cytoscape.min.js` that dominates the ranking).
+
+**Scale benchmark**, this repo (5501 nodes, 12036 edges, 6553 `calls` edges;
+2887 coupled nodes), release build, warm, whole-process wall clock, best of 5:
+
+| Command | Time |
+| --- | --- |
+| `roteiro coupling --limit 20` | **0.05 s** |
+| `roteiro coupling --limit 0` (all 2887) | **0.07 s** |
+| `roteiro debt` (existing baseline) | 0.04 s |
+| `roteiro search store` (scans all nodes) | 0.05 s |
+
+Ranking runs on the counts alone and only the nodes that survive the cap are read
+back, so a top-N question costs one edge scan plus N node lookups — not the
+whole-graph node scan `/hotspots` performs.
+
+**Documentation debt (both items), fixed in [#288](https://github.com/OffeneDatenmodellierung/Roteiro/issues/288), which is where they live** —
+not in any repo file:
+
+- **Security taxonomy normalised.** Rows S1–S6 carried `GPB`/`CVE`/`SAST`, which
+  the issue's own class key never defines. They now use the defined
+  **GDS**/**NNX**/**EXT**/**LLM** vocabulary, assigned to match the issue's own
+  A1–A4 tiering (S1, S4 → `GDS`; S2, S3 → `NNX`; S5, S6 → `EXT`), and S1 is
+  retitled to the inventory it can actually be.
+- **The SmolVLM claim is now marked a hypothesis.** *"too small to emit
+  `<tool_call>`"* rests on no code and no benchmark — **NOT FOUND** across four
+  queries: `grep -rni smolvlm --include='*.rs' crates/` (10 hits, all registry /
+  media-producer / speculative-decoding plumbing), `grep -rni tool_call` filtered
+  to vision/VLM/mmproj/image terms (zero), and `roteiro search` for
+  *"smolvlm tool_call"* and *"vision tool protocol"* (no matches). Stage 31's DoD
+  required Qwen3 to be **shown** to emit a `<tool_call>`; no equivalent run exists
+  for SmolVLM. The describe-then-query recommendation built on it is relabelled as
+  the safe default, with the one-run experiment that would settle it.
+
+The A1 cost line in #288 (*"~20-line mirror of `debt`"*) is struck through and
+replaced with the ~195–500 LOC / 6–8 file figure this stage is built on.
+
+**Still to land:** Q1 (debt density) and S1 (config-secret inventory), as separate
+PRs — Q3 shipped alone deliberately, because a reviewable diff beats a complete one
+nobody can check.
+
 ### Stage 28 — Generated media content moves out of `derived` ([ADR-0015](adr/0015-generated-media-content-artifact-store.md)) → **v1.10.x** ✅ *delivered* *(independent track)*
 
 **Goal:** stop generative model output masquerading as deterministic extraction —
