@@ -84,7 +84,7 @@ Verified against `main` at the time of writing:
 | Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | **`11`** (`crates/rto-graph/src/extract.rs`) — the Stage 28 bump landed in #316 | Bumping it forces full re-extraction for every user. No test pins the value. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
-| Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one. |
+| Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one — **done**, and tested against `lru_evict_count`'s own numbers. |
 
 ---
 
@@ -481,6 +481,88 @@ cache that stops sessions re-deriving what they already know.
   recall immediately regardless of age; an unanchored memory is still retrievable
   and clearly labelled.
 
+**Delivered.** Migration **12** (`agent_cache` + `agent_cache_clock`),
+retrieval-time ranking in `rto_graph::memory`, the byte-budget sweep, and the
+`search` memory channel. All four DoD items have a test, and each was
+**fault-injected**: the guarded behaviour was broken, the guard watched go red,
+and the source reverted byte-identically (15 injections, all red — two of them
+only after the tests they exposed as weak were strengthened).
+
+**What shipped, and where it deviated:**
+
+1. **`Decay` is `none | linear[:span] | exponential[:half-life]`, and `none` is
+   the default.** ADR-0013 offered the three modes without saying which one leads;
+   the reproducible answer is the default here, on the same terms as
+   `SearchOptions` defaulting generated content off. Age is counted in
+   **generations** — one per record written — so ranking never touches a clock.
+2. **`base_confidence` defaults to `0.5`** when a writer states none. Not in the
+   ADR. `1.0` would let every record that claimed nothing outrank one that
+   honestly claimed `0.9`, pricing honesty; `0.0` would make the common case (the
+   CLI states no confidence unless asked) unrecallable. The midpoint is the only
+   value that makes stating one worth the trouble in both directions.
+3. **`anchor_penalty` ranks `drifted` *below* `vanished`** (`valid` 1.0,
+   `unanchored` 0.9, `unverifiable` 0.5, `vanished` 0.35, `drifted` 0.25). Drift
+   is the one state that can actively mislead about code still sitting under the
+   same key; a vanished anchor can mislead nobody, and ranking it lowest would
+   punish exactly the records the ADR says are worth keeping most. Two properties
+   are asserted rather than assumed: nothing is ever zero, and every state that
+   `AnchorState::applies` outranks every state that does not.
+4. **The eviction counters needed a logical clock**, so migration 12 adds a
+   single-row `agent_cache_clock` beside the table (on `sync_state`'s precedent).
+   ADR-0013 §3 rules out wall-clock and the ADR's proposed `agent_cache` names
+   `generation`/`last_used` without saying where the values come from. `ticks`
+   advances per access — `ModelCache`'s list position, made durable, with no ties
+   for the sweep to break arbitrarily — and `generation` advances once per sweep,
+   which is what makes "written in the current generation" a window rather than a
+   single row, and what makes the pin lapse instead of becoming permanent.
+5. **`evict_count` is a pure function tested against `lru_evict_count`'s own
+   numbers.** Porting an existing policy is worth nothing if the port quietly
+   behaves differently. The always-keep-the-MRU rule moved from a
+   `len - evict > 1` guard into the caller's pinned set, because this tier pins
+   other rows too and one rule beats two. A sweep can therefore finish **still
+   over budget** when everything left is pinned; `CacheSweep::over_budget` says so
+   rather than leaving a bound that silently failed to bind.
+6. **Memory reaches `search` through a third channel, `--include-memory`, off by
+   default** — beside the graph and generated channels, never merged with either.
+   Its scorer shares no branch with the node scorer, so "memory never takes the
+   `authored` +40" is structural. Stage 23's *total absence* assertion is restated
+   rather than relaxed, and is now checked more sharply than absence could check
+   it: a memory hit's score must not exceed the ceiling its own lexical terms can
+   produce, which is what a leaked +40 would breach.
+7. **CLI:** `roteiro memory recall [query] [--decay …] [--applicable-only] …`,
+   which prints every term of the ranking and not just the product, and
+   `roteiro memory cache [--sweep] [--budget-mb]`. The sweep also runs at the
+   maintenance seam in `roteiro context --refresh`, never on a read path.
+   `context --refresh --json` keeps its long-standing shape: wrapping it would
+   break callers to pay for maintenance they did not ask about, so the sweep is
+   reported on stderr there and has its own `--json` under `memory cache`.
+8. **Budget:** `--budget-mb`, else `ROTEIRO_CACHE_BUDGET_MB`, else the 256 MB of
+   §9.1. An unreadable value is an **error, not a fallback** — running the default
+   under a name that says otherwise is how an operator ends up believing in a
+   bound that was never applied. The config-file layer was deliberately not
+   touched.
+
+**Two absolute assertions on a shared constant disarmed**, at `store.rs:1709` and
+`:1880` — `assert_eq!(store.schema_version()?, 11)`, which migration 12 breaks.
+Both now read `migrations::latest_version()`, the idiom
+`a_later_migration_is_additive_on_a_populated_store` already uses. The literal was
+defended in a comment as making someone confirm a new migration is meant to apply
+on open, but `apply` runs *every* migration newer than the recorded version, so
+there was never a per-migration choice there to confirm — the literal asserted the
+value of a shared constant and nothing else. Fault injection confirmed the
+rewritten assertions still catch the thing they are for: an `apply` that stops one
+migration short of `latest_version()` fails both.
+
+**`EXTRACT_VERSION` is unchanged**, and
+`tests/sync.rs::memory_writes_do_not_invalidate_the_fact_cache` still passes —
+also fault-injected, by making a memory write clear `sync_env`.
+
+**Not in this stage, deliberately:** the cache tier ships with its policy, its
+seam and its API, but **no producer** — `node_context` is still the context cache.
+Moving a live cache onto the bounded tier is a data migration, not a policy
+change, and bundling it would have put a schema move and an eviction policy in one
+reviewable unit.
+
 ### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)*
 
 **Goal:** deepen the graph itself — the on-brand work — with **honest costs**.
@@ -741,7 +823,7 @@ is why it rides an independent track.
 | v1.11.x | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved |
 | v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
 | v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
-| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
+| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction — **met** |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | v1.11.0 ✅ | Stage 29 — audio metadata as `derived` facts | Format read costs 1–100 µs and instantiates no decoder; duration exact/estimated/absent never guessed — **met** |

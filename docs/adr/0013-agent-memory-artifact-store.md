@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
-last-modified: 2026-08-15
+version: "1.2"
+last-modified: 2026-08-16
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -323,21 +323,47 @@ eviction tier can later be altered without touching durable memory.
 
 For Review. This ADR is itself the smallest useful step, since it forecloses the
 cheap `NodeKind::Other("memory")` shortcut that someone will otherwise take.
-Execution is planned in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) Stage 23, whose
-episodic half is **delivered**: migration 11, the `agent_memory` store, and
-`roteiro memory add|list|forget` — write path only, no retrieval ranking, no
-graph integration. The cache tier remains Stage 25.
 
-**Settled since v1.0:** the `scope` question, above — scope is a namespace, and
-applicability is decided by anchor resolution.
+**Both halves are now delivered.** Stage 23 shipped the episodic tier — migration
+11, the `agent_memory` store, `roteiro memory add|list|forget`. Stage 25 shipped
+the rest: migration **12** (`agent_cache`, plus the single-row `agent_cache_clock`
+its counters are drawn from), retrieval-time ranking, the byte-budget sweep at the
+`refresh_contexts` maintenance seam, and a **third `search` channel** for memory
+that is off by default and takes no `authored` boost.
 
-**Still open for the reviewer** (deliberately not decided here): the cache tier's
-byte budget *value*. The unit follows `ModelCache`; the number is a judgement
-about tolerable `.git/roteiro/` growth, and it is not needed until Stage 25.
+**Settled since v1.0:** the `scope` question (v1.1) — scope is a namespace, and
+applicability is decided by anchor resolution. **The cache byte budget** is
+answered: **256 MB by default, raisable** via `ROTEIRO_CACHE_BUDGET_MB` or
+`--budget-mb` (build plan §9.1, decided by the owner). Nothing is left open.
+
+**Where the implementation went beyond this ADR** — none of it reversing a
+decision here, all of it recorded in the build plan's Stage 25 entry:
+
+- **The logical clock.** The proposed `agent_cache` names `generation` and
+  `last_used` without saying where the values come from, and §3 above rules out
+  wall-clock. They are drawn from `agent_cache_clock`: `ticks` advances per
+  access, `generation` once per sweep. The split is what makes "written in the
+  current generation" a *window* rather than a single row, and what makes the
+  never-evict pin lapse instead of becoming permanent.
+- **`decay = none` is the default**, not merely offered.
+- **`base_confidence` defaults to `0.5`** when a writer states none — the midpoint
+  of the range a writer can state, so claiming high evidence promotes and claiming
+  low evidence demotes, both relative to silence.
+- **`anchor_penalty` ranks `drifted` below `vanished`.** Drift is the state that
+  can mislead about code still under the same key; ranking vanished lowest would
+  have punished exactly the records this ADR says are worth keeping most.
+- **A sweep can finish over budget** and reports it. The always-keep-the-MRU rule
+  and the current-generation pin can between them leave nothing evictable, which
+  is this ADR's own rule; what it does not say is that a bound which fails to bind
+  must say so, and `CacheSweep::over_budget` does.
+- **The cache tier has no producer yet.** `node_context` remains the context
+  cache; moving it onto the bounded tier is a data migration rather than a policy
+  change, and was deliberately not bundled with the policy.
 
 ## Document version history
 
 | Version | Date | Notes |
 |---------|------|-------|
 | 1.0 | 2026-08-15 | For Review. Two-tier artifact store for durable agent-learned knowledge: episodic (unbounded, never auto-evicted, following the `imports` precedent) and a byte-budget-bounded transient cache (porting `rto-llama`'s `ModelCache` LRU to disk). Depreciation by evidence — anchor drift and explicit supersession — not by clock; decay computed at retrieval, never stored. Nothing enters `nodes`/`edges`; no `Provenance` variant; `EXTRACT_VERSION` unchanged. Rejects `NodeKind::Other("memory")`, authored-with-metadata, and a single TTL'd table. Left two questions to the reviewer: the cache byte budget, and what `scope` means. |
+| 1.2 | 2026-08-16 | **Both tiers delivered; the last open question answered.** The cache byte budget is **256 MB by default, raisable** (`ROTEIRO_CACHE_BUDGET_MB`, `--budget-mb`), so nothing is left open. Records where the Stage 25 implementation went beyond this ADR without reversing it: a single-row `agent_cache_clock` supplies the `generation`/`last_used` counters the proposed table named but did not source (§3 rules out wall-clock — `ticks` advances per access, `generation` once per sweep, which is what makes the never-evict pin a lapsing window rather than a permanent one); `decay = none` is the *default* rather than merely offered; `base_confidence` defaults to the midpoint `0.5` when a writer states none, so stating one is worth the trouble in both directions; `anchor_penalty` ranks `drifted` **below** `vanished`, because drift is the state that can mislead about code still under the same key and ranking vanished lowest would punish the records this ADR most wants kept; a sweep that finishes over budget (everything left pinned — this ADR's own rule) reports it rather than leaving a bound that silently failed to bind; and the tier ships with its policy and seam but **no producer**, since moving `node_context` onto it is a data migration rather than a policy change. No decision from 1.0 or 1.1 changed. |
 | 1.1 | 2026-08-15 | **Scope settled** (new §*Scope*): a lesson is valid in a tree only if the relevant association is present there *in the same format*, so **the anchor is the scope test** and `scope` is a coarse per-repo/project **namespace, never a branch label**. Records what "same format" means (the blob matches — strictly, so a reformat breaks it and the failure is toward *marked*, not toward silently applying), that `unverifiable` therefore does not apply, and that a record with **no anchor** is repo-wide and must never be conflated with an anchor that failed to resolve. No new machinery: this names what the existing anchor check was already deciding, and no decision from 1.0 changed. Also records the episodic tier as delivered. |
