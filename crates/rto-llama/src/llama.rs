@@ -84,6 +84,12 @@ use crate::speculative::{Mtp, SpecCounters, SpeculativeStats, draft_head_layers}
 /// Default context window when the caller does not set one.
 const DEFAULT_N_CTX: u32 = 4096;
 
+/// How wide a batch `mtmd_helper` is asked to chunk a multimodal prompt into.
+/// llama.cpp's own default for the same call, and the value this path has always
+/// used; [`LlamaEngine::chat_media`] clamps it to the context's capacity so it
+/// cannot become an over-wide batch on a small context.
+const MEDIA_CHUNK_TOKENS: u32 = 512;
+
 /// Ensures the native-log → `tracing` bridge is installed exactly once.
 static NATIVE_LOG_BRIDGE: std::sync::Once = std::sync::Once::new();
 
@@ -747,8 +753,28 @@ impl LlamaEngine {
         let mut ctx = self.new_context(model)?;
         // `eval_chunks` decodes text + projected media (image/audio) embeddings
         // into the context and returns the new position to continue generating.
+        //
+        // Unlike the text path this one needs no length guard: `mtmd_helper` does
+        // its own chunking, splitting both text and projected embeddings into
+        // batches of the width passed here — so an arbitrarily long media prompt
+        // arrives as a series of decodes that each fit. That width used to be the
+        // literal `512`, which is only *safe* while it happens to be under the
+        // context's batch capacity; an engine built with a context smaller than
+        // 512 would have handed llama.cpp an over-wide batch and aborted, which is
+        // the same defect as issue #346 waiting for a different caller. Taking the
+        // minimum keeps the chunk width at exactly 512 for every context in the
+        // tree today — so nothing about how a media prompt is batched changes —
+        // and shrinks it to fit when a caller asks for a smaller window.
+        let chunk_width = ctx.n_batch().min(MEDIA_CHUNK_TOKENS);
         let n_past = chunks
-            .eval_chunks(mtmd, &ctx, 0, 0, 512, true)
+            .eval_chunks(
+                mtmd,
+                &ctx,
+                0,
+                0,
+                i32::try_from(chunk_width).unwrap_or(1),
+                true,
+            )
             .map_err(|e| EngineError::Inference(format!("mtmd eval: {e}")))?;
 
         // No speculation here: `mtmd_eval_chunks` decodes the prompt itself, so

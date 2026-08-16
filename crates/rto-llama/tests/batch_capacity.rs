@@ -253,6 +253,10 @@ fn measure_what_a_wider_batch_costs() {
     use llama_cpp_2::model::params::LlamaModelParams;
 
     const N_CTX: u32 = 4096;
+    /// Contexts built per arm: one reading cannot resolve tens of KiB against a
+    /// ~160 MiB allocation, and the spread across repeats is the evidence for
+    /// saying so rather than merely asserting it.
+    const REPS: usize = 5;
 
     let Some(path) = model_gguf(TEXT_MODEL) else {
         eprintln!("SKIP: need `{TEXT_MODEL}` under ~/.roteiro/models");
@@ -285,10 +289,7 @@ fn measure_what_a_wider_batch_costs() {
     };
 
     // One arm: build a context, note what llama.cpp settled on, and how much
-    // resident memory appeared while it existed. Repeated, because a single
-    // reading of a ~160 MiB allocation cannot resolve a difference of tens of
-    // KiB, and the spread is the evidence for saying so.
-    const REPS: usize = 5;
+    // resident memory appeared while it existed.
     let arm = |n_batch: Option<u32>| -> (u32, u32, Vec<i64>) {
         let (mut widths, mut costs) = ((0, 0), Vec::with_capacity(REPS));
         for _ in 0..REPS {
@@ -306,39 +307,39 @@ fn measure_what_a_wider_batch_costs() {
     };
 
     // Before: `n_batch` unset, so llama.cpp's 2048 default, clamped to n_ctx.
-    let (b_batch, b_ubatch, b_costs) = arm(None);
+    let (narrow_logical, narrow_physical, narrow_costs) = arm(None);
     // After: `n_batch` asked for as the full context, as `base_params` now does.
-    let (a_batch, a_ubatch, a_costs) = arm(Some(N_CTX));
+    let (wide_logical, wide_physical, wide_costs) = arm(Some(N_CTX));
 
     let median = |v: &[i64]| v[v.len() / 2];
     let spread = |v: &[i64]| v[v.len() - 1] - v[0];
     eprintln!(
         "n_ctx={N_CTX}, {REPS} repeats per arm, RSS in KiB\n\
-         before: n_batch={b_batch} n_ubatch={b_ubatch}  median +{}  spread {}  {b_costs:?}\n\
-         after:  n_batch={a_batch} n_ubatch={a_ubatch}  median +{}  spread {}  {a_costs:?}\n\
+         before: n_batch={narrow_logical} n_ubatch={narrow_physical}  median +{}  spread {}  {narrow_costs:?}\n\
+         after:  n_batch={wide_logical} n_ubatch={wide_physical}  median +{}  spread {}  {wide_costs:?}\n\
          median delta: {:+} KiB, against a within-arm spread of {} KiB",
-        median(&b_costs),
-        spread(&b_costs),
-        median(&a_costs),
-        spread(&a_costs),
-        median(&a_costs) - median(&b_costs),
-        spread(&b_costs).max(spread(&a_costs)),
+        median(&narrow_costs),
+        spread(&narrow_costs),
+        median(&wide_costs),
+        spread(&wide_costs),
+        median(&wide_costs) - median(&narrow_costs),
+        spread(&narrow_costs).max(spread(&wide_costs)),
     );
 
     // The point of the change: the batch is now as wide as the advertised window.
     assert_eq!(
-        a_batch, N_CTX,
+        wide_logical, N_CTX,
         "the wider context must accept a full window"
     );
     assert!(
-        b_batch < a_batch,
-        "nothing was measured — the default was already {b_batch}"
+        narrow_logical < wide_logical,
+        "nothing was measured — the default was already {narrow_logical}"
     );
     // And the physical batch — the one that sizes the compute graph, and so the
     // one that would have made this expensive — did not move. This is the real
     // assertion of the test; the RSS figures above are context for reading it.
     assert_eq!(
-        b_ubatch, a_ubatch,
+        narrow_physical, wide_physical,
         "n_ubatch must be untouched; it is what would make this expensive"
     );
 }
