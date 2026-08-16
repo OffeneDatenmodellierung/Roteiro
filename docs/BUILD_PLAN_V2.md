@@ -76,7 +76,7 @@ Verified against `main` at the time of writing:
 
 | Fact | Value | Consequence for V2 |
 |---|---|---|
-| Released | **v1.10.1** on crates.io (baseline at V2's start: v1.9.0) | V2 work is post-1.0 — semver is now real. |
+| Released | **v1.10.1** on crates.io; workspace at **1.11.0**, publish in flight (only `rto-llama-v1.11.0` tagged so far) | V2 work is post-1.0 — semver is now real. |
 | MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
 | Coverage | 85% per-file ratchet | Every stage below carries test cost, not just code cost. |
@@ -596,7 +596,7 @@ the gate avoids. The gate **abstains**, and abstention is a pass, so those forma
 still reach the model. Whether to close that gap with structural parsing (no
 dependency) is tracked separately.
 
-### Stage 29 — Audio metadata as `derived` facts ([ADR-0016](adr/0016-audio-metadata-extraction.md)) → *in progress* · effort **M** *(independent track)*
+### Stage 29 — Audio metadata as `derived` facts ([ADR-0016](adr/0016-audio-metadata-extraction.md)) → **v1.11.0** · effort **M** ✅ *delivered* *(independent track)*
 
 **Goal:** the complement of Stage 28. That stage took *generated* content out of
 `derived` because it is invented; this one puts *extracted* content in because it is
@@ -621,7 +621,7 @@ count and tags, from a **format read with no decoding and no model** (measured
   `export_factset` unchanged in shape; tests need **no model**, so they run on CI
   rather than self-skipping.
 
-### Stage 30 — MTP speculative decoding (issue #320) → *opt-in, unreleased* · effort **M** *(independent track)*
+### Stage 30 — MTP speculative decoding (issue #320) → **v1.11.0**, opt-in only · effort **M** ✅ *delivered* *(independent track)*
 
 **Goal:** spend the draft head a Qwen3.5+ GGUF already carries. Generation on Metal
 is memory-bandwidth bound, so a decode that *confirms* three proposed tokens costs
@@ -666,7 +666,7 @@ them, so the memory is already paid for.
 - **Not shippable as a default** until either llama.cpp's cross-batch-width numerics
   tighten or the divergence is judged acceptable as a product decision. That is an
   open question, not a task — see §9.
-### Stage 31 — Model lifecycle: resumable pulls, removal, high tier ([ADR-0003](adr/0003-pluggable-embedding-models.md)) → **v1.10.x** · effort **M** *(independent track)*
+### Stage 31 — Model lifecycle: resumable pulls, removal, high tier ([ADR-0003](adr/0003-pluggable-embedding-models.md)) → **v1.11.0** · effort **M** ✅ *delivered* *(independent track)*
 
 **Goal:** make a multi-gigabyte model store survivable. Nothing here touches the
 graph, the schema or `EXTRACT_VERSION` — it is the store and its CLI only, which
@@ -736,9 +736,9 @@ is why it rides an independent track.
 | v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction |
 | v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
-| — | Stage 29 — audio metadata as `derived` facts | *in progress* |
-| — | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
-| v1.10.x | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
+| v1.11.0 ✅ | Stage 29 — audio metadata as `derived` facts | Format read costs 1–100 µs and instantiates no decoder; duration exact/estimated/absent never guessed — **met** |
+| v1.11.0 ✅ | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
+| v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
