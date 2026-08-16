@@ -97,6 +97,12 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   The build script fails loudly — with this recipe and the expected digest — if
   the variable is unset, points at a remote URL, or the bytes do not match. Build
   without `exec-boxlite` if you would rather not provision.
+
+  `prefetch` is gated on `execution`, so **any** build can run that first line —
+  including `--no-default-features --features execution`. That is not a
+  convenience: it is what stops this recipe being circular. If provisioning sat
+  behind an execution backend, obtaining the archive `exec-boxlite` demands at
+  compile time would first require a build with the *other* backend compiled in.
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny --all-features check` and `cargo audit` — clean. **Every new
@@ -117,14 +123,19 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   [`docs/VENDORED_DEPENDENCIES.md`](docs/VENDORED_DEPENDENCIES.md); a change that
   vendors non-Rust code adds its row in the same PR.
 - **Offline by default.** The default build needs no model and makes no network
-  call of its own. It does ship `models` — `roteiro model pull` is the
-  prerequisite for *preparing* to work offline, so it must exist in a stock
-  install — which means "offline by default" is a claim about **behaviour**, not
-  about the absence of an HTTP client: the socket is compiled in, and only
-  `pull`, after an explicit `[y/N]` consent, may open it. Keep heavy
-  dependencies (llama.cpp, PDF/OCR/vision, the model server, analyzer execution)
-  behind **feature flags** so the default build stays small and needs no
-  toolchain class it does not already require.
+  call of its own. It does ship `models` and `exec-subprocess`, because
+  `roteiro model pull` and `roteiro security prefetch` are the prerequisites for
+  *preparing* to work offline and must exist in a stock install. So "offline by
+  default" is a claim about **behaviour**, not about the absence of an HTTP
+  client: the socket is compiled in, and only `pull` and
+  `prefetch --allow-download`, each after an explicit consent, may open it.
+  Likewise `exec-subprocess` compiles in the *capability* to run an analyzer as a
+  child process; `--allow-unsandboxed` is what permits an actual run, it is
+  required every time, and since the build-time gate is no longer in the default
+  path it is the only gate left — do not weaken it. Keep heavy dependencies
+  (llama.cpp, PDF/OCR/vision, the model server, the sandbox runtime) behind
+  **feature flags** so the default build stays small and needs no toolchain class
+  it does not already require.
 
 ## Pull requests
 

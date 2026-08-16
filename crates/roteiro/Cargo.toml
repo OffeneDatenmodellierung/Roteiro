@@ -108,25 +108,61 @@ http-body-util = "0.1"
 #     reads crate metadata and cannot see C++ vendored by a build script.
 #     Defaulting it on would ship that unmonitored surface to everyone rather
 #     than to the people who asked for inference.
-# The same reasoning keeps `exec-subprocess` off; its own comment below says why.
-default = ["execution", "models"]
-# The `AnalyzerRunner` seam and `roteiro security ingest|list` (ADR-0012,
-# ADR-0014). Adds no third-party dependency: `rto-exec` is a workspace crate over
-# serde plus the SHA-256 implementation already in the tree.
-execution = ["dep:rto-exec"]
-# The subprocess analyzer backend and its provisioning: `roteiro security
-# run|prefetch|status` (ADR-0014). **Off by default** — it executes third-party
-# binaries on the host with no isolation boundary, so it must be asked for at
-# build time as well as consented to per run with `--allow-unsandboxed`.
+# `exec-subprocess` is on by default so that the *other* half of "prepare once,
+# then work offline" ships too. Enabling it compiles the capability to run an
+# analyzer as a child process; it does not exercise it, and three things keep
+# that true:
+#   * `--allow-unsandboxed` is still required **per run**. See below — with the
+#     build-time gate gone from the default path, that flag is now the only thing
+#     between a stock install and an unsandboxed execution, so it got *more*
+#     load-bearing here, not less.
+#   * Roteiro never installs an analyzer. `semgrep` and `osv-scanner` must
+#     already be on `PATH`, so the host owner has already opted into having them;
+#     a missing one is a named error, not a fetch.
+#   * A run records `isolation=none` in its evidence either way.
+# `serve` is the one thing that stays off, for the reasons above.
+default = ["execution", "models", "exec-subprocess"]
+# The `AnalyzerRunner` seam, `roteiro security ingest|list`, and — since the
+# provisioning/execution split — `security prefetch|status` (ADR-0012, ADR-0014).
 #
-# Takes `ureq`, which is already here for `roteiro model pull` — so this adds an
-# edge to the dependency graph rather than a crate to the lockfile. It is the
-# transport for `security prefetch --allow-download`, which provisions
-# `osv-scanner`'s per-ecosystem OSV databases. `rto-exec` deliberately does
-# **not** gain a network dependency for this: it takes the fetcher as a function
+# Provisioning lives here rather than behind a backend feature because it
+# executes nothing: it downloads, digests, pins and reports. Every `Command::new`
+# in `rto-exec` is in `subprocess.rs` or `boxlite.rs`, both still gated. Gating it
+# on a backend was also circular — `exec-boxlite`'s build script demands a
+# verified runtime archive at compile time, and `prefetch` is what obtains it, so
+# provisioning had to be reachable from a build with no backend at all.
+#
+# It takes `ureq` for that reason and no other: `prefetch --allow-download`
+# fetches `osv-scanner`'s per-ecosystem OSV databases. `rto-exec` deliberately
+# does **not** gain a network dependency — it takes the fetcher as a function
 # argument, so the code that can open a socket lives in the CLI and is reachable
-# only from `prefetch`.
-exec-subprocess = ["execution", "rto-exec/exec-subprocess", "dep:ureq"]
+# only from `prefetch`. In the default set `ureq` is already present for
+# `roteiro model pull`, so this costs nothing there; in a
+# `--no-default-features --features execution` build it is the one crate the
+# split adds.
+execution = ["dep:rto-exec", "dep:ureq"]
+# The subprocess analyzer *backend*: `roteiro security run` (ADR-0014). **On by
+# default**, which is a change — it used to have to be asked for at build time as
+# well as consented to per run.
+#
+# Rewriting rather than deleting that caution, because only half of it stopped
+# being true. What the build-time default grants is the *presence* of the runner;
+# what it does not grant is a run. `security run` still refuses without
+# `--allow-unsandboxed` on every single invocation, still records
+# `isolation=none` in the run's evidence, and still cannot fetch an asset — a
+# cold cache fails and names the `prefetch` command. And it cannot install an
+# analyzer: if `semgrep` is not on `PATH` the run stops with a message saying so
+# and pointing at `roteiro security ingest`.
+#
+# So `--allow-unsandboxed` is now the *only* gate between a stock install and
+# executing a third-party binary on this host with no isolation boundary. Do not
+# weaken it "for consistency" because the build-time gate is gone; it is carrying
+# the load the build-time gate used to share. ADR-0014 v1.1 records this.
+#
+# Keeping it a named feature is still worth it: `--no-default-features --features
+# execution` builds a Roteiro that provisions and ingests but **cannot execute**,
+# which is the shape a locked-down environment wants.
+exec-subprocess = ["execution", "rto-exec/exec-subprocess"]
 # The sandboxed analyzer backend: `roteiro security run` inside a digest-pinned
 # OCI image in a microVM (ADR-0014). **Off by default.**
 #

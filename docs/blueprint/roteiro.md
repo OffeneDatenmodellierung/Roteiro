@@ -136,8 +136,14 @@ derived symbols against an external tool as a validation-only comparison.
   across branches, worktrees, and CI caches.
 - **Authored intent is CI-gated** (§5): this blueprint and the ADRs cannot drift
   from the code without failing `check`.
-- **Heavy dependencies stay opt-in** (§1): llama.cpp and the model *execution*
-  tiers are behind feature flags. The default build needs no toolchain class
-  beyond the C compiler Rust already requires — it compiles C for bundled SQLite,
-  18 tree-sitter grammars, and (since `models` became a default feature) `ring`'s
-  crypto core — but never C++, cmake or libclang.
+- **Heavy dependencies stay opt-in** (§1): llama.cpp, the model *execution*
+  tiers and the sandbox runtime are behind feature flags. The default build needs
+  no toolchain class beyond the C compiler Rust already requires — it compiles C
+  for bundled SQLite, 18 tree-sitter grammars, and (since `models` became a
+  default feature) `ring`'s crypto core — but never C++, cmake or libclang.
+- **Capability in the default build is not activity** (§1). `models` and
+  `exec-subprocess` ship by default so a stock install can *prepare* to work
+  offline, but each retains its own runtime consent: `model pull` needs a `[y/N]`
+  yes, `security prefetch --allow-download` needs the flag, and `security run`
+  needs `--allow-unsandboxed` on every invocation. Removing a build-time gate is
+  only safe while the runtime one stays.

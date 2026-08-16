@@ -17,7 +17,7 @@ what automating it would take.
 | **SQLite** | `libsqlite3-sys` 0.37.0 (`bundled`), via `rusqlite` 0.39.0 | **3.51.3** | always — the default build | [sqlite.org/cves.html](https://www.sqlite.org/cves.html) |
 | **tree-sitter C runtime** | `tree-sitter` 0.26.12 | tracks the crate version | always — the default build | [tree-sitter/tree-sitter security advisories](https://github.com/tree-sitter/tree-sitter/security/advisories) |
 | **tree-sitter grammars** (18) | each `tree-sitter-<lang>` crate ships generated `parser.c` + hand-written `scanner.c` | tracks each crate version (see `Cargo.lock`) | always — the default build | the individual grammar repositories, mostly under [github.com/tree-sitter](https://github.com/tree-sitter) |
-| **BoringSSL-derived crypto** | `ring` 0.17.14 (C + per-architecture assembly) | tracks the crate version | **always — the default build**, via `ureq` → `rustls` under the default `models` feature; also `serve` + `tls` | [RustSec](https://rustsec.org/) — see below; upstream [briansmith/ring](https://github.com/briansmith/ring/security) |
+| **BoringSSL-derived crypto** | `ring` 0.17.14 (C + per-architecture assembly) | tracks the crate version | **always — the default build**, via `ureq` → `rustls` under the default `models` and `execution` features; also `serve` + `tls` | [RustSec](https://rustsec.org/) — see below; upstream [briansmith/ring](https://github.com/briansmith/ring/security) |
 
 `llama-cpp-sys-2`'s vendored version is not printed anywhere, so it was resolved
 the long way and is recorded here to save the next person the trip: the crate's

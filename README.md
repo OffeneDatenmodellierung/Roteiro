@@ -33,11 +33,17 @@ roteiro review                 # graph-grounded review of your change
 
 The default build needs no toolchain class beyond the C compiler Rust itself
 requires — no C++, no cmake, no libclang — and makes no network call on its own.
-It does include `roteiro model pull`, so the one-time model download is
-available without rebuilding — nothing is fetched until you say yes to it. Local
-*inference* and *serving* remain opt-in (`--features inference-local-models`,
-`--features serve`), as do the analyzer prefetch/run commands (`--features
-exec-subprocess`).
+It includes everything needed to *prepare* for working offline —
+`roteiro model pull` and `roteiro security prefetch|status|run` — so
+[`docs/OFFLINE_SETUP.md`](docs/OFFLINE_SETUP.md) needs no special build. Nothing
+is fetched until you say yes to it, and `security run` still requires
+`--allow-unsandboxed` on every invocation, because it executes a third-party
+analyzer on this host with no isolation boundary. **The analyzers themselves are
+yours to install** (`semgrep`, `osv-scanner`, `cargo install cargo-audit`) — the
+guide has the commands, and `roteiro security ingest` accepts a report produced
+anywhere if you would rather install none of them. Local *inference* and
+*serving* remain opt-in (`--features inference-local-models`, `--features
+serve`).
 
 Planning to work on a train or a plane? Models and analyzer databases must be
 fetched once, deliberately, before you disconnect —
@@ -72,8 +78,8 @@ it through the digest-pinned asset machinery instead, then points `boxlite` at
 the local copy so its fetch never reaches the network:
 
 ```sh
-# A build that can already provision — the subprocess feature is enough:
-cargo install roteiro --features exec-subprocess
+# Any build can provision — `security prefetch` is in the default install:
+cargo install roteiro
 roteiro security prefetch --analyzer sandbox --allow-download
 
 # Then build the sandboxed backend against the verified archive:

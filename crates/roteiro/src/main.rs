@@ -985,13 +985,16 @@ enum SecurityAction {
         json: bool,
     },
     /// Run an analyzer against this worktree as a **child process on this
-    /// host**, with no isolation (`--features exec-subprocess`).
+    /// host**, with no isolation.
     ///
-    /// The analyzer's own egress is switched off and its inputs are pinned and
-    /// pre-provisioned, but a subprocess on this host can do what this host can
-    /// do — so the run's evidence records `isolation=none`, and
-    /// `--allow-unsandboxed` is required to say you accept that. Assets are
-    /// never fetched here: a cold cache fails and names the prefetch command.
+    /// Gated on `exec-subprocess`, which is on by default. The analyzer's own
+    /// egress is switched off and its inputs are pinned and pre-provisioned, but
+    /// a subprocess on this host can do what this host can do — so the run's
+    /// evidence records `isolation=none`, and **`--allow-unsandboxed` is
+    /// required, on every invocation**, to say you accept that. Since the
+    /// feature became a default that flag is the only gate left, so it is not
+    /// optional and will not be made so. Assets are never fetched here: a cold
+    /// cache fails and names the prefetch command.
     #[cfg(feature = "exec-subprocess")]
     Run {
         /// The analyzer to run (`roteiro security status` lists them).
@@ -1003,10 +1006,33 @@ enum SecurityAction {
         #[arg(long)]
         json: bool,
     },
+    /// Not available in this build — rebuild with `--features exec-subprocess`.
+    ///
+    /// The variant exists purely so the answer is a sentence rather than clap's
+    /// `unrecognized subcommand`. Shipping a feature-gated command that vanishes
+    /// without explanation is the exact defect this release fixes for
+    /// `roteiro model`, and it would be perverse to reintroduce it here. Only a
+    /// `--no-default-features` build reaches this.
+    #[cfg(not(feature = "exec-subprocess"))]
+    Run {
+        /// The analyzer that would be run.
+        analyzer: String,
+        /// Accepted so the refusal names the feature rather than the flag.
+        #[arg(long)]
+        allow_unsandboxed: bool,
+        /// Accepted for the same reason.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install and verify every pinned asset an analyzer needs, recording each
-    /// digest — the one command that writes to the asset cache
-    /// (`--features exec-subprocess`).
-    #[cfg(feature = "exec-subprocess")]
+    /// digest — the one command that writes to the asset cache.
+    ///
+    /// Gated on `execution`, which is on by default: provisioning downloads,
+    /// digests and pins, and executes no analyzer. It is deliberately reachable
+    /// from a build with *no* execution backend, because that is what
+    /// bootstraps one — `exec-boxlite` requires the verified runtime archive at
+    /// compile time.
+    #[cfg(feature = "execution")]
     Prefetch {
         /// Only this analyzer's assets. Default: all of them.
         #[arg(long, value_name = "NAME")]
@@ -1028,8 +1054,11 @@ enum SecurityAction {
     },
     /// Report each pinned asset's digest and fetch time, the advisory-database
     /// age behind each live findings layer, and which languages the shipped
-    /// analyzers cover (`--features exec-subprocess`).
-    #[cfg(feature = "exec-subprocess")]
+    /// analyzers cover.
+    ///
+    /// Gated on `execution` alongside `prefetch`: reporting on the asset cache
+    /// executes nothing.
+    #[cfg(feature = "execution")]
     Status {
         /// Only this analyzer.
         #[arg(long, value_name = "NAME")]
@@ -5362,13 +5391,21 @@ fn run_security(action: SecurityAction) -> anyhow::Result<()> {
             allow_unsandboxed,
             json,
         } => run_security_run(&analyzer, allow_unsandboxed, json),
-        #[cfg(feature = "exec-subprocess")]
+        #[cfg(not(feature = "exec-subprocess"))]
+        SecurityAction::Run { analyzer, .. } => anyhow::bail!(
+            "`roteiro security run {analyzer}` needs the `exec-subprocess` feature, which this \
+             build does not have; rebuild with `--features exec-subprocess` (it is in the default \
+             set, so this is a `--no-default-features` build). To get findings without executing \
+             an analyzer here, run it elsewhere and use `roteiro security ingest` — this build \
+             can still `prefetch` and `status` the assets."
+        ),
+        #[cfg(feature = "execution")]
         SecurityAction::Prefetch {
             analyzer,
             allow_download,
             json,
         } => run_security_prefetch(analyzer.as_deref(), allow_download, json),
-        #[cfg(feature = "exec-subprocess")]
+        #[cfg(feature = "execution")]
         SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
     }
 }
@@ -5561,19 +5598,14 @@ fn report_written_at(file: &str) -> String {
 
 /// The advisory-database evidence this machine has provisioned for `analyzer`.
 ///
-/// Only meaningful in a build with the subprocess backend, which is the build
-/// that has an asset cache; otherwise there is nothing provisioned to describe.
-#[cfg(feature = "exec-subprocess")]
+/// Every `execution` build has an asset cache to describe now that provisioning
+/// no longer sits behind a backend feature, so this no longer needs a
+/// there-is-nothing-to-say counterpart. An unprovisioned cache is reported as
+/// unprovisioned by `resolve`, which is a different thing from a build that
+/// could not have one.
+#[cfg(feature = "execution")]
 fn advisory_db_evidence(analyzer: &str) -> Option<rto_graph::AdvisoryDb> {
     rto_exec::assets::advisory_db_evidence(&rto_exec::asset_root(), analyzer)
-}
-
-/// Without the subprocess backend there is no asset cache, so there is nothing
-/// provisioned to describe — and saying nothing is the honest answer, not a
-/// degraded one.
-#[cfg(all(feature = "execution", not(feature = "exec-subprocess")))]
-fn advisory_db_evidence(_analyzer: &str) -> Option<rto_graph::AdvisoryDb> {
-    None
 }
 
 /// The git blob id of `Cargo.lock`, when this checkout has one.
@@ -5988,7 +6020,7 @@ fn advisory_db_line(db: &rto_graph::AdvisoryDb) -> String {
 }
 
 /// The `--json` shape of `roteiro security prefetch`.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
 struct SecurityPrefetchReport {
     root: String,
@@ -6046,7 +6078,7 @@ struct SecurityPrefetchReport {
 /// a declared success status, so a corrupt database fails a scan rather than
 /// silently shrinking it. Parsing here would duplicate that for one asset kind
 /// while doing nothing for a future non-zip one.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 fn download_asset_file(url: &str, path: &std::path::Path) -> Result<(), String> {
     let response = ureq::get(url)
         // Ask for the framing whose completeness can be checked. ureq decodes a
@@ -6091,7 +6123,7 @@ fn download_asset_file(url: &str, path: &std::path::Path) -> Result<(), String> 
 /// negative or non-numeric value is `None` rather than an error: the caller's
 /// answer to "no usable length" is the same refusal either way, and it says so
 /// in one place.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 fn declared_body_length(header: Option<&str>) -> Option<u64> {
     header?.trim().parse::<u64>().ok()
 }
@@ -6103,7 +6135,7 @@ fn declared_body_length(header: Option<&str>) -> Option<u64> {
 /// because the guarantee belongs to this function rather than to a dependency's
 /// current behaviour: this is the only code that can put network bytes into a
 /// pinned asset, and a ureq upgrade must not be able to silently relax it.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 fn verify_transferred(url: &str, declared: u64, written: u64) -> Result<(), String> {
     if written == declared {
         return Ok(());
@@ -6122,7 +6154,7 @@ fn verify_transferred(url: &str, declared: u64, written: u64) -> Result<(), Stri
 /// directory the operator provides, and if it is absent this says where it
 /// looked and which command obtains it rather than going and getting it; the
 /// OSV databases are fetched by URL, which is what `--allow-download` is for.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 fn run_security_prefetch(
     analyzer: Option<&str>,
     allow_download: bool,
@@ -6256,7 +6288,7 @@ fn run_security_prefetch(
 }
 
 /// The `--json` shape of `roteiro security status`.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
 struct SecurityStatusReport {
     root: String,
@@ -6267,7 +6299,7 @@ struct SecurityStatusReport {
 
 /// What one shipped analyzer covers — the coverage matrix, read off the code
 /// rather than off a document, so the two cannot drift apart unnoticed.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
 struct AnalyzerCoverage {
     analyzer: &'static str,
@@ -6278,7 +6310,7 @@ struct AnalyzerCoverage {
 }
 
 /// The staleness of the advisory data behind one live findings layer.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
 struct LayerStaleness {
     layer: String,
@@ -6303,7 +6335,7 @@ struct LayerStaleness {
 // shapes. Splitting it would scatter one screen of output across three
 // functions that only ever run together.
 #[allow(clippy::too_many_lines)]
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let assets = rto_exec::status(&root, analyzer);
@@ -8845,7 +8877,7 @@ mod memory_cli {
 // HTTP over a loopback `TcpListener` — no external network, no fixtures — and
 // assert both that a bad transfer fails and that it leaves nothing a later
 // `prefetch` would treat as installed.
-#[cfg(all(test, feature = "exec-subprocess"))]
+#[cfg(all(test, feature = "execution"))]
 mod asset_download {
     use super::{declared_body_length, download_asset_file, verify_transferred};
     use std::io::{Read as _, Write as _};
@@ -9367,7 +9399,58 @@ mod security_cli {
         assert!(Cli::try_parse_from(["roteiro", "security", "run"]).is_err());
     }
 
-    #[cfg(feature = "exec-subprocess")]
+    /// Provisioning is reachable from **any** `execution` build, including one
+    /// with no execution backend compiled in at all.
+    ///
+    /// This is the compile-and-expose half of the provisioning/execution split,
+    /// and it is exactly the shape a future refactor breaks silently: move the
+    /// `assets` module back behind a backend feature and a
+    /// `--no-default-features --features execution` build stops being able to
+    /// `prefetch` — which is also the build that has to bootstrap
+    /// `exec-boxlite`, whose build script demands the verified runtime archive
+    /// at compile time. The gate below is a `cfg`, so it fails as a compile
+    /// error in that build rather than as a wrong answer here.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn provisioning_is_reachable_without_any_execution_backend() {
+        for argv in [
+            ["roteiro", "security", "prefetch"],
+            ["roteiro", "security", "status"],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_ok(),
+                "`{}` must parse in every `execution` build",
+                argv.join(" ")
+            );
+        }
+        // And the asset machinery they call is linked in, not merely parseable.
+        assert!(!rto_exec::asset_root().as_os_str().is_empty());
+        assert!(!rto_exec::ASSETS.is_empty());
+    }
+
+    /// `run` is the one thing an `execution`-only build must *not* be able to do
+    /// — and it must say so by name rather than as `unrecognized subcommand`.
+    #[cfg(not(feature = "exec-subprocess"))]
+    #[test]
+    fn run_is_absent_but_names_the_feature() {
+        let SecurityAction::Run { analyzer, .. } =
+            action(["roteiro", "security", "run", "cargo-audit"])
+        else {
+            panic!("expected the explanatory Run stub to parse");
+        };
+        assert_eq!(analyzer, "cargo-audit");
+        let message = crate::run_security(SecurityAction::Run {
+            analyzer: "cargo-audit".to_owned(),
+            allow_unsandboxed: true,
+            json: false,
+        })
+        .expect_err("an execution-only build must refuse to run an analyzer")
+        .to_string();
+        assert!(message.contains("exec-subprocess"), "{message}");
+        assert!(message.contains("security ingest"), "{message}");
+    }
+
+    #[cfg(feature = "execution")]
     #[test]
     fn prefetch_and_status_default_to_every_analyzer() {
         let SecurityAction::Prefetch {

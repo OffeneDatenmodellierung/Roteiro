@@ -48,7 +48,10 @@ the optional-capability precedent of
 - **`boxlite` is the opt-in local backend** — Apache-2.0, OCI containers in Linux
   microVMs, `Hypervisor.framework` + libkrun on Apple Silicon, KVM on Linux.
 - **Subprocess is the explicit escape hatch**, requiring `--allow-unsandboxed` and
-  labelling its evidence `isolation=none`.
+  labelling its evidence `isolation=none`. *(Update, v1.2: `exec-subprocess` is now
+  a default feature, so the build-time half of that gate is gone from a stock
+  install and `--allow-unsandboxed` carries it alone. It is unchanged and must
+  stay so — see v1.2 below.)*
 - **Assets are pre-downloaded and digest-pinned**, never fetched implicitly. Cold
   cache with no network fails with a named, actionable error.
 - **`code_interpreter` remains a non-goal.** The availability of a sandbox must
@@ -106,7 +109,14 @@ response returns normalized findings plus the digest evidence
 |---|---|---|---|
 | **Ingest** | Always, no feature | `ingested` | Consumes a normalized report; the zero-install default. |
 | **boxlite** | `exec-boxlite` | `microvm` | Digest-pinned OCI image; the reproducible local path. |
-| **Subprocess** | `exec-subprocess` | `none` | Requires `--allow-unsandboxed`; evidence is labelled honestly. |
+| **Subprocess** | `exec-subprocess` — **in the default set since v1.2** | `none` | Requires `--allow-unsandboxed` on every invocation; evidence is labelled honestly. |
+
+Asset **provisioning** (`security prefetch|status`) is not in this table because it
+is not a runner: it downloads, digests, pins and reports, and executes nothing. As
+of v1.2 it sits on `execution` alongside `ingest`/`list` rather than behind a
+backend feature — which is also what makes the boxlite bootstrap non-circular,
+since `exec-boxlite`'s build script demands the verified runtime archive that
+`prefetch` is what obtains.
 
 Because all three satisfy one contract, CI ingestion and local sandboxed execution
 stop being competing architectures and become **the same code path**.
@@ -229,3 +239,4 @@ than a packaging problem.
 |---|---|---|
 | 1.0 | 2026-08-15 | Initial: the seam, the three backends, boxlite chosen, the provisioning and degradation contract. |
 | 1.1 | 2026-08-15 | Clarified what `prefetch` "fetches": as Stage 22 shipped it, it verifies and pins but downloads nothing, because neither shipped asset is a digest-stable download. The pinned-before-use, never-implicit and no-host-fallback obligations are unchanged. See [[docs/adr/0018-analyzer-coverage-matrix.md]]. |
+| 1.2 | 2026-08-16 | **`exec-subprocess` joins the default feature set, and provisioning leaves it.** Two changes with one motive — a stock install should be able to prepare itself for offline work. (a) `security prefetch\|status` move from `exec-subprocess` to `execution`: they execute nothing (every `Command::new` in `rto-exec` is in `subprocess.rs`/`boxlite.rs`), the asset module was already shared between backends and owned by neither, and gating provisioning on a backend made the boxlite bootstrap circular. (b) `exec-subprocess` becomes a default, so `security run` ships in a stock install. **This retires half of v1.0's justification and the remaining half must not be weakened.** v1.0 defended the subprocess backend as "asked for at build time **as well as** consented to per run"; the build-time half no longer applies to a default install. What remains — and is unchanged, deliberately — is that `--allow-unsandboxed` is required on **every** invocation, that the run records `isolation=none`, that a cold asset cache refuses rather than fetching, and that Roteiro never installs the analyzer, so an operator has already chosen to have `semgrep`/`osv-scanner` on `PATH`. The flag is now the only gate; do not soften it for consistency with the build-time one that went away. `--no-default-features --features execution` remains a build that provisions and ingests but cannot execute. |
