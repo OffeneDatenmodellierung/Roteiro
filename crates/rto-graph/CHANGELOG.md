@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.1...rto-graph-v1.11.0) - 2026-08-16
+
+### Added
+
+- *(audio)* read stream shape, duration and tags as `derived` facts
+- *(media)* add the pre-generation gate, recorded not silent
+- *(media)* move generated content to its own artifact store
+
+### Fixed
+
+- *(test)* make the cache snapshot fail fast instead of silently empty
+- *(memory)* unbreak main — EXTRACT_VERSION guard missed audio-metadata
+- *(audio)* de-duplicate tags on `(name, value)`, not on the whole row
+- *(sync)* honour the extraction identity at an unchanged tree
+- *(gate)* abstain on a WAV data chunk that is not whole samples
+- *(media)* close the outcome CHECK's measurement-without-reason hole
+- *(media)* correct the generation counter and the status advice
+- *(test)* one WAV encoder in the workspace ([#302](https://github.com/OffeneDatenmodellierung/Roteiro/pull/302))
+
+### Other
+
+- Merge pull request #329 from OffeneDatenmodellierung/fix/extract-version-guard
+- Merge remote-tracking branch 'origin/main' into fix/extract-version-guard
+- Merge origin/main into feat/stage22-analyzers
+- Merge pull request #317 from OffeneDatenmodellierung/feat/stage23-agent-memory
+- *(audio)* `read`'s `None` is unreadable, not "no duration"
+- *(adr)* ADR-0016 v1.1 — what the implementation found
+- *(audio)* the three duration cases, determinism, and placement
+- *(deps)* symphonia behind `audio-metadata`, and MPL-2.0 in the allow-list
+- *(media)* satisfy clippy on the two review fixes
+- *(media)* assert each pre-generation gate invariant
+- *(llama)* cache the mtmd projector per model, not per blob
+- *(tests)* name the right constraint per direction
+
 ## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.10.0...rto-graph-v1.10.1) - 2026-08-15
 
 ### Fixed

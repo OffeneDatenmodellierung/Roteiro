@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.10.1...roteiro-v1.11.0) - 2026-08-16
+
+### Added
+
+- *(model)* add `roteiro model rm`, and show installed size in `model list`
+- *(models)* resume interrupted model downloads instead of restarting
+- *(memory)* settle scope — the anchor is the scope test (ADR-0013 v1.1)
+- *(cli)* roteiro memory add|list|forget
+- *(explorer)* surface generated media content, always attributed
+- *(media)* add the pre-generation gate, recorded not silent
+- *(media)* move generated content to its own artifact store
+
+### Fixed
+
+- *(media)* stop `media status` calling a gate refusal a generated record
+- *(media)* correct the generation counter and the status advice
+
+### Other
+
+- Merge branch 'main' into feat/model-lifecycle
+- Merge pull request #317 from OffeneDatenmodellierung/feat/stage23-agent-memory
+- *(media)* add the deferred `media` argument-shape tests
+
 ## [1.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.10.0...roteiro-v1.10.1) - 2026-08-15
 
 ### Fixed
