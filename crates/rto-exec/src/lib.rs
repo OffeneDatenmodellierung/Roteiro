@@ -61,16 +61,37 @@
 //! assert_eq!(response.run.isolation, rto_graph::Isolation::Ingested);
 //! ```
 
+pub mod adapter;
+#[cfg(feature = "exec-subprocess")]
+pub mod assets;
+mod clock;
 mod ingest;
 mod runner;
+pub mod snippet;
+#[cfg(feature = "exec-subprocess")]
+pub mod subprocess;
 
+pub use adapter::{
+    ADAPTERS, Adapter, AssetPaths, Invocation, NO_SNIPPET, NativeContext, UNKNOWN_VERSION,
+    adapter_for, known_analyzers, snippet_hash, snippet_hash_at,
+};
+#[cfg(feature = "exec-subprocess")]
+pub use assets::{
+    ASSETS, AssetKind, AssetSpec, AssetStatus, InstalledAsset, MissingAsset, asset, asset_path,
+    asset_root, assets_for, provision, resolve, status,
+};
+pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
+    normalize_native,
 };
 pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,
     check_reported_path, check_request, worktree_id,
 };
+pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
+#[cfg(feature = "exec-subprocess")]
+pub use subprocess::{SubprocessError, SubprocessRunner};
 
 /// Lowercase hex SHA-256 of `bytes`.
 ///

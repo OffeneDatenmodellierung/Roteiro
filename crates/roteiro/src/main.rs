@@ -858,8 +858,15 @@ enum SecurityAction {
     /// fixed disappears instead of lingering. Nothing is written to the graph:
     /// `roteiro export` is unaffected by this command.
     Ingest {
-        /// Normalized report file (`-` reads from stdin).
+        /// Report file (`-` reads from stdin). Either a normalized
+        /// `roteiro.findings/v1` report, or an analyzer's own native output —
+        /// `semgrep --json`, `cargo audit --json` — in which case `--analyzer`
+        /// names which one it is.
         file: String,
+        /// The analyzer FILE is native output from. Required for native output,
+        /// ignored for a normalized report (which names its own analyzer).
+        #[arg(long, value_name = "NAME")]
+        analyzer: Option<String>,
         /// Emit the ingest report as JSON.
         #[arg(long)]
         json: bool,
@@ -870,6 +877,49 @@ enum SecurityAction {
         #[arg(long, value_name = "NAME")]
         analyzer: Option<String>,
         /// Emit the listing as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run an analyzer against this worktree as a **child process on this
+    /// host**, with no isolation (`--features exec-subprocess`).
+    ///
+    /// The analyzer's own egress is switched off and its inputs are pinned and
+    /// pre-provisioned, but a subprocess on this host can do what this host can
+    /// do — so the run's evidence records `isolation=none`, and
+    /// `--allow-unsandboxed` is required to say you accept that. Assets are
+    /// never fetched here: a cold cache fails and names the prefetch command.
+    #[cfg(feature = "exec-subprocess")]
+    Run {
+        /// The analyzer to run (`roteiro security status` lists them).
+        analyzer: String,
+        /// Accept that this run has no isolation boundary. Required.
+        #[arg(long)]
+        allow_unsandboxed: bool,
+        /// Emit the run report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install and verify every pinned asset an analyzer needs, recording each
+    /// digest — the one command that writes to the asset cache
+    /// (`--features exec-subprocess`).
+    #[cfg(feature = "exec-subprocess")]
+    Prefetch {
+        /// Only this analyzer's assets. Default: all of them.
+        #[arg(long, value_name = "NAME")]
+        analyzer: Option<String>,
+        /// Emit the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report each pinned asset's digest and fetch time, the advisory-database
+    /// age behind each live findings layer, and which languages the shipped
+    /// analyzers cover (`--features exec-subprocess`).
+    #[cfg(feature = "exec-subprocess")]
+    Status {
+        /// Only this analyzer.
+        #[arg(long, value_name = "NAME")]
+        analyzer: Option<String>,
+        /// Emit the status as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -4707,8 +4757,24 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
 #[cfg(feature = "execution")]
 fn run_security(action: SecurityAction) -> anyhow::Result<()> {
     match action {
-        SecurityAction::Ingest { file, json } => run_security_ingest(&file, json),
+        SecurityAction::Ingest {
+            file,
+            analyzer,
+            json,
+        } => run_security_ingest(&file, analyzer.as_deref(), json),
         SecurityAction::List { analyzer, json } => run_security_list(analyzer.as_deref(), json),
+        #[cfg(feature = "exec-subprocess")]
+        SecurityAction::Run {
+            analyzer,
+            allow_unsandboxed,
+            json,
+        } => run_security_run(&analyzer, allow_unsandboxed, json),
+        #[cfg(feature = "exec-subprocess")]
+        SecurityAction::Prefetch { analyzer, json } => {
+            run_security_prefetch(analyzer.as_deref(), json)
+        }
+        #[cfg(feature = "exec-subprocess")]
+        SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
     }
 }
 
@@ -4744,23 +4810,99 @@ struct SecurityListing {
 }
 
 /// Just enough of a normalized report to learn which analyzer it claims to be
-/// from, so `security ingest <file>` needs no `--analyzer` flag.
+/// from, and whether it is a normalized report at all.
 #[cfg(feature = "execution")]
 #[derive(serde::Deserialize)]
 struct AnalyzerPeek {
-    analyzer: String,
+    /// Present only on a normalized report. Native analyzer output has no such
+    /// field, which is exactly how the two are told apart.
+    #[serde(default)]
+    schema: Option<String>,
+    #[serde(default)]
+    analyzer: Option<String>,
 }
 
-/// The analyzer a report declares.
+/// Which analyzer a report file belongs to, and whether it is already
+/// normalized.
 ///
-/// The runner re-checks this against the request, so peeking here only removes a
-/// flag from the command line — it does not weaken the substituted-report check
-/// that protects programmatic callers and a future `security run <analyzer>`.
+/// A normalized report names its own analyzer, so `--analyzer` is not needed and
+/// is ignored if given (the runner re-checks the report against the request
+/// anyway, so nothing is weakened by peeking). Native output names nothing, so
+/// `--analyzer` is required — and guessing from the JSON's shape is deliberately
+/// not done: two analyzers' formats could overlap, and silently attributing a
+/// report to the wrong tool would mis-key every finding in it.
 #[cfg(feature = "execution")]
-fn report_analyzer(bytes: &[u8], source: &str) -> anyhow::Result<String> {
-    let peek: AnalyzerPeek = serde_json::from_slice(bytes)
-        .map_err(|e| anyhow::anyhow!("{source} is not a normalized analyzer report: {e}"))?;
-    Ok(peek.analyzer)
+fn report_analyzer(
+    bytes: &[u8],
+    source: &str,
+    requested: Option<&str>,
+) -> anyhow::Result<(String, bool)> {
+    let peek: AnalyzerPeek = serde_json::from_slice(bytes).map_err(|e| {
+        anyhow::anyhow!("{source} is not JSON, so it is not an analyzer report: {e}")
+    })?;
+
+    if peek.schema.as_deref() == Some(rto_exec::REPORT_SCHEMA) {
+        let analyzer = peek.analyzer.ok_or_else(|| {
+            anyhow::anyhow!("{source} claims to be a normalized report but names no analyzer")
+        })?;
+        return Ok((analyzer, false));
+    }
+
+    let analyzer = requested.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{source} is not a normalized `{}` report, so it must be an analyzer's own output —              say which analyzer with `--analyzer <name>` (known: {})",
+            rto_exec::REPORT_SCHEMA,
+            rto_exec::known_analyzers().join(", ")
+        )
+    })?;
+    Ok((analyzer.to_owned(), true))
+}
+
+/// The best available evidence of when a report file was produced: the file's
+/// modification time.
+///
+/// Native analyzer output carries no timestamps — neither `semgrep --json` nor
+/// `cargo audit --json` stamps the window it ran in — and an
+/// [`rto_graph::AnalysisRun`] must say when it happened. The file's mtime is the
+/// only honest answer available, so it is used and documented as such rather
+/// than replaced by "now", which would claim the analyzer ran during the ingest.
+#[cfg(feature = "execution")]
+fn report_written_at(file: &str) -> String {
+    std::fs::metadata(file)
+        .and_then(|m| m.modified())
+        .map_or_else(
+            |_| rto_exec::rfc3339_utc(std::time::SystemTime::now()),
+            rto_exec::rfc3339_utc,
+        )
+}
+
+/// The advisory-database evidence this machine has provisioned for `analyzer`.
+///
+/// Only meaningful in a build with the subprocess backend, which is the build
+/// that has an asset cache; otherwise there is nothing provisioned to describe.
+#[cfg(feature = "exec-subprocess")]
+fn advisory_db_evidence(analyzer: &str) -> Option<rto_graph::AdvisoryDb> {
+    rto_exec::assets::advisory_db_evidence(&rto_exec::asset_root(), analyzer)
+}
+
+/// Without the subprocess backend there is no asset cache, so there is nothing
+/// provisioned to describe — and saying nothing is the honest answer, not a
+/// degraded one.
+#[cfg(all(feature = "execution", not(feature = "exec-subprocess")))]
+fn advisory_db_evidence(_analyzer: &str) -> Option<rto_graph::AdvisoryDb> {
+    None
+}
+
+/// The git blob id of `Cargo.lock`, when this checkout has one.
+///
+/// `cargo-audit` keys a finding partly by lockfile blob, so a finding stays
+/// distinct when the lockfile changes underneath the same advisory. Computing it
+/// the same way on both the ingest and the run path is what makes those two
+/// paths produce identical keys.
+#[cfg(feature = "execution")]
+fn lockfile_blob(repo: &rto_graph::Repo) -> Option<String> {
+    let lockfile = repo.workdir()?.join("Cargo.lock");
+    repo.blob_oid(&std::fs::read(lockfile).ok()?).ok()
 }
 
 /// Ingest a normalized analyzer report as a replaceable findings layer.
@@ -4771,10 +4913,11 @@ fn report_analyzer(bytes: &[u8], source: &str) -> anyhow::Result<String> {
 /// are never written — which is what keeps `roteiro export` byte-identical across
 /// an ingest.
 #[cfg(feature = "execution")]
-fn run_security_ingest(file: &str, json: bool) -> anyhow::Result<()> {
+fn run_security_ingest(file: &str, analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
     use rto_exec::{AnalysisRequest, AnalyzerRunner, Consent, IngestRunner, Worktree};
 
-    let bytes = if file == "-" {
+    let from_stdin = file == "-";
+    let bytes = if from_stdin {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
         buf
@@ -4782,9 +4925,7 @@ fn run_security_ingest(file: &str, json: bool) -> anyhow::Result<()> {
         std::fs::read(file)?
     };
 
-    // The analyzer id comes from the report itself, so the command stays
-    // `security ingest <file>`.
-    let analyzer = report_analyzer(&bytes, file)?;
+    let (analyzer, is_native) = report_analyzer(&bytes, file, analyzer)?;
 
     let (repo, mut store, _cache) = open_graph()?;
     let worktree_path = repo
@@ -4805,8 +4946,44 @@ fn run_security_ingest(file: &str, json: bool) -> anyhow::Result<()> {
         source: rto_graph::SourceIdentity {
             commit: repo.head_commit_id().ok(),
             tree: repo.head_tree_id().ok(),
-            lockfile_blob: None,
+            lockfile_blob: lockfile_blob(&repo),
         },
+    };
+
+    // Native output goes through the analyzer's adapter first — the *same*
+    // adapter a local `security run` uses on the bytes it captured. That is what
+    // makes a CI report and a local run produce identical findings, rather than
+    // two conversions that have to be kept in step.
+    let bytes = if is_native {
+        let written_at = if from_stdin {
+            rto_exec::rfc3339_utc(std::time::SystemTime::now())
+        } else {
+            report_written_at(file)
+        };
+        let snippets = rto_exec::WorktreeSnippets::new(&worktree_path);
+        let ctx = rto_exec::NativeContext {
+            started_at: written_at.clone(),
+            ended_at: written_at,
+            // Native output rarely names the version that produced it; the
+            // adapter records "unknown" rather than an empty field.
+            analyzer_version: None,
+            // The producer's exit status is not in the file. `0` is recorded
+            // because the report exists and parsed; the findings themselves are
+            // the evidence of what it found.
+            exit_status: 0,
+            source: &request.source,
+            rules_digest: None,
+            // The same provisioning record a local `security run` would read, so
+            // a CI report and a local run describe the same pinned database.
+            // `None` when nothing is provisioned, which is honest: an ingested
+            // report says nothing about what this machine has.
+            advisory_db: advisory_db_evidence(&request.analyzer),
+            snippets: &snippets,
+        };
+        let report = rto_exec::normalize_native(&request.analyzer, &bytes, &ctx)?;
+        serde_json::to_vec(&report)?
+    } else {
+        bytes
     };
 
     let response = IngestRunner::new(bytes).run(&request)?;
@@ -4842,14 +5019,10 @@ fn run_security_ingest(file: &str, json: bool) -> anyhow::Result<()> {
             );
         }
         if let Some(db) = &response.run.advisory_db {
-            // Say when the advisory data was published, never that it is current:
-            // the same analyzer at the same commit with a newer database
-            // legitimately reports something different.
-            let published = db.published_at.as_deref().unwrap_or("unknown");
-            println!(
-                "advisory db {} published {published} — results are as current as that database, no more",
-                db.digest
-            );
+            // Say when the advisory data was published and how old that makes
+            // it, never that it is current: the same analyzer at the same commit
+            // with a newer database legitimately reports something different.
+            println!("{}", advisory_db_line(db));
         }
     }
     Ok(())
@@ -4898,6 +5071,414 @@ fn run_security_list(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
         }
     }
     println!("{total} finding(s) across {} layer(s)", layers.len());
+    Ok(())
+}
+
+/// The `--json` shape of `roteiro security run`.
+#[cfg(feature = "exec-subprocess")]
+#[derive(serde::Serialize)]
+struct SecurityRunReport {
+    layer: String,
+    analyzer: String,
+    analyzer_version: String,
+    runner: rto_graph::RunnerKind,
+    isolation: rto_graph::Isolation,
+    /// The exact argv that was executed, so a run is reproducible by hand.
+    command: Vec<String>,
+    findings: usize,
+    removed: usize,
+    replaced: bool,
+    exit_status: i32,
+    started_at: String,
+    ended_at: String,
+    report_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rules_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advisory_db: Option<rto_graph::AdvisoryDb>,
+}
+
+/// Run an analyzer as a child process on this host and file its findings.
+///
+/// Everything that makes this defensible happens before a process starts: the
+/// `--allow-unsandboxed` flag, the analyzer being one this build knows, and its
+/// pinned assets being provisioned. A cold cache therefore fails having executed
+/// nothing at all.
+#[cfg(feature = "exec-subprocess")]
+fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyhow::Result<()> {
+    use rto_exec::{AnalysisRequest, AnalyzerRunner, Consent, SubprocessRunner, Worktree};
+
+    let runner = SubprocessRunner::new(analyzer, &rto_exec::asset_root(), allow_unsandboxed)?;
+
+    let (repo, mut store, _cache) = open_graph()?;
+    let worktree_path = repo
+        .workdir()
+        .unwrap_or_else(|| repo.git_dir())
+        .to_path_buf();
+    let request = AnalysisRequest {
+        analyzer: analyzer.to_owned(),
+        worktree: Worktree::read_only(&worktree_path)?,
+        network: rto_graph::NetworkPolicy::Deny,
+        // The flag is the consent. It is a separate, explicit act from asking
+        // for the run, because what is being consented to — executing a
+        // third-party binary on this host with no boundary — is not what
+        // "analyze my code" implies.
+        consent: Consent::Granted,
+        source: rto_graph::SourceIdentity {
+            commit: repo.head_commit_id().ok(),
+            tree: repo.head_tree_id().ok(),
+            lockfile_blob: lockfile_blob(&repo),
+        },
+    };
+
+    let invocation = runner.invocation();
+    if !json {
+        // Disclose what is about to run before it runs. A command that executes
+        // a third-party binary should never leave the user guessing which one,
+        // with which arguments.
+        eprintln!(
+            "running (isolation none, on this host): {} {}",
+            invocation.program,
+            invocation.args.join(" ")
+        );
+    }
+
+    let response = runner.run(&request)?;
+    let applied = store.replace_findings_layer(&response.run, &response.findings)?;
+
+    let mut command = vec![invocation.program];
+    command.extend(invocation.args);
+
+    if json {
+        emit_json(&SecurityRunReport {
+            layer: applied.layer,
+            analyzer: response.run.analyzer,
+            analyzer_version: response.run.analyzer_version,
+            runner: response.run.runner,
+            isolation: response.run.isolation,
+            command,
+            findings: applied.findings,
+            removed: applied.removed,
+            replaced: applied.replaced,
+            exit_status: response.run.exit_status,
+            started_at: response.run.started_at,
+            ended_at: response.run.ended_at,
+            report_digest: response.run.report_digest,
+            rules_digest: response.run.rules_digest,
+            advisory_db: response.run.advisory_db,
+        })?;
+        return Ok(());
+    }
+
+    println!(
+        "{} {} produced {} finding(s) → {} (runner {}, isolation {})",
+        response.run.analyzer,
+        response.run.analyzer_version,
+        applied.findings,
+        applied.layer,
+        response.run.runner.as_str(),
+        response.run.isolation.as_str(),
+    );
+    println!(
+        "  isolation none — the analyzer ran on this host. Its egress was configured off and its \
+         inputs were pinned, but nothing enforced that."
+    );
+    if let Some(digest) = &response.run.rules_digest {
+        println!("  rules {digest}");
+    }
+    if let Some(db) = &response.run.advisory_db {
+        println!("  {}", advisory_db_line(db));
+    }
+    if applied.replaced {
+        println!(
+            "  replaced the previous layer: {} finding(s) removed, {} now live",
+            applied.removed, applied.findings
+        );
+    }
+    Ok(())
+}
+
+/// One line describing an advisory database's identity, publication date and
+/// age — never the word *current*.
+///
+/// ADR-0012 is explicit: a cached-but-old database still runs, but its results
+/// are labelled *possibly stale*. Saying how old, in days, is what turns that
+/// label from a disclaimer into information.
+#[cfg(feature = "execution")]
+fn advisory_db_line(db: &rto_graph::AdvisoryDb) -> String {
+    let Some(published) = db.published_at.as_deref() else {
+        return format!(
+            "advisory db {} — publication date unknown, so results are possibly stale",
+            db.digest
+        );
+    };
+    let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
+    match rto_exec::age_in_days(published, &now) {
+        Some(days) => format!(
+            "advisory db {} published {published} ({days} day(s) ago) — results are possibly \
+             stale, never current: a newer database can legitimately say something different",
+            db.digest
+        ),
+        None => format!(
+            "advisory db {} published {published} — results are possibly stale, never current",
+            db.digest
+        ),
+    }
+}
+
+/// The `--json` shape of `roteiro security prefetch`.
+#[cfg(feature = "exec-subprocess")]
+#[derive(serde::Serialize)]
+struct SecurityPrefetchReport {
+    root: String,
+    provisioned: Vec<rto_exec::InstalledAsset>,
+}
+
+/// Install and verify every pinned asset, recording each digest.
+///
+/// This is the only command that writes to the asset cache. It fetches nothing
+/// over the network: the rule set is compiled into this binary, and the advisory
+/// database is a directory the operator provides — if it is absent, this says
+/// where it looked and which command obtains it, and does not go and get it.
+#[cfg(feature = "exec-subprocess")]
+fn run_security_prefetch(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let root = rto_exec::asset_root();
+    let specs: Vec<&rto_exec::AssetSpec> = match analyzer {
+        Some(name) => {
+            let specs = rto_exec::assets_for(name);
+            if specs.is_empty() {
+                anyhow::bail!(
+                    "no assets for analyzer `{name}` in this build (known: {})",
+                    rto_exec::known_analyzers().join(", ")
+                );
+            }
+            specs
+        }
+        None => rto_exec::ASSETS.iter().collect(),
+    };
+
+    let mut provisioned = Vec::with_capacity(specs.len());
+    let mut failures = Vec::new();
+    for spec in specs {
+        if !json {
+            // Disclose source and licence before installing, exactly as
+            // `roteiro model pull` does.
+            eprintln!(
+                "provisioning {} for {} ({}, {})",
+                spec.id,
+                spec.analyzer,
+                spec.kind.as_str(),
+                spec.licence
+            );
+        }
+        match rto_exec::provision(&root, spec) {
+            Ok(record) => provisioned.push(record),
+            // One unprovisionable asset must not hide the others: report it and
+            // carry on, then fail at the end with everything that went wrong.
+            Err(e) => failures.push(format!("{e}")),
+        }
+    }
+
+    if json {
+        emit_json(&SecurityPrefetchReport {
+            root: root.display().to_string(),
+            provisioned,
+        })?;
+    } else {
+        for record in &provisioned {
+            let files = record
+                .files
+                .map(|n| format!(" over {n} file(s)"))
+                .unwrap_or_default();
+            println!(
+                "{} → {} (digest {}{files}, fetched {})",
+                record.id,
+                root.join(&record.id).display(),
+                &record.digest[..12.min(record.digest.len())],
+                record.fetched_at
+            );
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{} asset(s) could not be provisioned:\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
+    }
+}
+
+/// The `--json` shape of `roteiro security status`.
+#[cfg(feature = "exec-subprocess")]
+#[derive(serde::Serialize)]
+struct SecurityStatusReport {
+    root: String,
+    analyzers: Vec<AnalyzerCoverage>,
+    assets: Vec<rto_exec::AssetStatus>,
+    layers: Vec<LayerStaleness>,
+}
+
+/// What one shipped analyzer covers — the coverage matrix, read off the code
+/// rather than off a document, so the two cannot drift apart unnoticed.
+#[cfg(feature = "exec-subprocess")]
+#[derive(serde::Serialize)]
+struct AnalyzerCoverage {
+    analyzer: &'static str,
+    summary: &'static str,
+    languages: &'static [&'static str],
+    /// Whether every asset it needs is provisioned and still matches its digest.
+    ready: bool,
+}
+
+/// The staleness of the advisory data behind one live findings layer.
+#[cfg(feature = "exec-subprocess")]
+#[derive(serde::Serialize)]
+struct LayerStaleness {
+    layer: String,
+    analyzer: String,
+    findings: usize,
+    runner: rto_graph::RunnerKind,
+    isolation: rto_graph::Isolation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advisory_db: Option<rto_graph::AdvisoryDb>,
+    /// Days between the advisory database's publication and now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advisory_db_age_days: Option<i64>,
+    /// `true` whenever an advisory database is involved at all. Never `false`
+    /// meaning "current" — only "this result has no advisory-data axis".
+    possibly_stale: bool,
+}
+
+/// Report what is provisioned, what it covers, and how old the advisory data
+/// behind each live layer is.
+///
+// One arm per reported section — assets, analyzers, layers — plus their `--json`
+// shapes. Splitting it would scatter one screen of output across three
+// functions that only ever run together.
+#[allow(clippy::too_many_lines)]
+#[cfg(feature = "exec-subprocess")]
+fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let root = rto_exec::asset_root();
+    let assets = rto_exec::status(&root, analyzer);
+
+    let analyzers: Vec<AnalyzerCoverage> = rto_exec::ADAPTERS
+        .iter()
+        .filter(|a| analyzer.is_none_or(|name| a.analyzer() == name))
+        .map(|adapter| AnalyzerCoverage {
+            analyzer: adapter.analyzer(),
+            summary: adapter.summary(),
+            languages: adapter.languages(),
+            ready: rto_exec::resolve(&root, adapter.analyzer()).is_ok(),
+        })
+        .collect();
+
+    // Staleness comes from the *runs*, because the advisory database's
+    // publication date is something the analyzer reported, not something
+    // provisioning could know.
+    let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
+    let layers: Vec<LayerStaleness> = open_graph()
+        .and_then(|(_repo, store, _cache)| Ok(store.findings_layers(analyzer)?))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|layer| {
+            let age = layer
+                .run
+                .advisory_db
+                .as_ref()
+                .and_then(|db| db.published_at.as_deref())
+                .and_then(|published| rto_exec::age_in_days(published, &now));
+            LayerStaleness {
+                layer: layer.run.layer,
+                analyzer: layer.run.analyzer,
+                findings: layer.findings.len(),
+                runner: layer.run.runner,
+                isolation: layer.run.isolation,
+                possibly_stale: layer.run.advisory_db.is_some(),
+                advisory_db: layer.run.advisory_db,
+                advisory_db_age_days: age,
+            }
+        })
+        .collect();
+
+    if json {
+        emit_json(&SecurityStatusReport {
+            root: root.display().to_string(),
+            analyzers,
+            assets,
+            layers,
+        })?;
+        return Ok(());
+    }
+
+    println!("asset cache: {}", root.display());
+    println!("\nanalyzers");
+    for coverage in &analyzers {
+        println!(
+            "  {:<12} {}  [{}]",
+            coverage.analyzer,
+            if coverage.ready {
+                "ready"
+            } else {
+                "not provisioned"
+            },
+            coverage.languages.join(", ")
+        );
+        println!("               {}", coverage.summary);
+    }
+
+    println!("\nassets");
+    for asset in &assets {
+        match &asset.installed {
+            Some(record) => println!(
+                "  {:<22} {:<12} digest {} fetched {} ({} day(s) ago){}",
+                asset.id,
+                asset.kind.as_str(),
+                &record.digest[..12.min(record.digest.len())],
+                record.fetched_at,
+                asset.age_days.unwrap_or_default(),
+                if asset.verified == Some(false) {
+                    "  ** ON-DISK BYTES NO LONGER MATCH — re-run prefetch **"
+                } else {
+                    ""
+                }
+            ),
+            None => println!(
+                "  {:<22} {:<12} not provisioned — run `roteiro security prefetch`",
+                asset.id,
+                asset.kind.as_str()
+            ),
+        }
+    }
+
+    if layers.is_empty() {
+        println!("\nno findings layers yet");
+        return Ok(());
+    }
+    println!("\nlive findings layers");
+    for layer in &layers {
+        println!(
+            "  {} — {} finding(s), runner {}, isolation {}",
+            layer.layer,
+            layer.findings,
+            layer.runner.as_str(),
+            layer.isolation.as_str()
+        );
+        match (&layer.advisory_db, layer.advisory_db_age_days) {
+            (Some(db), Some(days)) => println!(
+                "    advisory db {} published {} ({days} day(s) ago) — possibly stale, never current",
+                db.digest,
+                db.published_at.as_deref().unwrap_or("unknown")
+            ),
+            (Some(db), None) => println!(
+                "    advisory db {} — publication date unreadable, so possibly stale",
+                db.digest
+            ),
+            (None, _) => println!("    no advisory database — this analyzer has no staleness axis"),
+        }
+    }
     Ok(())
 }
 
@@ -7068,24 +7649,47 @@ mod security_cli {
 
     #[test]
     fn ingest_takes_one_report_argument() {
-        let SecurityAction::Ingest { file, json } =
-            action(["roteiro", "security", "ingest", "r.json"])
+        let SecurityAction::Ingest {
+            file,
+            analyzer,
+            json,
+        } = action(["roteiro", "security", "ingest", "r.json"])
         else {
             panic!("expected Ingest");
         };
         assert_eq!(file, "r.json");
+        assert_eq!(analyzer, None, "a normalized report names its own analyzer");
         assert!(!json);
     }
 
     #[test]
     fn ingest_reads_stdin_and_emits_json_like_its_neighbours() {
-        let SecurityAction::Ingest { file, json } =
-            action(["roteiro", "security", "ingest", "-", "--json"])
+        let SecurityAction::Ingest {
+            file,
+            analyzer,
+            json,
+        } = action(["roteiro", "security", "ingest", "-", "--json"])
         else {
             panic!("expected Ingest");
         };
         assert_eq!(file, "-", "`-` is stdin, matching `roteiro load`");
+        assert_eq!(analyzer, None);
         assert!(json);
+    }
+
+    #[test]
+    fn ingest_takes_an_analyzer_for_native_output() {
+        let SecurityAction::Ingest { analyzer, .. } = action([
+            "roteiro",
+            "security",
+            "ingest",
+            "--analyzer",
+            "semgrep",
+            "semgrep.json",
+        ]) else {
+            panic!("expected Ingest");
+        };
+        assert_eq!(analyzer.as_deref(), Some("semgrep"));
     }
 
     #[test]
@@ -7117,25 +7721,47 @@ mod security_cli {
     }
 
     #[test]
-    fn the_analyzer_is_read_out_of_the_report() {
+    fn the_analyzer_is_read_out_of_a_normalized_report() {
         let report = br#"{"schema":"roteiro.findings/v1","analyzer":"cargo-audit"}"#;
-        assert_eq!(
-            report_analyzer(report, "r.json").expect("peek"),
-            "cargo-audit"
+        let (analyzer, native) = report_analyzer(report, "r.json", None).expect("peek");
+        assert_eq!(analyzer, "cargo-audit");
+        assert!(!native);
+
+        // A normalized report names its own analyzer, so `--analyzer` cannot
+        // relabel it — the runner would refuse the mismatch anyway, and letting
+        // the flag win here would only move the error further from its cause.
+        let (analyzer, _) = report_analyzer(report, "r.json", Some("semgrep")).expect("peek");
+        assert_eq!(analyzer, "cargo-audit");
+    }
+
+    /// Native output names no analyzer, and its format is *not* guessed from the
+    /// JSON's shape: two analyzers' formats could overlap, and attributing a
+    /// report to the wrong tool would mis-key every finding in it.
+    #[test]
+    fn native_output_requires_an_explicit_analyzer() {
+        let native = br#"{"version":"1.136.0","results":[]}"#;
+        let err = report_analyzer(native, "sg.json", None).expect_err("must ask");
+        let message = err.to_string();
+        assert!(message.contains("--analyzer"), "{message}");
+        assert!(
+            message.contains("semgrep"),
+            "it must list what it knows: {message}"
         );
+
+        let (analyzer, is_native) =
+            report_analyzer(native, "sg.json", Some("semgrep")).expect("peek");
+        assert_eq!(analyzer, "semgrep");
+        assert!(is_native);
     }
 
     #[test]
-    fn a_file_that_is_not_a_report_fails_with_a_message_naming_it() {
-        let err = report_analyzer(b"not json", "r.json").expect_err("must fail");
+    fn a_file_that_is_not_json_fails_with_a_message_naming_it() {
+        let err = report_analyzer(b"not json", "r.json", None).expect_err("must fail");
         let message = err.to_string();
         assert!(
-            message.contains("r.json") && message.contains("not a normalized analyzer report"),
+            message.contains("r.json") && message.contains("not JSON"),
             "unhelpful error: {message}"
         );
-        // A JSON object that simply is not a report fails the same way, rather
-        // than being half-ingested.
-        assert!(report_analyzer(b"{\"nope\":1}", "r.json").is_err());
     }
 
     #[test]
@@ -7164,6 +7790,105 @@ mod security_cli {
         let value = serde_json::to_value(&listing).expect("serialize");
         assert_eq!(value["findings"], 0);
         assert!(value["layers"].as_array().expect("array").is_empty());
+    }
+
+    /// The flag that accepts an unsandboxed run is required, and it is a flag
+    /// rather than a default — a build with this backend must not be able to
+    /// execute a third-party binary because somebody forgot to say no.
+    #[cfg(feature = "exec-subprocess")]
+    #[test]
+    fn run_requires_the_unsandboxed_flag_to_be_given_explicitly() {
+        let SecurityAction::Run {
+            analyzer,
+            allow_unsandboxed,
+            json,
+        } = action(["roteiro", "security", "run", "semgrep"])
+        else {
+            panic!("expected Run");
+        };
+        assert_eq!(analyzer, "semgrep");
+        assert!(
+            !allow_unsandboxed,
+            "the flag must default to off; the runner refuses without it"
+        );
+        assert!(!json);
+
+        let SecurityAction::Run {
+            allow_unsandboxed, ..
+        } = action([
+            "roteiro",
+            "security",
+            "run",
+            "semgrep",
+            "--allow-unsandboxed",
+        ])
+        else {
+            panic!("expected Run");
+        };
+        assert!(allow_unsandboxed);
+    }
+
+    #[cfg(feature = "exec-subprocess")]
+    #[test]
+    fn run_needs_an_analyzer_named() {
+        assert!(Cli::try_parse_from(["roteiro", "security", "run"]).is_err());
+    }
+
+    #[cfg(feature = "exec-subprocess")]
+    #[test]
+    fn prefetch_and_status_default_to_every_analyzer() {
+        let SecurityAction::Prefetch { analyzer, json } =
+            action(["roteiro", "security", "prefetch"])
+        else {
+            panic!("expected Prefetch");
+        };
+        assert_eq!(analyzer, None);
+        assert!(!json);
+
+        let SecurityAction::Status { analyzer, json } = action([
+            "roteiro",
+            "security",
+            "status",
+            "--analyzer",
+            "semgrep",
+            "--json",
+        ]) else {
+            panic!("expected Status");
+        };
+        assert_eq!(analyzer.as_deref(), Some("semgrep"));
+        assert!(json);
+    }
+
+    /// ADR-0012: a cached-but-old advisory database still runs, but its results
+    /// are labelled *possibly stale* — **never** *current*. That word is the
+    /// contract, so it is checked rather than trusted to review.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn the_advisory_line_says_possibly_stale_and_never_current() {
+        use super::advisory_db_line;
+
+        let dated = advisory_db_line(&rto_graph::AdvisoryDb {
+            digest: "ec5f7ef0".to_owned(),
+            published_at: Some("2020-01-01T00:00:00Z".to_owned()),
+        });
+        assert!(dated.contains("possibly stale"), "{dated}");
+        assert!(dated.contains("ec5f7ef0"), "{dated}");
+        assert!(
+            dated.contains("day(s) ago"),
+            "an age makes it actionable: {dated}"
+        );
+        assert!(
+            !dated.contains("is current") && !dated.contains("up to date"),
+            "a database must never be described as current: {dated}"
+        );
+
+        // An unknown publication date is *more* reason to say possibly stale,
+        // not less.
+        let undated = advisory_db_line(&rto_graph::AdvisoryDb {
+            digest: "ec5f7ef0".to_owned(),
+            published_at: None,
+        });
+        assert!(undated.contains("possibly stale"), "{undated}");
     }
 }
 

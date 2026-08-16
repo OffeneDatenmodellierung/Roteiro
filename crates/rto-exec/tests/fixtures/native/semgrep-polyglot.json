@@ -1,0 +1,288 @@
+{
+  "engine_requested": "OSS",
+  "errors": [],
+  "paths": {
+    "scanned": [
+      "java/ReportService.java",
+      "node/server.js",
+      "python/app.py",
+      "rust/src/deploy.rs",
+      "sql/schema.sql"
+    ]
+  },
+  "results": [
+    {
+      "check_id": "roteiro.java.runtime-exec",
+      "end": {
+        "col": 78,
+        "line": 10,
+        "offset": 394
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "`Runtime.getRuntime().exec(...)` with a composed string is command injection when any part of that string came from outside the program. Use `ProcessBuilder` with a list of arguments.",
+        "metadata": {
+          "category": "security",
+          "confidence": "MEDIUM",
+          "cwe": "CWE-78: OS Command Injection"
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "java/ReportService.java",
+      "start": {
+        "col": 16,
+        "line": 10,
+        "offset": 332
+      }
+    },
+    {
+      "check_id": "roteiro.java.concatenated-sql",
+      "end": {
+        "col": 95,
+        "line": 15,
+        "offset": 646
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "A SQL string built by concatenation is SQL injection as soon as any part of it is caller-supplied. Use a `PreparedStatement` with bound parameters.",
+        "metadata": {
+          "category": "security",
+          "confidence": "MEDIUM",
+          "cwe": "CWE-89: SQL Injection"
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "java/ReportService.java",
+      "start": {
+        "col": 16,
+        "line": 15,
+        "offset": 567
+      }
+    },
+    {
+      "check_id": "roteiro.js.child-process-exec",
+      "end": {
+        "col": 43,
+        "line": 6,
+        "offset": 248
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "`child_process.exec` runs its argument through a shell. Use `execFile` or `spawn` with an argument array so no value can become shell syntax.",
+        "metadata": {
+          "category": "security",
+          "confidence": "HIGH",
+          "cwe": "CWE-78: OS Command Injection"
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "node/server.js",
+      "start": {
+        "col": 10,
+        "line": 6,
+        "offset": 215
+      }
+    },
+    {
+      "check_id": "roteiro.js.eval-call",
+      "end": {
+        "col": 22,
+        "line": 11,
+        "offset": 346
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "`eval` executes whatever string it is given. If any part of that string came from outside the program, so did the code.",
+        "metadata": {
+          "category": "security",
+          "confidence": "HIGH",
+          "cwe": "CWE-95: Eval Injection"
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "node/server.js",
+      "start": {
+        "col": 10,
+        "line": 11,
+        "offset": 334
+      }
+    },
+    {
+      "check_id": "roteiro.python.subprocess-shell-true",
+      "end": {
+        "col": 81,
+        "line": 8,
+        "offset": 268
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "`shell=True` runs the command through a shell, so any interpolated value becomes shell syntax. Pass a list of arguments and leave `shell` at its default.",
+        "metadata": {
+          "category": "security",
+          "confidence": "HIGH",
+          "cwe": "CWE-78: OS Command Injection"
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "python/app.py",
+      "start": {
+        "col": 12,
+        "line": 8,
+        "offset": 199
+      }
+    },
+    {
+      "check_id": "roteiro.python.eval-of-input",
+      "end": {
+        "col": 41,
+        "line": 13,
+        "offset": 397
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "`eval`/`exec` on a value that came from outside the program executes whatever the caller supplied. Parse the value instead.",
+        "metadata": {
+          "category": "security",
+          "confidence": "HIGH",
+          "cwe": "CWE-95: Eval Injection"
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "python/app.py",
+      "start": {
+        "col": 12,
+        "line": 13,
+        "offset": 368
+      }
+    },
+    {
+      "check_id": "roteiro.rust.shell-out-to-sh",
+      "end": {
+        "col": 23,
+        "line": 8,
+        "offset": 277
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "Spawning a shell (`sh -c`) turns every argument into shell syntax, so any interpolated value becomes code. Invoke the program directly and pass arguments as separate `.arg()` calls.",
+        "metadata": {
+          "category": "security",
+          "confidence": "HIGH",
+          "cwe": "CWE-78: OS Command Injection"
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "rust/src/deploy.rs",
+      "start": {
+        "col": 5,
+        "line": 8,
+        "offset": 259
+      }
+    },
+    {
+      "check_id": "roteiro.rust.unwrap-on-env-var",
+      "end": {
+        "col": 47,
+        "line": 13,
+        "offset": 456
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "`std::env::var(...).unwrap()` panics when the variable is unset, which turns a missing configuration value into a crash with no diagnostic. Handle the `Err` and say what was missing.",
+        "metadata": {
+          "category": "correctness",
+          "confidence": "MEDIUM"
+        },
+        "severity": "WARNING",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "rust/src/deploy.rs",
+      "start": {
+        "col": 5,
+        "line": 13,
+        "offset": 414
+      }
+    },
+    {
+      "check_id": "roteiro.sql.grant-all-privileges",
+      "end": {
+        "col": 70,
+        "line": 13,
+        "offset": 424
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "Granting ALL PRIVILEGES hands over every current and future permission on the object, including ones that did not exist when the grant was written. Grant the specific rights the role needs.",
+        "metadata": {
+          "category": "security",
+          "confidence": "HIGH",
+          "cwe": "CWE-732: Incorrect Permission Assignment",
+          "engine-note": "Matched by semgrep's generic (token) engine, not a SQL parser."
+        },
+        "severity": "WARNING",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "sql/schema.sql",
+      "start": {
+        "col": 1,
+        "line": 10,
+        "offset": 239
+      }
+    },
+    {
+      "check_id": "roteiro.sql.select-star-into-outfile",
+      "end": {
+        "col": 70,
+        "line": 13,
+        "offset": 424
+      },
+      "extra": {
+        "engine_kind": "OSS",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "message": "`INTO OUTFILE` writes query results to a file on the database server's filesystem. It is almost never what an application migration wants, and it is a common exfiltration primitive.",
+        "metadata": {
+          "category": "security",
+          "confidence": "HIGH",
+          "cwe": "CWE-552: Files Accessible to External Parties",
+          "engine-note": "Matched by semgrep's generic (token) engine, not a SQL parser."
+        },
+        "severity": "ERROR",
+        "validation_state": "NO_VALIDATOR"
+      },
+      "path": "sql/schema.sql",
+      "start": {
+        "col": 38,
+        "line": 13,
+        "offset": 392
+      }
+    }
+  ],
+  "skipped_rules": [],
+  "version": "1.136.0"
+}
