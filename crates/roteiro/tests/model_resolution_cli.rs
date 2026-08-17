@@ -237,6 +237,80 @@ fn a_wrong_modality_pin_is_refused_by_name_and_never_falls_back() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// **A key that names no model is reported exactly as it is resolved** — on every
+/// surface of `roteiro config`, not just the one that happens to call the shared
+/// accessor (PR #379 review).
+///
+/// `[models] audio = "   "` used to be printed as set and attributed to the
+/// project layer, in the same document whose resolution table called it unset,
+/// and `--json` echoed the raw `"   "` beside a `"source": "default"`. Three
+/// surfaces, two answers. For the stage whose whole claim is that one place
+/// decides and can say why, a report that contradicts the decision is the defect
+/// it exists to end, not a cosmetic one — so this asserts all three at once.
+#[test]
+fn a_blank_pin_reads_as_unset_on_every_surface() {
+    let dir = fresh_repo("blank-pin");
+    std::fs::write(dir.join("roteiro.toml"), "[models]\naudio = \"   \"\n").expect("write project");
+
+    let text = stdout(&roteiro(&dir, &["config"]));
+
+    // Surface 1: the key list. Not `Some("   ")  (project)`.
+    let key_line = text
+        .lines()
+        .find(|l| l.starts_with("  audio "))
+        .unwrap_or_else(|| panic!("no `[models] audio` line in:\n{text}"));
+    assert!(
+        key_line.contains("None") && key_line.contains("(default)"),
+        "a value that names no model is not a set key: {key_line}"
+    );
+
+    // Surface 2: the resolution table, which always said this.
+    let line = resolution_line(&text, "transcribe");
+    assert!(
+        line.contains("built-in default") && line.contains("voxtral-mini-3b"),
+        "resolution is unchanged: {line}"
+    );
+
+    // Surface 3: `--json`, which serialises the effective config directly and so
+    // never went through the accessor at all — the reason the fix belongs at the
+    // parse, not at the point of use.
+    let json = roteiro(&dir, &["config", "--json"]);
+    let cfg: serde_json::Value = serde_json::from_slice(&json.stdout).expect("valid JSON");
+    assert!(
+        cfg["models"]["audio"].is_null(),
+        "the echoed config agrees with the resolution beside it: {}",
+        cfg["models"]
+    );
+    let transcribe = entry(
+        cfg["model_resolution"].as_array().expect("array"),
+        "transcribe",
+    );
+    assert_eq!(transcribe["source"], "default");
+    assert!(transcribe["layer"].is_null(), "no layer pinned it");
+
+    // A real name still survives the same normalisation, trimmed to what the
+    // resolver looks up — so this is not "blank keys are dropped", it is "the
+    // report and the resolution read the value the same way".
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[models]\naudio = \"  voxtral-mini-3b  \"\n",
+    )
+    .expect("write project");
+    let text = stdout(&roteiro(&dir, &["config"]));
+    assert!(
+        resolution_line(&text, "transcribe").contains("pinned by `[models] audio`"),
+        "a padded name is still a pin: {text}"
+    );
+    let json = roteiro(&dir, &["config", "--json"]);
+    let cfg: serde_json::Value = serde_json::from_slice(&json.stdout).expect("valid JSON");
+    assert_eq!(
+        cfg["models"]["audio"], "voxtral-mini-3b",
+        "reported as the name that was resolved, not as it was typed"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// An unknown name is refused too — the typo case. A fallback here would be the
 /// quietest possible failure: the config file says one model, the tool uses
 /// another, and nothing says so.
