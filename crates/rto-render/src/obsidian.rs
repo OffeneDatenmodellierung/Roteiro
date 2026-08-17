@@ -193,6 +193,19 @@ pub struct AdrEntry {
     pub status: Option<String>,
 }
 
+/// One file in the `_Home` overview's intent-debt density table.
+#[derive(Debug, Clone)]
+pub struct DensityEntry {
+    /// Repository-relative path, used for both the wikilink and the label.
+    pub path: String,
+    /// Retained markers in the file.
+    pub markers: u32,
+    /// The file's length in lines — the denominator.
+    pub lines: u32,
+    /// Markers per 1,000 lines.
+    pub per_kloc: f64,
+}
+
 /// One node in the `_Home` overview's directed-coupling table.
 #[derive(Debug, Clone)]
 pub struct CouplingEntry {
@@ -223,6 +236,10 @@ pub struct VaultSummary {
     pub adrs: Vec<AdrEntry>,
     /// `(category, count)` of intent-debt markers.
     pub debt: Vec<(String, usize)>,
+    /// The files where that debt is most **concentrated**, already ranked and
+    /// capped by the caller. Empty when the graph has no markers, or when no
+    /// file carrying one has a recorded length.
+    pub densest_files: Vec<DensityEntry>,
     /// The most depended-on symbols by **directed** call fan-in, already ranked
     /// and capped by the caller. Empty when the graph has no `calls` edges.
     pub most_called: Vec<CouplingEntry>,
@@ -306,6 +323,29 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
         }
     }
 
+    if !s.densest_files.is_empty() {
+        c.push_str(
+            "\n### Densest files (markers per 1,000 lines)\n\n\
+             *Where the debt above is concentrated, rather than where there is \
+             most of it — a raw count ranks the biggest file first by \
+             construction. The denominator is file length: every line, blanks and \
+             comments included, not source lines of code. Prose matches (`for \
+             now`, `tbd`) count too, so a design document can rank high.*\n\n",
+        );
+        c.push_str("| File | Markers | Lines | Per 1k |\n| --- | --- | --- | --- |\n");
+        for e in &s.densest_files {
+            let _ = writeln!(
+                c,
+                "| [[{}\\|{}]] | {} | {} | {:.2} |",
+                note_name(&format!("file:{}", e.path)),
+                e.path,
+                e.markers,
+                e.lines,
+                e.per_kloc
+            );
+        }
+    }
+
     if !s.most_called.is_empty() {
         c.push_str(
             "\n## Most depended-on (call fan-in)\n\n\
@@ -347,7 +387,8 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdrEntry, CouplingEntry, HOME_NOTE, VaultSummary, note_name, render_home, render_note,
+        AdrEntry, CouplingEntry, DensityEntry, HOME_NOTE, VaultSummary, note_name, render_home,
+        render_note,
     };
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
 
@@ -496,6 +537,12 @@ mod tests {
                 status: Some("Accepted".into()),
             }],
             debt: vec![("todo".into(), 4)], // roteiro:ignore
+            densest_files: vec![DensityEntry {
+                path: "src/small.rs".into(),
+                markers: 3,
+                lines: 120,
+                per_kloc: 25.0,
+            }],
             most_called: vec![CouplingEntry {
                 key: "sym:rust:a.rs#helper".into(),
                 name: "helper".into(),
@@ -525,6 +572,19 @@ mod tests {
             note.content.contains("resolved by simple name"),
             "the precision caveat travels with the figures"
         );
+        // Density: the count and the denominator are both shown, so the ratio can
+        // be checked rather than taken on trust, and the wikilink's own `|` is
+        // escaped so it cannot break the table it sits in.
+        assert!(
+            note.content
+                .contains("| [[file-src-small.rs\\|src/small.rs]] | 3 | 120 | 25.00 |"),
+            "{}",
+            note.content
+        );
+        assert!(
+            note.content.contains("not source lines of code"),
+            "the denominator caveat travels with the figures"
+        );
         // A repository link + short-commit permalink note.
         assert!(
             note.content
@@ -532,6 +592,27 @@ mod tests {
             "{}",
             note.content
         );
+    }
+
+    #[test]
+    fn render_home_omits_density_for_a_graph_with_no_markers() {
+        // A clean repository has no markers, so there is no density to rank. An
+        // empty table under a heading reads as "measured, and there is nothing";
+        // the section is absent instead. Same rule as the coupling table below.
+        let note = render_home(&VaultSummary {
+            project: "clean".into(),
+            total_nodes: 1,
+            ..VaultSummary::default()
+        });
+        assert!(
+            !note.content.contains("Densest files"),
+            "no heading without rows: {}",
+            note.content
+        );
+        // The intent-debt section itself still renders — density is an addition
+        // to it, not a replacement.
+        assert!(note.content.contains("## Intent debt"));
+        assert!(note.content.contains("*None recorded.*"));
     }
 
     #[test]

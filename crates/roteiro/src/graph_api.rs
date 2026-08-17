@@ -196,6 +196,10 @@ fn graph_routes(prefix: &str) -> Router<AppState> {
             get(neighbourhood),
         )
         .route(&format!("{prefix}/{{project}}/debt"), get(project_debt))
+        .route(
+            &format!("{prefix}/{{project}}/debt/density"),
+            get(debt_density),
+        )
         .route(&format!("{prefix}/{{project}}/hotspots"), get(hotspots))
         .route(&format!("{prefix}/{{project}}/coupling"), get(coupling))
 }
@@ -326,6 +330,19 @@ struct CouplingQuery {
     limit: Option<usize>,
     /// Ranking: `total` | `fan_in` | `fan_out` (default `total`).
     order: Option<String>,
+}
+
+/// The query for `/v1/graph/{project}/debt/density`.
+#[derive(Deserialize)]
+struct DensityQuery {
+    /// Number of top-density files to return (default [`DEFAULT_HOTSPOTS`]);
+    /// `0` returns every ranked file.
+    limit: Option<usize>,
+    /// Ranking: `density` | `markers` | `lines` (default `density`).
+    order: Option<String>,
+    /// Shortest file length that may enter the ranking (default
+    /// [`rto_graph::DEFAULT_MIN_LINES`]); `0` ranks every file.
+    min_lines: Option<u32>,
 }
 
 /// The `qualified` key for `/v1/graph/resolve`.
@@ -625,6 +642,44 @@ async fn project_debt(State(st): State<AppState>, params: RawPathParams) -> ApiR
     let ignore = crate::config::debt_ignore_for(ws, Some(project))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let report = ws.with_store(Some(project), |s| debt(s, &[], &ignore))??;
+    Ok(Json(report).into_response())
+}
+
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/debt/density?limit=&order=&min_lines=`
+/// → the top-`limit` files by intent-debt **density** (markers per 1,000 lines),
+/// each with its marker count, its length and its per-category split.
+///
+/// A sibling of `/debt` rather than a replacement: `/debt` lists markers, and a
+/// count of them ranks the largest file first by construction. Both honour the
+/// **target project's own** `[debt] ignore`, by the same rule and for the same
+/// reason as `/debt` above — a fallback to "no exclusions" would serve a silently
+/// different number than the CLI does.
+///
+/// An unknown `order` is a 400 rather than a silent fall back to `density`: a
+/// caller that asked for `markers` and got a density ranking has no way to tell.
+async fn debt_density(
+    State(st): State<AppState>,
+    params: RawPathParams,
+    Query(dq): Query<DensityQuery>,
+) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let order = match dq.order.as_deref() {
+        None => rto_graph::DensityOrder::default(),
+        Some(token) => rto_graph::DensityOrder::from_token(token).ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "unknown order `{token}` (expected {})",
+                rto_graph::DensityOrder::tokens().join("|")
+            ))
+        })?,
+    };
+    let ignore = crate::config::debt_ignore_for(ws, Some(project))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let limit = dq.limit.unwrap_or(DEFAULT_HOTSPOTS);
+    let min_lines = dq.min_lines.unwrap_or(rto_graph::DEFAULT_MIN_LINES);
+    let report = ws.with_store(Some(project), |s| {
+        rto_graph::debt_density(s, &[], &ignore, order, limit, min_lines)
+    })??;
     Ok(Json(report).into_response())
 }
 
@@ -2439,6 +2494,77 @@ mod tests {
             single_set(Workspace::single(HUB, hub_store())),
             None,
             "/v1/graph/hub/coupling?order=degree",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// Two files, the same marker count, lengths twenty-fold apart — the pair
+    /// `/debt` cannot separate and `/debt/density` must.
+    fn marked_store() -> Store {
+        let file = |path: &str, lines: u64| {
+            let mut n = Node::new(format!("file:{path}"), NodeKind::File, path);
+            n.path = Some(path.to_owned());
+            n.meta = json!({ "bytes": lines * 30, "lines": lines });
+            n
+        };
+        let marker = |path: &str, line: u32| {
+            let mut n = Node::new(
+                format!("marker:{path}#{line}"),
+                NodeKind::Marker,
+                "TODO x", // roteiro:ignore
+            );
+            n.path = Some(path.to_owned());
+            n.meta = json!({
+                "category": "todo", // roteiro:ignore
+                "text": "TODO x",   // roteiro:ignore
+                "line": line,
+            });
+            n
+        };
+        let mut facts = FactSet::new()
+            .with_node(file("big.rs", 4000))
+            .with_node(file("small.rs", 200));
+        for line in 1..=10 {
+            facts = facts.with_node(marker("big.rs", line));
+            facts = facts.with_node(marker("small.rs", line));
+        }
+        apply(Store::open_in_memory().expect("store"), &facts)
+    }
+
+    #[tokio::test]
+    async fn density_endpoint_normalises_the_count_debt_reports_raw() {
+        let set = || single_set(Workspace::single(HUB, marked_store()));
+
+        let (status, json) = get(set(), None, "/v1/graph/hub/debt/density").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["order"], "density");
+        assert_eq!(json["items"][0]["path"], "small.rs", "{json}");
+        assert_eq!(json["items"][0]["per_kloc"], 50.0);
+        assert_eq!(json["items"][1]["per_kloc"], 2.5);
+        assert_eq!(
+            json["items"][0]["markers"], json["items"][1]["markers"],
+            "the same raw count `/debt` would report: {json}"
+        );
+        assert_eq!(json["overall_per_kloc"], 4.76, "the baseline: {json}");
+
+        // `min_lines` is reachable, and excluding a file is reported rather than
+        // served as a silently shorter ranking.
+        let (status, json) = get(set(), None, "/v1/graph/hub/debt/density?min_lines=1000").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["short_files"], 1);
+        assert_eq!(json["files_with_markers"], 2);
+        assert_eq!(json["items"][0]["path"], "big.rs", "{json}");
+    }
+
+    #[tokio::test]
+    async fn density_endpoint_rejects_an_unknown_order() {
+        // Falling back to `density` would answer a question the caller did not
+        // ask and give them no way to tell.
+        let (status, _) = get(
+            single_set(Workspace::single(HUB, marked_store())),
+            None,
+            "/v1/graph/hub/debt/density?order=count",
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
