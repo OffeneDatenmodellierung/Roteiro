@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.15.0...rto-render-v1.16.0) - 2026-08-17
+
+### Added
+
+- *(cli)* `roteiro config-secrets`, and the limitation on every surface
+- *(cli)* `roteiro debt-density`, and the five other surfaces
+
+### Fixed
+
+- *(render)* `_Home` scopes intent debt by `[debt] ignore`, both tables
+
 ## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.12.0...rto-render-v1.13.0) - 2026-08-16
 
 ### Added

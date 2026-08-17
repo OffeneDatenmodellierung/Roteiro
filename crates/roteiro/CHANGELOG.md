@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.15.0...roteiro-v1.16.0) - 2026-08-17
+
+### Added
+
+- *(cli)* `roteiro config-secrets`, and the limitation on every surface
+- *(cli)* `roteiro debt-density`, and the five other surfaces
+
+### Fixed
+
+- *(render)* `_Home` scopes intent debt by `[debt] ignore`, both tables
+
+### Other
+
+- make the "split" claim on the token fixtures true
+
 ## [1.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.14.0...roteiro-v1.15.0) - 2026-08-17
 
 ### Fixed
