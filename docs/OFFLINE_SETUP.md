@@ -42,8 +42,10 @@ these two included: a sandboxed *run* never pulls, and refuses with
 ## Step 0 — host toolchain
 
 Before `cargo install`. A working C compiler and linker is a prerequisite of
-Rust itself, not of Roteiro; the default build additionally compiles SQLite and
-18 tree-sitter grammars from C.
+Rust itself, not of Roteiro; the default build additionally compiles SQLite, 18
+tree-sitter grammars, and `ring`'s crypto core (the TLS used by `model pull`)
+from C and pregenerated assembly. That is the *same* toolchain class, not an
+extra one — no C++, no cmake, no libclang.
 
 ```sh
 # macOS
@@ -65,14 +67,40 @@ fails outright. `protoc` is *not* required by any feature.
 A feature that is off is not "degraded", it is **absent**: the subcommand does
 not exist in the parser and you get `unrecognized subcommand`. Choose now.
 
+**Steps 2 and 3 need nothing extra.** `models` and `exec-subprocess` are both
+default features, so a stock `cargo install roteiro` has `roteiro model pull`,
+`roteiro security prefetch|status|run` — every command in this guide. That is
+the point of the guide: preparing to work offline should not need a special
+build.
+
 ```sh
-cargo install roteiro --features models                   # pull models
-cargo install roteiro --features models,exec-subprocess   # + analyzer prefetch/run/status
-cargo install roteiro --features serve                    # + local serving (implies models)
+cargo install roteiro                       # everything in this guide
+cargo install roteiro --features serve      # + local model serving and inference
 ```
 
-Note that `exec-subprocess` is **not** implied by `models` or `serve`. If you
-want `roteiro security prefetch` to exist, ask for it explicitly.
+Neither default changes when bytes move. `model pull` is still consent-gated;
+`security prefetch` still refuses to download without `--allow-download`; and a
+`security run` still refuses without `--allow-unsandboxed`, every time.
+
+> **`--allow-unsandboxed` matters more now, not less.** `security run` executes
+> a third-party analyzer as a child process on this host with **no isolation
+> boundary** — the run's own evidence records `isolation=none`. That used to be
+> gated twice: once at build time by asking for `exec-subprocess`, and once per
+> run by the flag. The build-time half is gone now that the feature is a default,
+> so the flag is the only thing left. It is required on every invocation and will
+> not be softened. If you want a boundary, `--features exec-boxlite` runs the
+> same analyzer in a microVM (see the README); if you want neither, use
+> `roteiro security ingest` and never execute anything locally.
+
+If you want a build that provisions and ingests but genuinely **cannot** execute
+an analyzer — a locked-down CI image, say — that is still one flag away:
+
+```sh
+cargo install roteiro --no-default-features --features execution
+```
+
+That build keeps `security ingest|list|prefetch|status` and refuses `security
+run` with a message naming the feature it would need.
 
 ## Step 2 — warm the model store
 
@@ -129,9 +157,80 @@ Maven 9.6, crates.io 3.2.
 > fetch is trust-on-first-use; every run afterwards re-verifies against the
 > digest recorded then. That makes *when* you prefetch a security decision.
 
-**The analyzers themselves are yours to install.** Roteiro provisions rules and
-databases; it never installs `semgrep`, `osv-scanner` or `cargo`. If a binary is
-missing it says so and points at `roteiro security ingest` as the alternative.
+### The analyzers themselves are yours to install
+
+Roteiro provisions rules and databases; it never installs `semgrep`,
+`osv-scanner` or `cargo`. If a binary is missing, `security run` says so by name
+and points at `roteiro security ingest`:
+
+```
+analyzer binary `semgrep` not found on PATH (needed to run `semgrep`). Roteiro does
+not install analyzers; install it yourself, or produce the report elsewhere and
+use `roteiro security ingest`.
+```
+
+**None of the three is mandatory.** Install only the ones whose axis you want —
+they overlap deliberately little:
+
+| Analyzer | `security run --analyzer` | What it finds | Languages |
+| --- | --- | --- | --- |
+| **semgrep** | `semgrep` | Static analysis (SAST) of your *own* code, against a rule set vendored in the binary | Rust, Python, Java, JavaScript, TypeScript, SQL (generic mode) |
+| **cargo-audit** | `cargo-audit` | RustSec advisories against `Cargo.lock` — your *dependencies* | Rust only |
+| **osv-scanner** | `osv-scanner` | OSV.dev advisories against resolved lockfiles — your *dependencies*, across ecosystems | Python, Java, JavaScript, TypeScript, Rust |
+
+`cargo-audit` and `osv-scanner` overlap on Rust and answer slightly differently;
+[ADR-0018](adr/0018-analyzer-coverage-matrix.md) is the record of why, and
+`roteiro security list` cross-references them rather than double-counting.
+
+```sh
+# macOS
+brew install semgrep
+brew install osv-scanner
+cargo install cargo-audit          # NOT a standalone binary — see below
+
+# Debian / Ubuntu
+python3 -m pip install semgrep     # no apt package; pipx works too
+#   osv-scanner: no apt package — take a release binary from
+#   https://github.com/google/osv-scanner/releases and put it on PATH,
+#   or `go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest`
+cargo install cargo-audit
+```
+
+**`cargo-audit` is the odd one out.** It is a **cargo subcommand**, not a
+standalone program: `cargo install cargo-audit` puts `cargo-audit` in
+`~/.cargo/bin` and Roteiro invokes it as `cargo audit`. Do not go looking for a
+`cargo-audit` package in a system package manager — installing "the analyzer" for
+this one means installing a Rust toolchain, which you already have if you built
+Roteiro from source.
+
+**No minimum version is enforced.** This was checked rather than assumed: nothing
+in the adapters compares a version. `subprocess.rs` reads `--version` from the
+binary and records it as *evidence* on the run — its own comment says "a version
+is evidence, not a precondition" — and an analyzer that will not answer
+`--version` is recorded as `unknown` and run anyway. So a version older than the
+ones below will not be refused; it may simply behave differently from what the
+adapters were written against. Those reference versions, for a known-good
+comparison, are the ones Stage 22/22b were developed and measured on:
+
+| Analyzer | Developed and measured against |
+| --- | --- |
+| `semgrep` | **1.173.0** (subprocess/sandbox parity run, 4 identical findings) |
+| `osv-scanner` | **2.5.0** (fixtures are real captured output at this version) |
+| `cargo-audit` | **0.22.2** (`0.21.2` for the committed report fixtures) |
+
+### Or install none of them: `roteiro security ingest`
+
+`ingest` accepts a normalized report produced **anywhere** — a CI job, a
+colleague's machine, a container image that has the analyzer you do not want on
+your laptop — and files it as a findings layer that is byte-for-byte the shape a
+local run produces. It is seam (c) of
+[ADR-0014](adr/0014-sandboxed-analyzer-execution.md) and the zero-install path,
+not a consolation prize: `security list`, cross-referencing and the staleness
+reporting all work identically over an ingested layer, and the run's evidence
+records `isolation=ingested` so nothing is being claimed that was not done.
+
+For a machine that must never execute an analyzer at all, build it out:
+`cargo install roteiro --no-default-features --features execution`.
 
 ## Step 4 — verify before you unplug
 

@@ -90,8 +90,10 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   the binary. Once, before your first `--all-features` build:
 
   ```sh
-  # 1. The runtime archive. Any build can do this — the archive is an asset.
-  roteiro security prefetch --allow-download   # verifies against a pinned digest
+  # 1. The runtime archive. Any build can do this. The archive belongs to no
+  #    analyzer, so `--analyzer sandbox` selects it alone rather than also
+  #    fetching ~250 MB of advisory databases you may not want yet.
+  roteiro security prefetch --analyzer sandbox --allow-download   # pinned digest
   export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
 
   # 2. The analyzer image. This step needs a binary that *has* `exec-boxlite`,
@@ -104,14 +106,18 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   the variable is unset, points at a remote URL, or the bytes do not match. Build
   without `exec-boxlite` if you would rather not provision.
 
-  **Step 2 is not optional and used to be missing here.** The image half of
-  `prefetch` is behind `#[cfg(feature = "exec-boxlite")]`, so a binary built to
-  satisfy step 1 compiles it out and pulls the archive and *silently not the
-  image*. Skip step 2 and `cargo test --workspace --all-features` fails in
-  `backend_parity` with `ImageNotProvisioned` — on a machine that followed this
-  recipe exactly. The bootstrap order is what makes two passes necessary: you
-  cannot build the binary that pulls the image until the archive it needs is
-  already there.
+  `prefetch` is gated on `execution`, so **any** build can run step 1 —
+  including `--no-default-features --features execution`. That is not a
+  convenience: it is what stops this recipe being circular. If provisioning sat
+  behind an execution backend, obtaining the archive `exec-boxlite` demands at
+  compile time would first require a build with the *other* backend compiled in.
+
+  **Step 2 is a separate pass, and used to be missing here.** Provisioning is
+  universally available, but the *image* half of `prefetch` is behind
+  `#[cfg(feature = "exec-boxlite")]` — so a binary built to satisfy step 1
+  compiles it out, pulls the archive, and *silently not the image*. Skip step 2
+  and `cargo test --workspace --all-features` fails in `backend_parity` with
+  `ImageNotProvisioned`, on a machine that followed this recipe exactly.
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny --all-features check` and `cargo audit` — clean. **Every new
@@ -131,10 +137,20 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   reach and is tracked by name in
   [`docs/VENDORED_DEPENDENCIES.md`](docs/VENDORED_DEPENDENCIES.md); a change that
   vendors non-Rust code adds its row in the same PR.
-- **Offline by default.** The default build needs no network and no model. Keep
-  heavy dependencies (llama.cpp, GGUF models, PDF/OCR/vision, the model server)
-  behind **feature flags** so the default build stays small, and never touch the
-  network without an explicit `[y/N]` consent.
+- **Offline by default.** The default build needs no model and makes no network
+  call of its own. It does ship `models` and `exec-subprocess`, because
+  `roteiro model pull` and `roteiro security prefetch` are the prerequisites for
+  *preparing* to work offline and must exist in a stock install. So "offline by
+  default" is a claim about **behaviour**, not about the absence of an HTTP
+  client: the socket is compiled in, and only `pull` and
+  `prefetch --allow-download`, each after an explicit consent, may open it.
+  Likewise `exec-subprocess` compiles in the *capability* to run an analyzer as a
+  child process; `--allow-unsandboxed` is what permits an actual run, it is
+  required every time, and since the build-time gate is no longer in the default
+  path it is the only gate left — do not weaken it. Keep heavy dependencies
+  (llama.cpp, PDF/OCR/vision, the model server, the sandbox runtime) behind
+  **feature flags** so the default build stays small and needs no toolchain class
+  it does not already require.
 
 ## Pull requests
 

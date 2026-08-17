@@ -66,19 +66,28 @@ blast radius) rather than the diff alone.
 
 ## Triaging an automated reviewer's comments
 
-Automated review is worth having — on one measured sample of 25 comments from
-GitHub Copilot across 12 PRs, **22 were real defects that were accepted and
-fixed**, and not one of them was caught by CI or by the author's own
+Automated review is worth having — over twelve PRs in one day, *every* comment
+GitHub Copilot left was adjudicated, and **22 of them were real defects that were
+accepted and fixed**. Not one was caught by CI or by the author's own
 verification, because every one of them *passed*. They were contract-accuracy
 defects: code that worked but did not mean what it said.
+
+Those adjudications, plus any added since, live in
+[`crates/rto-graph/tests/fixtures/review/`](../crates/rto-graph/tests/fixtures/review/README.md).
+Take current counts from that fixture's class table, which a test holds to the
+data; the figures quoted here describe the original twelve-PR sample and are not
+updated as rows are added.
 
 But adjudicate before acting, and one rule pays for itself:
 
 - [ ] **A comment claiming the code will not compile is refuted by the CI
       `msrv` job at that commit, not by an investigation.** In that sample every
       false positive was a compile-error claim (a move out of a borrow, three
-      times), and *every* compile-error claim was a false positive — 3 for 3,
-      with no real defect in that class. `msrv` is
+      times), and *every* compile-error claim was a false positive. A fourth has
+      since joined them on #352 — `Duration::from_mins` called "not on MSRV
+      1.94", though it is stable since 1.91.0 — so the class now stands at
+      **4 for 4**, with no real defect in it. Record a newly adjudicated comment
+      in the corpus linked above. `msrv` is
       `cargo check --workspace --all-features` and finishes in about 40 seconds;
       in each case it had already gone green **at the commit the comment was
       left on**, roughly a minute before the comment was posted. So the
