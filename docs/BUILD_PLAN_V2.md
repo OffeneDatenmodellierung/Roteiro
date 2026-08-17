@@ -1187,9 +1187,9 @@ resolution is deterministic and unit-tested without loading a model.
 
 ---
 
-### Stage 34 — Remote model tier (ADR-0019, *not yet written*) → **v1.17.0** · effort **L** *(independent track)*
+### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)*
 
-**Blocked on ADR-0019 being written and accepted. Do not start before it.**
+**ADR-0019 is written. Blocked on it being *Accepted* — do not start before that.**
 
 **Goal:** an optional, explicitly-consented remote model backend for work local
 models cannot do.

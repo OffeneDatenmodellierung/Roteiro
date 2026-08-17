@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-08-16
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.0 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -34,6 +34,8 @@ Introduces a **persistent configuration file** so per-project preferences (which
 Add an optional **`roteiro.toml`** at the repository root (committed — so a team shares the same, reproducible settings), plus an optional user-level `~/.roteiro/config.toml`, with a clear precedence:
 
 > **CLI flag > project `roteiro.toml` > user `~/.roteiro/config.toml` > built-in default.**
+
+**One documented exception (v1.2).** For the remote-model-tier enable key this order is **inverted**: the project file may **deny but never grant**. See [[docs/adr/0019-remote-model-tier.md]]. The reason is in this ADR's own words — `roteiro.toml` is "committed — so a team shares the same, reproducible settings" — and a merged line authorising egress on every teammate's machine is not consent. Granting requires the **user** layer *and* the invocation, neither sufficient alone. Every other key follows the order above.
 
 **Format: TOML, and only TOML.** Not YAML.
 
@@ -127,5 +129,6 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 
 | Version | Date | Notes |
 |---------|------|-------|
+| 1.2 | 2026-08-17 | Amended by [[docs/adr/0019-remote-model-tier.md]]. One key — the remote-model-tier enable — inverts the precedence: the committed project file may **deny but never grant** egress, and granting needs the user layer plus the invocation. Recorded here as well as in 0019 because a reader of this ADR would otherwise apply the general rule and be wrong. No other key is affected. Also corrects the header table, which read 1.0 while the frontmatter read 1.1. |
 | 1.1 | 2026-08-16 | Amended (issue #321). Two refinements to layering, neither changing the CLI > project > user > default order: (a) **list-valued exclusion keys merge** — `[debt] ignore` unions the layers instead of the project layer discarding the user layer, with a new `ignore_reset` key as the explicit way to inherit nothing, and per-pattern provenance in `roteiro config`; discovery/selection lists deliberately still replace. (b) **Per-repo resolution**: in a multi-repo process each repository is scanned under its *own* config, extending ADR-0009's per-repo `[[links]]` rule. Motivation: the graph API applied no exclusions at all, so the explorer UI and the CLI reported different intent debt for the same repository. |
 | 1.0 | 2026-08-09 | Accepted. Optional `roteiro.toml` (project, committed) + `~/.roteiro/config.toml` (user), TOML-only (YAML rejected — `serde_yaml` unmaintained), precedence CLI > project > user > default. Initial schema: `[models]`/`[ingest]`/`[infer]` first, then `[duplicates]`/`[debt]`/`[serve]`/`[paths]`. Fully defaulted (zero-config works); unknown keys ignored; malformed = hard error; missing-feature keys warn. |

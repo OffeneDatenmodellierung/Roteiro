@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.2"
+version: "1.3"
 last-modified: 2026-08-15
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -43,7 +43,7 @@ Scope remains **reuse + performance**, not a general model server. Loopback-boun
 
 ## Context
 
-Roteiro already downloads, verifies, and stores real GGUF/safetensors models for its own use. A separate local tool that only sometimes needs a model would otherwise re-download its own copy and ship its own runtime. Serving reuses the local store so nothing new is fetched and nothing leaves the machine. Two things sharpened the design after the first draft:
+Roteiro already downloads, verifies, and stores real GGUF/safetensors models for its own use. A separate local tool that only sometimes needs a model would otherwise re-download its own copy and ship its own runtime. Serving reuses the local store so nothing new is fetched and nothing leaves the machine. **Scoped to serving (v1.3).** That sentence is about `roteiro serve` and remains true of it. It is not a project-wide guarantee: [[docs/adr/0019-remote-model-tier.md]] adds an optional, default-off remote model tier that does send content off the machine, under a consent gate described there. Nothing in this ADR changes — `serve` still exposes only installed models and still never downloads — but a reader quoting this line as a general promise would now be wrong. Two things sharpened the design after the first draft:
 
 1. **Performance is a first-class requirement.** These models run frequently in the background; slow inference is a real developer-experience cost. That tilts the engine choice toward the fastest viable option, and makes candle's modest quantized-Metal decode a genuine liability rather than a footnote.
 2. **A local server is only interesting if it's *ours*.** Anyone can run Ollama or `llama-server`. Roteiro's reason to serve is to hand the model **the codebase graph** — the one query surface from ADR-0001/0002 — so the served model is code-aware. That argues for owning the request loop (to inject tools), not delegating to a black-box server.
@@ -107,4 +107,5 @@ Project direction incorporated: **prioritise performance** (background use; deve
 |---------|------|-------|
 | 1.0 | 2026-08-09 | Accepted. Opt-in loopback OpenAI-compatible endpoint reusing installed models, warm + serialised over the ADR-0002 stack; scoped to reuse; candle-implied engine; rejected Ollama-replacement and MCP-only as the front door. |
 | 1.1 | 2026-08-09 | Revised after a head-to-head engine de-risk. **Engine → llama.cpp (`llama-cpp-2`)** — fastest, and the only candidate passing `cargo deny` unchanged (mistral.rs fails on MPL-2.0/CDLA/0BSD; candle is slower). **Serving via our own thin `/v1`** (not stock `llama-server`) so **Roteiro's graph tools auto-register** into the model (code-aware serving). Accepts a C/C++ toolchain for the opt-in `serve` feature; no `deny` change needed. States the candle→llama.cpp inference-core unify as the direction (follow-up ADR-0003 amendment). |
+| 1.3 | 2026-08-17 | Scoped, not changed. "Nothing leaves the machine" is stated of **serving**, which is what it always described; ADR-0019 adds an optional default-off remote model tier elsewhere in the product, so the sentence needed a boundary before it was read as project-wide. No decision in this ADR changed. |
 | 1.2 | 2026-08-15 | Consequence added: llama.cpp's backend is a process-global, initialised once and shared by every engine, so a long-lived `serve` process can hold more than one engine instead of silently losing every engine after the first (issue #296). No decision changed. |
