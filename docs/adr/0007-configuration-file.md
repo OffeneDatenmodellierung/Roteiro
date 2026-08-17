@@ -12,7 +12,7 @@ domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
 version: "1.2"
-last-modified: 2026-08-16
+last-modified: 2026-08-17
 confluence-url:
 ---
 
