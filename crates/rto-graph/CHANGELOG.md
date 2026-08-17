@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.19.0...rto-graph-v1.19.1) - 2026-08-17
+
+### Fixed
+
+- *(graph)* say which class each retained cache object was kept for
+- *(graph)* reclaim superseded object-cache generations
+
+### Other
+
+- Merge pull request #392 from OffeneDatenmodellierung/fix/limit-zero-means-unlimited
+
 ## [1.18.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.17.0...rto-graph-v1.18.0) - 2026-08-17
 
 ### Added
