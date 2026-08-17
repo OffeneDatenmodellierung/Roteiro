@@ -571,8 +571,27 @@ mod tests {
             }
             // Name the first differing line rather than dumping two 5 KB blobs
             // into the CI log, which buries the one line that matters.
-            let (got, want): (Vec<_>, Vec<_>) =
-                (committed.lines().collect(), template.lines().collect());
+            //
+            // `split('\n')`, not `lines()`: `lines()` strips a trailing `\r` and
+            // drops the empty segment after a final newline, so a pure CRLF-vs-LF
+            // divergence — one copy normalised by a Windows editor while the asset
+            // stays LF — compares *equal* here even though the raw strings did not.
+            // The search then finds nothing, the index falls off the end of both
+            // sides, and the panic names a line that does not exist with `None` on
+            // both sides: the diagnostic fails in precisely the case it exists for,
+            // where the difference is invisible to the eye. `split` is lossless —
+            // joining its segments with `\n` reconstructs the input byte for byte —
+            // so unequal strings always diverge here, either at a segment or in
+            // segment count, and `{:?}` renders the surviving `\r`.
+            let (got, want): (Vec<_>, Vec<_>) = (
+                committed.split('\n').collect(),
+                template.split('\n').collect(),
+            );
+            // With a lossless split, no match means one side is a strict prefix of
+            // the other, so this index is in range on the longer side and `None`
+            // there reads as "this file ends here". It can no longer be `None` on
+            // both: that would mean equal segment counts and no differing segment,
+            // i.e. equal strings, which returned above.
             let n = got
                 .iter()
                 .zip(&want)
@@ -584,7 +603,10 @@ mod tests {
                  The template is written verbatim over this file by `roteiro init`, so an \
                  edit made here is deleted on the next run — silently, with no conflict. \
                  Move the change into crates/roteiro/assets/skill/SKILL.md and re-run \
-                 `roteiro init` to regenerate both copies.",
+                 `roteiro init` to regenerate both copies. If the two sides above read \
+                 identically, compare them as printed: a trailing `\\r`, or a trailing \
+                 empty segment, is a line-ending divergence rather than a content edit — \
+                 there is nothing to move, and normalising this file to LF is the fix.",
                 n + 1,
                 got.get(n),
                 want.get(n),
