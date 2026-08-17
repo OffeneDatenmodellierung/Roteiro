@@ -1427,9 +1427,11 @@ byte-identical afterwards.
 
 ---
 
-### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)*
+### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)* 🔶 *part 1 of 2 delivered*
 
 **Unblocked.** [ADR-0019](adr/0019-remote-model-tier.md) is **Accepted** (2026-08-17), so this stage has a settled contract to build against. It remains the largest posture change in the project: the first capability that sends repository content off the machine.
+
+**Cut in two, guard first.** Part 1 — the consent gate, the payload allow-list, the dry-run and the egress record — has landed, in a build that compiles **no backend and therefore cannot send anything**. Part 2 is the transport and the promise amendments it makes necessary. See *What shipped* below for the seam and for what part 2 still owes.
 
 **Goal:** an optional, explicitly-consented remote model backend for work local
 models cannot do.
@@ -1468,6 +1470,94 @@ VendorAsserted}` so a record states on its face that its identity is a *claim*.
 **Sequencing note:** Stage 27 re-audits *every "offline" claim*. Landing this
 before it converts a documentation task into a re-litigation of the product's
 identity.
+
+#### What shipped — part 1 of 2: **the guard, before the capability**
+
+The stage is **cut in two**, at the seam ADR-0019's own structure suggests. Part
+1 is everything that decides, shows and records; part 2 is the thing that sends.
+The reason is not PR size, though the size is real: an egress path whose guard
+lands in the same change as its transport is a guard nobody reviewed on its own,
+and ADR-0019 §4 names that failure explicitly — *"deferring this is how an egress
+path ships before its guard"*. Landing the guard **first** inverts that, and
+leaves a build that cannot send anything at all to review it in.
+
+**`rto-remote`** — a new crate holding the policy and **no HTTP client**.
+`call_with` takes the transport as a caller-supplied closure, exactly as
+`rto-exec` takes its `Fetcher`, so the code that decides whether bytes may leave
+is not the code that can make them leave. The guarantee is checkable from a
+`Cargo.toml` rather than promised in prose, and every test exercises the whole
+path with no network — a test cannot accidentally become the first thing that
+sends data. `rto-graph` gains nothing: its `gix` is still pinned
+`default-features = false`, and `rto-remote` depends *on* it.
+
+Five modules, one per clause:
+
+- **`consent`** — ADR-0019 §3's inversion. `ConfigGrant::from_layers` is the
+  workspace's single implementation of "a project may deny but never grant", and
+  the binary's config layering calls it, so the value `roteiro config` echoes and
+  the value the gate consults cannot drift apart. Six named `Reason`s, each with
+  a remedy — except `ProjectDenied`, whose honest remedy is *"no flag overrides
+  this; take it up with the repository"*. A discarded project grant is **reported
+  rather than swallowed**: a committed setting that silently does nothing is
+  worse than one refused out loud.
+- **`payload`** — the allow-list as a *type*. `ContextItem::from_node` reads five
+  named fields off a node — key, kind, name, path, and up to 1,500 characters of
+  `meta.content`; every other key in its free-form `meta` is unreachable, and the
+  test that proves it plants a credential in a sibling key. `disclosure()` says
+  what leaves *and refuses to stop at the reassuring half*, naming the
+  `DATABASE_URL` case that matches none of `is_secret_key`'s ten needles.
+- **`record`** — the egress ledger at `$ROTEIRO_HOME/remote/egress.jsonl`
+  (owner-only on Unix). Endpoint, model, `ProducerTrust`, timestamp and a copy of
+  the body, written **before** the transport runs, so a call that hung is still a
+  call you know about. **An unwritable ledger refuses the call** rather than
+  sending unrecorded — the one ordering decision in `call_with` that is a policy
+  rather than a convenience.
+- **`escalation`** — the deterministic post-hoc check. `LocalAttempt` carries
+  nothing but measurements of a finished run, so it **cannot be constructed
+  before the local attempt happened** — a stronger guarantee than a comment
+  saying so. A trigger is an input to the gate, never a substitute for it.
+- **`trust`** — `ProducerTrust::{PinnedDigest, VendorAsserted}`, with the caveat
+  a vendor-asserted record is displayed with.
+
+**Config.** `[remote]` grows three keys, of which exactly one inverts. `enabled`
+goes through `ConfigGrant`; `endpoint` and `model` are ordinary keys and layer
+ordinarily, so a project may choose *where* its gateway is without being able to
+turn the tier on. `roteiro config` prints the section as **layers rather than one
+merged value**, because a reader applying the general precedence here would be
+wrong about the one key where being wrong means believing egress is off when it
+is on. Without the feature the section still prints, saying the build has no
+tier — an omitted section reads as "no such setting".
+
+**CLI.** `roteiro remote status | dry-run | log`, behind an **off-by-default**
+`remote` feature that adds no third-party dependency. `status` reports the gate
+layer by layer then the decision; `dry-run` prints the exact bytes and sends
+nothing; `log` reads the ledger and says *"nothing has left this machine"* rather
+than leaving that to be inferred from silence.
+
+**What is deliberately absent, and is part 2.** The `ureq` backend and the
+`Transport` implementation over it; the TTY-prompt form of the invocation grant
+(`status` and `dry-run` must never prompt, so the prompt belongs with the call);
+wiring the tier into `spec draft` / Ask via `model_choice`; and the README and
+website amendments. **Those docs are not owed yet**: with no backend compiled,
+*"nothing leaves the machine"* is still literally true of every build this
+produces, and amending it now would describe a capability that does not exist.
+Part 2 owes them on the same commit that makes them false.
+
+**One thing the resolver could not express, and was not routed around.**
+`rto_graph::model_choice` resolves a *registry* model — a name with a variant, a
+platform and a digest on disk. A remote model is none of those, and
+`ModelChoice::installed` has no meaning for one. Part 1 needs no resolution (it
+never picks a model to run; the endpoint names its own), so nothing bespoke was
+added and nothing was worked around. Part 2 does need it, and the proposal is a
+`ModelSource::Remote { trust }` variant plus a `ModelChoice::installed` that is
+`None` rather than `false` for it — an amendment to Stage 33's resolver, not a
+second selection rule beside it.
+
+**Gates:** `fmt` clean; `clippy --all-targets` and `--all-targets --all-features`
+clean at `-D warnings`; `cargo test --workspace --no-fail-fast` and
+`--all-features --no-fail-fast` green. `EXTRACT_VERSION` unchanged at 11, no
+migration, **no new dependency**, and no network — in either the code or the
+tests. Every new test was fault-injected.
 
 ---
 
