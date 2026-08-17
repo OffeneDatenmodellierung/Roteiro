@@ -236,7 +236,14 @@ inference-local-models = [
 # backend**, and this build therefore cannot send anything; `roteiro remote`'s
 # subcommands inspect and report, and the one path that would call out fails
 # loudly with `RemoteError::NoTransport` naming the endpoint.
-remote = ["dep:rto-remote", "dep:rto-exec"]
+#
+# It takes `rto-remote` and nothing else. `rto_remote::Clock` — the injected
+# timestamp source the ledger stamps entries with — will want `rto-exec`'s
+# `rfc3339_utc` when part 2 wires the call path; it is deliberately *not*
+# declared here yet, because nothing in this build calls `call_with`, and a
+# dependency added for a call site that does not exist is a dependency nobody
+# can see the need for.
+remote = ["dep:rto-remote"]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
 pdf-text = ["rto-graph/pdf-text"]
