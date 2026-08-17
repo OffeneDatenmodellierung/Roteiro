@@ -1157,7 +1157,10 @@ fn main() -> anyhow::Result<()> {
     // *may* this run generate at all, and *should* it bother for this blob.
     let gate = cfg.effective.media.resolve();
     // Paths excluded from the intent-debt scan (`[debt] ignore`), shared by
-    // `debt` and `check`'s debt summary.
+    // every surface that reports intent debt for *this* repository — `debt`,
+    // `debt-density`, `check`'s debt summary, and the Obsidian `_Home` overview.
+    // One list, so no two surfaces can disagree about what is in scope
+    // (ADR-0007 v1.1, issues #321 and #372).
     let debt_ignore: &[String] = cfg.effective.debt.ignore.as_deref().unwrap_or(&[]);
     // Honour `[paths] model_store` before any command touches the model store.
     // The registry lives behind the `models` feature; on a build without it a
@@ -1284,8 +1287,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
-        Command::Init { fetch, vault } => run_init(ingest, fetch, vault),
-        Command::Render { target, out } => run_render(ingest, &target, out),
+        Command::Init { fetch, vault } => run_init(ingest, fetch, vault, debt_ignore),
+        Command::Render { target, out } => run_render(ingest, &target, out, debt_ignore),
         Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
         Command::Spec { action } => run_spec(&cfg.effective, ingest, action),
         Command::Config { json } => run_config(&cfg, json),
@@ -2051,7 +2054,12 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
 /// Scaffold Roteiro in the current repository: build the initial graph, install
 /// the managed git hooks (`post-checkout`/`post-merge`/`post-commit` freshness +
 /// a `pre-commit` drift gate), and add the `AGENTS.md` snippet.
-fn run_init(ingest: rto_graph::IngestConfig, fetch: bool, vault: bool) -> anyhow::Result<()> {
+fn run_init(
+    ingest: rto_graph::IngestConfig,
+    fetch: bool,
+    vault: bool,
+    debt_ignore: &[String],
+) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
 
     let report = build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
@@ -2109,7 +2117,7 @@ fn run_init(ingest: rto_graph::IngestConfig, fetch: bool, vault: bool) -> anyhow
     // With `--vault`, render the vault once now so it exists immediately (the
     // installed hooks keep it fresh thereafter).
     if vault {
-        render_obsidian(ingest, None)?;
+        render_obsidian(ingest, None, debt_ignore)?;
     }
 
     println!("roteiro initialised — graph has {nodes} nodes, {edges} edges");
@@ -8080,10 +8088,11 @@ fn run_render(
     ingest: rto_graph::IngestConfig,
     target: &str,
     out: Option<String>,
+    debt_ignore: &[String],
 ) -> anyhow::Result<()> {
     match rto_render::Target::parse(target) {
         Some(rto_render::Target::DocsSite) => render_docs(out),
-        Some(rto_render::Target::ObsidianVault) => render_obsidian(ingest, out),
+        Some(rto_render::Target::ObsidianVault) => render_obsidian(ingest, out, debt_ignore),
         None => anyhow::bail!("unknown render target `{target}` (expected: docs | obsidian)"),
     }
 }
@@ -8187,7 +8196,11 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
 
 /// Render an Obsidian vault: one linked markdown note per graph node in `<out>`
 /// (default `vault`).
-fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyhow::Result<()> {
+fn render_obsidian(
+    ingest: rto_graph::IngestConfig,
+    out: Option<String>,
+    debt_ignore: &[String],
+) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
     let out = out.map_or_else(
@@ -8220,7 +8233,13 @@ fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyh
 
     // The overview note: what was scanned, structure, provenance, ADRs, debt.
     let repo_url = remote.as_deref().and_then(repo_web_root);
-    let home = rto_render::render_home(&vault_summary(&repo, &store, repo_url, commit)?);
+    let home = rto_render::render_home(&vault_summary(
+        &repo,
+        &store,
+        repo_url,
+        commit,
+        debt_ignore,
+    )?);
     std::fs::write(out.join(&home.filename), &home.content)?;
 
     println!(
@@ -8232,11 +8251,16 @@ fn render_obsidian(ingest: rto_graph::IngestConfig, out: Option<String>) -> anyh
 }
 
 /// Aggregate the store into the figures the vault's `_Home` overview shows.
+///
+/// `debt_ignore` is the repository's `[debt] ignore` list, threaded from `main`
+/// so `_Home` scopes intent debt exactly as `roteiro debt`, `roteiro
+/// debt-density`, `check` and the graph API do (ADR-0007 v1.1).
 fn vault_summary(
     repo: &rto_graph::Repo,
     store: &rto_graph::Store,
     repo_url: Option<String>,
     commit: Option<String>,
+    debt_ignore: &[String],
 ) -> anyhow::Result<rto_render::VaultSummary> {
     use rto_graph::{NodeKind, Provenance};
 
@@ -8284,18 +8308,23 @@ fn vault_summary(
         })
         .collect();
 
-    let debt = rto_graph::debt(store, &[], &[])?
+    // Scoped by the repository's own `[debt] ignore`: a vault that counted the
+    // vendored tree the CLI excludes would report a different debt for the same
+    // repository, which is the disagreement ADR-0007 v1.1 exists to prevent.
+    let debt = rto_graph::debt(store, &[], debt_ignore)?
         .by_category
         .into_iter()
         .collect();
 
     // Where that debt is concentrated, which the category counts above cannot
     // show. Capped for the same reason as the coupling table below; the full
-    // ranking is `roteiro debt-density` / `GET .../debt/density`.
+    // ranking is `roteiro debt-density` / `GET .../debt/density`. The same
+    // `debt_ignore` as the category counts above — the two tables sit on one
+    // page and must be two lenses on one marker set, not two marker sets.
     let densest_files = rto_graph::debt_density(
         store,
         &[],
-        &[],
+        debt_ignore,
         rto_graph::DensityOrder::Density,
         HOME_COUPLING_ROWS,
         rto_graph::DEFAULT_MIN_LINES,

@@ -266,6 +266,10 @@ impl GraphServer {
                           enclosing symbol or file via a `contains` edge."
     )]
     async fn debt(&self, Parameters(args): Parameters<DebtArgs>) -> CallToolResult {
+        // `ignore` is empty by necessity, not by oversight: this crate has no
+        // access to the target project's `roteiro.toml`, so there is no list to
+        // apply. Every surface that *can* reach the config does — the
+        // enumeration is on `debt_density` below.
         query_result(self.with_project(args.project.as_deref(), |store| {
             debt(store, &args.kind, &[])
         }))
@@ -307,8 +311,12 @@ impl GraphServer {
         };
         // `ignore` is empty here for the same reason `debt` above passes none:
         // this crate has no access to the target project's `roteiro.toml`. The
-        // CLI, the graph API and the served-chat registry all apply the project's
-        // own `[debt] ignore`; an MCP client sees the unfiltered inventory.
+        // CLI (`debt`, `debt-density`, `check`), the graph API, the served-chat
+        // tool registry and the Obsidian `_Home` overview all apply the project's
+        // own `[debt] ignore`. That is the complete list, written out rather than
+        // summarised because `_Home` was missed when the same defect was fixed on
+        // the surfaces that happened to be reported (issues #321, #372). An MCP
+        // client sees the unfiltered inventory.
         query_result(self.with_project(args.project.as_deref(), |store| {
             rto_graph::debt_density(store, &args.kind, &[], order, limit, min_lines)
         }))
