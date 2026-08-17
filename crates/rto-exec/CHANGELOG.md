@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.14.0...rto-exec-v1.15.0) - 2026-08-17
+
+### Added
+
+- *(exec)* verify the runtime boxlite extracted, not just the archive
+
+### Fixed
+
+- *(exec)* percent-encode the file:// URLs this prints, since curl decodes them
+- *(exec)* format, and correct the feature-gating claim the message relies on
+- *(exec)* look in the asset cache before demanding BOXLITE_RUNTIME_URL
+
+### Other
+
+- *(exec)* record the runtime-verification trade, and fix the stale selection rule
+
 ## [1.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.13.0...rto-exec-v1.14.0) - 2026-08-17
 
 ### Fixed
