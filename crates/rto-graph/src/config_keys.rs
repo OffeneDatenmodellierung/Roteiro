@@ -22,6 +22,14 @@
 /// Shared by the extractor that emits them and the store reader that finds them.
 pub(crate) const KIND: &str = "config_key";
 
+/// The placeholder a redacted config value is replaced with, before anything is
+/// persisted. Single-sourced across the two places that *write* it — this module
+/// (a k8s `Secret`'s data, secret whatever the key is called) and
+/// [`crate::extract`] (any secret-*named* key) — and the one that *reads* it back,
+/// [`crate::config_secrets`]. That lens's whole report is "was this redacted",
+/// so it cannot be allowed to drift from the redactor by a spelling.
+pub(crate) const REDACTED: &str = "<redacted>";
+
 /// A single leaf config setting: its dotted key, source file, and value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConfigKey {
@@ -363,7 +371,7 @@ fn k8s_data(doc: &Yaml, field: &str, file: &str, out: &mut Vec<ConfigKey>, redac
         let Some(k) = k.as_str() else { continue };
         if redact {
             // A Secret's value is secret whatever its shape — always redact.
-            push(out, file, k, "<redacted>".to_owned());
+            push(out, file, k, REDACTED.to_owned());
         } else if let Some(value) = yaml_scalar(v) {
             push(out, file, k, value);
         }
