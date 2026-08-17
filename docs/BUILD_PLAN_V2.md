@@ -1220,6 +1220,65 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 
 ---
 
+## 8b. Beyond v2.0 — deferred work, and where it is written down
+
+Stage 27 is the last *scheduled* stage. It is not the last work, and the
+difference has been invisible: everything below was decided somewhere in this
+document and then scattered across §9 and Stage 26's deferral list, where a
+reader planning the next quarter would not find it. This section is a map, not a
+new commitment — each item keeps its original reasoning at the reference given.
+
+### Already decided, deliberately not scheduled
+
+| Item | Where | Why it is not in a stage |
+|---|---|---|
+| **Semantic recall** — vector index over memory | §9.3 | Needs migration, model/dimension versioning, retention, rebuild and storage-size policy. Materially more than "persist embeddings". |
+| **Findings ↔ graph cross-surfacing** | §9.7 | Joining findings to graph facts is deliberately not free in this design. When wanted, it needs a *designed* join, not an implicit one. |
+| **`code_interpreter`** | §9.4, ADR-0014 | Rejected. The real question is *is local code execution something Roteiro wants to be?* — a product decision, not a backend one. |
+| **Q2 — LOC hotspots** | Stage 26 | Not a pure query: `Node.span` is *byte offsets*, so it needs net-new extraction metadata. |
+| **Q10 — dependency pins** | Stage 26 | Mis-scoped as written; existing pins are Docker `image_ref` and submodules, so package-manifest pins are extraction work. |
+| **Q7 — doc coverage** | Stage 26 | Needs a language and a denominator; docs live mostly in symbol `meta.content`, not `Doc` nodes. |
+| **S2–S6** — the rest of the security lens series | Stage 26 | Taxonomy normalised (S1, S4 → `GDS`; S2, S3 → `NNX`; S5, S6 → `EXT`), but none is scoped. |
+
+### The batching constraint that shapes all of it
+
+**Q2, Q10 and cross-language call-edge resolution each need extraction metadata,
+so each forces an `EXTRACT_VERSION` bump — and every bump is a full
+re-extraction for every user.** The risk register already says to batch
+extraction-touching lenses behind a single bump. That makes these a *cluster*
+rather than three independent tickets: doing them one at a time is the expensive
+way to do the same work.
+
+Cross-language call-edge resolution belongs in that cluster and is not yet
+recorded anywhere else. Stage 26's Q3 measured **615 of 6,553 call edges (9.4%)
+on this repository as cross-language name collisions** — cross-file resolution
+binds a callee by simple name across every `Fn` node regardless of language, and
+no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
+work, so it batches with Q2 and Q10 or it is paid for twice.
+
+### Designed but never recorded as stages
+
+Scoped in investigation and deliberately left out of the roadmap, because none
+has been decided:
+
+- **Local model resolution.** `[models]` has keys for `embedding` and
+  `generative` only — vision, audio and OCR are hard-coded string constants, so
+  *a project cannot pin its ASR model today*. Seven surfaces each choose a model
+  by their own rule and none knows the others exist. No network, no new
+  dependency, no ADR; it closes a user-facing gap on its own merits.
+- **A remote/frontier model tier.** Needs an ADR first: it would amend ADR-0006's
+  *"nothing leaves the machine"*, invert ADR-0007's precedence so a committed
+  `roteiro.toml` may **deny but never grant**, and exempt principle 10. The
+  governing conclusion from the investigation: *the local→remote edge is not a
+  routing decision, it is a gate the user opened* — so a learned router is the
+  wrong shape regardless of model quality.
+- **A `roteiro review` LLM mode.** `crates/rto-graph/tests/fixtures/review/`
+  holds 26 adjudicated review comments with verdicts and defect classes, added
+  precisely so a reviewer can be *measured* rather than guessed at. It currently
+  has no consumer, which is how fixtures rot.
+
+---
+
 ## 9. Open questions (decide before the stage that needs them)
 
 1. ~~**Cache bound value** (Stage 25)~~ — **answered: 256 MB by default,
