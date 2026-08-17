@@ -1154,6 +1154,128 @@ assembled graph is not, so sharing it would mean last-writer-wins.
   migration 12 is covered by the existing additive-migration property test (#329)
   rather than a pinned version number.
 
+### Stage 33 — Local model resolution → **v1.16.0** · effort **S–M** *(independent track)*
+
+**Goal:** one place decides which model serves a task, and can say why.
+
+**The user-facing gap:** `[models]` has keys for `embedding` and `generative`
+only. Vision, audio and OCR are **hard-coded string constants**
+(`voxtral-mini-3b`, `smolvlm-500m-gguf`, `ocrs-text`), so **a project cannot pin
+its ASR model today**. Seven surfaces each pick a model by their own rule —
+`spec draft`, `infer --model`, `serve` load, `serve`/Ask answer, media
+generation, OCR during `sync` — and none knows the others exist.
+
+**Shape:** one function in `rto-graph` — the crate that structurally cannot reach
+the network — taking `(task_kind, modality, config, host_platform)` and returning
+the model **plus the rule that chose it**, folding in the scattered call sites.
+Deterministic rules over categorical signals, not a classifier: every reliably
+observable signal here is low-cardinality (installed, modality, build feature,
+task kind), and **a table over categoricals *is* the correct model**.
+
+The seed already exists and is the right one: `chat_capable_model_ids` filters
+models that *cannot do the job*, and exists because routing a BERT encoder
+through `/v1/chat/completions` aborts llama.cpp with a `GGML_ASSERT`. Generalise
+that, rather than starting from "which model is best".
+
+**No network, no new dependency, no ADR** — it implements what ADR-0003 and
+ADR-0007 already document, so it takes amendments with version-history rows, not
+a new decision.
+
+**DoD:** vision, audio and OCR models are configurable and pinned per project;
+`roteiro config` answers *why did it use that model?* for every surface;
+resolution is deterministic and unit-tested without loading a model.
+
+---
+
+### Stage 34 — Remote model tier (ADR-0019, *not yet written*) → **v1.17.0** · effort **L** *(independent track)*
+
+**Blocked on ADR-0019 being written and accepted. Do not start before it.**
+
+**Goal:** an optional, explicitly-consented remote model backend for work local
+models cannot do.
+
+**Why an ADR is a prerequisite rather than paperwork.** This is the first
+capability that sends repository content off the machine, and three written
+promises currently forbid it:
+
+- **ADR-0006** says *"nothing leaves the machine"* — twice. This contradicts it;
+  it does not extend it.
+- **ADR-0007**'s precedence must **invert for one key**: `roteiro.toml` is
+  committed and shared by design, so a project file may **deny but never grant**.
+  Grant lives at the user layer plus the invocation — both required, neither
+  sufficient. A teammate must not inherit egress from a merged line.
+- **Principle 10** (*offline-capable, not offline*) works because optional assets
+  are digest-pinned and prefetched. A remote call is fetching by definition and
+  can be neither pinned nor prefetched — so it must be **exempted**, explicitly.
+
+**The framing that decides the design:** mis-routing among local models wastes
+tokens; mis-routing *outward* sends source off the machine for a reason nobody
+can inspect. **The local→remote edge is not a routing decision — it is a gate the
+user opened.** So no learned router, at any model quality.
+
+**And the disclosure gap must be stated in the ADR, not deferred:** extraction
+redacts secret-*named* config keys before persistence, but that is name-matching
+over ten needles and **there is no redaction chokepoint on a prompt**. Prompts
+carry symbol names and prose; `DATABASE_URL=postgres://user:pw@host` matches none
+of those needles.
+
+**Also unresolved by design:** ADR-0015's `Producer` identity folds a
+`model_digest`. A hosted model has no digest — a vendor model string is a
+**mutable pointer**, and the weights behind it can change while the name does
+not. If remote output is ever stored, it needs `ProducerTrust::{PinnedDigest,
+VendorAsserted}` so a record states on its face that its identity is a *claim*.
+
+**Sequencing note:** Stage 27 re-audits *every "offline" claim*. Landing this
+before it converts a documentation task into a re-litigation of the product's
+identity.
+
+---
+
+### Stage 35 — `roteiro review` LLM mode → **v1.18.0** · effort **M–L** *(independent track)*
+
+**Depends on Stage 33** (a reviewer must resolve a model without a fourth
+bespoke rule). Independent of Stage 34 — it can run wholly local.
+
+**Goal:** give the adjudicated review corpus a consumer, and put the graph to
+work on the one thing a diff-only reviewer structurally cannot see.
+
+**The asset that already exists:** `crates/rto-graph/tests/fixtures/review/` holds
+**26 adjudicated review comments** with verdicts, defect classes, and the
+`reviewed_sha` each was left on. That makes a reviewer **measurable rather than
+guessed at** — which most projects cannot do. It currently has **no consumer**,
+and that is how a fixture rots.
+
+**What the graph adds, stated honestly:** not access — Copilot has been agentic
+since March 2026 and reads repository context via tool calls, verified against
+this corpus (it cited a file outside a PR's changed set, correctly). What
+`roteiro review` has is **pre-assembled, provenance-tagged** context: governing
+ADRs, authored drift, blast radius, intent debt. A weaker claim than a moat, and
+the one to test.
+
+**Two constraints inherited from the investigation:**
+
+- **A free precision filter.** On this corpus, *every* false positive was a
+  compile-error claim and *every* compile-error claim was a false positive (4/4).
+  CI's `msrv` job already refutes them ~60 s before a human reads the comment. So
+  withhold any finding claiming the code will not compile while the relevant
+  check is green **at that commit and configuration** — see
+  `docs/REVIEW_CHECKLIST.md`, which records why "green build" alone is too coarse
+  (ubuntu-only, `--all-features`; the macOS teardown abort of #291 was invisible
+  to it).
+- **Context budget measured, not guessed:** ~30k tokens single-call, ~79k
+  per-file on this repository.
+
+**DoD:** scored against the corpus with per-defect-class recall — **not an
+average**, which hides the only thing an implementer needs — at the
+`reviewed_sha` of each comment, never the PR head (merged heads contain the fix
+commits, so scoring against them measures recall on already-fixed code and
+silently reports zero).
+
+**"Do not build this" remains an acceptable outcome.** The corpus keeps its value
+either way: it is how any future reviewer, hosted or local, gets measured.
+
+---
+
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ⏸️ *deferred by decision*
 
 > **Deferred deliberately, not merely unstarted.** The owner's call, recorded so
@@ -1161,10 +1283,14 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 > decided to leave look identical six months later, and the second should not be
 > picked up by whoever next has a free afternoon.
 >
-> Nothing blocks it — Stages 21–25 and 28–32 are delivered and v1.15.0 is out.
-> It is held because the hardening it describes is worth more once the remaining
-> A1 lenses (Stage 26) have landed and had their own scale behaviour measured,
-> and because v2.0.0 is a number worth spending once, deliberately.
+> Nothing *blocks* it — Stages 21–25 and 28–32 are delivered and v1.15.0 is out.
+> It is held because the hardening it describes is worth more once the work ahead
+> of it has landed and been measured: the remaining A1 lenses (Stage 26) and
+> Stages 33–35. And because v2.0.0 is a number worth spending once, deliberately.
+>
+> Stage 34 in particular should land *before* this, not after: Stage 27 re-audits
+> every "offline" claim, and adding a remote tier afterwards would reopen an audit
+> that had just been closed.
 >
 > One consequence to carry: the scope below grew during v1.10–v1.15. The offline
 > claim it re-audits is now a real surface — `docs/OFFLINE_SETUP.md`, the
@@ -1200,6 +1326,9 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 | v1.11.0 ✅ | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
 | v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
+| v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
+| v1.17.0 | Stage 34 — remote model tier | **Gated on ADR-0019.** Project file may deny, never grant; no learned router on the local→remote edge |
+| v1.18.0 | Stage 35 — `roteiro review` LLM mode | Scored against the in-tree corpus at each comment's `reviewed_sha`, per defect class |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -1256,26 +1385,20 @@ binds a callee by simple name across every `Fn` node regardless of language, and
 no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
 work, so it batches with Q2 and Q10 or it is paid for twice.
 
-### Designed but never recorded as stages
+### Now scheduled as Stages 33–35
 
-Scoped in investigation and deliberately left out of the roadmap, because none
-has been decided:
+Formerly scoped-but-unrecorded; added to the roadmap by decision. Summarised here
+because §8b is where a reader looks for what outlives the current stage — the
+stages themselves carry the detail:
 
-- **Local model resolution.** `[models]` has keys for `embedding` and
-  `generative` only — vision, audio and OCR are hard-coded string constants, so
-  *a project cannot pin its ASR model today*. Seven surfaces each choose a model
-  by their own rule and none knows the others exist. No network, no new
-  dependency, no ADR; it closes a user-facing gap on its own merits.
-- **A remote/frontier model tier.** Needs an ADR first: it would amend ADR-0006's
-  *"nothing leaves the machine"*, invert ADR-0007's precedence so a committed
-  `roteiro.toml` may **deny but never grant**, and exempt principle 10. The
-  governing conclusion from the investigation: *the local→remote edge is not a
-  routing decision, it is a gate the user opened* — so a learned router is the
-  wrong shape regardless of model quality.
-- **A `roteiro review` LLM mode.** `crates/rto-graph/tests/fixtures/review/`
-  holds 26 adjudicated review comments with verdicts and defect classes, added
-  precisely so a reviewer can be *measured* rather than guessed at. It currently
-  has no consumer, which is how fixtures rot.
+- **Stage 33 — local model resolution.** Closes a user-facing gap on its own
+  merits: a project cannot pin its ASR model today. No network, no new
+  dependency, no ADR.
+- **Stage 34 — remote model tier.** **Blocked on ADR-0019**, which must amend
+  ADR-0006, invert ADR-0007's precedence for one key, and exempt principle 10.
+  Not startable until that ADR is accepted.
+- **Stage 35 — `roteiro review` LLM mode.** Depends on Stage 33. Gives the
+  26-comment adjudicated corpus a consumer before it rots.
 
 ---
 
