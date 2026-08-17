@@ -39,6 +39,89 @@ fn json(out: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).expect("valid JSON")
 }
 
+/// The **maintenance seam reclaims the object cache** (issue #387).
+///
+/// This is the "when does it run" decision, tested where it is made: the same
+/// `--refresh` that sweeps the bounded memory tier, and nowhere else. Not on
+/// store open, and not on `sync` — `sync` is reached from `refresh_for_read` on
+/// every ordinary query, so sweeping there would put deletion back on the read
+/// path the seam exists to keep it off. A plain `roteiro context <key>` therefore
+/// leaves the superseded entry alone, and that is asserted first.
+#[test]
+fn the_maintenance_seam_reclaims_superseded_cache_objects() {
+    let dir = std::env::temp_dir().join(format!("roteiro-ctx-gc-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+    std::fs::write(dir.join("src/lib.rs"), "pub fn only() -> u32 { 1 }\n").expect("write");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    // A refresh syncs (populating the object cache) *and* runs the seam, so the
+    // cache is in its steady post-maintenance state before anything is planted.
+    let first = roteiro(&dir, &["context", "--refresh"]);
+    assert!(first.status.success(), "initial refresh: {first:?}");
+    let objects = dir.join(".git/roteiro/objects");
+    let live = cache_files(&objects);
+    assert!(!live.is_empty(), "the sync should have cached something");
+
+    // What a previous binary left behind: an entry differing from a live one only
+    // in its `-v<version>-` field, at a generation long superseded.
+    let (shard, name) = live.first().expect("a live entry").clone();
+    let (head, tail) = name.rsplit_once("-v").expect("a key carries a version tag");
+    let env = tail.rsplit_once("-e").expect("…and an env tag").1;
+    let superseded = objects.join(&shard).join(format!("{head}-v1-e{env}.json"));
+    std::fs::write(&superseded, br#"{"nodes":[],"edges":[]}"#).expect("plant");
+
+    // A read is not a sweep: the seam is the only thing that deletes.
+    let read = roteiro(&dir, &["context", "file:src/lib.rs"]);
+    assert!(read.status.success(), "an ordinary read: {read:?}");
+    assert!(
+        superseded.exists(),
+        "an ordinary read must not reclaim anything",
+    );
+
+    let out = roteiro(&dir, &["context", "--refresh"]);
+    assert!(out.status.success(), "refresh failed: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("object cache swept: 1 superseded object(s) freed"),
+        "the seam must say what it reclaimed: {text}",
+    );
+    assert!(!superseded.exists(), "the superseded entry must be gone");
+    assert_eq!(
+        cache_files(&objects),
+        live,
+        "and every live entry must survive: {text}",
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Every `<shard>/<stem>.json` under an object-cache root, sorted, as
+/// `(shard, stem)` pairs. Failures panic rather than being skipped: an empty
+/// listing compares equal to another empty listing, so a swallowed read error
+/// would let "every live entry survived" pass having checked nothing.
+fn cache_files(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for shard in std::fs::read_dir(root).expect("read object cache root") {
+        let shard = shard.expect("shard entry");
+        if !shard.file_type().expect("shard file type").is_dir() {
+            continue;
+        }
+        let prefix = shard.file_name().to_string_lossy().into_owned();
+        for entry in std::fs::read_dir(shard.path()).expect("read shard") {
+            let name = entry.expect("cache entry").file_name();
+            let name = name.to_string_lossy();
+            if let Some(stem) = name.strip_suffix(".json") {
+                out.push((prefix.clone(), stem.to_owned()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 #[test]
 fn dependency_change_invalidates_dependent_context() {
     let dir = std::env::temp_dir().join(format!("roteiro-ctx-cli-{}", std::process::id()));

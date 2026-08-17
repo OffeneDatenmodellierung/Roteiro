@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.4"
-last-modified: 2026-08-16
+version: "1.5"
+last-modified: 2026-08-17
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.4 |
+| **Document version** | 1.5 |
 
 ## Reference
 
@@ -79,8 +79,8 @@ unreproducible. It can only coexist with that contract by being *outside* it.
 **2. No *persisted* store is bounded — but an eviction idiom does exist, and we
 follow it.** Nothing in SQLite is capacity-managed: `node_context`
 (`migrations.rs:94-100`) is `(key, fingerprint, json)` with no timestamp, no hit
-counter, no TTL and no LRU; `ObjectCache` (`cache.rs`) has no delete method at all
-and *orphans* stale entries by folding `EXTRACT_VERSION` into the key rather than
+counter, no TTL and no LRU; `ObjectCache` (`cache.rs`) had no delete method at all
+and *orphaned* stale entries by folding `EXTRACT_VERSION` into the key rather than
 deleting them; telemetry rotates by time only, with size-based rotation explicitly
 deferred (`telemetry.rs:81-82`). For *persistent* staleness the house idiom is
 **content-addressed key invalidation, not expiry**.
@@ -96,6 +96,16 @@ This ADR therefore does **not** invent a policy: it **ports an existing one to
 disk**. The consequences are concrete — the cache tier is bounded by *bytes*
 rather than row count, and inherits the always-keep-the-MRU rule, so a session's
 just-written entry can never be evicted by its own sweep.
+
+> **Since v1.5** (issue #387): `ObjectCache` orphans no longer *stay*. It gained
+> [[crates/rto-graph/src/cache.rs#ObjectCache::sweep]], driven by
+> [[crates/rto-graph/src/sync.rs#sweep_superseded]] at this ADR's own maintenance
+> seam. That completes the house idiom rather than departing from it — key
+> invalidation is still what makes an entry stale, and the sweep only *collects*
+> what invalidation already orphaned. It is deliberately **not** a byte budget:
+> an entry whose generation has been superseded is provably unreachable, so no
+> ordering over live entries has to be invented and none is evicted. The clock
+> problem §3 describes is exactly why that mattered.
 
 **3. There is no clock to rank by.** Only two timestamps exist — `imports.imported_at`
 and `schema_migrations.applied_at` — and **neither is read by any query**; no
@@ -379,6 +389,7 @@ decision here, all of it recorded in the build plan's Stage 25 entry:
 
 | Version | Date | Notes |
 |---------|------|-------|
+| 1.5 | 2026-08-17 | **One survey fact in §*Context* went out of date and is corrected on the change that made it false** (issue #387). `ObjectCache` no longer "has no delete method at all": it gained a sweep, and the maintenance seam this ADR established for the memory tier now drives both caches. **No decision here changed** — the sweep is the *collection* half of content-addressed key invalidation, not an expiry policy, and it is explicitly not the byte budget §2 ported from `ModelCache`: a superseded extractor generation is provably unreachable, so nothing live is ranked, ordered or evicted, which is what let it avoid the missing-clock problem §3 records. The seam gains a second sweep and no second maintenance concept. |
 | 1.4 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
 | 1.0 | 2026-08-15 | For Review. Two-tier artifact store for durable agent-learned knowledge: episodic (unbounded, never auto-evicted, following the `imports` precedent) and a byte-budget-bounded transient cache (porting `rto-llama`'s `ModelCache` LRU to disk). Depreciation by evidence — anchor drift and explicit supersession — not by clock; decay computed at retrieval, never stored. Nothing enters `nodes`/`edges`; no `Provenance` variant; `EXTRACT_VERSION` unchanged. Rejects `NodeKind::Other("memory")`, authored-with-metadata, and a single TTL'd table. Left two questions to the reviewer: the cache byte budget, and what `scope` means. |
 | 1.3 | 2026-08-16 | **Two clarifications from PR #340 review; no behaviour changed.** (1) States the bound that makes "demote, never delete" true rather than intended: `anchor_penalty` floors at `0.25` and no `AnchorState` may ever be `0.0`, since a zero weight is deletion wearing a ranking's clothes. Names the one weight that may reach zero — `base_confidence`, and only when a writer states it — and the asymmetry behind that: what Roteiro *infers* never silences a record, what the operator *states* is honoured. Records that a zero score still ranks rather than removes, because nothing filters on it. (2) Notes that the cache sweep reads only the eviction columns and never a payload, which is what `agent_cache.bytes` was introduced for; `hits` is excluded too, being no part of the eviction order. |

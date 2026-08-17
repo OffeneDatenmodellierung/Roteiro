@@ -3624,7 +3624,9 @@ fn report_download_event(event: rto_graph::DownloadEvent) {
 }
 
 /// Format a byte count for a human: `1.4 GiB`, `812.0 MiB`, `947 B`.
-#[cfg(feature = "models")]
+///
+/// No longer gated on `models`: the object-cache sweep reports reclaimed bytes in
+/// every build (`object_sweep_line`), so this is reachable without it.
 fn human_bytes(bytes: u64) -> String {
     #[expect(
         clippy::cast_precision_loss,
@@ -5152,6 +5154,21 @@ fn first_line(body: &str, max: usize) -> String {
 /// contexts with the current graph — rebuilding stale ones and pruning entries
 /// for deleted nodes. The cache is dependency-aware: a change to a node or any of
 /// its neighbours invalidates its cached context (see `rto_graph::context`).
+/// One line for what the object-cache sweep reclaimed, naming what it kept as
+/// well as what it freed. Both halves are load-bearing: "0 objects freed" on a
+/// cache holding a single generation is the correct, healthy answer, and reads
+/// as a failure without the retained count beside it.
+fn object_sweep_line(swept: &rto_graph::ObjectSweep) -> String {
+    format!(
+        "object cache swept: {} superseded object(s) freed ({}), {} retained ({}) \
+         across the current and previous extractor generation",
+        swept.removed,
+        human_bytes(swept.freed_bytes),
+        swept.retained,
+        human_bytes(swept.retained_bytes),
+    )
+}
+
 fn run_context(
     ingest: rto_graph::IngestConfig,
     key: Option<String>,
@@ -5172,6 +5189,14 @@ fn run_context(
         // to grip it by, so `roteiro memory forget` stays the only thing that
         // removes a remembered record.
         let swept = store.sweep_agent_cache(resolve_cache_budget(None)?)?;
+        // The same seam, the other cache. The on-disk object cache is the larger
+        // of the two by an order of magnitude and had no reclaim at all: an
+        // `EXTRACT_VERSION` bump orphaned every entry and nothing ever removed one
+        // (issue #387). It hangs here rather than growing a second maintenance
+        // concept, and for the same reason the tier sweep does — `sync` is reached
+        // from `refresh_for_read` on every ordinary query, so sweeping there would
+        // put deletion back on the read path this seam exists to keep it off.
+        let reclaimed = rto_graph::sweep_superseded(&cache, rto_graph::DEFAULT_KEEP_GENERATIONS)?;
         if json {
             // The long-standing shape, unchanged: callers already parse this
             // object, and wrapping it for everyone would be a breaking change to
@@ -5193,6 +5218,9 @@ fn run_context(
                     },
                 );
             }
+            if reclaimed.removed > 0 || reclaimed.failed > 0 {
+                eprintln!("{}", object_sweep_line(&reclaimed));
+            }
         } else {
             println!(
                 "context cache refreshed: {} rebuilt, {} reused, {} pruned",
@@ -5206,6 +5234,14 @@ fn run_context(
                 println!(
                     "  still over budget — what remains is pinned (this generation's own \
                      work, and the most-recently-used entry, which is always kept)"
+                );
+            }
+            println!("{}", object_sweep_line(&reclaimed));
+            if reclaimed.failed > 0 {
+                println!(
+                    "  {} superseded object(s) could not be deleted — check permissions on \
+                     the cache directory",
+                    reclaimed.failed,
                 );
             }
         }

@@ -1864,13 +1864,30 @@ nothing about this exception makes them cheaper to do separately.
 **What the bump cost, measured** on a store extracted at version 11 and then
 opened by the version-12 binary: **all 275 cached fact sets re-extracted** (every
 tracked blob — the base version is unconditional, so nothing survives the key
-change), 3.2 s cold against 0.17 s warm on a debug build. The object cache is
-write-and-keep with no eviction (`crates/rto-graph/src/cache.rs`), so the
-superseded version-11 entries stay on disk: `.git/roteiro/objects` went
-**4.8 MiB → 9.7 MiB** and does not shrink again. That is per repository, per
-user, and it is the whole price —
-`.git/roteiro` is derived, so deleting it is always safe if a user would rather
-reclaim the space than keep the old entries.
+change), 3.2 s cold against 0.17 s warm on a debug build. The disk half of that
+price was open-ended when this was written: the object cache was write-and-keep
+with no eviction, so the superseded version-11 entries stayed on disk —
+`.git/roteiro/objects` went **4.8 MiB → 9.7 MiB** and did not shrink again, per
+repository, per user, for every bump.
+
+**That half is now bounded** (issue #387). `sweep_superseded`
+(`crates/rto-graph/src/sync.rs`) runs at the maintenance seam and deletes the
+generations a bump orphaned, keeping the current one and — by
+`DEFAULT_KEEP_GENERATIONS` — one behind it, so switching between a branch that
+bumped and the `main` it will merge into stays a cache hit. **So a bump costs CPU
+once and disk once, not disk for ever**, which is what the batching rule in this
+section already assumed it cost. Measured on a copy of this repository's own
+cache, where four generations had accumulated (9, 10, 11 and 12): **3,812 objects
+/ 71.6 MB → 1,876 / 40.0 MB** in one pass, and the live set verified intact by
+the only test that matters — a sync into an empty store afterwards reported 278
+blobs, **0 extracted, 278 cached**. Generation 12 alone is 594 objects / 10.0 MB,
+which is what `keep_generations: 0` leaves; the 30 MB between the two is the
+retained generation 11, and is what the insurance costs. Two things are
+deliberately *not*
+reclaimed and stay a known cost: the environment tag (`-e…`) is a hash with no
+ordering, so no tag can be shown to supersede another, and the live set itself is
+still unbounded. `.git/roteiro` remains derived, so deleting the lot is still
+always safe.
 
 ### Stages 33–35 — status
 

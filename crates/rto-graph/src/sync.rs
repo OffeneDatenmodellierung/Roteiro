@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::cache::{CacheError, ObjectCache};
+use crate::cache::{CacheError, ObjectCache, ObjectSweep};
 use crate::extract::Extractor;
 use crate::git::{GitError, Repo};
 use crate::store::StoreError;
@@ -784,6 +784,117 @@ fn cache_key(path: &str, oid: &str, env: u64) -> String {
     )
 }
 
+/// How many superseded extractor generations [`sweep_superseded`] keeps behind
+/// the current one by default: **one**.
+///
+/// Not clutter, and not free — it is a trade against the one workflow this
+/// project actually has. Roteiro is developed *inside* the repository it indexes,
+/// so a branch that bumps [`crate::extract::EXTRACT_VERSION`] and the `main` it
+/// will merge into share one `.git/roteiro` (the cache is under the **common**
+/// git dir). With no retention, one maintenance pass on the branch deletes
+/// `main`'s whole live set, and every switch back pays a full cold extraction;
+/// keeping the previous generation makes that switch free. Rolling a release back
+/// one version gets the same protection as a side effect.
+///
+/// It is bounded, which is the part that matters: the complaint being answered
+/// (#387) is *unbounded* accumulation — four generations resident and counting —
+/// and the steady state here is two, whatever happens next.
+pub const DEFAULT_KEEP_GENERATIONS: u32 = 1;
+
+/// Delete the object-cache entries left behind by **superseded** extractor
+/// generations, keeping the current one and `keep_generations` behind it.
+///
+/// # Why a sweep and not a byte budget
+///
+/// Because a proof is available here and nowhere else. [`cache_key`] writes the
+/// extractor generation into every key, and that generation only ever moves
+/// forward, so an entry tagged with an older one *cannot be asked for* by any
+/// binary at or beyond the current generation — no bookkeeping, no recency, no
+/// guessing. A byte budget (the Stage 25 / `rto-llama` `ModelCache` precedent,
+/// ported to disk by [`crate::Store::sweep_agent_cache`]) would have had to
+/// invent an ordering over live entries and would then evict *reachable* ones by
+/// design: on a cache shared by every worktree that means one worktree silently
+/// paying for another's working set, and it would need a last-used column this
+/// store has no clock to fill (ADR-0013 §3). It buys a bound this does not give —
+/// the live set itself is unbounded, and a repository large enough for that to
+/// hurt still needs one. That is a second policy on top of this one, not an
+/// alternative to it, and nothing has yet measured a need for it.
+///
+/// # What "superseded" is allowed to mean
+///
+/// **Only the generation**, i.e. [`crate::extract::EXTRACT_BASE_VERSION`]. The
+/// other two things folded into a key are deliberately *not* eligible:
+///
+/// - The **feature namespace** ([`crate::extract::FEATURE_NAMESPACE_STRIDE`] and
+///   above). A default build and an `--all-features` build write different
+///   `EXTRACT_VERSION`s at the *same* generation, and both are live at once —
+///   `cargo test --workspace` and `cargo test --all-features` on one repository
+///   are exactly that. Sweeping on the whole version number would have each build
+///   delete the other's cache on sight, and the two would take turns
+///   re-extracting for ever. So the namespace is masked off, and every namespace
+///   at a kept generation is kept.
+/// - The **environment tag** (`-e…`: the installed media-model and ingestion
+///   identity). It is a hash — unordered, so no tag can be shown to supersede
+///   another, and several are legitimately live at once (a build without
+///   `image-ocr` tags `0`; a build with it and a model installed does not).
+///   Reclaiming those would need the ordering the paragraph above rejected. They
+///   are left alone, and the cost of that is stated rather than hidden: env churn
+///   *within* one generation is not reclaimed by this pass.
+///
+/// # Why this is safe while other worktrees are live
+///
+/// The rule reads only the key, never the repository — so it does not need to
+/// know what any other worktree has checked out, and cannot be wrong about it. A
+/// reachability rule phrased over *blob ids* would need exactly that knowledge,
+/// and would be the dangerous version of this function: an oid unreachable from
+/// one worktree's `HEAD` is routinely live in another's. This one never asks.
+///
+/// Its only cross-worktree effect is on a worktree running an **older** binary,
+/// which it can cost a re-extraction and nothing else — the cache is derived, so
+/// a miss is slow, never wrong. The asymmetry runs one way: an entry from a
+/// *newer* generation than the sweeper's is retained, because `generation >=
+/// oldest_kept` holds for anything ahead. Two binaries of different ages can
+/// therefore never take turns deleting each other's work.
+///
+/// # Errors
+/// Returns [`CacheError`] if the cache cannot be listed. See
+/// [`ObjectCache::sweep`] for what a failure to delete an individual entry does
+/// (it is counted, not raised).
+pub fn sweep_superseded(
+    cache: &ObjectCache,
+    keep_generations: u32,
+) -> Result<ObjectSweep, CacheError> {
+    let oldest_kept = crate::extract::EXTRACT_BASE_VERSION.saturating_sub(keep_generations);
+    cache.sweep(&|key| match key_generation(key) {
+        // Not a key this module writes — a foreign or future format. Unreadable
+        // is not the same as unreachable, and only one of the two may be deleted.
+        None => true,
+        Some(generation) => generation >= oldest_kept,
+    })
+}
+
+/// The extractor **generation** encoded in a [`cache_key`] key, or `None` if the
+/// key does not carry one in the exact shape `cache_key` writes.
+///
+/// The parse is strict on purpose: this is the predicate a delete hangs off, so
+/// every doubt has to resolve to `None`, which retains. It therefore requires the
+/// whole `-v<digits>-e<16 hex digits>` tail, rejects a sign that `u32::from_str`
+/// would otherwise accept (`+12`), and rejects an environment tag of the wrong
+/// width — anything merely *shaped like* a key is left alone.
+fn key_generation(key: &str) -> Option<u32> {
+    let (head, env) = key.rsplit_once("-e")?;
+    if env.len() != 16 || !env.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (_, version) = head.rsplit_once("-v")?;
+    if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Mask off the feature namespace; what remains is the generation. Sound while
+    // the base stays below the stride, which `extract.rs` asserts at compile time.
+    Some(version.parse::<u32>().ok()? % crate::extract::FEATURE_NAMESPACE_STRIDE)
+}
+
 /// FNV-1a (64-bit). Dependency-free and deterministic; used only to derive
 /// cache filenames, so it needs no cryptographic properties.
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -797,7 +908,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key, resolve_calls};
+    use super::{ObjectCache, cache_key, key_generation, resolve_calls};
     use crate::{EdgeKind, FactSet, Node, NodeKind};
 
     fn fn_node(key: &str, name: &str, calls: &[&str]) -> Node {
@@ -862,5 +973,121 @@ mod tests {
             cache_key("src/a.rs", oid, 0)
                 .contains(&format!("-v{}", crate::extract::EXTRACT_VERSION))
         );
+    }
+
+    /// The sweep predicate's one input. The round trip is what makes the sweep
+    /// safe: a key this module just wrote must decode to *this* generation, or a
+    /// pass at the current version would delete its own live entries.
+    #[test]
+    fn key_generation_round_trips_the_key_this_module_writes() {
+        let key = cache_key("src/a.rs", "abc123", 0);
+        assert_eq!(
+            key_generation(&key),
+            Some(crate::extract::EXTRACT_BASE_VERSION),
+            "a key written now decodes to the current generation: {key}",
+        );
+        // …and so does the same generation in another feature build's namespace,
+        // which is the whole reason the namespace is masked off rather than
+        // compared. Both are live at once on a machine that runs the default and
+        // `--all-features` test suites over one repository.
+        let base = crate::extract::EXTRACT_BASE_VERSION;
+        for namespace in [100, 200, 300, 400, 500, 600, 700] {
+            let other = format!(
+                "abc123-0000000000000000-v{}-e0000000000000000",
+                base + namespace
+            );
+            assert_eq!(
+                key_generation(&other),
+                Some(base),
+                "namespace {namespace} is not a different generation",
+            );
+        }
+    }
+
+    /// Every doubt resolves to `None`, and `None` retains. These are the strings
+    /// that must *not* be read as a generation — each one would otherwise put a
+    /// file nobody can identify in reach of a delete.
+    #[test]
+    fn key_generation_refuses_anything_it_did_not_write() {
+        for not_a_key in [
+            "",
+            "abc123",                                                 // no tail at all
+            "abc123-0000000000000000-v12",                            // no env tag
+            "abc123-0000000000000000-e0000000000000000",              // no version tag
+            "abc123-0000000000000000-v12-e00000000000000",            // env too short
+            "abc123-0000000000000000-v12-e00000000000000000",         // env too long
+            "abc123-0000000000000000-v12-egggggggggggggggg",          // env not hex
+            "abc123-0000000000000000-v+12-e0000000000000000",         // `+12` parses as 12
+            "abc123-0000000000000000-v-e0000000000000000",            // empty version
+            "abc123-0000000000000000-v1 2-e0000000000000000",         // not all digits
+            "abc123-0000000000000000-v99999999999-e0000000000000000", // overflows u32
+        ] {
+            assert_eq!(
+                key_generation(not_a_key),
+                None,
+                "`{not_a_key}` must not be read as a generation",
+            );
+        }
+    }
+
+    /// The sweep's contract, on a cache holding one entry per generation and
+    /// namespace: the current generation survives in **every** namespace, the
+    /// retained generations survive, older ones go, and a *newer* one — written
+    /// by a binary ahead of this one sharing the same common git dir — is never
+    /// touched, whatever the retention.
+    #[test]
+    fn sweep_superseded_keeps_current_future_and_kept_generations() {
+        let base = crate::extract::EXTRACT_BASE_VERSION;
+        let dir = std::env::temp_dir().join(format!("roteiro-gc-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let cache = ObjectCache::open(&dir).expect("open");
+
+        let key = |version: u32| format!("abc123-0000000000000000-v{version}-e0000000000000000");
+        let ancient = key(base - 2);
+        let previous = key(base - 1);
+        let current = key(base);
+        let current_all_features = key(base + 700);
+        let future = key(base + 1);
+        let foreign = "not-a-roteiro-cache-key".to_owned();
+        for k in [
+            &ancient,
+            &previous,
+            &current,
+            &current_all_features,
+            &future,
+            &foreign,
+        ] {
+            cache.put(k, &FactSet::new()).expect("put");
+        }
+
+        // Keeping one generation back: only `base - 2` is unreachable.
+        let swept =
+            super::sweep_superseded(&cache, super::DEFAULT_KEEP_GENERATIONS).expect("sweep");
+        assert_eq!(swept.removed, 1, "{swept:?}");
+        assert!(!cache.contains(&ancient));
+        for k in [
+            &previous,
+            &current,
+            &current_all_features,
+            &future,
+            &foreign,
+        ] {
+            assert!(cache.contains(k), "`{k}` must survive a keep-1 sweep");
+        }
+
+        // Keeping none: the previous generation goes too, and nothing else does.
+        let swept = super::sweep_superseded(&cache, 0).expect("sweep");
+        assert_eq!(swept.removed, 1, "{swept:?}");
+        assert!(!cache.contains(&previous));
+        for k in [&current, &current_all_features, &future, &foreign] {
+            assert!(cache.contains(k), "`{k}` must survive a keep-0 sweep");
+        }
+
+        // A repeat pass is a no-op: nothing reachable is ever swept "eventually".
+        let swept = super::sweep_superseded(&cache, 0).expect("sweep");
+        assert_eq!(swept.removed, 0, "{swept:?}");
+        assert_eq!(swept.retained, 4, "{swept:?}");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
