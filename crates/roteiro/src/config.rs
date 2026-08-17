@@ -341,13 +341,119 @@ pub struct LinkDecl {
 }
 
 /// `[models]` — override the registry tier defaults for this project.
+///
+/// One key per model **kind**, not per command: `generative` governs both `spec
+/// draft` and the Ask panel, because they want the same kind of model and a
+/// project that pins one and not the other has almost certainly made a mistake.
+/// Which key governs which surface is [`rto_graph::ModelTask::config_key`], and
+/// `roteiro config` prints the whole mapping resolved.
+///
+/// `vision`, `audio` and `ocr` arrived in Stage 33. Until then those three models
+/// were compiled-in string constants, so **a project could not pin its ASR model
+/// at all** — the setting simply did not exist. Every key is still optional and
+/// unset still means exactly what it meant before: the same model, chosen the
+/// same way.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelsConfig {
-    /// Registry name of the embedding model `infer --model` defaults to.
+    /// Registry name of the embedding model `roteiro infer` embeds nodes with.
     pub embedding: Option<String>,
-    /// Registry name of the generative model `spec draft` defaults to.
+    /// Registry name of the generative model `spec draft` and the Ask panel
+    /// generate with.
     pub generative: Option<String>,
+    /// Registry name of the vision-language model `media build` describes images
+    /// with.
+    pub vision: Option<String>,
+    /// Registry name of the audio model `media build` transcribes speech with.
+    pub audio: Option<String>,
+    /// Registry name of the OCR model `sync` reads literal image text with.
+    pub ocr: Option<String>,
+}
+
+/// The one reading of a `[models]` value: surrounding whitespace is not part of a
+/// registry name, and a value with nothing left after trimming names no model, so
+/// the key is unset.
+///
+/// **The resolver's semantics, adopted here rather than the other way round**,
+/// because the resolver's are the ones that decide what actually runs
+/// ([`rto_graph::ModelPins::by_key`]). A reporting surface that disagreed with
+/// them would be describing a run that did not happen.
+fn model_pin(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|value| !value.is_empty())
+}
+
+impl ModelsConfig {
+    /// Drop values that name no model, so every downstream surface sees one
+    /// answer for "is this key set?".
+    ///
+    /// Applied once, where a layer is parsed ([`read_config`]), rather than at
+    /// each point of use — there are four of those (`roteiro config`'s key list,
+    /// its per-surface resolution table, the `--json` echo of the effective
+    /// config, and the resolver), and normalising at the point of use would have
+    /// meant four implementations of one rule with nothing holding them level.
+    ///
+    /// That is not hypothetical: `[models] audio = "   "` was reported as **set**
+    /// and attributed to a layer by two of those surfaces while the other two
+    /// resolved it as **unset** (PR #379 review). Normalising the parsed value
+    /// makes the four agree by construction instead of by coincidence.
+    fn normalize(&mut self) {
+        for slot in [
+            &mut self.embedding,
+            &mut self.generative,
+            &mut self.vision,
+            &mut self.audio,
+            &mut self.ocr,
+        ] {
+            *slot = slot
+                .take()
+                .and_then(|value| model_pin(Some(&value)).map(ToOwned::to_owned));
+        }
+    }
+
+    /// The value of one `[models]` key by name, so a caller iterating the
+    /// resolver's tasks can report *which layer* set the key governing each one
+    /// without a match arm per key at every call site.
+    ///
+    /// Reads through [`model_pin`], so it gives the same answer as the resolver
+    /// even for a `ModelsConfig` that never went through [`ModelsConfig::normalize`]
+    /// — one built in a test, say. Belt and braces on the parsed path, and the
+    /// only guard on every other path.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&str> {
+        model_pin(match key {
+            "embedding" => self.embedding.as_deref(),
+            "generative" => self.generative.as_deref(),
+            "vision" => self.vision.as_deref(),
+            "audio" => self.audio.as_deref(),
+            "ocr" => self.ocr.as_deref(),
+            _ => None,
+        })
+    }
+
+    /// Resolve to the graph-layer pins the resolver reads, in the same shape as
+    /// [`IngestConfig::resolve`]: this layer owns precedence between config
+    /// files, `rto-graph` owns what the resulting names *mean*.
+    ///
+    /// Nothing is validated here. A name is checked against the registry when a
+    /// task is resolved, so `roteiro config` can *report* a bad pin instead of
+    /// refusing to run — which is the command an operator reaches for when a pin
+    /// is not doing what they expected.
+    ///
+    /// Gated on `models` because the resolver is: without the registry there is
+    /// nothing for a name to resolve *to*. The keys themselves still parse, and
+    /// `roteiro config` still shows them, so a config shared with a fuller build
+    /// is never rejected by a leaner one (ADR-0007's forward-compatibility rule).
+    #[cfg(feature = "models")]
+    #[must_use]
+    pub fn resolve(&self) -> rto_graph::ModelPins {
+        rto_graph::ModelPins {
+            embedding: self.embedding.clone(),
+            generative: self.generative.clone(),
+            vision: self.vision.clone(),
+            audio: self.audio.clone(),
+            ocr: self.ocr.clone(),
+        }
+    }
 }
 
 /// `[ingest]` — which blob content `roteiro sync` extracts for embedding. Each
@@ -581,6 +687,9 @@ impl Config {
                     .generative
                     .clone()
                     .or(self.models.generative.clone()),
+                vision: over.models.vision.clone().or(self.models.vision.clone()),
+                audio: over.models.audio.clone().or(self.models.audio.clone()),
+                ocr: over.models.ocr.clone().or(self.models.ocr.clone()),
             },
             infer: InferConfig {
                 min_confidence: over.infer.min_confidence.or(self.infer.min_confidence),
@@ -900,7 +1009,14 @@ fn read_config(path: Option<&Path>) -> anyhow::Result<Config> {
     };
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading config {}: {e}", path.display()))?;
-    toml::from_str(&text).map_err(|e| anyhow::anyhow!("parsing config {}: {e}", path.display()))
+    let mut config: Config = toml::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parsing config {}: {e}", path.display()))?;
+    // The one place a `[models]` value is interpreted. Both provenance layers and
+    // the effective config are built from here, so normalising once means the key
+    // list, the resolution table, the `--json` echo and the resolver cannot
+    // disagree about whether a key is set (see [`ModelsConfig::normalize`]).
+    config.models.normalize();
+    Ok(config)
 }
 
 /// Roteiro's home directory: `$ROTEIRO_HOME` when set, else `~/.roteiro`. The one
@@ -955,6 +1071,101 @@ mod tests {
     use super::{
         Config, NamedWorkspace, WorkspaceConfig, expand_tilde_with, find_project_config, load_from,
     };
+
+    /// **The two sides of a `[models]` key must agree about whether it is set.**
+    ///
+    /// One side reports (`roteiro config`'s key list and its layer labels), the
+    /// other decides (`rto_graph`'s resolver). They read the same string through
+    /// different code, and they diverged: `[models] audio = "   "` was reported as
+    /// set and attributed to a layer while resolution treated it as unset (PR
+    /// #379 review). A fix without this assertion only resets the clock — the two
+    /// implementations are still separate, and nothing else notices when one
+    /// moves.
+    ///
+    /// So this drives *both* over the same table and asserts they answer
+    /// identically: set-or-not, and — when set — the same name, since trimming
+    /// changes the value as well as its presence.
+    #[cfg(feature = "models")]
+    #[test]
+    fn a_models_key_is_reported_exactly_as_it_is_resolved() {
+        use rto_graph::{ModelSource, ModelTask};
+
+        // `(key, task)` for the three keys whose model is a real registry entry
+        // this test can name. `embedding` is deliberately included: its *default*
+        // is not a model, but a *pin* on it resolves like any other.
+        let keys = [
+            ("generative", ModelTask::Draft, "qwen3-8b"),
+            ("audio", ModelTask::Transcribe, "voxtral-mini-3b"),
+            ("embedding", ModelTask::Embed, "bge-base-en-v1.5"),
+        ];
+        for (key, task, model) in keys {
+            for raw in [
+                "",
+                "   ",
+                "\t\n ",
+                model,
+                &format!("  {model}  "),
+                &format!("{model}\t"),
+            ] {
+                let mut cfg = super::ModelsConfig::default();
+                let slot = match key {
+                    "generative" => &mut cfg.generative,
+                    "audio" => &mut cfg.audio,
+                    _ => &mut cfg.embedding,
+                };
+                *slot = Some(raw.to_owned());
+
+                let reported = cfg.get(key);
+                let resolved = rto_graph::resolve_model_with(task, &cfg.resolve())
+                    .expect("every value here is either blank or a valid model");
+
+                assert_eq!(
+                    reported.is_some(),
+                    resolved.source == ModelSource::Pinned,
+                    "{key} = {raw:?}: reported set={:?} but resolved source={:?}",
+                    reported.is_some(),
+                    resolved.source,
+                );
+                if let Some(reported) = reported {
+                    assert_eq!(
+                        Some(reported),
+                        resolved.model,
+                        "{key} = {raw:?}: reported and resolved names differ",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The normalisation happens where a layer is **parsed**, so it reaches the
+    /// surfaces that never call `get` — the `--json` echo of the effective config
+    /// serialises the struct directly, and would otherwise print `"   "` for a key
+    /// the resolution table in the same document calls unset.
+    #[test]
+    fn a_blank_pin_is_dropped_when_the_layer_is_parsed() {
+        let dir = std::env::temp_dir().join(format!("roteiro-blank-pin-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let project = dir.join("roteiro.toml");
+        std::fs::write(
+            &project,
+            "[models]\naudio = \"   \"\ngenerative = \"  qwen3-8b  \"\n",
+        )
+        .expect("write");
+
+        let loaded = load_from(None, Some(project)).expect("load");
+        // Not `Some("   ")`: the value reached the struct itself, so serde sees
+        // the same thing every other surface does.
+        assert_eq!(loaded.effective.models.audio, None);
+        assert_eq!(loaded.project.models.audio, None);
+        // A real name survives, trimmed — the same string the resolver looks up.
+        assert_eq!(
+            loaded.effective.models.generative.as_deref(),
+            Some("qwen3-8b")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn project_config_is_repo_root_bounded() {

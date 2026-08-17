@@ -46,6 +46,11 @@ pub mod media;
 mod memory;
 mod migrations;
 mod model;
+// Which model serves which task, and **why** (Stage 33). Deliberately in *this*
+// crate: `gix` is pinned here without transports, so a resolver that decides
+// which model runs structurally cannot grow a "check for a newer one" call.
+#[cfg(feature = "models")]
+pub mod model_choice;
 #[cfg(feature = "models")]
 mod models;
 mod provenance;
@@ -101,6 +106,12 @@ pub use memory::{
     cache_budget_bytes,
 };
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
+#[cfg(feature = "models")]
+pub use model_choice::{
+    DEFAULT_GENERATIVE, DEFAULT_OCR, ModelChoice, ModelChoiceError, ModelPins, ModelSource,
+    ModelTask, TASKS as MODEL_TASKS, resolve as resolve_model, resolve_all_with as resolve_models,
+    resolve_with as resolve_model_with, set_model_pins,
+};
 #[cfg(feature = "models")]
 pub use models::{
     DownloadError, DownloadEvent, ModelFile, ModelKind, ModelRole, ModelSpec, ModelVariant,

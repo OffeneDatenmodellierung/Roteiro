@@ -1200,6 +1200,15 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    // Publish the `[models]` pins to the resolver, once, before any command picks
+    // a model (Stage 33). A process-wide slot rather than a threaded parameter
+    // because the OCR pin has to reach `ocr_content`, which runs per blob deep
+    // inside extraction — exactly the reason `[paths] model_store` above is set
+    // the same way. Nothing is validated here: a name is checked when a task is
+    // resolved, so `roteiro config` can *report* a bad pin rather than being the
+    // one command a bad pin stops you from running.
+    #[cfg(feature = "models")]
+    rto_graph::set_model_pins(cfg.effective.models.resolve());
     // Own the process's single llama.cpp backend for the rest of `main` (issue
     // #296). Declared **before** the media guard below precisely so that it drops
     // *after* it: Rust drops locals in reverse declaration order, and llama.cpp
@@ -1402,7 +1411,15 @@ fn emit_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
 /// (`project` / `user` / `default`) — the answer to "why did it use that?".
 fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
     if json {
-        emit_json(&loaded.effective)?;
+        // The effective config, plus one **added** top-level key carrying the
+        // model resolution. Added rather than nested: every existing path
+        // (`infer.min_confidence`, `debt.ignore`, …) is where it was, so a
+        // consumer written against the old shape keeps working.
+        let mut value = serde_json::to_value(&loaded.effective)?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("model_resolution".to_owned(), model_resolution_json(loaded));
+        }
+        emit_json(&value)?;
         return Ok(());
     }
     println!(
@@ -1429,17 +1446,7 @@ fn print_config_sections(loaded: &config::Loaded) {
     let source = provenance;
     let e = &loaded.effective;
     let (p, u) = (&loaded.project, &loaded.user);
-    println!("\n[models]");
-    println!(
-        "  embedding  = {:?}  ({})",
-        e.models.embedding,
-        source(p.models.embedding.is_some(), u.models.embedding.is_some())
-    );
-    println!(
-        "  generative = {:?}  ({})",
-        e.models.generative,
-        source(p.models.generative.is_some(), u.models.generative.is_some())
-    );
+    print_models_section(loaded);
     println!("[infer]");
     println!(
         "  min_confidence = {:?}  ({})",
@@ -1513,6 +1520,149 @@ fn print_config_sections(loaded: &config::Loaded) {
     print_debt_section(loaded);
     print_telemetry_section(e, p, u);
     print_workspace_section(e, p, u);
+}
+
+/// Print `[models]`: the five keys as set, each with the layer that set it, then
+/// the resolution table saying what those keys *did*.
+///
+/// Its own function because the two halves answer different questions — what is
+/// configured, and what is used — and because the section is now five keys and
+/// six surfaces, which is most of a screen on its own.
+fn print_models_section(loaded: &config::Loaded) {
+    let e = &loaded.effective;
+    let (p, u) = (&loaded.project, &loaded.user);
+    println!("\n[models]");
+    for (label, key) in [
+        ("embedding ", "embedding"),
+        ("generative", "generative"),
+        ("vision    ", "vision"),
+        ("audio     ", "audio"),
+        ("ocr       ", "ocr"),
+    ] {
+        println!(
+            "  {label} = {:?}  ({})",
+            e.models.get(key),
+            provenance(p.models.get(key).is_some(), u.models.get(key).is_some())
+        );
+    }
+    print_model_resolution(loaded);
+}
+
+/// The model resolution as JSON: one entry per surface, each carrying the model,
+/// the rule, the layer a pin came from, and whether the weights are on disk — or
+/// the error, for a key that cannot be honoured.
+///
+/// The same content as the human table, because a `--json` consumer asking "why
+/// did it use that model?" is asking the same question and must not have to parse
+/// prose for the answer.
+#[cfg(feature = "models")]
+fn model_resolution_json(loaded: &config::Loaded) -> serde_json::Value {
+    let pins = loaded.effective.models.resolve();
+    let entries: Vec<serde_json::Value> = rto_graph::resolve_models(&pins)
+        .into_iter()
+        .map(|(task, result)| match result {
+            Ok(choice) => serde_json::json!({
+                "task": task.as_str(),
+                "surface": task.surface(),
+                "config_key": task.config_key(),
+                "model": choice.model,
+                "source": choice.source.as_str(),
+                "layer": (choice.source == rto_graph::ModelSource::Pinned).then(|| provenance(
+                    loaded.project.models.get(task.config_key()).is_some(),
+                    loaded.user.models.get(task.config_key()).is_some(),
+                )),
+                "installed": choice.installed,
+                "why": choice.why(),
+            }),
+            Err(err) => serde_json::json!({
+                "task": task.as_str(),
+                "surface": task.surface(),
+                "config_key": task.config_key(),
+                "error": err.to_string(),
+            }),
+        })
+        .collect();
+    serde_json::Value::Array(entries)
+}
+
+/// Without the registry there is nothing to resolve against; an empty array says
+/// "nothing resolved" without inventing entries that were never computed.
+#[cfg(not(feature = "models"))]
+fn model_resolution_json(_loaded: &config::Loaded) -> serde_json::Value {
+    serde_json::Value::Array(Vec::new())
+}
+
+/// Print **which model serves each surface, and why** — the resolution table
+/// (Stage 33).
+///
+/// The five `[models]` keys printed above say what was *set*. Six surfaces
+/// consume them, two of those share a key, and three of them had no key at all
+/// before this stage — so the keys alone do not answer the question ADR-0007
+/// promised `roteiro config` would answer: *why did it use that model?* This
+/// does, in the same spirit as the per-pattern `[debt] ignore` provenance below:
+/// report the thing the operator actually observes, not only the input it came
+/// from.
+///
+/// A key that cannot be honoured prints as its own error rather than being
+/// suppressed or replaced by a default. This is the command someone runs
+/// *because* a pin is not doing what they expected, so it is the one command a
+/// bad pin must not stop — every other model surface refuses outright.
+#[cfg(feature = "models")]
+fn print_model_resolution(loaded: &config::Loaded) {
+    let pins = loaded.effective.models.resolve();
+    println!("  resolution — the model each surface uses, and the rule that chose it:");
+    for (task, result) in rto_graph::resolve_models(&pins) {
+        let key = task.config_key();
+        match result {
+            Ok(choice) => {
+                // Where a pin came from, on the same `project`/`user` terms as
+                // every other value in this report.
+                let layer = if choice.source == rto_graph::ModelSource::Pinned {
+                    format!(
+                        " in {} config",
+                        provenance(
+                            loaded.project.models.get(key).is_some(),
+                            loaded.user.models.get(key).is_some(),
+                        )
+                    )
+                } else {
+                    String::new()
+                };
+                let state = if choice.model.is_some() && !choice.installed {
+                    "  [not installed]"
+                } else {
+                    ""
+                };
+                println!(
+                    "    {:<12}{:<30}{:<34}  ({}{}){state}",
+                    task.as_str(),
+                    task.surface(),
+                    choice.label(),
+                    choice.why(),
+                    layer,
+                );
+            }
+            // Deliberately not styled as a warning: it is the answer to the
+            // question, and the answer is that this surface will refuse to run.
+            Err(err) => println!(
+                "    {:<12}{:<30}UNRESOLVED — {err}",
+                task.as_str(),
+                task.surface()
+            ),
+        }
+    }
+}
+
+/// Without the registry there is nothing to resolve a name against, so the keys
+/// are reported as set and nothing more. Said out loud rather than omitted: a
+/// silently missing section reads as "there is no resolution", not as "this build
+/// cannot compute one".
+#[cfg(not(feature = "models"))]
+fn print_model_resolution(_loaded: &config::Loaded) {
+    println!(
+        "  resolution — unavailable: this build lacks the `models` feature, so it \
+         has no registry to resolve these names against"
+    );
 }
 
 /// Print `[debt]` with **per-pattern** provenance.
@@ -2153,6 +2303,31 @@ fn run_init(
     Ok(())
 }
 
+/// The embedding model `[models] embedding` names, **resolved** rather than read
+/// straight out of the config (Stage 33).
+///
+/// The difference is what happens to a wrong value. Read straight, an unknown
+/// name or a generative model reached the embedder and failed there, several
+/// layers from the key that caused it; resolved, it is a named error quoting the
+/// key. An explicit `--model` flag still wins over this and is validated by the
+/// embedder, which is where a flag belongs.
+///
+/// # Errors
+/// The resolver's error when `[models] embedding` names no known model, or names
+/// one that is not an embedding model.
+#[cfg(all(feature = "inference", feature = "models"))]
+fn configured_embedding_model(_cfg: &config::Config) -> anyhow::Result<Option<&'static str>> {
+    Ok(rto_graph::resolve_model(rto_graph::ModelTask::Embed)?.model)
+}
+
+/// Without the registry there is nothing to resolve a name *against*, so the
+/// configured name passes through unvalidated to [`config_embedding_model`],
+/// which warns that this build cannot honour it either way.
+#[cfg(all(feature = "inference", not(feature = "models")))]
+fn configured_embedding_model(cfg: &config::Config) -> anyhow::Result<Option<&str>> {
+    Ok(cfg.models.embedding.as_deref())
+}
+
 /// Resolve a config-sourced embedding model name against this binary's feature
 /// set. When built with `inference-local-models`, the name is honoured; when
 /// built without it, a config-set model can't be loaded, so — per ADR-0007's
@@ -2198,7 +2373,10 @@ fn run_infer(
     // binary lacks local-model support). A model coming *only* from config must
     // degrade gracefully per ADR-0007: warn and fall back to the offline default
     // rather than hard-failing a build that can't use it.
-    let model = model.or_else(|| config_embedding_model(cfg.models.embedding.as_deref()));
+    let model = match model {
+        Some(flag) => Some(flag),
+        None => config_embedding_model(configured_embedding_model(cfg)?),
+    };
 
     if !(0.0..=1.0).contains(&min_confidence) {
         anyhow::bail!("--min-confidence must be in 0.0..=1.0 (got {min_confidence})");
@@ -3180,41 +3358,41 @@ fn run_spec_draft(
     kind: &str,
     out: Option<&str>,
 ) -> anyhow::Result<()> {
-    use rto_graph::{
-        ModelKind, ModelRole, Platform, REGISTRY, ResourceTier, find_model, is_installed,
-    };
+    use rto_graph::{ModelSource, ModelTask, resolve_model_with};
 
     let (scaffold, label, ctx) = build_scaffold(ingest, topic, title, kind)?;
 
-    // Model pick: `[models] generative` from config if set (and a real generative
-    // entry), otherwise the low-tier default (runs anywhere).
-    let Some(spec) = cfg
-        .models
-        .generative
-        .as_deref()
-        .and_then(find_model)
-        .filter(|m| m.kind == ModelKind::Generative)
-        .or_else(|| {
-            // Deterministic default as the registry grows: the low-tier *instruct*
-            // model (qwen3-0.6b), not just any low-tier generative (which now
-            // includes coding/reasoning picks).
-            REGISTRY.iter().find(|m| {
-                m.kind == ModelKind::Generative
-                    && m.role == ModelRole::Instruct
-                    && m.tier == ResourceTier::Low
-            })
-        })
-    else {
+    // Model pick, via the one resolver (Stage 33): `[models] generative` if it
+    // pins one, else the low-tier instruct default that runs anywhere. This used
+    // to search the registry here, and — the part worth replacing — it *filtered*
+    // a pin that was not a generative model, which silently fell back to the
+    // default and left the configuration looking honoured.
+    //
+    // Resolved from the config in hand rather than from the process-wide pins:
+    // both hold the same table (the pins are published from this very config at
+    // startup), and taking the argument keeps the dependency visible in the
+    // signature. The process-wide slot exists for the call sites config cannot
+    // reach — OCR, per blob, inside extraction.
+    let choice = resolve_model_with(ModelTask::Draft, &cfg.models.resolve())?;
+    let Some(model) = choice.model else {
         anyhow::bail!("no generative model in the registry");
     };
-    let installed = spec
-        .variant_for(Platform::host())
-        .is_some_and(|v| is_installed(spec.name, v));
-    if !installed {
+    if !choice.installed {
+        // A **pinned** model that is not installed is a hard error naming the
+        // key, matching what `roteiro infer` has always done with a configured
+        // embedding model: the operator asked for that model specifically, and
+        // quietly producing a model-less scaffold answers a question they did not
+        // ask. An *unpinned* default that is not installed keeps the note-and-
+        // scaffold path unchanged — nothing was asked for, so nothing is refused.
+        if choice.source == ModelSource::Pinned {
+            return Err(choice
+                .require_installed()
+                .expect_err("an uninstalled pin errors")
+                .into());
+        }
         eprintln!(
-            "note: generative model `{0}` is not installed — emitting the scaffold. \
-             Draft prose with: roteiro model pull {0}",
-            spec.name
+            "note: generative model `{model}` is not installed — emitting the scaffold. \
+             Draft prose with: roteiro model pull {model}"
         );
         return emit_artifact(&scaffold, &format!("{label} scaffold"), out);
     }
@@ -3225,11 +3403,11 @@ fn run_spec_draft(
              release build (`cargo build --release`) for usable speed."
         );
     }
-    let drafts = draft_sections(spec.name, &scaffold, topic, &ctx)?;
+    let drafts = draft_sections(model, &scaffold, topic, &ctx)?;
     eprintln!(
         "drafted {} section(s) with {} (via {GEN_BACKEND})",
         drafts.len(),
-        spec.name
+        model
     );
     let md = rto_spec::apply_drafts(&scaffold, &drafts);
     emit_artifact(&md, &format!("{label} draft"), out)
@@ -3834,21 +4012,55 @@ fn run_media_status(json: bool) -> anyhow::Result<()> {
         if status.available_producers.iter().any(|p| p.kind == kind) {
             continue;
         }
+        // The model *this repository* would use, not the built-in default: a
+        // project that pinned `[models] audio` and is told to pull the default
+        // would pull the wrong model and still be unable to build. A pin that
+        // cannot be honoured is reported as itself, since "pull this" is not the
+        // fix for it.
+        let (model, why) = match resolved_media_model(kind) {
+            Ok(pair) => pair,
+            Err(err) => {
+                println!("  unavailable  {kind}: {err}");
+                continue;
+            }
+        };
         if kind.compiled_in() {
             println!(
-                "  unavailable  {kind}: the model is not installed — run `roteiro model pull {}`",
-                kind.model(),
+                "  unavailable  {kind}: the model is not installed — run \
+                 `roteiro model pull {model}`{why}"
             );
         } else {
             println!(
                 "  unavailable  {kind}: this build has no {kind} generator — rebuild with \
-                 `--features {}`, then `roteiro model pull {}`",
+                 `--features {}`, then `roteiro model pull {model}`{why}",
                 kind.feature(),
-                kind.model(),
             );
         }
     }
     Ok(())
+}
+
+/// The model `media status` should tell an operator to pull for `kind`, and the
+/// parenthetical saying where that choice came from — or the resolver's error,
+/// for a `[models]` pin that cannot be honoured.
+///
+/// Naming the *resolved* model matters here more than it looks: a project that
+/// pinned `[models] audio` and was told to pull the built-in default would pull
+/// the wrong weights and still not be able to build.
+#[cfg(feature = "models")]
+fn resolved_media_model(kind: rto_graph::MediaKind) -> Result<(String, String), String> {
+    match rto_graph::resolve_model(kind.task()) {
+        Ok(choice) => Ok((choice.label().to_owned(), format!(" ({})", choice.why()))),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Without the registry there is nothing to resolve against — and nothing a pin
+/// could be honoured *with* — so the modality's built-in default is both the
+/// only answer available and the correct one.
+#[cfg(not(feature = "models"))]
+fn resolved_media_model(kind: rto_graph::MediaKind) -> Result<(String, String), String> {
+    Ok((kind.model().to_owned(), String::new()))
 }
 
 /// Discard records, wholly or per producer. The graph is untouched.
@@ -7419,24 +7631,26 @@ fn serve_mcp(
 /// `[serve] models` allow-list if set. Returns the list; serving is the caller's.
 #[cfg(feature = "serve")]
 fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
-    use rto_graph::{ModelKind, Platform, REGISTRY, is_installed, model_dir};
+    use rto_graph::{ModelKind, ModelTask, Platform, REGISTRY, is_installed, model_dir};
     let host = Platform::host();
     let wanted = cfg.serve.models.as_deref();
     let has_file = |m: &rto_graph::ModelSpec, name: &str| {
         m.variant_for(host)
             .is_some_and(|v| v.files.iter().any(|f| f.name == name))
     };
+    // What `/v1` can serve is exactly what one of its two endpoints can use:
+    // `/v1/chat/completions` (generative + vision) or `/v1/embeddings`. Asked of
+    // the capability table (Stage 33) rather than re-listed here, so a new model
+    // kind cannot become servable by being forgotten in this match.
+    let endpoint_capable =
+        |kind: ModelKind| ModelTask::Chat.capable(kind) || ModelTask::Embed.capable(kind);
     REGISTRY
         .iter()
         .filter(|m| wanted.is_none_or(|w| w.iter().any(|n| n == m.name)))
         .filter(|m| has_file(m, "model.gguf"))
-        .filter(|m| match m.kind {
-            ModelKind::Generative | ModelKind::Embedding => true,
-            // A vision model is only servable with its multimodal projector.
-            ModelKind::Vision => has_file(m, "mmproj.gguf"),
-            // OCR and audio are sync-time ingestion models, not `/v1` endpoints.
-            ModelKind::Ocr | ModelKind::Audio => false,
-        })
+        .filter(|m| endpoint_capable(m.kind))
+        // A vision model is only servable with its multimodal projector.
+        .filter(|m| m.kind != ModelKind::Vision || has_file(m, "mmproj.gguf"))
         .filter(|m| m.variant_for(host).is_some_and(|v| is_installed(m.name, v)))
         .map(|m| rto_serve::llama::Served {
             name: m.name.to_owned(),
@@ -7458,24 +7672,41 @@ fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
 /// model. `served_ids` is the engine's served set (registry names), so every id
 /// resolves in the registry.
 ///
+/// Since Stage 33 both halves come from the shared resolver rather than from a
+/// rule written here: the membership filter is
+/// [`rto_graph::ModelTask::capable`] — this function's own exclusion rule,
+/// generalised into the table every surface now shares — and the pinned default
+/// is [`rto_graph::resolve_model`], so a `[models] generative` naming an
+/// embedding model is refused here for the same reason, with the same message,
+/// as it is refused in `spec draft`.
+///
 /// Gated on `explorer` too: the Ask model pool only exists when the explorer UI
 /// (and its `/v1/graph/capabilities` route) is compiled in.
 #[cfg(all(feature = "serve", feature = "explorer"))]
 fn chat_capable_model_ids(cfg: &config::Config, served_ids: &[String]) -> Vec<String> {
-    use rto_graph::{ModelKind, find_model};
+    use rto_graph::{ModelKind, ModelTask, find_model};
     let is_generative = |id: &str| find_model(id).is_some_and(|s| s.kind == ModelKind::Generative);
-    // Drop embedding-only models; keep generative + vision (both can chat).
+    // Drop what cannot chat; keep generative + vision (both can). An id the
+    // registry does not know is kept, exactly as before — `served_ids` is the
+    // engine's set of registry names, so that case is unreachable, and dropping
+    // an unrecognised id would be a silent narrowing of the Ask pool.
     let mut ids: Vec<String> = served_ids
         .iter()
-        .filter(|id| !find_model(id).is_some_and(|s| s.kind == ModelKind::Embedding))
+        .filter(|id| find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
         .cloned()
         .collect();
     // Pick the default and rotate it to the front, preserving the order of the
-    // rest (a stable, predictable capabilities list).
-    let default_pos = cfg
-        .models
-        .generative
-        .as_deref()
+    // rest (a stable, predictable capabilities list). A pin the resolver refuses
+    // is *not* silently replaced by the first served generative model: `serve`
+    // validated it at startup and never got here.
+    // Resolved from the passed config rather than from the process-wide pins, so
+    // this stays a pure function of its arguments and the selection tests below
+    // can drive it without touching process state.
+    let pinned = rto_graph::resolve_model_with(ModelTask::Chat, &cfg.models.resolve())
+        .ok()
+        .filter(|c| c.source == rto_graph::ModelSource::Pinned)
+        .and_then(|c| c.model);
+    let default_pos = pinned
         .and_then(|g| ids.iter().position(|id| id == g && is_generative(id)))
         .or_else(|| ids.iter().position(|id| is_generative(id)));
     if let Some(pos) = default_pos {
@@ -7552,6 +7783,13 @@ fn serve_models_endpoint(
         opts.tls_cert.clone(),
         opts.tls_key.clone(),
     );
+
+    // Refuse a `[models] generative` this endpoint cannot honour **before** the
+    // listener opens (Stage 33). `serve` is long-running, so a configuration
+    // error has to fail at startup or it becomes a per-request surprise — and the
+    // Ask panel sends `models[0]`, so a bad pin there is the one that used to be
+    // silently replaced by whatever happened to be served first.
+    rto_graph::resolve_model_with(rto_graph::ModelTask::Chat, &cfg.models.resolve())?;
 
     let served = served_models(cfg);
     if served.is_empty() {

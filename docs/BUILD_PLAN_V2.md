@@ -1331,7 +1331,7 @@ assembled graph is not, so sharing it would mean last-writer-wins.
   migration 12 is covered by the existing additive-migration property test (#329)
   rather than a pinned version number.
 
-### Stage 33 — Local model resolution → **v1.16.0** · effort **S–M** *(independent track)*
+### Stage 33 — Local model resolution → **v1.16.0** · effort **S–M** ✅ *delivered (independent track)*
 
 **Goal:** one place decides which model serves a task, and can say why.
 
@@ -1361,6 +1361,69 @@ a new decision.
 **DoD:** vision, audio and OCR models are configurable and pinned per project;
 `roteiro config` answers *why did it use that model?* for every surface;
 resolution is deterministic and unit-tested without loading a model.
+
+#### What shipped
+
+`rto_graph::model_choice` — `resolve_with(task, pins) -> Result<ModelChoice,
+ModelChoiceError>`, plus a process-wide pin slot published once at startup beside
+the existing `[paths] model_store` one. `ModelChoice` carries the model, the rule
+(`pinned` / `built-in default`), and whether the weights are on disk; the error
+type names the offending key.
+
+`[models]` grew to five keys — `embedding`, `generative`, `vision`, `audio`,
+`ocr` — one per model **kind**, not per command, so `generative` governs both
+`spec draft` and Ask.
+
+**Signature, corrected.** The plan said `(task_kind, modality, config,
+host_platform)`. `modality` turned out to be the same axis as `task_kind` — a
+`transcribe` task *is* the audio modality — so a separate parameter would have
+admitted the meaningless pair `(Ocr, Audio)`. Host platform is read inside, from
+the registry's existing `Platform::host()`, rather than passed: making it an
+argument would have let a caller ask about a machine that is not the one the model
+must load on. The signature is `(task, pins)`.
+
+**Nine call sites, not seven.** The plan's seven are all real and all folded in:
+`spec draft` (generative), `infer` (embedding — the config half only; a `--model`
+flag still wins and is validated by the embedder), `serve` load (`served_models`'
+kind filter), `serve`/Ask (`chat_capable_model_ids`, plus a startup check so a bad
+pin fails before the listener opens rather than per request), media generation
+**audio**, media generation **vision**, and OCR during `sync`. Two the plan did
+not name turned up while enumerating:
+
+- **`media status`**, which told an operator to `roteiro model pull` the built-in
+  default even when the project had pinned another model — advice that would have
+  them download the wrong weights and still be unable to build.
+- **The extraction cache key** (`media_env_tag`), which folded `ocrs-text` *by
+  name*. Left alone it would have made `[models] ocr` the one pin that changes
+  what is extracted without invalidating what was extracted before it, so a
+  repository would keep serving text read by a model it no longer uses.
+
+**Two behaviours changed for a set config, deliberately.** `spec draft` used to
+*filter out* a `[models] generative` that was not a generative model and fall
+through to the default — a silent fallback, and exactly the failure this stage
+exists to remove; it now refuses, naming the key. And a pinned model that is not
+installed is now a hard error there, matching what `roteiro infer` has always done
+with a configured embedding model. Unset behaviour is unchanged on every surface.
+
+**The one exception to failing loudly** is `roteiro config` itself, which reports
+a bad key rather than refusing — it is the command an operator runs *because* a
+pin is misbehaving, so it must not be the command the pin breaks.
+
+**Cost, measured:** **+1,667 / −106 lines across 12 files** (1,635 of the
+insertions are Rust across 9 files; the rest is the two ADR amendments, this
+entry, and the website's config sample). Against an estimate of **S–M**. The bulk
+is the resolver itself (769 lines, of which roughly half is the module's own
+documentation and its 12 unit tests) and the new 355-line CLI test. As with Stage
+26, the surfaced-everywhere work is what costs: 366 lines of `main.rs` are the
+call sites, the `roteiro config` resolution table, and its `--json` twin.
+
+**Gates:** `fmt` clean; `clippy --all-targets` and `clippy --all-targets
+--all-features` clean at `-D warnings`; `cargo test --workspace --no-fail-fast`
+853 passed / 0 failed; `--all-features --no-fail-fast` 1,073 passed / 0 failed.
+`EXTRACT_VERSION` unchanged at 11, no migration, no new dependency, no network.
+Every new test was fault-injected — 12 unit tests and 6 CLI tests, each shown to
+fail under a mutation of the behaviour it claims to check, with the tree
+byte-identical afterwards.
 
 ---
 
