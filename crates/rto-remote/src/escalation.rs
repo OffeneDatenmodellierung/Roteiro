@@ -68,6 +68,14 @@ impl Default for Policy {
 
 /// What fell short. Each is a named, observable property of the finished local
 /// attempt — the three ADR-0019 §1 lists, and no fourth.
+///
+/// **Deliberately not `#[non_exhaustive]`**, unlike most of this crate's public
+/// enums (see [`crate::Reason`] for that decision and its cost). The set is
+/// closed by the ADR, which enumerates these three; a fourth would be a change to
+/// what escalation *means*, not an addition to a list, and it should break a
+/// downstream `match` so that whoever wrote it re-reads §1. Exhaustiveness is the
+/// right default where the set is closed by a decision rather than by today's
+/// implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trigger {

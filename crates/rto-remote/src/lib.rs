@@ -90,7 +90,12 @@ pub type Transport<'a> = dyn Fn(&Endpoint, &str) -> Result<String, String> + 'a;
 pub type Clock<'a> = dyn Fn() -> String + 'a;
 
 /// Why a remote call did not produce an answer.
+/// Marked `#[non_exhaustive]` for the reason recorded on
+/// [`crate::Reason`]: this crate is published at 1.x, and error sets grow.
+/// Taken while the crate had no consumer that could exist; it will not be
+/// taken again.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RemoteError {
     /// The gate is shut. Nothing was assembled, nothing was recorded, nothing
     /// was sent.
@@ -220,6 +225,111 @@ pub fn call_with(
         endpoint: endpoint.url().to_owned(),
         detail,
     })
+}
+
+/// **Every public enum here has had the `#[non_exhaustive]` question answered.**
+///
+/// Asserted against this crate's own source, not against behaviour, because
+/// "somebody thought about semver" is a property of the text rather than of any
+/// runtime value — the same reason `remote_is_not_a_default_feature` reads a
+/// `Cargo.toml`.
+///
+/// This exists because the decision was expensive to make once and would be
+/// silently unmade by the next `pub enum` added without it. `rto-remote` is
+/// published at 1.x, so a variant added to a bare public enum is a breaking
+/// change; [`Reason`] carries the full reasoning, and `rto_graph::StoreError`
+/// carries the cautionary case. A new enum passes here by taking the attribute
+/// **or** by saying in its own docs why its set is closed — either is a decision,
+/// and only silence is not.
+#[cfg(test)]
+mod semver_posture {
+    /// Every `src/*.rs` in this crate, as `(file name, contents)`.
+    fn sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read this crate's src/")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .expect("a file name")
+                    .to_string_lossy()
+                    .into_owned();
+                (
+                    name,
+                    std::fs::read_to_string(&p).expect("read a source file"),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn every_public_enum_either_is_non_exhaustive_or_says_why_not() {
+        let mut seen = 0;
+        for (file, text) in sources() {
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(rest) = line.strip_prefix("pub enum ") else {
+                    continue;
+                };
+                seen += 1;
+                let name = rest.split_whitespace().next().unwrap_or(rest);
+
+                // Walk back over the item's attributes and doc comment, which is
+                // everything contiguous above it that is one or the other.
+                //
+                // Attributes and docs are kept **apart** on purpose. The first
+                // version of this test joined them and asked whether the block
+                // contained `#[non_exhaustive]` — which every deliberately-
+                // exhaustive enum's doc comment does, because saying "not
+                // `#[non_exhaustive]`" names the attribute. It reported `Trigger`
+                // as both marked and unmarked. A check for an attribute has to
+                // look at attribute lines.
+                let (mut attrs, mut docs) = (Vec::new(), Vec::new());
+                for above in lines[..i].iter().rev() {
+                    let t = above.trim_start();
+                    if t.starts_with("///") {
+                        docs.push(t);
+                    } else if t.starts_with("#[") || t.starts_with(')') {
+                        attrs.push(t);
+                    } else if !t.starts_with("//") || t.starts_with("//!") {
+                        // An ordinary `//` comment sits inside the block and is
+                        // skipped; anything else — including a module doc, which
+                        // means we have run off the top of the file — ends it.
+                        break;
+                    }
+                }
+
+                let marked = attrs.contains(&"#[non_exhaustive]");
+                // The opt-out has to *name* the attribute, so it reads as a
+                // refusal rather than as prose that happens to be nearby.
+                let justified = docs.iter().any(|d| d.contains("not `#[non_exhaustive]`"));
+                assert!(
+                    marked || justified,
+                    "{file}: `pub enum {name}` is neither `#[non_exhaustive]` nor documented as \
+                     deliberately exhaustive. This crate is published at 1.x, so a variant added \
+                     to it later is a breaking change — see `Reason`'s doc comment for what that \
+                     cost the last time, and `rto_graph::StoreError` for what it costs when the \
+                     decision is not made at all. Take the attribute, or say in the enum's own \
+                     docs why its set is closed."
+                );
+                assert!(
+                    !(marked && justified),
+                    "{file}: `pub enum {name}` both carries `#[non_exhaustive]` and documents \
+                     itself as deliberately not; one of the two is stale"
+                );
+            }
+        }
+        assert!(
+            seen >= 9,
+            "only found {seen} public enums — the scan stopped matching, which would let this \
+             test pass by finding nothing"
+        );
+    }
 }
 
 /// Temp directories for this crate's tests. No network, no fixtures, no shared

@@ -114,7 +114,12 @@ impl Answer {
 ///
 /// Every variant is a refusal. None of them is recoverable by using part of what
 /// arrived, and none of them falls back to a local model — see the module docs.
+/// Marked `#[non_exhaustive]` for the reason recorded on
+/// [`crate::Reason`]: this crate is published at 1.x, and error sets grow.
+/// Taken while the crate had no consumer that could exist; it will not be
+/// taken again.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ResponseError {
     /// The body is not the shape a chat completion has.
     #[error(

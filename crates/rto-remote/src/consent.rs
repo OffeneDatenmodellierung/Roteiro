@@ -6,8 +6,8 @@
 //! source off the machine for a reason nobody can inspect afterwards. So the
 //! local→remote edge is **a boolean the user opened**, never a prediction: there
 //! is no classifier here, no scoring, nothing probabilistic, and nothing in this
-//! module reads anything about the request it is gating. [`decide`] takes four
-//! `Option<bool>`-shaped facts about *layers* and returns one of six [`Reason`]s.
+//! module reads anything about the request it is gating. [`decide`] takes facts
+//! about *layers* and returns one of seven [`Reason`]s.
 //!
 //! # The precedence is inverted for this one key
 //!
@@ -116,7 +116,12 @@ impl ConfigGrant {
 ///
 /// [`decide`] takes the flag form directly, because that is the common one and
 /// changing its signature would have bought nothing; [`decide_with`] takes this.
+///
+/// Marked `#[non_exhaustive]` for the reason recorded on [`Reason`]: the ADR
+/// names two forms today, and a third — an environment grant, an MCP client's
+/// own consent — would otherwise be breaking to add.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Invocation {
     /// Neither flag was passed, and nobody was asked. **Not a grant** — the run
     /// still has to opt in.
@@ -161,8 +166,50 @@ impl Invocation {
 /// [`Reason::as_str`] is the stable token in `remote status --json`, so a new
 /// variant adds a token while a payload would change the *shape* of one readers
 /// already parse.
+///
+/// # Why this is `#[non_exhaustive]`, and what it cost to make it so
+///
+/// Adding [`Reason::PromptDeclined`] to a **published**, non-`#[non_exhaustive]`
+/// enum is a breaking change: a downstream crate matching exhaustively stops
+/// compiling. `rto-remote` was published at 1.19.0 hours before this, with nine
+/// downloads and no consumer that could exist. So the attribute went on **at the
+/// same time**, and the record of that is here rather than in a version number.
+///
+/// The nearest precedent is `rto_graph::StoreError`, and it went the other way.
+/// `rto_graph::store`'s comment records the same trap and **designed around** it
+/// (#342/#348) — a new `SchemaAhead` type rather than a variant — because by then
+/// the enum had shipped without the attribute and a variant would have cost a
+/// major bump of all seven crates. That was the right call *there*, where the
+/// fact had a natural home outside the enum. It does not transfer here: the fact
+/// that needed reporting **is which reason to report**, and this is by
+/// construction the type that answers that. Moving it out would leave
+/// `remote status --json` emitting `invocation_denied` for a prompt and
+/// `call_with` still saying `--no-remote`, which is the defect the variant
+/// exists to fix, reinstated one layer down.
+///
+/// The workspace convention is the attribute, not the workaround —
+/// `rto_exec::ExecError`, `SubprocessError`, `AssetError`, `AssetSource` and
+/// `rto_graph::NetworkPolicy` all carry it, and `AssetSource`'s own docs record
+/// that *"the enum being `#[non_exhaustive]` is what made adding it a
+/// non-breaking change"*. `StoreError` is the one that missed the convention and
+/// paid for it. This one is not going to.
+///
+/// **The cost, stated rather than glossed.** Downstream `match`es now need a
+/// wildcard arm and lose exhaustiveness checking — the trade `NetworkPolicy`
+/// names explicitly ("match with equality rather than exhaustively"). That is
+/// worth it for a set that has already grown once and will grow again if consent
+/// ever acquires another layer or another form.
+///
+/// **What was deliberately *not* done.** The public structs in this crate —
+/// [`Decision`], `Egress`, `Outcome`, `ContextItem`, `Answer`, `Check` — still
+/// have public fields, so adding a field to any of them is breaking in the same
+/// way. They were left alone because `LocalAttempt` and `Policy` are built *by*
+/// callers and `#[non_exhaustive]` would make them unconstructible, so the sweep
+/// is not uniform and a uniform-looking change would have been a lie. That
+/// hazard is real and is recorded here rather than discovered later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Reason {
     /// The user layer and the invocation both granted. The only granting reason.
     Granted,

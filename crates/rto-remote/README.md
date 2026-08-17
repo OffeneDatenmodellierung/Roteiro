@@ -107,4 +107,30 @@ model quality. `escalation` measures a *finished* local attempt — empty output
 no tool call after `MAX_ROUNDS`, below a length floor — and records the number it
 measured. A trigger is an input to the consent gate, never a substitute for it.
 
+## API stability, and one incompatible change made on purpose
+
+**The release after 1.19.0 changes this crate's public API incompatibly.**
+`Reason` gained a seventh variant, `PromptDeclined`, and most of the public
+enums here — `Reason`,
+`Invocation`, `RemoteError`, `EndpointError`, `PayloadError`, `ResponseError` and
+`Entry` — became `#[non_exhaustive]`. A downstream crate matching exhaustively on
+any of them will stop compiling and needs a wildcard arm.
+
+Both halves were done in one change, while the crate was hours old with nine
+downloads and no consumer that could exist, because that is the only moment the
+cost is nil. The variant was the fix for a real defect — a declined consent prompt
+reported itself as a flag the user had never passed — and the attribute is what
+stops the next such fix from facing the same choice at a moment when it is
+expensive. `rto_graph::StoreError` is the cautionary case: it shipped without the
+attribute and a later addition had to be designed around instead (#342/#348).
+
+**The version number does not say this**, and that is deliberate rather than an
+oversight: in this workspace a breaking-change marker cuts a major release across
+all seven crates, and 2.0.0 is reserved for a hardening milestone. So the record
+is here, in the commit, and in `Reason`'s own doc comment. **It will not be done
+again** — that is what the `#[non_exhaustive]` was bought for.
+
+`Trigger` and `ProducerTrust` are deliberately left exhaustive; their own doc
+comments say why.
+
 Licensed under MIT OR Apache-2.0.

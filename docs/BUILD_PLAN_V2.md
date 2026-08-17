@@ -1604,6 +1604,27 @@ the shape of one readers already parse. The test asserts the **rendered text**,
 not the variant — a `Reason` that classified right while still printing the flag
 would be the same bug.
 
+*And that variant was a semver break, caught in review.* `rto-remote` had been
+published at 1.19.0 hours earlier, and `Reason` was not `#[non_exhaustive]`, so
+the seventh variant would stop a downstream exhaustive `match` from compiling.
+Three options were weighed. **Design around it**, as `StoreError` did
+(#342/#348), does not transfer: there the fact had a home outside the enum, where
+here the fact *is* which reason to report, so moving it out would leave
+`--json` emitting `invocation_denied` for a prompt and reinstate the defect one
+layer down. **Accept it and mark the commit `!`** would cut **2.0.0**, the
+version this plan reserves for Stage 27 — the mistake #341 already made by
+accident. So: `#[non_exhaustive]` went on in the same change, along with the rest
+of the crate's open enums, while the crate had nine downloads and no consumer
+that could exist. That is the workspace convention rather than a departure from
+it — `ExecError`, `SubprocessError`, `AssetError`, `AssetSource` and
+`NetworkPolicy` all carry it, and `AssetSource`'s docs record that the attribute
+"is what made adding it a non-breaking change". `StoreError` is the one that
+missed the convention and paid for it. `Trigger` and `ProducerTrust` stay
+exhaustive on purpose — closed sets, where a new member is a redesign a
+downstream `match` should be made to notice — and say so at their definitions.
+**The version number will not record the break**; `Reason`'s doc comment, the
+crate README and the commit do.
+
 *An absent `finish_reason` was read as "it finished".* `parse` only refused when
 the field was present and outside the allow-list, so silence passed — a strictly
 weaker reading than the `length` case it already refuses, since `length` at least

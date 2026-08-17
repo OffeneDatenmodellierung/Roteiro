@@ -2321,6 +2321,23 @@ fn run_remote_log(limit: usize, json: bool) -> anyhow::Result<()> {
                 println!("{}  RETURNED  {} bytes", o.at, o.response_bytes);
             }
             rto_remote::Entry::Outcome(o) => println!("{}  FAILED    {}", o.at, o.detail),
+            // `Entry` is `#[non_exhaustive]`, so this arm is required. It prints
+            // rather than skips, because on an egress log a line nobody mentions
+            // reads as a line that is not there — the same "no record, so
+            // presumably nothing left" default `rto_remote::record` argues
+            // against.
+            //
+            // Today it is unreachable, and by a route worth knowing about:
+            // `Ledger::read` drops lines that will not deserialize, and an
+            // unknown `event` tag is one of those. So a future Roteiro's third
+            // line kind would vanish at the serde layer *before* reaching here.
+            // That is a gap in `read`, not in this match, and it is left for the
+            // change that introduces such a kind — which is the change that can
+            // test it.
+            other => println!(
+                "{}  ?         a line this build does not understand ({other:?})",
+                other.at()
+            ),
         }
     }
     Ok(())
