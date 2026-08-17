@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.16.0...roteiro-v1.17.0) - 2026-08-17
+
+### Added
+
+- *(models)* one resolver decides which model serves a task, and says why
+
+### Fixed
+
+- *(config)* a `[models]` value that names no model reads as unset everywhere
+- *(init)* put "Proving a negative" in the skill template, not just its output
+
+### Other
+
+- *(init)* diff the skill artifacts with split('\n'), not lines()
+
 ## [1.16.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.15.0...roteiro-v1.16.0) - 2026-08-17
 
 ### Added
