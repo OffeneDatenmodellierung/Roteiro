@@ -1192,9 +1192,9 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 | v1.11.0 ✅ | Stage 22 — semgrep + cargo-audit (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure — **met** |
 | v1.11.x ✅ | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved — **met** |
 | v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
-| v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
-| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction — **met** |
-| v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
+| v1.13.0 ✅ | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean — **met** (#352): identical finding keys via both backends, differing only in isolation label and image digest |
+| v1.12.0 ✅ | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction — **met** (#340). Shipped two releases ahead of its nominal target |
+| v1.13.0 🟡 | Stage 26 — lenses Q3/Q1/S1 | **Q3 only** (#346): `coupling --limit 0` over 2,887 nodes in 0.07 s; no CI gate offered, because cross-language call edges are name collisions (615/6,553 = 9.4%) and resolving that is extraction work. Q1 and S1 outstanding |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | v1.11.0 ✅ | Stage 29 — audio metadata as `derived` facts | Format read costs 1–100 µs and instantiates no decoder; duration exact/estimated/absent never guessed — **met** |
 | v1.11.0 ✅ | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
