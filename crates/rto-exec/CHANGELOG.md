@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.13.0...rto-exec-v1.14.0) - 2026-08-17
+
+### Other
+
+- Merge pull request #359 from OffeneDatenmodellierung/feat/models-default-feature
+- *(features)* UNREVIEWED checkpoint - exec-subprocess default + prefetch/status move
+
 ## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.12.0...rto-exec-v1.13.0) - 2026-08-16
 
 ### Added
