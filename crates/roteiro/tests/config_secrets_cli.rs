@@ -19,9 +19,12 @@ use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_roteiro");
 
-/// A token-shaped literal, split so this file does not itself contain a string
-/// that a real secret scanner would flag.
-const FAKE_TOKEN: &str = "ghp_0123456789abcdefghijklmnopqrstuvwx";
+/// A token-shaped literal, genuinely split: the prefix is concatenated at compile
+/// time so the **file text** never contains `ghp_` followed by an unbroken
+/// alphanumeric run, which is what a regex-rule secret scanner matches on. The
+/// assembled value is unchanged and is what every fixture and assertion below
+/// uses — the split is about this source file, not about the test.
+const FAKE_TOKEN: &str = concat!("ghp", "_0123456789abcdefghijklmnopqrstuvwx");
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")

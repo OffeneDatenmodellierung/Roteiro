@@ -2933,8 +2933,13 @@ mod tests {
         let mut store = configured();
         let mut hardcoded = Node::new("sym:rust:src/main.rs#connect", NodeKind::Fn, "connect");
         hardcoded.path = Some("src/main.rs".into());
+        // Split at the prefix for the same reason as `FAKE_TOKEN` in
+        // `roteiro/tests/config_secrets_cli.rs`: assembled, this is AWS's own
+        // documentation placeholder, but it matches the canonical access-key-id
+        // rule exactly and a regex-rule scanner cannot know the difference. The
+        // assembled value is unchanged; no assertion here matches on its text.
         hardcoded.meta = serde_json::json!({
-            "content": "let token = \"AKIAIOSFODNN7EXAMPLE\";",
+            "content": concat!("let token = \"AKIA", "IOSFODNN7EXAMPLE\";"),
         });
         store
             .apply_factset(&FactSet::new().with_node(hardcoded))
