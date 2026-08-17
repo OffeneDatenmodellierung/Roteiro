@@ -243,3 +243,158 @@ fn review_labels_untracked_files_as_added() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------------
+// `roteiro review --score` (Stage 35): scoring a candidate reviewer against the
+// adjudicated corpus. Needs no graph, no model and no network — the corpus is
+// embedded and the scoring is pure, which is what lets these numbers be
+// recomputed anywhere, CI included.
+// ---------------------------------------------------------------------------
+
+/// Two real `reviewed_sha`s from the shipped corpus, and the rows anchored to
+/// them. Written out rather than read from the fixture so that this test states
+/// what it expects instead of agreeing with whatever the file happens to say.
+const SHA_308: &str = "2b761ce79c44df5759ef69ef9e5f8476302d10cb";
+
+/// Write a run document and score it, returning `(stdout, stderr, success)`.
+fn score_run(name: &str, doc: &str, extra: &[&str]) -> (String, String, bool) {
+    let dir = fresh_dir(name);
+    let path = dir.join("run.json");
+    std::fs::write(&path, doc).expect("write run");
+    let mut args = vec!["review", "--score", path.to_str().expect("utf-8 path")];
+    args.extend_from_slice(extra);
+    let out = roteiro(&dir, &args);
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+/// A run document over `shas` with `findings` (each `(sha, path, line)`).
+fn run_doc(shas: &[&str], findings: &[(&str, &str, u32)]) -> String {
+    let shas: Vec<String> = shas.iter().map(|s| format!("{s:?}")).collect();
+    let findings: Vec<String> = findings
+        .iter()
+        .map(|(sha, path, line)| {
+            format!(
+                "{{\"reviewed_sha\": {sha:?}, \"path\": {path:?}, \"line\": {line}, \
+                 \"description\": \"a finding\"}}"
+            )
+        })
+        .collect();
+    format!(
+        "{{\"schema\": \"roteiro.review-run/v1\", \"attempted_shas\": [{}], \
+         \"findings\": [{}]}}",
+        shas.join(", "),
+        findings.join(", ")
+    )
+}
+
+/// The embedded corpus scores a run end to end, and the report is **per class**.
+/// A single averaged number is deliberately absent: which classes a reviewer can
+/// see is the only thing an implementer can act on.
+#[test]
+fn score_reports_recall_per_defect_class() {
+    // A row on #308: the ADR whose text contradicted the code it described.
+    let doc = run_doc(
+        &[SHA_308],
+        &[(SHA_308, "docs/adr/0005-image-ocr-vision-ingestion.md", 16)],
+    );
+    let (out, err, ok) = score_run("score-per-class", &doc, &[]);
+    assert!(ok, "scoring should succeed: {out}{err}");
+    assert!(
+        out.contains("recall by defect class"),
+        "the table is the report: {out}"
+    );
+    assert!(
+        out.contains("1/1   contract-drift") || out.contains("1/1  contract-drift"),
+        "credits the contract-drift row: {out}"
+    );
+    // Only the attempted commit's rows are in scope, so this reads as a partial
+    // run rather than as a poor one.
+    assert!(
+        out.contains("partial run"),
+        "a one-commit run says it is partial: {out}"
+    );
+    assert!(
+        !out.contains("overall recall") && !out.contains("average"),
+        "no averaged headline: {out}"
+    );
+}
+
+/// A finding matching no row is reported as **unadjudicated**, never as a false
+/// positive — the corpus records what one reviewer said about these trees, not
+/// every defect in them.
+#[test]
+fn an_unmatched_finding_is_reported_as_unadjudicated() {
+    let doc = run_doc(
+        &[SHA_308],
+        &[(SHA_308, "crates/rto-graph/src/store.rs", 42)],
+    );
+    let (out, err, ok) = score_run("score-unadjudicated", &doc, &[]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("UNADJUDICATED"), "{out}");
+    assert!(
+        out.contains("not computable"),
+        "no adjudicated finding means no precision figure, not 0%: {out}"
+    );
+}
+
+/// **The most expensive mistake available here**, refused rather than scored: a
+/// run against a merged PR head names a commit no row carries, and the error says
+/// what the number would have meant.
+#[test]
+fn scoring_against_a_commit_outside_the_corpus_is_refused() {
+    let head = "0123456789abcdef0123456789abcdef01234567";
+    let (out, err, ok) = score_run("score-wrong-sha", &run_doc(&[head], &[]), &[]);
+    assert!(!ok, "must not score: {out}");
+    assert!(
+        err.contains("reviewed_sha") && err.contains("silently reports zero"),
+        "explains the PR-head trap: {err}"
+    );
+}
+
+/// A document that is not a run says so, rather than failing as a missing field.
+#[test]
+fn a_document_with_the_wrong_schema_is_named_as_such() {
+    let (_, err, ok) = score_run(
+        "score-wrong-schema",
+        "{\"schema\": \"roteiro.review/v1\", \"attempted_shas\": [], \"findings\": []}",
+        &[],
+    );
+    assert!(!ok);
+    assert!(
+        err.contains("roteiro.review-run/v1"),
+        "names the schema it scores: {err}"
+    );
+}
+
+/// `--json` emits the versioned score document.
+#[test]
+fn score_json_carries_the_schema_tag() {
+    let doc = run_doc(&[SHA_308], &[]);
+    let (out, err, ok) = score_run("score-json", &doc, &["--json"]);
+    assert!(ok, "{out}{err}");
+    let value: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(value["schema"], "roteiro.review-score/v1");
+    assert!(
+        value["per_class"].as_array().is_some_and(|a| a.len() == 14),
+        "every class is present, so two reports line up: {out}"
+    );
+}
+
+/// `--score` and `--base` answer different questions and are refused together, so
+/// a caller cannot believe it scored a branch review.
+#[test]
+fn score_and_base_are_mutually_exclusive() {
+    let dir = fresh_dir("score-conflict");
+    std::fs::write(dir.join("run.json"), run_doc(&[SHA_308], &[])).expect("write");
+    let out = roteiro(&dir, &["review", "--score", "run.json", "--base", "main"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+        "clap refuses the pair: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

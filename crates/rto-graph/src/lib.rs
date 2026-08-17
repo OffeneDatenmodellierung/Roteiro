@@ -55,6 +55,14 @@ pub mod model_choice;
 mod models;
 mod provenance;
 mod query;
+// Stage 35 — the adjudicated review corpus, and the two pure decisions made over
+// it. In *this* crate for the same reason `model_choice` is: `gix` is pinned here
+// without transports, and both a historical record that must not be "refreshed
+// from the GitHub API" and a suppression rule that must not "just ask CI" are
+// precisely the code that would otherwise acquire such a call.
+pub mod compile_claim;
+pub mod review_corpus;
+pub mod review_score;
 mod store;
 mod sync;
 mod workspace;

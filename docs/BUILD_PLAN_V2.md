@@ -1476,6 +1476,35 @@ identity.
 **Depends on Stage 33** (a reviewer must resolve a model without a fourth
 bespoke rule). Independent of Stage 34 — it can run wholly local.
 
+> **Split into two PRs at the measurement seam.** 35a — the scoring harness and
+> the suppression filter — is **delivered**: `roteiro review --score`, the corpus
+> as a typed shipped asset, per-class recall, and `rto_graph::compile_claim`. It
+> lands before any reviewer because it is what makes a reviewer's value a number
+> instead of an impression, and because a "do not build" verdict needs the same
+> harness a "build it" verdict does.
+>
+> 35b — the local reviewer arm — is **not built, pending 35a's numbers**. Two
+> measurements from 35a constrain it, and both were taken on this repository
+> rather than assumed:
+>
+> - **Whole-diff review is not the shape.** Reconstructing the 15 review diffs at
+>   `-U3` costs ~513k tokens total, ~34k mean, 103k worst (PR #339). Against the
+>   measured ~30k single-call budget, **9 of 15 do not fit in one call** before
+>   any graph context is added. The ~79k per-file budget is the one to design to,
+>   which puts `contract-drift` — the largest class, 5 of 22 — squarely on the
+>   graph: per-file review cannot see a doc in another file contradicting the code
+>   under review unless something hands it that doc. That is the claim to test,
+>   and it is now testable.
+> - **The corpus can falsify a reviewer but not finely rank two.** 22 real rows
+>   over 13 classes, 8 of them holding a single row. A 0-or-2-of-22 result is
+>   decisive; a 9-vs-11 difference is not. 35b's DoD should be a *floor* to clear,
+>   not a percentage to maximise.
+>
+> 35b also needs a **resolver addition, not a workaround**: `ModelTask::Review`
+> in `rto_graph::model_choice`, sharing the `generative` key with `Draft`/`Chat`.
+> Adding a seventh task is the Stage 33-sanctioned move; a bespoke selection rule
+> in the reviewer would be the fourth one Stage 33 exists to have removed.
+
 **Goal:** give the adjudicated review corpus a consumer, and put the graph to
 work on the one thing a diff-only reviewer structurally cannot see.
 
@@ -1510,6 +1539,18 @@ average**, which hides the only thing an implementer needs — at the
 `reviewed_sha` of each comment, never the PR head (merged heads contain the fix
 commits, so scoring against them measures recall on already-fixed code and
 silently reports zero).
+
+**Delivered in 35a**, so 35b inherits rather than rebuilds it: `review --score`,
+per-class recall with the denominators printed beside the rates, an outright
+refusal to score a commit the corpus does not know (the PR-head guard), and
+`compile_claim`'s coverage model. One thing 35a had to fix on the way: the
+corpus README's own reconstruction recipe — `merge-base <base> <reviewed_sha>` —
+**produced an empty diff for 13 of the 15 review commits**, because a merged PR
+branch is an ancestor of `main` and the merge base is then the review commit
+itself. A reviewer handed an empty diff also scores zero, silently, from the
+opposite direction. The recipe is corrected and now has an executable form
+(`every_row_reconstructs_a_non_empty_reviewed_diff`), which also checks that each
+reconstructed diff touches the file its comment is anchored to.
 
 **"Do not build this" remains an acceptable outcome.** The corpus keeps its value
 either way: it is how any future reviewer, hosted or local, gets measured.
