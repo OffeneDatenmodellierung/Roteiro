@@ -77,7 +77,7 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // cached blob keeps serving the phantom marker until its bytes happen to
 // change. No namespace moves: this is a base-version change only, unconditional
 // across every feature combination.
-pub(crate) const EXTRACT_VERSION: u32 = 12
+pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "audio-metadata") {
@@ -85,6 +85,35 @@ pub(crate) const EXTRACT_VERSION: u32 = 12
     } else {
         0
     };
+
+/// The **generation** half of [`EXTRACT_VERSION`]: what a bump above counts, with
+/// no feature namespace added. Monotone, global, and identical in every build —
+/// which is what makes it, and not [`EXTRACT_VERSION`], the thing an entry's
+/// reachability can be decided against (see [`crate::sync::sweep_superseded`]).
+///
+/// The split was always there, encoded in the arithmetic; naming it only makes
+/// it readable. `EXTRACT_VERSION` is unchanged in every build: this is the same
+/// `12` the sum has always started from.
+pub(crate) const EXTRACT_BASE_VERSION: u32 = 12;
+
+/// The stride between feature namespaces above. Each of the three
+/// extraction-affecting features occupies a distinct power-of-ten *bit* slot
+/// (100/200/400 — see the history above), so a namespace is always a whole
+/// multiple of this and the base is always the remainder.
+pub(crate) const FEATURE_NAMESPACE_STRIDE: u32 = 100;
+
+// The key grammar depends on this: `v{EXTRACT_VERSION}` is decodable back into
+// (base, namespace) only while the base stays below the stride. It has always
+// depended on it — a base of 100 with no features would have written the same
+// `v100` as a base of 0 in a `pdf-text` build, aliasing two generations onto one
+// key — so this asserts an existing invariant rather than adding one. If the
+// base ever approaches 100, widen the stride (and the namespaces with it) in the
+// same change; do not let it wrap.
+const _: () = assert!(
+    EXTRACT_BASE_VERSION < FEATURE_NAMESPACE_STRIDE,
+    "EXTRACT_BASE_VERSION must stay below FEATURE_NAMESPACE_STRIDE, or a version \
+     tag stops decoding into (generation, feature namespace)"
+);
 
 /// Max characters of embeddable content (markdown body / doc-comment / PDF text)
 /// captured into a node's `meta.content`, to keep the store small while giving
