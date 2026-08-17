@@ -364,39 +364,13 @@ pub struct AssetStatus {
     pub verified: Option<bool>,
 }
 
-/// Resolve the root of the asset cache from its inputs, without touching the
-/// environment — so it is testable.
-fn root_from(
-    security_root: Option<PathBuf>,
-    roteiro_home: Option<PathBuf>,
-    home: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(dir) = security_root {
-        return dir;
-    }
-    if let Some(dir) = roteiro_home {
-        return dir.join("security");
-    }
-    home.unwrap_or_else(|| PathBuf::from("."))
-        .join(".roteiro")
-        .join("security")
-}
-
-/// Root of the asset cache (`~/.roteiro/security`), honouring
-/// `ROTEIRO_SECURITY_ASSETS` and then `ROTEIRO_HOME`.
-///
-/// It sits beside the model store rather than inside the repository: assets are
-/// per-user, are shared across every checkout, and must never be committed.
-#[must_use]
-pub fn asset_root() -> PathBuf {
-    root_from(
-        std::env::var_os("ROTEIRO_SECURITY_ASSETS").map(PathBuf::from),
-        std::env::var_os("ROTEIRO_HOME").map(PathBuf::from),
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from),
-    )
-}
+// Re-exported rather than defined here, and it used to be defined here. The
+// resolution moved to `asset_paths.rs` so that `build.rs` can `include!` it:
+// looking for the provisioned sandbox runtime is looking in *this* cache, and a
+// build script that resolved the path with its own copy of the precedence would
+// disagree with `prefetch` the first time either side changed. Kept re-exported
+// so `rto_exec::assets::asset_root` still names it.
+pub use crate::asset_paths::asset_root;
 
 /// Directory a given asset lives in.
 #[must_use]
@@ -1419,26 +1393,6 @@ mod tests {
         };
         let record = super::provision_with(&cache.0, spec, Some(honest)).expect("provision");
         assert_eq!(record.digest, crate::sha256_hex(&body));
-    }
-
-    #[test]
-    fn the_cache_root_prefers_the_explicit_override_then_roteiro_home() {
-        assert_eq!(
-            root_from(
-                Some("/explicit".into()),
-                Some("/home/.roteiro".into()),
-                None
-            ),
-            PathBuf::from("/explicit")
-        );
-        assert_eq!(
-            root_from(None, Some("/home/.roteiro".into()), None),
-            PathBuf::from("/home/.roteiro/security")
-        );
-        assert_eq!(
-            root_from(None, None, Some("/home/me".into())),
-            PathBuf::from("/home/me/.roteiro/security")
-        );
     }
 
     #[test]

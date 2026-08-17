@@ -62,6 +62,15 @@
 //! ```
 
 pub mod adapter;
+/// Where the pinned-asset cache lives, and the precedence that decides it.
+///
+/// Its source carries no `//!` header because `build.rs` pulls the same file in
+/// with `include!`, where an inner doc comment is a syntax error — so the module
+/// documentation lives here instead. `build.rs` needs it to find the sandbox
+/// runtime `roteiro security prefetch` installed, which is the same cache
+/// [`asset_paths::asset_root`] names; read the file's own comments for why that
+/// is shared rather than copied.
+pub mod asset_paths;
 // Asset provisioning is **always compiled**, behind no feature at all.
 //
 // It used to be `cfg(any(exec-subprocess, exec-boxlite))`, on the reading that
