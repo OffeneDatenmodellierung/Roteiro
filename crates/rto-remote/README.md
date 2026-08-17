@@ -41,6 +41,15 @@ that stopped early *reads* as finished, so handing it over would be the silent
 downgrade ADR-0019 most needs to prevent: a different answer with no signal that
 anything changed.
 
+Completeness is established **positively**, so a response that never says whether
+it finished is refused as well. That is the rule the asset fetch already applies
+at the other end of the wire — *a length that cannot be established is not a
+length that checks out* — and reading an absent `finish_reason` as "it must have
+finished" would be strictly weaker than the `length` case above, which at least
+tells you something. Nothing this tier can address omits the field on a complete
+response; the one shape that legitimately carries `null` is a streaming delta,
+and `Payload::body` pins `"stream": false`.
+
 ## The consent model, which is inverted for one key
 
 ADR-0007's precedence is **CLI flag > project `roteiro.toml` > user
@@ -52,12 +61,19 @@ only that key, it inverts:
 | Built-in default | denied by default | — |
 | Project `roteiro.toml` | **yes** | **no** |
 | User `~/.roteiro/config.toml` | yes | yes — necessary, not sufficient |
-| Invocation (`--allow-remote`) | yes | yes — necessary, not sufficient |
+| Invocation (`--allow-remote`, or a TTY prompt) | yes | yes — necessary, not sufficient |
 
 `roteiro.toml` is committed and shared by design, so a merged line authorising
 egress on every teammate's machine is not consent — it is consent by pull
 request, granted by someone else, noticed by nobody. A project may still switch
 the tier **off** for everyone: denial has none of the problems of grant.
+
+The invocation's two forms are distinguishable — `Invocation::{Unset, Flag,
+Prompt}` — because they deny differently and a `Reason` has to say which. Someone
+who read the disclosure and answered *no* at a prompt is reported as
+`PromptDeclined`, not as having passed `--no-remote`: on this path above all
+others, a message that misreports how consent was withheld undermines the thing
+it is reporting on.
 
 ## What may be sent
 

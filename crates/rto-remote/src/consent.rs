@@ -103,6 +103,47 @@ impl ConfigGrant {
     }
 }
 
+/// How the invocation answered — **and by which of its two forms.**
+///
+/// ADR-0019 §3's table row is *"Invocation (flag, or a TTY prompt)"*: the ADR
+/// always had two forms, and until this type existed the code collapsed them
+/// into one `Option<bool>`. That collapse was not free. A person who answered
+/// *no* at a prompt was told they had passed `--no-remote` — a flag they never
+/// typed, and would not find in their shell history if they went looking. A
+/// message about consent that misreports how consent was withheld undermines the
+/// thing it is reporting on, so the two forms are distinguishable here and
+/// produce different [`Reason`]s.
+///
+/// [`decide`] takes the flag form directly, because that is the common one and
+/// changing its signature would have bought nothing; [`decide_with`] takes this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invocation {
+    /// Neither flag was passed, and nobody was asked. **Not a grant** — the run
+    /// still has to opt in.
+    Unset,
+    /// `--allow-remote` (`true`) or `--no-remote` (`false`).
+    Flag(bool),
+    /// A person was shown the exact bytes at a TTY and answered: `true` for yes,
+    /// `false` for anything else.
+    ///
+    /// A prompt may only ever supply this half of consent, and only from
+    /// [`Reason::InvocationUnset`] — it may never stand in for the user layer,
+    /// or the two grants ADR-0019 §3 requires separately collapse into one
+    /// keystroke. That rule is enforced at the call site (`may_prompt`), because
+    /// it is a rule about when to *ask*, and this type only records the answer.
+    Prompt(bool),
+}
+
+impl Invocation {
+    /// What this invocation said, discarding *how* it said it.
+    fn answer(self) -> Option<bool> {
+        match self {
+            Self::Unset => None,
+            Self::Flag(granted) | Self::Prompt(granted) => Some(granted),
+        }
+    }
+}
+
 /// Why the gate is open or shut. Every variant names a layer and, via
 /// [`Reason::remedy`], says what would change it.
 ///
@@ -110,6 +151,16 @@ impl ConfigGrant {
 /// answer anyone can act on, and because the reasons are not interchangeable:
 /// [`Reason::ProjectDenied`] is a deliberate decision by the repository that no
 /// flag can override, while [`Reason::InvocationUnset`] is one flag away.
+///
+/// The invocation denies in **two** ways, and they are separate variants rather
+/// than one variant carrying a source. Three reasons, in increasing order of how
+/// much they matter: the remedies genuinely differ (*"drop the flag"* against
+/// *"answer yes next time"*); a new variant makes every exhaustive `match` in the
+/// workspace fail to compile until it is considered, where a new payload on an
+/// existing variant would silently widen every `matches!` already written; and
+/// [`Reason::as_str`] is the stable token in `remote status --json`, so a new
+/// variant adds a token while a payload would change the *shape* of one readers
+/// already parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
@@ -117,8 +168,18 @@ pub enum Reason {
     Granted,
     /// The project's `roteiro.toml` denied it. Outranks every other layer.
     ProjectDenied,
-    /// This invocation denied it (`--no-remote`).
+    /// This invocation denied it **with the flag** (`--no-remote`).
+    ///
+    /// Only ever produced by [`Invocation::Flag`]. A prompt answered *no* is
+    /// [`Reason::PromptDeclined`], because telling someone they passed a flag
+    /// they did not pass is worse than saying nothing.
     InvocationDenied,
+    /// A person was shown the exact bytes at a prompt and said no.
+    ///
+    /// The most deliberate refusal in this enum — the only one made by someone
+    /// who had already read what would leave — and the one whose message must not
+    /// blame a flag.
+    PromptDeclined,
     /// The user config set `enabled = false`.
     UserLayerDenied,
     /// The user config does not set `enabled = true`. This is the default state.
@@ -135,6 +196,7 @@ impl Reason {
             Self::Granted => "granted",
             Self::ProjectDenied => "project_denied",
             Self::InvocationDenied => "invocation_denied",
+            Self::PromptDeclined => "prompt_declined",
             Self::UserLayerDenied => "user_layer_denied",
             Self::UserLayerUnset => "user_layer_unset",
             Self::InvocationUnset => "invocation_unset",
@@ -154,6 +216,9 @@ impl Reason {
                  switches the remote tier off for everyone working in it"
             }
             Self::InvocationDenied => "this invocation denied it (`--no-remote`)",
+            Self::PromptDeclined => {
+                "you were shown exactly what would be sent and answered no, so nothing was sent"
+            }
             Self::UserLayerDenied => {
                 "your `~/.roteiro/config.toml` sets `[remote] enabled = false`"
             }
@@ -178,6 +243,14 @@ impl Reason {
                  with the repository rather than with your own configuration",
             ),
             Self::InvocationDenied => Some("drop `--no-remote` to leave the decision to consent"),
+            // Deliberately does not lead with the flag. Someone who has just read
+            // the disclosure and declined is the last person who should be told,
+            // first, how to skip being asked.
+            Self::PromptDeclined => Some(
+                "nothing is wrong — run it again and answer `y` if you change your mind. \
+                 `--allow-remote` grants the run without the question, which is what a script \
+                 needs; at a terminal, being asked is the point",
+            ),
             Self::UserLayerDenied | Self::UserLayerUnset => Some(
                 "set `[remote] enabled = true` in `~/.roteiro/config.toml`. It has to be that \
                  file: a committed `roteiro.toml` may deny egress but never grant it, so nobody \
@@ -237,10 +310,25 @@ impl Decision {
     }
 }
 
-/// Decide whether this run may send.
+/// Decide whether this run may send, from **the flag form** of the invocation.
 ///
-/// `invocation` is the flag (or, later, a TTY prompt): `Some(true)` for
-/// `--allow-remote`, `Some(false)` for `--no-remote`, `None` for neither.
+/// `invocation` is the flag: `Some(true)` for `--allow-remote`, `Some(false)`
+/// for `--no-remote`, `None` for neither. Kept as it was because it is the
+/// common form and every existing caller passes it; a run whose invocation came
+/// from a **prompt** must use [`decide_with`], so that declining at a prompt is
+/// not reported as a flag nobody passed.
+///
+/// A thin wrapper over [`decide_with`], not a second implementation — there is
+/// one place that knows which layer outranks which, and this is not it.
+#[must_use]
+pub fn decide(config: ConfigGrant, invocation: Option<bool>) -> Decision {
+    decide_with(
+        config,
+        invocation.map_or(Invocation::Unset, Invocation::Flag),
+    )
+}
+
+/// Decide whether this run may send, given **how** the invocation answered.
 ///
 /// # The order the layers are consulted, and why it is this order
 ///
@@ -249,16 +337,26 @@ impl Decision {
 /// wastes the reader's time. Someone who passed `--no-remote` does not need to be
 /// told their user config is also unset; someone in a repository that denies the
 /// tier must not be told to edit their user config, because it would not help.
+///
+/// The same argument is why the invocation's two denial forms are two reasons
+/// and not one: *"drop the flag"* is the wrong advice for someone who declined a
+/// prompt, and *"you passed `--no-remote`"* is not merely unhelpful but untrue.
 #[must_use]
-pub fn decide(config: ConfigGrant, invocation: Option<bool>) -> Decision {
+pub fn decide_with(config: ConfigGrant, invocation: Invocation) -> Decision {
     let reason = match (config.project_denied(), invocation, config.as_effective()) {
         (true, _, _) => Reason::ProjectDenied,
-        (false, Some(false), _) => Reason::InvocationDenied,
+        (false, Invocation::Flag(false), _) => Reason::InvocationDenied,
+        (false, Invocation::Prompt(false), _) => Reason::PromptDeclined,
         (false, _, Some(false)) => Reason::UserLayerDenied,
         (false, _, None) => Reason::UserLayerUnset,
-        (false, None, Some(true)) => Reason::InvocationUnset,
-        (false, Some(true), Some(true)) => Reason::Granted,
+        (false, Invocation::Unset, Some(true)) => Reason::InvocationUnset,
+        (false, Invocation::Flag(true) | Invocation::Prompt(true), Some(true)) => Reason::Granted,
     };
+    debug_assert_eq!(
+        reason.granted(),
+        invocation.answer() == Some(true) && config.as_effective() == Some(true),
+        "a grant needs both halves, whichever form the invocation took"
+    );
     Decision {
         reason,
         project_grant_ignored: config.project_grant_ignored(),
@@ -367,6 +465,121 @@ mod tests {
         );
     }
 
+    /// **Declining at a prompt must not be reported as a flag nobody passed.**
+    ///
+    /// The failure this guards is not a wording slip: it tells someone they did
+    /// something they did not do. A person who read the disclosure and answered
+    /// *no* was being told they had passed `--no-remote` — and if they went
+    /// looking for it in their shell history or their scripts, they would not
+    /// find it. This is the consent path, so a message that misreports **how**
+    /// consent was withheld undermines the thing it is reporting on.
+    ///
+    /// Asserted on the **rendered error text**, not on the variant: the variant
+    /// being right is not the property that was broken, and a `Reason` that
+    /// classified correctly while still printing the flag would be the same bug.
+    #[test]
+    fn declining_at_a_prompt_is_not_reported_as_a_flag_nobody_passed() {
+        // The state a prompt is reachable from: the user layer granted, this run
+        // had not — and then the person said no.
+        let config = ConfigGrant::from_layers(None, Some(true));
+        let declined = super::decide_with(config, super::Invocation::Prompt(false));
+        assert!(!declined.granted());
+        assert_eq!(declined.reason, Reason::PromptDeclined);
+
+        // What the user actually sees, through the error `remote call` returns.
+        let text = crate::RemoteError::NotConsented(declined.reason).to_string();
+        assert!(
+            !text.contains("--no-remote"),
+            "it names a flag the person never typed: {text}"
+        );
+        assert!(
+            text.contains("answered no"),
+            "it has to say what they actually did: {text}"
+        );
+        assert!(
+            text.contains("shown exactly what would be sent"),
+            "…and that they saw the disclosure first, which is the point of asking: {text}"
+        );
+        assert!(
+            text.contains("run it again and answer `y`"),
+            "the remedy for a decline is not a flag: {text}"
+        );
+
+        // The flag form is unchanged and still names the flag, because there it
+        // is true — the two must not be made interchangeable by fixing this.
+        let by_flag = super::decide_with(config, super::Invocation::Flag(false));
+        assert_eq!(by_flag.reason, Reason::InvocationDenied);
+        let flag_text = crate::RemoteError::NotConsented(by_flag.reason).to_string();
+        assert!(flag_text.contains("--no-remote"), "{flag_text}");
+        assert_ne!(
+            text, flag_text,
+            "two different acts must not produce one message"
+        );
+
+        // A yes is a yes whichever form asked, and `decide` keeps meaning the
+        // flag form for every caller that already passes an `Option<bool>`.
+        assert!(super::decide_with(config, super::Invocation::Prompt(true)).granted());
+        assert_eq!(decide(config, Some(false)).reason, Reason::InvocationDenied);
+        assert_eq!(decide(config, None).reason, Reason::InvocationUnset);
+        assert!(decide(config, Some(true)).granted());
+    }
+
+    /// **A prompt supplies the invocation and nothing else.** A *yes* at a prompt
+    /// cannot reach past its own layer: a project denial still wins, and an unset
+    /// user layer is still unset, because the human opting *themselves* in is a
+    /// separate act from opting *this run* in (ADR-0019 §3).
+    ///
+    /// A *no* is a different matter, and the asymmetry is deliberate rather than
+    /// an oversight: an explicit refusal is reported ahead of an absent grant,
+    /// exactly as `--no-remote` is by
+    /// `an_explicit_denial_is_reported_ahead_of_an_absent_grant`. Someone who has
+    /// just declined a prompt should be told that is why nothing was sent, not
+    /// sent to edit a config file they may already have set correctly. Denial has
+    /// none of the problems of grant — which is the whole shape of this gate.
+    #[test]
+    fn a_prompt_answers_for_the_run_and_never_for_another_layer() {
+        // A yes reaches nothing beyond its own layer.
+        assert_eq!(
+            super::decide_with(
+                ConfigGrant::from_layers(Some(false), Some(true)),
+                super::Invocation::Prompt(true)
+            )
+            .reason,
+            Reason::ProjectDenied,
+            "a yes at a prompt cannot overrule a repository"
+        );
+        assert_eq!(
+            super::decide_with(
+                ConfigGrant::from_layers(None, None),
+                super::Invocation::Prompt(true)
+            )
+            .reason,
+            Reason::UserLayerUnset,
+            "…nor stand in for the user layer"
+        );
+
+        // A no is reported as itself, ahead of any absence — the flag's rule,
+        // applied to the other form of the same layer.
+        assert_eq!(
+            super::decide_with(
+                ConfigGrant::from_layers(None, None),
+                super::Invocation::Prompt(false)
+            )
+            .reason,
+            Reason::PromptDeclined,
+            "a decline explains itself rather than blaming an unset user layer"
+        );
+        // …but never ahead of the project's, which no local act overrides.
+        assert_eq!(
+            super::decide_with(
+                ConfigGrant::from_layers(Some(false), Some(true)),
+                super::Invocation::Prompt(false)
+            )
+            .reason,
+            Reason::ProjectDenied
+        );
+    }
+
     /// Explicit denials are reported ahead of absent grants, because their
     /// remedies differ and the wrong remedy is worse than none.
     #[test]
@@ -389,14 +602,19 @@ mod tests {
     /// change it. A gate that only says "no" is not a consent model.
     #[test]
     fn every_reason_explains_itself_and_only_the_grant_needs_no_remedy() {
-        for reason in [
+        // Every variant, so a seventh cannot be added with an empty explanation
+        // — `roteiro remote status` renders whatever this returns, for any
+        // reason it is handed.
+        let all = [
             Reason::Granted,
             Reason::ProjectDenied,
             Reason::InvocationDenied,
+            Reason::PromptDeclined,
             Reason::UserLayerDenied,
             Reason::UserLayerUnset,
             Reason::InvocationUnset,
-        ] {
+        ];
+        for reason in all {
             assert!(!reason.explain().is_empty(), "{reason:?}");
             assert!(!reason.as_str().is_empty(), "{reason:?}");
             assert_eq!(
@@ -405,6 +623,18 @@ mod tests {
                 "{reason:?}: only a grant needs no remedy"
             );
         }
+        // The `--json` tokens are the stable contract, so two reasons must never
+        // share one: a reader parsing `prompt_declined` is being told something
+        // `invocation_denied` does not say.
+        let mut tokens: Vec<&str> = all.iter().map(|r| r.as_str()).collect();
+        tokens.sort_unstable();
+        let distinct = tokens.len();
+        tokens.dedup();
+        assert_eq!(
+            tokens.len(),
+            distinct,
+            "two reasons share a token: {tokens:?}"
+        );
         // The user-layer remedy has to name the *user* file, since naming the
         // project file would be advice that cannot work.
         let remedy = Reason::UserLayerUnset.remedy().expect("a remedy");

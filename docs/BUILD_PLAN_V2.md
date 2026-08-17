@@ -1495,11 +1495,12 @@ Five modules, one per clause:
 - **`consent`** — ADR-0019 §3's inversion. `ConfigGrant::from_layers` is the
   workspace's single implementation of "a project may deny but never grant", and
   the binary's config layering calls it, so the value `roteiro config` echoes and
-  the value the gate consults cannot drift apart. Six named `Reason`s, each with
-  a remedy — except `ProjectDenied`, whose honest remedy is *"no flag overrides
-  this; take it up with the repository"*. A discarded project grant is **reported
-  rather than swallowed**: a committed setting that silently does nothing is
-  worse than one refused out loud.
+  the value the gate consults cannot drift apart. **Seven** named `Reason`s — six
+  until part 2a split the invocation's two denial forms apart (see below) — each
+  with a remedy, except `ProjectDenied`, whose honest remedy is *"no flag
+  overrides this; take it up with the repository"*. A discarded project grant is
+  **reported rather than swallowed**: a committed setting that silently does
+  nothing is worse than one refused out loud.
 - **`payload`** — the allow-list as a *type*. `ContextItem::from_node` reads five
   named fields off a node — key, kind, name, path, and up to 1,500 characters of
   `meta.content`; every other key in its free-form `meta` is unreachable, and the
@@ -1583,6 +1584,39 @@ has not. A prompt may never stand in for the **user layer**, or the two grants
 ADR-0019 §3 requires separately collapse into one keystroke; it may never
 override a project denial; and a non-interactive stdin is **refused**, not
 assumed to agree, because a pipe cannot consent.
+
+**Two review findings on #386, both about a message that was untrue rather than
+merely unhelpful** — the class this project keeps finding, because such a message
+passes every gate.
+
+*Declining a prompt claimed you had passed a flag.* The invocation's two forms
+were collapsed into one `Option<bool>`, so answering *no* produced
+`InvocationDenied`, whose text names `--no-remote` — a flag the person never
+typed and would not find in their shell history. On the consent path especially,
+a message that misreports **how** consent was withheld undermines the thing it
+reports on. Fixed with `Invocation::{Unset, Flag, Prompt}` and a seventh
+`Reason::PromptDeclined`; `decide` keeps its `Option<bool>` flag form and became
+a thin wrapper over `decide_with`, so there is still one implementation of which
+layer outranks which. A distinct variant rather than a payload on the existing
+one, for a reason that decides it: `Reason::as_str` is the stable token in
+`remote status --json`, so a variant adds a token where a payload would change
+the shape of one readers already parse. The test asserts the **rendered text**,
+not the variant — a `Reason` that classified right while still printing the flag
+would be the same bug.
+
+*An absent `finish_reason` was read as "it finished".* `parse` only refused when
+the field was present and outside the allow-list, so silence passed — a strictly
+weaker reading than the `length` case it already refuses, since `length` at least
+says something. This is #367's rule at the other end of the same wire: *a length
+that cannot be established is not a length that checks out*. Now
+`ResponseError::Indeterminate`, and the message says why (completeness could not
+be established) rather than that a field was missing. Checked before changing it
+that nothing this tier addresses legitimately omits the field: `rto-serve`'s own
+`ChatChoice::finish_reason` is a non-optional `&'static str`, and the one shape
+that legitimately carries `null` is a **streaming delta**, which `Payload::body`'s
+pinned `"stream": false` means this tier never asks for — so a `null` here is an
+endpoint streaming at a request that said not to, which is the least complete a
+body can be.
 
 **Testing the untestable bit.** Part 1 could say the binary compiled no backend.
 That sentence is now false, so the guarantee is re-established on different

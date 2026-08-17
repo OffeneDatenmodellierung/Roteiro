@@ -62,7 +62,7 @@ pub mod record;
 pub mod response;
 pub mod trust;
 
-pub use consent::{ConfigGrant, Decision, Reason};
+pub use consent::{ConfigGrant, Decision, Invocation, Reason};
 pub use endpoint::{Endpoint, EndpointError};
 pub use escalation::{Check, LocalAttempt, Policy, Trigger};
 pub use payload::{ContextItem, Payload, PayloadError};

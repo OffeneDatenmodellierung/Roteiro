@@ -2172,10 +2172,19 @@ fn run_remote_call(
         eprintln!("{note}\n");
     }
     if !decision.granted() && remote_transport::may_prompt(decision.reason) {
-        // A prompt is the invocation, not a second chance at the config: `decide`
-        // is re-run with the answer rather than the decision being patched, so
-        // the gate stays the single implementation of who may send.
-        decision = rto_remote::consent::decide(grant, ask_to_send(&endpoint, &body, &payload)?);
+        // A prompt is the invocation, not a second chance at the config: the gate
+        // is re-run with the answer rather than the decision being patched, so it
+        // stays the single implementation of who may send.
+        //
+        // `Invocation::Prompt` rather than a bare `Some(bool)`, and that is the
+        // whole of the fix for #386's second review comment: collapsing the two
+        // forms made a declined prompt report itself as `--no-remote`, telling
+        // someone they had passed a flag they never typed. On the consent path of
+        // all places, a message that misreports *how* consent was withheld
+        // undermines the thing it is reporting on.
+        let said_yes = ask_to_send(&endpoint, &body, &payload)?;
+        decision =
+            rto_remote::consent::decide_with(grant, rto_remote::Invocation::Prompt(said_yes));
     }
 
     let ledger = remote_ledger()?;
@@ -2226,10 +2235,12 @@ fn run_remote_call(
 /// Ask this terminal to grant *this run*, having shown it exactly what would
 /// leave.
 ///
-/// Returns the invocation grant to re-decide with: `Some(true)` for a yes,
-/// `Some(false)` for anything else. A refusal is an explicit denial rather than
-/// an absence, so the gate reports `InvocationDenied` — *"you said no"* — instead
-/// of `InvocationUnset` and its advice to pass a flag the person just declined.
+/// Returns the answer alone — `true` for a yes, `false` for anything else. The
+/// caller wraps it in [`rto_remote::Invocation::Prompt`], which is what keeps a
+/// declined prompt from being reported as `--no-remote`: an answer is an explicit
+/// denial rather than an absence, so the gate reports `PromptDeclined` — *"you
+/// read it and said no"* — rather than either `InvocationUnset` and its advice to
+/// pass a flag, or `InvocationDenied` and its claim that one was passed.
 ///
 /// **A non-interactive stdin is never prompted and never granted.** A pipe
 /// cannot consent, and treating an unattended run as a yes is exactly the
@@ -2240,7 +2251,7 @@ fn ask_to_send(
     endpoint: &rto_remote::Endpoint,
     body: &str,
     payload: &rto_remote::Payload,
-) -> anyhow::Result<Option<bool>> {
+) -> anyhow::Result<bool> {
     use std::io::Write as _;
 
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -2259,7 +2270,7 @@ fn ask_to_send(
     std::io::stderr().flush().ok();
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
-    Ok(Some(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")))
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// Read the egress ledger — what left this machine, and when.
