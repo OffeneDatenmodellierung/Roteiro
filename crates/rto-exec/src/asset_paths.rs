@@ -116,7 +116,10 @@ mod asset_paths_tests {
             })
             .collect();
 
-        assert!(!read.is_empty(), "no var_os call was found to check against");
+        assert!(
+            !read.is_empty(),
+            "no var_os call was found to check against"
+        );
         for var in &read {
             assert!(
                 super::ASSET_ROOT_VARS.contains(var),

@@ -48,7 +48,7 @@
 //! - **present, and the digest does not**: the loudest failure here, naming both
 //!   digests and both sizes. A file at the exact path `prefetch` writes to whose
 //!   bytes are not the pinned ones is the case most worth stopping for, and
-//!   falling through to "set BOXLITE_RUNTIME_URL" would bury it.
+//!   falling through to "set `BOXLITE_RUNTIME_URL`" would bury it.
 //! - **absent**: the provisioning recipe, which is where the bootstrap out of a
 //!   bare `cargo install roteiro --all-features` is spelled out.
 //!
@@ -127,7 +127,10 @@ fn main() {
     let Some(url) = std::env::var_os("BOXLITE_RUNTIME_URL") else {
         // Resolved through the same code `prefetch` writes with, never a second
         // copy of the precedence — see the module docs.
-        refuse_without_the_variable(&asset_root().join(RUNTIME_ASSET).join(RUNTIME_FILE), archive);
+        refuse_without_the_variable(
+            &asset_root().join(RUNTIME_ASSET).join(RUNTIME_FILE),
+            archive,
+        );
     };
 
     let url = url.to_string_lossy().into_owned();
@@ -176,10 +179,7 @@ fn main() {
 /// told to fetch something, to look at a file that is not what it should be, or
 /// simply to export a path this script has already verified for them.
 fn refuse_without_the_variable(provisioned: &Path, archive: &PinnedArchive) -> ! {
-    let export = format!(
-        "BOXLITE_RUNTIME_URL=\"file://{}\"",
-        provisioned.display()
-    );
+    let export = format!("BOXLITE_RUNTIME_URL=\"file://{}\"", provisioned.display());
 
     if !provisioned.exists() {
         fail(&format!(

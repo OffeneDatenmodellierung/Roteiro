@@ -1112,7 +1112,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
 mod tests {
     use super::{
         ASSETS, AssetError, AssetKind, AssetSource, asset, asset_path, assets_for, installed,
-        provision, resolve, root_from, status,
+        provision, resolve, status,
     };
     use crate::runner::ExecError;
     use std::path::PathBuf;
