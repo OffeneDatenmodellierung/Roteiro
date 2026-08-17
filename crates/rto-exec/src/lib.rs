@@ -96,8 +96,28 @@ pub mod assets;
 pub mod boxlite;
 mod clock;
 pub mod crossref;
+/// Emitting a `file://` URL for a local path, and reading one back.
+///
+/// Its source carries no `//!` header because `build.rs` pulls the same file in
+/// with `include!`, where an inner doc comment is a syntax error — so the module
+/// documentation lives here instead. `build.rs` is this crate's only emitter: it
+/// prints the `BOXLITE_RUNTIME_URL=` recipe an operator pastes, and parses that
+/// variable back when it is set. What reads the URL in between is `boxlite`'s
+/// own `curl`, which percent-decodes and rejects an unencoded space outright —
+/// read the file's own comments for the measurements, and for why the encoder
+/// and the decoder have to be one file rather than two.
+pub mod file_url;
 mod ingest;
 mod runner;
+/// The per-file digests of the extracted sandbox runtime — **generated**.
+///
+/// Derived from the archives in [`runtime_pins`] by
+/// `scripts/derive-runtime-file-pins.py`, and verified by `build.rs` against
+/// what `boxlite` actually extracted, since those files rather than the archive
+/// are what `include_bytes!` puts in the binary. Same `include!` arrangement,
+/// and so the same standalone constraint; its module documentation lives here
+/// for the same reason [`runtime_pins`]'s does.
+pub mod runtime_file_pins;
 /// The pinned sandbox-runtime archives, and the host-platform selection.
 ///
 /// Its source carries no `//!` header because `build.rs` pulls the same file in
@@ -129,6 +149,9 @@ pub use ingest::{
 pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,
     check_reported_path, check_request, worktree_id,
+};
+pub use runtime_file_pins::{
+    PinnedFile, PinnedRuntimeFiles, RUNTIME_FILES, RUNTIME_FILES_VERSION, runtime_files_for,
 };
 pub use runtime_pins::{
     PinnedArchive, RUNTIME_ARCHIVES, RUNTIME_ASSET, RUNTIME_FILE, RUNTIME_VERSION, archive_for,

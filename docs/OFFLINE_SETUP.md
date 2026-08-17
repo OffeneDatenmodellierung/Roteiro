@@ -21,15 +21,34 @@ Stage 24). Leave the feature off and none of this applies:
 
 | Host | What | Reached by |
 | --- | --- | --- |
-| `github.com` | the boxlite sandbox runtime archive | `roteiro security prefetch --analyzer sandbox --allow-download` |
+| `github.com` | the boxlite sandbox runtime archive | `roteiro security prefetch --analyzer sandbox --allow-download`, **or `boxlite`'s own build script** — see below |
 | `docker.io` | the pinned analyzer image | `roteiro security prefetch --analyzer semgrep --allow-download` |
 
-The archive goes through the same `ureq` call site as everything above. The
-image does not: an OCI pull runs through `oci-client` inside the `boxlite`
-dependency, so it is the one egress path that is not first-party code. Both are
-pinned — the archive by SHA-256 in `crates/rto-exec/src/runtime_pins.rs`, the
-image by manifest digest in `SANDBOX_IMAGES` — so a registry serving different
-bytes fails the pin rather than being trusted.
+**One of those is reached at build time rather than run time, and that is the
+trap.** Building `--features exec-boxlite` with `BOXLITE_RUNTIME_URL` unset lets
+`boxlite`'s own build script `curl` the runtime archive from `github.com`. The
+bytes are still verified — `rto-exec`'s build script checks every extracted file
+against `crates/rto-exec/src/runtime_file_pins.rs` before anything links — but a
+socket is opened, so **that build is not an offline build**. On a host with no
+egress it fails inside `boxlite`, before Roteiro's own checks are reached.
+
+To keep the build offline, provision the archive first and name it:
+
+```sh
+roteiro security prefetch --analyzer sandbox --allow-download
+export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
+```
+
+`boxlite`'s `curl` then reads that local file and opens no socket, and the
+archive is verified before it is extracted as well as after.
+
+The archive goes through the same `ureq` call site as everything above when
+`prefetch` is what obtains it. The image does not: an OCI pull runs through
+`oci-client` inside the `boxlite` dependency, so it is the one egress path that
+is not first-party code. All of it is pinned — the archive by SHA-256 in
+`crates/rto-exec/src/runtime_pins.rs`, the files it extracts to by SHA-256 in
+`runtime_file_pins.rs`, the image by manifest digest in `SANDBOX_IMAGES` — so a
+host serving different bytes fails the pin rather than being trusted.
 
 Everything else — the semgrep baseline rules, the explorer's JavaScript, every
 tree-sitter grammar — is compiled into the binary. There is no lazy fetch, no

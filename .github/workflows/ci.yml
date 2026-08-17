@@ -33,7 +33,14 @@ jobs:
       # This provisions it from the digests pinned in
       # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
       # boxlite's own fetch resolves to a local, verified file and never reaches
-      # the network. `rto-exec/build.rs` refuses to build without it.
+      # the network.
+      #
+      # The build no longer *requires* it — `rto-exec/build.rs` verifies the files
+      # boxlite extracted against per-file pins either way (ADR-0014 v1.3). CI
+      # keeps provisioning deliberately, for two reasons: it is the strict,
+      # no-egress path and something should exercise it on every run, and it takes
+      # a 26 MB download out of three jobs' critical path. Do not remove this on
+      # the grounds that the build now works without it.
       - name: Install protoc (`exec-boxlite` feature)
         run: sudo apt-get install -y protobuf-compiler
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
@@ -183,7 +190,14 @@ jobs:
       # This provisions it from the digests pinned in
       # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
       # boxlite's own fetch resolves to a local, verified file and never reaches
-      # the network. `rto-exec/build.rs` refuses to build without it.
+      # the network.
+      #
+      # The build no longer *requires* it — `rto-exec/build.rs` verifies the files
+      # boxlite extracted against per-file pins either way (ADR-0014 v1.3). CI
+      # keeps provisioning deliberately, for two reasons: it is the strict,
+      # no-egress path and something should exercise it on every run, and it takes
+      # a 26 MB download out of three jobs' critical path. Do not remove this on
+      # the grounds that the build now works without it.
       - name: Install protoc (`exec-boxlite` feature)
         run: sudo apt-get install -y protobuf-compiler
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
@@ -239,7 +253,14 @@ jobs:
       # This provisions it from the digests pinned in
       # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
       # boxlite's own fetch resolves to a local, verified file and never reaches
-      # the network. `rto-exec/build.rs` refuses to build without it.
+      # the network.
+      #
+      # The build no longer *requires* it — `rto-exec/build.rs` verifies the files
+      # boxlite extracted against per-file pins either way (ADR-0014 v1.3). CI
+      # keeps provisioning deliberately, for two reasons: it is the strict,
+      # no-egress path and something should exercise it on every run, and it takes
+      # a 26 MB download out of three jobs' critical path. Do not remove this on
+      # the grounds that the build now works without it.
       - name: Install protoc (`exec-boxlite` feature)
         run: sudo apt-get install -y protobuf-compiler
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)

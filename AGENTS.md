@@ -83,41 +83,45 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — clean
   (pedantic). Prefer fixing over `#[allow(...)]`; when an allow is right, justify
   it in a comment.
-- `cargo test --workspace --all-features` — green. **`--all-features` now
-  includes `exec-boxlite`, which will not build until the sandbox runtime is
-  provisioned** — deliberately, because otherwise boxlite's own build script
-  downloads a 25 MB archive with no digest check of any kind and embeds it in
-  the binary. Once, before your first `--all-features` build:
+- `cargo test --workspace --all-features` — green. **`--all-features` includes
+  `exec-boxlite`.** That builds without a pre-step now: `boxlite` fetches the
+  runtime archive over TLS and `rto-exec`'s build script verifies **every
+  extracted file** against the per-file digests in `src/runtime_file_pins.rs`
+  before anything links, failing on a mismatch, a missing file or an unpinned
+  extra one. You still need one pass of your own:
 
   ```sh
-  # 1. The runtime archive. Any build can do this. The archive belongs to no
-  #    analyzer, so `--analyzer sandbox` selects it alone rather than also
-  #    fetching ~250 MB of advisory databases you may not want yet.
-  roteiro security prefetch --analyzer sandbox --allow-download   # pinned digest
-  export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
-
-  # 2. The analyzer image. This step needs a binary that *has* `exec-boxlite`,
-  #    which step 1 is what makes buildable — so it cannot be folded into step 1.
+  # The analyzer image. It needs a binary that *has* `exec-boxlite`, so it
+  # cannot be folded into anything earlier.
   cargo run -p roteiro --features exec-boxlite -- \
     security prefetch --analyzer semgrep --allow-download   # ~435 MB, pinned by digest
   ```
 
-  The build script fails loudly — with this recipe and the expected digest — if
-  the variable is unset, points at a remote URL, or the bytes do not match. Build
-  without `exec-boxlite` if you would rather not provision.
+  **That pass is easy to miss.** The *image* half of `prefetch` is behind
+  `#[cfg(feature = "exec-boxlite")]`, so a binary without it compiles the image
+  step out entirely. Skip it and `cargo test --workspace --all-features` fails in
+  `backend_parity` with `ImageNotProvisioned`.
 
-  `prefetch` is gated on `execution`, so **any** build can run step 1 —
-  including `--no-default-features --features execution`. That is not a
-  convenience: it is what stops this recipe being circular. If provisioning sat
-  behind an execution backend, obtaining the archive `exec-boxlite` demands at
-  compile time would first require a build with the *other* backend compiled in.
+  **For a build with no network at all**, provision the archive and name it. Then
+  `boxlite`'s `curl` reads a local file, and the bytes are verified before they
+  are extracted as well as after:
 
-  **Step 2 is a separate pass, and used to be missing here.** Provisioning is
-  universally available, but the *image* half of `prefetch` is behind
-  `#[cfg(feature = "exec-boxlite")]` — so a binary built to satisfy step 1
-  compiles it out, pulls the archive, and *silently not the image*. Skip step 2
-  and `cargo test --workspace --all-features` fails in `backend_parity` with
-  `ImageNotProvisioned`, on a machine that followed this recipe exactly.
+  ```sh
+  # The archive belongs to no analyzer, so `--analyzer sandbox` selects it alone
+  # rather than also fetching ~260 MB of advisory databases you may not want yet.
+  roteiro security prefetch --analyzer sandbox --allow-download   # pinned digest
+  export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
+  ```
+
+  `prefetch` is gated on `execution`, a default feature, so **any** build can run
+  that — including `--no-default-features --features execution`. Both paths are
+  verified; only this one is offline, and neither should be described as the
+  other (ADR-0014 v1.3).
+
+  **If you bump the `boxlite` pin**, re-derive the per-file digests rather than
+  editing them: `scripts/derive-runtime-file-pins.py` (and `--check` to confirm
+  the checked-in file is current). It covers all three pinned targets, not just
+  your host's.
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny --all-features check` and `cargo audit` — clean. **Every new
