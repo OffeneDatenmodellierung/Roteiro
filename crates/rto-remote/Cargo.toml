@@ -1,0 +1,37 @@
+[package]
+name = "rto-remote"
+description = "The remote model tier's consent gate, payload allow-list and egress record (ADR-0019) — the policy half of Roteiro's one explicitly-consented egress path, with no transport of its own"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# **There is deliberately no HTTP client here, and there must never be one.**
+#
+# ADR-0019 carves Roteiro's single exception to "nothing leaves the machine",
+# and the thing that makes the exception checkable rather than merely promised
+# is that the code holding the *policy* cannot perform the *act*. This crate
+# assembles what may be sent, decides whether it may be sent, and records that
+# it was — and takes the transport as a caller-supplied closure
+# ([`crate::Transport`]), exactly as `rto-exec` takes its [`rto_exec::Fetcher`].
+# The socket lives in the binary.
+#
+# That is also what lets every test here exercise the whole path without a
+# network, so a test cannot accidentally become the first thing that sends data.
+[dependencies]
+# Node identity and `meta`, which the payload allow-list reads *five named
+# fields* out of (see `payload::ContextItem::from_node`). `rto-graph` is the
+# crate that structurally cannot reach the network — its `gix` is pinned
+# `default-features = false` to exclude the transports — so depending on it
+# adds no transport here either.
+rto-graph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

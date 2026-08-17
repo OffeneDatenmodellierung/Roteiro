@@ -490,7 +490,9 @@ models are GGUF, run through the shared llama.cpp engine. A rough guide:</p>
 choices, Roteiro merges two layers: a per-user <code>~/.roteiro/config.toml</code>
 and a per-project <code>roteiro.toml</code> at the repository root (project wins).
 <code>roteiro config</code> prints the effective, merged values and labels which
-layer set each one.</p>
+layer set each one. <strong>One key inverts that</strong>: <code>[remote]
+enabled</code>, which opens Roteiro's only egress path, may be switched
+<em>off</em> by the committed project file but never <em>on</em> — see below.</p>
 
 <pre><code><span class="c"># roteiro.toml — every key is optional; shown with its default</span>
 
@@ -500,6 +502,15 @@ generative = "qwen3-0.6b"               <span class="c"># model for `spec draft`
 vision     = "smolvlm-500m-gguf"        <span class="c"># image description for `media build`</span>
 audio      = "voxtral-mini-3b"          <span class="c"># speech transcription for `media build`</span>
 ocr        = "ocrs-text"                <span class="c"># literal image text for `sync`</span>
+
+[remote]                                <span class="c"># the optional remote model tier — OFF by default, and the one key</span>
+enabled  = false                        <span class="c"># whose precedence inverts: roteiro.toml may set this false for</span>
+                                        <span class="c"># everyone, and may NEVER set it true. Only your own</span>
+                                        <span class="c"># ~/.roteiro/config.toml can grant it — and a run still needs</span>
+                                        <span class="c"># --allow-remote. Both are required; neither alone is enough.</span>
+endpoint = "https://…/v1/chat/completions"  <span class="c"># ordinary key: either layer may choose the destination</span>
+model    = "vendor/model-name"          <span class="c"># a vendor model string is a mutable pointer, so anything recorded</span>
+                                        <span class="c"># from this tier is `vendor_asserted`, never digest-pinned</span>
 
 [ingest]                                <span class="c"># which blob content `sync` embeds</span>
 prose  = true                           <span class="c"># Markdown / plain text bodies</span>

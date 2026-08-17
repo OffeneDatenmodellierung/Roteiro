@@ -4108,6 +4108,7 @@ dependencies = [
  "rto-exec",
  "rto-graph",
  "rto-llama",
+ "rto-remote",
  "rto-render",
  "rto-serve",
  "rto-spec",
@@ -4301,6 +4302,16 @@ dependencies = [
  "anyhow",
  "encoding_rs",
  "llama-cpp-2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rto-remote"
+version = "1.17.0"
+dependencies = [
+ "rto-graph",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 

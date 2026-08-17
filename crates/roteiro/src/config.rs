@@ -119,6 +119,21 @@ impl Loaded {
     }
 }
 
+#[cfg(feature = "remote")]
+impl Loaded {
+    /// What the two **config layers** say about the remote model tier, as the
+    /// consent gate reads them (ADR-0019 §3).
+    ///
+    /// Built from the *layers*, not from [`Loaded::effective`], because the
+    /// merge is lossy on purpose: a project-layer grant is discarded on the way
+    /// to the effective value, and `rto_remote::ConfigGrant` is what remembers
+    /// there was one to report. The invocation is the caller's to supply.
+    #[must_use]
+    pub fn remote_config_grant(&self) -> rto_remote::ConfigGrant {
+        rto_remote::ConfigGrant::from_layers(self.project.remote.enabled, self.user.remote.enabled)
+    }
+}
+
 /// Roteiro configuration. All fields optional; see the module docs.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -137,6 +152,10 @@ pub struct Config {
     pub serve: ServeConfig,
     /// `roteiro debt` tuning (paths excluded from the intent-debt scan).
     pub debt: DebtConfig,
+    /// `[remote]` — the optional, default-off remote model tier (ADR-0019).
+    /// **The one table whose `enabled` key does not follow this file's
+    /// precedence**; see [`RemoteConfig`].
+    pub remote: RemoteConfig,
     /// Filesystem locations (the model store).
     pub paths: PathsConfig,
     /// `[telemetry]` — opt-in structured file logging (ADR-0011). Unset ⇒ stdout
@@ -229,6 +248,94 @@ pub struct DebtConfig {
     /// file) or `ignore-reset`.
     #[serde(alias = "ignore-reset")]
     pub ignore_reset: Option<bool>,
+}
+
+/// `[remote]` — the optional, **default-off** remote model tier (ADR-0019), and
+/// the one table in this file whose precedence is not the one the module docs
+/// describe.
+///
+/// # `enabled` inverts the layering, and only `enabled`
+///
+/// ADR-0007's order is **CLI flag > project > user > built-in default**. For
+/// [`RemoteConfig::enabled`] it is inverted, because `roteiro.toml` is
+/// *committed and shared by design* — this file's own reason for existing — so a
+/// merged line authorising egress on every teammate's machine would be consent
+/// granted by someone else and noticed by nobody:
+///
+/// | Layer | May deny | May grant |
+/// |---|---|---|
+/// | Built-in default | denied by default | — |
+/// | Project `roteiro.toml` | **yes** | **no** |
+/// | User `~/.roteiro/config.toml` | yes | yes — necessary, not sufficient |
+/// | Invocation (`--allow-remote`) | yes | yes — necessary, not sufficient |
+///
+/// [`RemoteConfig::endpoint`] and [`RemoteConfig::model`] are **ordinary keys**
+/// and layer ordinarily, project over user. A project may point the tier at its
+/// own gateway; it still cannot turn the tier on, and the endpoint it chose is
+/// printed by `roteiro remote status` and by every dry-run before anything is
+/// sent.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RemoteConfig {
+    /// Whether *this layer* opts into the remote model tier.
+    ///
+    /// Meaningful per layer rather than merged like a scalar — see the type's
+    /// docs, and [`remote_enabled_effective`] for the merge.
+    pub enabled: Option<bool>,
+    /// The URL a request goes to. Must be `https://`, or `http://` to a loopback
+    /// address for a gateway that terminates TLS itself.
+    pub endpoint: Option<String>,
+    /// The vendor's model string. It is a **mutable pointer**: the weights behind
+    /// it can change while the name does not, which is why anything recorded from
+    /// this tier is `vendor_asserted` rather than digest-pinned.
+    pub model: Option<String>,
+}
+
+impl RemoteConfig {
+    /// Overlay the project layer (`over`) on the user layer (`self`).
+    ///
+    /// Its own function, unlike the tables that inline their overlay in
+    /// [`Config::overlaid_with`], because **one of these three fields does not
+    /// follow the rule the other two do** and that difference deserves to be
+    /// visible at the point it is applied rather than inferred from a comment
+    /// twenty lines into a hundred-line merge.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            // ADR-0019 §3. `over.enabled.or(self.enabled)` — the shape every
+            // other scalar in this file uses — would let a merged line in a
+            // committed `roteiro.toml` authorise egress on every teammate's
+            // machine, which is the failure the inversion exists to prevent.
+            enabled: remote_enabled_effective(self.enabled, over.enabled),
+            // Ordinary keys, ordinary precedence: a project may choose *where*
+            // its own gateway is without being able to turn the tier on.
+            endpoint: over.endpoint.clone().or_else(|| self.endpoint.clone()),
+            model: over.model.clone().or_else(|| self.model.clone()),
+        }
+    }
+}
+
+/// The `[remote] enabled` the config layers jointly produce, before the
+/// invocation is consulted.
+///
+/// Delegates to `rto_remote::ConfigGrant`, which is the workspace's single
+/// implementation of "a project may deny but never grant" — so the value
+/// `roteiro config` echoes and the value the gate consults cannot drift apart.
+#[cfg(feature = "remote")]
+fn remote_enabled_effective(user: Option<bool>, project: Option<bool>) -> Option<bool> {
+    rto_remote::ConfigGrant::from_layers(project, user).as_effective()
+}
+
+/// Without the `remote` feature there is no tier for a key to enable, so the
+/// effective value is unset whatever the layers say.
+///
+/// Reported as unset rather than echoed back, because echoing `enabled = true`
+/// from a build that cannot send anything would describe a capability that is not
+/// there. The key still **parses** in this build, so a config shared with a
+/// fuller one is never rejected by a leaner one (ADR-0007's forward-compatibility
+/// rule); `roteiro config` says the build has no remote tier.
+#[cfg(not(feature = "remote"))]
+fn remote_enabled_effective(_user: Option<bool>, _project: Option<bool>) -> Option<bool> {
+    None
 }
 
 /// `[paths]` — filesystem locations.
@@ -741,6 +848,10 @@ impl Config {
                 // inherited pattern was plainly still present.
                 ignore_reset: over.debt.ignore_reset,
             },
+            // The one table in this merge whose `enabled` key does **not**
+            // follow the project-over-user rule every line above uses; see
+            // [`RemoteConfig::overlaid_with`] (ADR-0019 §3).
+            remote: self.remote.overlaid_with(&over.remote),
             paths: PathsConfig {
                 model_store: over
                     .paths
