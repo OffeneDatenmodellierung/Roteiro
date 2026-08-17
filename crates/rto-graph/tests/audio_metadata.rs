@@ -1,4 +1,3 @@
-#![cfg(feature = "audio-metadata")]
 //! ADR-0016: audio metadata as `derived` facts.
 //!
 //! Everything here runs from the committed fixtures — **no model, no network, no
@@ -29,6 +28,14 @@
 //!   committed 10-frame MP3, repeated (see [`long_cbr_mp3`]);
 //! * WAV and MP3 files carrying tags — the committed clips with a RIFF `LIST`
 //!   `INFO` chunk or an `ID3v2` tag spliced in (see [`tagged`]).
+
+// Keep this gate *below* the `//!` block, not on line 1. A crate-level `#![cfg]`
+// that evaluates false strips everything after it — including the `//!` header,
+// which is itself a crate attribute. With the gate first, the default feature
+// set was left with an empty, undocumented test crate and `missing_docs` failed
+// the build under `-D warnings`. Ordered this way the docs are already attached
+// when the gate is applied, and survive it.
+#![cfg(feature = "audio-metadata")]
 
 use rto_graph::{Extractor, NodeKind, Registry};
 
