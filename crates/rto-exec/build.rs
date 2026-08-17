@@ -91,11 +91,13 @@ use std::path::{Path, PathBuf};
 include!("src/runtime_pins.rs");
 include!("src/runtime_file_pins.rs");
 include!("src/asset_paths.rs");
+include!("src/file_url.rs");
 
 fn main() {
     println!("cargo:rerun-if-changed=src/runtime_pins.rs");
     println!("cargo:rerun-if-changed=src/runtime_file_pins.rs");
     println!("cargo:rerun-if-changed=src/asset_paths.rs");
+    println!("cargo:rerun-if-changed=src/file_url.rs");
     println!("cargo:rerun-if-env-changed=BOXLITE_RUNTIME_URL");
     // Where the archive is looked for is an input to this script, so a build
     // that moves the cache must re-run it rather than keep the old answer.
@@ -184,12 +186,9 @@ fn main() {
              To take the network out of it entirely, provision the archive and name it — then \
              the bytes are checked before boxlite is ever handed them:\n\n    \
              roteiro security prefetch --analyzer sandbox --allow-download\n    \
-             BOXLITE_RUNTIME_URL=\"file://{provisioned}\" cargo build --features exec-boxlite",
+             BOXLITE_RUNTIME_URL=\"{url}\" cargo build --features exec-boxlite",
             dir = dir.display(),
-            provisioned = asset_root()
-                .join(RUNTIME_ASSET)
-                .join(RUNTIME_FILE)
-                .display(),
+            url = file_url(&asset_root().join(RUNTIME_ASSET).join(RUNTIME_FILE)),
         )),
     }
 }
@@ -263,14 +262,14 @@ fn report_the_network_path(provisioned: &Path, archive: &PinnedArchive) {
     match verify(provisioned, archive) {
         Ok(()) => println!(
             "cargo:warning=rto-exec: for a build with no network at all, name the verified \
-             archive you already have: BOXLITE_RUNTIME_URL=\"file://{path}\"",
-            path = provisioned.display()
+             archive you already have: BOXLITE_RUNTIME_URL=\"{url}\"",
+            url = file_url(provisioned)
         ),
         Err(Flaw::Unreadable(_)) => println!(
             "cargo:warning=rto-exec: for a build with no network at all: roteiro security \
              prefetch --analyzer sandbox --allow-download, then \
-             BOXLITE_RUNTIME_URL=\"file://{path}\"",
-            path = provisioned.display()
+             BOXLITE_RUNTIME_URL=\"{url}\"",
+            url = file_url(provisioned)
         ),
         Err(flaw) => println!(
             "cargo:warning=rto-exec: NOTE — the archive at {path} is not the pinned artifact \
@@ -491,22 +490,6 @@ fn setuid_or_setgid(meta: &std::fs::Metadata) -> Option<u32> {
 #[cfg(not(unix))]
 fn setuid_or_setgid(_meta: &std::fs::Metadata) -> Option<u32> {
     None
-}
-
-/// The local path a `file://` URL names, or `None` for any other scheme.
-///
-/// Deliberately minimal: `file:///abs/path` and the `file://localhost/abs/path`
-/// form. Percent-decoding is applied for the one character that actually turns
-/// up in cache paths, a space; anything more exotic is refused by simply not
-/// existing later, which is a clearer failure than a half-implemented decoder.
-fn file_url_path(url: &str) -> Option<PathBuf> {
-    let rest = url
-        .strip_prefix("file://localhost")
-        .or_else(|| url.strip_prefix("file://"))?;
-    if !rest.starts_with('/') {
-        return None;
-    }
-    Some(PathBuf::from(rest.replace("%20", " ")))
 }
 
 /// Why a candidate archive is not the pinned one.

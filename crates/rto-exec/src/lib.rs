@@ -96,6 +96,17 @@ pub mod assets;
 pub mod boxlite;
 mod clock;
 pub mod crossref;
+/// Emitting a `file://` URL for a local path, and reading one back.
+///
+/// Its source carries no `//!` header because `build.rs` pulls the same file in
+/// with `include!`, where an inner doc comment is a syntax error — so the module
+/// documentation lives here instead. `build.rs` is this crate's only emitter: it
+/// prints the `BOXLITE_RUNTIME_URL=` recipe an operator pastes, and parses that
+/// variable back when it is set. What reads the URL in between is `boxlite`'s
+/// own `curl`, which percent-decodes and rejects an unencoded space outright —
+/// read the file's own comments for the measurements, and for why the encoder
+/// and the decoder have to be one file rather than two.
+pub mod file_url;
 mod ingest;
 mod runner;
 /// The per-file digests of the extracted sandbox runtime — **generated**.
