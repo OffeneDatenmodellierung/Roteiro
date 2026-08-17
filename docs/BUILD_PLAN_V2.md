@@ -76,12 +76,12 @@ Verified against `main` at the time of writing:
 
 | Fact | Value | Consequence for V2 |
 |---|---|---|
-| Released | **v1.10.1** on crates.io; workspace at **1.11.0**, publish in flight (only `rto-llama-v1.11.0` tagged so far) | V2 work is post-1.0 — semver is now real. |
+| Released | **v1.15.0** on crates.io, all seven crates | V2 work is post-1.0 — semver is now real. |
 | MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
 | Coverage | **measured in CI, not gated** — `cargo llvm-cov` runs non-blocking; the 85% per-file floor is an aspiration (ADR-0001), never an enforced check (issue #319) | Every stage below still carries test cost, but a DoD may not cite "85% coverage" as if something verified it. |
-| CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
-| Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
+| CI | Ubuntu-only; `--all-features` **and** the default set (the `default-features` job, added by #364 after the default set was found not to compile — issue #360) | `/dev/kvm` may be absent; Apple Silicon untested. Turning features *on* cannot find defects caused by code being cfg'd *out*. |
+| Schema | **migrations 1–13 applied** (1–7 at V2's start) | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | **`11`** (`crates/rto-graph/src/extract.rs`) — the Stage 28 bump landed in #316 | Bumping it forces full re-extraction for every user. No test pins the value. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
 | Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one — **done**, and tested against `lru_evict_count`'s own numbers. |
@@ -484,7 +484,7 @@ should rank on this predicate (`AnchorState::applies`), not invent a second one.
 `search` integration — all Stage 25. Memory currently reaches `search` through no
 channel at all, which is asserted rather than assumed.
 
-### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L**
+### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L** ✅ *delivered*
 
 **Goal:** the reproducible, offline-capable local run — one command, pinned inputs,
 digest-level evidence.
@@ -607,7 +607,7 @@ parity proof above ran on Apple Silicon locally, and CI runners have no
 and subprocess paths carry the functional coverage. That gap is unchanged and
 still accepted.
 
-### Stage 25 — Memory recall: cache tier, decay, supersession → **v1.14.0** · effort **L**
+### Stage 25 — Memory recall: cache tier, decay, supersession → shipped in **v1.12.0** · effort **L** ✅ *delivered*
 
 **Goal:** make memory *useful* — recall that ranks by evidence, plus the bounded
 cache that stops sessions re-deriving what they already know.
@@ -729,7 +729,7 @@ Moving a live cache onto the bounded tier is a data migration, not a policy
 change, and bundling it would have put a schema move and an eviction policy in one
 reviewable unit.
 
-### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)*
+### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)* 🟡 *Q3 delivered; Q1 and S1 outstanding*
 
 **Goal:** deepen the graph itself — the on-brand work — with **honest costs**.
 
@@ -1154,7 +1154,23 @@ assembled graph is not, so sharing it would mean last-writer-wins.
   migration 12 is covered by the existing additive-migration property test (#329)
   rather than a pinned version number.
 
-### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
+### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ⏸️ *deferred by decision*
+
+> **Deferred deliberately, not merely unstarted.** The owner's call, recorded so
+> the two are distinguishable: a stage nobody has got to and a stage somebody
+> decided to leave look identical six months later, and the second should not be
+> picked up by whoever next has a free afternoon.
+>
+> Nothing blocks it — Stages 21–25 and 28–32 are delivered and v1.15.0 is out.
+> It is held because the hardening it describes is worth more once the remaining
+> A1 lenses (Stage 26) have landed and had their own scale behaviour measured,
+> and because v2.0.0 is a number worth spending once, deliberately.
+>
+> One consequence to carry: the scope below grew during v1.10–v1.15. The offline
+> claim it re-audits is now a real surface — `docs/OFFLINE_SETUP.md`, the
+> `security prefetch`/`status` contract, digest-pinned assets, and per-file
+> verification of the extracted boxlite runtime — so this is an audit against
+> something concrete rather than a prose sweep.
 
 - Semver review: query output is explicitly versioned, so new query shapes carry
   semver weight.
