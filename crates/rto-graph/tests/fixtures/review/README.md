@@ -55,8 +55,28 @@ Every PR here is merged, so it is tempting to reconstruct a diff with
 `git diff <base>...<head>`. That is wrong, and quietly so. The merged head
 contains the *fix commits* — a reviewer scored against it is being asked to find
 defects that are no longer there, and will appear to have missed all of them.
-Reconstruct with `git diff $(git merge-base <base> <reviewed_sha>) <reviewed_sha>`
-instead.
+
+### Reconstructing the diff, correctly
+
+This paragraph previously recommended
+`git diff $(git merge-base <base> <reviewed_sha>) <reviewed_sha>`. **That produces
+an empty diff for 13 of the 15 review commits here**, which is the same silent zero
+arrived at from the other side: these PRs were merged with merge commits, so each
+`reviewed_sha` is an *ancestor* of `main`, which makes `merge-base main
+<reviewed_sha>` the review commit itself.
+
+The base you want is where the PR branch forked. Find the merge commit `M` that
+brought the branch in — `reviewed_sha` is an ancestor of `M^2` but not of `M^1`,
+and it is the earliest such merge on `git rev-list --merges --ancestry-path
+<reviewed_sha>..main` — then diff from `git merge-base M^1 <reviewed_sha>`. Where
+there is no such merge (a branch rebased or squashed away, as PR #293's two rows
+were) the commit is no longer an ancestor and `merge-base main <reviewed_sha>` is
+right after all.
+
+Do not trust this paragraph either: `every_row_reconstructs_a_non_empty_reviewed_diff`
+in [`../../review_corpus.rs`](../../review_corpus.rs) is the recipe's executable
+form, and it requires every row's reconstructed diff to be non-empty *and* to touch
+the file the comment is anchored to.
 
 `fix_commit` is a different sha for the same reason: it points *forward*, to the
 change that resolved the finding, and is what a reader follows to see the defect
@@ -67,9 +87,10 @@ and its repair.
 Recorded once, in [`docs/REVIEW_CHECKLIST.md`](../../../../../docs/REVIEW_CHECKLIST.md),
 so that the rule and the corpus cannot drift apart. In short: a real defect has a
 commit fixing it; a false positive has a maintainer reply refuting it; and for a
-claim that the code *will not compile*, the `msrv` job's conclusion at
-`reviewed_sha` is decisive. Follow that file, not this paragraph, when adding
-rows.
+claim that the code *will not compile*, a green check at `reviewed_sha` is
+decisive — but only one that actually compiled the code in question, which is
+narrower than "CI is green" and is spelled out there. Follow that file, not this
+paragraph, when adding rows.
 
 Three rows carry an **empty `fix_commit`** — the PR #299 `vacuous-test` findings
 (ids `3789173576`, `3789173583`, `3789173587`). All three were accepted and
@@ -109,9 +130,14 @@ CI already computes the refutation: the `msrv` job is
 `cargo check --workspace --all-features` and finishes in well under a minute. On
 every one of those rows it had gone **green before the claim was posted** — by 65
 seconds on `2b761ce`, and by 83 seconds on `c1481836`. So withholding a
-compile-failure claim while the build is green costs no extra compute and, on
-this evidence, discards nothing true. Each investigation those comments triggered
-was avoidable by reading a status that already existed.
+compile-failure claim that a *covering* check has refuted costs no extra compute
+and, on this evidence, discards nothing true. Each investigation those comments
+triggered was avoidable by reading a status that already existed.
+
+"Covering" is load-bearing and not a hedge: `msrv` is ubuntu-only,
+`--all-features`, and has no `--all-targets`, so a green run says nothing about
+macOS code, a `--no-default-features` build, or test code on the MSRV toolchain.
+`rto_graph::compile_claim` is the rule with that model attached.
 
 The corollary is the more useful half: the *remaining* classes are where an
 automated reviewer earned its keep here. `contract-drift` is the largest of
@@ -141,6 +167,49 @@ confirms each `reviewed_sha` is a real object here, which catches a typo'd or
 truncated sha. It needs the git history, so in a shallow clone it prints a `SKIP:`
 line and passes, following the pattern the model-dependent tests in
 `../audio_ingest.rs` use.
+
+## Consumers (Stage 35)
+
+The corpus is no longer test-only data. It is embedded into `rto-graph`
+(`review_corpus::BUILTIN`) and read by three shipped modules:
+
+| Module | What it does with the corpus |
+|---|---|
+| `rto_graph::review_corpus` | Loads it as typed rows. `deny_unknown_fields` with no optional fields, so the eleven-field schema is enforced by the type rather than by a second transcript of it in a test |
+| `rto_graph::review_score` | Scores a candidate reviewer: **per-class recall**, plus the two precision-adjacent numbers the corpus can and cannot support |
+| `rto_graph::compile_claim` | The suppression rule the `false-compile-claim` row licenses, with the coverage model that stops it becoming a "green build" check |
+
+`roteiro review --score <run.json>` is the CLI surface. It takes a
+`roteiro.review-run/v1` document — the commits a candidate was run against and what
+it said about each — and needs no model, no graph and no network, so a score can be
+recomputed anywhere.
+
+### What may and may not be computed from this file
+
+**Recall is well defined**: there are 22 real defects and a candidate either found a
+given one or did not.
+
+**Precision is not.** This file is a complete record of *what one reviewer said*
+about these trees, never a complete inventory of the defects in them. A candidate
+finding matching no row is therefore **unadjudicated**, not false — it may be a real
+defect nobody commented on. Scoring one as a false positive would penalise a better
+reviewer for being better. `review_score` reports three separate numbers for this
+reason: per-class recall, how many of the 4 known-false claims a candidate repeated
+(the only measured precision signal here), and how many findings the corpus cannot
+judge.
+
+And read the per-class table with its denominators in view. Eight classes hold a
+single real row, so their recall is one bit rather than a rate. This corpus can
+falsify a reviewer decisively; it cannot finely rank two good ones.
+
+### Measured cost of using it
+
+Reconstructing all 15 review diffs at `-U3` costs about **513k tokens in total**,
+averaging **34k per commit** and reaching **103k** on PR #339. Against a measured
+single-call budget of ~30k on this repository, **9 of the 15 diffs do not fit in one
+call before any context is added**, which is why a whole-diff reviewer is not the
+shape to build; the ~79k per-file budget is. (Figures are `len(diff) / 4`, so they
+are an estimate of the same order, not a tokeniser's count.)
 
 ## Extending it
 

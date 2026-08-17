@@ -78,6 +78,13 @@ Take current counts from that fixture's class table, which a test holds to the
 data; the figures quoted here describe the original twelve-PR sample and are not
 updated as rows are added.
 
+They are also **measurable rather than anecdotal**: `roteiro review --score
+<run.json>` scores any candidate reviewer against that corpus, reporting recall
+**per defect class**. Two things it will not do, because the corpus cannot support
+them — report an averaged recall (which hides the only actionable fact, *which*
+classes a reviewer sees), or call an unmatched finding a false positive (the corpus
+records what one reviewer said about those trees, not every defect in them).
+
 But adjudicate before acting, and one rule pays for itself:
 
 - [ ] **A comment claiming the code will not compile is refuted by the CI
@@ -93,16 +100,32 @@ But adjudicate before acting, and one rule pays for itself:
       left on**, roughly a minute before the comment was posted. So the
       refutation exists before anyone reads the comment: check that job, reply,
       move on. Do not dispatch work to "fix" it.
-- [ ] **But green refutes only what it compiled.** `msrv` and `checks` both run
-      on `ubuntu-latest` with the pinned MSRV toolchain, over
-      `--all-features`. So a green run says nothing about a
-      `--no-default-features` build, a different toolchain, or — the one that
-      matters most here — **code behind `cfg(target_os = "macos")`**, which this
-      repo has a good deal of (Metal, the engine teardown path, the sandbox
-      backend). The `GGML_ASSERT` teardown abort was macOS-only and Ubuntu CI
-      was structurally blind to it. So: confirm the relevant job actually ran at
-      that sha, and that it covers the configuration the comment is about. If it
-      does not, the claim is unrefuted and you owe it a real look.
+- [ ] **But green refutes only what it compiled.** Confirm the relevant job
+      actually ran at that sha *and* that it covers the configuration the comment
+      is about. Four axes, each one a way this CI is narrower than "the build":
+      - **Platform.** Every compiling job runs on `ubuntu-latest`, so **nothing
+        here compiles `cfg(target_os = "macos")` code**, of which this repo has a
+        good deal (Metal, the engine teardown path, the sandbox backend). The
+        `GGML_ASSERT` teardown abort was macOS-only and Ubuntu CI was
+        structurally blind to it.
+      - **Features.** `msrv` and `checks` are `--all-features`;
+        `default-features` is the default set. **Neither covers the other** —
+        turning features on cannot find a defect in code being cfg'd *out*,
+        which is why that job exists. Nothing builds
+        `--no-default-features`.
+      - **Targets.** `msrv` is `cargo check --workspace --all-features` with **no
+        `--all-targets`**, so it never compiles `#[cfg(test)]` modules or
+        `tests/` targets. The jobs that do compile test code (`checks`,
+        `default-features`) run on **stable**. So a claim that *test* code will
+        not build **on MSRV 1.94** is refuted by no job in this repository.
+      - **Toolchain.** Only `msrv` is on 1.94. A green `stable` build says
+        nothing about an MSRV claim.
+
+      If no green job covers the configuration, the claim is unrefuted and you
+      owe it a real look. `rto_graph::compile_claim` is this rule as code — the
+      coverage model, the four axes, and every case above as a test — so a
+      reviewer applying it mechanically and a human applying it by eye reach the
+      same answer.
 - [ ] Every other class in that sample was real. Treat a non-compile finding as
       probably correct and verify it against the code, rather than assuming the
       reviewer is noisy.

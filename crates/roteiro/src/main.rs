@@ -137,8 +137,22 @@ enum Command {
         /// Review the commit range `<base>..HEAD` (any revspec — a branch,
         /// `HEAD~3`, a sha) against the committed graph, instead of the
         /// working-tree change. Use for a whole-branch review (e.g. `--base main`).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "score")]
         base: Option<String>,
+        /// Score a candidate reviewer's findings against the adjudicated review
+        /// corpus instead of reviewing this working tree.
+        ///
+        /// Takes a JSON `roteiro.review-run/v1` document: the commits the
+        /// candidate was run against, and what it said about each. Reports recall
+        /// **per defect class** — never averaged, since which classes a reviewer
+        /// can see is the only thing an implementer can act on. Needs no model and
+        /// no network.
+        #[arg(long, value_name = "RUN.json", conflicts_with = "base")]
+        score: Option<String>,
+        /// Score against a corpus file other than the one in this repository —
+        /// for scoring a candidate on someone else's adjudicated set.
+        #[arg(long, value_name = "CORPUS.jsonl", requires = "score")]
+        corpus: Option<String>,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
@@ -1236,7 +1250,15 @@ fn main() -> anyhow::Result<()> {
             committed,
             staged,
         } => run_check(ingest, json, committed, staged, debt_ignore),
-        Command::Review { json, base } => run_review(ingest, json, base.as_deref()),
+        Command::Review {
+            json,
+            base,
+            score,
+            corpus,
+        } => match score {
+            Some(run) => review::run_score(&run, corpus.as_deref(), json),
+            None => run_review(ingest, json, base.as_deref()),
+        },
         Command::Query {
             key,
             kind,
@@ -1402,7 +1424,7 @@ fn provenance(proj: bool, usr: bool) -> &'static str {
 
 /// Print `value` as pretty JSON to stdout — the shared `--json` output path for
 /// every subcommand.
-fn emit_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+pub(crate) fn emit_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }

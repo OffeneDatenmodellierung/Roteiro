@@ -272,6 +272,122 @@ fn symbol_review(node: &rto_graph::Node, ctx: Option<&NodeContext>) -> SymbolRev
     }
 }
 
+/// Score a candidate reviewer's run against the adjudicated corpus and print the
+/// result (Stage 35).
+///
+/// Needs no graph, no model and no network: the corpus is embedded and the scoring
+/// is pure. That is what makes it usable as a regression gate on a reviewer — the
+/// numbers can be recomputed on any machine, including CI.
+///
+/// # Errors
+/// If the run document cannot be read or scored, or the corpus override cannot be
+/// read or parsed.
+pub fn run_score(run_path: &str, corpus_path: Option<&str>, json: bool) -> anyhow::Result<()> {
+    use rto_graph::review_corpus::Corpus;
+    use rto_graph::review_score::{CandidateRun, score};
+
+    let corpus = match corpus_path {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("reading corpus {path}: {e}"))?;
+            Corpus::parse(&text).map_err(|e| anyhow::anyhow!("{path}: {e}"))?
+        }
+        None => rto_graph::review_corpus::builtin()?,
+    };
+    let text = std::fs::read_to_string(run_path)
+        .map_err(|e| anyhow::anyhow!("reading run {run_path}: {e}"))?;
+    let run = CandidateRun::parse(&text).map_err(|e| anyhow::anyhow!("{run_path}: {e}"))?;
+    let scored = score(&corpus, &run)?;
+
+    if json {
+        crate::emit_json(&scored)?;
+    } else {
+        print_score(&scored);
+    }
+    Ok(())
+}
+
+/// Render a score as a per-class table.
+///
+/// The table is the report. A single headline number is deliberately absent: the
+/// question an implementer is asking is *which* defect classes a reviewer can see,
+/// and a mean over the classes — most of which hold a single row — answers a
+/// question nobody asked while hiding the one they did. The exact denominators are
+/// printed beside each rate rather than stated here, so this comment cannot go
+/// stale as rows are added.
+fn print_score(score: &rto_graph::review_score::Score) {
+    println!(
+        "scored {} of {} corpus commit(s)",
+        score.attempted_shas, score.corpus_shas
+    );
+    println!("\nrecall by defect class (found/real):");
+    for class in &score.per_class {
+        if class.real == 0 {
+            continue;
+        }
+        let rate = match class.recall() {
+            Some(r) => format!("{:>4.0}%", r * 100.0),
+            None => "   —".to_owned(),
+        };
+        // `n=1` is printed beside the rate, not left to the caveats, because a
+        // reader scanning a column of percentages will otherwise compare 0% of one
+        // row against 40% of five as though they weighed the same.
+        let weight = if class.real == 1 { "  (n=1)" } else { "" };
+        println!(
+            "  {rate}  {:>2}/{:<2}  {}{weight}",
+            class.found,
+            class.real,
+            class.class.as_str()
+        );
+        if class.misclassified > 0 {
+            println!(
+                "          {} found but labelled as another class",
+                class.misclassified
+            );
+        }
+        // The misses are the actionable half of a recall figure — "0/1
+        // `cleanup-gap`" tells nobody what to look at. Printed with the anchor and
+        // the permalink so the next step is opening a file, not grepping a fixture.
+        for miss in &class.missed {
+            println!(
+                "          miss {}:{} — {}",
+                miss.path, miss.line, miss.description
+            );
+            println!("               {}", miss.comment_url);
+        }
+    }
+    println!(
+        "\n{}/{} real defect(s) found; {}/{} known-false claim(s) reproduced",
+        score.found, score.real_in_scope, score.known_false_reproduced, score.known_false_in_scope
+    );
+    match score.corpus_precision() {
+        Some(p) => println!(
+            "precision over adjudicated findings only: {:.0}% \
+             ({} unadjudicated finding(s) excluded — see below)",
+            p * 100.0,
+            score.unadjudicated
+        ),
+        None => println!(
+            "precision: not computable — no finding matched an adjudicated row \
+             ({} unadjudicated)",
+            score.unadjudicated
+        ),
+    }
+    if score.suppressed_real + score.suppressed_known_false + score.suppressed_unadjudicated > 0 {
+        println!(
+            "suppression filter withheld: {} real, {} known-false, {} unadjudicated",
+            score.suppressed_real, score.suppressed_known_false, score.suppressed_unadjudicated
+        );
+    }
+    let caveats = score.caveats();
+    if !caveats.is_empty() {
+        println!("\nread these numbers with:");
+        for caveat in &caveats {
+            println!("  - {caveat}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Freeze the `--json` schema tags (see `docs/JSON_SCHEMA.md`). These are the
@@ -280,6 +396,11 @@ mod tests {
     #[test]
     fn json_schema_tags_are_frozen() {
         assert_eq!(super::REVIEW_SCHEMA, "roteiro.review/v1");
+        assert_eq!(
+            rto_graph::review_score::SCORE_SCHEMA,
+            "roteiro.review-score/v1"
+        );
+        assert_eq!(rto_graph::review_score::RUN_SCHEMA, "roteiro.review-run/v1");
         assert_eq!(rto_graph::SCHEMA, "roteiro.query/v1");
         assert_eq!(rto_graph::ARTIFACT_SCHEMA, "roteiro.graph/v1");
         assert_eq!(rto_graph::ORACLE_SCHEMA, "roteiro.oracle/v1");
