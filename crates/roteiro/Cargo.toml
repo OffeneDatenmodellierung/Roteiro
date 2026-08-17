@@ -21,6 +21,10 @@ clap = { workspace = true }
 rto-exec = { workspace = true, optional = true }
 rto-graph = { workspace = true }
 rto-llama = { workspace = true, optional = true }
+# `remote` only: the remote model tier's consent gate, payload allow-list and
+# egress record (ADR-0019). Optional and **off by default** — see the `remote`
+# feature below, and do not "complete the job" by adding it to `default`.
+rto-remote = { workspace = true, optional = true }
 rto-render = { workspace = true }
 rto-serve = { workspace = true, optional = true }
 rto-spec = { workspace = true }
@@ -212,6 +216,27 @@ inference-local-models = [
     "dep:rto-llama",
     "rto-llama/llama",
 ]
+# The remote model tier (ADR-0019) — Roteiro's **one explicitly-consented egress
+# path**, and the first capability in the project that can send repository
+# content off the machine.
+#
+# **Off by default, and it stays off.** No release may flip it. That is not a
+# preference about defaults: ADR-0019 exempts this capability from Principle 10
+# (a remote call is fetching by definition and can be neither digest-pinned nor
+# prefetched), and the exemption is only tolerable because the capability is
+# absent unless someone asked for it at build time *and* again in their own user
+# config *and* again per invocation. `remote_is_not_a_default_feature` in
+# `tests/remote_consent_cli.rs` reads this file and fails if `default` grows it.
+#
+# Enabling it adds **no third-party dependency**: `rto-remote` is a workspace
+# crate over `rto-graph`, `serde` and `thiserror`, and it deliberately contains
+# no HTTP client — the transport is a caller-supplied closure, as `rto-exec`'s
+# `Fetcher` is. So this feature compiles the *policy*: the consent gate, the
+# payload allow-list, the dry-run and the egress ledger. **It compiles no
+# backend**, and this build therefore cannot send anything; `roteiro remote`'s
+# subcommands inspect and report, and the one path that would call out fails
+# loudly with `RemoteError::NoTransport` naming the endpoint.
+remote = ["dep:rto-remote", "dep:rto-exec"]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
 pdf-text = ["rto-graph/pdf-text"]

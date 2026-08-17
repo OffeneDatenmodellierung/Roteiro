@@ -271,6 +271,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect the remote model tier — Roteiro's one explicitly-consented
+    /// egress path (ADR-0019). **Nothing under this command sends anything.**
+    ///
+    /// The tier is off unless *both* your own `~/.roteiro/config.toml` and the
+    /// invocation grant it. A committed `roteiro.toml` may switch it off for
+    /// everyone, and may never switch it on for anyone.
+    #[cfg(feature = "remote")]
+    Remote {
+        /// What to inspect.
+        #[command(subcommand)]
+        cmd: RemoteCmd,
+    },
     /// List intent-debt markers (TODOs, stubs, deferred work) in the graph.
     Debt {
         /// Restrict to these categories (repeatable): todo | fixme | hack |
@@ -689,6 +701,60 @@ enum SpecAction {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<String>,
+    },
+}
+
+/// `roteiro remote` actions — the remote model tier's inspection surface
+/// (ADR-0019).
+///
+/// **No subcommand here sends anything.** That is not an accident of this
+/// build's feature set, it is the shape of the stage: the consent gate, the
+/// payload allow-list and the egress record land before any backend does, so the
+/// guard is reviewable on its own and cannot arrive after the capability it
+/// guards. `dry-run` shows the exact bytes a call *would* send; `status` says
+/// whether it would be permitted, and why; `log` reads the record of what
+/// actually left.
+#[cfg(feature = "remote")]
+#[derive(Subcommand)]
+enum RemoteCmd {
+    /// Report the consent gate: what each layer said, what this run would be
+    /// permitted to do, and what a request would disclose.
+    Status {
+        /// Grant *this run* (the invocation half of consent). Necessary and not
+        /// sufficient: your `~/.roteiro/config.toml` must grant too.
+        #[arg(long, conflicts_with = "no_remote")]
+        allow_remote: bool,
+        /// Deny this run, whatever the config layers say.
+        #[arg(long)]
+        no_remote: bool,
+        /// Emit the gate's state as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the **exact payload** a remote call would send, and send nothing.
+    ///
+    /// Takes no consent flag on purpose: an inspection is not a disclosure, so
+    /// it must be available to someone deciding whether to grant one.
+    DryRun {
+        /// The instruction to ask.
+        instruction: String,
+        /// A graph node key to include as context (repeatable). Only the node's
+        /// key, kind, name, path and captured prose are sent — never its other
+        /// metadata, and never source.
+        #[arg(long = "key", value_name = "KEY")]
+        keys: Vec<String>,
+        /// Emit the payload and its disclosure as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the egress ledger: **what left this machine, and when.**
+    Log {
+        /// Show at most this many calls, most recent last. `0` shows every one.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit the ledger as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1324,6 +1390,8 @@ fn main() -> anyhow::Result<()> {
         Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
         Command::Spec { action } => run_spec(&cfg.effective, ingest, action),
         Command::Config { json } => run_config(&cfg, json),
+        #[cfg(feature = "remote")]
+        Command::Remote { cmd } => run_remote(&cfg, ingest, cmd),
         #[cfg(feature = "inference")]
         Command::Infer {
             min_confidence,
@@ -1517,9 +1585,67 @@ fn print_config_sections(loaded: &config::Loaded) {
         e.serve.tools,
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
     );
+    print_remote_section(loaded);
     print_debt_section(loaded);
     print_telemetry_section(e, p, u);
     print_workspace_section(e, p, u);
+}
+
+/// Print `[remote]` — the one table whose `enabled` key does **not** follow this
+/// report's `project > user` rule.
+///
+/// It gets its own function, and a stated rule, for the reason ADR-0019 gives
+/// for restating the inversion in ADR-0007 as well as in itself: a reader who
+/// applies the general precedence here will be wrong, and will be wrong about
+/// the one key where being wrong means believing egress is off when it is on (or
+/// the reverse). So the per-layer values are printed rather than the merged one,
+/// and each is labelled with what that layer is allowed to do.
+#[cfg(feature = "remote")]
+fn print_remote_section(loaded: &config::Loaded) {
+    let e = &loaded.effective;
+    println!("\n[remote]  (ADR-0019 — off by default; run `roteiro remote status` for the gate)");
+    println!(
+        "  enabled  = {:?}  (project: {:?} — may deny, never grant; user: {:?} — may grant)",
+        e.remote.enabled, loaded.project.remote.enabled, loaded.user.remote.enabled
+    );
+    println!(
+        "  endpoint = {:?}  ({})",
+        e.remote.endpoint,
+        provenance(
+            loaded.project.remote.endpoint.is_some(),
+            loaded.user.remote.endpoint.is_some()
+        )
+    );
+    println!(
+        "  model    = {:?}  ({})",
+        e.remote.model,
+        provenance(
+            loaded.project.remote.model.is_some(),
+            loaded.user.remote.model.is_some()
+        )
+    );
+    if loaded.project.remote.enabled == Some(true) {
+        println!(
+            "  note: the project file's `enabled = true` was read and ignored — a committed \
+             file may deny egress but never grant it"
+        );
+    }
+    println!(
+        "  a granted run still needs `--allow-remote`: your user config opts you in, the \
+         invocation opts the run in"
+    );
+}
+
+/// Without the `remote` feature there is no tier, and the section says so rather
+/// than being absent — an omitted section reads as "no such setting", which
+/// would leave someone with `[remote] enabled = true` in their config believing
+/// it was honoured.
+#[cfg(not(feature = "remote"))]
+fn print_remote_section(_loaded: &config::Loaded) {
+    println!(
+        "\n[remote]  (ADR-0019 — not built: this binary has no remote model tier, so nothing \
+         here can send anything, whatever the keys say)"
+    );
 }
 
 /// Print `[models]`: the five keys as set, each with the layer that set it, then
@@ -1663,6 +1789,293 @@ fn print_model_resolution(_loaded: &config::Loaded) {
         "  resolution — unavailable: this build lacks the `models` feature, so it \
          has no registry to resolve these names against"
     );
+}
+
+/// The egress ledger's path: `$ROTEIRO_HOME/remote/egress.jsonl`, else
+/// `~/.roteiro/remote/egress.jsonl`.
+///
+/// Beside the model store and the logs rather than inside the repository, and
+/// deliberately so on two counts. It is a record of what *this machine*
+/// disclosed, which does not partition by repository — the question "what left
+/// this machine, and when?" is asked by a person, not by a checkout. And a
+/// per-repo ledger would sooner or later be committed, which would publish
+/// verbatim copies of everything that was ever sent.
+///
+/// # Errors
+/// When neither `ROTEIRO_HOME` nor a home directory can be found, since there is
+/// then nowhere to record a call and — per [`rto_remote::call_with`] — a call
+/// that cannot be recorded does not happen.
+#[cfg(feature = "remote")]
+fn remote_ledger() -> anyhow::Result<rto_remote::Ledger> {
+    let home = config::roteiro_home().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no home directory and no `ROTEIRO_HOME`, so the remote tier has nowhere to record \
+             what it sends — and a call that cannot be recorded is a call Roteiro will not make"
+        )
+    })?;
+    Ok(rto_remote::Ledger::at(
+        home.join("remote").join("egress.jsonl"),
+    ))
+}
+
+/// Build the endpoint from `[remote] endpoint` / `[remote] model`.
+///
+/// Always [`rto_remote::ProducerTrust::VendorAsserted`]: a hosted model has no
+/// digest this machine can compute, so nothing here may claim otherwise.
+///
+/// # Errors
+/// When either key is unset, or the endpoint is one
+/// [`rto_remote::Endpoint::new`] refuses.
+#[cfg(feature = "remote")]
+fn remote_endpoint(cfg: &config::Config) -> anyhow::Result<rto_remote::Endpoint> {
+    let endpoint = cfg.remote.endpoint.as_deref().unwrap_or_default();
+    let model = cfg.remote.model.as_deref().unwrap_or_default();
+    if endpoint.trim().is_empty() {
+        anyhow::bail!(
+            "`[remote] endpoint` is not set, so there is nowhere to send to. Set it in \
+             `roteiro.toml` or `~/.roteiro/config.toml` — either layer may choose the \
+             destination; only your user config can grant the tier"
+        );
+    }
+    Ok(rto_remote::Endpoint::new(
+        endpoint,
+        model,
+        rto_remote::ProducerTrust::VendorAsserted,
+    )?)
+}
+
+/// The invocation half of consent, from the two flags.
+///
+/// `None` — neither flag — is the common case and is *not* a grant: ADR-0019
+/// requires the run to opt in as well as the human, so an absent flag denies.
+#[cfg(feature = "remote")]
+fn invocation_grant(allow_remote: bool, no_remote: bool) -> Option<bool> {
+    match (allow_remote, no_remote) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        // `conflicts_with` makes `(true, true)` unreachable from the CLI; read as
+        // no grant, which is the safe reading of an ambiguous invocation.
+        _ => None,
+    }
+}
+
+/// `roteiro remote …` — the tier's inspection surface. Sends nothing.
+#[cfg(feature = "remote")]
+fn run_remote(
+    cfg: &config::Loaded,
+    ingest: rto_graph::IngestConfig,
+    cmd: RemoteCmd,
+) -> anyhow::Result<()> {
+    match cmd {
+        RemoteCmd::Status {
+            allow_remote,
+            no_remote,
+            json,
+        } => run_remote_status(cfg, invocation_grant(allow_remote, no_remote), json),
+        RemoteCmd::DryRun {
+            instruction,
+            keys,
+            json,
+        } => run_remote_dry_run(cfg, ingest, &instruction, &keys, json),
+        RemoteCmd::Log { limit, json } => run_remote_log(limit, json),
+    }
+}
+
+/// Report the consent gate, layer by layer, plus the disclosure a grant would
+/// authorise.
+///
+/// Prints the layers **before** the decision, because a reader who disagrees
+/// with the decision needs to see the inputs to find out where they went wrong —
+/// and because "your project file said yes and it was ignored" is only
+/// intelligible next to the file that said it.
+#[cfg(feature = "remote")]
+fn run_remote_status(
+    cfg: &config::Loaded,
+    invocation: Option<bool>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let grant = cfg.remote_config_grant();
+    let decision = rto_remote::consent::decide(grant, invocation);
+    let endpoint = remote_endpoint(&cfg.effective);
+    let ledger = remote_ledger()?;
+
+    if json {
+        return emit_json(&serde_json::json!({
+            "granted": decision.granted(),
+            "reason": decision.reason.as_str(),
+            "explanation": decision.reason.explain(),
+            "remedy": decision.reason.remedy(),
+            "project_grant_ignored": decision.project_grant_ignored,
+            "layers": {
+                "project": cfg.project.remote.enabled,
+                "user": cfg.user.remote.enabled,
+                "invocation": invocation,
+            },
+            "endpoint": endpoint.as_ref().ok().map(rto_remote::Endpoint::url),
+            "model": endpoint.as_ref().ok().map(rto_remote::Endpoint::model),
+            "trust": rto_remote::ProducerTrust::VendorAsserted.as_str(),
+            "endpoint_error": endpoint.as_ref().err().map(ToString::to_string),
+            "ledger": ledger.path().display().to_string(),
+            "backend": serde_json::Value::Null,
+        }));
+    }
+
+    println!("remote model tier (ADR-0019) — off unless every layer below allows it\n");
+    println!("consent layers:");
+    println!(
+        "  project roteiro.toml     = {:?}   (may deny; may never grant)",
+        cfg.project.remote.enabled
+    );
+    println!(
+        "  user ~/.roteiro/config   = {:?}   (may grant — necessary, not sufficient)",
+        cfg.user.remote.enabled
+    );
+    println!(
+        "  this invocation          = {invocation:?}   (may grant — necessary, not sufficient)"
+    );
+    println!(
+        "\ndecision: {}\n  because {}",
+        if decision.granted() {
+            "GRANTED"
+        } else {
+            "DENIED"
+        },
+        decision.reason.explain()
+    );
+    if let Some(remedy) = decision.reason.remedy() {
+        println!("  to change it: {remedy}");
+    }
+    if let Some(note) = decision.ignored_project_grant_note() {
+        println!("\n{note}");
+    }
+    match &endpoint {
+        Ok(e) => println!(
+            "\nendpoint: {}\nmodel:    {}  (trust: {} — {})",
+            e.url(),
+            e.model(),
+            e.trust().as_str(),
+            e.trust().caveat().unwrap_or("verified on this machine"),
+        ),
+        Err(err) => println!("\nendpoint: unusable — {err}"),
+    }
+    println!("ledger:   {}", ledger.path().display());
+    println!(
+        "\nbackend:  none in this build. The consent gate, the payload allow-list and the \
+         egress record\n          landed before any transport did, so this build cannot send \
+         anything at all."
+    );
+    println!("\n{}", rto_remote::Payload::disclosure());
+    Ok(())
+}
+
+/// Print the exact bytes a call would send, having sent nothing.
+///
+/// The payload is assembled from the graph by the **same** allow-list the call
+/// path uses, so this is a preview of the act rather than a description of it:
+/// `rto_remote::dry_run` and `rto_remote::call_with` render the body through one
+/// function.
+#[cfg(feature = "remote")]
+fn run_remote_dry_run(
+    cfg: &config::Loaded,
+    ingest: rto_graph::IngestConfig,
+    instruction: &str,
+    keys: &[String],
+    json: bool,
+) -> anyhow::Result<()> {
+    let endpoint = remote_endpoint(&cfg.effective)?;
+    let mut nodes = Vec::with_capacity(keys.len());
+    if !keys.is_empty() {
+        let (repo, mut store, cache) = open_graph()?;
+        refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+        for key in keys {
+            let node = store.get_node(key)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)"
+                )
+            })?;
+            nodes.push(node);
+        }
+    }
+    let payload = rto_remote::Payload::new(instruction, &nodes)?;
+    let body = rto_remote::dry_run(&endpoint, &payload);
+
+    if json {
+        return emit_json(&serde_json::json!({
+            "endpoint": endpoint.url(),
+            "model": endpoint.model(),
+            "trust": endpoint.trust().as_str(),
+            "fields": payload.fields_present(),
+            "bytes": body.len(),
+            "body": body,
+            "disclosure": rto_remote::Payload::disclosure(),
+            "sent": false,
+        }));
+    }
+
+    println!("DRY RUN — nothing was sent, and nothing was recorded.\n");
+    println!("would POST to: {}", endpoint.url());
+    println!("model:         {}", endpoint.model());
+    println!(
+        "carrying:      {} ({} bytes)",
+        payload.fields_present().join(", "),
+        body.len()
+    );
+    println!("\n--- the exact body ---\n{body}\n--- end of body ---\n");
+    println!("{}", rto_remote::Payload::disclosure());
+    Ok(())
+}
+
+/// Read the egress ledger — what left this machine, and when.
+///
+/// An empty ledger is reported as empty and never as an error: "nothing has left
+/// this machine" is the answer most of the time, and it is the answer the reader
+/// wants stated rather than inferred from silence.
+#[cfg(feature = "remote")]
+fn run_remote_log(limit: usize, json: bool) -> anyhow::Result<()> {
+    let ledger = remote_ledger()?;
+    let entries = ledger.read()?;
+    let shown = if limit == 0 || limit >= entries.len() {
+        &entries[..]
+    } else {
+        &entries[entries.len() - limit..]
+    };
+
+    if json {
+        return emit_json(&serde_json::json!({
+            "ledger": ledger.path().display().to_string(),
+            "total": entries.len(),
+            "entries": shown,
+        }));
+    }
+
+    println!("egress ledger: {}", ledger.path().display());
+    if entries.is_empty() {
+        println!("\nnothing has left this machine.");
+        return Ok(());
+    }
+    println!(
+        "{} entr{}\n",
+        entries.len(),
+        if entries.len() == 1 { "y" } else { "ies" }
+    );
+    for entry in shown {
+        match entry {
+            rto_remote::Entry::Egress(e) => println!(
+                "{}  SENT      {} bytes to {} as {} ({})\n            carrying: {}",
+                e.at,
+                e.bytes,
+                e.endpoint,
+                e.model,
+                e.trust.as_str(),
+                e.fields.join(", "),
+            ),
+            rto_remote::Entry::Outcome(o) if o.ok => {
+                println!("{}  RETURNED  {} bytes", o.at, o.response_bytes);
+            }
+            rto_remote::Entry::Outcome(o) => println!("{}  FAILED    {}", o.at, o.detail),
+        }
+    }
+    Ok(())
 }
 
 /// Print `[debt]` with **per-pattern** provenance.
