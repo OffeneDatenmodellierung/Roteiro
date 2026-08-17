@@ -76,12 +76,12 @@ Verified against `main` at the time of writing:
 
 | Fact | Value | Consequence for V2 |
 |---|---|---|
-| Released | **v1.10.1** on crates.io; workspace at **1.11.0**, publish in flight (only `rto-llama-v1.11.0` tagged so far) | V2 work is post-1.0 — semver is now real. |
+| Released | **v1.15.0** on crates.io, all seven crates | V2 work is post-1.0 — semver is now real. |
 | MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
 | Coverage | **measured in CI, not gated** — `cargo llvm-cov` runs non-blocking; the 85% per-file floor is an aspiration (ADR-0001), never an enforced check (issue #319) | Every stage below still carries test cost, but a DoD may not cite "85% coverage" as if something verified it. |
-| CI | Ubuntu-only, `--all-features` | `/dev/kvm` may be absent; Apple Silicon untested. |
-| Schema | **migrations 1–11 applied** (1–7 at V2's start) | V2 appends only; see §5. |
+| CI | Ubuntu-only; `--all-features` **and** the default set (the `default-features` job, added by #364 after the default set was found not to compile — issue #360) | `/dev/kvm` may be absent; Apple Silicon untested. Turning features *on* cannot find defects caused by code being cfg'd *out*. |
+| Schema | **migrations 1–13 applied** (1–7 at V2's start) | V2 appends only; see §5. |
 | `EXTRACT_VERSION` | **`11`** (`crates/rto-graph/src/extract.rs`) — the Stage 28 bump landed in #316 | Bumping it forces full re-extraction for every user. No test pins the value. |
 | Provenance | `Derived | Authored | Inferred`, CHECK-constrained | Unchanged by V2, by decision. |
 | Eviction idiom | in-memory byte-budget LRU (`rto-llama` `ModelCache`); **nothing persisted is bounded** | Stage 25 ports the existing policy to disk rather than inventing one — **done**, and tested against `lru_evict_count`'s own numbers. |
@@ -484,7 +484,7 @@ should rank on this predicate (`AnchorState::applies`), not invent a second one.
 `search` integration — all Stage 25. Memory currently reaches `search` through no
 channel at all, which is asserted rather than assumed.
 
-### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L**
+### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L** ✅ *delivered*
 
 **Goal:** the reproducible, offline-capable local run — one command, pinned inputs,
 digest-level evidence.
@@ -607,7 +607,7 @@ parity proof above ran on Apple Silicon locally, and CI runners have no
 and subprocess paths carry the functional coverage. That gap is unchanged and
 still accepted.
 
-### Stage 25 — Memory recall: cache tier, decay, supersession → **v1.14.0** · effort **L**
+### Stage 25 — Memory recall: cache tier, decay, supersession → shipped in **v1.12.0** · effort **L** ✅ *delivered*
 
 **Goal:** make memory *useful* — recall that ranks by evidence, plus the bounded
 cache that stops sessions re-deriving what they already know.
@@ -729,7 +729,7 @@ Moving a live cache onto the bounded tier is a data migration, not a policy
 change, and bundling it would have put a schema move and an eviction policy in one
 reviewable unit.
 
-### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)*
+### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)* 🟡 *Q3 delivered; Q1 and S1 outstanding*
 
 **Goal:** deepen the graph itself — the on-brand work — with **honest costs**.
 
@@ -1154,7 +1154,149 @@ assembled graph is not, so sharing it would mean last-writer-wins.
   migration 12 is covered by the existing additive-migration property test (#329)
   rather than a pinned version number.
 
-### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M**
+### Stage 33 — Local model resolution → **v1.16.0** · effort **S–M** *(independent track)*
+
+**Goal:** one place decides which model serves a task, and can say why.
+
+**The user-facing gap:** `[models]` has keys for `embedding` and `generative`
+only. Vision, audio and OCR are **hard-coded string constants**
+(`voxtral-mini-3b`, `smolvlm-500m-gguf`, `ocrs-text`), so **a project cannot pin
+its ASR model today**. Seven surfaces each pick a model by their own rule —
+`spec draft`, `infer --model`, `serve` load, `serve`/Ask answer, media
+generation, OCR during `sync` — and none knows the others exist.
+
+**Shape:** one function in `rto-graph` — the crate that structurally cannot reach
+the network — taking `(task_kind, modality, config, host_platform)` and returning
+the model **plus the rule that chose it**, folding in the scattered call sites.
+Deterministic rules over categorical signals, not a classifier: every reliably
+observable signal here is low-cardinality (installed, modality, build feature,
+task kind), and **a table over categoricals *is* the correct model**.
+
+The seed already exists and is the right one: `chat_capable_model_ids` filters
+models that *cannot do the job*, and exists because routing a BERT encoder
+through `/v1/chat/completions` aborts llama.cpp with a `GGML_ASSERT`. Generalise
+that, rather than starting from "which model is best".
+
+**No network, no new dependency, no ADR** — it implements what ADR-0003 and
+ADR-0007 already document, so it takes amendments with version-history rows, not
+a new decision.
+
+**DoD:** vision, audio and OCR models are configurable and pinned per project;
+`roteiro config` answers *why did it use that model?* for every surface;
+resolution is deterministic and unit-tested without loading a model.
+
+---
+
+### Stage 34 — Remote model tier (ADR-0019, *not yet written*) → **v1.17.0** · effort **L** *(independent track)*
+
+**Blocked on ADR-0019 being written and accepted. Do not start before it.**
+
+**Goal:** an optional, explicitly-consented remote model backend for work local
+models cannot do.
+
+**Why an ADR is a prerequisite rather than paperwork.** This is the first
+capability that sends repository content off the machine, and three written
+promises currently forbid it:
+
+- **ADR-0006** says *"nothing leaves the machine"* — twice. This contradicts it;
+  it does not extend it.
+- **ADR-0007**'s precedence must **invert for one key**: `roteiro.toml` is
+  committed and shared by design, so a project file may **deny but never grant**.
+  Grant lives at the user layer plus the invocation — both required, neither
+  sufficient. A teammate must not inherit egress from a merged line.
+- **Principle 10** (*offline-capable, not offline*) works because optional assets
+  are digest-pinned and prefetched. A remote call is fetching by definition and
+  can be neither pinned nor prefetched — so it must be **exempted**, explicitly.
+
+**The framing that decides the design:** mis-routing among local models wastes
+tokens; mis-routing *outward* sends source off the machine for a reason nobody
+can inspect. **The local→remote edge is not a routing decision — it is a gate the
+user opened.** So no learned router, at any model quality.
+
+**And the disclosure gap must be stated in the ADR, not deferred:** extraction
+redacts secret-*named* config keys before persistence, but that is name-matching
+over ten needles and **there is no redaction chokepoint on a prompt**. Prompts
+carry symbol names and prose; `DATABASE_URL=postgres://user:pw@host` matches none
+of those needles.
+
+**Also unresolved by design:** ADR-0015's `Producer` identity folds a
+`model_digest`. A hosted model has no digest — a vendor model string is a
+**mutable pointer**, and the weights behind it can change while the name does
+not. If remote output is ever stored, it needs `ProducerTrust::{PinnedDigest,
+VendorAsserted}` so a record states on its face that its identity is a *claim*.
+
+**Sequencing note:** Stage 27 re-audits *every "offline" claim*. Landing this
+before it converts a documentation task into a re-litigation of the product's
+identity.
+
+---
+
+### Stage 35 — `roteiro review` LLM mode → **v1.18.0** · effort **M–L** *(independent track)*
+
+**Depends on Stage 33** (a reviewer must resolve a model without a fourth
+bespoke rule). Independent of Stage 34 — it can run wholly local.
+
+**Goal:** give the adjudicated review corpus a consumer, and put the graph to
+work on the one thing a diff-only reviewer structurally cannot see.
+
+**The asset that already exists:** `crates/rto-graph/tests/fixtures/review/` holds
+**26 adjudicated review comments** with verdicts, defect classes, and the
+`reviewed_sha` each was left on. That makes a reviewer **measurable rather than
+guessed at** — which most projects cannot do. It currently has **no consumer**,
+and that is how a fixture rots.
+
+**What the graph adds, stated honestly:** not access — Copilot has been agentic
+since March 2026 and reads repository context via tool calls, verified against
+this corpus (it cited a file outside a PR's changed set, correctly). What
+`roteiro review` has is **pre-assembled, provenance-tagged** context: governing
+ADRs, authored drift, blast radius, intent debt. A weaker claim than a moat, and
+the one to test.
+
+**Two constraints inherited from the investigation:**
+
+- **A free precision filter.** On this corpus, *every* false positive was a
+  compile-error claim and *every* compile-error claim was a false positive (4/4).
+  CI's `msrv` job already refutes them ~60 s before a human reads the comment. So
+  withhold any finding claiming the code will not compile while the relevant
+  check is green **at that commit and configuration** — see
+  `docs/REVIEW_CHECKLIST.md`, which records why "green build" alone is too coarse
+  (ubuntu-only, `--all-features`; the macOS teardown abort of #291 was invisible
+  to it).
+- **Context budget measured, not guessed:** ~30k tokens single-call, ~79k
+  per-file on this repository.
+
+**DoD:** scored against the corpus with per-defect-class recall — **not an
+average**, which hides the only thing an implementer needs — at the
+`reviewed_sha` of each comment, never the PR head (merged heads contain the fix
+commits, so scoring against them measures recall on already-fixed code and
+silently reports zero).
+
+**"Do not build this" remains an acceptable outcome.** The corpus keeps its value
+either way: it is how any future reviewer, hosted or local, gets measured.
+
+---
+
+### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ⏸️ *deferred by decision*
+
+> **Deferred deliberately, not merely unstarted.** The owner's call, recorded so
+> the two are distinguishable: a stage nobody has got to and a stage somebody
+> decided to leave look identical six months later, and the second should not be
+> picked up by whoever next has a free afternoon.
+>
+> Nothing *blocks* it — Stages 21–25 and 28–32 are delivered and v1.15.0 is out.
+> It is held because the hardening it describes is worth more once the work ahead
+> of it has landed and been measured: the remaining A1 lenses (Stage 26) and
+> Stages 33–35. And because v2.0.0 is a number worth spending once, deliberately.
+>
+> Stage 34 in particular should land *before* this, not after: Stage 27 re-audits
+> every "offline" claim, and adding a remote tier afterwards would reopen an audit
+> that had just been closed.
+>
+> One consequence to carry: the scope below grew during v1.10–v1.15. The offline
+> claim it re-audits is now a real surface — `docs/OFFLINE_SETUP.md`, the
+> `security prefetch`/`status` contract, digest-pinned assets, and per-file
+> verification of the extracted boxlite runtime — so this is an audit against
+> something concrete rather than a prose sweep.
 
 - Semver review: query output is explicitly versioned, so new query shapes carry
   semver weight.
@@ -1176,14 +1318,17 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 | v1.11.0 ✅ | Stage 22 — semgrep + cargo-audit (SAST axis, five languages) | Offline warm-cache run; named cold-cache failure — **met** |
 | v1.11.x ✅ | Stage 22b — `osv-scanner` (dependency axis: Python/Java/Node) | Lockfile findings per ecosystem; Rust overlap resolved — **met** |
 | v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
-| v1.13.0 | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean |
-| v1.14.0 | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction — **met** |
-| v1.15.0 | Stage 26 — lenses Q3/Q1/S1 | `check` green; benchmarked |
+| v1.13.0 ✅ | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean — **met** (#352): identical finding keys via both backends, differing only in isolation label and image digest |
+| v1.12.0 ✅ | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction — **met** (#340). Shipped two releases ahead of its nominal target |
+| v1.13.0 🟡 | Stage 26 — lenses Q3/Q1/S1 | **Q3 only** (#346): `coupling --limit 0` over 2,887 nodes in 0.07 s; no CI gate offered, because cross-language call edges are name collisions (615/6,553 = 9.4%) and resolving that is extraction work. Q1 and S1 outstanding |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | v1.11.0 ✅ | Stage 29 — audio metadata as `derived` facts | Format read costs 1–100 µs and instantiates no decoder; duration exact/estimated/absent never guessed — **met** |
 | v1.11.0 ✅ | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
 | v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
+| v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
+| v1.17.0 | Stage 34 — remote model tier | **Gated on ADR-0019.** Project file may deny, never grant; no learned router on the local→remote edge |
+| v1.18.0 | Stage 35 — `roteiro review` LLM mode | Scored against the in-tree corpus at each comment's `reviewed_sha`, per defect class |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -1201,6 +1346,59 @@ assembled graph is not, so sharing it would mean last-writer-wins.
 | A single-vendor factual claim drives a design | Medium | This plan already survived one: a "boxlite is unpublished, therefore unmergeable" blocker was refuted by direct crates.io checking. Verify checkable externals independently. |
 | `EXTRACT_VERSION` bumped twice, forcing two full re-extractions | Low | Batch all extraction-touching lenses behind one bump (Stage 26). |
 | Speculative decoding silently changes a completion | **High** | Measured, not hypothetical (Stage 30). Off unless `ROTEIRO_SPECULATIVE` explicitly says on; unrecognised values are not consent. The risk is *acceptance by default*, so the mitigation is that there is no default. |
+
+---
+
+## 8b. Beyond v2.0 — deferred work, and where it is written down
+
+Stage 27 is the last *scheduled* stage. It is not the last work, and the
+difference has been invisible: everything below was decided somewhere in this
+document and then scattered across §9 and Stage 26's deferral list, where a
+reader planning the next quarter would not find it. This section is a map, not a
+new commitment — each item keeps its original reasoning at the reference given.
+
+### Already decided, deliberately not scheduled
+
+| Item | Where | Why it is not in a stage |
+|---|---|---|
+| **Semantic recall** — vector index over memory | §9.3 | Needs migration, model/dimension versioning, retention, rebuild and storage-size policy. Materially more than "persist embeddings". |
+| **Findings ↔ graph cross-surfacing** | §9.7 | Joining findings to graph facts is deliberately not free in this design. When wanted, it needs a *designed* join, not an implicit one. |
+| **`code_interpreter`** | §9.4, ADR-0014 | Rejected. The real question is *is local code execution something Roteiro wants to be?* — a product decision, not a backend one. |
+| **Q2 — LOC hotspots** | Stage 26 | Not a pure query: `Node.span` is *byte offsets*, so it needs net-new extraction metadata. |
+| **Q10 — dependency pins** | Stage 26 | Mis-scoped as written; existing pins are Docker `image_ref` and submodules, so package-manifest pins are extraction work. |
+| **Q7 — doc coverage** | Stage 26 | Needs a language and a denominator; docs live mostly in symbol `meta.content`, not `Doc` nodes. |
+| **S2–S6** — the rest of the security lens series | Stage 26 | Taxonomy normalised (S1, S4 → `GDS`; S2, S3 → `NNX`; S5, S6 → `EXT`), but none is scoped. |
+
+### The batching constraint that shapes all of it
+
+**Q2, Q10 and cross-language call-edge resolution each need extraction metadata,
+so each forces an `EXTRACT_VERSION` bump — and every bump is a full
+re-extraction for every user.** The risk register already says to batch
+extraction-touching lenses behind a single bump. That makes these a *cluster*
+rather than three independent tickets: doing them one at a time is the expensive
+way to do the same work.
+
+Cross-language call-edge resolution belongs in that cluster and is not yet
+recorded anywhere else. Stage 26's Q3 measured **615 of 6,553 call edges (9.4%)
+on this repository as cross-language name collisions** — cross-file resolution
+binds a callee by simple name across every `Fn` node regardless of language, and
+no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
+work, so it batches with Q2 and Q10 or it is paid for twice.
+
+### Now scheduled as Stages 33–35
+
+Formerly scoped-but-unrecorded; added to the roadmap by decision. Summarised here
+because §8b is where a reader looks for what outlives the current stage — the
+stages themselves carry the detail:
+
+- **Stage 33 — local model resolution.** Closes a user-facing gap on its own
+  merits: a project cannot pin its ASR model today. No network, no new
+  dependency, no ADR.
+- **Stage 34 — remote model tier.** **Blocked on ADR-0019**, which must amend
+  ADR-0006, invert ADR-0007's precedence for one key, and exempt principle 10.
+  Not startable until that ADR is accepted.
+- **Stage 35 — `roteiro review` LLM mode.** Depends on Stage 33. Gives the
+  26-comment adjudicated corpus a consumer before it rots.
 
 ---
 
