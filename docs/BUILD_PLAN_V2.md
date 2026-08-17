@@ -1756,6 +1756,46 @@ binds a callee by simple name across every `Fn` node regardless of language, and
 no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
 work, so it batches with Q2 and Q10 or it is paid for twice.
 
+#### The one exception, and why it was made
+
+**The `placeholder` marker-needle correction (#384) spent a bump on its own**
+(`EXTRACT_VERSION` 11 → 12), by the owner's decision. It is not a fourth member of
+the cluster above: it shipped alone, and Q2, Q10 and cross-language edge
+resolution remain a cluster **with each other**, still unpaid and still
+unscheduled — this exception does not release them.
+
+The trade the batching rule is meant to prevent is *paying twice for the same
+work*. That is not what this was. The bare word `placeholder` was a `stub` needle
+scoring **0% precision — 36 of 36 findings on this repository, none a stub**: the
+external-ref placeholder node (ADR-0009), the redaction placeholder (ADR-0015),
+S1's own sentence about not being able to tell a secret from a placeholder, a
+`{tag}` ref template, CSS `::placeholder`. The lens was reporting the codebase's
+vocabulary as its debt, and `roteiro check` printed the inflated figure at a
+glance. Replacing the word with the two phrases that predicate incompleteness of
+an implementation — `placeholder implementation`, `returns a placeholder` — takes
+`stub` from 36 to **0**, the true count, and reclassifies nothing else.
+
+Holding that behind Q2, Q10 and cross-language edge resolution would have meant
+shipping a knowingly false count for the whole of an unscheduled, post-v2.0
+horizon — indefinitely, since none of the three has a date. Stage 26's standard
+is that a lens which over-reports is worse than none; a 100%-noise category is
+the case that standard was written for. Correctness of a number users read now
+outweighed the cost of one re-extraction, so the batching rule was set aside
+deliberately rather than forgotten. It still governs the three items above: they
+each add *new* extraction metadata, they are genuinely one body of work, and
+nothing about this exception makes them cheaper to do separately.
+
+**What the bump cost, measured** on a store extracted at version 11 and then
+opened by the version-12 binary: **all 275 cached fact sets re-extracted** (every
+tracked blob — the base version is unconditional, so nothing survives the key
+change), 3.2 s cold against 0.17 s warm on a debug build. The object cache is
+write-and-keep with no eviction (`crates/rto-graph/src/cache.rs`), so the
+superseded version-11 entries stay on disk: `.git/roteiro/objects` went
+**4.8 MiB → 9.7 MiB** and does not shrink again. That is per repository, per
+user, and it is the whole price —
+`.git/roteiro` is derived, so deleting it is always safe if a user would rather
+reclaim the space than keep the old entries.
+
 ### Stages 33–35 — status
 
 Formerly scoped-but-unrecorded, added to the roadmap by decision, and since
