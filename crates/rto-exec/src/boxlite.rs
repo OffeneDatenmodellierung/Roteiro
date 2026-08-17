@@ -604,23 +604,7 @@ impl BoxliteRunner {
     /// never does. A scan must not be able to fail because a registry was
     /// unreachable, nor to succeed by silently fetching something new.
     async fn require_image(&self, runtime: &BoxliteRuntime) -> Result<(), SandboxError> {
-        let images = runtime
-            .images()
-            .map_err(|e| SandboxError::Runtime {
-                stage: "images",
-                message: e.to_string(),
-            })?
-            .list()
-            .await
-            .map_err(|e| SandboxError::Runtime {
-                stage: "images",
-                message: e.to_string(),
-            })?;
-
-        let present = images
-            .iter()
-            .any(|i| i.id == self.image.digest || i.reference == self.image.reference);
-        if present {
+        if image_present(runtime, self.image).await? {
             Ok(())
         } else {
             Err(SandboxError::ImageNotProvisioned {
@@ -824,6 +808,80 @@ pub fn provision_image(analyzer: &str, assets_root: &Path) -> Result<String, San
             })?;
         Ok(image.digest.to_owned())
     })
+}
+
+/// Whether the pinned image for `analyzer` is already in the local store.
+///
+/// The question that has to be asked *before* a run rather than discovered
+/// during one. `provision_image` downloads and a run refuses — but a caller that
+/// only wants to know which of those applies had no way to ask, so "the image
+/// was never pulled" could only surface as a failed scan. That is how it reached
+/// [`crate::boxlite`]'s parity test as an error indistinguishable from a
+/// regression: a missing setup step wearing the costume of a broken backend.
+///
+/// Reads the local store and nothing else. Asking never pulls.
+///
+/// # Errors
+/// [`SandboxError::NoImage`] if this build has no image for the analyzer, or
+/// [`SandboxError::Runtime`] if the local image store cannot be opened or
+/// listed. A store that cannot be read is deliberately an error rather than
+/// `Ok(false)`: "definitely absent" and "could not tell" are different answers,
+/// and only the first one is safe for a caller to treat as a skip.
+pub fn image_is_provisioned(analyzer: &str, assets_root: &Path) -> Result<bool, SandboxError> {
+    let image = image_for(analyzer).ok_or_else(|| SandboxError::NoImage {
+        requested: analyzer.to_owned(),
+        known: SANDBOX_IMAGES
+            .iter()
+            .map(|i| i.analyzer)
+            .collect::<Vec<_>>()
+            .join(", "),
+    })?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| SandboxError::Runtime {
+            stage: "runtime",
+            message: e.to_string(),
+        })?;
+
+    runtime.block_on(async {
+        let boxlite = BoxliteRuntime::new(BoxliteOptions {
+            home_dir: assets_root.join("boxlite-home"),
+            image_registries: Vec::new(),
+        })
+        .map_err(|e| SandboxError::Runtime {
+            stage: "open",
+            message: e.to_string(),
+        })?;
+        image_present(&boxlite, image).await
+    })
+}
+
+/// Whether `image` is in `runtime`'s local store.
+///
+/// One place that knows how presence is decided, so the pre-run probe and the
+/// run's own refusal cannot come to different conclusions about the same store.
+async fn image_present(
+    runtime: &BoxliteRuntime,
+    image: &SandboxImage,
+) -> Result<bool, SandboxError> {
+    let images = runtime
+        .images()
+        .map_err(|e| SandboxError::Runtime {
+            stage: "images",
+            message: e.to_string(),
+        })?
+        .list()
+        .await
+        .map_err(|e| SandboxError::Runtime {
+            stage: "images",
+            message: e.to_string(),
+        })?;
+
+    Ok(images
+        .iter()
+        .any(|i| i.id == image.digest || i.reference == image.reference))
 }
 
 #[cfg(test)]

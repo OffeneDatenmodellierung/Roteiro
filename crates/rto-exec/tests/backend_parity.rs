@@ -232,15 +232,41 @@ fn preconditions() -> Option<PathBuf> {
     }
 
     // The image is never pulled by a run, and this test is a run.
-    match BoxliteRunner::new("semgrep", &root) {
-        Ok(_) => Some(root),
-        Err(e) => {
+    if let Err(e) = BoxliteRunner::new("semgrep", &root) {
+        eprintln!(
+            "SKIPPED: the sandboxed backend is not ready on this host: {e}\n         \
+             provision it with `roteiro security prefetch --analyzer sandbox --allow-download`"
+        );
+        return None;
+    }
+
+    // Constructing the runner does *not* prove the image is there — the runner
+    // checks that only when it runs, so this guard used to pass on a host with a
+    // working sandbox and an empty image store, and the missing setup step then
+    // surfaced as `ImageNotProvisioned` from the assertion itself. A skipped
+    // step reading as a broken backend is the failure this check exists to
+    // prevent, and it is why the recipe below is spelled out rather than named.
+    match rto_exec::boxlite::image_is_provisioned("semgrep", &root) {
+        Ok(true) => Some(root),
+        Ok(false) => {
             eprintln!(
-                "SKIPPED: the sandboxed backend is not ready on this host: {e}\n         \
-                 provision it with `roteiro security prefetch --allow-download`"
+                "SKIPPED: the pinned semgrep image is not in the local store, so the \
+                 sandboxed half cannot run.\n         Provision it with:\n\n           \
+                 cargo run -p roteiro --features exec-boxlite -- \\\n             \
+                 security prefetch --analyzer semgrep --allow-download\n\n         \
+                 The `--features exec-boxlite` is load-bearing: the image half of \
+                 `prefetch` is compiled out of any build without it, so the runtime-only \
+                 recipe in AGENTS.md provisions the archive and silently not the image."
             );
             None
         }
+        // Deliberately not a skip. "Definitely absent" and "could not tell" are
+        // different answers, and only the first is safe to treat as "nothing to
+        // run here" — a store that will not open is a broken host, and skipping
+        // on it would hide exactly what a skip is supposed to make visible.
+        Err(e) => panic!(
+            "the local image store could not be read, so whether this host can run the sandboxed half is unknown: {e}"
+        ),
     }
 }
 

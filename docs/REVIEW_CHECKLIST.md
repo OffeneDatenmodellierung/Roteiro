@@ -27,7 +27,19 @@ blast radius) rather than the diff alone.
 - [ ] `cargo test --workspace --all-features` green; new behaviour has a test.
       `--all-features` includes `exec-boxlite`, whose build refuses until the
       sandbox runtime is provisioned and pinned — see `AGENTS.md` for the
-      one-time `security prefetch` + `BOXLITE_RUNTIME_URL` recipe.
+      one-time `security prefetch` + `BOXLITE_RUNTIME_URL` recipe. **Both
+      passes**: the archive, then the image, from an `exec-boxlite` build.
+- [ ] **A gate verified on your machine was verified with your machine's state.**
+      Three defects in one day were of this shape: a documented command that no
+      longer does what the doc says, merged because the person checking had more
+      state than the recipe produces — an image pulled during development, a
+      binary built with a feature the recipe cannot have yet. Before claiming a
+      setup recipe works, run it as written from the state a fresh machine has.
+      `ROTEIRO_SECURITY_ASSETS=$(mktemp -d)` gives you that for anything asset-
+      backed without touching your real cache. If a test needs state the recipe
+      does not create, it must **skip visibly and name the exact command**, the
+      way `dependency_axis.rs` does for the OSV database — never fail as though
+      the code were broken, and never skip silently.
 - [ ] `cargo run -p roteiro -- check` green — ADR `[[…]]` links and `// @rto:`
       annotations resolve (CI dogfoods this).
 - [ ] `cargo deny --all-features check` + `cargo audit` clean; any new

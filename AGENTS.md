@@ -90,19 +90,34 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   the binary. Once, before your first `--all-features` build:
 
   ```sh
-  roteiro security prefetch --allow-download   # verifies against a pinned digest
+  # 1. The runtime archive. Any build can do this. The archive belongs to no
+  #    analyzer, so `--analyzer sandbox` selects it alone rather than also
+  #    fetching ~250 MB of advisory databases you may not want yet.
+  roteiro security prefetch --analyzer sandbox --allow-download   # pinned digest
   export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
+
+  # 2. The analyzer image. This step needs a binary that *has* `exec-boxlite`,
+  #    which step 1 is what makes buildable — so it cannot be folded into step 1.
+  cargo run -p roteiro --features exec-boxlite -- \
+    security prefetch --analyzer semgrep --allow-download   # ~435 MB, pinned by digest
   ```
 
   The build script fails loudly — with this recipe and the expected digest — if
   the variable is unset, points at a remote URL, or the bytes do not match. Build
   without `exec-boxlite` if you would rather not provision.
 
-  `prefetch` is gated on `execution`, so **any** build can run that first line —
+  `prefetch` is gated on `execution`, so **any** build can run step 1 —
   including `--no-default-features --features execution`. That is not a
   convenience: it is what stops this recipe being circular. If provisioning sat
   behind an execution backend, obtaining the archive `exec-boxlite` demands at
   compile time would first require a build with the *other* backend compiled in.
+
+  **Step 2 is a separate pass, and used to be missing here.** Provisioning is
+  universally available, but the *image* half of `prefetch` is behind
+  `#[cfg(feature = "exec-boxlite")]` — so a binary built to satisfy step 1
+  compiles it out, pulls the archive, and *silently not the image*. Skip step 2
+  and `cargo test --workspace --all-features` fails in `backend_parity` with
+  `ImageNotProvisioned`, on a machine that followed this recipe exactly.
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny --all-features check` and `cargo audit` — clean. **Every new
