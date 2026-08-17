@@ -254,7 +254,19 @@ inference-local-models = [
 #     because nothing then called `call_with`; that call site now exists. It
 #     does **not** enable `execution`, so `--features remote` still yields a
 #     binary with no analyzer surface.
-remote = ["dep:rto-remote", "dep:rto-exec", "dep:ureq"]
+#
+# Part 2b adds a fourth, and it is a **resolver** dependency rather than a model
+# one. The tier does not choose itself: `ModelSource::Remote` is a variant of the
+# *shared* `rto_graph::model_choice` resolver, which is gated on
+# `rto-graph/models`, and `spec draft` / Ask ask that resolver which backend
+# serves them before either can send. Without it a `--features remote` build
+# would hold a consent gate and a transport and nothing that decides when to use
+# them.
+#   * `models` — the shared resolver (and, incidentally, the registry and the
+#     `roteiro model` commands, both already in `default`). It pulls no
+#     llama.cpp, and it does **not** enable the tier: the user layer and the
+#     invocation still have to grant, every run.
+remote = ["dep:rto-remote", "dep:rto-exec", "dep:ureq", "models"]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
 pdf-text = ["rto-graph/pdf-text"]

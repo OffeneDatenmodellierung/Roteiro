@@ -65,6 +65,12 @@ pub mod review_corpus;
 pub mod review_score;
 mod store;
 mod sync;
+// Whether a producer's identity is measured or asserted (ADR-0019 §5). In *this*
+// crate rather than in `rto-remote` because `rto-remote` depends on this one, so
+// `ModelSource::Remote` cannot name a type that lives there — and because the
+// grade qualifies `Producer`, which is here. Two variants and a sentence: it
+// brings no transport with it.
+pub mod trust;
 mod workspace;
 
 pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
@@ -117,8 +123,9 @@ pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
 pub use model_choice::{
     DEFAULT_GENERATIVE, DEFAULT_OCR, ModelChoice, ModelChoiceError, ModelPins, ModelSource,
-    ModelTask, TASKS as MODEL_TASKS, resolve as resolve_model, resolve_all_with as resolve_models,
-    resolve_with as resolve_model_with, set_model_pins,
+    ModelTask, RemoteTier, TASKS as MODEL_TASKS, resolve as resolve_model,
+    resolve_all_with as resolve_models, resolve_with as resolve_model_with,
+    resolve_with_remote as resolve_model_with_remote, set_model_pins,
 };
 #[cfg(feature = "models")]
 pub use models::{
@@ -141,6 +148,7 @@ pub use sync::{
     DEFAULT_KEEP_GENERATIONS, ReclaimReport, SyncError, SyncReport, sweep_superseded, sync,
     sync_index, sync_tree, sync_worktree,
 };
+pub use trust::ProducerTrust;
 pub use workspace::{
     Follow, ResolvedWorkspace, Workspace, WorkspaceError, WorkspaceSet, discover_repos_under,
     parse_qualified,

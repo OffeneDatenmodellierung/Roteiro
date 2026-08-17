@@ -241,11 +241,43 @@ pub fn call_with(
 /// carries the cautionary case. A new enum passes here by taking the attribute
 /// **or** by saying in its own docs why its set is closed — either is a decision,
 /// and only silence is not.
+///
+/// # It follows re-exports, because a type that moves out of `src/` is still ours
+///
+/// A directory scan has one blind spot, and Stage 34 part 2b walked straight into
+/// it: [`ProducerTrust`] moved to `rto_graph::trust` — forced, because
+/// `rto_graph::ModelSource::Remote` carries it and `rto-remote` depends on
+/// `rto-graph` rather than the other way round — and left this crate's `src/`.
+/// It is still `rto_remote::ProducerTrust`, still public, still published, and a
+/// variant added to it is still a breaking change here; but the scan stopped
+/// seeing it, and a guard that quietly stops guarding is worse than no guard.
+///
+/// The `seen` floor below caught the loss — 9 became 8 — which is the floor doing
+/// its job, but it reports it as *"the scan stopped matching"* rather than as
+/// *"a type escaped"*, and it would not have caught the move at all if the floor
+/// had been set one lower. So [`RE_EXPORTED_SOURCES`] makes the scan follow the
+/// type instead of relying on arithmetic to notice its absence. Semver does not
+/// care which directory a file is stored in.
 #[cfg(test)]
 mod semver_posture {
-    /// Every `src/*.rs` in this crate, as `(file name, contents)`.
+    /// Files outside this crate that define types it **re-exports**, and which the
+    /// scan must therefore read as if they were its own.
+    ///
+    /// Paths relative to `CARGO_MANIFEST_DIR`. Kept as a short explicit list
+    /// rather than derived from `pub use` lines: the derivation would have to
+    /// parse Rust to be right, and a list of one entry that must be extended by
+    /// hand is a list somebody reads when they add the second.
+    ///
+    /// A missing file here is a **failure**, not a skip — see `sources`. A
+    /// re-exported definition that has been moved or deleted is exactly the case
+    /// this list exists to notice.
+    const RE_EXPORTED_SOURCES: [&str; 1] = ["../rto-graph/src/trust.rs"];
+
+    /// Every `src/*.rs` in this crate, plus [`RE_EXPORTED_SOURCES`], as
+    /// `(display name, contents)`.
     fn sources() -> Vec<(String, String)> {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = root.join("src");
         let mut files: Vec<_> = std::fs::read_dir(&dir)
             .expect("read this crate's src/")
             .filter_map(Result::ok)
@@ -264,6 +296,17 @@ mod semver_posture {
             })
             .collect();
         files.sort();
+        for rel in RE_EXPORTED_SOURCES {
+            let text = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| {
+                panic!(
+                    "{rel} is re-exported by this crate but could not be read ({e}). If the type \
+                     moved again, move this entry with it; if it is no longer re-exported, drop \
+                     the entry — but do not leave the scan pointing at nothing, because that is \
+                     how a public enum stops being guarded without anyone noticing"
+                )
+            });
+            files.push((format!("(re-exported) {rel}"), text));
+        }
         files
     }
 
@@ -327,7 +370,22 @@ mod semver_posture {
         assert!(
             seen >= 9,
             "only found {seen} public enums — the scan stopped matching, which would let this \
-             test pass by finding nothing"
+             test pass by finding nothing. If a type moved out of this crate's `src/` and is \
+             still re-exported, add its file to `RE_EXPORTED_SOURCES` rather than lowering this \
+             floor: the floor notices a loss, but it cannot tell you a public enum escaped from \
+             a scan that broke"
+        );
+        // `ProducerTrust` by name, because it is the one that has already left
+        // `src/` once. The count above would go on passing if the entry were
+        // dropped and some other enum were added in the same change; this would
+        // not, and naming it is what makes `RE_EXPORTED_SOURCES` load-bearing
+        // rather than decorative.
+        assert!(
+            sources()
+                .iter()
+                .any(|(_, text)| text.contains("pub enum ProducerTrust")),
+            "`ProducerTrust` is re-exported by this crate but no scanned source defines it — \
+             the guard has lost the type it lost once already"
         );
     }
 }

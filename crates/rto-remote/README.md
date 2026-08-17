@@ -21,10 +21,13 @@ still pinned `default-features = false` to exclude the transports, and this
 crate depends *on* it rather than the other way round.
 
 The socket lives in the `roteiro` binary, in `remote_transport.rs`, behind the
-off-by-default `remote` feature: one function, reachable from one command
-(`roteiro remote call`), handed to `call_with` as a closure. Adding an HTTP
-client to *this* crate's `Cargo.toml` is the change that would undo all of the
-above, which is why the manifest says so where someone would be adding one.
+off-by-default `remote` feature: **one** function, handed to `call_with` as a
+closure. Three commands can reach it — `roteiro remote call`, `roteiro spec draft
+--allow-remote` and `roteiro serve --allow-remote` (the Ask panel's model) — and
+all three go through the same gate, the same allow-list and the same ledger,
+because there is only one path to that closure. Adding an HTTP client to *this*
+crate's `Cargo.toml` is the change that would undo all of the above, which is why
+the manifest says so where someone would be adding one.
 
 ## Reading the response is also here, where there is no socket
 
@@ -95,6 +98,17 @@ An append-only JSONL ledger records the endpoint, the model string, the
 `ProducerTrust`, the timestamp and a copy of the body — written **before** the
 transport runs, so a call that hung is still a call you know about. A ledger
 that cannot be written refuses the call rather than sending unrecorded.
+
+## `ProducerTrust` lives in `rto-graph`
+
+It was defined here, and it moved when `rto_graph::ModelSource::Remote` had to
+carry it: this crate depends on `rto-graph`, so a variant in that crate's model
+resolver cannot name a type defined here. `rto_remote::ProducerTrust` still
+resolves — it is a re-export, and there is exactly one type behind both paths.
+
+That single definition is the point rather than a tidiness preference. The grade
+answers *"is this identity a measurement or a claim?"*, and an answer that a
+ledger entry and a model resolution could disagree about is not an answer.
 
 ## Two things it deliberately does not do
 

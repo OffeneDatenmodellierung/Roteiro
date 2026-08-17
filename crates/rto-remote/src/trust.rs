@@ -1,122 +1,61 @@
 //! How much a producer's identity can be trusted — ADR-0019 §5.
 //!
-//! [[docs/adr/0015-generated-media-content-artifact-store.md]]'s `Producer` is
-//! not a label but a *verifiable identity*: it folds a `model_digest` **as pinned
-//! in the registry** into a canonical id, which is what makes re-describing an
-//! image with different weights a new record rather than a silent overwrite.
+//! **The type moved to [`rto_graph::trust`], and this module is the re-export.**
+//! It was written here, alongside the egress ledger that first recorded it, and
+//! it moved when `ModelSource::Remote` had to carry it: `rto-remote` depends on
+//! `rto-graph`, so a variant in `rto-graph`'s model resolver cannot name a type
+//! defined here.
 //!
-//! **That does not transfer to a hosted model, and pretending it does would be
-//! the dishonest part of this feature.** A hosted model has no digest anyone can
-//! compute. A vendor model string is a **mutable pointer**: the weights behind
-//! `some-vendor/some-model-2026-05` can change while the name does not, and
-//! Roteiro cannot detect it. Two records naming the same model may have been
-//! produced by different weights, and nothing on this machine can tell.
+//! The alternative was a second, parallel enum — one for the resolver, one for
+//! the ledger — and that is precisely the thing this grade exists to prevent.
+//! `ProducerTrust` answers *"is this identity a measurement or a claim?"*, and an
+//! answer that two types could disagree about is not an answer. So there is one
+//! definition, and `rto_remote::ProducerTrust`, `rto_remote::trust::ProducerTrust`
+//! and `rto_graph::ProducerTrust` are all the same type.
 //!
-//! So a record states its trust on its face. [`ProducerTrust::VendorAsserted`]
-//! is not a lesser grade of the same thing as [`ProducerTrust::PinnedDigest`] —
-//! it is a **claim** where the other is a **measurement**, and
-//! [`ProducerTrust::caveat`] is the sentence that says so wherever such a record
-//! is displayed.
+//! Nothing about the decision changed with the address; the documentation of
+//! *why* a hosted model can only ever be [`ProducerTrust::VendorAsserted`] moved
+//! with the type and is worth reading there.
+//!
+//! # The exhaustiveness decision travelled too, and so did the guard
+//!
+//! PR #391 swept `#[non_exhaustive]` across this crate's public enums and left
+//! `ProducerTrust` **deliberately exhaustive**, saying so at the definition. That
+//! reasoning is not a property of the crate it happened to be written in — it is
+//! a property of the type — so it moved with it and is stated at its new
+//! definition in `rto_graph::trust`.
+//!
+//! The *guard* had to be made to follow as well.
+//! `semver_posture::every_public_enum_either_is_non_exhaustive_or_says_why_not`
+//! scans this crate's `src/`, and a type that leaves the directory leaves the
+//! scan — silently, since the test would go on passing over the enums that
+//! remain. It now also reads the files this crate **re-exports from**, because a
+//! re-exported type is part of this crate's public API whatever directory it is
+//! stored in, and semver does not care where a file lives.
 
-use serde::{Deserialize, Serialize};
-
-/// Whether a producer's identity is measured or asserted.
-///
-/// **Deliberately not `#[non_exhaustive]`**, unlike most of this crate's public
-/// enums (see [`crate::Reason`] for that decision and its cost). This is a
-/// two-valued distinction, not a list: an identity either was verified on this
-/// machine or it was not, and [`ProducerTrust::is_verifiable`] is the whole of
-/// it. A third value would mean the distinction had changed, which is a redesign
-/// a downstream `match` should be made to notice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProducerTrust {
-    /// The weights were digested on this machine and the digest is part of the
-    /// identity — the local-model case ADR-0015 was written for. Two records
-    /// with this trust and the same identity really were produced by the same
-    /// bytes.
-    PinnedDigest,
-    /// The identity is a name the vendor chose, and nothing more. Roteiro cannot
-    /// verify it, cannot detect a change behind it, and does not claim to.
-    VendorAsserted,
-}
-
-impl ProducerTrust {
-    /// Stable token for `--json` output and for the egress ledger.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PinnedDigest => "pinned_digest",
-            Self::VendorAsserted => "vendor_asserted",
-        }
-    }
-
-    /// Whether this identity was verified on this machine.
-    #[must_use]
-    pub fn is_verifiable(self) -> bool {
-        matches!(self, Self::PinnedDigest)
-    }
-
-    /// The sentence a record carrying this trust must be displayed with, or
-    /// `None` when the identity speaks for itself.
-    #[must_use]
-    pub fn caveat(self) -> Option<&'static str> {
-        match self {
-            Self::PinnedDigest => None,
-            Self::VendorAsserted => Some(
-                "this identity is a claim, not a measurement: a vendor model string is a \
-                 mutable pointer, so the weights behind it can change while the name does \
-                 not, and Roteiro cannot detect that",
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for ProducerTrust {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+pub use rto_graph::trust::ProducerTrust;
 
 #[cfg(test)]
 mod tests {
     use super::ProducerTrust;
 
-    /// A vendor-asserted record must state on its face that its identity is a
-    /// claim — the one thing ADR-0019 §5 says is worth more than the feature.
+    /// **One type, three paths.** The re-export is not a convenience alias over a
+    /// local copy: an endpoint built with `rto_graph`'s spelling and a ledger
+    /// entry read back through `rto_remote`'s must be the same value, because a
+    /// record whose trust grade depended on which import the writer reached for
+    /// would be a record that cannot answer the question it exists for.
     #[test]
-    fn a_vendor_asserted_identity_declares_itself_a_claim() {
-        let trust = ProducerTrust::VendorAsserted;
-        assert!(!trust.is_verifiable());
-        let caveat = trust
-            .caveat()
-            .expect("a vendor-asserted record carries a caveat");
-        assert!(caveat.contains("mutable pointer"), "{caveat}");
-        assert!(caveat.contains("cannot detect"), "{caveat}");
-    }
-
-    /// A digest-pinned identity was measured here, so it needs no caveat — and
-    /// the two must not render the same, or the distinction buys nothing.
-    #[test]
-    fn a_pinned_digest_needs_no_caveat_and_renders_differently() {
-        assert!(ProducerTrust::PinnedDigest.is_verifiable());
-        assert!(ProducerTrust::PinnedDigest.caveat().is_none());
-        assert_ne!(
-            ProducerTrust::PinnedDigest.as_str(),
-            ProducerTrust::VendorAsserted.as_str()
+    fn the_re_exported_trust_is_the_one_definition() {
+        let from_graph: rto_graph::ProducerTrust = rto_graph::ProducerTrust::VendorAsserted;
+        // Assigning across the paths is the assertion: it does not compile if
+        // they are distinct types.
+        let from_remote: ProducerTrust = from_graph;
+        let from_crate: crate::ProducerTrust = from_remote;
+        assert_eq!(from_crate, ProducerTrust::VendorAsserted);
+        assert_eq!(from_crate.as_str(), "vendor_asserted");
+        assert!(
+            from_crate.caveat().is_some_and(|c| c.contains("claim")),
+            "the caveat travels with the type, not with the crate that re-exports it"
         );
-    }
-
-    /// The token is what the ledger stores, so it round-trips through serde
-    /// unchanged — a record whose trust could not be read back would be a record
-    /// that cannot answer the question it exists for.
-    #[test]
-    fn the_token_round_trips_through_serde() {
-        for trust in [ProducerTrust::PinnedDigest, ProducerTrust::VendorAsserted] {
-            let json = serde_json::to_string(&trust).expect("serialize");
-            assert_eq!(json, format!("\"{}\"", trust.as_str()));
-            let back: ProducerTrust = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(back, trust);
-        }
     }
 }

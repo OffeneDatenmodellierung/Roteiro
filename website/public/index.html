@@ -77,9 +77,20 @@ own <code>~/.roteiro/config.toml</code> <em>and</em> from the invocation
 (<code>--allow-remote</code>, or a prompt that shows you the exact bytes) — neither alone
 suffices, and a committed <code>roteiro.toml</code> may <strong>deny</strong> it for a whole
 repository but can never grant it, because a merged line must not authorise egress on a
-teammate's machine. <code>roteiro remote dry-run</code> prints exactly what would be sent;
-<code>roteiro remote log</code> reads the append-only record of what did. Source code is not
-sent — function bodies are not in the graph — but symbol names, paths and captured prose
+teammate's machine. Three commands can send, and each has to be told to: <code>roteiro remote call</code> is the
+one that exists to, <code>roteiro spec draft --allow-remote</code> drafts with the hosted
+model instead of a local one, and <code>roteiro serve --allow-remote</code> makes it the
+model the Ask panel uses — <em>only</em> <code>remote call</code> ever prompts, because a
+prompt on a command whose default is local turns a habituated “yes” into consent you never
+quite gave. <code>serve --allow-remote</code> grants for the life of the server
+<em>process</em>: every Ask it answers sends context to the hosted model for as long as it
+runs, including requests from anyone else who can reach the port — bounded by
+loopback-by-default binding, by your user config having granted independently, and by the
+ledger; it is never persisted and dies with the process. A refused
+<code>--allow-remote</code> stops the run and names the layer that refused, rather than
+answering from a local model. <code>roteiro remote dry-run</code> prints exactly what would
+be sent; <code>roteiro remote log</code> reads the append-only record of what did. Source
+code is not sent — function bodies are not in the graph — but symbol names, paths and captured prose
 are, they identify a codebase, and there is no redaction chokepoint on a prompt. And it
 never degrades quietly: an unreachable endpoint is an error naming that endpoint, not a
 local model's answer handed over in its place. So <em>“nothing leaves the machine”</em> is
@@ -202,7 +213,7 @@ cargo build --release --all-features</code></pre>
 <tr><td><code>exec-subprocess</code> <em>(default)</em></td><td>Runs an analyzer (<code>semgrep</code>, <code>osv-scanner</code>, <code>cargo audit</code>) as a child process on this host. You install the analyzer; Roteiro never does. No isolation boundary, so <strong>every run requires <code>--allow-unsandboxed</code></strong> and records <code>isolation=none</code>. Use <code>--no-default-features --features execution</code> for a build that provisions and ingests but cannot execute.</td></tr>
 <tr><td><code>exec-boxlite</code></td><td>The same analyzers inside a digest-pinned OCI image in a microVM — read-only worktree, no egress. Needs <code>protoc</code> and a provisioned runtime; see the README.</td></tr>
 <tr><td><code>serve</code></td><td>An OpenAI-compatible <code>/v1</code> model endpoint over your installed models (llama.cpp).</td></tr>
-<tr><td><code>remote</code></td><td><strong>The one feature that can send your repository's content off this machine</strong> — <code>roteiro remote status|dry-run|call|log</code> against a hosted model (ADR-0019). Off by default and staying off. Compiling it does not enable it: a run needs your <code>~/.roteiro/config.toml</code> <em>and</em> the invocation, and a committed <code>roteiro.toml</code> may deny it but never grant it. <a href="#remote-tier">Read the note above</a> before turning it on.</td></tr>
+<tr><td><code>remote</code></td><td><strong>The one feature that can send your repository's content off this machine</strong> — <code>roteiro remote status|dry-run|call|log</code> against a hosted model, plus <code>spec draft --allow-remote</code> and <code>serve --allow-remote</code> (Ask), which take the same gate (ADR-0019). Off by default and staying off. Compiling it does not enable it: a run needs your <code>~/.roteiro/config.toml</code> <em>and</em> the invocation, and a committed <code>roteiro.toml</code> may deny it but never grant it. <a href="#remote-tier">Read the note above</a> before turning it on.</td></tr>
 <tr><td><code>mcp</code></td><td>The MCP graph server, exposing the graph to AI agents (stdio or HTTP).</td></tr>
 <tr><td><code>--all-features</code></td><td>Every capability above at once — the largest build. Requires a C/C++ toolchain because the serving and vision features compile llama.cpp. <strong>This includes <code>remote</code></strong>, so such a build <em>can</em> call a hosted model once you grant it in your user config and per run; it still cannot without both.</td></tr>
 </table>
