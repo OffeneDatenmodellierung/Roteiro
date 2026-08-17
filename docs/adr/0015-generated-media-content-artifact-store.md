@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0015"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-08-15
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -287,8 +287,14 @@ for something extracted from the source.
 
 ## Status
 
-For Review. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) as Stage 28, and
+**Accepted** (2026-08-17), and implemented — Stage 28a/28b (#310, #312), released from **v1.10.x**. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) as Stage 28, and
 implemented across two changes: the artifact store, its CLI and the search
 channel (Stage 28a), then the pre-generation gate and the explorer surfacing
 (Stage 28b). The projector cache (#301) is complementary and tracked separately;
 the gate compounds with it, since a refused blob loads no projector to cache.
+
+## Version history
+
+| Version | Date | Notes |
+|---|---|---|
+| 1.2 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |

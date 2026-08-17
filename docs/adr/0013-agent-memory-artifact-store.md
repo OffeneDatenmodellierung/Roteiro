@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0013"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
+version: "1.4"
 last-modified: 2026-08-16
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 
 ## Reference
 
@@ -336,7 +336,7 @@ eviction tier can later be altered without touching durable memory.
 
 ## Status
 
-For Review. This ADR is itself the smallest useful step, since it forecloses the
+**Accepted** (2026-08-17), and implemented — Stage 23 (#317) in **v1.11.0** and Stage 25 (#340) in **v1.12.0**. This ADR is itself the smallest useful step, since it forecloses the
 cheap `NodeKind::Other("memory")` shortcut that someone will otherwise take.
 
 **Both halves are now delivered.** Stage 23 shipped the episodic tier — migration
@@ -379,6 +379,7 @@ decision here, all of it recorded in the build plan's Stage 25 entry:
 
 | Version | Date | Notes |
 |---------|------|-------|
+| 1.4 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
 | 1.0 | 2026-08-15 | For Review. Two-tier artifact store for durable agent-learned knowledge: episodic (unbounded, never auto-evicted, following the `imports` precedent) and a byte-budget-bounded transient cache (porting `rto-llama`'s `ModelCache` LRU to disk). Depreciation by evidence — anchor drift and explicit supersession — not by clock; decay computed at retrieval, never stored. Nothing enters `nodes`/`edges`; no `Provenance` variant; `EXTRACT_VERSION` unchanged. Rejects `NodeKind::Other("memory")`, authored-with-metadata, and a single TTL'd table. Left two questions to the reviewer: the cache byte budget, and what `scope` means. |
 | 1.3 | 2026-08-16 | **Two clarifications from PR #340 review; no behaviour changed.** (1) States the bound that makes "demote, never delete" true rather than intended: `anchor_penalty` floors at `0.25` and no `AnchorState` may ever be `0.0`, since a zero weight is deletion wearing a ranking's clothes. Names the one weight that may reach zero — `base_confidence`, and only when a writer states it — and the asymmetry behind that: what Roteiro *infers* never silences a record, what the operator *states* is honoured. Records that a zero score still ranks rather than removes, because nothing filters on it. (2) Notes that the cache sweep reads only the eviction columns and never a payload, which is what `agent_cache.bytes` was introduced for; `hits` is excluded too, being no part of the eviction order. |
 | 1.2 | 2026-08-16 | **Both tiers delivered; the last open question answered.** The cache byte budget is **256 MB by default, raisable** (`ROTEIRO_CACHE_BUDGET_MB`, `--budget-mb`), so nothing is left open. Records where the Stage 25 implementation went beyond this ADR without reversing it: a single-row `agent_cache_clock` supplies the `generation`/`last_used` counters the proposed table named but did not source (§3 rules out wall-clock — `ticks` advances per access, `generation` once per sweep, which is what makes the never-evict pin a lapsing window rather than a permanent one); `decay = none` is the *default* rather than merely offered; `base_confidence` defaults to the midpoint `0.5` when a writer states none, so stating one is worth the trouble in both directions; `anchor_penalty` ranks `drifted` **below** `vanished`, because drift is the state that can mislead about code still under the same key and ranking vanished lowest would punish the records this ADR most wants kept; a sweep that finishes over budget (everything left pinned — this ADR's own rule) reports it rather than leaving a bound that silently failed to bind; and the tier ships with its policy and seam but **no producer**, since moving `node_context` onto it is a data migration rather than a policy change. No decision from 1.0 or 1.1 changed. |

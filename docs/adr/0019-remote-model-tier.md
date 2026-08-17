@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0019"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-17
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | VERY HIGH |
 | **Domain** | Inference |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -248,11 +248,20 @@ because it produces a different answer with no signal that anything changed.
 
 ## Status
 
-**For Review.** Decided in outline, unbuilt. Stage 34 is blocked until this is
-Accepted; nothing else in the plan depends on it.
+**Accepted** (2026-08-17), and **unbuilt** — a departure from this repository's
+habit, worth stating rather than leaving to be noticed. Every ADR accepted before
+this one was accepted alongside working code. This is a decision about a
+capability that does not exist yet, accepted so Stage 34 has a settled contract to
+build against rather than discovering its consent model halfway through.
+
+What that means in practice: the *decision* is not open for re-litigation, but
+nothing here has been proved by an implementation. Where building Stage 34 shows a
+clause to be unworkable, that is an amendment to this ADR with a version-history
+row — never a quiet deviation in code.
 
 ## Version history
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1 | 2026-08-17 | **Accepted.** No content changed; Stage 34 is unblocked. |
 | 1.0 | 2026-08-17 | Initial. Written to unblock Stage 34. |

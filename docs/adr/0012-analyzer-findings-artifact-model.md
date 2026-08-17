@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0012"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-15
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -183,7 +183,13 @@ explicit and informative, and no code path becomes quietly network-dependent.
 
 ## Status
 
-For Review. Execution is planned in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) Stage 21,
-which lands this contract-first: the runner trait, the normalized finding schema,
-and `roteiro security ingest` before any sandboxed backend (the backend itself is
+**Accepted** (2026-08-17), and implemented — Stage 21 (#293), released in **v1.10.0**. It was executed contract-first, as [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) Stage 21
+sequenced it: the runner trait, the normalized finding schema, and
+`roteiro security ingest` landed before any sandboxed backend (the backend itself is
 [[docs/adr/0014-sandboxed-analyzer-execution.md]]).
+
+## Version history
+
+| Version | Date | Notes |
+|---|---|---|
+| 1.1 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |

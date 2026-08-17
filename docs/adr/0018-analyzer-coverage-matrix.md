@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0018"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.2"
+version: "1.3"
 last-modified: 2026-08-16
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Security Tooling |
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -441,7 +441,7 @@ must see both disappear.
 
 ## Status
 
-For Review. The semgrep and `cargo-audit` adapters, the subprocess runner and the
+**Accepted** (2026-08-17), and implemented — Stages 22 and 22b (#322, #339), released in **v1.11.0** and **v1.11.x**. The semgrep and `cargo-audit` adapters, the subprocess runner and the
 `prefetch`/`status` provisioning landed in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md)
 Stage 22. **`osv-scanner` landed in Stage 22b**, and with it the dependency axis
 matches the SAST axis.
@@ -457,6 +457,7 @@ cross-reference at the reporting layer for the Rust overlap.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.3 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
 | 1.0 | 2026-08-15 | Initial: the analyzer→language matrix with evidence, the SQL qualification, the rule-licence position, and the three verified tool behaviours. |
 | 1.1 | 2026-08-16 | Resolves the Rust overlap left open by v1.0: keep both `cargo-audit` and `osv-scanner` findings and cross-reference them on the RUSTSEC id / alias set. Records that OSV.dev *does* carry `RustSec` informational advisories, which refutes the premise of the suppression option, and flags the database-vs-scanner distinction for Stage 22b to measure. |
 | 1.2 | 2026-08-16 | `osv-scanner` shipped (Stage 22b); the dependency column of the matrix is filled. **Corrects v1.0's options-table row**, which conflated the database with the tool: measured against osv-scanner 2.5.0, the scanner *does* report `unmaintained` and `unsound` by default; only `yanked` is unavailable to it, and structurally so. Records the measured RustSec→OSV ingestion lag (~2.5 minutes, so pin age rather than ingestion is what makes the two analyzers differ), three further undocumented tool behaviours, and the package-and-version constraint the cross-reference join turned out to need. |
