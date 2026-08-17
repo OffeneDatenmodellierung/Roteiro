@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.14.0...roteiro-v1.15.0) - 2026-08-17
+
+### Fixed
+
+- *(exec)* format, and correct the feature-gating claim the message relies on
+
+### Other
+
+- *(exec)* record the runtime-verification trade, and fix the stale selection rule
+
 ## [1.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.13.0...roteiro-v1.14.0) - 2026-08-17
 
 ### Added
