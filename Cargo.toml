@@ -5,6 +5,7 @@ members = [
     "crates/rto-graph",
     "crates/rto-llama",
     "crates/rto-spec",
+    "crates/rto-remote",
     "crates/rto-render",
     "crates/rto-serve",
     "crates/roteiro",
@@ -23,6 +24,7 @@ authors = ["The Roteiro Project Team"]
 rto-exec = { path = "crates/rto-exec", version = "1.17.0" }
 rto-graph = { path = "crates/rto-graph", version = "1.17.0" }
 rto-llama = { path = "crates/rto-llama", version = "1.17.0" }
+rto-remote = { path = "crates/rto-remote", version = "1.17.0" }
 rto-spec = { path = "crates/rto-spec", version = "1.17.0" }
 rto-render = { path = "crates/rto-render", version = "1.17.0" }
 rto-serve = { path = "crates/rto-serve", version = "1.17.0" }

@@ -4305,6 +4305,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rto-remote"
+version = "1.17.0"
+dependencies = [
+ "rto-graph",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rto-render"
 version = "1.17.0"
 dependencies = [
