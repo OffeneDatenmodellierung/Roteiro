@@ -134,6 +134,18 @@ pub enum MediaError {
         /// Registry name of the missing model.
         model: String,
     },
+    /// The `[models]` key governing this modality names a model that cannot be
+    /// used — an unknown name, the wrong modality, or one that is not installed.
+    ///
+    /// A separate variant from [`MediaError::ModelMissing`] because the fix is
+    /// different in kind: that one is a download, this one is an edit to a config
+    /// file that is currently *appearing* to be honoured. Falling back to the
+    /// default instead would be the worst outcome available — and, given that
+    /// llama.cpp aborts rather than errors when handed a model of the wrong
+    /// architecture, not merely a cosmetic one.
+    #[cfg(feature = "models")]
+    #[error(transparent)]
+    ModelConfig(#[from] crate::model_choice::ModelChoiceError),
     /// A stored row could not be interpreted (database corruption).
     #[error("corrupt media record: {0}")]
     Corrupt(String),
@@ -205,14 +217,33 @@ impl MediaKind {
         }
     }
 
-    /// Registry name of the model this modality generates with — the argument to
-    /// `roteiro model pull`. Unconditional for the same reason as
-    /// [`MediaKind::feature`].
+    /// Registry name of the model this modality generates with **when nothing
+    /// pins one** — the argument to `roteiro model pull` on a stock setup, and
+    /// the value [`crate::ModelTask::default_model`] reads for this modality.
+    /// Unconditional for the same reason as [`MediaKind::feature`].
+    ///
+    /// Since Stage 33 a project can pin another with `[models] audio` /
+    /// `[models] vision`, so a caller that needs the model *this repository*
+    /// actually uses must ask [`crate::resolve_model`] with [`MediaKind::task`],
+    /// not this. The two differ exactly when a pin is set, which is why this one
+    /// is documented as the default rather than as "the" model.
     #[must_use]
-    pub fn model(self) -> &'static str {
+    pub const fn model(self) -> &'static str {
         match self {
             Self::Audio => "voxtral-mini-3b",
             Self::Vision => "smolvlm-500m-gguf",
+        }
+    }
+
+    /// The resolver task this modality's generation is (`transcribe` /
+    /// `describe`), so a call site holding a [`MediaKind`] can ask which model
+    /// this repository pinned without restating the mapping.
+    #[cfg(feature = "models")]
+    #[must_use]
+    pub fn task(self) -> crate::model_choice::ModelTask {
+        match self {
+            Self::Audio => crate::model_choice::ModelTask::Transcribe,
+            Self::Vision => crate::model_choice::ModelTask::Describe,
         }
     }
 

@@ -652,11 +652,19 @@ pub(crate) fn image_dimensions_ok(bytes: &[u8]) -> bool {
 /// engine can panic on some inputs, so the call is panic-guarded.
 #[cfg(feature = "image-ocr")]
 fn ocr_content(bytes: &[u8]) -> Option<String> {
-    let dir = crate::models::model_dir("ocrs-text");
+    // Which OCR model *this repository* uses: `[models] ocr` if it pins one, else
+    // `ocrs-text` (Stage 33). A pin that cannot be honoured resolves to `None`
+    // and OCR goes inert, as it does for a model that is not installed;
+    // `roteiro config` is where the reason is stated, because `sync` walks a
+    // whole tree and repeating one configuration error per image would bury it.
+    let model = crate::model_choice::resolve(crate::model_choice::ModelTask::Ocr)
+        .ok()?
+        .model?;
+    let dir = crate::models::model_dir(model);
     let detection = dir.join("text-detection.rten");
     let recognition = dir.join("text-recognition.rten");
     if !detection.exists() || !recognition.exists() || !image_dimensions_ok(bytes) {
-        // Models not installed → OCR is inert (run `roteiro model pull ocrs-text`).
+        // Models not installed → OCR is inert (run `roteiro model pull <model>`).
         return None;
     }
     // Borrow `bytes` into the guarded closure — no need to clone the (up to
@@ -817,10 +825,22 @@ fn vlm_content(_bytes: &[u8]) -> Option<String> {
 /// wrote into `meta.content`; since ADR-0015 they do not, so their presence
 /// changes no derived fact and must not perturb a cache key. A machine that
 /// installs Voxtral no longer re-extracts its whole tree.
+///
+/// The model folded in is the **resolved** one, not the built-in default:
+/// repointing `[models] ocr` changes what extraction reads out of an image, so it
+/// has to move the cache key too, or the repository would keep serving text read
+/// by the model it no longer uses. With the key unset this is byte-identical to
+/// what it was before — the resolver returns `ocrs-text`.
 #[cfg(feature = "image-ocr")]
 pub(crate) fn media_env_tag() -> u64 {
+    let Some(model) = crate::model_choice::resolve(crate::model_choice::ModelTask::Ocr)
+        .ok()
+        .and_then(|choice| choice.model)
+    else {
+        return 0;
+    };
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    if fold_installed_model(&mut hash, "ocrs-text") {
+    if fold_installed_model(&mut hash, model) {
         hash | 1
     } else {
         0

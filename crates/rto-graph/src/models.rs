@@ -83,6 +83,19 @@ pub enum ModelKind {
 }
 
 impl ModelKind {
+    /// Every kind, in registry-section order.
+    ///
+    /// Exists so [`crate::model_choice`] can derive which kinds a `[models]` key
+    /// accepts by filtering this list through the capability table, rather than
+    /// writing the accepted set down a second time where it could drift from it.
+    pub const ALL: [Self; 5] = [
+        Self::Embedding,
+        Self::Generative,
+        Self::Ocr,
+        Self::Vision,
+        Self::Audio,
+    ];
+
     /// Stable token naming the model's *section* in the registry.
     #[must_use]
     pub fn as_str(self) -> &'static str {

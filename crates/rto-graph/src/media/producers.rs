@@ -41,13 +41,35 @@ const ASR_MAX_TOKENS: u32 = 512;
 #[cfg(feature = "image-vision")]
 const VLM_MAX_TOKENS: u32 = 128;
 
-/// The GGUF audio model backing `audio-transcribe`.
-#[cfg(feature = "audio-transcribe")]
-pub(crate) const ASR_MODEL: &str = "voxtral-mini-3b";
+/// The GGUF model backing `kind` **as this repository resolves it**: the
+/// `[models] audio` / `[models] vision` pin when one is set, else the modality's
+/// built-in default ([`MediaKind::model`]).
+///
+/// This replaced a pair of `const &str`s, and that pair was the whole of Stage
+/// 33's user-facing gap: with the model a compiled-in constant, no amount of
+/// configuration could change which model transcribed a project's audio.
+///
+/// A pin that cannot be honoured comes back as the resolver's error, never as a
+/// fallback to the default. Silence would be worse here than anywhere else in the
+/// resolver: a model of the wrong architecture reaching llama.cpp's `mtmd` path
+/// aborts the process on a `GGML_ASSERT` rather than returning something a caller
+/// could catch.
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+fn resolved(kind: MediaKind) -> Result<crate::model_choice::ModelChoice, MediaError> {
+    Ok(crate::model_choice::resolve(kind.task())?)
+}
 
-/// The GGUF vision-language model backing `image-vision`.
-#[cfg(feature = "image-vision")]
-pub(crate) const VLM_MODEL: &str = "smolvlm-500m-gguf";
+/// The audio model used when nothing pins one. Kept as a constant **for the
+/// model-loading tests only**, which need a name to check installation against
+/// before deciding whether to skip; production code asks [`resolved`], and those
+/// tests set no pins, so the two agree there by construction.
+#[cfg(all(test, feature = "audio-transcribe"))]
+pub(crate) const ASR_MODEL: &str = MediaKind::Audio.model();
+
+/// The vision model used when nothing pins one — on the same terms as
+/// [`ASR_MODEL`].
+#[cfg(all(test, feature = "image-vision"))]
+pub(crate) const VLM_MODEL: &str = MediaKind::Vision.model();
 
 /// The producers this binary can run right now: one per modality that is both
 /// compiled in and installed, ordered `audio` then `vision`.
@@ -80,9 +102,11 @@ pub fn available() -> Vec<Producer> {
 ///
 /// # Errors
 /// Returns [`MediaError::NoProducer`] when the modality was not compiled in
-/// (naming the cargo feature that provides it), or [`MediaError::ModelMissing`]
+/// (naming the cargo feature that provides it), [`MediaError::ModelMissing`]
 /// when it was but the model is not on disk (naming the `roteiro model pull`
-/// command that installs it). Both are actionable; neither degrades to silence.
+/// command that installs it), or [`MediaError::ModelConfig`] when the modality's
+/// `[models]` key names a model that cannot be used at all. All three are
+/// actionable; none degrades to silence.
 pub fn installed(opts: MediaBuildOptions) -> Result<Vec<Box<dyn MediaProducer>>, MediaError> {
     let mut out: Vec<Box<dyn MediaProducer>> = Vec::new();
     if opts.audio {
@@ -104,9 +128,11 @@ pub fn installed(opts: MediaBuildOptions) -> Result<Vec<Box<dyn MediaProducer>>,
 /// projector is never touched (issue #301).
 #[cfg(feature = "audio-transcribe")]
 fn audio_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
-    let producer = asr_producer().ok_or_else(|| MediaError::ModelMissing {
-        model: ASR_MODEL.to_owned(),
-    })?;
+    let model = resolved(MediaKind::Audio)?.require_installed()?;
+    let producer = registry_producer(MediaKind::Audio, model, ASR_PROMPT, ASR_MAX_TOKENS)
+        .ok_or_else(|| MediaError::ModelMissing {
+            model: model.to_owned(),
+        })?;
     Ok(Box::new(LlamaProducer {
         producer,
         engine: asr_engine,
@@ -125,9 +151,11 @@ fn audio_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
 /// [`audio_producer`].
 #[cfg(feature = "image-vision")]
 fn vision_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
-    let producer = vlm_producer().ok_or_else(|| MediaError::ModelMissing {
-        model: VLM_MODEL.to_owned(),
-    })?;
+    let model = resolved(MediaKind::Vision)?.require_installed()?;
+    let producer = registry_producer(MediaKind::Vision, model, VLM_PROMPT, VLM_MAX_TOKENS)
+        .ok_or_else(|| MediaError::ModelMissing {
+            model: model.to_owned(),
+        })?;
     Ok(Box::new(LlamaProducer {
         producer,
         engine: vlm_engine,
@@ -143,16 +171,22 @@ fn vision_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
 }
 
 /// The identity the installed ASR model would write under, or `None` when it is
-/// not installed.
+/// not installed — **or when the `[models] audio` pin cannot be honoured**, which
+/// is the same answer for the same reason: [`available`] must never error, and a
+/// modality that cannot run is one this binary cannot offer. `media build` calls
+/// [`audio_producer`], which reports the pin's error in full.
 #[cfg(feature = "audio-transcribe")]
 fn asr_producer() -> Option<Producer> {
-    registry_producer(MediaKind::Audio, ASR_MODEL, ASR_PROMPT, ASR_MAX_TOKENS)
+    let model = resolved(MediaKind::Audio).ok()?.model?;
+    registry_producer(MediaKind::Audio, model, ASR_PROMPT, ASR_MAX_TOKENS)
 }
 
-/// The identity the installed vision model would write under, or `None`.
+/// The identity the installed vision model would write under, or `None` — on the
+/// same terms as [`asr_producer`].
 #[cfg(feature = "image-vision")]
 fn vlm_producer() -> Option<Producer> {
-    registry_producer(MediaKind::Vision, VLM_MODEL, VLM_PROMPT, VLM_MAX_TOKENS)
+    let model = resolved(MediaKind::Vision).ok()?.model?;
+    registry_producer(MediaKind::Vision, model, VLM_PROMPT, VLM_MAX_TOKENS)
 }
 
 /// Build a [`Producer`] from the **registry's pinned digests** for `model`,
@@ -300,8 +334,10 @@ static ASR_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
 static VLM_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
     rto_llama::EngineSlot::new();
 
-/// The process-wide audio engine, built lazily from the installed [`ASR_MODEL`]
-/// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed.
+/// The process-wide audio engine, built lazily from the **resolved** audio model
+/// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed,
+/// or when the `[models] audio` pin cannot be honoured — the caller has already
+/// been told why by [`audio_producer`], which resolves before any blob is read.
 ///
 /// Lives in an [`EngineSlot`](rto_llama::EngineSlot) rather than a
 /// `static OnceLock` so [`crate::release_media_engines`] can destroy it *before*
@@ -313,7 +349,7 @@ static VLM_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
 /// first no longer decides whether the other works at all (issue #296).
 #[cfg(feature = "audio-transcribe")]
 pub(crate) fn asr_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
-    ASR_ENGINE.get_or_init(|| build_engine(ASR_MODEL))
+    ASR_ENGINE.get_or_init(|| build_engine(resolved(MediaKind::Audio).ok()?.model?))
 }
 
 /// Transcribe one clip through the real engine, returning just the text.
@@ -334,11 +370,12 @@ pub(crate) fn asr_content(bytes: &[u8]) -> Option<String> {
     .map(|c| c.text)
 }
 
-/// The process-wide vision engine, built lazily from the installed [`VLM_MODEL`].
-/// Same slot mechanism and the same shared backend as [`asr_engine`].
+/// The process-wide vision engine, built lazily from the **resolved** vision
+/// model. Same slot mechanism and the same shared backend as [`asr_engine`], and
+/// `None` on the same terms.
 #[cfg(feature = "image-vision")]
 pub(crate) fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
-    VLM_ENGINE.get_or_init(|| build_engine(VLM_MODEL))
+    VLM_ENGINE.get_or_init(|| build_engine(resolved(MediaKind::Vision).ok()?.model?))
 }
 
 /// Describe one image through the real engine, returning just the text. Test-only

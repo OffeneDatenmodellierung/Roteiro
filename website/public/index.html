@@ -494,9 +494,12 @@ layer set each one.</p>
 
 <pre><code><span class="c"># roteiro.toml — every key is optional; shown with its default</span>
 
-[models]                                <span class="c"># unset ⇒ offline defaults (hashing embedder / qwen3-0.6b)</span>
+[models]                                <span class="c"># unset ⇒ offline defaults; `roteiro config` shows what each surface resolved to</span>
 embedding  = "bge-small-en-v1.5-gguf"   <span class="c"># embedding model for `infer`</span>
-generative = "qwen3-0.6b"               <span class="c"># model for `spec draft` / serving</span>
+generative = "qwen3-0.6b"               <span class="c"># model for `spec draft` / serving / Ask</span>
+vision     = "smolvlm-500m-gguf"        <span class="c"># image description for `media build`</span>
+audio      = "voxtral-mini-3b"          <span class="c"># speech transcription for `media build`</span>
+ocr        = "ocrs-text"                <span class="c"># literal image text for `sync`</span>
 
 [ingest]                                <span class="c"># which blob content `sync` embeds</span>
 prose  = true                           <span class="c"># Markdown / plain text bodies</span>
