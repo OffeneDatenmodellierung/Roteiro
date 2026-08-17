@@ -134,7 +134,7 @@ pub use query::{
     DEFAULT_MIN_LINES, DebtDensityReport, DebtItem, DebtReport, DensityItem, DensityOrder, EdgeRef,
     Explanation, GeneratedHit, Listing, MemoryHit, NodeSummary, Path, PathHop, RedactionState,
     SCHEMA, SearchHit, SearchOptions, SearchResults, config_secrets, coupling, debt, debt_density,
-    explain, list_kind, path, search, search_channels,
+    explain, list_kind, path, search, search_channels, window,
 };
 pub use store::{ImportApplied, SchemaAhead, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_tree, sync_worktree};
