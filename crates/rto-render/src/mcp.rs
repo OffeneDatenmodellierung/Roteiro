@@ -6,11 +6,11 @@
 //! Two transports are offered (see [`serve_stdio`] / [`serve_http`]): stdio for
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
-//! same tools — `search`, `explain`, `list_kind`, `path`, `debt`, `coupling`,
-//! and `list_projects` — as thin wrappers over the matching [`rto_graph`] query
-//! primitives, so agents and the CLI see the same graph. Each tool takes an
-//! optional `project` selector for a multi-repo workspace (ADR-0008). See
-//! ADR-0002 for the decision to adopt `rmcp`.
+//! same tools — `search`, `explain`, `list_kind`, `path`, `debt`,
+//! `debt_density`, `coupling`, and `list_projects` — as thin wrappers over the
+//! matching [`rto_graph`] query primitives, so agents and the CLI see the same
+//! graph. Each tool takes an optional `project` selector for a multi-repo
+//! workspace (ADR-0008). See ADR-0002 for the decision to adopt `rmcp`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -94,6 +94,27 @@ struct DebtArgs {
     /// deferred.
     #[serde(default)]
     kind: Vec<String>,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Arguments for the `debt_density` tool.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct DensityArgs {
+    /// Restrict to these categories (empty = all): todo, fixme, hack, stub,
+    /// deferred.
+    #[serde(default)]
+    kind: Vec<String>,
+    /// Rank by `density` (default), `markers` (the raw count) or `lines`.
+    #[serde(default)]
+    order: Option<String>,
+    /// Max files to return (default 20, capped at 100).
+    #[serde(default)]
+    limit: Option<u32>,
+    /// Shortest file that may be ranked (default 50; `0` ranks every file).
+    #[serde(default)]
+    min_lines: Option<u32>,
     /// Which hosted project to query (see `list_projects`); omit if single.
     #[serde(default)]
     project: Option<String>,
@@ -250,6 +271,49 @@ impl GraphServer {
         }))
     }
 
+    /// Rank files by intent-debt density (markers per 1,000 lines).
+    #[tool(
+        description = "Rank FILES by intent-debt DENSITY — markers per 1,000 lines — rather \
+                          than by raw marker count, which ranks the biggest file first by \
+                          construction. Each row carries `markers`, `lines`, `per_kloc` and a \
+                          per-category split; `overall_per_kloc` is the repository baseline to \
+                          read a file's figure against. Args: kind, order (density|markers|\
+                          lines), limit, min_lines. \
+                          Two limits worth passing on to the user rather than reporting a \
+                          number as a finding. The denominator is FILE LENGTH — every line, \
+                          blanks and comments included — not source lines of code, so figures \
+                          run lower than an SLOC tool's and flatter verbose or generated \
+                          files. And the markers beneath it include prose matches (`for now`, \
+                          `placeholder`, `tbd`), so a design document can rank as dense debt. \
+                          This is a measurement, not a gate."
+    )]
+    async fn debt_density(&self, Parameters(args): Parameters<DensityArgs>) -> CallToolResult {
+        let limit = usize::try_from(args.limit.unwrap_or(20).clamp(1, 100)).unwrap_or(20);
+        let min_lines = args.min_lines.unwrap_or(rto_graph::DEFAULT_MIN_LINES);
+        // An unrecognised `order` is an error, not a silent fall back to
+        // `density`: a model told it ranked by `markers` when it did not will
+        // report that as fact.
+        let order = match args.order.as_deref() {
+            None => rto_graph::DensityOrder::default(),
+            Some(token) => match rto_graph::DensityOrder::from_token(token) {
+                Some(order) => order,
+                None => {
+                    return tool_error(&format!(
+                        "unknown order `{token}` (expected {})",
+                        rto_graph::DensityOrder::tokens().join("|")
+                    ));
+                }
+            },
+        };
+        // `ignore` is empty here for the same reason `debt` above passes none:
+        // this crate has no access to the target project's `roteiro.toml`. The
+        // CLI, the graph API and the served-chat registry all apply the project's
+        // own `[debt] ignore`; an MCP client sees the unfiltered inventory.
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            rto_graph::debt_density(store, &args.kind, &[], order, limit, min_lines)
+        }))
+    }
+
     /// Rank nodes by directed call coupling (fan-in / fan-out).
     #[tool(
         description = "Rank symbols by DIRECTED call coupling over `calls` edges: `fan_in` \
@@ -308,8 +372,8 @@ impl ServerHandler for GraphServer {
              and ranks curated docs first, so it answers \"what is X / why\"); then \
              `explain` a key for its provenance-labelled neighbourhood. `list_kind` \
              enumerates a kind, `path` finds how two nodes connect, `debt` lists \
-             intent-debt markers, and `coupling` ranks symbols by directed call \
-             fan-in/fan-out."
+             intent-debt markers, `debt_density` ranks files by markers per 1,000 \
+             lines, and `coupling` ranks symbols by directed call fan-in/fan-out."
                 .into(),
         );
         info
@@ -386,7 +450,8 @@ pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), Mcp
 #[cfg(test)]
 mod tests {
     use super::{
-        CouplingArgs, DebtArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs, SearchArgs,
+        CouplingArgs, DebtArgs, DensityArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs,
+        SearchArgs,
     };
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
@@ -400,7 +465,13 @@ mod tests {
         marker.meta =
             serde_json::json!({ "category": "todo", "text": "TODO wire this up", "line": 7 });
         marker.path = Some("a.rs".into());
+        // The `file` node carries the `meta.lines` that `debt_density` divides
+        // by, exactly as `extract::file_node` emits it.
+        let mut file = Node::new("file:a.rs", NodeKind::File, "a.rs");
+        file.path = Some("a.rs".into());
+        file.meta = serde_json::json!({ "bytes": 2000, "lines": 100 });
         let facts = FactSet::new()
+            .with_node(file)
             .with_node(Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"))
             .with_node(Node::new("sym:rust:a.rs#helper", NodeKind::Fn, "helper"))
             .with_node(marker)
@@ -521,6 +592,55 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&none).expect("json");
         assert_eq!(json["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn debt_density_tool_normalises_by_file_length() {
+        let server = seeded();
+        let out = text_of(
+            &server
+                .debt_density(Parameters(DensityArgs::default()))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["order"], "density");
+        assert_eq!(json["items"][0]["path"], "a.rs");
+        assert_eq!(json["items"][0]["markers"], 1);
+        assert_eq!(json["items"][0]["lines"], 100, "from the file node: {json}");
+        assert_eq!(
+            json["items"][0]["per_kloc"], 10.0,
+            "1 marker in 100 lines is 10 per 1,000: {json}"
+        );
+        assert_eq!(json["items"][0]["by_category"]["todo"], 1); // roteiro:ignore
+
+        // The `min_lines` floor is reachable from the tool, and excluding the
+        // only file is reported rather than served as an empty ranking.
+        let out = text_of(
+            &server
+                .debt_density(Parameters(DensityArgs {
+                    min_lines: Some(500),
+                    ..DensityArgs::default()
+                }))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["short_files"], 1);
+        assert_eq!(json["files_with_markers"], 1);
+        assert_eq!(json["items"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn debt_density_tool_errors_rather_than_silently_reordering() {
+        // A model told it got `markers` when it got `density` would report that
+        // as fact, so an unknown order must surface as a tool error.
+        let out = seeded()
+            .debt_density(Parameters(DensityArgs {
+                order: Some("count".into()),
+                ..DensityArgs::default()
+            }))
+            .await;
+        assert_eq!(out.is_error, Some(true), "{out:?}");
+        assert!(text_of(&out).contains("unknown order `count`"), "{out:?}");
     }
 
     #[tokio::test]

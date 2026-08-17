@@ -281,6 +281,35 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rank files by intent-debt **density** — markers per 1,000 lines — rather
+    /// than by raw marker count, which ranks the biggest file first by
+    /// construction.
+    ///
+    /// A report, not a gate: it always exits zero. The denominator is the file's
+    /// length in lines as recorded at extraction — every line, blanks and
+    /// comments included, *not* source lines of code. Markers are filtered
+    /// exactly as `roteiro debt` filters them, `[debt] ignore` globs included.
+    DebtDensity {
+        /// Restrict to these categories (repeatable): todo | fixme | hack |
+        /// stub | deferred. Omit to count all.
+        #[arg(long, value_name = "CATEGORY")]
+        kind: Vec<String>,
+        /// Rank by: `density` | `markers` | `lines`. Defaults to `density`.
+        #[arg(long, value_name = "ORDER", default_value = "density")]
+        order: String,
+        /// Max rows to show; `0` shows every ranked file.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Exclude files shorter than this from the ranking (`0` ranks every
+        /// file). Short files are still counted and reported: one marker in a
+        /// 10-line file is 100 per 1,000 lines, which is arithmetic rather than
+        /// a finding.
+        #[arg(long, value_name = "N", default_value_t = rto_graph::DEFAULT_MIN_LINES)]
+        min_lines: u32,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Rank nodes by **directed** call coupling: fan-in (how many distinct
     /// symbols call this one) and fan-out (how many it calls), over `calls`
     /// edges only.
@@ -1198,6 +1227,13 @@ fn main() -> anyhow::Result<()> {
         Command::Memory { action } => run_memory(action),
         Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
         Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
+        Command::DebtDensity {
+            kind,
+            order,
+            limit,
+            min_lines,
+            json,
+        } => run_debt_density(ingest, &kind, &order, limit, min_lines, json, debt_ignore),
         Command::Coupling { order, limit, json } => run_coupling(ingest, &order, limit, json),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Links {
@@ -4353,6 +4389,98 @@ fn debt_summary(report: &rto_graph::DebtReport) -> String {
         "intent debt: {} marker(s) ({})",
         report.total,
         breakdown.join(", ")
+    )
+}
+
+/// Parse a `--order` token into a [`rto_graph::DensityOrder`], naming the
+/// accepted set from the type itself so the CLI and the tool schemas cannot
+/// drift apart.
+fn parse_density_order(token: &str) -> anyhow::Result<rto_graph::DensityOrder> {
+    rto_graph::DensityOrder::from_token(token).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown --order `{token}` (expected: {})",
+            rto_graph::DensityOrder::tokens().join(" | ")
+        )
+    })
+}
+
+/// Rank files by intent-debt density. A report, not a gate: it always exits
+/// zero, for the reasons in [`rto_graph::debt_density`]'s own documentation.
+fn run_debt_density(
+    ingest: rto_graph::IngestConfig,
+    kinds: &[String],
+    order: &str,
+    limit: usize,
+    min_lines: u32,
+    json: bool,
+    debt_ignore: &[String],
+) -> anyhow::Result<()> {
+    let order = parse_density_order(order)?;
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+
+    let report = rto_graph::debt_density(&store, kinds, debt_ignore, order, limit, min_lines)?;
+    if json {
+        emit_json(&report)?;
+    } else {
+        for item in &report.items {
+            let cats: Vec<String> = item
+                .by_category
+                .iter()
+                .map(|(cat, n)| format!("{cat} {n}"))
+                .collect();
+            println!(
+                "  {:>8.2}/kloc  {:>4} in {:>6} lines  {}  ({})",
+                item.per_kloc,
+                item.markers,
+                item.lines,
+                item.path,
+                cats.join(", ")
+            );
+        }
+        println!("{}", density_summary(&report));
+    }
+    Ok(())
+}
+
+/// A one- or two-line summary of a [`rto_graph::DebtDensityReport`]. States the
+/// population and the repository-wide baseline alongside the shown rows, because
+/// a per-file density means nothing without one to compare it against, and names
+/// what the denominator is so the figure is not read as source lines of code.
+fn density_summary(report: &rto_graph::DebtDensityReport) -> String {
+    if report.files_with_markers == 0 {
+        return "intent-debt density: no markers in this graph".to_owned();
+    }
+    let mut excluded = Vec::new();
+    if report.short_files > 0 {
+        excluded.push(format!(
+            "{} file(s) under {} lines",
+            report.short_files, report.min_lines
+        ));
+    }
+    if report.unknown_length_files > 0 {
+        excluded.push(format!(
+            "{} file(s) of unrecorded length",
+            report.unknown_length_files
+        ));
+    }
+    let excluded = if excluded.is_empty() {
+        String::new()
+    } else {
+        format!(", excluding {}", excluded.join(" and "))
+    };
+    format!(
+        "intent-debt density: {} of {} ranked file(s) shown, by {}; \
+         {} marker(s) over {} file(s){excluded}\n\
+         baseline: {:.2} marker(s) per 1,000 lines across {} ranked line(s) \
+         — file length, blanks and comments included, not source lines of code",
+        report.items.len(),
+        report.ranked_files,
+        report.order,
+        report.total_markers,
+        report.files_with_markers,
+        report.overall_per_kloc,
+        report.total_lines,
     )
 }
 
@@ -7622,6 +7750,83 @@ impl GraphToolRegistry {
     }
 }
 
+/// The served-chat `debt_density` tool definition. Lifted out of
+/// [`GraphToolRegistry::tools`] to keep that function readable, not because it
+/// is shared: the MCP server declares its own (see `rto_render::mcp`).
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(feature = "serve")]
+fn debt_density_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "debt_density".to_owned(),
+        description: "Rank FILES by intent-debt DENSITY — markers per 1,000 lines — \
+                      rather than by raw marker count, which ranks the biggest file \
+                      first by construction. Each row carries `markers`, `lines`, \
+                      `per_kloc` and a per-category split; `overall_per_kloc` is the \
+                      repository baseline to read a file's figure against. Use `debt` \
+                      instead when the question is which markers exist, not where \
+                      they are concentrated. \
+                      Two limits to pass on rather than reporting a number as a \
+                      finding: the denominator is FILE LENGTH — every line, blanks \
+                      and comments included — not source lines of code, so figures \
+                      run lower than an SLOC tool's and flatter verbose or generated \
+                      files; and the markers beneath it include prose matches (`for \
+                      now`, `placeholder`, `tbd`), so a design document can rank as \
+                      dense debt. This is a measurement, not a gate."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({
+                "categories": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                },
+                "order": {
+                    "type": "string",
+                    "enum": rto_graph::DensityOrder::tokens(),
+                },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+                "min_lines": { "type": "integer", "minimum": 0 },
+            })),
+        }),
+    }
+}
+
+/// The `(order, limit, min_lines)` triple for a served-chat `debt_density` call,
+/// lifted out of [`GraphToolRegistry::call`] to keep that dispatcher readable.
+///
+/// An unrecognised `order` is an `Err` rather than a silent fall back to
+/// `density`: a model told it ranked by `markers` when it did not will state that
+/// as fact to the user. `limit` is model-controlled, so it is clamped to the
+/// advertised bound — a huge value cannot make the server do pointless work.
+#[cfg(feature = "serve")]
+fn density_args(args: &serde_json::Value) -> Result<(rto_graph::DensityOrder, usize, u32), String> {
+    let order = match args.get("order").and_then(serde_json::Value::as_str) {
+        None => rto_graph::DensityOrder::default(),
+        Some(token) => rto_graph::DensityOrder::from_token(token).ok_or_else(|| {
+            format!(
+                "unknown order `{token}` (expected {})",
+                rto_graph::DensityOrder::tokens().join("|")
+            )
+        })?,
+    };
+    let limit = args
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let min_lines = args
+        .get("min_lines")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(rto_graph::DEFAULT_MIN_LINES);
+    Ok((order, limit, min_lines))
+}
+
 /// The served-chat `coupling` tool definition. Lifted out of
 /// [`GraphToolRegistry::tools`] to keep that function readable, not because it
 /// is shared: the MCP server declares its own (see `rto_render::mcp`).
@@ -7738,6 +7943,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     })),
                 }),
             },
+            debt_density_tool_def(&with_project),
             coupling_tool_def(&with_project),
         ];
         tools.push(rto_serve::ToolDef {
@@ -7817,6 +8023,26 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     config::debt_ignore_for(&self.workspace, project).map_err(|e| e.to_string())?;
                 self.run(project, |store| {
                     rto_graph::debt(store, &categories, &ignore)
+                })
+            }
+            "debt_density" => {
+                let categories: Vec<String> = args
+                    .get("categories")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let (order, limit, min_lines) = density_args(args)?;
+                // The same `[debt] ignore` rule as `debt` above, for the same
+                // reason: a density computed over a different marker set than
+                // `roteiro debt-density` prints is a number nobody can reconcile.
+                let ignore =
+                    config::debt_ignore_for(&self.workspace, project).map_err(|e| e.to_string())?;
+                self.run(project, |store| {
+                    rto_graph::debt_density(store, &categories, &ignore, order, limit, min_lines)
                 })
             }
             "coupling" => {
@@ -8063,6 +8289,27 @@ fn vault_summary(
         .into_iter()
         .collect();
 
+    // Where that debt is concentrated, which the category counts above cannot
+    // show. Capped for the same reason as the coupling table below; the full
+    // ranking is `roteiro debt-density` / `GET .../debt/density`.
+    let densest_files = rto_graph::debt_density(
+        store,
+        &[],
+        &[],
+        rto_graph::DensityOrder::Density,
+        HOME_COUPLING_ROWS,
+        rto_graph::DEFAULT_MIN_LINES,
+    )?
+    .items
+    .into_iter()
+    .map(|i| rto_render::DensityEntry {
+        path: i.path,
+        markers: i.markers,
+        lines: i.lines,
+        per_kloc: i.per_kloc,
+    })
+    .collect();
+
     // Directed call coupling, ranked by fan-in — "what does this codebase most
     // depend on". Capped, because `_Home` is an overview, not the report; the
     // full ranking is `roteiro coupling` / `GET .../coupling`.
@@ -8089,14 +8336,16 @@ fn vault_summary(
         edge_provenance,
         adrs,
         debt,
+        densest_files,
         most_called,
         repo_url,
         commit,
     })
 }
 
-/// Rows in the vault `_Home` note's directed-coupling table. An overview figure:
-/// enough to see the shape of the codebase, not the whole ranking.
+/// Rows in the vault `_Home` note's directed-coupling and debt-density tables.
+/// An overview figure: enough to see the shape of the codebase, not the whole
+/// ranking.
 const HOME_COUPLING_ROWS: usize = 10;
 
 /// Web root for a git remote URL (`https://<host>/<owner>/<repo>`), or `None` if
@@ -9870,6 +10119,101 @@ mod workspace_scoped_tools {
             .call("coupling", &serde_json::json!({ "order": "degree" }))
             .expect_err("an unknown order must be refused");
         assert!(err.contains("unknown order `degree`"), "was: {err}");
+    }
+
+    /// A one-project registry with two files carrying the **same** marker count
+    /// and lengths twenty-fold apart: indistinguishable under `debt`, separated
+    /// under `debt_density`.
+    fn marked_registry() -> GraphToolRegistry {
+        use rto_graph::{FactSet, Node, NodeKind};
+        let file = |path: &str, lines: u64| {
+            let mut n = Node::new(format!("file:{path}"), NodeKind::File, path);
+            n.path = Some(path.to_owned());
+            n.meta = serde_json::json!({ "bytes": lines * 30, "lines": lines });
+            n
+        };
+        let marker = |path: &str, line: u32| {
+            let mut n = Node::new(
+                format!("marker:{path}#{line}"),
+                NodeKind::Marker,
+                "TODO x", // roteiro:ignore
+            );
+            n.path = Some(path.to_owned());
+            n.meta = serde_json::json!({
+                "category": "todo", // roteiro:ignore
+                "text": "TODO x",   // roteiro:ignore
+                "line": line,
+            });
+            n
+        };
+        let mut store = rto_graph::Store::open_in_memory().expect("store");
+        let mut facts = FactSet::new()
+            .with_node(file("big.rs", 4000))
+            .with_node(file("small.rs", 200));
+        for line in 1..=10 {
+            facts = facts.with_node(marker("big.rs", line));
+            facts = facts.with_node(marker("small.rs", line));
+        }
+        store.apply_factset(&facts).expect("apply");
+        GraphToolRegistry::new(std::sync::Arc::new(rto_graph::Workspace::single(
+            "api", store,
+        )))
+    }
+
+    /// The served-chat registry is a **separate** registry from the MCP server's,
+    /// so a lens reaching MCP proves nothing about the chat surface. This is the
+    /// chat side.
+    #[test]
+    fn debt_density_is_advertised_and_normalises_by_file_length() {
+        use rto_serve::ToolRegistry as _;
+        let reg = marked_registry();
+
+        let advertised = reg.tools();
+        let def = advertised
+            .iter()
+            .find(|t| t.name == "debt_density")
+            .expect("`debt_density` advertised to the served model");
+        assert_eq!(
+            def.parameters["properties"]["order"]["enum"],
+            serde_json::json!(rto_graph::DensityOrder::tokens()),
+            "the schema's accepted orders come from the type, so they cannot drift"
+        );
+        // The caveat travels with the tool, so a model reporting a figure can
+        // pass on what the denominator actually is.
+        assert!(
+            def.description.contains("not source lines of code"),
+            "was: {}",
+            def.description
+        );
+
+        let out = reg
+            .call("debt_density", &serde_json::json!({}))
+            .expect("call");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["items"][0]["path"], "small.rs", "{json}");
+        assert_eq!(json["items"][0]["per_kloc"], 50.0);
+        assert_eq!(json["items"][1]["path"], "big.rs");
+        assert_eq!(json["items"][1]["per_kloc"], 2.5);
+        assert_eq!(
+            json["items"][0]["markers"], json["items"][1]["markers"],
+            "the same raw count `debt` would report: {json}"
+        );
+
+        // `markers` is the control: on the raw count the two tie and break on path.
+        let out = reg
+            .call("debt_density", &serde_json::json!({ "order": "markers" }))
+            .expect("call");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["items"][0]["path"], "big.rs", "{json}");
+    }
+
+    #[test]
+    fn debt_density_refuses_an_unknown_order_rather_than_reordering_silently() {
+        use rto_serve::ToolRegistry as _;
+        let err = marked_registry()
+            .call("debt_density", &serde_json::json!({ "order": "count" }))
+            .expect_err("an unknown order must be refused");
+        assert!(err.contains("unknown order `count`"), "was: {err}");
     }
 }
 
