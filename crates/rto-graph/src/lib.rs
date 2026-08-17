@@ -111,9 +111,10 @@ pub use models::{
 };
 pub use provenance::Provenance;
 pub use query::{
-    CouplingItem, CouplingOrder, CouplingReport, DebtItem, DebtReport, EdgeRef, Explanation,
-    GeneratedHit, Listing, MemoryHit, NodeSummary, Path, PathHop, SCHEMA, SearchHit, SearchOptions,
-    SearchResults, coupling, debt, explain, list_kind, path, search, search_channels,
+    CouplingItem, CouplingOrder, CouplingReport, DEFAULT_MIN_LINES, DebtDensityReport, DebtItem,
+    DebtReport, DensityItem, DensityOrder, EdgeRef, Explanation, GeneratedHit, Listing, MemoryHit,
+    NodeSummary, Path, PathHop, SCHEMA, SearchHit, SearchOptions, SearchResults, coupling, debt,
+    debt_density, explain, list_kind, path, search, search_channels,
 };
 pub use store::{ImportApplied, SchemaAhead, Store, StoreError};
 pub use sync::{SyncError, SyncReport, sync, sync_index, sync_tree, sync_worktree};

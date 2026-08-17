@@ -5,7 +5,8 @@
 //! can depend on the shape. The primitives are [`explain`] (a node and its
 //! provenance-labelled neighbourhood), [`list_kind`] (all nodes of a kind),
 //! [`path`] (a shortest path between two nodes), [`debt`] (the intent-debt marker
-//! inventory), [`coupling`] (directed fan-in/fan-out over `Calls` edges), and
+//! inventory), [`debt_density`] (that inventory per file, normalised by file
+//! length), [`coupling`] (directed fan-in/fan-out over `Calls` edges), and
 //! [`search`] (relevance-ranked node search). All return
 //! mixed-provenance results — the "one query surface" from ADR-0001 — with every
 //! edge carrying its `provenance`.
@@ -177,6 +178,346 @@ pub fn debt(
         by_category,
         items,
     })
+}
+
+/// How a [`DebtDensityReport`]'s files are ranked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DensityOrder {
+    /// By `per_kloc` — markers relative to file length. The lens's own question.
+    #[default]
+    Density,
+    /// By `markers` — the raw count, which [`debt`] already reports per marker.
+    /// Offered so the two rankings can be compared on one report rather than the
+    /// reader being asked to trust that they differ.
+    Markers,
+    /// By `lines` — longest file first. Not a debt ranking; the control that
+    /// shows *which* files the denominator is large for.
+    Lines,
+}
+
+impl DensityOrder {
+    /// The stable token for this order, as accepted by [`from_token`](Self::from_token).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Density => "density",
+            Self::Markers => "markers",
+            Self::Lines => "lines",
+        }
+    }
+
+    /// Parse an order token. `None` for anything else — callers surface an error
+    /// rather than silently ranking by something the caller did not ask for.
+    #[must_use]
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s {
+            "density" => Some(Self::Density),
+            "markers" => Some(Self::Markers),
+            "lines" => Some(Self::Lines),
+            _ => None,
+        }
+    }
+
+    /// The tokens [`from_token`](Self::from_token) accepts, for error messages
+    /// and argument schemas — so the accepted set is stated in exactly one place.
+    #[must_use]
+    pub fn tokens() -> [&'static str; 3] {
+        [
+            Self::Density.as_str(),
+            Self::Markers.as_str(),
+            Self::Lines.as_str(),
+        ]
+    }
+}
+
+/// The default `min_lines` floor for [`debt_density`]: files shorter than this
+/// are counted but not ranked (see [`DebtDensityReport::min_lines`] for why the
+/// floor exists at all).
+///
+/// 50 because that is where one marker stops dominating: a single marker in a
+/// 50-line file scores 20 per kloc, which is already near the top of this
+/// repository's real ranking, so any shorter file with a marker is guaranteed a
+/// high placement by its length alone. It is a default, not a rule — `0` ranks
+/// every file.
+pub const DEFAULT_MIN_LINES: u32 = 50;
+
+/// One file's intent-debt density in a [`DebtDensityReport`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DensityItem {
+    /// Repository-relative path of the file.
+    pub path: String,
+    /// Retained markers in this file (after category and `ignore` filtering).
+    pub markers: u32,
+    /// The file's length in lines — the denominator. See [`debt_density`] for
+    /// exactly what this counts and what it does not.
+    pub lines: u32,
+    /// Markers per 1,000 lines, rounded to two decimals. Per *kilo*-line rather
+    /// than per line because per-line densities are all leading zeroes: this
+    /// repository's worst file is 0.06 markers per line, and `60.0` per kloc is
+    /// a number a reader can hold.
+    pub per_kloc: f64,
+    /// Count per category within this file, ordered by category token — so a
+    /// dense file can be read as "twelve `todo`" or "twelve `stub`", which are
+    /// not the same finding.
+    pub by_category: BTreeMap<String, usize>,
+}
+
+/// Intent-debt **density**: markers per file normalised by file length, ranked.
+/// The counterpart to [`debt`], which reports markers and therefore ranks large
+/// files first by construction.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DebtDensityReport {
+    /// Stable schema tag ([`SCHEMA`]).
+    pub schema: &'static str,
+    /// The ranking that produced `items` ([`DensityOrder::as_str`]).
+    pub order: &'static str,
+    /// The requested cap on `items`; `0` means unlimited.
+    pub limit: usize,
+    /// The `min_lines` floor applied. Files shorter than this are excluded from
+    /// the ranking and counted in `short_files`; `0` disables the floor.
+    ///
+    /// The floor exists because density is unstable in the denominator's tail: a
+    /// 3-line stub file with one marker scores 333 per kloc, which is true and
+    /// tells the reader nothing. Excluding those files is a ranking decision,
+    /// not a suppression — they stay in `files_with_markers` and `total_markers`.
+    pub min_lines: u32,
+    /// Distinct files carrying at least one retained marker, before the
+    /// `min_lines` floor. The population `items` is drawn from.
+    pub files_with_markers: usize,
+    /// Files that passed the `min_lines` floor and were therefore ranked.
+    /// `ranked_files > items.len()` means `limit` truncated the list.
+    pub ranked_files: usize,
+    /// Files excluded from the ranking by the `min_lines` floor — reported, not
+    /// silently dropped, so a short-file-heavy repository cannot read as a clean one.
+    pub short_files: usize,
+    /// Files whose marker count is known but whose length is **not**: no `file`
+    /// node, or one carrying no `meta.lines`. Excluded from the ranking, because
+    /// a density with no denominator is not a number — and reported, because
+    /// silently omitting them would understate the inventory.
+    pub unknown_length_files: usize,
+    /// Retained markers across every file in `files_with_markers`, including
+    /// those the floor excluded. Matches [`DebtReport::total`] for the same
+    /// filters, minus any marker with no `path`.
+    pub total_markers: usize,
+    /// Summed `lines` of the ranked files. The denominator behind
+    /// `overall_per_kloc`.
+    pub total_lines: u64,
+    /// Markers per 1,000 lines across the **ranked** files taken together — the
+    /// baseline a single file's `per_kloc` should be read against. `0.0` when
+    /// nothing was ranked.
+    pub overall_per_kloc: f64,
+    /// The ranked files: by `order` descending, ties broken by `path` ascending.
+    pub items: Vec<DensityItem>,
+}
+
+/// Rank files by intent-debt **density** — retained markers per 1,000 lines —
+/// most-dense first by `order`, capped at `limit` (`0` = unlimited). `categories`
+/// and `ignore` filter markers exactly as [`debt`] does, so the two lenses always
+/// agree about which markers exist.
+///
+/// # Why this is not [`debt`] with a division
+///
+/// A raw marker count ranks by file size: the biggest file wins because it has
+/// the most lines to put a marker on. Density asks the different question — *how
+/// concentrated is the debt* — and a 40-marker file of 4,000 lines and a
+/// 40-marker file of 200 lines separate by a factor of twenty under it while
+/// being indistinguishable under [`debt`].
+///
+/// # The denominator, and why it is this one
+///
+/// **`lines` is the `file` node's `meta.lines`**, recorded at extraction time as
+/// the count of `\n` bytes in the blob. It is read straight from the graph, so
+/// this lens adds **no extraction metadata and needs no `EXTRACT_VERSION` bump**.
+///
+/// It is deliberately *not* derived from [`crate::Span`]: a node's span is a pair
+/// of **byte offsets**, not line numbers, and there is no line index in the store
+/// to convert one to the other. Anything span-derived would be a byte density,
+/// which is not the quantity anyone means by "debt density".
+///
+/// Three alternatives were rejected, each for the same reason:
+///
+/// - **Source lines of code** (blank and comment lines removed) is the denominator
+///   a reader probably imagines. It does not exist in the graph and cannot be
+///   computed from it: producing it means counting lines per language at
+///   extraction, which is net-new derived metadata and would move this lens into
+///   the batch that pays for an `EXTRACT_VERSION` bump.
+/// - **Per symbol** rather than per file would be the finer-grained view — markers
+///   already attach to their innermost enclosing symbol. But a symbol's length in
+///   *lines* is exactly what `Span`'s byte offsets cannot give.
+/// - **The highest marker line in the file** is available (`meta.line`), and is a
+///   lower bound on the file's length rather than the length: a file whose only
+///   marker is on line 3 would score 333 per kloc however long it is.
+///
+/// So `lines` is what the graph honestly has. What it counts, stated plainly
+/// because the name invites over-reading:
+///
+/// - **Every line, including blanks, comments, imports and licence headers.** It
+///   is *file length*, not "lines of code". Density figures here are therefore
+///   systematically lower than an SLOC-based tool's, and by a different factor
+///   per language and per file.
+/// - **Newline bytes.** A file not ending in a newline is counted one line short,
+///   and a file of a single unterminated line counts as `0` lines and is reported
+///   under `unknown_length_files` rather than divided by zero.
+/// - **The whole blob, vendored code included.** A minified bundle is one enormous
+///   line and will look flawless. Use `ignore` (the shared `[debt] ignore` globs)
+///   rather than a second exclusion vocabulary.
+///
+/// # Confidence, and why there is no CI gate
+///
+/// Density inherits every false positive of the marker scan beneath it — the
+/// prose rules (`for now`, `placeholder`, `tbd`) fire on ordinary writing, so a
+/// design document rich in the word "deferred" ranks as dense debt. It then adds
+/// one of its own: the denominator is file length, so a language or a file with
+/// low information per line (verbose config, generated code, wide indentation) is
+/// systematically flattered, and a dense language is systematically penalised.
+/// Neither is a defect being reported; both move the number. A gate would fail
+/// builds on prose and on formatting. So this lens **offers no CI gate**, and its
+/// suppression story is the one that already exists: `[debt] ignore` globs and
+/// the `roteiro:ignore` / `roteiro:ignore-file` source directives, both applied
+/// before anything is counted here.
+///
+/// Ordering is total and deterministic: by the chosen metric descending, then by
+/// `path` ascending, so identical input yields byte-identical output.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure.
+pub fn debt_density(
+    store: &Store,
+    categories: &[String],
+    ignore: &[String],
+    order: DensityOrder,
+    limit: usize,
+    min_lines: u32,
+) -> Result<DebtDensityReport, StoreError> {
+    // Reuse `debt` rather than re-walking the markers: the two lenses must never
+    // disagree about which markers exist, and the only way to guarantee that is
+    // for one to be built from the other's output.
+    let inventory = debt(store, categories, ignore)?;
+    let mut per_file: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut total_markers = 0usize;
+    for item in &inventory.items {
+        // A marker with no `path` cannot be attributed to a file, so it cannot
+        // have a density. Extraction always records one; this is defence in
+        // depth, and such a marker is left out of `total_markers` too so the
+        // report's own arithmetic stays consistent.
+        let Some(path) = item.path.as_deref() else {
+            continue;
+        };
+        *per_file
+            .entry(path.to_owned())
+            .or_default()
+            .entry(item.category.clone())
+            .or_default() += 1;
+        total_markers += 1;
+    }
+    let files_with_markers = per_file.len();
+
+    // Only files that actually carry a marker are read back, so the denominator
+    // costs one node lookup per such file rather than a whole-graph file scan —
+    // which matters because `file` nodes carry captured `meta.content`.
+    let mut ranked: Vec<(String, u32, u32, BTreeMap<String, usize>)> = Vec::new();
+    let mut short_files = 0usize;
+    let mut unknown_length_files = 0usize;
+    for (path, by_category) in per_file {
+        let markers = u32::try_from(by_category.values().sum::<usize>()).unwrap_or(u32::MAX);
+        let Some(lines) = file_lines(store, &path)? else {
+            unknown_length_files += 1;
+            continue;
+        };
+        if lines < min_lines {
+            short_files += 1;
+            continue;
+        }
+        ranked.push((path, markers, lines, by_category));
+    }
+    let ranked_files = ranked.len();
+    let total_lines: u64 = ranked
+        .iter()
+        .map(|(_, _, lines, _)| u64::from(*lines))
+        .sum();
+    let ranked_markers: u64 = ranked.iter().map(|(_, m, _, _)| u64::from(*m)).sum();
+
+    ranked.sort_by(|a, b| {
+        // Each order yields the metric as an exact `numerator / denominator`, so
+        // the comparison can cross-multiply. Ranking on the rounded `per_kloc`
+        // instead would make genuinely different densities tie and then break on
+        // `path`, silently reordering the ranking the caller asked for; ranking
+        // on `f64` at full precision would make the order depend on the last bit
+        // of a division. `u128` so the cross-product cannot overflow whatever the
+        // file lengths are, rather than relying on repositories staying small.
+        let metric =
+            |&(_, markers, lines, _): &(String, u32, u32, BTreeMap<String, usize>)| match order {
+                DensityOrder::Density => (u128::from(markers) * 1000, u128::from(lines)),
+                DensityOrder::Markers => (u128::from(markers), 1),
+                DensityOrder::Lines => (u128::from(lines), 1),
+            };
+        let (an, ad) = metric(a);
+        let (bn, bd) = metric(b);
+        (bn * ad).cmp(&(an * bd)).then_with(|| a.0.cmp(&b.0))
+    });
+    if limit > 0 {
+        ranked.truncate(limit);
+    }
+
+    let items = ranked
+        .into_iter()
+        .map(|(path, markers, lines, by_category)| DensityItem {
+            path,
+            markers,
+            lines,
+            per_kloc: per_kloc(u64::from(markers), u64::from(lines)),
+            by_category,
+        })
+        .collect();
+
+    Ok(DebtDensityReport {
+        schema: SCHEMA,
+        order: order.as_str(),
+        limit,
+        min_lines,
+        files_with_markers,
+        ranked_files,
+        short_files,
+        unknown_length_files,
+        total_markers,
+        total_lines,
+        overall_per_kloc: per_kloc(ranked_markers, total_lines),
+        items,
+    })
+}
+
+/// A file's length in lines from its `file` node's `meta.lines`, or `None` when
+/// the node is absent, carries no `lines`, or reports **zero** lines.
+///
+/// Zero is folded into `None` deliberately: it is not a length that can be
+/// divided by, and the two cases a reader would want distinguished — a genuinely
+/// empty file and a single line with no terminating newline — are
+/// indistinguishable in a newline count. Reporting both as "length unknown" is
+/// the honest reading; reporting either as a density is not.
+fn file_lines(store: &Store, path: &str) -> Result<Option<u32>, StoreError> {
+    let Some(node) = store.get_node(&format!("file:{path}"))? else {
+        return Ok(None);
+    };
+    Ok(node
+        .meta
+        .get("lines")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0))
+}
+
+/// Markers per 1,000 lines, rounded to two decimals; `0.0` for a zero
+/// denominator, which callers have already excluded from any ranking.
+fn per_kloc(markers: u64, lines: u64) -> f64 {
+    if lines == 0 {
+        return 0.0;
+    }
+    // `u64 as f64` is lossy above 2^53; a line count or marker count that large
+    // is not reachable from a repository on disk, and the precision lost would be
+    // below the two decimals this rounds to anyway.
+    #[expect(clippy::cast_precision_loss, reason = "counts are far below 2^53")]
+    let ratio = (markers as f64) * 1000.0 / (lines as f64);
+    round2(ratio)
 }
 
 /// Match a slash-separated `path` against a glob `pattern`, anchored end-to-end.
@@ -1273,8 +1614,9 @@ fn placeholder_hop() -> PathHop {
 #[cfg(test)]
 mod tests {
     use super::{
-        CouplingItem, CouplingOrder, CouplingReport, SCHEMA, SNIPPET_MAX, coupling, explain,
-        glob_match, list_kind, memory_score, path, search,
+        CouplingItem, CouplingOrder, CouplingReport, DebtDensityReport, DensityItem, DensityOrder,
+        SCHEMA, SNIPPET_MAX, coupling, debt_density, explain, glob_match, list_kind, memory_score,
+        path, search,
     };
     use crate::{AnchorState, Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
@@ -1887,6 +2229,281 @@ mod tests {
         }
         assert!(
             CouplingOrder::from_token("degree").is_none(),
+            "an unknown order is rejected, not silently defaulted"
+        );
+    }
+
+    // -- debt density (Q1) -------------------------------------------------
+
+    /// A `file` node carrying the `meta.lines` this lens divides by — the shape
+    /// `extract::file_node` emits for every blob.
+    fn file_of(path: &str, lines: u64) -> Node {
+        let mut node = Node::new(format!("file:{path}"), NodeKind::File, path);
+        node.path = Some(path.to_owned());
+        node.meta = serde_json::json!({ "bytes": lines * 30, "lines": lines });
+        node
+    }
+
+    /// A marker node as `markers::augment` emits it.
+    fn marker_of(path: &str, line: u32, category: &str) -> Node {
+        let mut node = Node::new(
+            format!("marker:{path}#{line}"),
+            NodeKind::Marker,
+            format!("TODO {line}"), // roteiro:ignore
+        );
+        node.path = Some(path.to_owned());
+        node.meta = serde_json::json!({
+            "category": category,
+            "text": format!("TODO {line}"), // roteiro:ignore
+            "line": line,
+        });
+        node
+    }
+
+    /// Two files with the **same marker count** and very different lengths —
+    /// indistinguishable under `debt`, twenty-fold apart under density. Plus a
+    /// third, short file whose single marker would top the ranking on arithmetic
+    /// alone.
+    fn marked() -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        let mut facts = FactSet::new()
+            .with_node(file_of("big.rs", 4000))
+            .with_node(file_of("small.rs", 200))
+            .with_node(file_of("tiny.rs", 10));
+        for line in 1..=40 {
+            facts = facts.with_node(marker_of("big.rs", line, "todo")); // roteiro:ignore
+            facts = facts.with_node(marker_of("small.rs", line, "todo")); // roteiro:ignore
+        }
+        facts = facts.with_node(marker_of("tiny.rs", 3, "stub"));
+        store.apply_factset(&facts).expect("apply");
+        store
+    }
+
+    /// Every default: no category filter, no ignore globs, unlimited, floored at
+    /// [`super::DEFAULT_MIN_LINES`].
+    fn density(store: &Store, order: DensityOrder) -> DebtDensityReport {
+        debt_density(store, &[], &[], order, 0, super::DEFAULT_MIN_LINES).expect("density")
+    }
+
+    /// Find an item by path, so assertions read by file not by index.
+    fn at<'a>(report: &'a DebtDensityReport, path: &str) -> &'a DensityItem {
+        report
+            .items
+            .iter()
+            .find(|i| i.path == path)
+            .unwrap_or_else(|| panic!("`{path}` missing from {:?}", report.items))
+    }
+
+    #[test]
+    fn density_separates_files_a_raw_marker_count_cannot() {
+        let report = density(&marked(), DensityOrder::Density);
+        let big = at(&report, "big.rs");
+        let small = at(&report, "small.rs");
+
+        // Identical under `debt` — the same forty markers each.
+        assert_eq!(big.markers, small.markers, "same raw count");
+
+        // …and twenty-fold apart under density, which is the whole lens.
+        assert!(
+            (big.per_kloc - 10.0).abs() < f64::EPSILON,
+            "40 markers in 4000 lines is 10 per kloc, was {}",
+            big.per_kloc
+        );
+        assert!(
+            (small.per_kloc - 200.0).abs() < f64::EPSILON,
+            "40 markers in 200 lines is 200 per kloc, was {}",
+            small.per_kloc
+        );
+        assert_eq!(
+            report.items.first().map(|i| i.path.as_str()),
+            Some("small.rs"),
+            "the dense file ranks first: {:?}",
+            report.items
+        );
+
+        // The per-file category split, so "forty todo" and "forty stub" stay
+        // distinguishable in a report that otherwise shows one number per file.
+        assert_eq!(small.by_category.get("todo"), Some(&40)); // roteiro:ignore
+        assert_eq!(report.schema, SCHEMA);
+    }
+
+    #[test]
+    fn markers_order_ranks_the_way_debt_already_does() {
+        // The control: on `markers` the two forty-marker files tie and break on
+        // path, so density is demonstrably the thing that separated them — not
+        // some other difference in the fixture.
+        let report = density(&marked(), DensityOrder::Markers);
+        assert_eq!(
+            report.items.iter().map(|i| &i.path).collect::<Vec<_>>(),
+            ["big.rs", "small.rs"],
+            "equal counts tie and break on path ascending"
+        );
+    }
+
+    #[test]
+    fn the_short_file_floor_excludes_without_hiding() {
+        // `tiny.rs` is 1 marker in 10 lines = 100 per kloc, which would place it
+        // second on arithmetic alone. The floor keeps it out of the *ranking*
+        // while leaving it in the population and the totals.
+        let report = density(&marked(), DensityOrder::Density);
+        assert!(
+            !report.items.iter().any(|i| i.path == "tiny.rs"),
+            "a 10-line file is not ranked: {:?}",
+            report.items
+        );
+        assert_eq!(report.short_files, 1, "and its exclusion is reported");
+        assert_eq!(
+            report.files_with_markers, 3,
+            "the population still counts it"
+        );
+        assert_eq!(report.ranked_files, 2);
+        assert_eq!(
+            report.total_markers, 81,
+            "and so do the totals: 40 + 40 + 1"
+        );
+
+        // `min_lines = 0` disables the floor rather than merely lowering it.
+        let unfloored =
+            debt_density(&marked(), &[], &[], DensityOrder::Density, 0, 0).expect("density");
+        assert_eq!(unfloored.short_files, 0);
+        assert_eq!(unfloored.ranked_files, 3);
+        let tiny = at(&unfloored, "tiny.rs").per_kloc;
+        assert!(
+            (tiny - 100.0).abs() < f64::EPSILON,
+            "the arithmetic the floor exists to keep out of the ranking, was {tiny}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_recorded_length_is_reported_not_divided_by() {
+        // Three ways a denominator goes missing, all of which must land in
+        // `unknown_length_files` rather than in the ranking with a fabricated
+        // density: no `file` node at all, a `file` node with no `meta.lines`, and
+        // a `lines` of zero (an empty file, or one unterminated line — a newline
+        // count cannot tell those apart, so neither does this).
+        let mut store = Store::open_in_memory().expect("store");
+        let mut no_lines = Node::new("file:b.rs", NodeKind::File, "b.rs");
+        no_lines.path = Some("b.rs".into());
+        no_lines.meta = serde_json::json!({ "bytes": 90 });
+        let facts = FactSet::new()
+            .with_node(marker_of("orphan.rs", 1, "todo")) // roteiro:ignore
+            .with_node(no_lines)
+            .with_node(marker_of("b.rs", 1, "todo")) // roteiro:ignore
+            .with_node(file_of("empty.rs", 0))
+            .with_node(marker_of("empty.rs", 1, "todo")); // roteiro:ignore
+        store.apply_factset(&facts).expect("apply");
+
+        let report = density(&store, DensityOrder::Density);
+        assert!(report.items.is_empty(), "nothing rankable: {report:?}");
+        assert_eq!(report.unknown_length_files, 3);
+        assert_eq!(
+            report.total_markers, 3,
+            "the markers are still inventoried, so the file cannot vanish silently"
+        );
+        assert!(
+            (report.overall_per_kloc - 0.0).abs() < f64::EPSILON,
+            "and no density is invented from a zero denominator"
+        );
+    }
+
+    #[test]
+    fn density_shares_debt_s_filters_rather_than_adding_a_second_vocabulary() {
+        let store = marked();
+        // The `[debt] ignore` globs `debt` already honours.
+        let ignored = debt_density(
+            &store,
+            &[],
+            &["small.rs".into()],
+            DensityOrder::Density,
+            0,
+            super::DEFAULT_MIN_LINES,
+        )
+        .expect("density");
+        assert!(
+            !ignored.items.iter().any(|i| i.path == "small.rs"),
+            "an ignored path leaves the report entirely: {:?}",
+            ignored.items
+        );
+        assert_eq!(
+            ignored.files_with_markers, 2,
+            "not merely unranked — it is not in the population either"
+        );
+
+        // And the same category filter, so a `--kind stub` density is the density
+        // of stubs and not of everything.
+        let stubs = debt_density(&store, &["stub".into()], &[], DensityOrder::Density, 0, 0)
+            .expect("density");
+        assert_eq!(stubs.total_markers, 1);
+        assert_eq!(
+            stubs.items.iter().map(|i| &i.path).collect::<Vec<_>>(),
+            ["tiny.rs"]
+        );
+    }
+
+    #[test]
+    fn density_ranks_on_the_exact_ratio_not_the_rounded_one() {
+        // Two files whose densities differ in the fourth decimal: 1/3000 is
+        // 0.3333 per kloc and 1/3001 is 0.3332. Both round to 0.33, so a ranking
+        // built on `per_kloc` would tie them and break on path — putting the
+        // *less* dense file first, since `a.rs` sorts before `b.rs`.
+        let mut store = Store::open_in_memory().expect("store");
+        let facts = FactSet::new()
+            .with_node(file_of("a.rs", 3001))
+            .with_node(marker_of("a.rs", 1, "todo")) // roteiro:ignore
+            .with_node(file_of("b.rs", 3000))
+            .with_node(marker_of("b.rs", 1, "todo")); // roteiro:ignore
+        store.apply_factset(&facts).expect("apply");
+
+        let report = density(&store, DensityOrder::Density);
+        assert_eq!(
+            report.items.iter().map(|i| &i.path).collect::<Vec<_>>(),
+            ["b.rs", "a.rs"],
+            "the shorter file is denser, however the figures round"
+        );
+        assert_eq!(
+            (report.items[0].per_kloc, report.items[1].per_kloc),
+            (0.33, 0.33),
+            "and the rendered figures really are equal, so the order came from elsewhere"
+        );
+    }
+
+    #[test]
+    fn density_reports_truncation_and_is_deterministic() {
+        let store = marked();
+        let capped = debt_density(&store, &[], &[], DensityOrder::Density, 1, 0).expect("density");
+        assert_eq!(capped.items.len(), 1);
+        assert_eq!(capped.limit, 1);
+        assert_eq!(
+            capped.ranked_files, 3,
+            "the population is reported, so a capped list cannot read as the whole repository"
+        );
+        // `overall_per_kloc` is the baseline across every ranked file, not across
+        // the ones that survived the cap — otherwise the top file's own density
+        // would be its own baseline.
+        assert_eq!(capped.total_lines, 4210);
+        assert!(
+            (capped.overall_per_kloc - 19.24).abs() < f64::EPSILON,
+            "81 markers over 4210 lines, was {}",
+            capped.overall_per_kloc
+        );
+
+        let a = serde_json::to_string(&capped).expect("json");
+        let b = serde_json::to_string(
+            &debt_density(&store, &[], &[], DensityOrder::Density, 1, 0).expect("density"),
+        )
+        .expect("json");
+        assert_eq!(a, b, "deterministic serialisation");
+    }
+
+    #[test]
+    fn density_order_tokens_round_trip() {
+        for token in DensityOrder::tokens() {
+            let order = DensityOrder::from_token(token)
+                .unwrap_or_else(|| panic!("`{token}` is advertised but not accepted"));
+            assert_eq!(order.as_str(), token);
+        }
+        assert!(
+            DensityOrder::from_token("count").is_none(),
             "an unknown order is rejected, not silently defaulted"
         );
     }
