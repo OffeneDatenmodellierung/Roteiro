@@ -1815,7 +1815,11 @@ fn print_model_resolution(loaded: &config::Loaded) {
                 } else {
                     String::new()
                 };
-                let state = if choice.model.is_some() && !choice.installed {
+                // `Some(false)` only: `installed: None` means the question does
+                // not apply (a remote resolution has no weights on any disk), and
+                // labelling that "[not installed]" would send a reader to `model
+                // pull` for a model no registry lists.
+                let state = if choice.model.is_some() && choice.installed == Some(false) {
                     "  [not installed]"
                 } else {
                     ""
@@ -4027,7 +4031,7 @@ fn run_spec_draft(
     let Some(model) = choice.model else {
         anyhow::bail!("no generative model in the registry");
     };
-    if !choice.installed {
+    if choice.installed == Some(false) {
         // A **pinned** model that is not installed is a hard error naming the
         // key, matching what `roteiro infer` has always done with a configured
         // embedding model: the operator asked for that model specifically, and
