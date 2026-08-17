@@ -310,6 +310,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inventory the **secret-named** config keys in the graph: where they are,
+    /// what they are called, and whether their values were redacted before being
+    /// persisted.
+    ///
+    /// NOT A SECRET SCANNER. Extraction redacts a secret-named config value
+    /// before it ever reaches the store, so this reports *"secret-named config
+    /// keys are present and safely redacted"* — with paths and key names, never
+    /// values. It **cannot** find a hardcoded credential in source code (that is
+    /// not a config key and produces no node here), cannot judge whether a value
+    /// is valid, and cannot tell a real secret from a placeholder. An empty
+    /// report means "no secret-*named* config key" — a statement about naming,
+    /// not a clean bill of health.
+    ///
+    /// A report, not a gate: it always exits zero.
+    ConfigSecrets {
+        /// Max rows to show; `0` shows every secret-named key.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Rank nodes by **directed** call coupling: fan-in (how many distinct
     /// symbols call this one) and fan-out (how many it calls), over `calls`
     /// edges only.
@@ -1237,6 +1259,7 @@ fn main() -> anyhow::Result<()> {
             min_lines,
             json,
         } => run_debt_density(ingest, &kind, &order, limit, min_lines, json, debt_ignore),
+        Command::ConfigSecrets { limit, json } => run_config_secrets(ingest, limit, json),
         Command::Coupling { order, limit, json } => run_coupling(ingest, &order, limit, json),
         Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
         Command::Links {
@@ -4490,6 +4513,85 @@ fn density_summary(report: &rto_graph::DebtDensityReport) -> String {
         report.overall_per_kloc,
         report.total_lines,
     )
+}
+
+/// Inventory the secret-named config keys and their redaction state. A report,
+/// not a gate: it always exits zero — including when `unredacted` is non-zero,
+/// because that finding is about **this store**, not about the user's source, and
+/// failing their build over Roteiro's own import layer would be the wrong
+/// response. See [`rto_graph::config_secrets`] for what this cannot do.
+fn run_config_secrets(
+    ingest: rto_graph::IngestConfig,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+
+    let report = rto_graph::config_secrets(&store, limit)?;
+    if json {
+        emit_json(&report)?;
+    } else {
+        for item in &report.items {
+            let loc = item.path.as_deref().unwrap_or(&item.key);
+            println!("  [{:>8}] {loc}  {}", item.state.as_str(), item.name);
+        }
+        for line in config_secrets_summary(&report) {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// The summary lines for a [`rto_graph::ConfigSecretReport`], as separate lines
+/// so the caveat is never truncated onto the end of a count.
+///
+/// The caveat is unconditional — printed even for an empty report, because an
+/// empty report is exactly where a reader is most likely to conclude something
+/// this lens never claimed.
+fn config_secrets_summary(report: &rto_graph::ConfigSecretReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if report.secret_named == 0 {
+        lines.push(format!(
+            "config secrets: no secret-named config key among {} config key(s)",
+            report.config_keys
+        ));
+    } else {
+        lines.push(format!(
+            "config secrets: {} of {} secret-named key(s) shown, across {} file(s); \
+             {} redacted, {} declared in code without a value, {} unredacted",
+            report.items.len(),
+            report.secret_named,
+            report.files,
+            report.redacted,
+            report.declared,
+            report.unredacted,
+        ));
+    }
+    if report.redacted_not_secret_named > 0 {
+        lines.push(format!(
+            "  plus {} redacted value(s) under non-secret key name(s) (e.g. a k8s \
+             Secret's data), counted but not listed",
+            report.redacted_not_secret_named
+        ));
+    }
+    if report.unredacted > 0 {
+        // Loud, because extraction cannot produce this state: something else put
+        // an unredacted value in this store.
+        lines.push(format!(
+            "WARNING: {} secret-named key(s) carry an unredacted value. Extraction \
+             always redacts, so these came from an import layer — inspect the \
+             importing tool, not the source repository",
+            report.unredacted
+        ));
+    }
+    lines.push(
+        "note: an inventory of secret-NAMED config keys, not a secret scan — it \
+         cannot see a hardcoded credential in source, cannot judge a value (it \
+         never sees one), and cannot tell a real secret from a placeholder"
+            .to_owned(),
+    );
+    lines
 }
 
 /// Parse a `--order` token into a [`rto_graph::CouplingOrder`], naming the
@@ -7803,6 +7905,52 @@ fn debt_density_tool_def(
     }
 }
 
+/// The served-chat `config_secrets` tool definition. Lifted out of
+/// [`GraphToolRegistry::tools`] to keep that function readable, not because it is
+/// shared: the MCP server declares its own (see `rto_render::mcp`).
+///
+/// The description carries the limitations in full, and deliberately at length.
+/// The rename from the shortlist's original secret-*scanner* title is
+/// load-bearing, and a served model sees only this string — so every limit it must
+/// pass on to the user is stated here, not left in the Rust doc comment.
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(feature = "serve")]
+fn config_secrets_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "config_secrets".to_owned(),
+        description: "Inventory the SECRET-NAMED config keys in the graph: their file \
+                      paths, their key names, and whether each value was redacted \
+                      before being stored (`state` = redacted | declared | present). \
+                      Answers \"which of this repo's config surfaces deal in \
+                      credentials\" and \"did anything unredacted get into this \
+                      graph\". \
+                      THIS IS NOT A SECRET SCANNER — state the limits when you report \
+                      it, and never imply a security guarantee. It CANNOT find a \
+                      hardcoded credential in source code: it reads config-key nodes, \
+                      so a token in a Rust or Python string literal produces nothing \
+                      here and is invisible. It CANNOT judge whether a value is valid, \
+                      because it never sees one — values are redacted before they \
+                      reach the store. It CANNOT tell a real secret from a \
+                      placeholder: `API_TOKEN=changeme` in a committed `.env.example` \
+                      and a live token are the same row. And an EMPTY RESULT DOES NOT \
+                      MEAN THERE ARE NO SECRETS — it means no config key is \
+                      secret-NAMED; a credential under an innocuous key like `dsn` or \
+                      `endpoint` never appears. If asked to scan for secrets, say \
+                      plainly that this tool cannot do it."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+            })),
+        }),
+    }
+}
+
 /// The `(order, limit, min_lines)` triple for a served-chat `debt_density` call,
 /// lifted out of [`GraphToolRegistry::call`] to keep that dispatcher readable.
 ///
@@ -7952,6 +8100,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 }),
             },
             debt_density_tool_def(&with_project),
+            config_secrets_tool_def(&with_project),
             coupling_tool_def(&with_project),
         ];
         tools.push(rto_serve::ToolDef {
@@ -8052,6 +8201,17 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 self.run(project, |store| {
                     rto_graph::debt_density(store, &categories, &ignore, order, limit, min_lines)
                 })
+            }
+            "config_secrets" => {
+                // `limit` is model-controlled: clamp to the advertised bound so a
+                // huge value cannot make the server do pointless work.
+                let limit = args
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(50)
+                    .clamp(1, 200);
+                self.run(project, |store| rto_graph::config_secrets(store, limit))
             }
             "coupling" => {
                 // An unrecognised `order` is an error rather than a silent fall
@@ -8339,6 +8499,8 @@ fn vault_summary(
     })
     .collect();
 
+    let config_secrets = vault_config_secrets(store)?;
+
     // Directed call coupling, ranked by fan-in — "what does this codebase most
     // depend on". Capped, because `_Home` is an overview, not the report; the
     // full ranking is `roteiro coupling` / `GET .../coupling`.
@@ -8366,10 +8528,45 @@ fn vault_summary(
         adrs,
         debt,
         densest_files,
+        config_secrets,
         most_called,
         repo_url,
         commit,
     })
+}
+
+/// The `_Home` note's secret-named config-key figures, or `None` when the graph
+/// holds none — the overview then omits the section rather than rendering a row of
+/// zeroes, which would read as "scanned, and clean". See
+/// [`rto_graph::config_secrets`] for why this lens cannot support that reading.
+///
+/// Key **names** are deliberately left out of the vault: a note is browsed
+/// casually and out of context, and `roteiro config-secrets` is where the names
+/// belong, alongside the full caveat. The file list is capped for the same reason
+/// the other overview tables are.
+fn vault_config_secrets(
+    store: &rto_graph::Store,
+) -> anyhow::Result<Option<rto_render::ConfigSecretSummary>> {
+    let secrets = rto_graph::config_secrets(store, 0)?;
+    if secrets.secret_named == 0 {
+        return Ok(None);
+    }
+    // `items` is ordered by `(path, …)`, so equal paths are adjacent and `dedup`
+    // is enough to make this the distinct-file list.
+    let mut files: Vec<String> = secrets
+        .items
+        .iter()
+        .filter_map(|i| i.path.clone())
+        .collect();
+    files.dedup();
+    files.truncate(HOME_COUPLING_ROWS);
+    Ok(Some(rto_render::ConfigSecretSummary {
+        secret_named: secrets.secret_named,
+        redacted: secrets.redacted,
+        declared: secrets.declared,
+        unredacted: secrets.unredacted,
+        files,
+    }))
 }
 
 /// Rows in the vault `_Home` note's directed-coupling and debt-density tables.
@@ -8433,6 +8630,86 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()>
         }
     }
     Ok(())
+}
+
+// The `roteiro config-secrets` summary lines. Tested here rather than end-to-end
+// because the state that matters most — a secret-named key carrying an unredacted
+// value — is one extraction cannot produce (it always redacts), so no repository
+// fixture can reach it. Only an import layer can, and the warning must still be
+// right when it does.
+#[cfg(test)]
+mod config_secrets_summary_tests {
+    use super::config_secrets_summary;
+
+    fn report(secret_named: usize, unredacted: usize) -> rto_graph::ConfigSecretReport {
+        rto_graph::ConfigSecretReport {
+            schema: rto_graph::SCHEMA,
+            limit: 0,
+            config_keys: 100,
+            secret_named,
+            redacted: secret_named - unredacted,
+            declared: 0,
+            unredacted,
+            redacted_not_secret_named: 0,
+            files: 1,
+            items: Vec::new(),
+        }
+    }
+
+    /// The caveat every summary must carry, whatever it found.
+    const CAVEAT: &str = "not a secret scan";
+
+    #[test]
+    fn the_caveat_is_unconditional() {
+        // Including — especially — when nothing was found, which is where a reader
+        // is most likely to conclude something this lens never claimed.
+        let empty = config_secrets_summary(&report(0, 0)).join("\n");
+        assert!(
+            empty.contains("no secret-named config key") && empty.contains(CAVEAT),
+            "{empty}"
+        );
+        assert!(
+            config_secrets_summary(&report(3, 0))
+                .join("\n")
+                .contains(CAVEAT),
+            "and when something was"
+        );
+    }
+
+    #[test]
+    fn an_unredacted_value_is_warned_about_and_attributed_to_the_import() {
+        let clean = config_secrets_summary(&report(3, 0)).join("\n");
+        assert!(!clean.contains("WARNING"), "nothing to warn about: {clean}");
+
+        let leaky = config_secrets_summary(&report(3, 1)).join("\n");
+        assert!(leaky.contains("WARNING"), "{leaky}");
+        assert!(
+            leaky.contains("came from an import layer"),
+            "and it points at the importing tool, not the source repository: {leaky}"
+        );
+        assert!(leaky.contains(CAVEAT), "the caveat still travels: {leaky}");
+    }
+
+    #[test]
+    fn a_redaction_under_a_non_secret_name_is_explained_when_present() {
+        // Without this line a reader comparing `redacted` against the number of
+        // redacted values in the graph finds an unexplained surplus.
+        let mut r = report(2, 0);
+        assert!(
+            !config_secrets_summary(&r)
+                .join("\n")
+                .contains("non-secret key name"),
+            "silent when there are none"
+        );
+        r.redacted_not_secret_named = 4;
+        assert!(
+            config_secrets_summary(&r)
+                .join("\n")
+                .contains("plus 4 redacted value(s) under non-secret key name(s)"),
+            "{:?}",
+            config_secrets_summary(&r)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -10243,6 +10520,104 @@ mod workspace_scoped_tools {
             .call("debt_density", &serde_json::json!({ "order": "count" }))
             .expect_err("an unknown order must be refused");
         assert!(err.contains("unknown order `count`"), "was: {err}");
+    }
+
+    /// A one-project registry with one secret-named config key (redacted), one
+    /// struct-declared secret-named key (no value), and one that is not
+    /// secret-named — the three cases `config_secrets` must keep apart.
+    fn configured_registry() -> GraphToolRegistry {
+        use rto_graph::{FactSet, Node, NodeKind};
+        let cfg = |path: &str, dotted: &str, meta: serde_json::Value| {
+            let mut n = Node::new(
+                format!("cfgkey:{path}#{dotted}"),
+                NodeKind::Other("config_key".to_owned()),
+                dotted,
+            );
+            n.path = Some(path.to_owned());
+            n.meta = meta;
+            n
+        };
+        let mut store = rto_graph::Store::open_in_memory().expect("store");
+        store
+            .apply_factset(
+                &FactSet::new()
+                    .with_node(cfg(
+                        ".env",
+                        "API_TOKEN",
+                        serde_json::json!({ "key": "API_TOKEN", "value": "<redacted>" }),
+                    ))
+                    .with_node(cfg(
+                        "src/config.rs",
+                        "serve.api_key",
+                        serde_json::json!({ "key": "serve.api_key", "source": "struct" }),
+                    ))
+                    .with_node(cfg(
+                        ".env",
+                        "PORT",
+                        serde_json::json!({ "key": "PORT", "value": "8017" }),
+                    )),
+            )
+            .expect("apply");
+        GraphToolRegistry::new(std::sync::Arc::new(rto_graph::Workspace::single(
+            "api", store,
+        )))
+    }
+
+    /// The served-chat registry is a **separate** registry from the MCP server's,
+    /// so a lens reaching MCP proves nothing about the chat surface. This is the
+    /// chat side.
+    #[test]
+    fn config_secrets_is_advertised_and_reports_state_never_a_value() {
+        use rto_serve::ToolRegistry as _;
+        let reg = configured_registry();
+
+        assert!(
+            reg.tools().iter().any(|t| t.name == "config_secrets"),
+            "`config_secrets` advertised to the served model"
+        );
+
+        let out = reg
+            .call("config_secrets", &serde_json::json!({}))
+            .expect("config_secrets");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["config_keys"], 3, "the population: {json}");
+        assert_eq!(json["secret_named"], 2, "`PORT` is not: {json}");
+        assert_eq!(json["redacted"], 1);
+        assert_eq!(json["declared"], 1, "the struct-derived key: {json}");
+        assert_eq!(json["unredacted"], 0);
+        // Ordered by `(path, name, key)` — an inventory, not a ranking.
+        assert_eq!(json["items"][0]["name"], "API_TOKEN");
+        assert_eq!(json["items"][1]["state"], "declared");
+        assert!(
+            !out.contains("<redacted>") && json["items"][0].get("value").is_none(),
+            "no value reaches the model, not even the placeholder: {out}"
+        );
+    }
+
+    #[test]
+    fn config_secrets_tool_description_refuses_the_scanner_reading() {
+        // The rename is load-bearing and a served model sees only this string, so
+        // each limitation must be stated where the model will read it. A separate
+        // registry from MCP's means a separate assertion.
+        use rto_serve::ToolRegistry as _;
+        let tools = configured_registry().tools();
+        let def = tools
+            .iter()
+            .find(|t| t.name == "config_secrets")
+            .expect("advertised");
+        for claim in [
+            "NOT A SECRET SCANNER",
+            "CANNOT find a hardcoded credential in source code",
+            "never sees one",
+            "real secret from a placeholder",
+            "EMPTY RESULT DOES NOT MEAN THERE ARE NO SECRETS",
+        ] {
+            assert!(
+                def.description.contains(claim),
+                "missing `{claim}` from: {}",
+                def.description
+            );
+        }
     }
 }
 

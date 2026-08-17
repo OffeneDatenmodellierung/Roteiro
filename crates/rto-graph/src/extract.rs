@@ -358,7 +358,7 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
         // Redact the value of secret-looking keys so tokens/passwords from
         // `.env`/config files are never persisted into the (exportable) store.
         let value = if crate::config_keys::is_secret_key(&key) {
-            "<redacted>".to_owned()
+            crate::config_keys::REDACTED.to_owned()
         } else {
             value
         };
