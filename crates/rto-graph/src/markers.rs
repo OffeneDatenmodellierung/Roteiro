@@ -5,18 +5,21 @@
 //! "Intent debt" is the class of signals that say *something is missing* or
 //! *left for later*: `TODO`/`FIXME`/`HACK` comments (in any case for the
 //! unambiguous tags), `todo!()`/`unimplemented!()` stubs, and deferral phrases
-//! (`for now`, `deferred`, `not implemented`, `placeholder`, unchecked `- [ ]`
-//! items). The scan is line-based so it works uniformly over code, docs, and
-//! ADRs; [`augment`] attaches each finding to its innermost enclosing symbol (or
-//! the file) via a `contains` edge.
+//! (`for now`, `deferred`, `not implemented`, unchecked `- [ ]` items). The scan
+//! is line-based so it works uniformly over code, docs, and ADRs; [`augment`]
+//! attaches each finding to its innermost enclosing symbol (or the file) via a
+//! `contains` edge.
 //!
 //! The unambiguous tags (`TODO`, `todo!(`, `BUG:`) match anywhere on a line. The
-//! noisier prose phrases (`for now`, `deferred`, `not implemented`,
-//! `placeholder`, …) are restricted to *comment* context in code files — keyed
-//! off the file's [`CommentSyntax`] — so in code they are detected only inside
-//! comments, never in identifiers, string literals, or running code. Prose and
-//! unknown files carry no such syntax and are scanned in full, since there every
-//! line is effectively prose.
+//! noisier prose phrases (`for now`, `deferred`, `not implemented`, …) are
+//! restricted to *comment* context in code files — keyed off the file's
+//! [`CommentSyntax`] — so in code they are detected only inside comments, never
+//! in identifiers, string literals, or running code. Prose and unknown files
+//! carry no such syntax and are scanned in full, since there every line is
+//! effectively prose.
+//!
+//! A phrase must confess incompleteness, not merely *name* a concept. That is
+//! why the bare word `placeholder` is not a needle — see [`RULES`].
 //!
 //! Opt-out: a source can suppress false positives with an inline directive —
 //! `roteiro:ignore` on a line skips that line, and `roteiro:ignore-file`
@@ -37,8 +40,8 @@ pub enum MarkerCategory {
     Fixme,
     /// A `HACK`/`XXX`: a deliberate but unsatisfactory shortcut.
     Hack,
-    /// A stub / not-yet-implemented placeholder (`todo!()`, `unimplemented!()`,
-    /// "not implemented", "placeholder").
+    /// A stub: something declared but not written (`todo!()`,
+    /// `unimplemented!()`, "not implemented", "placeholder implementation").
     Stub,
     /// Work deliberately deferred ("for now", "deferred", "follow-up", "TBD",
     /// unchecked `- [ ]` items).
@@ -105,11 +108,37 @@ enum Mode {
 ///
 /// The final `bool` is `comment_only`: when set, the rule fires only within a
 /// *comment* (in a code file with a known [`CommentSyntax`]). This restricts the
-/// noisy prose phrases — `for now`, `deferred`, `placeholder`, … — to comments,
-/// so they no longer flag identifiers, string literals, or ordinary code. The
-/// unambiguous tags (`TODO`, `todo!(`, `BUG:`) still match anywhere, and prose
-/// files (Markdown, plain text, unknown types) are scanned in full — see
+/// noisy prose phrases — `for now`, `deferred`, … — to comments, so they no
+/// longer flag identifiers, string literals, or ordinary code. The unambiguous
+/// tags (`TODO`, `todo!(`, `BUG:`) still match anywhere, and prose files
+/// (Markdown, plain text, unknown types) are scanned in full — see
 /// [`comment_syntax`].
+///
+/// # Why the bare word `placeholder` is not a needle
+///
+/// It was one, and it was wrong every single time. Measured on this repository:
+/// **36 of 36** `stub` markers came from it and **not one** was a stub. They were
+/// the *external-ref placeholder node* ([`crate::links`], [`crate::Workspace`] —
+/// an implemented ADR-0009 concept), the redaction placeholder a secret value is
+/// replaced with ([`crate::config_keys`], ADR-0015), the security lens's own
+/// sentence about not being able to tell a secret from a placeholder, a `{tag}`
+/// ref template, and the CSS `::placeholder` pseudo-element. Restricting it to
+/// comments (which is right, and which it already was) does not help, because
+/// every one of those is *prose about the architecture*.
+///
+/// The distinction the table encodes is between a phrase that **confesses
+/// incompleteness** and a word that **names a thing**. `placeholder` is a common
+/// noun: a placeholder node, a placeholder value, placeholder text. Only when it
+/// predicates something of an implementation — "placeholder implementation",
+/// "returns a placeholder" — does it mean *unfinished*, and those are the forms
+/// kept below. The narrower `is a placeholder` was measured too and rejected: its
+/// single hit on this repository is [`crate::config_keys`] documenting the
+/// redaction value, so it is the same false positive with a longer needle.
+///
+/// Deleting the word costs no coverage that can be demonstrated: on this
+/// repository it removed 36 findings and reclassified none, and it is the reason
+/// `stub` now reports 0 — which is the true count, since `todo!(`,
+/// `unimplemented!(` and `not implemented` have no hits here either.
 const RULES: &[(&str, MarkerCategory, Mode, bool)] = &[
     ("todo!(", MarkerCategory::Stub, Mode::Substr, false),
     ("unimplemented!(", MarkerCategory::Stub, Mode::Substr, false),
@@ -128,7 +157,18 @@ const RULES: &[(&str, MarkerCategory, Mode, bool)] = &[
         true,
     ),
     ("not implemented", MarkerCategory::Stub, Mode::Phrase, true),
-    ("placeholder", MarkerCategory::Stub, Mode::Phrase, true),
+    (
+        "placeholder implementation",
+        MarkerCategory::Stub,
+        Mode::Phrase,
+        true,
+    ),
+    (
+        "returns a placeholder",
+        MarkerCategory::Stub,
+        Mode::Phrase,
+        true,
+    ),
     ("for now", MarkerCategory::Deferred, Mode::Phrase, true),
     ("deferred", MarkerCategory::Deferred, Mode::Phrase, true),
     ("follow-up", MarkerCategory::Deferred, Mode::Phrase, true),
@@ -488,7 +528,7 @@ mod tests {
 let x = todo!();
 // FIXME off-by-one
 // HACK relies on ordering
-// this is a placeholder for now
+// this is not implemented for now
 - [ ] finish the docs
 plain line, nothing here
 ";
@@ -497,7 +537,7 @@ plain line, nothing here
         assert_eq!(got[1], (2, MarkerCategory::Stub)); // todo!(
         assert_eq!(got[2], (3, MarkerCategory::Fixme));
         assert_eq!(got[3], (4, MarkerCategory::Hack));
-        assert_eq!(got[4], (5, MarkerCategory::Stub)); // placeholder wins over "for now"
+        assert_eq!(got[4], (5, MarkerCategory::Stub)); // "not implemented" wins over "for now"
         assert_eq!(got[5], (6, MarkerCategory::Deferred)); // checkbox
         assert_eq!(got.len(), 6, "the plain line is not a marker");
     }
@@ -529,11 +569,46 @@ plain line, nothing here
         assert!(categories("we fixed a bug in the hack layer").is_empty());
     }
 
+    // The scanner must tell a comment that *names* a placeholder — an implemented,
+    // load-bearing concept in this codebase — from one that *confesses* to being
+    // one. The bare word `placeholder` was a needle and could not: all 36 `stub`
+    // markers it produced on this repository were architectural prose (see
+    // `RULES`). The fixture below pairs the two senses line by line, so a rule
+    // that drifts back to the bare word fails here rather than in the debt count.
+    #[test]
+    fn naming_a_placeholder_is_not_confessing_to_one() {
+        let src = "\
+//! an **external-ref node** — a local placeholder standing in for the hub's node
+/// The placeholder a redacted config value is replaced with, before anything
+/// cannot distinguish a real secret from a placeholder. An empty report means
+/// value is a ref template with a `{tag}` placeholder, e.g. `app:{tag}`
+// placeholder implementation, returns empty
+// returns a placeholder until the resolver lands
+";
+        let got = categories_in("a.rs", src);
+        assert_eq!(
+            got,
+            vec![(5, MarkerCategory::Stub), (6, MarkerCategory::Stub)],
+            "only the two confessions are debt; lines 1-4 name a concept"
+        );
+
+        // The same four architectural lines in a prose file, where every line is
+        // comment context, are equally not debt — the fix is in the vocabulary,
+        // not in the comment gating that happens to hide it in code.
+        assert!(
+            categories_in(
+                "NOTES.md",
+                &src.lines().take(4).collect::<Vec<_>>().join("\n")
+            )
+            .is_empty()
+        );
+    }
+
     #[test]
     fn prose_phrases_are_comment_only_in_code_files() {
         // In a code file the deferral phrases fire only inside a comment…
         assert_eq!(
-            categories_in("a.rs", "    // just a placeholder for now\n")[0].1,
+            categories_in("a.rs", "    // just not implemented for now\n")[0].1,
             MarkerCategory::Stub
         );
         assert_eq!(
@@ -549,7 +624,7 @@ plain line, nothing here
             MarkerCategory::Deferred
         );
         assert_eq!(
-            categories_in("a.rs", "let x = 1; /* placeholder */ let y = 2;\n")[0].1,
+            categories_in("a.rs", "let x = 1; /* not implemented */ let y = 2;\n")[0].1,
             MarkerCategory::Stub
         );
         // An identifier that merely contains a phrase is not a marker.
@@ -567,7 +642,7 @@ plain line, nothing here
         // interior line; code after the close is not.
         let got = categories_in(
             "a.rs",
-            "/* a note\n   deferred to later\n*/ let placeholder_var = 1;\n",
+            "/* a note\n   deferred to later\n*/ let s = \"deferred to v2\";\n",
         );
         assert_eq!(got.len(), 1);
         assert_eq!(got[0], (2, MarkerCategory::Deferred));
@@ -588,7 +663,7 @@ plain line, nothing here
         // `#` line comments (Python/shell): phrase in a comment fires, in a string
         // does not.
         assert_eq!(
-            categories_in("m.py", "x = 1  # placeholder for now\n")[0].1,
+            categories_in("m.py", "x = 1  # not implemented for now\n")[0].1,
             MarkerCategory::Stub
         );
         assert!(categories_in("m.py", "msg = \"deferred until later\"\n").is_empty());
@@ -599,7 +674,7 @@ plain line, nothing here
         );
         // `--` line comments (SQL): comment fires, a quoted string does not.
         assert_eq!(
-            categories_in("q.sql", "SELECT 1; -- placeholder query\n")[0].1,
+            categories_in("q.sql", "SELECT 1; -- not implemented yet\n")[0].1,
             MarkerCategory::Stub
         );
         assert!(categories_in("q.sql", "SELECT 'deferred' AS status;\n").is_empty());

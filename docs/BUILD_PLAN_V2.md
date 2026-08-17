@@ -1756,6 +1756,27 @@ binds a callee by simple name across every `Fn` node regardless of language, and
 no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
 work, so it batches with Q2 and Q10 or it is paid for twice.
 
+**The `placeholder` marker needle joins that cluster** (branch
+`fix/placeholder-is-not-a-stub`, implemented and measured, **`EXTRACT_VERSION`
+deliberately left at 11 and therefore not mergeable on its own**). The bare word
+`placeholder` was a `stub` needle and produced **36 of 36 false positives on this
+repository — 0% precision**: the external-ref placeholder node (ADR-0009), the
+redaction placeholder (ADR-0015), S1's own sentence about not being able to tell a
+secret from a placeholder, a `{tag}` ref template, and CSS `::placeholder`. The
+lens was reporting the codebase's vocabulary as its debt. Replacing it with the
+two phrases that predicate incompleteness of an implementation — `placeholder
+implementation`, `returns a placeholder` — takes `stub` from 36 to **0**, which is
+the true count here, and reclassifies nothing else. Narrowing to `is a
+placeholder` was measured and rejected: its one hit is the redaction placeholder,
+the same false positive with a longer needle.
+
+Markers are emitted by `markers::augment` inside `extract`, so the change alters
+extraction output for any blob whose comments say "placeholder" — a cached fact
+set would keep serving the old 36. That is a bump, so it waits for the batch
+rather than spending one on a needle. Stage 26's standard is the reason it cannot
+simply be left alone: a lens that over-reports is worse than none, and this one is
+100% noise on the project's own repository.
+
 ### Now scheduled as Stages 33–35
 
 Formerly scoped-but-unrecorded; added to the roadmap by decision. Summarised here

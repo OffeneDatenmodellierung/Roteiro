@@ -366,7 +366,7 @@ pub struct DebtDensityReport {
 /// # Confidence, and why there is no CI gate
 ///
 /// Density inherits every false positive of the marker scan beneath it — the
-/// prose rules (`for now`, `placeholder`, `tbd`) fire on ordinary writing, so a
+/// prose rules (`for now`, `deferred`, `tbd`) fire on ordinary writing, so a
 /// design document rich in the word "deferred" ranks as dense debt. It then adds
 /// one of its own: the denominator is file length, so a language or a file with
 /// low information per line (verbose config, generated code, wide indentation) is
