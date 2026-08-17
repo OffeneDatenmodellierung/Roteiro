@@ -1698,8 +1698,8 @@ either way: it is how any future reviewer, hosted or local, gets measured.
 | v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
 | v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
-| v1.17.0 | Stage 34 — remote model tier | **Gated on ADR-0019.** Project file may deny, never grant; no learned router on the local→remote edge |
-| v1.18.0 | Stage 35 — `roteiro review` LLM mode | Scored against the in-tree corpus at each comment's `reviewed_sha`, per defect class |
+| v1.17.0 🔶 | Stage 34 — remote model tier | **Part 1 of 2 delivered** (#381): the consent gate, the payload allow-list and the egress record, with **no transport in the tree** — verified from `Cargo.toml`, not from call sites. Project file may deny, never grant; `LocalAttempt` cannot be constructed before a run, so "no prediction before the attempt" is a type rather than a rule. Part 2 owes the `ureq` transport, the TTY grant, the `ModelSource::Remote` resolver amendment, and the README/website promise amendments **on the commit that makes them false** |
+| v1.18.0 🔶 | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes. No reviewer yet, and **no verdict** — only the instrument. Two findings it forced: the corpus README's reconstruction recipe yielded an *empty* diff for 13 of 15 commits, and 9 of 15 diffs exceed the single-call budget, so per-file is the only viable shape — which puts `contract-drift`, the largest class, squarely on the graph |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -1756,20 +1756,29 @@ binds a callee by simple name across every `Fn` node regardless of language, and
 no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
 work, so it batches with Q2 and Q10 or it is paid for twice.
 
-### Now scheduled as Stages 33–35
+### Stages 33–35 — status
 
-Formerly scoped-but-unrecorded; added to the roadmap by decision. Summarised here
-because §8b is where a reader looks for what outlives the current stage — the
-stages themselves carry the detail:
+Formerly scoped-but-unrecorded, added to the roadmap by decision, and since
+largely delivered. Summarised here because §8b is where a reader looks for what
+outlives the current stage — the stages themselves carry the detail:
 
-- **Stage 33 — local model resolution.** Closes a user-facing gap on its own
-  merits: a project cannot pin its ASR model today. No network, no new
-  dependency, no ADR.
-- **Stage 34 — remote model tier.** **Blocked on ADR-0019**, which must amend
-  ADR-0006, invert ADR-0007's precedence for one key, and exempt principle 10.
-  Not startable until that ADR is accepted.
-- **Stage 35 — `roteiro review` LLM mode.** Depends on Stage 33. Gives the
-  26-comment adjudicated corpus a consumer before it rots.
+- **Stage 33 — local model resolution.** ✅ **Delivered** (v1.17.0). `[models]`
+  now takes `vision`, `audio` and `ocr`, so a project *can* pin its ASR model.
+  Enumeration found **nine** call sites, not the seven predicted — including the
+  extraction cache key, which folded the OCR model *by name* and would have made
+  `[models] ocr` the one pin that changes what is extracted without invalidating
+  what was extracted before it.
+- **Stage 34 — remote model tier.** 🔶 **Part 1 of 2 delivered.** ADR-0019 is
+  **Accepted**, so it is unblocked, not gated. Part 1 landed the consent gate,
+  the payload allow-list and the egress record **with no transport in the tree**
+  — the guard before the thing it guards, which is ADR-0019 §4's own argument.
+  Part 2 owes the transport, the TTY grant, the `ModelSource::Remote` resolver
+  amendment, and the README/website promise amendments **on the commit that makes
+  them false**.
+- **Stage 35 — `roteiro review` LLM mode.** 🔶 **35a delivered.** The corpus has
+  an instrument — `roteiro review --score`, per-class recall, `compile_claim` —
+  but **no reviewer and no verdict**. 35b is the reviewer, and *"do not build
+  this"* remains a legitimate outcome of measuring one.
 
 ---
 
