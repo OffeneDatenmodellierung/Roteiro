@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.13.0...rto-graph-v1.14.0) - 2026-08-17
+
+### Fixed
+
+- *(tests)* make the default feature set compile clean under -D warnings
+- *(review)* name the row in every validation failure, and stop the counts drifting
+
+### Other
+
+- *(review)* an adjudicated corpus so a reviewer can be measured, not guessed at
+
 ## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.12.0...rto-graph-v1.13.0) - 2026-08-16
 
 ### Added

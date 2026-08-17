@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.13.0...roteiro-v1.14.0) - 2026-08-17
+
+### Added
+
+- *(roteiro)* make `models` a default feature
+
+### Other
+
+- *(features)* UNREVIEWED checkpoint - exec-subprocess default + prefetch/status move
+
 ## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.12.0...roteiro-v1.13.0) - 2026-08-16
 
 ### Fixed
