@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0014"
-status: For Review                  # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
+version: "1.4"
 last-modified: 2026-08-17
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **State** | For Review |
+| **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Security Tooling |
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 
 ## Reference
 
@@ -277,15 +277,17 @@ execution is untested in CI** — an accepted, documented gap.
 
 ## Status
 
-For Review. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md): the seam and ingest
-land in Stage 21 (no boxlite), analyzers in Stage 22, and the boxlite backend in
-Stage 24 — which, since publication was verified, is a dependency addition rather
-than a packaging problem.
+**Accepted** (2026-08-17), and implemented — Stages 21, 22 and 24 (#293, #322, #352), the backend released in **v1.13.0**. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) and delivered in that order:
+the seam and ingest in Stage 21 (no boxlite), analyzers in Stage 22, and the
+boxlite backend in Stage 24 — which, publication having been verified, was a
+dependency addition rather than the packaging problem it was first reported to
+be.
 
 ## Version history
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
 | 1.0 | 2026-08-15 | Initial: the seam, the three backends, boxlite chosen, the provisioning and degradation contract. |
 | 1.1 | 2026-08-15 | Clarified what `prefetch` "fetches": as Stage 22 shipped it, it verifies and pins but downloads nothing, because neither shipped asset is a digest-stable download. The pinned-before-use, never-implicit and no-host-fallback obligations are unchanged. See [[docs/adr/0018-analyzer-coverage-matrix.md]]. |
 | 1.2 | 2026-08-16 | **`exec-subprocess` joins the default feature set, and provisioning leaves it.** Two changes with one motive — a stock install should be able to prepare itself for offline work. (a) `security prefetch\|status` move from `exec-subprocess` to `execution`: they execute nothing (every `Command::new` in `rto-exec` is in `subprocess.rs`/`boxlite.rs`), the asset module was already shared between backends and owned by neither, and gating provisioning on a backend made the boxlite bootstrap circular. (b) `exec-subprocess` becomes a default, so `security run` ships in a stock install. **This retires half of v1.0's justification and the remaining half must not be weakened.** v1.0 defended the subprocess backend as "asked for at build time **as well as** consented to per run"; the build-time half no longer applies to a default install. What remains — and is unchanged, deliberately — is that `--allow-unsandboxed` is required on **every** invocation, that the run records `isolation=none`, that a cold asset cache refuses rather than fetching, and that Roteiro never installs the analyzer, so an operator has already chosen to have `semgrep`/`osv-scanner` on `PATH`. The flag is now the only gate; do not soften it for consistency with the build-time one that went away. `--no-default-features --features execution` remains a build that provisions and ingests but cannot execute. |
