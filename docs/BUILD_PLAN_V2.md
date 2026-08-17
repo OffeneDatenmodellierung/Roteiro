@@ -1775,7 +1775,7 @@ either way: it is how any future reviewer, hosted or local, gets measured.
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
 | v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
 | v1.17.0 🔶 | Stage 34 — remote model tier | **ADR-0019 Accepted.** Cut in three. **1 — the guard** (#381): consent gate, payload allow-list, dry-run, egress ledger, in a build compiling no backend. **2a — the transport**: `ureq` behind the off-by-default `remote` feature, the TTY invocation grant (`status`/`dry-run` never prompt), the response reader that refuses a truncated generation, and the README/website promise amendments on the commit that made them false. Project file may deny, never grant; no learned router on the local→remote edge; no reachability probe; no test can reach a network. **2b — not built**: `ModelSource::Remote { trust }` and the `spec draft` / Ask wiring over it |
-| v1.18.0 | Stage 35 — `roteiro review` LLM mode | Scored against the in-tree corpus at each comment's `reviewed_sha`, per defect class |
+| v1.18.0 🔶 | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes. No reviewer yet, and **no verdict** — only the instrument. Two findings it forced: the corpus README's reconstruction recipe yielded an *empty* diff for 13 of 15 commits, and 9 of 15 diffs exceed the single-call budget, so per-file is the only viable shape — which puts `contract-drift`, the largest class, squarely on the graph |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -1832,22 +1832,71 @@ binds a callee by simple name across every `Fn` node regardless of language, and
 no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
 work, so it batches with Q2 and Q10 or it is paid for twice.
 
-### Now scheduled as Stages 33–35
+#### The one exception, and why it was made
 
-Formerly scoped-but-unrecorded; added to the roadmap by decision. Summarised here
-because §8b is where a reader looks for what outlives the current stage — the
-stages themselves carry the detail:
+**The `placeholder` marker-needle correction (#384) spent a bump on its own**
+(`EXTRACT_VERSION` 11 → 12), by the owner's decision. It is not a fourth member of
+the cluster above: it shipped alone, and Q2, Q10 and cross-language edge
+resolution remain a cluster **with each other**, still unpaid and still
+unscheduled — this exception does not release them.
 
-- **Stage 33 — local model resolution.** Closes a user-facing gap on its own
-  merits: a project cannot pin its ASR model today. No network, no new
-  dependency, no ADR.
-- **Stage 34 — remote model tier.** **Unblocked** — ADR-0019 is Accepted, and it
-  did all three things it had to: scoped ADR-0006's *"nothing leaves the
-  machine"* to serving, inverted ADR-0007's precedence for one key (v1.2), and
-  exempted principle 10 explicitly. Parts 1 and 2a are built; 2b — the
-  `model_choice` amendment and the `spec draft` / Ask wiring — is not.
-- **Stage 35 — `roteiro review` LLM mode.** Depends on Stage 33. Gives the
-  26-comment adjudicated corpus a consumer before it rots.
+The trade the batching rule is meant to prevent is *paying twice for the same
+work*. That is not what this was. The bare word `placeholder` was a `stub` needle
+scoring **0% precision — 36 of 36 findings on this repository, none a stub**: the
+external-ref placeholder node (ADR-0009), the redaction placeholder (ADR-0015),
+S1's own sentence about not being able to tell a secret from a placeholder, a
+`{tag}` ref template, CSS `::placeholder`. The lens was reporting the codebase's
+vocabulary as its debt, and `roteiro check` printed the inflated figure at a
+glance. Replacing the word with the two phrases that predicate incompleteness of
+an implementation — `placeholder implementation`, `returns a placeholder` — takes
+`stub` from 36 to **0**, the true count, and reclassifies nothing else.
+
+Holding that behind Q2, Q10 and cross-language edge resolution would have meant
+shipping a knowingly false count for the whole of an unscheduled, post-v2.0
+horizon — indefinitely, since none of the three has a date. Stage 26's standard
+is that a lens which over-reports is worse than none; a 100%-noise category is
+the case that standard was written for. Correctness of a number users read now
+outweighed the cost of one re-extraction, so the batching rule was set aside
+deliberately rather than forgotten. It still governs the three items above: they
+each add *new* extraction metadata, they are genuinely one body of work, and
+nothing about this exception makes them cheaper to do separately.
+
+**What the bump cost, measured** on a store extracted at version 11 and then
+opened by the version-12 binary: **all 275 cached fact sets re-extracted** (every
+tracked blob — the base version is unconditional, so nothing survives the key
+change), 3.2 s cold against 0.17 s warm on a debug build. The object cache is
+write-and-keep with no eviction (`crates/rto-graph/src/cache.rs`), so the
+superseded version-11 entries stay on disk: `.git/roteiro/objects` went
+**4.8 MiB → 9.7 MiB** and does not shrink again. That is per repository, per
+user, and it is the whole price —
+`.git/roteiro` is derived, so deleting it is always safe if a user would rather
+reclaim the space than keep the old entries.
+
+### Stages 33–35 — status
+
+Formerly scoped-but-unrecorded, added to the roadmap by decision, and since
+largely delivered. Summarised here because §8b is where a reader looks for what
+outlives the current stage — the stages themselves carry the detail:
+
+- **Stage 33 — local model resolution.** ✅ **Delivered** (v1.17.0). `[models]`
+  now takes `vision`, `audio` and `ocr`, so a project *can* pin its ASR model.
+  Enumeration found **nine** call sites, not the seven predicted — including the
+  extraction cache key, which folded the OCR model *by name* and would have made
+  `[models] ocr` the one pin that changes what is extracted without invalidating
+  what was extracted before it.
+- **Stage 34 — remote model tier.** 🔶 **Parts 1 and 2a delivered.** ADR-0019 is
+  **Accepted**, and it did all three things it had to: scoped ADR-0006's
+  *"nothing leaves the machine"* to serving, inverted ADR-0007's precedence for
+  one key (v1.2 also scopes *the invocation* for a long-lived process), and
+  exempted principle 10 explicitly. Part 1 landed the guard **before** anything
+  could send — ADR-0019 §4's own argument; 2a landed the transport and the
+  promise amendments on the commit that made them false. **2b is not built**:
+  the `ModelSource::Remote { trust }` resolver amendment and the
+  `spec draft` / Ask wiring over it.
+- **Stage 35 — `roteiro review` LLM mode.** 🔶 **35a delivered.** The corpus has
+  an instrument — `roteiro review --score`, per-class recall, `compile_claim` —
+  but **no reviewer and no verdict**. 35b is the reviewer, and *"do not build
+  this"* remains a legitimate outcome of measuring one.
 
 ---
 

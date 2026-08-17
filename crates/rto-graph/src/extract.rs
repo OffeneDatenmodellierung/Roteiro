@@ -65,7 +65,19 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // safe because the base version moved with it, so no historical key can collide,
 // and because the namespaces are powers of ten *bit* values (100/200/400/800)
 // that must stay disjoint: +300 would alias a `pdf-text` + `image-ocr` build.
-pub(crate) const EXTRACT_VERSION: u32 = 11
+// Bumped 11 → 12 for the marker-needle correction: the bare word `placeholder`
+// is no longer a `stub` needle (it scored 0% precision — 36 of 36 findings on
+// this repository named an implemented concept), replaced by the two phrases
+// that predicate incompleteness of an implementation. The next line names them,
+// and so carries the inline opt-out rather than reporting itself — the same
+// reason `markers.rs` carries the file-level one:
+// `placeholder implementation` / `returns a placeholder`.  roteiro:ignore
+// [`crate::markers::augment`] runs inside extraction, so every cached fact set
+// holding one of those 36 must be regenerated without it; without the bump a
+// cached blob keeps serving the phantom marker until its bytes happen to
+// change. No namespace moves: this is a base-version change only, unconditional
+// across every feature combination.
+pub(crate) const EXTRACT_VERSION: u32 = 12
     + if cfg!(feature = "pdf-text") { 100 } else { 0 }
     + if cfg!(feature = "image-ocr") { 200 } else { 0 }
     + if cfg!(feature = "audio-metadata") {

@@ -8772,7 +8772,7 @@ fn debt_density_tool_def(
                       and comments included — not source lines of code, so figures \
                       run lower than an SLOC tool's and flatter verbose or generated \
                       files; and the markers beneath it include prose matches (`for \
-                      now`, `placeholder`, `tbd`), so a design document can rank as \
+                      now`, `deferred`, `tbd`), so a design document can rank as \
                       dense debt. This is a measurement, not a gate."
             .to_owned(),
         parameters: json!({
