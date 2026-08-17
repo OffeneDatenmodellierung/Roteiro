@@ -146,7 +146,20 @@ def main() -> None:
         partial.replace(dest)
         print(f"verified sha256 {pin['sha256']}", file=sys.stderr)
 
-    url = f"file://{dest}"
+    # Percent-encoded, because what reads this variable is `boxlite`'s bare
+    # `curl -fsSL`: it rejects a `file://` URL with a raw space outright ("URL
+    # rejected: Malformed input to a URL function", exit 3), and it decodes `%`
+    # sequences, so an unencoded `%` sends it to a different file than the one
+    # `rto-exec/build.rs` verifies. `--dest` defaults into the asset cache,
+    # which follows `ROTEIRO_SECURITY_ASSETS` and `HOME`, so neither character
+    # is hypothetical on a developer machine.
+    #
+    # This is the same two-character map as `file_url` in
+    # `crates/rto-exec/src/file_url.rs`, which parses the variable back — `%`
+    # before the space, since `%` is the escape character. It is stated twice
+    # because the two sides are in different languages; do not widen one of them
+    # alone.
+    url = "file://" + str(dest).replace("%", "%25").replace(" ", "%20")
     if args.github_env and (github_env := os.environ.get("GITHUB_ENV")):
         with open(github_env, "a", encoding="utf-8") as handle:
             handle.write(f"BOXLITE_RUNTIME_URL={url}\n")

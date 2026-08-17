@@ -226,9 +226,21 @@ pub static ASSETS: &[AssetSpec] = &[
     AssetSpec {
         id: crate::runtime_pins::RUNTIME_ASSET,
         // Not an analyzer's asset: every analyzer run under the sandboxed
-        // backend needs the same one. No adapter declares it, so `assets_for`
-        // never returns it and `prefetch --analyzer <name>` never selects it;
-        // it is provisioned by a plain `prefetch`, and resolved directly by id.
+        // backend needs the same one, and no adapter declares it — so
+        // `assets_for` never returns it, and it is in no analyzer's asset set.
+        //
+        // That is exactly why `run_security_prefetch` falls back to selecting by
+        // this field when `assets_for` comes back empty: `prefetch --analyzer
+        // sandbox` **does** select this archive, alone, which is what lets
+        // someone bootstrapping `exec-boxlite` obtain it without also fetching
+        // ~260 MB of advisory databases. A plain `prefetch` provisions it too.
+        //
+        // The two clauses after the first used to say the opposite — that
+        // `--analyzer <name>` could never select it — and that outlived the
+        // fallback by long enough to put a wrong recipe in AGENTS.md and to
+        // nearly cost a correct review comment its adjudication (#362). The
+        // behaviour is asserted in `the_sandbox_analyzer_selects_the_runtime_
+        // archive_alone` so the two cannot drift again in silence.
         analyzer: SANDBOX,
         kind: AssetKind::SandboxRuntime,
         source: AssetSource::PinnedArchive {
@@ -364,39 +376,13 @@ pub struct AssetStatus {
     pub verified: Option<bool>,
 }
 
-/// Resolve the root of the asset cache from its inputs, without touching the
-/// environment — so it is testable.
-fn root_from(
-    security_root: Option<PathBuf>,
-    roteiro_home: Option<PathBuf>,
-    home: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(dir) = security_root {
-        return dir;
-    }
-    if let Some(dir) = roteiro_home {
-        return dir.join("security");
-    }
-    home.unwrap_or_else(|| PathBuf::from("."))
-        .join(".roteiro")
-        .join("security")
-}
-
-/// Root of the asset cache (`~/.roteiro/security`), honouring
-/// `ROTEIRO_SECURITY_ASSETS` and then `ROTEIRO_HOME`.
-///
-/// It sits beside the model store rather than inside the repository: assets are
-/// per-user, are shared across every checkout, and must never be committed.
-#[must_use]
-pub fn asset_root() -> PathBuf {
-    root_from(
-        std::env::var_os("ROTEIRO_SECURITY_ASSETS").map(PathBuf::from),
-        std::env::var_os("ROTEIRO_HOME").map(PathBuf::from),
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from),
-    )
-}
+// Re-exported rather than defined here, and it used to be defined here. The
+// resolution moved to `asset_paths.rs` so that `build.rs` can `include!` it:
+// looking for the provisioned sandbox runtime is looking in *this* cache, and a
+// build script that resolved the path with its own copy of the precedence would
+// disagree with `prefetch` the first time either side changed. Kept re-exported
+// so `rto_exec::assets::asset_root` still names it.
+pub use crate::asset_paths::asset_root;
 
 /// Directory a given asset lives in.
 #[must_use]
@@ -1137,8 +1123,8 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASSETS, AssetError, AssetKind, AssetSource, asset, asset_path, assets_for, installed,
-        provision, resolve, root_from, status,
+        ASSETS, AssetError, AssetKind, AssetSource, SANDBOX, asset, asset_path, assets_for,
+        installed, provision, resolve, status,
     };
     use crate::runner::ExecError;
     use std::path::PathBuf;
@@ -1194,6 +1180,41 @@ mod tests {
             }
             assert!(!spec.licence.is_empty(), "{} discloses no licence", spec.id);
         }
+    }
+
+    /// `--analyzer sandbox` selects the runtime archive, and selects only it.
+    ///
+    /// Both halves are asserted because the interesting behaviour is the join of
+    /// them: `assets_for` returns nothing for the sandbox — no adapter declares
+    /// the archive — which is what sends `run_security_prefetch` to its
+    /// fallback, and the fallback selects by [`AssetSpec::analyzer`]. If either
+    /// half moved, `prefetch --analyzer sandbox` would quietly start fetching
+    /// either nothing or a quarter-gigabyte of advisory databases, and the
+    /// bootstrap recipe in `build.rs`, `README.md` and `AGENTS.md` would be
+    /// wrong without a single test going red.
+    ///
+    /// That is not hypothetical: the comment on the spec described the
+    /// pre-fallback rule for long enough to ship a wrong recipe and nearly cost
+    /// a correct review comment its adjudication (#362).
+    #[test]
+    fn the_sandbox_analyzer_selects_the_runtime_archive_alone() {
+        assert!(
+            assets_for(SANDBOX).is_empty(),
+            "no adapter should declare the shared runtime; if one does, the fallback in \
+             run_security_prefetch is no longer what selects it"
+        );
+
+        let by_owner: Vec<&str> = ASSETS
+            .iter()
+            .filter(|spec| spec.analyzer == SANDBOX)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(
+            by_owner,
+            vec![crate::runtime_pins::RUNTIME_ASSET],
+            "`prefetch --analyzer sandbox` resolves by owner, so this is exactly what it \
+             provisions — it must be the runtime archive and nothing else"
+        );
     }
 
     /// The sandbox runtime's disclosure must name every licence family in the
@@ -1419,26 +1440,6 @@ mod tests {
         };
         let record = super::provision_with(&cache.0, spec, Some(honest)).expect("provision");
         assert_eq!(record.digest, crate::sha256_hex(&body));
-    }
-
-    #[test]
-    fn the_cache_root_prefers_the_explicit_override_then_roteiro_home() {
-        assert_eq!(
-            root_from(
-                Some("/explicit".into()),
-                Some("/home/.roteiro".into()),
-                None
-            ),
-            PathBuf::from("/explicit")
-        );
-        assert_eq!(
-            root_from(None, Some("/home/.roteiro".into()), None),
-            PathBuf::from("/home/.roteiro/security")
-        );
-        assert_eq!(
-            root_from(None, None, Some("/home/me".into())),
-            PathBuf::from("/home/me/.roteiro/security")
-        );
     }
 
     #[test]

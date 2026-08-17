@@ -175,11 +175,16 @@ exec-subprocess = ["execution", "rto-exec/exec-subprocess"]
 # embeds and the licence duties they carry.
 #
 # It pulls in `exec-subprocess` for a reason that is CLI plumbing, not policy:
-# `security prefetch|status|run` are all gated on that feature today, and the
-# sandboxed backend needs the same provisioning surface. Enabling it does **not**
-# enable unsandboxed runs — those still require `--allow-unsandboxed` per
-# invocation, and still record `isolation=none`. Worth untangling when the
-# `security` command's feature gates are next revisited.
+# `security run` is gated on that feature, and the sandboxed backend needs the
+# same command. (`prefetch` and `status` are **not** — they moved to `execution`
+# in the provisioning/execution split, and this comment kept saying all three
+# afterwards. That gating is load-bearing now: `rto-exec/build.rs` tells a
+# first-time installer that `cargo install roteiro` alone can provision the
+# runtime *because* `prefetch` sits behind a default feature, so the two must not
+# drift apart again.) Enabling it does **not** enable unsandboxed runs — those
+# still require `--allow-unsandboxed` per invocation, and still record
+# `isolation=none`. Worth untangling when the `security` command's feature gates
+# are next revisited.
 exec-boxlite = ["exec-subprocess", "rto-exec/exec-boxlite"]
 mcp = ["rto-render/mcp", "dep:tokio"]
 # The interactive workspace explorer's read-only `/v1/graph/*` JSON API, off by
