@@ -102,12 +102,12 @@ fn a_sweep_that_keeps_nothing_still_costs_the_live_set_no_hits() {
 
     let swept = sweep_superseded(&cache, 0).expect("sweep");
     assert_eq!(
-        (swept.removed, swept.failed, swept.raced),
+        (swept.sweep.removed, swept.sweep.failed, swept.sweep.raced),
         (0, 0, 0),
         "nothing at the current generation is superseded: {swept:?}",
     );
-    assert_eq!(swept.retained, 3, "{swept:?}");
-    assert!(swept.retained_bytes > 0, "{swept:?}");
+    assert_eq!(swept.sweep.retained, 3, "{swept:?}");
+    assert!(swept.sweep.retained_bytes > 0, "{swept:?}");
     assert_eq!(
         keys(&cache),
         live,
@@ -181,7 +181,11 @@ fn a_superseded_generation_is_reclaimed_and_neither_live_namespace_is() {
 
     let swept = sweep_superseded(&cache, DEFAULT_KEEP_GENERATIONS).expect("sweep");
     assert_eq!(
-        (swept.scanned, swept.retained, swept.removed),
+        (
+            swept.sweep.scanned,
+            swept.sweep.retained,
+            swept.sweep.removed
+        ),
         (12, 6, 6),
         "exactly the superseded generation goes: {swept:?}",
     );

@@ -8,6 +8,7 @@
 //! and rebuilt in a single transaction — a deliberately simple DB-write model
 //! for this stage; incremental DB updates can come later.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::cache::{CacheError, ObjectCache, ObjectSweep};
@@ -863,14 +864,95 @@ pub const DEFAULT_KEEP_GENERATIONS: u32 = 1;
 pub fn sweep_superseded(
     cache: &ObjectCache,
     keep_generations: u32,
-) -> Result<ObjectSweep, CacheError> {
-    let oldest_kept = crate::extract::EXTRACT_BASE_VERSION.saturating_sub(keep_generations);
-    cache.sweep(&|key| match key_generation(key) {
+) -> Result<ReclaimReport, CacheError> {
+    let current = crate::extract::EXTRACT_BASE_VERSION;
+    let oldest_kept = current.saturating_sub(keep_generations);
+
+    // The predicate is the only thing that ever classifies an entry, and it runs
+    // exactly once per scanned entry — so tallying here is the one place the
+    // reason for a retention is known, and it costs nothing extra. Counting it
+    // afterwards would mean a second walk, and reconstructing it in the caller
+    // would mean a second copy of this rule.
+    let current_kept = Cell::new(0);
+    let recent_kept = Cell::new(0);
+    let ahead_kept = Cell::new(0);
+    let unrecognised_kept = Cell::new(0);
+    let tally = |counter: &Cell<usize>| counter.set(counter.get() + 1);
+
+    let sweep = cache.sweep(&|key| match key_generation(key) {
         // Not a key this module writes — a foreign or future format. Unreadable
         // is not the same as unreachable, and only one of the two may be deleted.
-        None => true,
-        Some(generation) => generation >= oldest_kept,
-    })
+        None => {
+            tally(&unrecognised_kept);
+            true
+        }
+        Some(generation) if generation > current => {
+            tally(&ahead_kept);
+            true
+        }
+        Some(generation) if generation == current => {
+            tally(&current_kept);
+            true
+        }
+        Some(generation) if generation >= oldest_kept => {
+            tally(&recent_kept);
+            true
+        }
+        Some(_) => false,
+    })?;
+
+    let report = ReclaimReport {
+        kept_current: current_kept.get(),
+        kept_recent: recent_kept.get(),
+        kept_ahead: ahead_kept.get(),
+        kept_unrecognised: unrecognised_kept.get(),
+        sweep,
+    };
+    debug_assert_eq!(
+        report.kept_total(),
+        report.sweep.retained,
+        "every retained entry is retained for exactly one of the four reasons",
+    );
+    Ok(report)
+}
+
+/// What one [`sweep_superseded`] pass did — and, for everything it kept, **why**.
+///
+/// The four `kept_*` counts exist because the retention rule keeps more than the
+/// obvious class, and a summary that named only the obvious one would describe an
+/// irreversible operation inaccurately. They partition [`ObjectSweep::retained`]:
+/// each retained entry falls into exactly one, and their sum is that total.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ReclaimReport {
+    /// The underlying pass: what was scanned, freed, and left on disk.
+    pub sweep: ObjectSweep,
+    /// Kept at **this build's own generation** — the live set, the thing a sweep
+    /// exists to not touch.
+    pub kept_current: usize,
+    /// Kept at an **older** generation still inside the `keep_generations`
+    /// window. Unreachable by this build; deliberate insurance for the binary a
+    /// generation behind that shares this cache (see
+    /// [`DEFAULT_KEEP_GENERATIONS`]).
+    pub kept_recent: usize,
+    /// Kept because it belongs to a generation **ahead** of this build — another
+    /// worktree, or a colleague, running a newer binary against the same shared
+    /// cache. Never swept, which is what stops two binaries of different ages
+    /// taking turns deleting each other's work.
+    pub kept_ahead: usize,
+    /// Kept because `key_generation` could not read a generation out of the key
+    /// at all. Doubt retains, always — but a non-zero count here is worth
+    /// investigating rather than absorbing into a total, because it is either a
+    /// format this build no longer writes or a bug in the parser, and both are
+    /// things a reader would want to know their cache is holding.
+    pub kept_unrecognised: usize,
+}
+
+impl ReclaimReport {
+    /// The four `kept_*` counts summed — equal to [`ObjectSweep::retained`].
+    #[must_use]
+    pub fn kept_total(&self) -> usize {
+        self.kept_current + self.kept_recent + self.kept_ahead + self.kept_unrecognised
+    }
 }
 
 /// The extractor **generation** encoded in a [`cache_key`] key, or `None` if the
@@ -1063,7 +1145,27 @@ mod tests {
         // Keeping one generation back: only `base - 2` is unreachable.
         let swept =
             super::sweep_superseded(&cache, super::DEFAULT_KEEP_GENERATIONS).expect("sweep");
-        assert_eq!(swept.removed, 1, "{swept:?}");
+        assert_eq!(swept.sweep.removed, 1, "{swept:?}");
+        // Retention is not one class, and the report says which. Two entries sit
+        // at this generation (the two namespaces), one behind it, one ahead of
+        // it, and one key that does not parse — each counted under its own
+        // reason, because a summary that folded them together would describe an
+        // irreversible operation inaccurately.
+        assert_eq!(
+            (
+                swept.kept_current,
+                swept.kept_recent,
+                swept.kept_ahead,
+                swept.kept_unrecognised,
+            ),
+            (2, 1, 1, 1),
+            "{swept:?}",
+        );
+        assert_eq!(
+            swept.kept_total(),
+            swept.sweep.retained,
+            "the four reasons must partition the retained total: {swept:?}",
+        );
         assert!(!cache.contains(&ancient));
         for k in [
             &previous,
@@ -1077,7 +1179,7 @@ mod tests {
 
         // Keeping none: the previous generation goes too, and nothing else does.
         let swept = super::sweep_superseded(&cache, 0).expect("sweep");
-        assert_eq!(swept.removed, 1, "{swept:?}");
+        assert_eq!(swept.sweep.removed, 1, "{swept:?}");
         assert!(!cache.contains(&previous));
         for k in [&current, &current_all_features, &future, &foreign] {
             assert!(cache.contains(k), "`{k}` must survive a keep-0 sweep");
@@ -1085,8 +1187,8 @@ mod tests {
 
         // A repeat pass is a no-op: nothing reachable is ever swept "eventually".
         let swept = super::sweep_superseded(&cache, 0).expect("sweep");
-        assert_eq!(swept.removed, 0, "{swept:?}");
-        assert_eq!(swept.retained, 4, "{swept:?}");
+        assert_eq!(swept.sweep.removed, 0, "{swept:?}");
+        assert_eq!(swept.sweep.retained, 4, "{swept:?}");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

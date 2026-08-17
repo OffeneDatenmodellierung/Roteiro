@@ -5150,25 +5150,52 @@ fn first_line(body: &str, max: usize) -> String {
     format!("{head}…")
 }
 
-/// Fetch a node's cached context bundle, or (`--refresh`) reconcile all cached
-/// contexts with the current graph — rebuilding stale ones and pruning entries
-/// for deleted nodes. The cache is dependency-aware: a change to a node or any of
-/// its neighbours invalidates its cached context (see `rto_graph::context`).
-/// One line for what the object-cache sweep reclaimed, naming what it kept as
-/// well as what it freed. Both halves are load-bearing: "0 objects freed" on a
-/// cache holding a single generation is the correct, healthy answer, and reads
-/// as a failure without the retained count beside it.
-fn object_sweep_line(swept: &rto_graph::ObjectSweep) -> String {
+/// What the object-cache sweep reclaimed, and **why it kept what it kept**.
+///
+/// Both halves are load-bearing. "0 objects freed" on a cache holding a single
+/// generation is the correct, healthy answer and reads as a failure without the
+/// retained count beside it — and the retained count is itself four different
+/// things. `sweep_superseded` keeps the live generation, the older generation it
+/// holds as insurance, anything written by a *newer* build sharing this cache,
+/// and every key it could not parse. A summary naming only the first two would
+/// be describing an irreversible operation inaccurately, which is the failure
+/// this project keeps finding: a message that reports a scope it did not act on.
+///
+/// So each class is named and counted, including the zeroes — a count that is
+/// only printed once it is non-zero is a count nobody notices becoming non-zero.
+/// Bytes are reported for the totals only: the split by class would need a second
+/// stat pass over the whole cache, which is not worth it for a status line.
+fn object_sweep_lines(reclaimed: &rto_graph::ReclaimReport) -> String {
+    let swept = &reclaimed.sweep;
+    // Never deleted, and never quietly folded into a total either: an
+    // unrecognised key is either a format this build no longer writes or a bug in
+    // the key parser, and both are things the reader would want to go and look at.
+    let advisory = if reclaimed.kept_unrecognised > 0 {
+        "\n  an unrecognised key is always kept — but it means either a format this build no \
+         longer writes, or a bug in the key parser. Both are worth a look."
+    } else {
+        ""
+    };
     format!(
-        "object cache swept: {} superseded object(s) freed ({}), {} retained ({}) \
-         across the current and previous extractor generation",
+        "object cache swept: {} superseded object(s) freed ({}), {} retained ({})\
+         \n  retained: {} at this build's generation, {} at an older generation kept as \
+         insurance, {} written by a newer build, {} whose key this build does not \
+         recognise{advisory}",
         swept.removed,
         human_bytes(swept.freed_bytes),
         swept.retained,
         human_bytes(swept.retained_bytes),
+        reclaimed.kept_current,
+        reclaimed.kept_recent,
+        reclaimed.kept_ahead,
+        reclaimed.kept_unrecognised,
     )
 }
 
+/// Fetch a node's cached context bundle, or (`--refresh`) reconcile all cached
+/// contexts with the current graph — rebuilding stale ones and pruning entries
+/// for deleted nodes. The cache is dependency-aware: a change to a node or any of
+/// its neighbours invalidates its cached context (see `rto_graph::context`).
 fn run_context(
     ingest: rto_graph::IngestConfig,
     key: Option<String>,
@@ -5218,8 +5245,14 @@ fn run_context(
                     },
                 );
             }
-            if reclaimed.removed > 0 || reclaimed.failed > 0 {
-                eprintln!("{}", object_sweep_line(&reclaimed));
+            // Same rule as the tier sweep above: only when there is something
+            // to say. An unrecognised key counts as something to say — it is the
+            // one class the reader may need to act on.
+            if reclaimed.sweep.removed > 0
+                || reclaimed.sweep.failed > 0
+                || reclaimed.kept_unrecognised > 0
+            {
+                eprintln!("{}", object_sweep_lines(&reclaimed));
             }
         } else {
             println!(
@@ -5236,12 +5269,12 @@ fn run_context(
                      work, and the most-recently-used entry, which is always kept)"
                 );
             }
-            println!("{}", object_sweep_line(&reclaimed));
-            if reclaimed.failed > 0 {
+            println!("{}", object_sweep_lines(&reclaimed));
+            if reclaimed.sweep.failed > 0 {
                 println!(
                     "  {} superseded object(s) could not be deleted — check permissions on \
                      the cache directory",
-                    reclaimed.failed,
+                    reclaimed.sweep.failed,
                 );
             }
         }
