@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.15.0...rto-graph-v1.16.0) - 2026-08-17
+
+### Added
+
+- *(graph)* intent-debt density query (Q1)
+
 ## [1.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.13.0...rto-graph-v1.14.0) - 2026-08-17
 
 ### Fixed
