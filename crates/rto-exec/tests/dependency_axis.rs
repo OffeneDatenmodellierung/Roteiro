@@ -211,6 +211,11 @@ fn the_normalized_report_round_trips_through_the_wire_format() {
 
 /// Whether an `osv-scanner` binary is on `PATH`, printing why not when it is
 /// not.
+///
+/// Gated exactly as its only caller is: without `exec-subprocess` there is no
+/// live test to call it, and an ungated definition is genuinely dead code at
+/// the default feature set.
+#[cfg(feature = "exec-subprocess")]
 fn osv_scanner_available() -> bool {
     match std::process::Command::new("osv-scanner")
         .arg("--version")
@@ -235,6 +240,9 @@ fn osv_scanner_available() -> bool {
 ///
 /// `ROTEIRO_OSV_DB` overrides it, which is how a developer points the live tests
 /// at a database without provisioning the whole asset cache.
+///
+/// Gated with its caller, for the same reason as [`osv_scanner_available`].
+#[cfg(feature = "exec-subprocess")]
 fn pinned_database() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("ROTEIRO_OSV_DB") {
         return Some(std::path::PathBuf::from(dir));
