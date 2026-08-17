@@ -17,7 +17,7 @@ what automating it would take.
 | **SQLite** | `libsqlite3-sys` 0.37.0 (`bundled`), via `rusqlite` 0.39.0 | **3.51.3** | always — the default build | [sqlite.org/cves.html](https://www.sqlite.org/cves.html) |
 | **tree-sitter C runtime** | `tree-sitter` 0.26.12 | tracks the crate version | always — the default build | [tree-sitter/tree-sitter security advisories](https://github.com/tree-sitter/tree-sitter/security/advisories) |
 | **tree-sitter grammars** (18) | each `tree-sitter-<lang>` crate ships generated `parser.c` + hand-written `scanner.c` | tracks each crate version (see `Cargo.lock`) | always — the default build | the individual grammar repositories, mostly under [github.com/tree-sitter](https://github.com/tree-sitter) |
-| **BoringSSL-derived crypto** | `ring` 0.17.14 (C + per-architecture assembly) | tracks the crate version | `serve` + `tls`, via `rustls` | [RustSec](https://rustsec.org/) — see below; upstream [briansmith/ring](https://github.com/briansmith/ring/security) |
+| **BoringSSL-derived crypto** | `ring` 0.17.14 (C + per-architecture assembly) | tracks the crate version | **always — the default build**, via `ureq` → `rustls` under the default `models` and `execution` features; also `serve` + `tls` | [RustSec](https://rustsec.org/) — see below; upstream [briansmith/ring](https://github.com/briansmith/ring/security) |
 
 `llama-cpp-sys-2`'s vendored version is not printed anywhere, so it was resolved
 the long way and is recorded here to save the next person the trip: the crate's
@@ -36,7 +36,7 @@ unevenly. Measured against the RustSec database:
 | llama.cpp | **none** — no advisory names any `llama*` crate | **The real gap.** Upstream has 13 published advisories, including a critical unauthenticated RCE in the RPC backend and repeated heap buffer overflows in GGUF tensor parsing. None of that reaches `cargo audit`. |
 | SQLite | `RUSTSEC-2022-0090` on `libsqlite3-sys`, mirroring CVE-2022-35737 | The proxy has worked at least once. There is no guarantee and no automatic link from an upstream CVE to a Rust advisory. |
 | tree-sitter | advisories exist against *some* grammar crates (`tree-sitter-pkl`, `tree-sitter-perl-next` — neither of which this project uses) | RustSec does file against grammar crates, so coverage is plausible but not systematic. |
-| `ring` | `RUSTSEC-2025-0007`, `-0009`, `-0010` | Well covered. `ring` is maintained as a Rust crate, so its advisories arrive through the normal channel; it is in this register for completeness, not because it is a blind spot. |
+| `ring` | `RUSTSEC-2025-0007`, `-0009`, `-0010` | Well covered. `ring` is maintained as a Rust crate, so its advisories arrive through the normal channel; it is in this register for completeness, not because it is a blind spot. Note that since `models` became a default feature it reaches **every** shipped binary rather than only `serve` builds — which raises the stakes of that coverage without changing its quality. |
 
 llama.cpp is the one that matters. GGUF parsing takes an attacker-supplied file
 and is exactly the surface where the heap overflows keep appearing, and Roteiro

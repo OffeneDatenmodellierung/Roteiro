@@ -57,10 +57,14 @@ extracted from the source, a human decision, or a machine's suggestion.</p>
 vault, and an optional MCP server — are all <em>build outputs of the same graph</em>,
 so <strong>what humans review is exactly what agents query</strong>.</p>
 
-<div class="note"><strong>Offline by default.</strong> The default build needs no network and
-no model download. It is a small, pure-Rust binary. Everything heavier — local
-models, PDF/image ingestion, the model server — is opt-in behind a feature flag,
-and nothing ever touches the network without an explicit <code>[y/N]</code> consent.</div>
+<div class="note"><strong>Offline by default.</strong> The default build makes no network call
+of its own and needs no model to work. It is a small binary that needs no
+C++/cmake toolchain. It includes the whole of <em>preparing</em> to go offline —
+<code>roteiro model pull</code> and <code>roteiro security prefetch</code> — so that needs
+no rebuild. Nothing is ever fetched without an explicit <code>[y/N]</code> consent, and
+<code>security run</code> refuses without <code>--allow-unsandboxed</code> every time.
+Everything heavier — running local models, PDF/image ingestion, the model server, the
+sandboxed analyzer backend — stays opt-in behind a feature flag.</div>
 
 <h2 id="replaces">One graph, not a stack of tools</h2>
 
@@ -148,14 +152,15 @@ Both are build-outputs — regenerate either locally at any commit with
 <p>Roteiro is a Rust workspace (MSRV 1.94). Install the lean default build from
 crates.io, or build from source with the feature tiers you want.</p>
 
-<pre><code><span class="c"># Lean, fully-offline default build (--locked uses the published lockfile)</span>
+<pre><code><span class="c"># Lean default build — pure Rust, no network call of its own,</span>
+<span class="c"># and `roteiro model pull` included (--locked uses the published lockfile)</span>
 cargo install roteiro --locked
 
 <span class="c"># Pin a specific release</span>
 cargo install roteiro@1.1.0 --locked
 
 <span class="c"># Pick the capabilities you want</span>
-cargo install roteiro --features "inference,models,mcp" --locked
+cargo install roteiro --features "inference,mcp" --locked
 
 <span class="c"># Everything on — MCP, serving, local models, PDF/OCR/vision.</span>
 <span class="c"># Needs a C/C++ toolchain (the inference-local-models/serve/image-vision features build llama.cpp).</span>
@@ -169,11 +174,13 @@ cargo build --release --all-features</code></pre>
 <h3>Feature tiers</h3>
 <table>
 <tr><th>Feature</th><th>Adds</th></tr>
-<tr><td><em>(default)</em></td><td>Graph build, query, check, render — offline, no models, smallest binary.</td></tr>
+<tr><td><em>(default)</em></td><td>Graph build, query, check, render, the <code>roteiro model</code> registry, and <code>roteiro security ingest|list|prefetch|status|run</code> — smallest binary, no C++/cmake toolchain, and no network call unless you consent to a <code>pull</code> or a <code>prefetch --allow-download</code>.</td></tr>
 <tr><td><code>inference</code></td><td><code>roteiro infer</code> / <code>duplicates</code> with a pure-Rust hashing embedder. Still fully offline; no download.</td></tr>
-<tr><td><code>models</code></td><td>The <code>roteiro model</code> registry: list and consent-gated <code>pull</code> of local models.</td></tr>
+<tr><td><code>models</code> <em>(default)</em></td><td>The <code>roteiro model</code> registry: list and consent-gated <code>pull</code> of local models. On by default — <code>pull</code> is the prerequisite for working offline, so a stock install has it.</td></tr>
 <tr><td><code>inference-local-models</code></td><td>Run pulled GGUF embedding &amp; generative models via the shared llama.cpp engine.</td></tr>
 <tr><td><code>pdf-text</code> · <code>image-ocr</code> · <code>image-vision</code></td><td>Ingest text from PDFs, OCR text from images, and describe images with a local vision model.</td></tr>
+<tr><td><code>exec-subprocess</code> <em>(default)</em></td><td>Runs an analyzer (<code>semgrep</code>, <code>osv-scanner</code>, <code>cargo audit</code>) as a child process on this host. You install the analyzer; Roteiro never does. No isolation boundary, so <strong>every run requires <code>--allow-unsandboxed</code></strong> and records <code>isolation=none</code>. Use <code>--no-default-features --features execution</code> for a build that provisions and ingests but cannot execute.</td></tr>
+<tr><td><code>exec-boxlite</code></td><td>The same analyzers inside a digest-pinned OCI image in a microVM — read-only worktree, no egress. Needs <code>protoc</code> and a provisioned runtime; see the README.</td></tr>
 <tr><td><code>serve</code></td><td>An OpenAI-compatible <code>/v1</code> model endpoint over your installed models (llama.cpp).</td></tr>
 <tr><td><code>mcp</code></td><td>The MCP graph server, exposing the graph to AI agents (stdio or HTTP).</td></tr>
 <tr><td><code>--all-features</code></td><td>Every capability above at once — the largest build. Requires a C/C++ toolchain because the serving and vision features compile llama.cpp.</td></tr>

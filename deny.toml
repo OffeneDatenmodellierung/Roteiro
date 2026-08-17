@@ -44,8 +44,20 @@
 # is owed:
 #
 # * It entered for **`webpki-roots`** — Mozilla's CA root store, pulled in by
-#   `ureq` under the opt-in `models` feature, which is what fetches GGUF models
-#   with consent. It is the trust anchor for those HTTPS downloads.
+#   `ureq` under the `models` feature, which is what fetches GGUF models with
+#   consent. It is the trust anchor for those HTTPS downloads.
+# * **Scope update — `models` is now a default feature.** When this rationale was
+#   written `models` was opt-in, so `CDLA-Permissive-2.0` reached only builds that
+#   asked for it; it now reaches **every** shipped `roteiro` binary, along with
+#   `ISC` (`rustls-webpki`, `untrusted`, and the ISC half of `ring`'s
+#   `Apache-2.0 AND ISC`) and `BSD-3-Clause` (`subtle`). Nothing was added to the
+#   allow-list for that and nothing needed to be — all four were already allowed,
+#   and the reasoning above never depended on the feature being opt-in: it turns
+#   on what the licence obliges, not on how many people receive it. Recorded here
+#   because the *blast radius* of the entry changed even though the entry did not,
+#   and a future reader comparing this file against ADR-0017 should not have to
+#   reconstruct that. The `pathrs` entry below still says "a default build never
+#   sees it" — that remains true; `exec-boxlite` did not change.
 # * **It licenses data, not code.** The crate is a single generated `src/lib.rs`
 #   that is a table of CA certificates derived from the Common CA Database; the
 #   crate's own README states the data "is used via the CCADB Data Usage Terms"
@@ -68,7 +80,8 @@
 #
 # Revisit if `webpki-roots` relicenses, if the obligation in §2.1 stops being
 # satisfiable by shipping the crate's `LICENSE`, or if the `models` feature stops
-# needing a bundled root store.
+# needing a bundled root store. Now that `models` is a default feature, the first
+# two of those would affect every release rather than an opt-in build.
 #
 # ## `pathrs` — the second MPL-2.0 crate, re-examined as this file requires
 #
