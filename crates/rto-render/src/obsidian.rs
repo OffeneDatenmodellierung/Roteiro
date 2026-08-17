@@ -6,8 +6,10 @@
 //! `meta.content` (doc comments, prose, PDF/image text) as the knowledge base,
 //! show an ADR's status, and (when the repository's web host is known) a
 //! clickable **Source** link to the file. A generated `_Home` note is the overview: what was
-//! scanned, counts by kind, provenance breakdown, ADR statuses, intent-debt, and
-//! the most depended-on symbols by directed call fan-in.
+//! scanned, counts by kind, provenance breakdown, ADR statuses, intent-debt (with
+//! the files it is densest in), an inventory of secret-**named** config keys and
+//! their redaction state, and the most depended-on symbols by directed call
+//! fan-in.
 //! Built from the same [`Explanation`] the query surface returns, so the vault
 //! and the CLI agree.
 
@@ -193,6 +195,27 @@ pub struct AdrEntry {
     pub status: Option<String>,
 }
 
+/// The `_Home` overview's config-secret inventory figures.
+///
+/// Counts and file paths only — deliberately not the key names, which belong in
+/// `roteiro config-secrets` where the caveat can be stated at length. A vault note
+/// is read casually and out of context, which is exactly the wrong place for a
+/// list that looks like a secret scan's output.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigSecretSummary {
+    /// Config keys whose **name** matched the secret-name heuristic.
+    pub secret_named: usize,
+    /// Of those, how many had their value redacted before persistence.
+    pub redacted: usize,
+    /// Of those, how many are declared in code with no literal value.
+    pub declared: usize,
+    /// Of those, how many carry an unredacted value. Expected to be zero.
+    pub unredacted: usize,
+    /// Distinct files carrying at least one secret-named key, ordered and capped
+    /// by the caller.
+    pub files: Vec<String>,
+}
+
 /// One file in the `_Home` overview's intent-debt density table.
 #[derive(Debug, Clone)]
 pub struct DensityEntry {
@@ -240,6 +263,11 @@ pub struct VaultSummary {
     /// capped by the caller. Empty when the graph has no markers, or when no
     /// file carrying one has a recorded length.
     pub densest_files: Vec<DensityEntry>,
+    /// Secret-named config keys and their redaction state. `None` when the graph
+    /// holds no secret-named config key — the section is then absent rather than
+    /// rendering a row of zeroes, which would read as a clean bill of health this
+    /// lens cannot give.
+    pub config_secrets: Option<ConfigSecretSummary>,
     /// The most depended-on symbols by **directed** call fan-in, already ranked
     /// and capped by the caller. Empty when the graph has no `calls` edges.
     pub most_called: Vec<CouplingEntry>,
@@ -346,6 +374,45 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
         }
     }
 
+    if let Some(cs) = &s.config_secrets {
+        c.push_str("\n## Config keys named like secrets\n\n");
+        let _ = writeln!(
+            c,
+            "**{}** secret-named config key(s): {} redacted before storage, {} \
+             declared in code without a value, {} unredacted.",
+            cs.secret_named, cs.redacted, cs.declared, cs.unredacted
+        );
+        if cs.unredacted > 0 {
+            let _ = writeln!(
+                c,
+                "\n> [!warning] {} key(s) carry an **unredacted** value. Extraction \
+                 always redacts, so these came from an import layer — inspect the \
+                 importing tool, not this repository.",
+                cs.unredacted
+            );
+        }
+        if !cs.files.is_empty() {
+            c.push_str("\nIn:\n");
+            for path in &cs.files {
+                let _ = writeln!(c, "- [[{}\\|{path}]]", note_name(&format!("file:{path}")));
+            }
+        }
+        // The caveat is unconditional and comes last, so it is the final thing read
+        // in this section. A vault note is browsed out of context; this is exactly
+        // where "config keys named like secrets" would otherwise be misread as a
+        // secret scan that came back clean.
+        c.push_str(
+            "\n*An inventory of config keys whose **names** look secret, not a secret \
+             scan. Values are redacted before they are stored, so this reports that \
+             such keys exist and were redacted — never a value. It cannot see a \
+             hardcoded credential in source code, cannot judge whether a value is \
+             valid, and cannot tell a real secret from a placeholder. A credential \
+             under an innocuous key name (`dsn`, `endpoint`) does not appear here at \
+             all, so this section being small says nothing about whether this \
+             repository leaks secrets.*\n",
+        );
+    }
+
     if !s.most_called.is_empty() {
         c.push_str(
             "\n## Most depended-on (call fan-in)\n\n\
@@ -387,8 +454,8 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdrEntry, CouplingEntry, DensityEntry, HOME_NOTE, VaultSummary, note_name, render_home,
-        render_note,
+        AdrEntry, ConfigSecretSummary, CouplingEntry, DensityEntry, HOME_NOTE, VaultSummary,
+        note_name, render_home, render_note,
     };
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
 
@@ -543,6 +610,13 @@ mod tests {
                 lines: 120,
                 per_kloc: 25.0,
             }],
+            config_secrets: Some(ConfigSecretSummary {
+                secret_named: 4,
+                redacted: 3,
+                declared: 1,
+                unredacted: 0,
+                files: vec![".env".into()],
+            }),
             most_called: vec![CouplingEntry {
                 key: "sym:rust:a.rs#helper".into(),
                 name: "helper".into(),
@@ -585,6 +659,33 @@ mod tests {
             note.content.contains("not source lines of code"),
             "the denominator caveat travels with the figures"
         );
+        // Config secrets: counts and files, and no key names — a vault note is
+        // browsed out of context, which is the wrong place for a list that would
+        // read as a secret scan's output.
+        assert!(
+            note.content.contains(
+                "**4** secret-named config key(s): 3 redacted before storage, 1 \
+                 declared in code without a value, 0 unredacted."
+            ),
+            "{}",
+            note.content
+        );
+        assert!(
+            note.content.contains("- [[file-.env\\|.env]]"),
+            "{}",
+            note.content
+        );
+        assert!(
+            note.content.contains("not a secret scan")
+                && note.content.contains("cannot see a hardcoded credential"),
+            "the limitation travels with the figures: {}",
+            note.content
+        );
+        assert!(
+            !note.content.contains("[!warning]"),
+            "no warning when nothing is unredacted: {}",
+            note.content
+        );
         // A repository link + short-commit permalink note.
         assert!(
             note.content
@@ -613,6 +714,52 @@ mod tests {
         // to it, not a replacement.
         assert!(note.content.contains("## Intent debt"));
         assert!(note.content.contains("*None recorded.*"));
+    }
+
+    #[test]
+    fn render_home_omits_config_secrets_rather_than_rendering_zeroes() {
+        // A row of zeroes under this heading would read as "scanned, and clean" —
+        // a conclusion the lens cannot support, since a credential under an
+        // innocuous key name never appears in it. The section is absent instead.
+        let note = render_home(&VaultSummary {
+            project: "clean".into(),
+            total_nodes: 1,
+            ..VaultSummary::default()
+        });
+        assert!(
+            !note.content.contains("named like secrets"),
+            "no heading without figures: {}",
+            note.content
+        );
+    }
+
+    #[test]
+    fn render_home_warns_loudly_about_an_unredacted_value() {
+        // Extraction cannot produce this state, so if it appears something else
+        // put an unredacted value in the store — and the note must say where to
+        // look rather than implicating the repository.
+        let note = render_home(&VaultSummary {
+            project: "imported".into(),
+            total_nodes: 1,
+            config_secrets: Some(ConfigSecretSummary {
+                secret_named: 1,
+                redacted: 0,
+                declared: 0,
+                unredacted: 1,
+                files: vec!["imported.env".into()],
+            }),
+            ..VaultSummary::default()
+        });
+        assert!(
+            note.content.contains("[!warning]") && note.content.contains("**unredacted**"),
+            "{}",
+            note.content
+        );
+        assert!(
+            note.content.contains("came from an import layer"),
+            "and it points at the importing tool, not the repository: {}",
+            note.content
+        );
     }
 
     #[test]

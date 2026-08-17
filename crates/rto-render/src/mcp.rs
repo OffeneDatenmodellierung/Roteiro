@@ -7,7 +7,8 @@
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
 //! same tools — `search`, `explain`, `list_kind`, `path`, `debt`,
-//! `debt_density`, `coupling`, and `list_projects` — as thin wrappers over the
+//! `debt_density`, `coupling`, `config_secrets`, and `list_projects` — as thin
+//! wrappers over the
 //! matching [`rto_graph`] query primitives, so agents and the CLI see the same
 //! graph. Each tool takes an optional `project` selector for a multi-repo
 //! workspace (ADR-0008). See ADR-0002 for the decision to adopt `rmcp`.
@@ -115,6 +116,17 @@ struct DensityArgs {
     /// Shortest file that may be ranked (default 50; `0` ranks every file).
     #[serde(default)]
     min_lines: Option<u32>,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Arguments for the `config_secrets` tool.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct ConfigSecretArgs {
+    /// Max keys to return (default 50, capped at 200).
+    #[serde(default)]
+    limit: Option<u32>,
     /// Which hosted project to query (see `list_projects`); omit if single.
     #[serde(default)]
     project: Option<String>,
@@ -322,6 +334,38 @@ impl GraphServer {
         }))
     }
 
+    /// Inventory secret-named config keys and their redaction state.
+    #[tool(
+        description = "Inventory the SECRET-NAMED config keys in the graph: their file \
+                          paths, their key names, and whether each value was redacted \
+                          before being stored (`state` = redacted | declared | present). \
+                          Answers \"which of this repo's config surfaces deal in \
+                          credentials\" and \"did anything unredacted get into this \
+                          graph\". Args: limit. \
+                          THIS IS NOT A SECRET SCANNER — state the limits when you \
+                          report it, and never imply a security guarantee. It CANNOT \
+                          find a hardcoded credential in source code: it reads config-key \
+                          nodes, so a token in a Rust or Python string literal produces \
+                          nothing here and is invisible. It CANNOT judge whether a value \
+                          is valid, because it never sees one — values are redacted \
+                          before they reach the store. It CANNOT tell a real secret from \
+                          a placeholder: `API_TOKEN=changeme` in a committed \
+                          `.env.example` and a live token are the same row. And an EMPTY \
+                          RESULT DOES NOT MEAN THERE ARE NO SECRETS — it means no config \
+                          key is secret-NAMED; a credential under an innocuous key like \
+                          `dsn` or `endpoint` never appears. If asked to scan for \
+                          secrets, say plainly that this tool cannot do it."
+    )]
+    async fn config_secrets(
+        &self,
+        Parameters(args): Parameters<ConfigSecretArgs>,
+    ) -> CallToolResult {
+        let limit = usize::try_from(args.limit.unwrap_or(50).clamp(1, 200)).unwrap_or(50);
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            rto_graph::config_secrets(store, limit)
+        }))
+    }
+
     /// Rank nodes by directed call coupling (fan-in / fan-out).
     #[tool(
         description = "Rank symbols by DIRECTED call coupling over `calls` edges: `fan_in` \
@@ -381,7 +425,9 @@ impl ServerHandler for GraphServer {
              `explain` a key for its provenance-labelled neighbourhood. `list_kind` \
              enumerates a kind, `path` finds how two nodes connect, `debt` lists \
              intent-debt markers, `debt_density` ranks files by markers per 1,000 \
-             lines, and `coupling` ranks symbols by directed call fan-in/fan-out."
+             lines, `coupling` ranks symbols by directed call fan-in/fan-out, and \
+             `config_secrets` inventories secret-named config keys (an inventory, \
+             not a secret scan — see its description)."
                 .into(),
         );
         info
@@ -458,8 +504,8 @@ pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), Mcp
 #[cfg(test)]
 mod tests {
     use super::{
-        CouplingArgs, DebtArgs, DensityArgs, ExplainArgs, GraphServer, ListKindArgs, PathArgs,
-        SearchArgs,
+        ConfigSecretArgs, CouplingArgs, DebtArgs, DensityArgs, ExplainArgs, GraphServer,
+        ListKindArgs, PathArgs, SearchArgs,
     };
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
@@ -478,8 +524,22 @@ mod tests {
         let mut file = Node::new("file:a.rs", NodeKind::File, "a.rs");
         file.path = Some("a.rs".into());
         file.meta = serde_json::json!({ "bytes": 2000, "lines": 100 });
+        // A secret-named config key, redacted by extraction, plus one that is not
+        // secret-named — the `config_secrets` inventory's two cases.
+        let cfg = |dotted: &str, value: &str| {
+            let mut n = Node::new(
+                format!("cfgkey:.env#{dotted}"),
+                NodeKind::Other("config_key".to_owned()),
+                dotted,
+            );
+            n.path = Some(".env".into());
+            n.meta = serde_json::json!({ "key": dotted, "value": value });
+            n
+        };
         let facts = FactSet::new()
             .with_node(file)
+            .with_node(cfg("API_TOKEN", "<redacted>"))
+            .with_node(cfg("PORT", "8017"))
             .with_node(Node::new("sym:rust:a.rs#main", NodeKind::Fn, "main"))
             .with_node(Node::new("sym:rust:a.rs#helper", NodeKind::Fn, "helper"))
             .with_node(marker)
@@ -649,6 +709,53 @@ mod tests {
             .await;
         assert_eq!(out.is_error, Some(true), "{out:?}");
         assert!(text_of(&out).contains("unknown order `count`"), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn config_secrets_tool_reports_presence_and_state_never_a_value() {
+        let out = text_of(
+            &seeded()
+                .config_secrets(Parameters(ConfigSecretArgs::default()))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["config_keys"], 2, "the population: {json}");
+        assert_eq!(json["secret_named"], 1, "only `API_TOKEN` is: {json}");
+        assert_eq!(json["redacted"], 1);
+        assert_eq!(json["unredacted"], 0);
+        assert_eq!(json["items"][0]["name"], "API_TOKEN");
+        assert_eq!(json["items"][0]["path"], ".env");
+        assert_eq!(json["items"][0]["state"], "redacted");
+
+        // Nothing a model could mistake for a value reaches the tool result.
+        assert!(
+            json["items"][0].get("value").is_none() && !out.contains("<redacted>"),
+            "the tool reports presence and state, never a value: {out}"
+        );
+    }
+
+    #[test]
+    fn config_secrets_tool_description_refuses_the_scanner_reading() {
+        // The rename is load-bearing, and a model only sees the description. Each
+        // limitation must be stated where the model will read it, not only in the
+        // Rust doc comment.
+        let server = seeded();
+        let tool = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "config_secrets")
+            .expect("`config_secrets` advertised");
+        let desc = tool.description.as_deref().unwrap_or_default();
+        for claim in [
+            "NOT A SECRET SCANNER",
+            "CANNOT find a hardcoded credential in source code",
+            "never sees one",
+            "real secret from a placeholder",
+            "EMPTY RESULT DOES NOT MEAN THERE ARE NO SECRETS",
+        ] {
+            assert!(desc.contains(claim), "missing `{claim}` from: {desc}");
+        }
     }
 
     #[tokio::test]
