@@ -1756,20 +1756,29 @@ binds a callee by simple name across every `Fn` node regardless of language, and
 no FFI is extracted. That is why Q3 offers no CI gate. Fixing it is extraction
 work, so it batches with Q2 and Q10 or it is paid for twice.
 
-### Now scheduled as Stages 33–35
+### Stages 33–35 — status
 
-Formerly scoped-but-unrecorded; added to the roadmap by decision. Summarised here
-because §8b is where a reader looks for what outlives the current stage — the
-stages themselves carry the detail:
+Formerly scoped-but-unrecorded, added to the roadmap by decision, and since
+largely delivered. Summarised here because §8b is where a reader looks for what
+outlives the current stage — the stages themselves carry the detail:
 
-- **Stage 33 — local model resolution.** Closes a user-facing gap on its own
-  merits: a project cannot pin its ASR model today. No network, no new
-  dependency, no ADR.
-- **Stage 34 — remote model tier.** **Blocked on ADR-0019**, which must amend
-  ADR-0006, invert ADR-0007's precedence for one key, and exempt principle 10.
-  Not startable until that ADR is accepted.
-- **Stage 35 — `roteiro review` LLM mode.** Depends on Stage 33. Gives the
-  26-comment adjudicated corpus a consumer before it rots.
+- **Stage 33 — local model resolution.** ✅ **Delivered** (v1.17.0). `[models]`
+  now takes `vision`, `audio` and `ocr`, so a project *can* pin its ASR model.
+  Enumeration found **nine** call sites, not the seven predicted — including the
+  extraction cache key, which folded the OCR model *by name* and would have made
+  `[models] ocr` the one pin that changes what is extracted without invalidating
+  what was extracted before it.
+- **Stage 34 — remote model tier.** 🔶 **Part 1 of 2 delivered.** ADR-0019 is
+  **Accepted**, so it is unblocked, not gated. Part 1 landed the consent gate,
+  the payload allow-list and the egress record **with no transport in the tree**
+  — the guard before the thing it guards, which is ADR-0019 §4's own argument.
+  Part 2 owes the transport, the TTY grant, the `ModelSource::Remote` resolver
+  amendment, and the README/website promise amendments **on the commit that makes
+  them false**.
+- **Stage 35 — `roteiro review` LLM mode.** 🔶 **35a delivered.** The corpus has
+  an instrument — `roteiro review --score`, per-class recall, `compile_claim` —
+  but **no reviewer and no verdict**. 35b is the reviewer, and *"do not build
+  this"* remains a legitimate outcome of measuring one.
 
 ---
 
