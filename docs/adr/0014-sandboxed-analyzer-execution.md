@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
-last-modified: 2026-08-15
+version: "1.3"
+last-modified: 2026-08-17
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Security Tooling |
-| **Document version** | 1.1 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -187,6 +187,55 @@ An optional feature that pulls images or refreshes advisory databases must not b
 described as "offline"; it is **offline-capable once provisioned**, and the docs
 must say so in those words.
 
+### The sandbox runtime: verified where it enters the artifact
+
+`boxlite` compiled from crates.io does not build a hypervisor. Its own build
+script fetches a prebuilt runtime tarball with a bare `curl -fsSL`, extracts it,
+and `include_bytes!`s **the extracted files** into the rlib. That fetch verifies
+nothing. This is the largest single trust decision in the feature, so it is
+recorded here rather than left to a build script's comments.
+
+**What is verified, and where.** The extracted files, against per-file SHA-256
+digests, in `rto-exec`'s build script, before anything links. A digest mismatch,
+a missing pinned file, or an unpinned extra file stops the build — the last of
+those because `boxlite` embeds *every* regular file in that directory, so an
+extra file there is an extra file in the binary. The pins are **derived** from
+the pinned archives by `scripts/derive-runtime-file-pins.py`, which verifies each
+archive against its own digest before opening it; nobody hand-writes one.
+
+**Why not before the download.** Because Roteiro cannot get in front of it.
+`boxlite`'s build script reads `BOXLITE_RUNTIME_URL` from its own environment,
+and cargo runs it *before* `rto-exec`'s — a build script cannot set an
+environment variable for a dependency's build script. Verifying an archive and
+assuming `boxlite` consumed it was the previous arrangement; it checked a file
+the build was never obliged to use.
+
+**The trade, which is real.** Verification moved from before the download to
+after extraction. On the default path a malicious archive is therefore unpacked
+on the build machine before anything inspects it, and the check only ever
+inspects the runtime directory — a member escaping it (`../`, symlink traversal)
+is outside what these digests speak for. Both `tar` implementations in play
+refuse such members by default and the transport is TLS to a pinned release URL,
+so the window is narrow; it is not zero, and anyone asking "why check *after*?"
+is entitled to find this paragraph.
+
+**Consent and disclosure.** Enabling `exec-boxlite` — directly or via
+`--all-features` — **is** the consent for that fetch, on the same terms as every
+other optional capability here. The disclosure rides `cargo:warning=`, which
+cargo displays for a dependency's build script on success, on both `cargo build`
+and `cargo install` (verified on 1.97.1; a plain `eprintln!` is **not** shown, so
+the choice of channel is load-bearing). The build says that it fetched, from
+where, that the extracted files were verified and how many, that GPL-2.0 and
+LGPL-2.0 binaries are being embedded, and what to run for a build that touches
+no network.
+
+**The no-egress path stays.** `BOXLITE_RUNTIME_URL` pointing at a `file://` copy
+provisioned by `roteiro security prefetch --analyzer sandbox --allow-download`
+verifies the archive *before* extraction as well as after, and `boxlite`'s `curl`
+then opens no socket. That is what an air-gapped or egress-controlled build
+should use, and CI uses it. Neither path may be described as the other: the
+default is **verified but not offline**; the strict path is both.
+
 ### CI implications
 
 CI is Ubuntu-only with `--all-features`, so `exec-boxlite` must not make
@@ -240,3 +289,4 @@ than a packaging problem.
 | 1.0 | 2026-08-15 | Initial: the seam, the three backends, boxlite chosen, the provisioning and degradation contract. |
 | 1.1 | 2026-08-15 | Clarified what `prefetch` "fetches": as Stage 22 shipped it, it verifies and pins but downloads nothing, because neither shipped asset is a digest-stable download. The pinned-before-use, never-implicit and no-host-fallback obligations are unchanged. See [[docs/adr/0018-analyzer-coverage-matrix.md]]. |
 | 1.2 | 2026-08-16 | **`exec-subprocess` joins the default feature set, and provisioning leaves it.** Two changes with one motive — a stock install should be able to prepare itself for offline work. (a) `security prefetch\|status` move from `exec-subprocess` to `execution`: they execute nothing (every `Command::new` in `rto-exec` is in `subprocess.rs`/`boxlite.rs`), the asset module was already shared between backends and owned by neither, and gating provisioning on a backend made the boxlite bootstrap circular. (b) `exec-subprocess` becomes a default, so `security run` ships in a stock install. **This retires half of v1.0's justification and the remaining half must not be weakened.** v1.0 defended the subprocess backend as "asked for at build time **as well as** consented to per run"; the build-time half no longer applies to a default install. What remains — and is unchanged, deliberately — is that `--allow-unsandboxed` is required on **every** invocation, that the run records `isolation=none`, that a cold asset cache refuses rather than fetching, and that Roteiro never installs the analyzer, so an operator has already chosen to have `semgrep`/`osv-scanner` on `PATH`. The flag is now the only gate; do not soften it for consistency with the build-time one that went away. `--no-default-features --features execution` remains a build that provisions and ingests but cannot execute. |
+| 1.3 | 2026-08-17 | **The sandbox runtime is verified where it enters the artifact: the extracted files, not the archive.** `boxlite`'s own build script is what fetches, it reads `BOXLITE_RUNTIME_URL` from its own environment, and cargo runs it before `rto-exec`'s — so requiring that variable could never have been what kept the fetch honest, only what kept the build from completing. Measured: with the build script patched to proceed and the variable unset, the build succeeds and `boxlite` embeds 58.4 MB fetched over the network while the verified local archive is never opened. `rto-exec/build.rs` now verifies every file in `DEP_BOXLITE_RUNTIME_DIR` against per-file digests derived from the pinned archives (`scripts/derive-runtime-file-pins.py`), refusing a mismatch, a missing file, an unpinned extra file, or a runtime that was never extracted. **The guarantee is unchanged in strength and now attaches to the bytes that are actually built in** — but it is taken after extraction rather than before the download, and that trade, including the residual path-traversal exposure it opens on the default path, is stated in full above rather than left implicit. Enabling `exec-boxlite` (or `--all-features`) is the consent for the fetch; the disclosure rides `cargo:warning=`, which cargo shows for a dependency's build script on success under both `cargo build` and `cargo install`. `BOXLITE_RUNTIME_URL` remains the strict, no-egress path and is what CI uses. |

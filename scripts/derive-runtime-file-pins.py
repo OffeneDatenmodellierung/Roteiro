@@ -165,6 +165,12 @@ def members(target: str, body: bytes, cache: Path) -> list[tuple[str, str, int]]
     return sorted(files)
 
 
+def grouped(size: int) -> str:
+    """`26_520_984` — the form clippy's `unreadable_literal` asks for, and the
+    form `runtime_pins.rs` already writes its sizes in by hand."""
+    return f"{size:_}"
+
+
 def render(version: str, derived: list[tuple[str, dict[str, object], list[tuple[str, str, int]]]]) -> str:
     out = [
         "// GENERATED FILE — do not edit by hand.",
@@ -229,7 +235,7 @@ def render(version: str, derived: list[tuple[str, dict[str, object], list[tuple[
             out.append("            PinnedFile {")
             out.append(f'                name: "{name}",')
             out.append(f'                sha256: "{sha256}",')
-            out.append(f"                bytes: {size},")
+            out.append(f"                bytes: {grouped(size)},")
             out.append("            },")
         out.append("        ],")
         out.append("    },")

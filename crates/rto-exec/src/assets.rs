@@ -226,9 +226,21 @@ pub static ASSETS: &[AssetSpec] = &[
     AssetSpec {
         id: crate::runtime_pins::RUNTIME_ASSET,
         // Not an analyzer's asset: every analyzer run under the sandboxed
-        // backend needs the same one. No adapter declares it, so `assets_for`
-        // never returns it and `prefetch --analyzer <name>` never selects it;
-        // it is provisioned by a plain `prefetch`, and resolved directly by id.
+        // backend needs the same one, and no adapter declares it — so
+        // `assets_for` never returns it, and it is in no analyzer's asset set.
+        //
+        // That is exactly why `run_security_prefetch` falls back to selecting by
+        // this field when `assets_for` comes back empty: `prefetch --analyzer
+        // sandbox` **does** select this archive, alone, which is what lets
+        // someone bootstrapping `exec-boxlite` obtain it without also fetching
+        // ~260 MB of advisory databases. A plain `prefetch` provisions it too.
+        //
+        // The two clauses after the first used to say the opposite — that
+        // `--analyzer <name>` could never select it — and that outlived the
+        // fallback by long enough to put a wrong recipe in AGENTS.md and to
+        // nearly cost a correct review comment its adjudication (#362). The
+        // behaviour is asserted in `the_sandbox_analyzer_selects_the_runtime_
+        // archive_alone` so the two cannot drift again in silence.
         analyzer: SANDBOX,
         kind: AssetKind::SandboxRuntime,
         source: AssetSource::PinnedArchive {
@@ -1111,8 +1123,8 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASSETS, AssetError, AssetKind, AssetSource, asset, asset_path, assets_for, installed,
-        provision, resolve, status,
+        ASSETS, AssetError, AssetKind, AssetSource, SANDBOX, asset, asset_path, assets_for,
+        installed, provision, resolve, status,
     };
     use crate::runner::ExecError;
     use std::path::PathBuf;
@@ -1168,6 +1180,41 @@ mod tests {
             }
             assert!(!spec.licence.is_empty(), "{} discloses no licence", spec.id);
         }
+    }
+
+    /// `--analyzer sandbox` selects the runtime archive, and selects only it.
+    ///
+    /// Both halves are asserted because the interesting behaviour is the join of
+    /// them: `assets_for` returns nothing for the sandbox — no adapter declares
+    /// the archive — which is what sends `run_security_prefetch` to its
+    /// fallback, and the fallback selects by [`AssetSpec::analyzer`]. If either
+    /// half moved, `prefetch --analyzer sandbox` would quietly start fetching
+    /// either nothing or a quarter-gigabyte of advisory databases, and the
+    /// bootstrap recipe in `build.rs`, `README.md` and `AGENTS.md` would be
+    /// wrong without a single test going red.
+    ///
+    /// That is not hypothetical: the comment on the spec described the
+    /// pre-fallback rule for long enough to ship a wrong recipe and nearly cost
+    /// a correct review comment its adjudication (#362).
+    #[test]
+    fn the_sandbox_analyzer_selects_the_runtime_archive_alone() {
+        assert!(
+            assets_for(SANDBOX).is_empty(),
+            "no adapter should declare the shared runtime; if one does, the fallback in \
+             run_security_prefetch is no longer what selects it"
+        );
+
+        let by_owner: Vec<&str> = ASSETS
+            .iter()
+            .filter(|spec| spec.analyzer == SANDBOX)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(
+            by_owner,
+            vec![crate::runtime_pins::RUNTIME_ASSET],
+            "`prefetch --analyzer sandbox` resolves by owner, so this is exactly what it \
+             provisions — it must be the runtime archive and nothing else"
+        );
     }
 
     /// The sandbox runtime's disclosure must name every licence family in the

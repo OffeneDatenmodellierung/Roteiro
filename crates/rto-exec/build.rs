@@ -42,7 +42,7 @@
 //!   for the strict path.
 //!
 //! Enabling `exec-boxlite` is the consent for the second; the disclosure is what
-//! it buys back. ADR-0014 v1.2 records this.
+//! it buys back. ADR-0014 v1.3 records this.
 //!
 //! # The trade, stated plainly
 //!
@@ -174,17 +174,15 @@ fn main() {
             );
             println!("cargo:rustc-env=ROTEIRO_SANDBOX_RUNTIME_VERSION={RUNTIME_VERSION}");
         }
+        // The body carries its own remediation, because the cases need
+        // different ones: bytes that do not match the pins are a re-pinning
+        // question, and a runtime that was never extracted is not.
         Err(why) => fail(&format!(
-            "the sandbox runtime boxlite extracted is **not** what is pinned.\n\n    \
+            "the sandbox runtime boxlite produced cannot be verified against the pins.\n\n    \
              {dir}\n\n\
              {why}\n\n\
-             These are the files `include_bytes!` puts in this binary, so this stops the \
-             build rather than reporting it. Nothing here is repaired by retrying: either \
-             the bytes boxlite obtained are not the published artifact, or the published \
-             artifact has changed and crates/rto-exec/src/runtime_pins.rs must be re-pinned \
-             and `scripts/derive-runtime-file-pins.py` re-run — deliberately, never widened \
-             to make a build pass.\n\n\
-             To take the network out of it entirely, provision the archive and name it:\n\n    \
+             To take the network out of it entirely, provision the archive and name it — then \
+             the bytes are checked before boxlite is ever handed them:\n\n    \
              roteiro security prefetch --analyzer sandbox --allow-download\n    \
              BOXLITE_RUNTIME_URL=\"file://{provisioned}\" cargo build --features exec-boxlite",
             dir = dir.display(),
@@ -347,79 +345,14 @@ fn verify_extracted(dir: &Path, pinned: &PinnedRuntimeFiles) -> Result<usize, St
         let meta =
             std::fs::symlink_metadata(&path).map_err(|e| format!("cannot stat {name} ({e})"))?;
 
-        if meta.file_type().is_symlink() {
-            // Not embedded — `scan_entries` skips anything that is not a regular
-            // file — so a symlink cannot change the artifact. It is still held to
-            // pointing at a pinned sibling, because a link out of this directory
-            // has no honest reason to be here.
-            match std::fs::read_link(&path) {
-                Ok(target) => {
-                    let target = target.to_string_lossy().into_owned();
-                    if !pinned.files.iter().any(|f| f.name == target) {
-                        problems.push(format!(
-                            "  {name} is a symlink to {target:?}, which is not one of the \
-                             pinned files"
-                        ));
-                    }
-                }
-                Err(e) => problems.push(format!("  {name} is a symlink that cannot be read ({e})")),
+        match check_entry(&name, &path, &meta, pinned) {
+            Entry::Verified => {
+                println!("cargo:rerun-if-changed={}", path.display());
+                seen.push(name);
             }
-            continue;
-        }
-
-        if meta.is_dir() {
-            problems.push(format!(
-                "  {name} is a directory; the runtime directory is flat and nothing pinned \
-                 nests"
-            ));
-            continue;
-        }
-
-        if !meta.is_file() {
-            problems.push(format!("  {name} is neither a regular file nor a symlink"));
-            continue;
-        }
-
-        // boxlite writes this itself after extracting, and excludes it from what
-        // it embeds. Allowed by name, and by nothing wider.
-        if name == BOXLITE_FILE_MANIFEST {
-            continue;
-        }
-
-        let Some(pin) = pinned.files.iter().find(|f| f.name == name) else {
-            problems.push(format!(
-                "  {name} is not pinned, and every regular file here is embedded — so this \
-                 would be built in unverified"
-            ));
-            continue;
-        };
-
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let actual = bytes.len() as u64;
-                let digest = sha256_hex(&bytes);
-                if actual != pin.bytes || digest != pin.sha256 {
-                    problems.push(format!(
-                        "  {name}\n      pinned  sha256 {} ({} bytes)\n      on disk sha256 \
-                         {digest} ({actual} bytes)",
-                        pin.sha256, pin.bytes
-                    ));
-                } else if let Some(mode) = setuid_or_setgid(&meta) {
-                    // The mode itself is not pinned — `tar` applies the process
-                    // umask, so it is a property of the extracting machine rather
-                    // than of the archive. A set-user-ID bit is different: no
-                    // umask adds one, and nothing published here has ever carried
-                    // one.
-                    problems.push(format!(
-                        "  {name} is set-user-ID/set-group-ID (mode {mode:o}); no pinned \
-                         runtime file carries one"
-                    ));
-                } else {
-                    println!("cargo:rerun-if-changed={}", path.display());
-                    seen.push(name);
-                }
-            }
-            Err(e) => problems.push(format!("  {name} cannot be read ({e})")),
+            // boxlite's own manifest: present, not embedded, not pinned.
+            Entry::Ignored => {}
+            Entry::Problem(why) => problems.push(format!("  {why}")),
         }
     }
 
@@ -439,10 +372,106 @@ fn verify_extracted(dir: &Path, pinned: &PinnedRuntimeFiles) -> Result<usize, St
     }
     problems.sort();
     Err(format!(
-        "{} of the extracted file(s) did not check out:\n\n{}",
+        "{} of the extracted file(s) did not check out:\n\n{}\n\n\
+         These are the files `include_bytes!` puts in this binary, so this stops the build \
+         rather than reporting it. Nothing here is repaired by retrying: either the bytes \
+         boxlite obtained are not the published artifact, or the published artifact has \
+         changed and crates/rto-exec/src/runtime_pins.rs must be re-pinned and \
+         `scripts/derive-runtime-file-pins.py` re-run — deliberately, never widened to make a \
+         build pass.",
         problems.len(),
         problems.join("\n")
     ))
+}
+
+/// What one entry of the runtime directory turned out to be.
+enum Entry {
+    /// A pinned file, and its bytes match.
+    Verified,
+    /// Present, but not part of what gets embedded and not pinned.
+    Ignored,
+    /// Anything else, and why.
+    Problem(String),
+}
+
+/// Classify one entry of `boxlite`'s runtime directory.
+///
+/// Split out of [`verify_extracted`] so that the walk stays readable, and
+/// because every arm here is a rule someone may later want to argue with: they
+/// are easier to argue with in one place.
+fn check_entry(
+    name: &str,
+    path: &Path,
+    meta: &std::fs::Metadata,
+    pinned: &PinnedRuntimeFiles,
+) -> Entry {
+    if meta.file_type().is_symlink() {
+        // Not embedded — `scan_entries` skips anything that is not a regular
+        // file — so a symlink cannot change the artifact. It is still held to
+        // pointing at a pinned sibling, because a link out of this directory has
+        // no honest reason to be here.
+        return match std::fs::read_link(path) {
+            Ok(target) => {
+                let target = target.to_string_lossy().into_owned();
+                if pinned.files.iter().any(|f| f.name == target) {
+                    Entry::Ignored
+                } else {
+                    Entry::Problem(format!(
+                        "{name} is a symlink to {target:?}, which is not one of the pinned files"
+                    ))
+                }
+            }
+            Err(e) => Entry::Problem(format!("{name} is a symlink that cannot be read ({e})")),
+        };
+    }
+
+    if meta.is_dir() {
+        return Entry::Problem(format!(
+            "{name} is a directory; the runtime directory is flat and nothing pinned nests"
+        ));
+    }
+
+    if !meta.is_file() {
+        return Entry::Problem(format!("{name} is neither a regular file nor a symlink"));
+    }
+
+    // boxlite writes this itself after extracting, and excludes it from what it
+    // embeds. Allowed by name, and by nothing wider.
+    if name == BOXLITE_FILE_MANIFEST {
+        return Entry::Ignored;
+    }
+
+    let Some(pin) = pinned.files.iter().find(|f| f.name == name) else {
+        return Entry::Problem(format!(
+            "{name} is not pinned, and every regular file here is embedded — so this would be \
+             built in unverified"
+        ));
+    };
+
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => return Entry::Problem(format!("{name} cannot be read ({e})")),
+    };
+    let actual = bytes.len() as u64;
+    let digest = sha256_hex(&bytes);
+    if actual != pin.bytes || digest != pin.sha256 {
+        return Entry::Problem(format!(
+            "{name}\n      pinned  sha256 {} ({} bytes)\n      on disk sha256 {digest} \
+             ({actual} bytes)",
+            pin.sha256, pin.bytes
+        ));
+    }
+    if let Some(mode) = setuid_or_setgid(meta) {
+        // The mode itself is not pinned — `tar` applies the process umask, so it
+        // is a property of the extracting machine rather than of the archive. A
+        // set-user-ID bit is different: no umask adds one, and nothing published
+        // here has ever carried one.
+        return Entry::Problem(format!(
+            "{name} is set-user-ID/set-group-ID (mode {mode:o}); no pinned runtime file \
+             carries one"
+        ));
+    }
+    Entry::Verified
 }
 
 /// The name `boxlite` writes its own file list under, which it excludes from

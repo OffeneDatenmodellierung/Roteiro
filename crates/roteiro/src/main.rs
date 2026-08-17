@@ -6146,6 +6146,41 @@ fn verify_transferred(url: &str, declared: u64, written: u64) -> Result<(), Stri
     ))
 }
 
+/// Which assets `prefetch` provisions for a given `--analyzer`, or all of them.
+///
+/// Lifted out of [`run_security_prefetch`] so it can be tested. The fallback
+/// below is the whole reason `--analyzer sandbox` works, and the comment
+/// describing it in `rto-exec`'s asset table once outlived it by long enough to
+/// put a wrong recipe in `AGENTS.md` (#362). A rule worth documenting twice is a
+/// rule worth asserting once.
+#[cfg(feature = "execution")]
+fn assets_to_prefetch(analyzer: Option<&str>) -> anyhow::Result<Vec<&'static rto_exec::AssetSpec>> {
+    let Some(name) = analyzer else {
+        return Ok(rto_exec::ASSETS.iter().collect());
+    };
+
+    let mut specs = rto_exec::assets_for(name);
+    if specs.is_empty() {
+        // Some assets belong to no single analyzer — the sandbox runtime is
+        // shared by every analyzer that runs in one — so fall back to selecting
+        // by the spec's own owner. That is what makes `--analyzer sandbox`
+        // provision the runtime without also fetching a quarter-gigabyte of
+        // advisory databases.
+        specs = rto_exec::ASSETS
+            .iter()
+            .filter(|s| s.analyzer == name)
+            .collect();
+    }
+    if specs.is_empty() {
+        anyhow::bail!(
+            "no assets for `{name}` in this build (analyzers: {}; shared: {})",
+            rto_exec::known_analyzers().join(", "),
+            rto_exec::SANDBOX
+        );
+    }
+    Ok(specs)
+}
+
 /// Install and verify every pinned asset, recording each digest.
 ///
 /// This is the only command that writes to the asset cache, and the only one
@@ -6161,31 +6196,7 @@ fn run_security_prefetch(
     json: bool,
 ) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
-    let specs: Vec<&rto_exec::AssetSpec> = match analyzer {
-        Some(name) => {
-            let mut specs = rto_exec::assets_for(name);
-            if specs.is_empty() {
-                // Some assets belong to no single analyzer — the sandbox runtime
-                // is shared by every analyzer that runs in one — so fall back to
-                // selecting by the spec's own owner. That is what makes
-                // `--analyzer sandbox` provision the runtime without also
-                // fetching a quarter-gigabyte of advisory databases.
-                specs = rto_exec::ASSETS
-                    .iter()
-                    .filter(|s| s.analyzer == name)
-                    .collect();
-            }
-            if specs.is_empty() {
-                anyhow::bail!(
-                    "no assets for `{name}` in this build (analyzers: {}; shared: {})",
-                    rto_exec::known_analyzers().join(", "),
-                    rto_exec::SANDBOX
-                );
-            }
-            specs
-        }
-        None => rto_exec::ASSETS.iter().collect(),
-    };
+    let specs = assets_to_prefetch(analyzer)?;
 
     let fetcher: &rto_exec::Fetcher<'_> = &download_asset_file;
     let mut provisioned = Vec::with_capacity(specs.len());
@@ -9448,6 +9459,47 @@ mod security_cli {
         .to_string();
         assert!(message.contains("exec-subprocess"), "{message}");
         assert!(message.contains("security ingest"), "{message}");
+    }
+
+    /// `--analyzer sandbox` provisions the runtime archive and nothing else.
+    ///
+    /// The bootstrap recipe printed by `rto-exec/build.rs` — and repeated in
+    /// `README.md`, `AGENTS.md` and `docs/OFFLINE_SETUP.md` — rests entirely on
+    /// this. If the selection ever stopped resolving the shared runtime, that
+    /// recipe would provision nothing and every one of those documents would be
+    /// wrong, with no test to say so: the fallback it depends on is reached only
+    /// when `assets_for` comes back empty, which no other case exercises.
+    ///
+    /// Asserted here rather than trusted because the comment that described this
+    /// selection was stale for long enough to ship a wrong recipe (#362).
+    #[cfg(feature = "execution")]
+    #[test]
+    fn the_sandbox_analyzer_prefetches_the_runtime_archive_alone() {
+        let selected: Vec<&str> = super::assets_to_prefetch(Some(rto_exec::SANDBOX))
+            .expect("the shared runtime is always selectable")
+            .iter()
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(
+            selected,
+            vec![rto_exec::RUNTIME_ASSET],
+            "`prefetch --analyzer sandbox` must select the runtime archive and nothing else — \
+             it is what someone bootstrapping `exec-boxlite` runs, and the advisory databases \
+             are a quarter-gigabyte they do not need yet"
+        );
+
+        // The other half of the same rule: a bare `prefetch` still takes
+        // everything, so the fallback narrowed nothing it should not have.
+        assert_eq!(
+            super::assets_to_prefetch(None).expect("all assets").len(),
+            rto_exec::ASSETS.len()
+        );
+
+        let unknown = super::assets_to_prefetch(Some("no-such-analyzer"))
+            .expect_err("an unknown analyzer must be named, not silently empty")
+            .to_string();
+        assert!(unknown.contains("no-such-analyzer"), "{unknown}");
+        assert!(unknown.contains(rto_exec::SANDBOX), "{unknown}");
     }
 
     #[cfg(feature = "execution")]

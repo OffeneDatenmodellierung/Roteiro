@@ -158,13 +158,20 @@ const REVIEWED: &[Reviewed] = &[
     Reviewed {
         name: "boxlite",
         version: "0.9.7",
-        reason: "Downloads the prebuilt sandbox runtime with an unverified `curl` and embeds it \
-                 with include_bytes!. Governed: `crates/rto-exec/src/runtime_pins.rs` pins the \
-                 SHA-256 and size of every published archive, `roteiro security prefetch \
-                 --allow-download` verifies before installing, and `crates/rto-exec/build.rs` \
-                 refuses to build unless BOXLITE_RUNTIME_URL names a local file matching the \
-                 pin — so its curl never reaches the network. See NOTICE-boxlite-runtime.md \
-                 for what the archive contains and the licence duties it creates.",
+        reason: "Downloads the prebuilt sandbox runtime with an unverified `curl` and embeds \
+                 the extracted files with include_bytes!. Governed at the point the bytes \
+                 enter the artifact: `crates/rto-exec/src/runtime_file_pins.rs` pins the \
+                 SHA-256 and size of every file of every published archive — derived from the \
+                 archive pins in `runtime_pins.rs` by `scripts/derive-runtime-file-pins.py`, \
+                 never hand-written — and `crates/rto-exec/build.rs` verifies boxlite's \
+                 extracted runtime directory against them before anything links, refusing a \
+                 mismatch, a missing file or an unpinned extra one. Setting \
+                 BOXLITE_RUNTIME_URL to a `file://` copy provisioned by `roteiro security \
+                 prefetch --analyzer sandbox --allow-download` additionally verifies the \
+                 archive *before* extraction and keeps the curl off the network entirely; \
+                 without it the fetch does happen, over TLS to the pinned release URL, and \
+                 the build says so on its own output. See NOTICE-boxlite-runtime.md for what \
+                 the archive contains and the licence duties it creates.",
     },
     Reviewed {
         name: "libkrun-sys",
