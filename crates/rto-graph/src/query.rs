@@ -6,7 +6,8 @@
 //! provenance-labelled neighbourhood), [`list_kind`] (all nodes of a kind),
 //! [`path`] (a shortest path between two nodes), [`debt`] (the intent-debt marker
 //! inventory), [`debt_density`] (that inventory per file, normalised by file
-//! length), [`coupling`] (directed fan-in/fan-out over `Calls` edges), and
+//! length), [`coupling`] (directed fan-in/fan-out over `Calls` edges),
+//! [`config_secrets`] (secret-named config keys and their redaction state), and
 //! [`search`] (relevance-ranked node search). All return
 //! mixed-provenance results — the "one query surface" from ADR-0001 — with every
 //! edge carrying its `provenance`.
@@ -518,6 +519,249 @@ fn per_kloc(markers: u64, lines: u64) -> f64 {
     #[expect(clippy::cast_precision_loss, reason = "counts are far below 2^53")]
     let ratio = (markers as f64) * 1000.0 / (lines as f64);
     round2(ratio)
+}
+
+/// The redaction state of one config key in a [`ConfigSecretReport`]. Three
+/// states, because collapsing them would misreport two of them: "declared in
+/// code" is not a redaction, and "value present" is not a safe one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionState {
+    /// The value was read from a source file and **replaced** with the redaction
+    /// placeholder before anything was persisted. The expected state for a
+    /// secret-named key extracted from a config file.
+    Redacted,
+    /// The key carries **no value at all** — a struct-derived key
+    /// (`meta.source = "struct"`), a config *field* declared in Rust with no
+    /// literal in the code to redact.
+    ///
+    /// Not a redaction and not a leak: it records that a setting by this name
+    /// exists, which is the inventory's job, and nothing about any value.
+    Declared,
+    /// The key carries a value that is **not** the redaction placeholder.
+    ///
+    /// Extraction redacts every secret-named key, so this state is unreachable
+    /// from extraction alone. It is reachable through
+    /// [`Store::apply_import_layer`](crate::Store::apply_import_layer), which
+    /// upserts whatever nodes an imported factset carries — so an import produced
+    /// by another tool, or by an older Roteiro, can put an unredacted value in the
+    /// store. That is worth reporting loudly, and it is a finding about **this
+    /// store**, not about the source repository.
+    Present,
+}
+
+impl RedactionState {
+    /// The stable token for this state, as serialised.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Redacted => "redacted",
+            Self::Declared => "declared",
+            Self::Present => "present",
+        }
+    }
+}
+
+/// One secret-named config key in a [`ConfigSecretReport`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConfigSecretItem {
+    /// Natural key of the config-key node (`cfgkey:<path>#<dotted>`).
+    pub key: String,
+    /// Repository-relative path of the config file or Rust source it came from.
+    pub path: Option<String>,
+    /// The dotted key name (e.g. `serve.api_token`). **Names only** — no value is
+    /// carried here, by construction as much as by choice: the value in the store
+    /// is the redaction placeholder.
+    pub name: String,
+    /// Whether the value was redacted, absent, or present.
+    pub state: RedactionState,
+    /// `meta.source`, when the node records one — `struct` for a key synthesised
+    /// from a `@rto:config` Rust struct. Absent for a file-derived key.
+    pub source: Option<String>,
+}
+
+/// An inventory of **secret-named** config keys and their redaction state.
+///
+/// See [`config_secrets`] for what this is and — more importantly — what it is
+/// not.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConfigSecretReport {
+    /// Stable schema tag ([`SCHEMA`]).
+    pub schema: &'static str,
+    /// The requested cap on `items`; `0` means unlimited.
+    pub limit: usize,
+    /// Every `config_key` node in the graph, secret-named or not — the population
+    /// the inventory was drawn from.
+    pub config_keys: usize,
+    /// Config keys whose **name** matched the secret-name heuristic. `items` is
+    /// the first `limit` of these, so `secret_named > items.len()` means truncation.
+    pub secret_named: usize,
+    /// Of `secret_named`: how many carry the redaction placeholder.
+    pub redacted: usize,
+    /// Of `secret_named`: how many carry no value at all (struct-derived).
+    pub declared: usize,
+    /// Of `secret_named`: how many carry a value that is **not** the placeholder.
+    ///
+    /// **Expected to be zero.** A non-zero count is a finding about this store —
+    /// see [`RedactionState::Present`] for the one path that reaches it.
+    pub unredacted: usize,
+    /// Config keys that are redacted but whose name is **not** secret-looking: a
+    /// Kubernetes `Secret`'s `data`, redacted because of where it lives rather
+    /// than what it is called.
+    ///
+    /// Reported so the redaction counts reconcile against the graph: without it a
+    /// reader comparing `redacted` to the number of `<redacted>` values in the
+    /// store would find an unexplained surplus.
+    pub redacted_not_secret_named: usize,
+    /// Distinct files carrying at least one secret-named key.
+    pub files: usize,
+    /// The secret-named keys, ordered by `(path, name, key)`.
+    pub items: Vec<ConfigSecretItem>,
+}
+
+/// Inventory the **secret-named** config keys in the graph — where they are, what
+/// they are called, and whether their values were redacted before persistence —
+/// capped at `limit` (`0` = unlimited).
+///
+/// # What this reports
+///
+/// Config extraction (ADR-0009) flattens TOML/JSON/YAML/`.env` into `config_key`
+/// nodes, and **redacts the value of any secret-named key before it reaches the
+/// store** (see [`crate::config_keys::REDACTED`] and the redaction sites it
+/// names). This lens reads that back: *secret-named config keys are present, here
+/// are their paths and names, and here is their redaction state*. It is an
+/// **inventory with an invariant check**, and it is useful for exactly two
+/// questions: which of my config surfaces deal in credentials, and did anything
+/// unredacted get into this graph.
+///
+/// # What this CANNOT do — read this before extending it
+///
+/// **It is not a secret scanner and this architecture cannot make it one.** The
+/// lens is named for the inventory it can be, not the scanner the shortlist's
+/// original title promised.
+///
+/// - **It cannot detect a hardcoded credential in source code.** It reads
+///   `config_key` nodes, which come only from config *files* and from
+///   `@rto:config` struct declarations. An AWS key pasted into a `.rs` string
+///   literal produces no `config_key` node and is invisible here. Nothing about
+///   the node kinds this reads can change that.
+/// - **It cannot judge validity.** It never sees a value: by the time anything is
+///   in the store, a secret-named value has already been replaced. There is no
+///   entropy test, no format check, no liveness probe, and there cannot be one
+///   without persisting the very thing extraction exists to redact.
+/// - **It cannot tell a real secret from a placeholder.** `API_TOKEN=changeme` in
+///   a committed `.env.example` and a genuine token in an uncommitted `.env` are
+///   the same row here: same key name, same redacted value, same state.
+/// - **It cannot say a repository has no secrets.** An empty report means "no
+///   secret-*named* config key", which is a statement about naming. A credential
+///   under an innocuous key (`endpoint`, `dsn`, `url`) is not secret-named, is not
+///   redacted, and does not appear.
+///
+/// If you find yourself wanting to widen this toward detecting real credentials,
+/// **that instinct is what the rename exists to prevent**: the widening cannot be
+/// built on these inputs, and a tool that half-does it while being named for the
+/// whole job is worse than one that does the inventory honestly. Every surface
+/// carries this limitation in its own words, so a model calling the tool passes it
+/// on rather than reporting a security guarantee that was never offered.
+///
+/// # The heuristic, stated
+///
+/// "Secret-named" is [`crate::config_keys::is_secret_key`]: the key's
+/// ASCII-alphanumerics, lowercased, containing any of `secret`, `password`,
+/// `passwd`, `passphrase`, `token`, `apikey`, `credential`, `privatekey`,
+/// `accesskey`, `pwd`. So it matches `API_TOKEN`, `db.passwordFile` and
+/// `serve.apiKey`, and misses `dsn`, `connection_string` and `auth` — and it
+/// false-positives on `token_bucket_size` and `csrf_token_header`, which are
+/// settings, not secrets. Both directions of error are inherent to matching on
+/// names; neither is reported as a finding.
+///
+/// # Ordering
+///
+/// By `(path, name, key)` ascending — an inventory, like [`debt`], not a ranking.
+/// There is deliberately no ordering knob: nothing here is a magnitude worth
+/// sorting by, and offering one would suggest some keys are more secret than
+/// others. Identical input yields byte-identical output.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure.
+pub fn config_secrets(store: &Store, limit: usize) -> Result<ConfigSecretReport, StoreError> {
+    let nodes = store.nodes_by_kind(&NodeKind::Other(crate::config_keys::KIND.to_owned()))?;
+    let config_keys = nodes.len();
+    let mut items = Vec::new();
+    let mut redacted = 0usize;
+    let mut declared = 0usize;
+    let mut unredacted = 0usize;
+    let mut redacted_not_secret_named = 0usize;
+    let mut files: BTreeSet<String> = BTreeSet::new();
+    for node in nodes {
+        // Prefer `meta.key` — the dotted key as the source spelled it — and fall
+        // back to the node's name, which extraction sets to the same string.
+        let name = node
+            .meta
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(node.name.as_str())
+            .to_owned();
+        let value = node.meta.get("value").and_then(serde_json::Value::as_str);
+        if !crate::config_keys::is_secret_key(&name) {
+            // A redacted value under a non-secret name is a k8s `Secret`'s data:
+            // counted so the report's redaction figures reconcile with the graph,
+            // but not listed — this lens's subject is secret-*named* keys.
+            if value == Some(crate::config_keys::REDACTED) {
+                redacted_not_secret_named += 1;
+            }
+            continue;
+        }
+        let state = match value {
+            Some(v) if v == crate::config_keys::REDACTED => {
+                redacted += 1;
+                RedactionState::Redacted
+            }
+            // A struct-derived key omits `meta.value` entirely: there is no
+            // literal in the code to redact, so "absent" is the honest state
+            // rather than folding it in with a successful redaction.
+            None => {
+                declared += 1;
+                RedactionState::Declared
+            }
+            Some(_) => {
+                unredacted += 1;
+                RedactionState::Present
+            }
+        };
+        if let Some(path) = node.path.as_deref() {
+            files.insert(path.to_owned());
+        }
+        items.push(ConfigSecretItem {
+            key: node.key,
+            path: node.path,
+            name,
+            state,
+            source: node
+                .meta
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        });
+    }
+    let secret_named = items.len();
+    items.sort_by(|a, b| (&a.path, &a.name, &a.key).cmp(&(&b.path, &b.name, &b.key)));
+    if limit > 0 {
+        items.truncate(limit);
+    }
+
+    Ok(ConfigSecretReport {
+        schema: SCHEMA,
+        limit,
+        config_keys,
+        secret_named,
+        redacted,
+        declared,
+        unredacted,
+        redacted_not_secret_named,
+        files: files.len(),
+        items,
+    })
 }
 
 /// Match a slash-separated `path` against a glob `pattern`, anchored end-to-end.
@@ -1614,9 +1858,9 @@ fn placeholder_hop() -> PathHop {
 #[cfg(test)]
 mod tests {
     use super::{
-        CouplingItem, CouplingOrder, CouplingReport, DebtDensityReport, DensityItem, DensityOrder,
-        SCHEMA, SNIPPET_MAX, coupling, debt_density, explain, glob_match, list_kind, memory_score,
-        path, search,
+        ConfigSecretReport, CouplingItem, CouplingOrder, CouplingReport, DebtDensityReport,
+        DensityItem, DensityOrder, RedactionState, SCHEMA, SNIPPET_MAX, config_secrets, coupling,
+        debt_density, explain, glob_match, list_kind, memory_score, path, search,
     };
     use crate::{AnchorState, Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
@@ -2506,5 +2750,264 @@ mod tests {
             DensityOrder::from_token("count").is_none(),
             "an unknown order is rejected, not silently defaulted"
         );
+    }
+
+    // -- config-secret inventory (S1) --------------------------------------
+
+    /// A `config_key` node as `extract::config_facts` emits it: `meta.value`
+    /// present (already redacted, if the key name called for it).
+    fn cfgkey(path: &str, dotted: &str, value: &str) -> Node {
+        let mut node = Node::new(
+            format!("cfgkey:{path}#{dotted}"),
+            NodeKind::Other("config_key".to_owned()),
+            dotted,
+        );
+        node.path = Some(path.to_owned());
+        node.meta = serde_json::json!({ "key": dotted, "value": value });
+        node
+    }
+
+    /// A **struct-derived** `config_key` node as `synthesize_config_keys` emits
+    /// it: `meta.value` OMITTED, because a Rust field declares no literal value.
+    fn struct_cfgkey(path: &str, dotted: &str) -> Node {
+        let mut node = Node::new(
+            format!("cfgkey:{path}#{dotted}"),
+            NodeKind::Other("config_key".to_owned()),
+            dotted,
+        );
+        node.path = Some(path.to_owned());
+        node.meta = serde_json::json!({
+            "key": dotted,
+            "source": "struct",
+            "struct": "AppConfig",
+        });
+        node
+    }
+
+    /// One of each state extraction can produce, plus a non-secret key and a
+    /// k8s-`Secret`-style redaction under an innocuous name.
+    fn configured() -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        let facts = FactSet::new()
+            // Secret-named, redacted by extraction — the expected state.
+            .with_node(cfgkey(".env", "API_TOKEN", "<redacted>"))
+            .with_node(cfgkey("config.toml", "db.password", "<redacted>"))
+            // Secret-named, struct-derived — no value to redact.
+            .with_node(struct_cfgkey("src/config.rs", "serve.api_key"))
+            // Not secret-named — not this lens's subject at all.
+            .with_node(cfgkey("config.toml", "serve.addr", "127.0.0.1:8017"))
+            // A k8s `Secret`'s data: redacted for where it lives, not what it is
+            // called, so it is counted but not listed.
+            .with_node(cfgkey("k8s/secret.yaml", "database-url", "<redacted>"));
+        store.apply_factset(&facts).expect("apply");
+        store
+    }
+
+    /// Find an item by dotted name.
+    fn secret<'a>(report: &'a ConfigSecretReport, name: &str) -> &'a super::ConfigSecretItem {
+        report
+            .items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("`{name}` missing from {:?}", report.items))
+    }
+
+    #[test]
+    fn the_inventory_reports_presence_and_redaction_not_values() {
+        let report = config_secrets(&configured(), 0).expect("config_secrets");
+
+        assert_eq!(report.config_keys, 5, "the population it drew from");
+        assert_eq!(report.secret_named, 3, "{:?}", report.items);
+        assert_eq!(report.files, 3);
+        assert_eq!(report.schema, SCHEMA);
+
+        // Paths, key names and state, which is what the lens is for.
+        assert_eq!(secret(&report, "API_TOKEN").path.as_deref(), Some(".env"));
+        assert_eq!(
+            secret(&report, "db.password").key,
+            "cfgkey:config.toml#db.password"
+        );
+        // The state comes from comparing the stored value against the redactor's
+        // own constant, so asserting it is what keeps reader and writer from
+        // drifting apart on a spelling.
+        assert_eq!(
+            secret(&report, "API_TOKEN").state,
+            RedactionState::Redacted,
+            "the placeholder extraction wrote is recognised as a redaction"
+        );
+        assert_eq!(report.redacted, 2, "{report:?}");
+
+        // No value is carried on any item — there is no field for one. The
+        // serialised shape is the contract, so assert against that, not the type.
+        let json = serde_json::to_value(&report).expect("json");
+        let text = serde_json::to_string(&report).expect("json");
+        assert!(
+            json["items"][0].get("value").is_none(),
+            "an item carries no value field: {text}"
+        );
+        assert!(
+            !text.contains("<redacted>"),
+            "not even the placeholder is echoed back: {text}"
+        );
+
+        // Ordering is `(path, name, key)` — an inventory, not a ranking.
+        assert_eq!(
+            report.items.iter().map(|i| &i.name).collect::<Vec<_>>(),
+            ["API_TOKEN", "db.password", "serve.api_key"]
+        );
+    }
+
+    #[test]
+    fn a_struct_declared_key_is_neither_redacted_nor_a_leak() {
+        // A `@rto:config` struct field has no literal value in code, so extraction
+        // omits `meta.value` entirely. Folding that in with a successful redaction
+        // would claim a redaction that never happened; calling it unredacted would
+        // report a leak that does not exist.
+        let report = config_secrets(&configured(), 0).expect("config_secrets");
+        let declared = secret(&report, "serve.api_key");
+        assert_eq!(declared.state, RedactionState::Declared);
+        assert_eq!(declared.source.as_deref(), Some("struct"));
+
+        assert_eq!(report.redacted, 2, "the two file-derived keys");
+        assert_eq!(report.declared, 1);
+        assert_eq!(
+            report.unredacted, 0,
+            "the invariant extraction maintains: {report:?}"
+        );
+    }
+
+    #[test]
+    fn an_unredacted_secret_named_value_is_reported_as_a_finding() {
+        // Extraction redacts every secret-named key, so this state is unreachable
+        // from extraction — but `apply_import_layer` upserts whatever nodes an
+        // imported factset carries, so another tool's import can put an unredacted
+        // value in the store. That is the one path worth reporting, and it is a
+        // finding about THIS STORE, not about the source repository.
+        let mut store = configured();
+        store
+            .apply_import_layer(
+                "other-tool",
+                &FactSet::new().with_node(cfgkey("imported.env", "AWS_SECRET", "AKIAnot-redacted")),
+            )
+            .expect("import");
+
+        let report = config_secrets(&store, 0).expect("config_secrets");
+        assert_eq!(report.unredacted, 1, "{report:?}");
+        assert_eq!(secret(&report, "AWS_SECRET").state, RedactionState::Present);
+        // And still no value in the report: the lens says *that* something is
+        // unredacted, and never repeats it.
+        let text = serde_json::to_string(&report).expect("json");
+        assert!(
+            !text.contains("AKIA"),
+            "the value is not echoed back: {text}"
+        );
+    }
+
+    #[test]
+    fn a_redaction_under_an_innocuous_name_is_counted_but_not_listed() {
+        // A k8s `Secret`'s `data` is redacted because of where it lives, whatever
+        // the key is called. It is not secret-*named*, so it is not this lens's
+        // subject — but it is counted, so a reader comparing `redacted` against the
+        // number of `<redacted>` values in the graph does not find a surplus they
+        // cannot explain.
+        let report = config_secrets(&configured(), 0).expect("config_secrets");
+        assert_eq!(report.redacted_not_secret_named, 1);
+        assert!(
+            !report.items.iter().any(|i| i.name == "database-url"),
+            "not listed: {:?}",
+            report.items
+        );
+        assert_eq!(
+            report.redacted + report.redacted_not_secret_named,
+            3,
+            "and the two figures together account for every redacted value"
+        );
+    }
+
+    #[test]
+    fn the_inventory_cannot_see_a_credential_that_is_not_a_config_key() {
+        // The load-bearing limitation, asserted rather than only documented: a
+        // credential in a Rust string literal produces no `config_key` node, so it
+        // is invisible here. No extension of this lens can change that — which is
+        // why it is named for the inventory it is, not the scanner it is not.
+        let mut store = configured();
+        let mut hardcoded = Node::new("sym:rust:src/main.rs#connect", NodeKind::Fn, "connect");
+        hardcoded.path = Some("src/main.rs".into());
+        // Split at the prefix for the same reason as `FAKE_TOKEN` in
+        // `roteiro/tests/config_secrets_cli.rs`: assembled, this is AWS's own
+        // documentation placeholder, but it matches the canonical access-key-id
+        // rule exactly and a regex-rule scanner cannot know the difference. The
+        // assembled value is unchanged; no assertion here matches on its text.
+        hardcoded.meta = serde_json::json!({
+            "content": concat!("let token = \"AKIA", "IOSFODNN7EXAMPLE\";"),
+        });
+        store
+            .apply_factset(&FactSet::new().with_node(hardcoded))
+            .expect("apply");
+
+        let report = config_secrets(&store, 0).expect("config_secrets");
+        assert_eq!(
+            report.secret_named, 3,
+            "a hardcoded credential does not appear: {:?}",
+            report.items
+        );
+        assert_eq!(report.config_keys, 5, "and is not a config key at all");
+    }
+
+    #[test]
+    fn the_inventory_reports_truncation_and_is_deterministic() {
+        let store = configured();
+        let capped = config_secrets(&store, 1).expect("config_secrets");
+        assert_eq!(capped.items.len(), 1);
+        assert_eq!(capped.limit, 1);
+        assert_eq!(
+            capped.secret_named, 3,
+            "the population is reported, so a capped list cannot read as a clean repository"
+        );
+        // The state counts are over the whole population too, not the shown rows —
+        // otherwise a cap could hide an `unredacted` finding.
+        assert_eq!((capped.redacted, capped.declared), (2, 1));
+
+        let a = serde_json::to_string(&capped).expect("json");
+        let b = serde_json::to_string(&config_secrets(&store, 1).expect("config_secrets"))
+            .expect("json");
+        assert_eq!(a, b, "deterministic serialisation");
+    }
+
+    #[test]
+    fn an_empty_report_means_no_secret_named_key_not_no_secret() {
+        // The distinction the lens must never blur: a credential under an
+        // innocuous key name (`dsn`) is not secret-named, is not redacted, and does
+        // not appear. So "nothing found" is a statement about naming.
+        let mut store = Store::open_in_memory().expect("store");
+        store
+            .apply_factset(&FactSet::new().with_node(cfgkey(
+                ".env",
+                "DSN",
+                "postgres://u:pw@host/db",
+            )))
+            .expect("apply");
+
+        let report = config_secrets(&store, 0).expect("config_secrets");
+        assert_eq!(report.secret_named, 0, "nothing is secret-*named*");
+        assert_eq!(report.redacted_not_secret_named, 0);
+        assert_eq!(
+            report.config_keys, 1,
+            "while the graph does hold a config key with a credential in it"
+        );
+    }
+
+    #[test]
+    fn redaction_state_tokens_match_their_serialisation() {
+        // The token and the wire form are the same string, so a caller matching on
+        // the JSON and a caller matching on `as_str` cannot disagree.
+        for state in [
+            RedactionState::Redacted,
+            RedactionState::Declared,
+            RedactionState::Present,
+        ] {
+            let json = serde_json::to_string(&state).expect("json");
+            assert_eq!(json, format!("\"{}\"", state.as_str()));
+        }
     }
 }

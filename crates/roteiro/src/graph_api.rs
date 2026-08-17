@@ -119,6 +119,11 @@ type Subgraph = (Vec<Node>, Vec<Edge>);
 const DEFAULT_NODE_LIMIT: usize = 100;
 /// Default number of `/hotspots` returned when no `limit` is given.
 const DEFAULT_HOTSPOTS: usize = 20;
+/// Default number of `/config-secrets` rows when no `limit` is given. Higher than
+/// [`DEFAULT_HOTSPOTS`] because this is an inventory rather than a ranking — a
+/// truncated top-20 of an unordered list is far less useful than a truncated
+/// top-20 of a ranked one.
+const DEFAULT_CONFIG_SECRETS: usize = 50;
 /// Upper bound on `/neighbourhood` traversal depth, so a request can't walk an
 /// unbounded subgraph.
 const MAX_DEPTH: usize = 5;
@@ -199,6 +204,10 @@ fn graph_routes(prefix: &str) -> Router<AppState> {
         .route(
             &format!("{prefix}/{{project}}/debt/density"),
             get(debt_density),
+        )
+        .route(
+            &format!("{prefix}/{{project}}/config-secrets"),
+            get(config_secrets),
         )
         .route(&format!("{prefix}/{{project}}/hotspots"), get(hotspots))
         .route(&format!("{prefix}/{{project}}/coupling"), get(coupling))
@@ -642,6 +651,33 @@ async fn project_debt(State(st): State<AppState>, params: RawPathParams) -> ApiR
     let ignore = crate::config::debt_ignore_for(ws, Some(project))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let report = ws.with_store(Some(project), |s| debt(s, &[], &ignore))??;
+    Ok(Json(report).into_response())
+}
+
+/// `GET /v1/graph[/workspaces/{ws}]/{project}/config-secrets?limit=` → an
+/// inventory of the **secret-named** config keys in the project's graph: paths,
+/// key names, and whether each value was redacted before persistence.
+///
+/// **Not a secret-scanning endpoint, and cannot be made into one.** Values are
+/// redacted at extraction, so this serves presence and redaction state only —
+/// never a value, not even the placeholder. It cannot see a hardcoded credential
+/// in source code (that produces no `config_key` node), cannot judge a value's
+/// validity, and cannot distinguish a real secret from a placeholder. An empty
+/// `items` means "no secret-*named* config key", which is a statement about
+/// naming rather than a clean bill of health. See `rto_graph::config_secrets`.
+///
+/// No `order` parameter, deliberately: this is an inventory, ordered by
+/// `(path, name, key)`, and an ordering knob would imply some keys are more
+/// secret than others.
+async fn config_secrets(
+    State(st): State<AppState>,
+    params: RawPathParams,
+    Query(lq): Query<LimitQuery>,
+) -> ApiResult {
+    let ws = select_ws(&st, &params)?;
+    let project = require_project(&params)?;
+    let limit = lq.limit.unwrap_or(DEFAULT_CONFIG_SECRETS);
+    let report = ws.with_store(Some(project), |s| rto_graph::config_secrets(s, limit))??;
     Ok(Json(report).into_response())
 }
 
@@ -2568,6 +2604,38 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn config_secrets_endpoint_reports_state_and_never_a_value() {
+        // The hub store's config keys are not secret-named, so start from an
+        // inventory that has something in it.
+        let store = apply(
+            Store::open_in_memory().expect("store"),
+            &FactSet::new()
+                .with_node(cfg_node(".env", "API_TOKEN", "<redacted>"))
+                .with_node(cfg_node("config.toml", "serve.addr", "127.0.0.1:8017")),
+        );
+        let (status, json) = get(
+            single_set(Workspace::single(HUB, store)),
+            None,
+            "/v1/graph/hub/config-secrets",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["secret_named"], 1, "{json}");
+        assert_eq!(json["config_keys"], 2, "the population: {json}");
+        assert_eq!(json["redacted"], 1);
+        assert_eq!(json["unredacted"], 0);
+        assert_eq!(json["items"][0]["name"], "API_TOKEN");
+        assert_eq!(json["items"][0]["state"], "redacted");
+
+        // No value reaches the wire — not even the redaction placeholder.
+        let body = json.to_string();
+        assert!(
+            json["items"][0].get("value").is_none() && !body.contains("<redacted>"),
+            "the endpoint serves presence and state, never a value: {body}"
+        );
     }
 
     #[tokio::test]

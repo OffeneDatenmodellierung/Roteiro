@@ -729,7 +729,7 @@ Moving a live cache onto the bounded tier is a data migration, not a policy
 change, and bundling it would have put a schema move and an eviction policy in one
 reviewable unit.
 
-### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)* 🟡 *Q3 delivered; Q1 and S1 outstanding*
+### Stage 26 — Analysis lenses (A1) → **v1.15.0** · effort **S–M per lens** *(independent track)* ✅ *delivered*
 
 **Goal:** deepen the graph itself — the on-brand work — with **honest costs**.
 
@@ -743,11 +743,14 @@ docs.
 
 Shortlist, in order:
 
-1. **Q3 — directed coupling** *(the standout)*. `Calls` edges already retain
+All three shipped, as three separate PRs — a reviewable diff beats a complete one
+nobody can check.
+
+1. **Q3 — directed coupling** ✅ *(the standout)*. `Calls` edges already retain
    direction, and today's hotspot view **throws that away by incrementing both
    ends**. Highest value per line in the set.
-2. **Q1 — debt density.** Builds directly on delivered intent-debt tracking.
-3. **S1 — config-secret inventory** *(renamed, deliberately)*. Values are redacted
+2. **Q1 — debt density** ✅. Builds directly on delivered intent-debt tracking.
+3. **S1 — config-secret inventory** ✅ *(renamed, deliberately)*. Values are redacted
    before persistence, so this lens can report *"secret-named config keys present
    and safely redacted"* with paths and key names. It **cannot** detect hardcoded
    credentials in source, judge validity, or distinguish a real secret from a
@@ -867,9 +870,183 @@ not in any repo file:
 The A1 cost line in #288 (*"~20-line mirror of `debt`"*) is struck through and
 replaced with the ~195–500 LOC / 6–8 file figure this stage is built on.
 
-**Still to land:** Q1 (debt density) and S1 (config-secret inventory), as separate
-PRs — Q3 shipped alone deliberately, because a reviewable diff beats a complete one
-nobody can check.
+#### Q1 — debt density ✅ *delivered*
+
+`rto_graph::debt_density` ranks **files** by retained intent-debt markers per 1,000
+lines. A raw marker count ranks by file size — the biggest file has the most lines
+to put a marker on — so a 40-marker file of 4,000 lines and a 40-marker file of 200
+lines are indistinguishable under `debt` and twenty-fold apart under this. Built on
+`debt`'s own output rather than re-walking markers, so the two lenses cannot
+disagree about which markers exist, and `[debt] ignore` applies unchanged.
+
+**The denominator was the design decision, and it did *not* need extraction
+metadata.** `lines` is the `file` node's `meta.lines` — the count of `\n` bytes in
+the blob, recorded at extraction since Stage 2 and therefore already in every
+`EXTRACT_VERSION` 11 blob. Three alternatives were rejected: **SLOC** does not
+exist in the graph and computing it is net-new derived metadata (which would have
+moved Q1 into the Q2/Q10 batch below); **per-symbol** is what
+`Node.span`'s **byte offsets** cannot give, since a span is not a line range; and
+**the highest marker line** is a lower bound on length, not the length. What
+`lines` counts is stated on every surface: every line, blanks and comments
+included — *file length*, not lines of code.
+
+Two rules keep the arithmetic honest. A `min_lines` floor (default **50**) keeps
+the denominator's tail out of the ranking — one marker in a 3-line file is 333 per
+kloc, true and useless — while leaving those files in `files_with_markers` and
+`total_markers`, reported as `short_files`. And ranking cross-multiplies the exact
+ratio in `u128` rather than the rounded `per_kloc`, so densities differing in the
+fourth decimal do not tie and silently reorder on path.
+
+**Surfaced on six of the seven stages; the seventh is a deliberate no-op.**
+
+| Stage | Q1 |
+| --- | --- |
+| Extraction (`scan_markers` + `augment`) | **Untouched by design** — the denominator was already extracted, so `EXTRACT_VERSION` stays **11**. Confirmed live: a rebuild from an empty store reported *257 of 258 blobs cached, 0 extracted*. |
+| Query fn | `rto_graph::debt_density` |
+| Query result types | `DebtDensityReport` / `DensityItem` / `DensityOrder` / `DEFAULT_MIN_LINES` |
+| MCP (`GraphServer`) | `debt_density` tool (`rto-render/src/mcp.rs`) |
+| Served-chat (`GraphToolRegistry`) | `debt_density` tool — a **separate** registry, with its own test |
+| Obsidian render | `_Home` → "Densest files (markers per 1,000 lines)", under the existing intent-debt section |
+| CLI-side aggregation | `roteiro debt-density [--kind] [--order] [--limit] [--min-lines] [--json]`, `GET /v1/graph/{project}/debt/density` |
+
+**Not surfaced:** the explorer web app has no density panel — the same position as
+Q3's coupling panel. `roteiro debt` is deliberately unchanged: a marker inventory is
+a different question, and `check` depends on its shape.
+
+**No CI gate, and the caveat travels on every surface** (both tool descriptions, the
+`_Home` table, the CLI summary, the endpoint doc) — Q3's precedent, not one buried
+mention. Density inherits the marker scan's prose false positives (`for now`,
+`placeholder`, `tbd` fire on ordinary writing, so a design document ranks as dense
+debt) and adds one of its own: the denominator is file length, so verbose,
+generated or widely-indented files are systematically flattered and dense
+languages penalised. A gate would fail builds on prose and on formatting. The
+suppression story is the existing one — `[debt] ignore` globs and the
+`roteiro:ignore` / `roteiro:ignore-file` directives, applied before anything is
+counted.
+
+**One follow-up, found in review and fixed on the branch** (`fix(render): _Home
+scopes intent debt by [debt] ignore, both tables`): the Obsidian `_Home` overview
+computed debt with an **empty** ignore list, so the vault reported a different debt
+for the same repository than `debt`, `debt-density`, `check` and the graph API —
+the disagreement ADR-0007 v1.1 was amended to end. Both `_Home` calls were fixed,
+not only the one Q1 added: leaving `debt`'s wrong would have had the category
+totals and the density table on one page disagreeing about which files exist,
+which is worse than being consistently wrong. This was the **third** surface with
+that defect (#321 records the first two) and it was missed for the same reason each
+time — the earlier fix went to the surfaces that had been *reported* rather than to
+this stage's own list of seven, which names the Obsidian render. The enumeration
+that closes it: `debt` and `debt_density` are the only functions in the workspace
+taking an `ignore: &[String]`, and every call site of either now passes the target
+project's list wherever one can be reached.
+
+#### S1 — config-secret inventory ✅ *delivered*
+
+`rto_graph::config_secrets` reports **secret-named** config keys — paths, key
+names, and whether each value was redacted before persistence — in three states,
+because collapsing any two would misreport them:
+
+| State | Meaning |
+| --- | --- |
+| `redacted` | The value was read from a config file and replaced with the placeholder before anything was stored. The expected state. |
+| `declared` | The key carries **no value at all** — a `@rto:config` struct field, declared in Rust with no literal to redact. Neither a redaction nor a leak. |
+| `present` | A value that is **not** the placeholder. Extraction cannot produce this; `Store::apply_import_layer` can, so a non-zero count is a finding about **this store**, pointing at the importing tool rather than the source repository. |
+
+`redacted_not_secret_named` counts values redacted for *where they live* (a
+Kubernetes `Secret`'s data) rather than what they are called, so the redaction
+figures reconcile against the graph instead of leaving an unexplained surplus.
+`config_keys::REDACTED` is now a single constant shared by the two redaction sites
+and this one reader, so the lens cannot drift from the redactor by a spelling.
+
+**`[debt] ignore` deliberately does not apply here**, which is worth stating given
+the follow-up above. That list is defined as a debt-marker exclusion (ADR-0007), and
+`config_secrets` takes no `ignore` parameter at all — so there is no call site that
+could be passing the wrong thing. Giving it one would mean inventing a second
+exclusion vocabulary for a different question, which is the mistake Q3 declined to
+make for coupling.
+
+**The rename is the whole point, and it is enforced rather than merely documented.**
+The lens **cannot** detect a hardcoded credential in source (that produces no
+`config_key` node), **cannot** judge validity (it never sees a value — no
+`ConfigSecretItem` has a value field), and **cannot** tell a real secret from a
+placeholder. An empty report means *no secret-**named** config key* — a statement
+about naming, not a clean bill of health: a credential under `dsn` or `endpoint`
+never appears. That limitation is carried in **both** tool descriptions in the
+imperative ("state the limits when you report it"; "if asked to scan for secrets,
+say plainly that this tool cannot do it"), in the CLI summary **unconditionally**
+including on an empty report, in the `_Home` section, and in the endpoint doc — and
+each of those is fault-injected. `tests/config_secrets_cli.rs` puts the *same*
+token in a `.env` (where it becomes a redacted config key) and in a Rust function
+body (where it becomes nothing this lens reads), so the boundary is a test.
+
+**Surfaced on six of the seven stages; the seventh is a deliberate no-op.**
+
+| Stage | S1 |
+| --- | --- |
+| Extraction (`scan_markers` + `augment`) | **Untouched by design** — the redaction already happens there, so `EXTRACT_VERSION` stays **11**. Confirmed live: *259 of 260 blobs cached, 0 extracted*. |
+| Query fn | `rto_graph::config_secrets` |
+| Query result types | `ConfigSecretReport` / `ConfigSecretItem` / `RedactionState` |
+| MCP (`GraphServer`) | `config_secrets` tool (`rto-render/src/mcp.rs`) |
+| Served-chat (`GraphToolRegistry`) | `config_secrets` tool — a **separate** registry, with its own test |
+| Obsidian render | `_Home` → "Config keys named like secrets" (counts and files, **not** key names — a vault note is browsed out of context) |
+| CLI-side aggregation | `roteiro config-secrets [--limit] [--json]`, `GET /v1/graph/{project}/config-secrets` |
+
+**Not surfaced:** the explorer web app has no config-secret panel. **No ordering
+knob**, deliberately: this is an inventory ordered by `(path, name, key)`, and an
+order would imply some keys are more secret than others. **No CI gate and no
+non-zero exit**, even on an `unredacted` finding — that finding is about Roteiro's
+own import layer, so failing a user's build over it would be the wrong response.
+
+**Scale benchmark**, this repo (5,860 nodes, 13,048 edges; 372 config keys, 48
+markers over 20 files, 32,444 ranked lines), release build, warm, whole-process
+wall clock, best of 5:
+
+| Command | Time |
+| --- | --- |
+| `roteiro debt-density --limit 20` | **0.04 s** |
+| `roteiro debt-density --limit 0` (all 20 ranked) | **0.04 s** |
+| `roteiro debt-density --limit 0 --min-lines 0` (floor off) | **0.04 s** |
+| `roteiro config-secrets` (default 50) | **0.04 s** |
+| `roteiro config-secrets --limit 0` (all 372 keys scanned) | **0.04 s** |
+| `roteiro debt` (existing baseline) | 0.04 s |
+| `roteiro coupling --limit 0` (Q3 reference) | 0.08 s |
+| `roteiro search store` (scans all nodes) | 0.05 s |
+
+Both new lenses are indistinguishable from the `debt` baseline. Q1 reads back only
+the files that actually carry a marker — one node lookup each, not a whole-graph
+`file`-node scan, which matters because `file` nodes carry captured `meta.content`.
+
+On this repository S1 finds **2 secret-named keys among 372 config keys**, both
+redacted, none unredacted — which is also a fair illustration of its reach.
+
+**The cost estimate, corrected a second time.** Actuals per lens, and the
+figure each was measured against:
+
+| Lens | Files | Insertions |
+| --- | --- | --- |
+| Q3 (#346) | 8 | 1,121 |
+| Q1 ([#372](https://github.com/OffeneDatenmodellierung/Roteiro/pull/372)) | 8 | 1,509 |
+| S1 | 10 | 1,523 |
+| **Stage total** | **11** | **3,016** |
+
+The RFC's original *"~20-line mirror of `debt`"* was out by ~75×. This stage's own
+corrected **195–500 LOC / 6–8 files** is out by ~3–8× on lines and right on files:
+a fully surfaced lens is **~1,100–1,500 insertions across 8–10 files**, and that
+is the figure a future lens should be planned against. The line count is dominated
+by tests and by doc comments defending the design decisions — Q1's denominator,
+S1's three states and its limits — not by the query, which is under 120 lines in
+both cases. S1 costs the same as Q1 despite a simpler query because the rename
+obliged the limitation to be restated, and fault-injected, on every surface.
+
+**41 fault injections** across the two lenses (20 for Q1, 21 for S1), one per new
+behaviour on every surface, each caught by a named test with every file
+byte-identical after revert. Two were retained after they exposed real test gaps
+rather than being retargeted: Q1's ranking on the rounded ratio, and S1's CLI
+warning path, which extraction cannot reach and so needed a unit test on
+`config_secrets_summary` rather than a repository fixture.
+
+**`EXTRACT_VERSION` is still 11** and no lens in this stage touched extraction
+output. The batched bump (§8b: Q2, Q10, cross-language edge resolution) remains
+unpaid and unblocked.
 
 ### Stage 28 — Generated media content moves out of `derived` ([ADR-0015](adr/0015-generated-media-content-artifact-store.md)) → **v1.10.x** ✅ *delivered* *(independent track)*
 
@@ -1320,7 +1497,7 @@ either way: it is how any future reviewer, hosted or local, gets measured.
 | v1.11.0 ✅ | Stage 23 — episodic memory | Survives rebuild; graph untouched — **met** (#317) |
 | v1.13.0 ✅ | Stage 24 — boxlite backend | Parity with subprocess; `cargo deny` clean — **met** (#352): identical finding keys via both backends, differing only in isolation label and image digest |
 | v1.12.0 ✅ | Stage 25 — recall + bounded cache | `decay=none` reproducible; no episodic eviction — **met** (#340). Shipped two releases ahead of its nominal target |
-| v1.13.0 🟡 | Stage 26 — lenses Q3/Q1/S1 | **Q3 only** (#346): `coupling --limit 0` over 2,887 nodes in 0.07 s; no CI gate offered, because cross-language call edges are name collisions (615/6,553 = 9.4%) and resolving that is extraction work. Q1 and S1 outstanding |
+| v1.13.0 ✅ | Stage 26 — lenses Q3/Q1/S1 | **All three**, one PR each — Q3 (#346), Q1 (#372), S1. `coupling --limit 0` over 2,887 nodes in 0.07 s; `debt-density --limit 0` and `config-secrets --limit 0` (372 keys) both 0.04 s, level with the `debt` baseline. **No lens offers a CI gate**, each saying why: Q3's cross-language call edges are name collisions (615/6,553 = 9.4%); Q1 inherits the marker scan's prose false positives and adds a file-length denominator; S1 is an inventory, and its one real finding indicts Roteiro's import layer, not the user's repo. `EXTRACT_VERSION` stayed **11** throughout. Cost: **11 files, 3,016 insertions** — the corrected 195–500 LOC estimate is itself out by ~3–8× |
 | v1.10.x ✅ | Stage 28 — generated media content moves out of `derived` | Silent clip cannot reach default search; `media build` restores searchability — **met** |
 | v1.11.0 ✅ | Stage 29 — audio metadata as `derived` facts | Format read costs 1–100 µs and instantiates no decoder; duration exact/estimated/absent never guessed — **met** |
 | v1.11.0 ✅ | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
