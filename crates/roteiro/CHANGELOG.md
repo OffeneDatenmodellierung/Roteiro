@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.19.0...roteiro-v1.20.0) - 2026-08-17
+
+### Fixed
+
+- *(remote)* refuse a `[remote] model` that squats on a local id; 4xx a refused gate
+- *(graph)* say which class each retained cache object was kept for
+- *(graph)* reclaim superseded object-cache generations
+
+### Other
+
+- Merge origin/main into feat/stage34b-surface-wiring
+- Merge pull request #392 from OffeneDatenmodellierung/fix/limit-zero-means-unlimited
+- Merge pull request #394 from OffeneDatenmodellierung/fix/object-cache-reclaim
+
 ## [1.19.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.18.0...roteiro-v1.19.0) - 2026-08-17
 
 ### Added

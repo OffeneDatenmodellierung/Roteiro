@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v1.19.0...rto-remote-v1.20.0) - 2026-08-17
+
+### Added
+
+- *(remote)* wire `spec draft` and Ask over the remote tier (ADR-0019)
+- *(graph)* ModelSource::Remote { trust } in the shared resolver (ADR-0019)
+
+### Other
+
+- Merge origin/main into feat/stage34b-surface-wiring
+
 ## [1.19.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v1.18.0...rto-remote-v1.19.0) - 2026-08-17
 
 ### Other
