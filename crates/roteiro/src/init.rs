@@ -508,6 +508,88 @@ mod tests {
         assert!(md.contains("search"), "covers the search entry point");
         assert!(md.contains("provenance"), "covers the provenance model");
         assert!(md.contains("roteiro spec"), "covers the plan workflow");
+        // The "Proving a negative" rule (#290): a sub-agent grepped
+        // `evict|ttl|prune|capacity|max_`, found nothing, and reported that no
+        // eviction idiom existed anywhere — which `roteiro search evict` refuted
+        // in seconds. It was hand-added to the generated artifacts and therefore
+        // absent from this template, so the next `init` deleted it from both
+        // copies. It lives here now; keep it here.
+        assert!(
+            md.contains("## Proving a negative"),
+            "the template must teach that `grep` cannot establish absence"
+        );
+        assert!(
+            md.contains("Never assert absence from `grep` alone"),
+            "the companion rule-of-thumb bullet points at that section"
+        );
+    }
+
+    /// The repository root, from this crate's manifest directory
+    /// (`crates/roteiro`). Mirrors `tests/ci_coverage_claims.rs`.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repo root is two levels above crates/roteiro")
+            .to_path_buf()
+    }
+
+    /// Guard: the committed skill artifacts must be exactly what the template
+    /// generates.
+    ///
+    /// `SKILL.md` is a *managed* file — `install_skill` overwrites it verbatim
+    /// from [`skill_markdown`] on every `roteiro init`. So an edit made to the
+    /// committed copy instead of to `assets/skill/SKILL.md` is not merged and
+    /// not warned about; it is destroyed at the next `init`, silently and with
+    /// no conflict. That is exactly how the "Proving a negative" section was
+    /// lost from both copies at once.
+    ///
+    /// Nothing in the build could notice, because "this artifact is stale" is
+    /// not a compile error. This test makes it noticeable, and fails at the
+    /// place that can act on it: whoever edits the artifact gets told to edit
+    /// the template and re-run `init`.
+    ///
+    /// It compares whole bytes rather than needles on purpose. A needle list
+    /// only guards the sections someone thought to enumerate, which is the same
+    /// failure again one level up — the deleted section was not on anyone's
+    /// list.
+    #[test]
+    fn committed_skill_artifacts_match_the_template() {
+        const COPIES: &[&str] = &[
+            ".agents/skills/roteiro/SKILL.md",
+            ".github/skills/roteiro/SKILL.md",
+        ];
+        let root = repo_root();
+        for rel in COPIES {
+            // Absent in a packaged crate — this guard is about *this* repository.
+            let Ok(committed) = std::fs::read_to_string(root.join(rel)) else {
+                continue;
+            };
+            let template = skill_markdown();
+            if committed == template {
+                continue;
+            }
+            // Name the first differing line rather than dumping two 5 KB blobs
+            // into the CI log, which buries the one line that matters.
+            let (got, want): (Vec<_>, Vec<_>) =
+                (committed.lines().collect(), template.lines().collect());
+            let n = got
+                .iter()
+                .zip(&want)
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| got.len().min(want.len()));
+            panic!(
+                "{rel} has diverged from crates/roteiro/assets/skill/SKILL.md at line {}:\n  \
+                 committed: {:?}\n  template:  {:?}\n\
+                 The template is written verbatim over this file by `roteiro init`, so an \
+                 edit made here is deleted on the next run — silently, with no conflict. \
+                 Move the change into crates/roteiro/assets/skill/SKILL.md and re-run \
+                 `roteiro init` to regenerate both copies.",
+                n + 1,
+                got.get(n),
+                want.get(n),
+            );
+        }
     }
 
     #[test]
