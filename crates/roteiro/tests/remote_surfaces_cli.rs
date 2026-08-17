@@ -401,3 +401,83 @@ fn a_configured_but_unconsented_repository_drafts_nothing_remotely() {
         ledger(&dir)
     );
 }
+
+/// **A `[remote] model` that squats on a local model id is refused, loudly.**
+///
+/// The failure it prevents is not a duplicate listing. Under
+/// `serve --allow-remote` a `[remote] model = "qwen3-0.6b"` makes that id a
+/// served model, so every request naming it is answered by the hosted endpoint —
+/// and `qwen3-0.6b` reads, to anyone looking, as the name of a local GGUF. The
+/// user layer granted, so the egress is authorised; it is *unrecognisable*, and
+/// ADR-0019 treats that as the same harm one step removed, because §1's gate is
+/// one somebody opened knowingly and §4's payload is one they can inspect.
+///
+/// Asserted on the **rendered message**, not the variant: an operator who cannot
+/// see which local id was collided with has been told their configuration is
+/// wrong and not which part.
+///
+/// Refused at `remote_endpoint`, the single constructor, so it reaches every
+/// surface — checked here through both a sending one (`spec draft`) and an
+/// inspecting one (`remote status`), since someone deciding whether to grant the
+/// tier should find out before they do rather than after.
+#[test]
+fn a_remote_model_colliding_with_a_local_id_is_refused_naming_both() {
+    let dir = fresh_repo("model-collision");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        format!("[remote]\nendpoint = \"{UNREACHABLE_LOOPBACK}\"\nmodel = \"qwen3-0.6b\"\n"),
+    )
+    .expect("write");
+    user_layer(&dir, "[remote]\nenabled = true\n");
+
+    let out = roteiro(&dir, &["spec", "draft", "store", "--allow-remote"]);
+    assert!(!out.status.success(), "a colliding id must not be usable");
+    let err = stderr(&out);
+    assert!(
+        err.contains("[remote] model"),
+        "names the key that is wrong: {err}"
+    );
+    assert!(
+        err.contains("qwen3-0.6b"),
+        "and the local id it collides with: {err}"
+    );
+    assert!(
+        err.contains("roteiro model list"),
+        "actionable — the names that are taken: {err}"
+    );
+    assert!(
+        ledger(&dir).is_empty(),
+        "nothing left the machine under a borrowed name: {:?}",
+        ledger(&dir)
+    );
+
+    // The inspecting surface reports it too, so the refusal is discoverable
+    // before a grant rather than only at the moment of one.
+    let status = roteiro(&dir, &["remote", "status", "--json"]);
+    assert!(status.status.success(), "status still reports: {status:?}");
+    let gate: serde_json::Value =
+        serde_json::from_str(&stdout(&status)).expect("status emits JSON");
+    let reported = gate["endpoint_error"]
+        .as_str()
+        .expect("an endpoint error is reported");
+    assert!(reported.contains("[remote] model"), "{reported}");
+    assert!(reported.contains("qwen3-0.6b"), "{reported}");
+}
+
+/// A vendor string that is *not* a registry name passes untouched — the guard
+/// refuses a collision, not a hosted model.
+#[test]
+fn a_vendor_model_string_that_is_not_a_registry_name_is_accepted() {
+    let dir = fresh_repo("model-no-collision");
+    project_layer(&dir, UNREACHABLE_LOOPBACK, "");
+    user_layer(&dir, "[remote]\nenabled = true\n");
+
+    let status = roteiro(&dir, &["remote", "status", "--json"]);
+    let gate: serde_json::Value =
+        serde_json::from_str(&stdout(&status)).expect("status emits JSON");
+    assert!(
+        gate["endpoint_error"].is_null(),
+        "`{MODEL}` is nobody's registry entry: {gate}"
+    );
+    assert_eq!(gate["model"], MODEL);
+}

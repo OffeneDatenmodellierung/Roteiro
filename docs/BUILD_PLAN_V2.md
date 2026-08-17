@@ -1781,6 +1781,48 @@ use them. It pulls no llama.cpp and enables nothing — and it is what makes
 `spec draft` reachable under `remote` alone, which is the point of a tier meant
 for work local models cannot do.
 
+**Two defects found in review, and one gap the merge opened.** Recorded because
+each was a *class* rather than an instance, and the class is the part worth
+carrying forward.
+
+- **`[remote] model` could squat on a local model id.** Nothing stopped
+  `model = "qwen3-0.6b"`, and under `serve --allow-remote` that id became a
+  served model: `/v1/models` listed it twice and every request naming it was
+  answered by the hosted endpoint. The duplicate listing is the symptom; the
+  defect is that repository content would leave under a name that reads as
+  local. The user layer granted, so it is not unauthorised — it is
+  **unrecognisable**, which is §1's knowing gate and §4's inspectable payload
+  defeated one step removed. Refused now at `remote_endpoint`, the single
+  constructor, so the check is one place and covers every surface including
+  `remote status`, where someone deciding whether to grant should find out
+  first. Refused rather than resolved in **either** direction: preferring the
+  local model would leave a granted tier silently inert, which is this ADR's own
+  failure mode in other clothes. Checked against the registry rather than the
+  served set, so a configuration cannot be legal until someone runs
+  `roteiro model pull`.
+- **A refused consent gate returned HTTP 500.** Every `RemoteError` was folded
+  into `EngineError::Inference`, which `rto-serve` maps to 500 — and this file
+  already disagreed with itself, using `InvalidRequest` for its own refusals
+  three lines up. Beyond the 4xx/5xx contract it told the wrong story: a 500
+  says *the server broke*, so a reader goes looking for a fault when what they
+  need is to grant consent. Fixed as a class, not an instance:
+  `NotConsented` → `InvalidRequest` (400), `NoTransport` → `Unsupported` (501, a
+  capability gap), `Transport` and `Ledger` → `Inference` (500, genuinely
+  server-side). **No new `EngineError` variant**, though 403 is the honest
+  status: that enum is not `#[non_exhaustive]` and `rto-llama`/`rto-serve` are
+  published at 1.x, so this is the `rto_graph::StoreError` case rather than the
+  `Reason` case — the fact is expressed within the existing set instead of by
+  widening it.
+- **The `#[non_exhaustive]` guard lost `ProducerTrust` when the type moved.**
+  #391 added `every_public_enum_either_is_non_exhaustive_or_says_why_not`, which
+  scans `rto-remote/src/`; 2b moved `ProducerTrust` to `rto-graph` and out of the
+  scan. The `seen >= 9` floor did catch it — but as *"the scan stopped
+  matching"*, not as *"a type escaped"*, and only because the count was exact.
+  The scan now follows the crate's re-exports, and asserts `ProducerTrust` by
+  name so the list cannot be emptied and replaced by an unrelated addition.
+  #391's reasoning for leaving the type exhaustive moved with the type, since it
+  is a property of the distinction and not of the directory.
+
 **The promises, amended again on the commit that changes them.** 2a's README and
 website text described a tier reached through `roteiro remote …`. Two more
 commands can send now, so both say so, name which one prompts and which two do
@@ -1789,15 +1831,19 @@ that the person starting the server consents on behalf of every later request to
 it.
 
 **Gates:** `fmt` clean; `clippy --all-targets` and `--all-targets --all-features`
-clean at `-D warnings`; `cargo test --workspace --no-fail-fast` **962 passed / 0
-failed** and `--all-features --no-fail-fast` **1,216 passed / 0 failed**; `cargo
+clean at `-D warnings`; `cargo test --workspace --no-fail-fast` **981 passed / 0
+failed** and `--all-features --no-fail-fast` **1,240 passed / 0 failed**; `cargo
 deny` clean. `EXTRACT_VERSION` unchanged at **12**, no migration, **no new
 dependency**, and no network — in either the code or the tests, where the only
 address any granted call may reach is `http://127.0.0.1:1/…` (loopback, a literal
 so there is no DNS query, and nothing listening). Every new test was
-fault-injected: 6 resolver, 1 re-export, 6 engine, 1 Ask-pool and 8 CLI, each
+fault-injected: 6 resolver, 1 re-export, 7 engine, 1 Ask-pool and 10 CLI, each
 shown to fail under a mutation of the behaviour it claims to check, with the tree
-byte-identical afterwards. The Ask grounding budget is asserted at **compile
+byte-identical afterwards. The collision guard's test asserts the **rendered
+message** names both the key and the local id, because "that name is taken" is
+unactionable without saying by what; and the semver guard was shown to fail under
+a mutation that empties its re-export list, which is the regression the type's
+move actually caused. The Ask grounding budget is asserted at **compile
 time** rather than in a test, so violating it fails the build that edits the
 literal.
 

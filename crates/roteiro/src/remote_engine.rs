@@ -83,6 +83,54 @@ const ASK_CONTEXT_NODES: usize = 12;
 /// rather than a test run that might not be looked at.
 const _: () = assert!(ASK_CONTEXT_NODES < rto_remote::payload::MAX_CONTEXT_ITEMS);
 
+/// **Which HTTP status a remote failure deserves** — the `/v1` server derives
+/// one from [`EngineError`]'s variant, so choosing the variant is choosing the
+/// status.
+///
+/// The default of "everything is [`EngineError::Inference`]" was wrong in a way
+/// that mattered, and not only for the 4xx/5xx contract. A 500 says *the server
+/// broke*, so someone reading one goes looking for a fault; a refused consent
+/// gate is the server working exactly as designed, and what they actually need to
+/// do is grant consent. The status is the first thing they see and it was
+/// pointing them away from the answer.
+///
+/// | Failure | Variant | Status | Why |
+/// |---|---|---|---|
+/// | [`rto_remote::RemoteError::NotConsented`] | [`EngineError::InvalidRequest`] | 400 | A policy refusal of *this request*. Not a fault, and the message carries the layer that refused and its remedy. |
+/// | [`rto_remote::RemoteError::NoTransport`] | [`EngineError::Unsupported`] | 501 | A capability this build does not have — the same shape as asking a chat-only engine for embeddings. |
+/// | [`rto_remote::RemoteError::Transport`] | [`EngineError::Inference`] | 500 | The upstream could not be reached. Genuinely server-side; 502 would be better and there is no variant for it. |
+/// | [`rto_remote::RemoteError::Ledger`] | [`EngineError::Inference`] | 500 | This machine could not record the call, so it refused to make it. A real fault, on this side. |
+///
+/// # No new `EngineError` variant, deliberately
+///
+/// 403 is the honest status for a refused gate, and adding a `Forbidden` variant
+/// would express it exactly. `EngineError` is **not** `#[non_exhaustive]`, and
+/// `rto-llama`/`rto-serve` are published at 1.x with `rto-serve`'s own dispatch
+/// matching it arm by arm — so a variant is a breaking change for every
+/// downstream `match`. PR #391 could take the attribute for `rto_remote::Reason`
+/// because that crate had been published hours earlier with nine downloads; this
+/// is the other case, the one `rto_graph::StoreError` records: the enum shipped
+/// without the attribute, so the fact gets expressed within the existing set
+/// rather than by widening it. 400 with the gate's own explanation and remedy in
+/// the body is a worse status code and a better answer.
+///
+/// A wildcard arm is required — [`rto_remote::RemoteError`] is
+/// `#[non_exhaustive]` as of #391 — and it maps to `Inference`, which is the
+/// conservative direction: a new failure this code has never seen is more likely
+/// to be a fault than a policy refusal, and over-reporting a 500 is safer than
+/// telling a client its request was invalid when nobody knows that it was.
+fn classify(err: &rto_remote::RemoteError) -> EngineError {
+    let text = err.to_string();
+    match err {
+        rto_remote::RemoteError::NotConsented(_) => EngineError::InvalidRequest(text),
+        rto_remote::RemoteError::NoTransport { .. } => EngineError::Unsupported(text),
+        rto_remote::RemoteError::Transport { .. } | rto_remote::RemoteError::Ledger(_) => {
+            EngineError::Inference(text)
+        }
+        _ => EngineError::Inference(text),
+    }
+}
+
 /// The served engine with the hosted model added beside it.
 ///
 /// Delegates everything it is not asked for. The **only** request it handles
@@ -237,6 +285,10 @@ impl Engine for RemoteBackedEngine {
     /// and that is the failure ADR-0019 §6 most needs to prevent. The error text
     /// says so in as many words, and it reaches the client as a `/v1` error
     /// rather than as prose from a different model.
+    ///
+    /// Which `/v1` error, and therefore which HTTP status, is [`classify`]'s
+    /// decision — a refused gate is a 400 and not a 500, because the server did
+    /// not break.
     fn chat_stream(
         &self,
         req: &ChatRequest,
@@ -255,7 +307,11 @@ impl Engine for RemoteBackedEngine {
             &|| rto_exec::rfc3339_utc(std::time::SystemTime::now()),
             Some(&crate::remote_transport::call),
         )
-        .map_err(|e| EngineError::Inference(e.to_string()))?;
+        .map_err(|e| classify(&e))?;
+        // Left as `Inference`: an unusable body is a failure *of the upstream*,
+        // not of the client's request. The nearest honest status would be 502,
+        // which `EngineError` has no variant for, and 500 is the closer of the
+        // two available answers — the client did nothing wrong and cannot fix it.
         let answer =
             rto_remote::response::parse(&raw).map_err(|e| EngineError::Inference(e.to_string()))?;
 
@@ -290,7 +346,7 @@ impl Engine for RemoteBackedEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteBackedEngine;
+    use super::{RemoteBackedEngine, classify};
     use rto_serve::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, Message};
     use std::sync::Arc;
 
@@ -436,7 +492,10 @@ mod tests {
             )
             .expect_err("the gate is shut");
 
-        assert!(matches!(err, EngineError::Inference(_)), "{err:?}");
+        // 400, not 500: a refused gate is the server working as designed, and a
+        // 500 would send whoever reads it looking for a fault instead of for the
+        // consent they have to grant.
+        assert!(matches!(err, EngineError::InvalidRequest(_)), "{err:?}");
         assert!(
             err.to_string().contains("not enabled for this run"),
             "names the gate: {err}"
@@ -449,6 +508,57 @@ mod tests {
         assert!(
             !dir.join("egress.jsonl").exists(),
             "a refusal disclosed nothing, so it records nothing"
+        );
+    }
+
+    /// **A refused gate is a 4xx, and the other failures keep their classes.**
+    ///
+    /// `EngineError`'s variant is what `rto-serve` turns into an HTTP status, so
+    /// this asserts the whole mapping rather than only the case that was wrong.
+    /// A 500 for a refused gate says *the server broke* and sends whoever reads
+    /// it hunting for a fault, when what they need is to grant consent — the
+    /// status is the first thing they see, and it was pointing away from the
+    /// answer.
+    #[test]
+    fn a_refused_gate_is_a_client_error_and_the_rest_keep_their_classes() {
+        use rto_remote::RemoteError;
+
+        let refused = classify(&RemoteError::NotConsented(
+            rto_remote::Reason::InvocationUnset,
+        ));
+        assert!(
+            matches!(refused, EngineError::InvalidRequest(_)),
+            "{refused:?}"
+        );
+        // The gate's own words survive the classification: a 400 whose body did
+        // not say which layer refused would be a status code and no answer.
+        assert!(
+            refused.to_string().contains("not enabled for this run"),
+            "{refused}"
+        );
+
+        // A build with no backend is a capability gap (501), not a fault and not
+        // a bad request — the same shape as asking a chat-only engine to embed.
+        let no_backend = classify(&RemoteError::NoTransport {
+            endpoint: "https://models.example/v1".to_owned(),
+        });
+        assert!(
+            matches!(no_backend, EngineError::Unsupported(_)),
+            "{no_backend:?}"
+        );
+
+        // An unreachable upstream really is server-side, and stays a 500.
+        let unreachable = classify(&RemoteError::Transport {
+            endpoint: "https://models.example/v1".to_owned(),
+            detail: "connection refused".to_owned(),
+        });
+        assert!(
+            matches!(unreachable, EngineError::Inference(_)),
+            "{unreachable:?}"
+        );
+        assert!(
+            unreachable.to_string().contains("did **not** fall back"),
+            "and it still refuses to degrade: {unreachable}"
         );
     }
 

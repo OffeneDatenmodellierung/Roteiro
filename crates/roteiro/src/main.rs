@@ -1947,8 +1947,14 @@ fn remote_ledger() -> anyhow::Result<rto_remote::Ledger> {
 /// Always [`rto_remote::ProducerTrust::VendorAsserted`]: a hosted model has no
 /// digest this machine can compute, so nothing here may claim otherwise.
 ///
+/// **The single constructor.** Every surface that can send — `remote
+/// status|dry-run|call`, `spec draft --allow-remote`, `serve --allow-remote` —
+/// gets its endpoint from here, which is what lets
+/// [`refuse_local_id_collision`] be one check rather than five.
+///
 /// # Errors
-/// When either key is unset, or the endpoint is one
+/// When either key is unset, when `[remote] model` collides with a local model id
+/// ([`refuse_local_id_collision`]), or when the endpoint is one
 /// [`rto_remote::Endpoint::new`] refuses.
 #[cfg(feature = "remote")]
 fn remote_endpoint(cfg: &config::Config) -> anyhow::Result<rto_remote::Endpoint> {
@@ -1961,11 +1967,76 @@ fn remote_endpoint(cfg: &config::Config) -> anyhow::Result<rto_remote::Endpoint>
              destination; only your user config can grant the tier"
         );
     }
+    refuse_local_id_collision(model)?;
     Ok(rto_remote::Endpoint::new(
         endpoint,
         model,
         rto_remote::ProducerTrust::VendorAsserted,
     )?)
+}
+
+/// **Refuse a `[remote] model` that squats on a local model id.**
+///
+/// Nothing stopped `[remote] model = "qwen3-0.6b"` before this. Under
+/// `serve --allow-remote` that id becomes a served model, so `/v1/models` lists
+/// it twice and every request naming it is answered by the hosted model — and
+/// `qwen3-0.6b` is, to anyone reading, the name of a local GGUF.
+///
+/// **That is egress under a false name.** The user layer granted, so it is not
+/// unauthorised; but ADR-0019's whole thesis is that the local→remote edge is a
+/// gate somebody opened *knowingly* — §4 requires the payload to be inspectable
+/// and §1 forbids consent from being probabilistic. Content leaving under a name
+/// that reads as local is unrecognisable as egress, which is the same harm one
+/// step removed: the record in `roteiro remote log` is honest and the name in
+/// front of the operator is not.
+///
+/// So it is refused, at the one place an endpoint is built, and refused for
+/// **every** surface rather than only for `serve` — `remote status` should say so
+/// before anyone grants anything.
+///
+/// # Refused, not resolved
+///
+/// Neither silent resolution is acceptable, and both were available:
+///
+/// * *Let the remote win* — the current behaviour, and the defect.
+/// * *Let the local win* — quieter, and worse: a tier the operator granted, paid
+///   for and can see in `remote status` would be **inert**, with the reason
+///   nowhere on screen. A capability that silently does nothing is the failure
+///   mode this ADR keeps naming in other clothes.
+///
+/// # The registry, not the served set
+///
+/// Checked against [`rto_graph::find_model`] — every id Roteiro can serve — and
+/// not against what happens to be installed. A configuration that is legal today
+/// and illegal after `roteiro model pull` would be a trap, and the served set is
+/// a subset of the registry, so the wider check subsumes the narrower one and is
+/// deterministic besides.
+///
+/// # Errors
+/// When `model` names a registry entry. The message names both the key and the
+/// id, because "that name is taken" is unactionable without saying by what.
+#[cfg(feature = "remote")]
+fn refuse_local_id_collision(model: &str) -> anyhow::Result<()> {
+    let model = model.trim();
+    let Some(spec) = rto_graph::find_model(model) else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "`[remote] model = {model:?}` collides with a local model id: `{name}` is a {kind} model \
+         in Roteiro's own registry, and that is the namespace local models are served under. \
+         Refusing.\n\n\
+         Under `serve --allow-remote` this id would appear twice in `/v1/models` and every \
+         request naming it would be answered by the hosted model at `[remote] endpoint` — so \
+         repository content would leave this machine under a name that reads as local. You \
+         granted the tier, so that is not unauthorised; it is unrecognisable, which ADR-0019 \
+         treats as the same harm one step removed.\n\n\
+         Set `[remote] model` to the hosted model's own vendor string (vendor strings are not \
+         registry names), or run `roteiro model list` to see which names are taken. Roteiro will \
+         not resolve this for you in either direction: preferring the local model would leave a \
+         tier you granted silently inert.",
+        name = spec.name,
+        kind = spec.kind.as_str(),
+    )
 }
 
 /// An open gate, with everything a call needs and nothing it could re-decide.
