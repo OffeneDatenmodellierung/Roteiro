@@ -27,6 +27,12 @@ mod pins;
 // leave is not the code that can make them leave.
 #[cfg(feature = "remote")]
 mod remote_transport;
+// Ask over the remote model tier: the served `Engine`, wrapped so the hosted
+// model is one more served id and `rto-serve` gains nothing (ADR-0019, Stage 34
+// part 2b). Needs `serve` as well as `remote` — without a chat endpoint there is
+// no Ask to wire.
+#[cfg(all(feature = "remote", feature = "serve"))]
+mod remote_engine;
 mod review;
 // Structured logging / telemetry init (ADR-0011): the single place the tracing
 // subscriber is built — the unchanged human-text stdout layer plus an opt-in
@@ -620,6 +626,23 @@ enum Command {
             conflicts_with_all = ["models", "addr", "tls_cert", "tls_key", "mcp"]
         )]
         http: Option<String>,
+        /// Serve the **remote model tier** as Ask's model, granting it for the
+        /// life of this server process (ADR-0019 v1.2).
+        ///
+        /// Read this before using it. Unlike a one-shot command, the invocation
+        /// here is the *process*: every Ask this server answers, for as long as
+        /// it runs, sends graph-derived context to the hosted model — including
+        /// requests made by anyone else who can reach the port. Your
+        /// `~/.roteiro/config.toml` must grant too, `serve` binds loopback by
+        /// default, and every call is on the egress ledger (`roteiro remote
+        /// log`). The grant dies with the process and is never persisted.
+        #[cfg(all(feature = "remote", feature = "serve"))]
+        #[arg(long, conflicts_with = "no_remote")]
+        allow_remote: bool,
+        /// Deny the remote tier for this server whatever the config layers say.
+        #[cfg(all(feature = "remote", feature = "serve"))]
+        #[arg(long)]
+        no_remote: bool,
     },
     /// Start the MCP graph server (ADR-0002): STDIO by default, or networked over
     /// streamable HTTP with `--http ADDR`. Exposes the `explain`/`search`/`path`/
@@ -710,6 +733,14 @@ enum SpecAction {
     /// (`--features serve` or `--features inference-local-models`, both
     /// llama.cpp) and a pulled generative model; falls back to the plain
     /// scaffold otherwise.
+    ///
+    /// **Local unless you say otherwise.** With `--features remote` and every
+    /// layer of ADR-0019's consent granting, `--allow-remote` sends the drafting
+    /// request to the hosted model instead. Nothing leaves without that flag:
+    /// this command never prompts, because a prompt on the default path is how a
+    /// habituated "y" becomes consent-by-default. `roteiro remote dry-run` shows
+    /// the shape of what would leave, and `roteiro remote status` says whether
+    /// the gate would open.
     Draft {
         /// Topic the artifact is about (grounds the draft against the graph).
         topic: String,
@@ -722,6 +753,17 @@ enum SpecAction {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<String>,
+        /// Draft with the **remote model tier** instead of a local model,
+        /// granting *this run* (ADR-0019). Necessary and not sufficient: your
+        /// `~/.roteiro/config.toml` must grant too, and a run that passes this
+        /// and is refused fails rather than quietly drafting locally.
+        #[cfg(feature = "remote")]
+        #[arg(long, conflicts_with = "no_remote")]
+        allow_remote: bool,
+        /// Deny the remote tier for this run whatever the config layers say.
+        #[cfg(feature = "remote")]
+        #[arg(long)]
+        no_remote: bool,
     },
 }
 
@@ -1449,7 +1491,11 @@ fn main() -> anyhow::Result<()> {
         Command::Init { fetch, vault } => run_init(ingest, fetch, vault, debt_ignore),
         Command::Render { target, out } => run_render(ingest, &target, out, debt_ignore),
         Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
-        Command::Spec { action } => run_spec(&cfg.effective, ingest, action),
+        // The whole `Loaded` config, not only the effective merge: `spec draft`
+        // can reach the remote tier, and ADR-0019 §3's consent gate has to read
+        // the project and user layers *separately* — a merged `[remote] enabled`
+        // cannot tell a grant that may stand from one that may not.
+        Command::Spec { action } => run_spec(&cfg, ingest, action),
         Command::Config { json } => run_config(&cfg, json),
         #[cfg(feature = "remote")]
         Command::Remote { cmd } => run_remote(&cfg, ingest, cmd),
@@ -1481,6 +1527,10 @@ fn main() -> anyhow::Result<()> {
             workspace_name,
             sync_on_access,
             mcp,
+            #[cfg(all(feature = "remote", feature = "serve"))]
+            allow_remote,
+            #[cfg(all(feature = "remote", feature = "serve"))]
+            no_remote,
         } => run_serve(
             ingest,
             &cfg.effective,
@@ -1491,6 +1541,15 @@ fn main() -> anyhow::Result<()> {
                 tls_cert,
                 tls_key,
                 mcp,
+                // Decided **here**, before anything is built or bound, and it is
+                // the whole of ADR-0019 v1.2's "the invocation is the server
+                // process": one gate consultation, at startup, whose answer the
+                // engine then carries for its lifetime. A `--allow-remote` the
+                // gate refuses fails here — the server does not start and then
+                // quietly answer locally, which would be the process-shaped form
+                // of the unannounced downgrade.
+                #[cfg(all(feature = "remote", feature = "serve"))]
+                remote: remote_grant_for(&cfg, invocation_grant(allow_remote, no_remote), "serve")?,
             },
             &workspace,
             workspace_name.as_deref(),
@@ -1907,6 +1966,90 @@ fn remote_endpoint(cfg: &config::Config) -> anyhow::Result<rto_remote::Endpoint>
         model,
         rto_remote::ProducerTrust::VendorAsserted,
     )?)
+}
+
+/// An open gate, with everything a call needs and nothing it could re-decide.
+///
+/// Held together in one value so no surface can hold a [`rto_remote::Decision`]
+/// without the [`rto_remote::Endpoint`] it was granted for, or the other way
+/// round. [`remote_grant_for`] is the only constructor, so a surface cannot
+/// assemble one out of a gate it did not consult.
+#[cfg(feature = "remote")]
+struct RemoteGrant {
+    /// Where the call goes, and under what model string.
+    endpoint: rto_remote::Endpoint,
+    /// The gate's answer, passed through to [`rto_remote::call_with`] verbatim
+    /// rather than re-derived — that function re-checks it, and a second
+    /// implementation of "may this send?" is exactly what ADR-0019 forbids.
+    decision: rto_remote::Decision,
+}
+
+/// **The remote tier's answer for a surface whose default is local** — `spec
+/// draft` and `serve`/Ask, as distinct from `roteiro remote call`, which exists
+/// to send.
+///
+/// Returns `Some` when the gate is open, `None` when this run is deliberately
+/// local, and an **error** when the run asked to go remote and cannot. That
+/// third case is the whole reason this is a function rather than three lines at
+/// each call site:
+///
+/// > A run that would have gone remote but was denied must say so rather than
+/// > silently answering locally.
+///
+/// Passing `--allow-remote` is someone asking for the hosted model's answer.
+/// Giving them a local model's answer instead is a *different answer with no
+/// signal that anything changed* — the same unannounced downgrade ADR-0019 §6
+/// forbids on a network failure, arriving through the consent gate instead of
+/// through a socket. So a shut gate under an explicit grant stops the run, names
+/// the layer that shut it, and offers that layer's own remedy.
+///
+/// An absent flag is **not** that case. It is the ordinary local run, and it is
+/// silent: there is nothing to announce when nobody asked for anything.
+///
+/// # This surface never prompts
+///
+/// `roteiro remote call` shows a TTY the exact bytes and asks, because sending
+/// is what that command does. Here the default is local, and a prompt on the
+/// default path turns a habituated "y" into consent-by-default — the thing
+/// ADR-0019 §3 built a two-layer gate to prevent. The flag is the only way.
+///
+/// # Errors
+/// When an explicit `--allow-remote` was refused by any layer, and when the gate
+/// opens but `[remote] endpoint`/`model` cannot produce a usable endpoint.
+#[cfg(feature = "remote")]
+fn remote_grant_for(
+    cfg: &config::Loaded,
+    invocation: Option<bool>,
+    surface: &str,
+) -> anyhow::Result<Option<RemoteGrant>> {
+    let decision = rto_remote::consent::decide(cfg.remote_config_grant(), invocation);
+    // Printed whatever the outcome: a committed `enabled = true` that does
+    // nothing is worse left mysterious, and it is equally mysterious on a run
+    // that went remote for other reasons.
+    if let Some(note) = decision.ignored_project_grant_note() {
+        eprintln!("{note}\n");
+    }
+
+    if decision.granted() {
+        // Built only now, so an unusable endpoint cannot be reported to someone
+        // who never asked to send anything.
+        return Ok(Some(RemoteGrant {
+            endpoint: remote_endpoint(&cfg.effective)?,
+            decision,
+        }));
+    }
+
+    if invocation == Some(true) {
+        anyhow::bail!(
+            "`{surface} --allow-remote` asked for the remote model tier and the gate refused: \
+             {reason}\n\nRoteiro did **not** fall back to a local model. A different model is \
+             a different answer, and handing you one without saying so is the failure ADR-0019 \
+             most needs to prevent. Re-run without `--allow-remote` to use the local model \
+             deliberately, or `roteiro remote status` to see every layer.",
+            reason = decision.reason,
+        );
+    }
+    Ok(None)
 }
 
 /// The invocation half of consent, from the two flags.
@@ -3916,7 +4059,7 @@ fn run_import_graphify(
 
 /// Graph-grounded spec/blueprint authoring (ADR-0004).
 fn run_spec(
-    cfg: &config::Config,
+    cfg: &config::Loaded,
     ingest: rto_graph::IngestConfig,
     action: SpecAction,
 ) -> anyhow::Result<()> {
@@ -3933,7 +4076,20 @@ fn run_spec(
             title,
             kind,
             out,
-        } => run_spec_draft(cfg, ingest, &topic, title.as_deref(), &kind, out.as_deref()),
+            #[cfg(feature = "remote")]
+            allow_remote,
+            #[cfg(feature = "remote")]
+            no_remote,
+        } => run_spec_draft(
+            cfg,
+            ingest,
+            &topic,
+            title.as_deref(),
+            &kind,
+            out.as_deref(),
+            #[cfg(feature = "remote")]
+            invocation_grant(allow_remote, no_remote),
+        ),
     }
 }
 
@@ -3996,38 +4152,110 @@ fn run_spec_scaffold(
     emit_artifact(&md, &format!("{label} scaffold"), out)
 }
 
-/// Draft the scaffold's unfilled sections with a small local instruct model
-/// (ADR-0004 Tier 1). Needs a generation backend (`serve` or
-/// `inference-local-models`, both llama.cpp) and a pulled generative model;
-/// without a model it emits the plain scaffold + a hint.
-// Stage 20: `spec draft` generation runs on **llama.cpp** (the shared `rto-llama`
-// engine, ADR-0006) — available whenever either the `serve` or the
-// `inference-local-models` feature is on.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+/// Draft the scaffold's unfilled sections (ADR-0004 Tier 1) — **locally unless
+/// this run said otherwise.**
+///
+/// Two backends now, and which one runs is a *consent gate*, not a preference:
+/// the local llama.cpp path (`serve` / `inference-local-models`), and — with
+/// `--features remote` and every layer of ADR-0019's consent granting — the
+/// hosted model. The tier is decided **before** the model is resolved, so the
+/// two live decisions are made in one place and in the right order.
+///
+/// Three rules hold here, and each one is a failure mode ADR-0019 names:
+///
+/// 1. **No `--allow-remote`, no egress.** The flag is the invocation half of
+///    consent and there is no TTY prompt on this path. `roteiro remote call`
+///    prompts because sending *is* what that command does; here the default is
+///    local, and a prompt on a default path is how a habituated "y" turns into
+///    consent-by-default.
+/// 2. **A refused `--allow-remote` stops the run.** Someone who typed the flag
+///    asked for the hosted model. Handing them the local model's answer instead
+///    is the unannounced downgrade this ADR most needs to prevent — the same
+///    failure as a silent fall back on a network error, wearing a different hat.
+///    See [`remote_grant_for`].
+/// 3. **The remote path is not the local prompt on a wire.** It rebuilds the
+///    request through [`rto_remote::Payload`], so graph content reaches the
+///    endpoint only as allow-listed [`rto_remote::ContextItem`]s. See
+///    [`spec_draft_remote`].
+// Stage 20: local `spec draft` generation runs on **llama.cpp** (the shared
+// `rto-llama` engine, ADR-0006) — available whenever either the `serve` or the
+// `inference-local-models` feature is on. Stage 34 part 2b added the remote
+// backend beside it, which is why this function is reachable under `remote`
+// alone: a build with the tier and no llama.cpp can still draft, and that is the
+// point of a tier meant for work local models cannot do.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "remote"
+))]
 fn run_spec_draft(
-    cfg: &config::Config,
+    cfg: &config::Loaded,
     ingest: rto_graph::IngestConfig,
     topic: &str,
     title: Option<&str>,
     kind: &str,
     out: Option<&str>,
+    #[cfg(feature = "remote")] invocation: Option<bool>,
 ) -> anyhow::Result<()> {
-    use rto_graph::{ModelSource, ModelTask, resolve_model_with};
-
     let (scaffold, label, ctx) = build_scaffold(ingest, topic, title, kind)?;
 
-    // Model pick, via the one resolver (Stage 33): `[models] generative` if it
-    // pins one, else the low-tier instruct default that runs anywhere. This used
-    // to search the registry here, and — the part worth replacing — it *filtered*
-    // a pin that was not a generative model, which silently fell back to the
-    // default and left the configuration looking honoured.
+    // Decided first, and it either grants, denies locally, or **stops the run**.
+    // Nothing below this line can turn a refusal into a local answer.
+    #[cfg(feature = "remote")]
+    let grant = remote_grant_for(cfg, invocation, "spec draft")?;
+    #[cfg(feature = "remote")]
+    let tier = grant
+        .as_ref()
+        .map_or(rto_graph::RemoteTier::Unavailable, |g| {
+            rto_graph::RemoteTier::Granted {
+                trust: g.endpoint.trust(),
+            }
+        });
+    #[cfg(not(feature = "remote"))]
+    let tier = rto_graph::RemoteTier::Unavailable;
+
+    // Model pick, via the one resolver (Stage 33): the remote tier if this run
+    // granted it, else `[models] generative` if it pins one, else the low-tier
+    // instruct default that runs anywhere. This used to search the registry here,
+    // and — the part worth replacing — it *filtered* a pin that was not a
+    // generative model, which silently fell back to the default and left the
+    // configuration looking honoured.
     //
     // Resolved from the config in hand rather than from the process-wide pins:
     // both hold the same table (the pins are published from this very config at
     // startup), and taking the argument keeps the dependency visible in the
     // signature. The process-wide slot exists for the call sites config cannot
     // reach — OCR, per blob, inside extraction.
-    let choice = resolve_model_with(ModelTask::Draft, &cfg.models.resolve())?;
+    let choice = rto_graph::resolve_model_with_remote(
+        rto_graph::ModelTask::Draft,
+        &cfg.effective.models.resolve(),
+        tier,
+    )?;
+
+    #[cfg(feature = "remote")]
+    if let Some(grant) = grant {
+        debug_assert!(
+            choice.source.is_remote(),
+            "a granted tier must be the resolution `spec draft` acts on"
+        );
+        return spec_draft_remote(&grant, topic, &scaffold, &label, &ctx, out);
+    }
+
+    spec_draft_local(&choice, topic, &scaffold, &label, &ctx, out)
+}
+
+/// Draft with the local llama.cpp model the resolver chose.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn spec_draft_local(
+    choice: &rto_graph::ModelChoice,
+    topic: &str,
+    scaffold: &str,
+    label: &str,
+    ctx: &rto_spec::SpecContext,
+    out: Option<&str>,
+) -> anyhow::Result<()> {
+    use rto_graph::ModelSource;
+
     let Some(model) = choice.model else {
         anyhow::bail!("no generative model in the registry");
     };
@@ -4048,7 +4276,7 @@ fn run_spec_draft(
             "note: generative model `{model}` is not installed — emitting the scaffold. \
              Draft prose with: roteiro model pull {model}"
         );
-        return emit_artifact(&scaffold, &format!("{label} scaffold"), out);
+        return emit_artifact(scaffold, &format!("{label} scaffold"), out);
     }
 
     if cfg!(debug_assertions) {
@@ -4057,14 +4285,191 @@ fn run_spec_draft(
              release build (`cargo build --release`) for usable speed."
         );
     }
-    let drafts = draft_sections(model, &scaffold, topic, &ctx)?;
+    let drafts = draft_sections(model, scaffold, topic, ctx)?;
     eprintln!(
         "drafted {} section(s) with {} (via {GEN_BACKEND})",
         drafts.len(),
         model
     );
-    let md = rto_spec::apply_drafts(&scaffold, &drafts);
+    let md = rto_spec::apply_drafts(scaffold, &drafts);
     emit_artifact(&md, &format!("{label} draft"), out)
+}
+
+/// `spec draft` in a build with the remote tier and **no local generator**: the
+/// resolver still ran, and the honest answer is that this build has nothing to
+/// draft with unless the run grants the tier.
+///
+/// Reachable only under `--features remote` without `serve` or
+/// `inference-local-models`, and it deliberately does not emit a bare scaffold:
+/// `spec scaffold` is the command for that, and quietly substituting it here
+/// would answer a question nobody asked.
+#[cfg(all(
+    feature = "remote",
+    not(any(feature = "serve", feature = "inference-local-models"))
+))]
+fn spec_draft_local(
+    _choice: &rto_graph::ModelChoice,
+    _topic: &str,
+    _scaffold: &str,
+    _label: &str,
+    _ctx: &rto_spec::SpecContext,
+    _out: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "this build has the remote model tier but no local generation backend, and this run \
+         did not grant the tier — so there is nothing to draft with. Pass `--allow-remote` \
+         (your `~/.roteiro/config.toml` must grant it too — see `roteiro remote status`), or \
+         rebuild with `--features inference-local-models`. (`spec scaffold` works with no \
+         model at all.)"
+    )
+}
+
+/// **Draft with the hosted model — one remote call per unfilled section.**
+///
+/// # The prompt is rebuilt, not forwarded
+///
+/// The local path calls [`rto_spec::draft_prompt`], which interpolates the
+/// grounded symbol and ADR names **into a string**. Sending that string as the
+/// instruction would put graph content on the wire without it ever passing
+/// through [`rto_remote::ContextItem::from_node`] — the allow-list would still
+/// exist and would simply have nothing to do, which is the "whatever the local
+/// path happened to build" assembly ADR-0019 §4 forbids by name.
+///
+/// So this rebuilds: [`remote_draft_instruction`] carries the *task* and no
+/// graph content at all, and the nodes travel as allow-listed context items.
+/// The consequence is stated rather than hidden — **the remote draft is not the
+/// local prompt.** It cannot be, without unmaking the guard.
+///
+/// # One call per section, and each one is an egress
+///
+/// Sections are drafted separately because they are separate questions, and each
+/// call is recorded on its own line of the ledger. A single batched call would
+/// read as one disclosure in the record when it was several.
+///
+/// # Errors
+/// Every refusal in [`rto_remote::call_with`] plus [`rto_remote::response::parse`]'s
+/// — a truncated generation, an endpoint-reported error, an unwritable ledger.
+/// **None of them falls back to a local model**, and the messages say so.
+#[cfg(feature = "remote")]
+fn spec_draft_remote(
+    grant: &RemoteGrant,
+    topic: &str,
+    scaffold: &str,
+    label: &str,
+    ctx: &rto_spec::SpecContext,
+    out: Option<&str>,
+) -> anyhow::Result<()> {
+    let nodes = remote_context_nodes(ctx)?;
+    let ledger = remote_ledger()?;
+    let targets = rto_spec::draft_targets(scaffold);
+
+    let mut drafts = Vec::with_capacity(targets.len());
+    let mut sent_bytes = 0usize;
+    let mut fields: Vec<&'static str> = Vec::new();
+    for (heading, hint) in targets {
+        let instruction = remote_draft_instruction(topic, &heading, &hint);
+        let payload = rto_remote::Payload::new(&instruction, &nodes)?;
+        if fields.is_empty() {
+            fields = payload.fields_present();
+        }
+        sent_bytes += rto_remote::dry_run(&grant.endpoint, &payload).len();
+        let raw = rto_remote::call_with(
+            &grant.endpoint,
+            &payload,
+            grant.decision,
+            &ledger,
+            &|| rto_exec::rfc3339_utc(std::time::SystemTime::now()),
+            Some(&remote_transport::call),
+        )?;
+        let answer = rto_remote::response::parse(&raw)?;
+        if let Some(note) = answer.model_discrepancy(grant.endpoint.model()) {
+            eprintln!("{note}");
+        }
+        drafts.push((heading, strip_thinking(&answer.text)));
+    }
+
+    // On stderr and unconditional, on the same terms as `roteiro remote call`'s
+    // receipt: a disclosure that only shows up when you ask for it is one people
+    // stop seeing. The trust caveat rides with it, because the drafted prose is
+    // about to be written to a file and the file will not carry one.
+    eprintln!(
+        "\ndrafted {} section(s) with {} via the remote model tier\n\
+         — {} call(s), {} bytes total ({}) sent to {} ({}); recorded in {}",
+        drafts.len(),
+        grant.endpoint.model(),
+        drafts.len(),
+        sent_bytes,
+        fields.join(", "),
+        grant.endpoint.url(),
+        grant.endpoint.trust().as_str(),
+        ledger.path().display(),
+    );
+    if let Some(caveat) = grant.endpoint.trust().caveat() {
+        eprintln!("  note: {caveat}");
+    }
+
+    let md = rto_spec::apply_drafts(scaffold, &drafts);
+    emit_artifact(&md, &format!("{label} draft"), out)
+}
+
+/// The instruction for one remotely-drafted section — **the task, and no graph
+/// content.**
+///
+/// Deliberately not [`rto_spec::draft_prompt`]: that function names the grounded
+/// symbols and ADRs inline, and inline is exactly where the allow-list cannot
+/// see them. Here the graph arrives as [`rto_remote::ContextItem`]s beside this
+/// text, so what leaves the machine is decided by
+/// [`rto_remote::ContextItem::from_node`] and by nothing else.
+#[cfg(feature = "remote")]
+fn remote_draft_instruction(topic: &str, heading: &str, hint: &str) -> String {
+    let focus = if hint.is_empty() {
+        String::new()
+    } else {
+        format!("Focus: {hint}. ")
+    };
+    format!(
+        "You are drafting the \"{heading}\" section of a house-style technical document about \
+         \"{topic}\". {focus}Write 2–4 precise, technical sentences. Reference only the graph \
+         nodes given to you; do not invent symbols, files, or facts, and say so if what you \
+         were given is not enough. Output only the prose, no heading."
+    )
+}
+
+/// The context nodes a remote draft may carry, read back out of the store.
+///
+/// [`rto_spec::SpecContext`] holds [`rto_graph::NodeSummary`]s, not nodes, and a
+/// summary cannot be fed to [`rto_remote::ContextItem::from_node`] — which is
+/// the point: the allow-list reads five named fields off a real node, and
+/// re-deriving it from a summary would be a second, unreviewed allow-list. So
+/// the keys are resolved back to nodes and the one allow-list does the rest.
+///
+/// A key that no longer resolves is **dropped rather than raised**: the graph was
+/// built moments ago by `build_scaffold`, so a miss means a concurrent change,
+/// and sending less context is the safe direction to fail in.
+///
+/// Bounded by [`rto_remote::payload::MAX_CONTEXT_ITEMS`] here as well as there,
+/// so the cap is a truncation of what is *requested* rather than a refusal at
+/// assembly time.
+#[cfg(feature = "remote")]
+fn remote_context_nodes(ctx: &rto_spec::SpecContext) -> anyhow::Result<Vec<rto_graph::Node>> {
+    let keys: Vec<&str> = ctx
+        .symbols
+        .iter()
+        .map(|s| s.node.key.as_str())
+        .chain(ctx.docs.iter().map(|d| d.key.as_str()))
+        .take(rto_remote::payload::MAX_CONTEXT_ITEMS)
+        .collect();
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_repo, store, _cache) = open_graph()?;
+    let mut nodes = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Some(node) = store.get_node(key)? {
+            nodes.push(node);
+        }
+    }
+    Ok(nodes)
 }
 
 /// The generation backend label shown after drafting.
@@ -4126,7 +4531,15 @@ fn draft_sections(
 
 /// Drop a leading `<think>…</think>` reasoning block, returning the answer that
 /// follows it. Text with no closing `</think>` is returned unchanged.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+///
+/// Applied to remote completions as well as local ones: a hosted reasoning model
+/// emits the same block, and leaving it in would splice a model's scratch
+/// thinking into a drafted document.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "remote"
+))]
 fn strip_thinking(text: &str) -> String {
     match text.find("</think>") {
         Some(end) => text[end + "</think>".len()..].trim_start().to_owned(),
@@ -4134,10 +4547,19 @@ fn strip_thinking(text: &str) -> String {
     }
 }
 
-/// `spec draft` without a generation backend: guide the user to enable one.
-#[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
+/// `spec draft` without any generation backend: guide the user to enable one.
+///
+/// Three now, not two — the remote tier is a backend for this command as of
+/// Stage 34 part 2b, and naming only the llama.cpp pair would send someone to a
+/// C/C++ toolchain they may not want when a build flag they already have would
+/// do.
+#[cfg(not(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "remote"
+)))]
 fn run_spec_draft(
-    _cfg: &config::Config,
+    _cfg: &config::Loaded,
     _ingest: rto_graph::IngestConfig,
     _topic: &str,
     _title: Option<&str>,
@@ -4147,7 +4569,10 @@ fn run_spec_draft(
     anyhow::bail!(
         "`spec draft` needs a generation backend: build with `--features serve` \
          or `--features inference-local-models` (both llama.cpp), then \
-         `roteiro model pull qwen3-0.6b`. (`spec scaffold` works with no model.)"
+         `roteiro model pull qwen3-0.6b` — or `--features remote` for the \
+         explicitly-consented hosted tier (ADR-0019), which needs no local model \
+         and sends only what `roteiro remote dry-run` shows. \
+         (`spec scaffold` works with no model at all.)"
     )
 }
 
@@ -7738,6 +8163,15 @@ struct ServeOptions {
     tls_key: Option<String>,
     /// With `--models`, also mount `/mcp` on the same port (`--mcp`).
     mcp: bool,
+    /// The remote model tier's grant for **this server process**, or `None` for
+    /// a server that will answer only from local models (ADR-0019 v1.2).
+    ///
+    /// Resolved once, in the command dispatch, and carried rather than
+    /// re-derived: the gate has one implementation and a long-lived process must
+    /// not consult it repeatedly and get different answers as files change under
+    /// it. It is not persisted anywhere and dies with the process.
+    #[cfg(all(feature = "remote", feature = "serve"))]
+    remote: Option<RemoteGrant>,
 }
 
 /// The server a `serve`/`mcp` invocation resolves to, factored out of the
@@ -8336,8 +8770,26 @@ fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
 ///
 /// Gated on `explorer` too: the Ask model pool only exists when the explorer UI
 /// (and its `/v1/graph/capabilities` route) is compiled in.
+///
+/// # The remote tier, when this process granted it, leads
+///
+/// `remote_id` is the hosted model's served id, or `None` on a server that will
+/// answer only locally. When it is set it goes to the front unconditionally and
+/// the `[models] generative` rotation below does not run: a server started with
+/// `--allow-remote` was started to use the tier, and leaving a local model in
+/// `models[0]` would make the flag do nothing that the person who typed it could
+/// see. The local models stay in the pool and stay addressable — only the
+/// default moved.
+///
+/// The pin is *not* silently ignored in the process: `resolve_with_remote` has
+/// already resolved it (so a broken one still failed at startup) and reported
+/// the displacement through `ModelChoice::why`.
 #[cfg(all(feature = "serve", feature = "explorer"))]
-fn chat_capable_model_ids(cfg: &config::Config, served_ids: &[String]) -> Vec<String> {
+fn chat_capable_model_ids(
+    cfg: &config::Config,
+    served_ids: &[String],
+    remote_id: Option<&str>,
+) -> Vec<String> {
     use rto_graph::{ModelKind, ModelTask, find_model};
     let is_generative = |id: &str| find_model(id).is_some_and(|s| s.kind == ModelKind::Generative);
     // Drop what cannot chat; keep generative + vision (both can). An id the
@@ -8349,6 +8801,13 @@ fn chat_capable_model_ids(cfg: &config::Config, served_ids: &[String]) -> Vec<St
         .filter(|id| find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
         .cloned()
         .collect();
+    // The granted tier leads, and nothing below reorders past it.
+    if let Some(remote) = remote_id
+        && let Some(pos) = ids.iter().position(|id| id == remote)
+    {
+        ids[..=pos].rotate_right(1);
+        return ids;
+    }
     // Pick the default and rotate it to the front, preserving the order of the
     // rest (a stable, predictable capabilities list). A pin the resolver refuses
     // is *not* silently replaced by the first served generative model: `serve`
@@ -8383,7 +8842,7 @@ mod chat_model_selection {
         // The Ask pool must drop bge and lead with a generative, so `models[0]`
         // (what the UI sends) can never be the crashing embedding model.
         let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
-        let out = chat_capable_model_ids(&config::Config::default(), &served);
+        let out = chat_capable_model_ids(&config::Config::default(), &served, None);
         assert_eq!(out, ids(&["qwen3-0.6b", "qwen3-8b"]));
         assert!(!out.iter().any(|m| m.contains("bge")), "no embedding model");
     }
@@ -8394,7 +8853,7 @@ mod chat_model_selection {
         let mut cfg = config::Config::default();
         cfg.models.generative = Some("qwen3-8b".to_owned());
         let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
-        let out = chat_capable_model_ids(&cfg, &served);
+        let out = chat_capable_model_ids(&cfg, &served, None);
         assert_eq!(out, ids(&["qwen3-8b", "qwen3-0.6b"]));
     }
 
@@ -8402,7 +8861,7 @@ mod chat_model_selection {
     fn vision_models_stay_in_the_pool_but_a_generative_leads() {
         // Vision models can chat, so they remain — but a generative is the default.
         let served = ids(&["bge-small-en-v1.5-gguf", "smolvlm-500m-gguf", "qwen3-0.6b"]);
-        let out = chat_capable_model_ids(&config::Config::default(), &served);
+        let out = chat_capable_model_ids(&config::Config::default(), &served, None);
         assert_eq!(out, ids(&["qwen3-0.6b", "smolvlm-500m-gguf"]));
     }
 
@@ -8411,8 +8870,41 @@ mod chat_model_selection {
         // Only an embedding + a vision model served: the embedding is dropped and
         // the (chat-capable) vision model becomes the default — never the encoder.
         let served = ids(&["bge-small-en-v1.5-gguf", "smolvlm-500m-gguf"]);
-        let out = chat_capable_model_ids(&config::Config::default(), &served);
+        let out = chat_capable_model_ids(&config::Config::default(), &served, None);
         assert_eq!(out, ids(&["smolvlm-500m-gguf"]));
+    }
+
+    /// **A granted tier takes the default slot the Ask UI sends.** A server
+    /// started with `--allow-remote` was started to use the tier; leaving a local
+    /// model in `models[0]` would make the flag do nothing its user could see.
+    /// The local models stay in the pool and stay addressable by name — only the
+    /// default moved, which is the difference between a default and a removal.
+    #[cfg(feature = "remote")]
+    #[test]
+    fn a_granted_remote_model_leads_the_ask_pool_without_removing_the_local_ones() {
+        let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "some-vendor/model"]);
+        let out = chat_capable_model_ids(
+            &config::Config::default(),
+            &served,
+            Some("some-vendor/model"),
+        );
+        assert_eq!(out, ids(&["some-vendor/model", "qwen3-0.6b"]));
+
+        // …and it outranks a `[models] generative` pin, which the resolver has
+        // already reported as displaced rather than silently skipped.
+        let mut cfg = config::Config::default();
+        cfg.models.generative = Some("qwen3-8b".to_owned());
+        let served = ids(&["qwen3-0.6b", "qwen3-8b", "some-vendor/model"]);
+        let out = chat_capable_model_ids(&cfg, &served, Some("some-vendor/model"));
+        assert_eq!(out[0], "some-vendor/model");
+        assert!(out.contains(&"qwen3-8b".to_owned()), "{out:?}");
+
+        // With no grant the pool is exactly what it was before the tier existed.
+        assert_eq!(
+            chat_capable_model_ids(&cfg, &served, None)[0],
+            "qwen3-8b",
+            "an ungranted server is unchanged"
+        );
     }
 
     #[test]
@@ -8420,8 +8912,32 @@ mod chat_model_selection {
         // Nothing chat-capable ⇒ empty pool ⇒ the UI keeps Ask disabled (no request
         // with an embedding model is ever sent).
         let served = ids(&["bge-small-en-v1.5-gguf"]);
-        assert!(chat_capable_model_ids(&config::Config::default(), &served).is_empty());
+        assert!(chat_capable_model_ids(&config::Config::default(), &served, None).is_empty());
     }
+}
+
+/// The tier this server process resolves models with — the grant taken at
+/// startup, re-expressed for the shared resolver.
+///
+/// A function rather than an inline expression so both `serve` resolutions (the
+/// startup validation and the Ask pool) read the same value, and so the
+/// non-`remote` build has one place saying "there is no tier here" instead of
+/// two.
+#[cfg(all(feature = "serve", feature = "remote"))]
+fn serve_remote_tier(opts: &ServeOptions) -> rto_graph::RemoteTier {
+    opts.remote
+        .as_ref()
+        .map_or(rto_graph::RemoteTier::Unavailable, |g| {
+            rto_graph::RemoteTier::Granted {
+                trust: g.endpoint.trust(),
+            }
+        })
+}
+
+/// Without the `remote` feature there is no tier to resolve with, ever.
+#[cfg(all(feature = "serve", not(feature = "remote")))]
+fn serve_remote_tier(_opts: &ServeOptions) -> rto_graph::RemoteTier {
+    rto_graph::RemoteTier::Unavailable
 }
 
 #[cfg(feature = "serve")]
@@ -8443,7 +8959,16 @@ fn serve_models_endpoint(
     // error has to fail at startup or it becomes a per-request surprise — and the
     // Ask panel sends `models[0]`, so a bad pin there is the one that used to be
     // silently replaced by whatever happened to be served first.
-    rto_graph::resolve_model_with(rto_graph::ModelTask::Chat, &cfg.models.resolve())?;
+    //
+    // Resolved with the tier so the failure ordering stays right in both
+    // directions: a broken pin still fails here even on a server that will answer
+    // remotely, because a broken configuration is broken whether or not this
+    // process reads it (`resolve_with_remote`).
+    rto_graph::resolve_model_with_remote(
+        rto_graph::ModelTask::Chat,
+        &cfg.models.resolve(),
+        serve_remote_tier(opts),
+    )?;
 
     let served = served_models(cfg);
     if served.is_empty() {
@@ -8486,6 +9011,33 @@ fn serve_models_endpoint(
     let engine = rto_serve::llama::LlamaEngine::new_with_budget(served, 0, budget_bytes)
         .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
     let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
+    // With the tier granted for this process, the hosted model joins the served
+    // set as one more id — `rto-serve` is not modified, and the socket stays in
+    // `remote_transport`. See `remote_engine` for the reduction that keeps the
+    // payload allow-list load-bearing over a chat transcript, and for what a
+    // process-scoped grant does and does not license.
+    #[cfg(feature = "remote")]
+    let engine: std::sync::Arc<dyn rto_serve::Engine> = match &opts.remote {
+        Some(grant) => {
+            eprintln!(
+                "remote model tier: ON for this server process — every Ask it answers sends \
+                 graph-derived\n  context to {} as {} ({}). Recorded in {}; the grant dies with \
+                 this process.",
+                grant.endpoint.url(),
+                grant.endpoint.model(),
+                grant.endpoint.trust().as_str(),
+                remote_ledger()?.path().display(),
+            );
+            std::sync::Arc::new(remote_engine::RemoteBackedEngine::new(
+                engine,
+                grant.endpoint.clone(),
+                grant.decision,
+                remote_ledger()?,
+                flat.clone(),
+            ))
+        }
+        None => engine,
+    };
 
     // TLS precedence mirrors `addr`: CLI flag > `[serve]` config.
     let tls = resolve_serve_tls(
@@ -8616,7 +9168,16 @@ fn serve_v1_tail(
     #[cfg(feature = "explorer")]
     let model_ids: Vec<String> = {
         let served_ids: Vec<String> = engine.models().into_iter().map(|m| m.id).collect();
-        chat_capable_model_ids(cfg, &served_ids)
+        // The hosted model's id when this process granted the tier, so it takes
+        // the default slot the Ask UI sends. Read from `opts` rather than
+        // inferred from the served set: which id is the remote one is a fact
+        // about the grant, and guessing it from the engine would be a second,
+        // weaker answer to the same question.
+        #[cfg(feature = "remote")]
+        let remote_id = opts.remote.as_ref().map(|g| g.endpoint.model());
+        #[cfg(not(feature = "remote"))]
+        let remote_id: Option<&str> = None;
+        chat_capable_model_ids(cfg, &served_ids, remote_id)
     };
 
     // Build the `/v1` model router, then merge any extra read-only/MCP surfaces
@@ -11699,7 +12260,7 @@ mod serve_explorer_wiring {
             std::sync::Arc::new(GraphToolRegistry::new(flat));
         let served_ids: Vec<String> = engine.models().into_iter().map(|m| m.id).collect();
         let model_ids =
-            super::chat_capable_model_ids(&super::config::Config::default(), &served_ids);
+            super::chat_capable_model_ids(&super::config::Config::default(), &served_ids, None);
         let base = rto_serve::app_with_tools(engine, tools);
         let router = mount_explorer_surfaces(base, set, Some("default".to_owned()), model_ids);
 

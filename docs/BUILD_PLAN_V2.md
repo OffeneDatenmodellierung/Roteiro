@@ -1427,11 +1427,11 @@ byte-identical afterwards.
 
 ---
 
-### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)* 🔶 *parts 1 and 2a delivered; 2b — the surface wiring — remains*
+### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)* ✅ *delivered in three parts: 1 the guard, 2a the transport, 2b the surface wiring*
 
 **Unblocked.** [ADR-0019](adr/0019-remote-model-tier.md) is **Accepted** (2026-08-17), so this stage has a settled contract to build against. It remains the largest posture change in the project: the first capability that sends repository content off the machine.
 
-**Cut in three, guard first, then the thing it guards, then the surfaces that use it.** Part 1 — the consent gate, the payload allow-list, the dry-run and the egress record — landed in a build that compiled **no backend and therefore could not send anything**. Part 2a — **delivered here** — is the `ureq` transport, the TTY form of the invocation grant, the response reader, and the README/website promise amendments that the transport makes necessary. Part 2b is the `model_choice` amendment and the `spec draft` / Ask wiring: it was cut out of 2a because it lands in a **shared** resolver that seven surfaces already read, and merging that with the first code in the project that can open a socket would put two unrelated risks in one review. See *What shipped* below.
+**Cut in three, guard first, then the thing it guards, then the surfaces that use it.** Part 1 — the consent gate, the payload allow-list, the dry-run and the egress record — landed in a build that compiled **no backend and therefore could not send anything**. Part 2a is the `ureq` transport, the TTY form of the invocation grant, the response reader, and the README/website promise amendments that the transport makes necessary. Part 2b — **delivered here** — is the `model_choice` amendment and the `spec draft` / Ask wiring: it was cut out of 2a because it lands in a **shared** resolver that seven surfaces already read, and merging that with the first code in the project that can open a socket would put two unrelated risks in one review. See *What shipped* below.
 
 **Goal:** an optional, explicitly-consented remote model backend for work local
 models cannot do.
@@ -1611,29 +1611,140 @@ meaning (a one-time, consented **download**, after which inference is local), an
 a note beside it says in as many words that enabling
 `inference-local-models` did not enable this.
 
-**What remains, and is part 2b.** The `model_choice` amendment —
-`ModelSource::Remote { trust }` with `installed: None` — and the `spec draft` /
-Ask wiring over it. Cut out of 2a deliberately: it lands in a **shared** resolver
-that seven surfaces already read, and pairing that blast radius with the first
-code in the project that can open a socket would put two unrelated risks in one
-review. `roteiro remote call` is a complete call site in the meantime, so the
-transport is exercised end to end rather than sitting unreachable.
+#### What shipped — part 2b of 3: **the surfaces, over a shared resolver**
 
-**One thing the resolver could not express, and was not routed around.**
-`rto_graph::model_choice` resolves a *registry* model — a name with a variant, a
-platform and a digest on disk. A remote model is none of those, and
-`ModelChoice::installed` has no meaning for one. Parts 1 and 2a need no
-resolution (they never pick a model to run; the endpoint names its own), so
-nothing bespoke was added and nothing was worked around. Part 2b does need it,
-and the proposal is a `ModelSource::Remote { trust }` variant plus a
-`ModelChoice::installed` that is `None` rather than `false` for it — an amendment
-to Stage 33's resolver, not a second selection rule beside it.
+Parts 1 and 2a built a tier you had to name to use. This part puts it behind two
+surfaces where a person could reach it **without typing `remote`** — and most of
+the work is making that impossible to do unaware.
+
+**`ModelSource::Remote { trust }`, and the three things it forced.** The variant
+carries the *trust grade* rather than a model name, because that is the whole of
+what it exists to say: a hosted model has no registry entry and no digest, a
+vendor model string is a mutable pointer, and a resolution must state on its face
+that its identity is a claim (ADR-0019 §5). Three consequences, none of them
+predicted by the plan and all of them structural rather than stylistic:
+
+- **`ProducerTrust` moved crate**, from `rto-remote` to `rto-graph`, re-exported
+  so `rto_remote::ProducerTrust` still resolves. Forced: `rto-remote` depends on
+  `rto-graph`, so a variant in the resolver cannot name a type in the crate above
+  it. The alternative was a second, parallel enum — which would let a ledger
+  entry and a resolution disagree about what *"vendor-asserted"* means, and a
+  grade two types could disagree about is not a grade. One definition now, three
+  paths, held level by a test that only compiles if they are the same type.
+- **`ModelChoice.installed` became `Option<bool>`**, exactly as the plan
+  proposed. `None` is a *third* answer rather than a negative one: there are no
+  weights on any disk, so `Some(false)` would point a reader at `roteiro model
+  pull` for a model no registry lists.
+- **`ModelChoice.model` stays a registry name and is `None` for a remote
+  choice.** A vendor string in that field would put a mutable pointer in the slot
+  reserved for digest-pinned names. The endpoint owns the string, together with
+  the grade that qualifies it.
+
+**The blast radius, counted rather than estimated.** `model_choice::resolve`
+spelled literally has 3 non-test call sites; the resolver *family* — `resolve`,
+`resolve_model`, `resolve_model_with`, `resolve_models` — has **10**. Eight
+needed no edit, because 2b adds `resolve_with_remote` as a new entry point rather
+than changing `resolve_with`'s signature; the other two are `installed`
+comparisons. A `RemoteTier` argument that **defaults to `Unavailable`** is what
+makes that safe: a caller who forgets the tier gets the local answer by
+construction rather than by remembering to.
+
+**Precedence, decided in the open.** The pin resolves **first, and its errors
+still fail**, even on a run whose local answer is about to be discarded — a
+`--allow-remote` that made a broken `[models] generative` stop being reported
+would hide bugs as a side effect of granting egress. Then the tier wins, because
+a per-run flag someone typed is more specific than a standing project default —
+and it wins **out loud**: `ModelChoice::why` names `[models] <key>` as not
+applying, so a displaced pin is reported rather than silently skipped. Only
+`Draft` and `Chat` are eligible; the other four tasks are refused *structurally*,
+because `Transcribe`, `Describe` and `Ocr` run inside extraction where there is
+no invocation to grant anything, so consent there could only come from a config
+value — the user layer again, which ADR-0019 §3 says never suffices alone.
+
+**`spec draft`: the flag is the only way, and a refusal stops the run.**
+`--allow-remote` / `--no-remote`, and **no TTY prompt** — deliberately unlike
+`roteiro remote call`. That command prompts because sending is what it does; here
+the default is local, and a prompt on a default path turns a habituated "y" into
+consent-by-default, which is the thing a two-layer gate exists to prevent. The
+harder half is the refusal: a `--allow-remote` the gate turns down **fails**,
+naming the layer and its remedy, rather than drafting locally. Handing back a
+local model's prose there is a different answer with no signal that anything
+changed — ADR-0019 §6's named failure, arriving through the consent gate instead
+of through a socket. It is the same silent downgrade wearing a different hat, and
+it is the failure this part most had to get right.
+
+**The remote draft is not the local prompt on a wire, and could not have been.**
+`rto_spec::draft_prompt` interpolates grounded symbol and ADR names **into a
+string**. Sending that string would put graph content on the wire without it ever
+passing `ContextItem::from_node` — the allow-list would still exist and simply
+have nothing to do, which is the *"whatever the local path happened to build"*
+assembly §4 forbids by name. So the remote path **rebuilds**: the instruction
+carries the task and no graph content, and the nodes travel as allow-listed
+context items. The cost is stated rather than hidden — a remote draft is not the
+same prompt as a local one — because keeping the allow-list load-bearing is worth
+more than prompt parity on the one path that leaves the machine. One call per
+unfilled section, so each disclosure is its own ledger line rather than several
+hidden inside one.
+
+**Ask: the served `Engine`, wrapped in the binary.** The explorer's panel POSTs
+`/v1/chat/completions`, which `rto_serve::server` handles over an
+`Arc<dyn Engine>` — so Ask is not a Roteiro function and the branch had two
+possible homes. `crates/roteiro/src/remote_engine.rs` is the one that changes
+nothing: **`rto-serve` gains no code, no feature and no dependency**, and the
+socket stays in `remote_transport`. The hosted model becomes one more served id
+and leads the Ask pool, so `models[0]` — what the UI sends — is the tier a server
+was started with `--allow-remote` to use; every local model stays served and
+addressable, so a default moved rather than anything being removed. The cost is
+named rather than discovered: that id is in `GET /v1/models`, so any client on
+the port may address it — bounded by loopback-by-default, by the user layer
+having granted independently, and by the ledger.
+
+**A chat transcript cannot be wrapped in an allow-list, so it is reduced.** With
+graph tools on, `chat_with_tools` injects **tool results** — raw graph query
+output — into the conversation before the model sees it. Proxying that array
+would route graph content past the guard entirely. So the remote path takes the
+`user` turns and only those, drops assistant, tool and system turns, grounds the
+question itself through `rto_spec::context`, and does not run the tool loop
+remotely at all. A remote Ask is therefore **not the same conversation** as a
+local one. That is a trade, made in the open, in the same direction as the draft
+path's.
+
+**`serve --allow-remote` is a process-scoped grant, per ADR-0019 v1.2.** Decided
+once, in the command dispatch, before anything is built or bound — so a refused
+grant stops the server from starting rather than letting it come up and answer
+locally. The `Decision` is then a field on the engine: never recomputed, never
+persisted, never read back from anywhere, dropped with the process. There is no
+code that could infer a grant from a previous session because there is nothing to
+infer one from.
+
+**`remote` now implies `models`, and it is a resolver dependency.** The tier does
+not choose itself: `ModelSource::Remote` is a variant of the *shared* resolver,
+which is gated on `rto-graph/models`, and both surfaces ask that resolver which
+backend serves them before either can send. Without it a `--features remote`
+build would hold a consent gate and a transport and nothing that decides when to
+use them. It pulls no llama.cpp and enables nothing — and it is what makes
+`spec draft` reachable under `remote` alone, which is the point of a tier meant
+for work local models cannot do.
+
+**The promises, amended again on the commit that changes them.** 2a's README and
+website text described a tier reached through `roteiro remote …`. Two more
+commands can send now, so both say so, name which one prompts and which two do
+not, and state the `serve` exposure in the terms ADR-0019 v1.2 uses — including
+that the person starting the server consents on behalf of every later request to
+it.
 
 **Gates:** `fmt` clean; `clippy --all-targets` and `--all-targets --all-features`
-clean at `-D warnings`; `cargo test --workspace --no-fail-fast` and
-`--all-features --no-fail-fast` green; `cargo deny` clean. `EXTRACT_VERSION`
-unchanged at 11, no migration, **no new dependency**, and no network — in either
-the code or the tests. Every new test was fault-injected.
+clean at `-D warnings`; `cargo test --workspace --no-fail-fast` **962 passed / 0
+failed** and `--all-features --no-fail-fast` **1,216 passed / 0 failed**; `cargo
+deny` clean. `EXTRACT_VERSION` unchanged at **12**, no migration, **no new
+dependency**, and no network — in either the code or the tests, where the only
+address any granted call may reach is `http://127.0.0.1:1/…` (loopback, a literal
+so there is no DNS query, and nothing listening). Every new test was
+fault-injected: 6 resolver, 1 re-export, 6 engine, 1 Ask-pool and 8 CLI, each
+shown to fail under a mutation of the behaviour it claims to check, with the tree
+byte-identical afterwards. The Ask grounding budget is asserted at **compile
+time** rather than in a test, so violating it fails the build that edits the
+literal.
 
 ---
 
@@ -1774,7 +1885,7 @@ either way: it is how any future reviewer, hosted or local, gets measured.
 | v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
 | v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
-| v1.17.0 🔶 | Stage 34 — remote model tier | **ADR-0019 Accepted.** Cut in three. **1 — the guard** (#381): consent gate, payload allow-list, dry-run, egress ledger, in a build compiling no backend. **2a — the transport**: `ureq` behind the off-by-default `remote` feature, the TTY invocation grant (`status`/`dry-run` never prompt), the response reader that refuses a truncated generation, and the README/website promise amendments on the commit that made them false. Project file may deny, never grant; no learned router on the local→remote edge; no reachability probe; no test can reach a network. **2b — not built**: `ModelSource::Remote { trust }` and the `spec draft` / Ask wiring over it |
+| v1.17.0 ✅ | Stage 34 — remote model tier | **ADR-0019 Accepted.** Cut in three, all delivered. **1 — the guard** (#381): consent gate, payload allow-list, dry-run, egress ledger, in a build compiling no backend. **2a — the transport**: `ureq` behind the off-by-default `remote` feature, the TTY invocation grant (`status`/`dry-run` never prompt), the response reader that refuses a truncated generation, and the README/website promise amendments on the commit that made them false. **2b — the surfaces**: `ModelSource::Remote { trust }` with `installed: None` in the shared resolver (which forced `ProducerTrust` from `rto-remote` into `rto-graph` — one definition, or a ledger entry and a resolution could disagree about what "vendor-asserted" means), then `spec draft --allow-remote` and `serve --allow-remote` over it. Neither prompts — the flag is the only way on a surface whose default is local — and a **refused** `--allow-remote` stops the run rather than answering locally, which is the same silent downgrade a network failure would be. Both rebuild the request through the payload allow-list rather than forwarding a local prompt or a chat transcript, so the guard still assembles what leaves. Ask is wired by wrapping the served `Engine` **in the binary**, so `rto-serve` gains nothing. Project file may deny, never grant; no learned router on the local→remote edge; no reachability probe; no test can reach a network |
 | v1.18.0 🔶 | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes. No reviewer yet, and **no verdict** — only the instrument. Two findings it forced: the corpus README's reconstruction recipe yielded an *empty* diff for 13 of 15 commits, and 9 of 15 diffs exceed the single-call budget, so per-file is the only viable shape — which puts `contract-drift`, the largest class, squarely on the graph |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
@@ -1884,15 +1995,18 @@ outlives the current stage — the stages themselves carry the detail:
   extraction cache key, which folded the OCR model *by name* and would have made
   `[models] ocr` the one pin that changes what is extracted without invalidating
   what was extracted before it.
-- **Stage 34 — remote model tier.** 🔶 **Parts 1 and 2a delivered.** ADR-0019 is
+- **Stage 34 — remote model tier.** ✅ **All three parts delivered.** ADR-0019 is
   **Accepted**, and it did all three things it had to: scoped ADR-0006's
   *"nothing leaves the machine"* to serving, inverted ADR-0007's precedence for
   one key (v1.2 also scopes *the invocation* for a long-lived process), and
   exempted principle 10 explicitly. Part 1 landed the guard **before** anything
   could send — ADR-0019 §4's own argument; 2a landed the transport and the
-  promise amendments on the commit that made them false. **2b is not built**:
-  the `ModelSource::Remote { trust }` resolver amendment and the
-  `spec draft` / Ask wiring over it.
+  promise amendments on the commit that made them false; 2b landed
+  `ModelSource::Remote { trust }` in the shared resolver and wired `spec draft`
+  and Ask over it. The thing 2b had to get right was not the sending but the
+  **not** sending: on a surface whose default is local there is no prompt, only
+  the flag, and a `--allow-remote` the gate refuses stops the run instead of
+  quietly producing a local answer.
 - **Stage 35 — `roteiro review` LLM mode.** 🔶 **35a delivered.** The corpus has
   an instrument — `roteiro review --score`, per-class recall, `compile_claim` —
   but **no reviewer and no verdict**. 35b is the reviewer, and *"do not build

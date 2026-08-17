@@ -62,6 +62,24 @@ send graph-derived context to a hosted model.
   Neither alone suffices. A committed `roteiro.toml` may **deny** it for a whole
   repository but can never grant it — a merged line must not authorise egress on
   a teammate's machine.
+- **Three commands can send, and each has to be told to.** `roteiro remote call`
+  is the one that exists to; `roteiro spec draft --allow-remote` drafts with the
+  hosted model instead of a local one; `roteiro serve --allow-remote` makes it
+  the model the Ask panel uses. Without the flag all three are local, and **only
+  `remote call` ever prompts** — on the other two the flag is the only way,
+  because a prompt on a command whose default is local turns a habituated "yes"
+  into consent you never quite gave.
+- **`serve --allow-remote` grants for the life of the server process**, not one
+  request at a time, and that is a materially larger exposure than a one-shot
+  command: every Ask that server answers sends context to the hosted model for as
+  long as it runs, including requests from anyone else who can reach the port.
+  `serve` binds loopback by default, your user config still has to have granted,
+  and every call is on the ledger. The grant dies with the process and is never
+  persisted.
+- **A refused `--allow-remote` stops the run.** If you asked for the hosted model
+  and a layer said no, Roteiro names the layer and does *not* answer from a local
+  model instead — that would be a different answer with nothing to signal the
+  change.
 - **What would be sent is inspectable first, and what did is recorded.**
   `roteiro remote dry-run` prints the exact body and sends nothing;
   `roteiro remote log` reads the append-only ledger of what left, and when.
