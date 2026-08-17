@@ -20,6 +20,27 @@ network, so a test cannot accidentally become the first thing that sends data.
 still pinned `default-features = false` to exclude the transports, and this
 crate depends *on* it rather than the other way round.
 
+The socket lives in the `roteiro` binary, in `remote_transport.rs`, behind the
+off-by-default `remote` feature: one function, reachable from one command
+(`roteiro remote call`), handed to `call_with` as a closure. Adding an HTTP
+client to *this* crate's `Cargo.toml` is the change that would undo all of the
+above, which is why the manifest says so where someone would be adding one.
+
+## Reading the response is also here, where there is no socket
+
+`response::parse` turns a chat-completion body into an answer, and refuses
+anything that is not a whole one: a generation stopped at a token limit, an empty
+completion, a body the endpoint filled with its own error, a body that is not the
+shape it claims to be. It is a pure function of a `&str`, so every one of those
+failures is tested against a string literal — the receive side gets the same
+guarantee as the send side, that a test cannot become the first thing that talks
+to a server.
+
+Refusing a truncated answer rather than returning it is the point. A completion
+that stopped early *reads* as finished, so handing it over would be the silent
+downgrade ADR-0019 most needs to prevent: a different answer with no signal that
+anything changed.
+
 ## The consent model, which is inverted for one key
 
 ADR-0007's precedence is **CLI flag > project `roteiro.toml` > user

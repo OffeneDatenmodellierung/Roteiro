@@ -18,8 +18,9 @@ Every edge in the graph records **how it was produced**:
 One SQLite store. One query surface. Three renderers: a docs website, an
 Obsidian vault, and an optional MCP server (`--features mcp`) — all build
 outputs of the same graph, so what humans review is what agents query. Offline
-by default; git-native and content-addressed, so the graph is shareable across a
-team.
+by default — one optional, default-off feature can call a hosted model, and
+[it is described below](#one-capability-sends-your-repositorys-content-elsewhere-it-is-off);
+git-native and content-addressed, so the graph is shareable across a team.
 
 ## Getting started
 
@@ -44,6 +45,39 @@ guide has the commands, and `roteiro security ingest` accepts a report produced
 anywhere if you would rather install none of them. Local *inference* and
 *serving* remain opt-in (`--features inference-local-models`, `--features
 serve`).
+
+### One capability sends your repository's content elsewhere. It is off.
+
+Everything above runs on your machine. **One optional feature does not**, and it
+is named here rather than left to be discovered: `--features remote` compiles the
+**remote model tier** ([ADR-0019](docs/adr/0019-remote-model-tier.md)), which can
+send graph-derived context to a hosted model.
+
+- **It is not in the default build.** `cargo install roteiro` cannot send
+  anything, and no release will change that. It *is* included in
+  `--all-features`, so a build made that way can — with consent.
+- **Enabling the feature does not enable the tier.** A run must be granted by
+  your own `~/.roteiro/config.toml` **and** by the invocation
+  (`--allow-remote`, or answering a prompt that shows you the exact bytes).
+  Neither alone suffices. A committed `roteiro.toml` may **deny** it for a whole
+  repository but can never grant it — a merged line must not authorise egress on
+  a teammate's machine.
+- **What would be sent is inspectable first, and what did is recorded.**
+  `roteiro remote dry-run` prints the exact body and sends nothing;
+  `roteiro remote log` reads the append-only ledger of what left, and when.
+- **Source code is not sent** — function bodies are not in the graph. That is
+  *not* the same as nothing identifying being sent: symbol names, file paths and
+  captured prose go, they identify a codebase, and there is no redaction
+  chokepoint on a prompt. `roteiro remote status` says so in full.
+- **It never falls back quietly.** With the tier on and the endpoint
+  unreachable, Roteiro fails with an error naming the endpoint rather than
+  answering from a local model — a different model is a different answer.
+
+So *"nothing leaves the machine"* is true of Roteiro **as shipped and as
+configured**, and is no longer a property of the software as a whole.
+[ADR-0006](docs/adr/0006-local-model-serving.md) states the same sentence scoped
+to `roteiro serve`, which still exposes only installed models and still never
+downloads.
 
 Planning to work on a train or a plane? Models and analyzer databases must be
 fetched once, deliberately, before you disconnect —

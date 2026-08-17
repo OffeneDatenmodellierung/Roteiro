@@ -8,8 +8,9 @@
 //! # What this crate is, and what it structurally cannot do
 //!
 //! It holds the **policy**: who consented ([`consent`]), what may be sent
-//! ([`payload`]), where to ([`endpoint`]), what was recorded ([`record`]), and
-//! whether a *local* attempt fell short ([`escalation`]).
+//! ([`payload`]), where to ([`endpoint`]), what came back ([`response`]), what
+//! was recorded ([`record`]), and whether a *local* attempt fell short
+//! ([`escalation`]).
 //!
 //! It holds **no transport**, and must never hold one. [`call_with`] takes the
 //! transport as a caller-supplied closure — the same shape `rto-exec` uses for
@@ -42,6 +43,11 @@
 //! produces a different answer with no signal that anything changed, and it is
 //! the failure mode ADR-0019 most needs to prevent.
 //!
+//! [`response::parse`] carries the same rule onto the receive side, where it is
+//! easier to miss: a completion that stopped at a token limit *reads* as
+//! finished, so returning it would be an unannounced downgrade with the
+//! endpoint's own name on it. It is refused instead.
+//!
 //! # Default-off, and it stays default-off
 //!
 //! Nothing in this crate has a default that permits a call. [`consent::decide`]
@@ -53,6 +59,7 @@ pub mod endpoint;
 pub mod escalation;
 pub mod payload;
 pub mod record;
+pub mod response;
 pub mod trust;
 
 pub use consent::{ConfigGrant, Decision, Reason};
@@ -60,6 +67,7 @@ pub use endpoint::{Endpoint, EndpointError};
 pub use escalation::{Check, LocalAttempt, Policy, Trigger};
 pub use payload::{ContextItem, Payload, PayloadError};
 pub use record::{Egress, Entry, Ledger, LedgerError, Outcome};
+pub use response::{Answer, ResponseError};
 pub use trust::ProducerTrust;
 
 /// The transport, supplied by the caller.
@@ -374,6 +382,109 @@ mod tests {
         };
         assert!(!outcome.ok);
         assert_eq!(outcome.detail, "connection refused");
+    }
+
+    /// **A call that fails leaves an honest record, not a missing one.**
+    ///
+    /// The ledger is written first *by design*, and the reason only shows up in
+    /// the failure case: `a_transport_failure_names_the_endpoint_and_refuses_to_fall_back`
+    /// reads the ledger after the call returns, which a single line written at the
+    /// end would also satisfy. This reads it **from inside the failing transport**,
+    /// which only the write-first ordering can satisfy — and it is the ordering
+    /// that matters, because the calls worth knowing about are exactly the ones
+    /// that never returned. "We have no record, so presumably nothing left" is the
+    /// wrong default for an egress log.
+    #[test]
+    fn a_failing_call_finds_its_egress_already_recorded_before_it_fails() {
+        let dir = temp_dir("failure-ordering");
+        let ledger = Ledger::at(dir.join("egress.jsonl"));
+        let payload = payload();
+        let endpoint = endpoint();
+
+        let transport = |_: &Endpoint, _: &str| -> Result<String, String> {
+            // The bytes are gone by now: whatever happens next, the record of
+            // their leaving is already on disk.
+            let seen = ledger.read().expect("read from inside the call");
+            assert_eq!(seen.len(), 1, "the egress line is on disk before sending");
+            let super::Entry::Egress(egress) = &seen[0] else {
+                panic!("expected an egress line, got {:?}", seen[0]);
+            };
+            assert_eq!(
+                egress.body,
+                dry_run(&endpoint, &payload),
+                "and it is these bytes"
+            );
+            Err("the peer hung up before answering".to_owned())
+        };
+
+        let err = call_with(
+            &endpoint,
+            &payload,
+            granted(),
+            &ledger,
+            &clock(),
+            Some(&transport as &Transport<'_>),
+        )
+        .expect_err("the transport failed");
+        assert!(matches!(err, RemoteError::Transport { .. }), "{err:?}");
+
+        // Two lines, not one: a call that disclosed bytes and then failed is a
+        // disclosure with a failure attached, never an absence.
+        let entries = ledger.read().expect("read");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].call(), entries[1].call());
+        let super::Entry::Outcome(outcome) = &entries[1] else {
+            panic!("expected an outcome line, got {:?}", entries[1]);
+        };
+        assert!(!outcome.ok);
+        assert_eq!(outcome.response_bytes, 0);
+        assert_eq!(outcome.detail, "the peer hung up before answering");
+    }
+
+    /// **A response is not an answer until it has been read**, and reading it is
+    /// [`response::parse`]'s job rather than the transport's. Held level here
+    /// because the seam is where the two could drift: `call_with` returns the
+    /// bytes verbatim, so a body the endpoint filled with its own error arrives
+    /// as `Ok` — and is still refused, with the endpoint's words rather than a
+    /// substituted local answer.
+    #[test]
+    fn a_transport_success_carrying_no_answer_is_still_a_refusal() {
+        let dir = temp_dir("unusable-response");
+        let ledger = Ledger::at(dir.join("egress.jsonl"));
+        let refusal = r#"{"error":{"message":"quota exhausted"}}"#;
+        let transport =
+            |_: &Endpoint, _: &str| -> Result<String, String> { Ok(refusal.to_owned()) };
+
+        let raw = call_with(
+            &endpoint(),
+            &payload(),
+            granted(),
+            &ledger,
+            &clock(),
+            Some(&transport as &Transport<'_>),
+        )
+        .expect("bytes came back, which is all `call_with` claims");
+        assert_eq!(raw, refusal, "the transport's bytes are returned verbatim");
+
+        let err = crate::response::parse(&raw).expect_err("those bytes are not an answer");
+        assert_eq!(
+            err,
+            crate::response::ResponseError::EndpointReported {
+                message: "quota exhausted".to_owned()
+            }
+        );
+
+        // The ledger is right either way: bytes did leave, and something did come
+        // back. The record answers "what left this machine?", not "was the reply
+        // any good?" — and conflating the two would make a refused call look like
+        // one that never happened.
+        let entries = ledger.read().expect("read");
+        assert_eq!(entries.len(), 2);
+        let super::Entry::Outcome(outcome) = &entries[1] else {
+            panic!("expected an outcome line, got {:?}", entries[1]);
+        };
+        assert!(outcome.ok, "the transport did succeed");
+        assert_eq!(outcome.response_bytes, refusal.len());
     }
 
     /// **An unrecordable call does not happen.** If the egress line cannot be

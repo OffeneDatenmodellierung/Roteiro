@@ -230,20 +230,31 @@ inference-local-models = [
 #
 # Enabling it adds **no third-party dependency**: `rto-remote` is a workspace
 # crate over `rto-graph`, `serde` and `thiserror`, and it deliberately contains
-# no HTTP client — the transport is a caller-supplied closure, as `rto-exec`'s
-# `Fetcher` is. So this feature compiles the *policy*: the consent gate, the
-# payload allow-list, the dry-run and the egress ledger. **It compiles no
-# backend**, and this build therefore cannot send anything; `roteiro remote`'s
-# subcommands inspect and report, and the one path that would call out fails
-# loudly with `RemoteError::NoTransport` naming the endpoint.
+# no HTTP client. `ureq` is already in the tree for `roteiro model pull` and
+# `security prefetch`, and `rto-exec` is a workspace crate — so `cargo deny` and
+# ADR-0017 have nothing new to look at, which is what ADR-0019 anticipated when
+# it recorded that `ureq` "is already in the tree, so this need not add a new
+# dependency closure".
 #
-# It takes `rto-remote` and nothing else. `rto_remote::Clock` — the injected
-# timestamp source the ledger stamps entries with — will want `rto-exec`'s
-# `rfc3339_utc` when part 2 wires the call path; it is deliberately *not*
-# declared here yet, because nothing in this build calls `call_with`, and a
-# dependency added for a call site that does not exist is a dependency nobody
-# can see the need for.
-remote = ["dep:rto-remote"]
+# **Part 2 is what made a build with this feature able to send.** Part 1
+# compiled the policy and no backend at all — the consent gate, the payload
+# allow-list, the dry-run and the egress ledger — so that build could not send
+# anything and the guard was reviewable on its own. `src/remote_transport.rs` is
+# the socket, and it is still handed to `rto_remote::call_with` as a closure:
+# the crate holding the policy has no HTTP client and must never acquire one,
+# which stays checkable from `crates/rto-remote/Cargo.toml` rather than promised
+# in prose.
+#
+# Three dependencies, each for one named reason:
+#   * `rto-remote` — the policy: who consented, what may be sent, what came
+#     back, what was recorded.
+#   * `ureq` — the transport, in `remote_transport::call` and nowhere else.
+#   * `rto-exec` — for `rfc3339_utc` alone, which stamps the ledger's entries
+#     through `rto_remote::Clock`. Part 1 deliberately left this undeclared
+#     because nothing then called `call_with`; that call site now exists. It
+#     does **not** enable `execution`, so `--features remote` still yields a
+#     binary with no analyzer surface.
+remote = ["dep:rto-remote", "dep:rto-exec", "dep:ureq"]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
 pdf-text = ["rto-graph/pdf-text"]

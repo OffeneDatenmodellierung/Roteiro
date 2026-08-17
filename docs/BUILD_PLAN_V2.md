@@ -1427,11 +1427,11 @@ byte-identical afterwards.
 
 ---
 
-### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)* 🔶 *part 1 of 2 delivered*
+### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)* 🔶 *parts 1 and 2a delivered; 2b — the surface wiring — remains*
 
 **Unblocked.** [ADR-0019](adr/0019-remote-model-tier.md) is **Accepted** (2026-08-17), so this stage has a settled contract to build against. It remains the largest posture change in the project: the first capability that sends repository content off the machine.
 
-**Cut in two, guard first.** Part 1 — the consent gate, the payload allow-list, the dry-run and the egress record — has landed, in a build that compiles **no backend and therefore cannot send anything**. Part 2 is the transport and the promise amendments it makes necessary. See *What shipped* below for the seam and for what part 2 still owes.
+**Cut in three, guard first, then the thing it guards, then the surfaces that use it.** Part 1 — the consent gate, the payload allow-list, the dry-run and the egress record — landed in a build that compiled **no backend and therefore could not send anything**. Part 2a — **delivered here** — is the `ureq` transport, the TTY form of the invocation grant, the response reader, and the README/website promise amendments that the transport makes necessary. Part 2b is the `model_choice` amendment and the `spec draft` / Ask wiring: it was cut out of 2a because it lands in a **shared** resolver that seven surfaces already read, and merging that with the first code in the project that can open a socket would put two unrelated risks in one review. See *What shipped* below.
 
 **Goal:** an optional, explicitly-consented remote model backend for work local
 models cannot do.
@@ -1471,13 +1471,13 @@ VendorAsserted}` so a record states on its face that its identity is a *claim*.
 before it converts a documentation task into a re-litigation of the product's
 identity.
 
-#### What shipped — part 1 of 2: **the guard, before the capability**
+#### What shipped — part 1 of 3: **the guard, before the capability**
 
-The stage is **cut in two**, at the seam ADR-0019's own structure suggests. Part
-1 is everything that decides, shows and records; part 2 is the thing that sends.
-The reason is not PR size, though the size is real: an egress path whose guard
-lands in the same change as its transport is a guard nobody reviewed on its own,
-and ADR-0019 §4 names that failure explicitly — *"deferring this is how an egress
+The stage is **cut at the seam ADR-0019's own structure suggests.** Part 1 is
+everything that decides, shows and records; part 2a is the thing that sends. The
+reason is not PR size, though the size is real: an egress path whose guard lands
+in the same change as its transport is a guard nobody reviewed on its own, and
+ADR-0019 §4 names that failure explicitly — *"deferring this is how an egress
 path ships before its guard"*. Landing the guard **first** inverts that, and
 leaves a build that cannot send anything at all to review it in.
 
@@ -1534,30 +1534,106 @@ layer by layer then the decision; `dry-run` prints the exact bytes and sends
 nothing; `log` reads the ledger and says *"nothing has left this machine"* rather
 than leaving that to be inferred from silence.
 
-**What is deliberately absent, and is part 2.** The `ureq` backend and the
-`Transport` implementation over it; the TTY-prompt form of the invocation grant
-(`status` and `dry-run` must never prompt, so the prompt belongs with the call);
-wiring the tier into `spec draft` / Ask via `model_choice`; and the README and
-website amendments. **Those docs are not owed yet**: with no backend compiled,
-*"nothing leaves the machine"* is still literally true of every build this
-produces, and amending it now would describe a capability that does not exist.
-Part 2 owes them on the same commit that makes them false.
+#### What shipped — part 2a of 3: **the thing the guard was for**
+
+Part 1's build could not send. This one can, and the change of posture is stated
+everywhere it is now false to say otherwise.
+
+**The transport, and where it is not.** `crates/roteiro/src/remote_transport.rs`
+— one `ureq` call, in the binary, reachable from one command. `rto-remote` still
+holds **no HTTP client**, and `call_with` is unchanged: the transport is handed
+to it as a closure, so the crate that decides whether bytes may leave still
+cannot make them leave, and that stays checkable from
+`crates/rto-remote/Cargo.toml`. Three things it does *not* do, each for a written
+reason: **no reachability probe** (ADR-0019 §2 — a probe *is* egress, and a DNS
+lookup leaks the query to a resolver), **no retry** (a retried call is a second
+disclosure, and that decision belongs to whoever consented), and **no redirect**
+(`max_redirects(0)` — the ledger records the endpoint that was consented to, and
+a `302` would make that record a lie about where the bytes went). It is **not** a
+new dependency: `ureq` was already in the tree for `model pull` and `security
+prefetch`, exactly as ADR-0019 anticipated.
+
+**The credential is an environment variable and cannot be a config key.**
+`ROTEIRO_REMOTE_API_KEY`, because `roteiro.toml` is committed by design — the
+same fact that inverted the precedence for `enabled` — and a key that could be
+set there is a key that gets committed. It cannot reach the ledger either, and
+not by discipline: the ledger records `Payload::body`, and headers are not part
+of it. `remote status` reports whether one is set, never what it is.
+
+**`response` — the receive side, in the crate with no socket.**
+`rto_remote::response::parse` is the mirror of `Payload::body`: pure, over a
+`&str`, so a truncated body, a malformed body and a body the endpoint filled with
+its own error are all string literals in a unit test. It **refuses** a generation
+that stopped short (`finish_reason: length`, `content_filter`, anything outside a
+short list of completion reasons) rather than returning it, because a completion
+that stopped early *reads* as finished — handing it over is the silent downgrade
+ADR-0019 §6 most needs to prevent, wearing the endpoint's own name. It also
+reports the one identity check this machine can make: a vendor model string is a
+mutable pointer, so the weights cannot be verified, but a **name** that answered
+under a different name than the one requested is a discrepancy, and it is
+printed rather than dropped.
+
+**The prompt, and the two commands that must never show it.** `remote call` is
+the only surface that asks. `status` and `dry-run` are the commands you run to
+find out what would happen, and a command that asks permission in order to tell
+you is useless — so the rule is asserted rather than assumed, with a test that
+runs both in the exact gate state a prompt could resolve. And exactly one gate
+state may be resolved by asking: `InvocationUnset` — the human opted in, this run
+has not. A prompt may never stand in for the **user layer**, or the two grants
+ADR-0019 §3 requires separately collapse into one keystroke; it may never
+override a project denial; and a non-interactive stdin is **refused**, not
+assumed to agree, because a pipe cannot consent.
+
+**Testing the untestable bit.** Part 1 could say the binary compiled no backend.
+That sentence is now false, so the guarantee is re-established on different
+ground rather than dropped: the granted-path CLI tests point `[remote] endpoint`
+at `http://127.0.0.1:1/…`. Loopback is not a network — the kernel cannot route
+those bytes to another host — there is **no DNS lookup** (which would itself be
+the egress §2 describes), and nothing listens, so the call is refused in
+microseconds. Everything about a *successful* response is tested over string
+literals in `rto-remote`. The failure paths all have tests: no network, an
+endpoint refusing by status, a malformed body, a truncated generation, and — the
+one that matters most — **a response arriving after the ledger write**, asserted
+from *inside* a failing transport closure, which only the write-first ordering
+can satisfy. Reading the ledger after the call returns would be satisfied by a
+single line written at the end, and the calls worth knowing about are exactly the
+ones that never returned.
+
+**The promises, amended on the commit that makes them false.** Part 1 left
+*"nothing leaves the machine"* alone, correctly: with no backend compiled it was
+still literally true of every build it produced. This build can send, so the
+README and the website now say the **scoped** thing — that the sentence is true
+of Roteiro as shipped and as configured, not of the software as a whole — name
+the tier in their feature tables, and flag that `--all-features` includes it.
+ADR-0006 was already scoped to serving in v1.3. The website additionally carries
+the terminology guard ADR-0019 asked for: *"Online mode"* keeps its existing
+meaning (a one-time, consented **download**, after which inference is local), and
+a note beside it says in as many words that enabling
+`inference-local-models` did not enable this.
+
+**What remains, and is part 2b.** The `model_choice` amendment —
+`ModelSource::Remote { trust }` with `installed: None` — and the `spec draft` /
+Ask wiring over it. Cut out of 2a deliberately: it lands in a **shared** resolver
+that seven surfaces already read, and pairing that blast radius with the first
+code in the project that can open a socket would put two unrelated risks in one
+review. `roteiro remote call` is a complete call site in the meantime, so the
+transport is exercised end to end rather than sitting unreachable.
 
 **One thing the resolver could not express, and was not routed around.**
 `rto_graph::model_choice` resolves a *registry* model — a name with a variant, a
 platform and a digest on disk. A remote model is none of those, and
-`ModelChoice::installed` has no meaning for one. Part 1 needs no resolution (it
-never picks a model to run; the endpoint names its own), so nothing bespoke was
-added and nothing was worked around. Part 2 does need it, and the proposal is a
-`ModelSource::Remote { trust }` variant plus a `ModelChoice::installed` that is
-`None` rather than `false` for it — an amendment to Stage 33's resolver, not a
-second selection rule beside it.
+`ModelChoice::installed` has no meaning for one. Parts 1 and 2a need no
+resolution (they never pick a model to run; the endpoint names its own), so
+nothing bespoke was added and nothing was worked around. Part 2b does need it,
+and the proposal is a `ModelSource::Remote { trust }` variant plus a
+`ModelChoice::installed` that is `None` rather than `false` for it — an amendment
+to Stage 33's resolver, not a second selection rule beside it.
 
 **Gates:** `fmt` clean; `clippy --all-targets` and `--all-targets --all-features`
 clean at `-D warnings`; `cargo test --workspace --no-fail-fast` and
-`--all-features --no-fail-fast` green. `EXTRACT_VERSION` unchanged at 11, no
-migration, **no new dependency**, and no network — in either the code or the
-tests. Every new test was fault-injected.
+`--all-features --no-fail-fast` green; `cargo deny` clean. `EXTRACT_VERSION`
+unchanged at 11, no migration, **no new dependency**, and no network — in either
+the code or the tests. Every new test was fault-injected.
 
 ---
 
@@ -1698,7 +1774,7 @@ either way: it is how any future reviewer, hosted or local, gets measured.
 | v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
 | v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
-| v1.17.0 | Stage 34 — remote model tier | **Gated on ADR-0019.** Project file may deny, never grant; no learned router on the local→remote edge |
+| v1.17.0 🔶 | Stage 34 — remote model tier | **ADR-0019 Accepted.** Cut in three. **1 — the guard** (#381): consent gate, payload allow-list, dry-run, egress ledger, in a build compiling no backend. **2a — the transport**: `ureq` behind the off-by-default `remote` feature, the TTY invocation grant (`status`/`dry-run` never prompt), the response reader that refuses a truncated generation, and the README/website promise amendments on the commit that made them false. Project file may deny, never grant; no learned router on the local→remote edge; no reachability probe; no test can reach a network. **2b — not built**: `ModelSource::Remote { trust }` and the `spec draft` / Ask wiring over it |
 | v1.18.0 | Stage 35 — `roteiro review` LLM mode | Scored against the in-tree corpus at each comment's `reviewed_sha`, per defect class |
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
@@ -1765,9 +1841,11 @@ stages themselves carry the detail:
 - **Stage 33 — local model resolution.** Closes a user-facing gap on its own
   merits: a project cannot pin its ASR model today. No network, no new
   dependency, no ADR.
-- **Stage 34 — remote model tier.** **Blocked on ADR-0019**, which must amend
-  ADR-0006, invert ADR-0007's precedence for one key, and exempt principle 10.
-  Not startable until that ADR is accepted.
+- **Stage 34 — remote model tier.** **Unblocked** — ADR-0019 is Accepted, and it
+  did all three things it had to: scoped ADR-0006's *"nothing leaves the
+  machine"* to serving, inverted ADR-0007's precedence for one key (v1.2), and
+  exempted principle 10 explicitly. Parts 1 and 2a are built; 2b — the
+  `model_choice` amendment and the `spec draft` / Ask wiring — is not.
 - **Stage 35 — `roteiro review` LLM mode.** Depends on Stage 33. Gives the
   26-comment adjudicated corpus a consumer before it rots.
 

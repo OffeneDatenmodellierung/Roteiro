@@ -20,6 +20,13 @@ mod infer_links;
 mod init;
 mod overview;
 mod pins;
+// The remote model tier's transport (ADR-0019) — **the only module in this
+// workspace that can send repository content off the machine.** It lives here,
+// in the binary, and not in `rto-remote`, which takes the transport as a
+// caller-supplied closure precisely so the code that decides whether bytes may
+// leave is not the code that can make them leave.
+#[cfg(feature = "remote")]
+mod remote_transport;
 mod review;
 // Structured logging / telemetry init (ADR-0011): the single place the tracing
 // subscriber is built — the unchanged human-text stdout layer plus an opt-in
@@ -721,13 +728,18 @@ enum SpecAction {
 /// `roteiro remote` actions — the remote model tier's inspection surface
 /// (ADR-0019).
 ///
-/// **No subcommand here sends anything.** That is not an accident of this
-/// build's feature set, it is the shape of the stage: the consent gate, the
-/// payload allow-list and the egress record land before any backend does, so the
-/// guard is reviewable on its own and cannot arrive after the capability it
-/// guards. `dry-run` shows the exact bytes a call *would* send; `status` says
-/// whether it would be permitted, and why; `log` reads the record of what
-/// actually left.
+/// **Exactly one subcommand here sends anything, and it is the one named for
+/// it.** The guard landed first, on its own, in a build that compiled no backend
+/// at all (part 1); `call` is what part 2 added beneath it. `dry-run` shows the
+/// exact bytes a call *would* send; `status` says whether it would be permitted,
+/// and why; `log` reads the record of what actually left; `call` does the one
+/// thing the other three exist to make inspectable.
+///
+/// **`status` and `dry-run` never prompt**, and the rule is worth stating rather
+/// than leaving to be noticed: they are the commands you run to find out what
+/// would happen, and a command that asks permission in order to tell you is
+/// useless. The TTY form of the invocation grant therefore lives with `call`
+/// alone — see [`remote_transport::may_prompt`].
 #[cfg(feature = "remote")]
 #[derive(Subcommand)]
 enum RemoteCmd {
@@ -758,6 +770,33 @@ enum RemoteCmd {
         #[arg(long = "key", value_name = "KEY")]
         keys: Vec<String>,
         /// Emit the payload and its disclosure as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// **Send** the payload `dry-run` prints, if every layer of consent allows
+    /// it — the one command in Roteiro that puts repository content on a wire.
+    ///
+    /// Requires the user layer *and* this invocation. With the user layer
+    /// granting and no `--allow-remote`, an interactive terminal is shown the
+    /// exact bytes and asked; a non-interactive one is refused and told which
+    /// flag to pass, because a pipe cannot consent.
+    Call {
+        /// The instruction to ask.
+        instruction: String,
+        /// A graph node key to include as context (repeatable). Only the node's
+        /// key, kind, name, path and captured prose are sent — never its other
+        /// metadata, and never source.
+        #[arg(long = "key", value_name = "KEY")]
+        keys: Vec<String>,
+        /// Grant *this run*, without being asked. Necessary and not sufficient:
+        /// your `~/.roteiro/config.toml` must grant too.
+        #[arg(long, conflicts_with = "no_remote")]
+        allow_remote: bool,
+        /// Deny this run, whatever the config layers say. Refuses before
+        /// anything is assembled, recorded or sent.
+        #[arg(long)]
+        no_remote: bool,
+        /// Emit the answer and what it cost in disclosure as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1881,7 +1920,8 @@ fn invocation_grant(allow_remote: bool, no_remote: bool) -> Option<bool> {
     }
 }
 
-/// `roteiro remote …` — the tier's inspection surface. Sends nothing.
+/// `roteiro remote …` — the tier's surface. Three subcommands inspect; one
+/// sends, and it is the one called `call`.
 #[cfg(feature = "remote")]
 fn run_remote(
     cfg: &config::Loaded,
@@ -1899,8 +1939,51 @@ fn run_remote(
             keys,
             json,
         } => run_remote_dry_run(cfg, ingest, &instruction, &keys, json),
+        RemoteCmd::Call {
+            instruction,
+            keys,
+            allow_remote,
+            no_remote,
+            json,
+        } => run_remote_call(
+            cfg,
+            ingest,
+            &instruction,
+            &keys,
+            invocation_grant(allow_remote, no_remote),
+            json,
+        ),
         RemoteCmd::Log { limit, json } => run_remote_log(limit, json),
     }
+}
+
+/// Assemble the payload for `dry-run` and for `call` — **one function, so the
+/// preview and the act cannot describe different requests.**
+///
+/// `rto_remote::Payload::body` already holds the two *renderings* level; this
+/// holds the two *assemblies* level, which is the other half of the same
+/// guarantee. A `call` that read one more node than its `dry-run` did would
+/// print an honest preview of a request that never existed.
+#[cfg(feature = "remote")]
+fn remote_payload(
+    ingest: rto_graph::IngestConfig,
+    instruction: &str,
+    keys: &[String],
+) -> anyhow::Result<rto_remote::Payload> {
+    let mut nodes = Vec::with_capacity(keys.len());
+    if !keys.is_empty() {
+        let (repo, mut store, cache) = open_graph()?;
+        refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+        for key in keys {
+            let node = store.get_node(key)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)"
+                )
+            })?;
+            nodes.push(node);
+        }
+    }
+    Ok(rto_remote::Payload::new(instruction, &nodes)?)
 }
 
 /// Report the consent gate, layer by layer, plus the disclosure a grant would
@@ -1938,7 +2021,11 @@ fn run_remote_status(
             "trust": rto_remote::ProducerTrust::VendorAsserted.as_str(),
             "endpoint_error": endpoint.as_ref().err().map(ToString::to_string),
             "ledger": ledger.path().display().to_string(),
-            "backend": serde_json::Value::Null,
+            "backend": "ureq",
+            // Whether, never what. A status command that echoed a credential
+            // would put one in every terminal scrollback and CI log that ran it.
+            "credential_env": remote_transport::API_KEY_ENV,
+            "credential_set": remote_transport::api_key_is_set(),
         }));
     }
 
@@ -1981,10 +2068,22 @@ fn run_remote_status(
         Err(err) => println!("\nendpoint: unusable — {err}"),
     }
     println!("ledger:   {}", ledger.path().display());
+    // Said plainly, because part 1's builds said the opposite and someone
+    // upgrading is entitled to notice the change rather than discover it.
     println!(
-        "\nbackend:  none in this build. The consent gate, the payload allow-list and the \
-         egress record\n          landed before any transport did, so this build cannot send \
-         anything at all."
+        "\nbackend:  ureq (compiled in). This build **can** send, when the gate above is open — \
+         it is\n          the one capability in Roteiro that does. `roteiro remote dry-run` \
+         shows the exact\n          bytes; `roteiro remote call` is what sends them."
+    );
+    println!(
+        "credential: {} ({} — it is an environment variable, not a config key, because \
+         `roteiro.toml`\n            is committed by design)",
+        if remote_transport::api_key_is_set() {
+            "set"
+        } else {
+            "not set"
+        },
+        remote_transport::API_KEY_ENV,
     );
     println!("\n{}", rto_remote::Payload::disclosure());
     Ok(())
@@ -2005,20 +2104,7 @@ fn run_remote_dry_run(
     json: bool,
 ) -> anyhow::Result<()> {
     let endpoint = remote_endpoint(&cfg.effective)?;
-    let mut nodes = Vec::with_capacity(keys.len());
-    if !keys.is_empty() {
-        let (repo, mut store, cache) = open_graph()?;
-        refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-        for key in keys {
-            let node = store.get_node(key)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)"
-                )
-            })?;
-            nodes.push(node);
-        }
-    }
-    let payload = rto_remote::Payload::new(instruction, &nodes)?;
+    let payload = remote_payload(ingest, instruction, keys)?;
     let body = rto_remote::dry_run(&endpoint, &payload);
 
     if json {
@@ -2045,6 +2131,135 @@ fn run_remote_dry_run(
     println!("\n--- the exact body ---\n{body}\n--- end of body ---\n");
     println!("{}", rto_remote::Payload::disclosure());
     Ok(())
+}
+
+/// **Send.** The one command in Roteiro that puts repository content on a wire.
+///
+/// The order below is the contract, and every step before the last is a refusal
+/// point:
+///
+/// 1. **Assemble**, through the same function `dry-run` uses, so the bytes are
+///    the bytes it showed.
+/// 2. **Decide**, from the config layers plus this invocation.
+/// 3. **Ask, if and only if asking is the missing half.** With the user layer
+///    granting and no `--allow-remote`, an interactive terminal is shown the
+///    exact body and the full disclosure and asked once. Every other denial is
+///    reported rather than prompted — see [`remote_transport::may_prompt`] for
+///    which, and why a prompt may never stand in for the user layer.
+/// 4. **Hand it to `rto_remote::call_with`**, which records before it sends and
+///    refuses to send if it cannot record.
+/// 5. **Read what came back**, and refuse anything that is not a whole answer.
+///
+/// Nothing here falls back to a local model at any step, and the errors say so
+/// in as many words. That is Principle 10's second half, which ADR-0019 says
+/// binds harder for this capability than for any other.
+#[cfg(feature = "remote")]
+fn run_remote_call(
+    cfg: &config::Loaded,
+    ingest: rto_graph::IngestConfig,
+    instruction: &str,
+    keys: &[String],
+    invocation: Option<bool>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let endpoint = remote_endpoint(&cfg.effective)?;
+    let payload = remote_payload(ingest, instruction, keys)?;
+    let body = rto_remote::dry_run(&endpoint, &payload);
+
+    let grant = cfg.remote_config_grant();
+    let mut decision = rto_remote::consent::decide(grant, invocation);
+    if let Some(note) = decision.ignored_project_grant_note() {
+        eprintln!("{note}\n");
+    }
+    if !decision.granted() && remote_transport::may_prompt(decision.reason) {
+        // A prompt is the invocation, not a second chance at the config: `decide`
+        // is re-run with the answer rather than the decision being patched, so
+        // the gate stays the single implementation of who may send.
+        decision = rto_remote::consent::decide(grant, ask_to_send(&endpoint, &body, &payload)?);
+    }
+
+    let ledger = remote_ledger()?;
+    let raw = rto_remote::call_with(
+        &endpoint,
+        &payload,
+        decision,
+        &ledger,
+        &|| rto_exec::rfc3339_utc(std::time::SystemTime::now()),
+        Some(&remote_transport::call),
+    )?;
+    let answer = rto_remote::response::parse(&raw)?;
+    let discrepancy = answer.model_discrepancy(endpoint.model());
+
+    if json {
+        return emit_json(&serde_json::json!({
+            "answer": answer.text,
+            "endpoint": endpoint.url(),
+            "model_requested": endpoint.model(),
+            "model_answered": answer.model,
+            "model_discrepancy": discrepancy,
+            "trust": endpoint.trust().as_str(),
+            "trust_caveat": endpoint.trust().caveat(),
+            "disclosed": payload.fields_present(),
+            "sent_bytes": body.len(),
+            "ledger": ledger.path().display().to_string(),
+        }));
+    }
+    if let Some(note) = discrepancy {
+        eprintln!("{note}\n");
+    }
+    println!("{}", answer.text);
+    // On stderr, so piping the answer somewhere does not also pipe the receipt —
+    // but printed every time, because a disclosure that only shows up when you
+    // ask for it is one people stop seeing.
+    eprintln!(
+        "\n— {} bytes ({}) sent to {} as {} ({}); recorded in {}",
+        body.len(),
+        payload.fields_present().join(", "),
+        endpoint.url(),
+        endpoint.model(),
+        endpoint.trust().as_str(),
+        ledger.path().display(),
+    );
+    Ok(())
+}
+
+/// Ask this terminal to grant *this run*, having shown it exactly what would
+/// leave.
+///
+/// Returns the invocation grant to re-decide with: `Some(true)` for a yes,
+/// `Some(false)` for anything else. A refusal is an explicit denial rather than
+/// an absence, so the gate reports `InvocationDenied` — *"you said no"* — instead
+/// of `InvocationUnset` and its advice to pass a flag the person just declined.
+///
+/// **A non-interactive stdin is never prompted and never granted.** A pipe
+/// cannot consent, and treating an unattended run as a yes is exactly the
+/// consent-by-default this ADR exists to prevent; the refusal names the flag
+/// that would work instead.
+#[cfg(feature = "remote")]
+fn ask_to_send(
+    endpoint: &rto_remote::Endpoint,
+    body: &str,
+    payload: &rto_remote::Payload,
+) -> anyhow::Result<Option<bool>> {
+    use std::io::Write as _;
+
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        anyhow::bail!(
+            "the remote model tier is enabled for you but not for this run, and this run is \
+             not interactive, so there is nobody to ask. Nothing was sent. Re-run with \
+             `--allow-remote` to grant it deliberately, or `roteiro remote dry-run` to see \
+             the exact bytes first"
+        );
+    }
+    eprint!(
+        "{}",
+        remote_transport::prompt_text(endpoint, body, &payload.fields_present())
+    );
+    eprint!("Send this now? [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(Some(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")))
 }
 
 /// Read the egress ledger — what left this machine, and when.
