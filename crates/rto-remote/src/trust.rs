@@ -21,6 +21,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Whether a producer's identity is measured or asserted.
+///
+/// **Deliberately not `#[non_exhaustive]`**, unlike most of this crate's public
+/// enums (see [`crate::Reason`] for that decision and its cost). This is a
+/// two-valued distinction, not a list: an identity either was verified on this
+/// machine or it was not, and [`ProducerTrust::is_verifiable`] is the whole of
+/// it. A third value would mean the distinction had changed, which is a redesign
+/// a downstream `match` should be made to notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProducerTrust {

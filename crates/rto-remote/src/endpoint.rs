@@ -28,7 +28,12 @@ pub struct Endpoint {
 }
 
 /// Why an endpoint could not be accepted.
+/// Marked `#[non_exhaustive]` for the reason recorded on
+/// [`crate::Reason`]: this crate is published at 1.x, and error sets grow.
+/// Taken while the crate had no consumer that could exist; it will not be
+/// taken again.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum EndpointError {
     /// The URL is empty, or names no scheme this will accept.
     #[error(

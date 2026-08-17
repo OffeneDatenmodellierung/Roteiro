@@ -236,7 +236,8 @@ fn excerpt(text: &str) -> String {
 /// | [`Reason::InvocationUnset`] | **yes** | The human opted in; this run has not. Asking is the invocation. |
 /// | [`Reason::UserLayerUnset`] / [`Reason::UserLayerDenied`] | no | The user layer opts *the human* in, and it lives in a file they edited deliberately. A prompt that could stand in for it would collapse two required grants into one, which is the thing ADR-0019 §3 says neither alone may do. |
 /// | [`Reason::ProjectDenied`] | no | A repository-wide denial that no flag overrides is not made overridable by asking nicely. |
-/// | [`Reason::InvocationDenied`] | no | This run already said no. Re-asking is not consent, it is nagging until yes. |
+/// | [`Reason::InvocationDenied`] | no | This run already said no, with a flag. Re-asking is not consent, it is nagging until yes. |
+/// | [`Reason::PromptDeclined`] | no | Someone was already shown the bytes and declined. Asking again is the same nagging with a worse excuse, and it is the loop this function would otherwise close. |
 /// | [`Reason::Granted`] | no | Nothing to ask. |
 ///
 /// [`Reason::InvocationUnset`]: rto_remote::Reason::InvocationUnset
@@ -244,6 +245,7 @@ fn excerpt(text: &str) -> String {
 /// [`Reason::UserLayerDenied`]: rto_remote::Reason::UserLayerDenied
 /// [`Reason::ProjectDenied`]: rto_remote::Reason::ProjectDenied
 /// [`Reason::InvocationDenied`]: rto_remote::Reason::InvocationDenied
+/// [`Reason::PromptDeclined`]: rto_remote::Reason::PromptDeclined
 /// [`Reason::Granted`]: rto_remote::Reason::Granted
 pub fn may_prompt(reason: rto_remote::Reason) -> bool {
     matches!(reason, rto_remote::Reason::InvocationUnset)
@@ -410,6 +412,9 @@ mod tests {
             Reason::Granted,
             Reason::ProjectDenied,
             Reason::InvocationDenied,
+            // The answer a prompt itself produces must not be promptable, or
+            // declining would only ever mean "ask me again".
+            Reason::PromptDeclined,
             Reason::UserLayerDenied,
             Reason::UserLayerUnset,
         ] {
