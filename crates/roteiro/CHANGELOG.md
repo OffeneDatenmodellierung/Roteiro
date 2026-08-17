@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.18.0...roteiro-v1.19.0) - 2026-08-17
+
+### Added
+
+- *(remote)* the transport, and the promises it makes false
+
+### Other
+
+- Merge branch 'main' into feat/stage34b-remote-transport
+- Merge main: keep the newest half of each side in the plan
+
+## [1.18.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.17.0...roteiro-v1.18.0) - 2026-08-17
+
+### Added
+
+- *(remote)* `[remote]` config with inverted precedence, and `roteiro remote`
+
+### Fixed
+
+- *(debt)* a placeholder is a thing you build, not a stub you owe
+
+### Other
+
+- Merge pull request #381 from OffeneDatenmodellierung/feat/stage34-remote-model-tier
+- *(remote)* drop the unused `rto-exec` edge from the `remote` feature
+- *(remote)* the consent gate, end to end through real files and flags
+
 ## [1.17.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.16.0...roteiro-v1.17.0) - 2026-08-17
 
 ### Added
