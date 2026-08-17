@@ -35,6 +35,36 @@
 //! external-ref edges the workspace resolver walks — which is why the API lives in
 //! the `roteiro` binary rather than `rto-render`.
 //!
+//! # Paging
+//!
+//! Five routes return a bounded list — `/nodes`, `/hotspots`, `/coupling`,
+//! `/debt/density` and `/config-secrets` — and they all read `limit` the same
+//! way, through the one implementation in [`rto_graph::window`]:
+//!
+//! - **`limit=0` means unlimited**: every matching row is returned. It does
+//!   *not* mean "no rows". Omitting `limit` is different again — it applies that
+//!   route's default page size ([`DEFAULT_NODE_LIMIT`], [`DEFAULT_HOTSPOTS`],
+//!   [`DEFAULT_CONFIG_SECRETS`]), so `0` is the only way to ask for everything.
+//! - **`offset` is `/nodes` only**, and applies *before* `limit`. So
+//!   `?offset=20&limit=0` is "skip the first 20 matches, then return every
+//!   remaining one" — the limit bounds what survives the offset, and an offset
+//!   past the last match is an empty page, not an error.
+//! - The `limit` echoed in a reply is **what the caller asked for**, not the row
+//!   count, so `"limit": 0` in a response also means unlimited. Where a reply
+//!   carries a `total` (`/nodes`) or a population count (`/config-secrets`'s
+//!   `secret_named`), that figure is taken *before* paging, so a cut page still
+//!   says what it was cut from.
+//!
+//! `/nodes` and `/hotspots` read `0` as "no rows" up to v1.19.0; they now agree
+//! with the other three (issue #375). The `0 = unlimited` reading is the one the
+//! CLI has always documented (`roteiro config-secrets --help`: *"0 shows every
+//! secret-named key"*), and it fails loudly rather than quietly: a caller who
+//! passes an unset variable gets an obviously oversized reply instead of an
+//! empty one that reads like a truthful "nothing found".
+//!
+//! This is the whole paging story for the API. The routes' own docs point here
+//! rather than restating it, so there is one sentence to keep true.
+//!
 //! Cross-repo semantics are read straight from the stores (so the API is fully
 //! testable over in-memory [`Workspace`]s, with no config-file scan): an inferred
 //! **external-ref** edge that still resolves to its hub node is a *match*; one
@@ -311,9 +341,10 @@ struct NodesQuery {
     provenance: Option<String>,
     /// Case-insensitive substring to match against a node's name or key.
     q: Option<String>,
-    /// Page size (default [`DEFAULT_NODE_LIMIT`]).
+    /// Page size (default [`DEFAULT_NODE_LIMIT`]); see [paging](self#paging).
     limit: Option<usize>,
-    /// Number of matching nodes to skip (default 0).
+    /// Number of matching nodes to skip before the page (default 0); see
+    /// [paging](self#paging).
     offset: Option<usize>,
 }
 
@@ -324,10 +355,13 @@ struct DepthQuery {
     depth: Option<usize>,
 }
 
-/// A `limit` for `/v1/graph/{project}/hotspots`.
+/// A bare `limit`, shared by `/v1/graph/{project}/hotspots` and
+/// `/v1/graph/{project}/config-secrets`. The two differ only in the default they
+/// apply when it is absent ([`DEFAULT_HOTSPOTS`] and [`DEFAULT_CONFIG_SECRETS`]
+/// respectively); they read a *given* `limit` identically.
 #[derive(Deserialize)]
 struct LimitQuery {
-    /// Number of top-degree nodes to return (default [`DEFAULT_HOTSPOTS`]).
+    /// Rows to return; see [paging](self#paging) for what `0` and absence mean.
     limit: Option<usize>,
 }
 
@@ -335,7 +369,7 @@ struct LimitQuery {
 #[derive(Deserialize)]
 struct CouplingQuery {
     /// Number of top-coupled nodes to return (default [`DEFAULT_HOTSPOTS`]);
-    /// `0` returns every coupled node.
+    /// see [paging](self#paging).
     limit: Option<usize>,
     /// Ranking: `total` | `fan_in` | `fan_out` (default `total`).
     order: Option<String>,
@@ -345,7 +379,7 @@ struct CouplingQuery {
 #[derive(Deserialize)]
 struct DensityQuery {
     /// Number of top-density files to return (default [`DEFAULT_HOTSPOTS`]);
-    /// `0` returns every ranked file.
+    /// see [paging](self#paging).
     limit: Option<usize>,
     /// Ranking: `density` | `markers` | `lines` (default `density`).
     order: Option<String>,
@@ -473,6 +507,10 @@ async fn project_links(State(st): State<AppState>, params: RawPathParams) -> Api
 
 /// `GET /v1/graph[/workspaces/{ws}]/{project}/nodes?kinds=&provenance=&q=&limit=&offset=`
 /// → filtered, paged nodes plus the pre-paging `total`.
+///
+/// `limit` and `offset` follow the router's [paging contract](self#paging), so
+/// `limit=0` returns every match and `offset=20&limit=0` is "skip the first 20,
+/// then every remaining match". This is the only endpoint with an `offset`.
 async fn project_nodes(
     State(st): State<AppState>,
     params: RawPathParams,
@@ -504,10 +542,12 @@ async fn project_nodes(
                 n.name.to_lowercase().contains(q) || n.key.to_lowercase().contains(q)
             })
     });
+    // `total` is the whole filtered population, taken before the window is cut,
+    // so a paged reply still says what it was cut from.
     let total = nodes.len();
-    let page: Vec<Node> = nodes.into_iter().skip(offset).take(limit).collect();
+    rto_graph::window(&mut nodes, offset, limit);
     Ok(Json(json!({
-        "nodes": page,
+        "nodes": nodes,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -669,6 +709,8 @@ async fn project_debt(State(st): State<AppState>, params: RawPathParams) -> ApiR
 /// No `order` parameter, deliberately: this is an inventory, ordered by
 /// `(path, name, key)`, and an ordering knob would imply some keys are more
 /// secret than others.
+///
+/// `limit` follows the router's [paging contract](self#paging).
 async fn config_secrets(
     State(st): State<AppState>,
     params: RawPathParams,
@@ -693,6 +735,9 @@ async fn config_secrets(
 ///
 /// An unknown `order` is a 400 rather than a silent fall back to `density`: a
 /// caller that asked for `markers` and got a density ranking has no way to tell.
+///
+/// `limit` follows the router's [paging contract](self#paging). `min_lines` is a
+/// filter rather than a page size, but reads `0` the same way — every file.
 async fn debt_density(
     State(st): State<AppState>,
     params: RawPathParams,
@@ -721,6 +766,8 @@ async fn debt_density(
 
 /// `GET /v1/graph[/workspaces/{ws}]/{project}/hotspots?limit=` → the top-`limit`
 /// nodes by total degree (in + out edges).
+///
+/// `limit` follows the router's [paging contract](self#paging).
 async fn hotspots(
     State(st): State<AppState>,
     params: RawPathParams,
@@ -744,6 +791,8 @@ async fn hotspots(
 ///
 /// An unknown `order` is a 400 rather than a silent fall back to `total`: a
 /// caller that asked for `fan_in` and got a total ranking has no way to tell.
+///
+/// `limit` follows the router's [paging contract](self#paging).
 async fn coupling(
     State(st): State<AppState>,
     params: RawPathParams,
@@ -1369,6 +1418,8 @@ fn neighbourhood_subgraph(
 
 /// The top-`limit` nodes by total degree (in + out edges), each as
 /// `{ key, name, kind, degree }`. Ties break by key, so the order is stable.
+/// `limit` follows the router's [paging contract](self#paging): `0` ranks and
+/// returns every node.
 ///
 /// **This deliberately discards direction** — both ends of every edge are
 /// incremented — because "how connected is this node" is a question about
@@ -1388,9 +1439,9 @@ fn compute_hotspots(store: &Store, limit: usize) -> Result<Vec<Value>, StoreErro
         .map(|n| (degree.get(&n.key).copied().unwrap_or(0), n))
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.key.cmp(&b.1.key)));
+    rto_graph::window(&mut ranked, 0, limit);
     Ok(ranked
         .into_iter()
-        .take(limit)
         .map(|(deg, n)| json!({ "key": n.key, "name": n.name, "kind": n.kind.as_str(), "degree": deg }))
         .collect())
 }
@@ -1744,6 +1795,78 @@ mod tests {
             (HUB.to_owned(), hub_store()),
             (SPOKE.to_owned(), spoke_store()),
         ])
+    }
+
+    // -- the `limit=0` population (issue #375) -----------------------------
+
+    /// Rows in [`paging_store`] on each list endpoint's own population. Chosen
+    /// so every one of the five is **larger than that endpoint's default page**
+    /// ([`DEFAULT_NODE_LIMIT`] 100, [`DEFAULT_CONFIG_SECRETS`] 50,
+    /// [`DEFAULT_HOTSPOTS`] 20): otherwise `limit=0` and "no `limit` at all"
+    /// would return the same rows, and a test could not tell "unlimited" from
+    /// "fell back to the default".
+    const SECRET_KEYS: usize = 120;
+    /// Files carrying a debt marker, and symbols carrying a call edge — both
+    /// above [`DEFAULT_HOTSPOTS`].
+    const MARKED_FILES: usize = 25;
+    /// Every node in [`paging_store`]: the secret keys, the marked files, their
+    /// markers, and the call-chain symbols. `/nodes` and `/hotspots` rank over
+    /// all of them.
+    const ALL_NODES: usize = SECRET_KEYS + MARKED_FILES * 3;
+
+    /// A store sized so that on each of the five list endpoints the full
+    /// population, the default page and a one-row page are three *different*
+    /// answers — the only shape in which "`limit=0` means unlimited" is
+    /// distinguishable from "`limit=0` fell through to the default".
+    ///
+    /// - `/config-secrets`: [`SECRET_KEYS`] secret-named config keys.
+    /// - `/debt/density`: [`MARKED_FILES`] files, each with a `file:` node
+    ///   carrying `meta.lines` (so it has a denominator) and one `Marker` node.
+    /// - `/coupling` and `/hotspots`: [`MARKED_FILES`] `fn` nodes in a call
+    ///   chain, so every one of them has a non-zero fan.
+    /// - `/nodes`: all [`ALL_NODES`] of the above.
+    fn paging_store() -> Store {
+        let store = Store::open_in_memory().expect("paging store");
+        let mut facts = FactSet::new();
+        for i in 0..SECRET_KEYS {
+            // `token` is one of `is_secret_key`'s substrings, so every one of
+            // these lands in the `/config-secrets` inventory.
+            facts = facts.with_node(cfg_node(
+                "config.toml",
+                &format!("app.token_{i:03}"),
+                "REDACTED",
+            ));
+        }
+        for i in 0..MARKED_FILES {
+            let path = format!("src/f{i:03}.rs");
+            let mut file = Node::new(format!("file:{path}"), NodeKind::File, path.clone());
+            file.path = Some(path.clone());
+            // A distinct length per file, so the density ranking is a strict
+            // order rather than a pile of ties broken by path.
+            file.meta = json!({ "lines": 200 + i });
+            let mut marker = Node::new(
+                format!("marker:{path}#1"),
+                NodeKind::Marker,
+                "TODO: unfinished",
+            );
+            marker.path = Some(path);
+            marker.meta = json!({ "category": "todo", "text": "TODO: unfinished", "line": 1 });
+            facts = facts.with_node(file).with_node(marker).with_node(Node::new(
+                format!("sym:f{i:03}"),
+                NodeKind::Fn,
+                format!("f{i:03}"),
+            ));
+        }
+        // A cycle rather than a chain, so *every* symbol has both fan_in and
+        // fan_out and none is dropped from `/coupling`'s coupled set.
+        for i in 0..MARKED_FILES {
+            facts = facts.with_edge(Edge::derived(
+                format!("sym:f{i:03}"),
+                format!("sym:f{:03}", (i + 1) % MARKED_FILES),
+                EdgeKind::Calls,
+            ));
+        }
+        apply(store, &facts)
     }
 
     /// Wrap a single [`Workspace`] as a one-entry (linked) set — the
@@ -2126,6 +2249,153 @@ mod tests {
         assert_eq!(page["nodes"].as_array().unwrap().len(), 1);
         assert_eq!(page["limit"], 1);
         assert_eq!(page["offset"], 1);
+    }
+
+    /// Every list endpoint, as a tuple of: a label, the uri up to and including
+    /// its query separator, the reply key holding the rows, that route's default
+    /// page size, and its full population in [`paging_store`].
+    ///
+    /// The five are exercised from one table on purpose: the defect in #375 was
+    /// not that any single endpoint was wrong, it was that they *disagreed*, and
+    /// a per-endpoint assertion cannot express agreement. A sixth list endpoint
+    /// added without a row here is the same defect returning.
+    const LIST_ENDPOINTS: [(&str, &str, &str, usize, usize); 5] = [
+        (
+            "/nodes",
+            "/v1/graph/hub/nodes?",
+            "nodes",
+            DEFAULT_NODE_LIMIT,
+            ALL_NODES,
+        ),
+        (
+            "/hotspots",
+            "/v1/graph/hub/hotspots?",
+            "hotspots",
+            DEFAULT_HOTSPOTS,
+            ALL_NODES,
+        ),
+        (
+            "/coupling",
+            "/v1/graph/hub/coupling?",
+            "items",
+            DEFAULT_HOTSPOTS,
+            MARKED_FILES,
+        ),
+        (
+            "/debt/density",
+            "/v1/graph/hub/debt/density?min_lines=1&",
+            "items",
+            DEFAULT_HOTSPOTS,
+            MARKED_FILES,
+        ),
+        (
+            "/config-secrets",
+            "/v1/graph/hub/config-secrets?",
+            "items",
+            DEFAULT_CONFIG_SECRETS,
+            SECRET_KEYS,
+        ),
+    ];
+
+    /// Row count in a list reply, or a panic naming the endpoint that broke.
+    fn rows(json: &Value, key: &str, label: &str) -> usize {
+        json[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{label} has no `{key}` array: {json}"))
+            .len()
+    }
+
+    /// `limit=0` means **unlimited** on all five list endpoints — issue #375.
+    ///
+    /// `/nodes` and `/hotspots` truncated with `Iterator::take` and so returned
+    /// an empty page for `0`, while `/coupling`, `/debt/density` and
+    /// `/config-secrets` truncated in `rto-graph` and returned everything. This
+    /// asserts the settled reading across all five, including the three that did
+    /// not change: an assertion covering only the two that moved could not show
+    /// that the five now agree.
+    #[tokio::test]
+    async fn limit_zero_means_unlimited_on_every_list_endpoint() {
+        for (label, uri, key, default, population) in LIST_ENDPOINTS {
+            let set = || single_set(Workspace::single(HUB, paging_store()));
+
+            let (status, unlimited) = get(set(), None, &format!("{uri}limit=0")).await;
+            assert_eq!(status, StatusCode::OK, "{label} answers");
+            assert_eq!(
+                rows(&unlimited, key, label),
+                population,
+                "{label}: limit=0 returns the whole population, not an empty page"
+            );
+            assert_eq!(
+                unlimited["limit"], 0,
+                "{label} echoes the limit it was asked for, so `0` in a reply also reads as unlimited"
+            );
+
+            // The fixture is sized so the default page is strictly smaller than
+            // the population. Without this, "unlimited" and "fell back to the
+            // default" would be the same observation.
+            let (_, defaulted) = get(set(), None, uri).await;
+            assert_eq!(
+                rows(&defaulted, key, label),
+                default,
+                "{label}: omitting `limit` still applies that route's default"
+            );
+            assert!(
+                default < population,
+                "{label}: fixture must exceed the default page to be able to tell them apart"
+            );
+
+            // And `0` is not simply "ignore the parameter": a real limit still bounds.
+            let (_, one) = get(set(), None, &format!("{uri}limit=1")).await;
+            assert_eq!(rows(&one, key, label), 1, "{label}: limit=1 still bounds");
+        }
+    }
+
+    /// `/nodes` is the only endpoint with an `offset`, so what `limit=0` means
+    /// alongside a non-zero one had to be decided rather than inherited:
+    /// **offset first, then unlimited** — skip N, return every remaining match.
+    #[tokio::test]
+    async fn nodes_offset_applies_before_an_unlimited_limit() {
+        let set = || single_set(Workspace::single(HUB, paging_store()));
+
+        let (status, json) = get(set(), None, "/v1/graph/hub/nodes?offset=10&limit=0").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            rows(&json, "nodes", "/nodes"),
+            ALL_NODES - 10,
+            "offset then unlimited is `skip 10, then everything left`"
+        );
+        assert_eq!(json["total"], ALL_NODES, "total stays pre-paging");
+        assert_eq!(json["offset"], 10);
+        assert_eq!(json["limit"], 0);
+
+        // The rows really are the tail: the first unskipped node is the 11th of
+        // the unpaged order, not the 1st.
+        let (_, whole) = get(set(), None, "/v1/graph/hub/nodes?limit=0").await;
+        assert_eq!(
+            json["nodes"][0], whole["nodes"][10],
+            "the window starts at the offset rather than the front"
+        );
+
+        // With a *bounded* limit the same order must hold — offset first, limit
+        // to what remains — so the reply is the middle slice, not the front one.
+        // Under `limit=0` the two orderings are indistinguishable, so this is
+        // where the ordering itself is pinned at the endpoint.
+        let (_, middle) = get(set(), None, "/v1/graph/hub/nodes?offset=10&limit=3").await;
+        assert_eq!(rows(&middle, "nodes", "/nodes"), 3);
+        assert_eq!(middle["nodes"][0], whole["nodes"][10]);
+        assert_eq!(middle["nodes"][2], whole["nodes"][12]);
+
+        // An offset past the last match is an empty page, not an error and not a
+        // wrapped-around one — even though the limit is unlimited.
+        let (status, past) = get(
+            set(),
+            None,
+            &format!("/v1/graph/hub/nodes?offset={}&limit=0", ALL_NODES + 5),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a page past the end still answers");
+        assert_eq!(rows(&past, "nodes", "/nodes"), 0);
+        assert_eq!(past["total"], ALL_NODES, "and still reports the population");
     }
 
     #[tokio::test]

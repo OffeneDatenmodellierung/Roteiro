@@ -23,6 +23,57 @@ use crate::{Edge, EdgeKind, NodeKind, Provenance};
 /// any breaking change to the shape.
 pub const SCHEMA: &str = "roteiro.query/v1";
 
+/// Cut an already-ordered, already-materialised list down to the window a caller
+/// asked for: skip `offset` items from the front, then keep at most `limit`.
+///
+/// **This is the one place that decides what `limit` and `offset` mean** for the
+/// graph's list lenses — [`debt_density`], [`config_secrets`] and [`coupling`]
+/// here, and the `/nodes` and `/hotspots` endpoints in the `roteiro` binary. It
+/// exists because the parameter previously had two implementations: three lenses
+/// truncated here and treated `0` as "no limit", while two HTTP handlers used
+/// [`Iterator::take`] and so returned nothing for `0` — the same parameter name
+/// with opposite meanings, and nothing that could make the disagreement visible
+/// (issue #375). A sixth list lens should call this rather than write a third.
+///
+/// The contract:
+///
+/// - **`limit == 0` means unlimited** — every item that survives `offset` is
+///   kept. This is the reading the CLI already documents (`roteiro
+///   config-secrets --help`: *"0 shows every secret-named key"*), so no
+///   published promise is withdrawn by making it universal; and it is the safer
+///   of the two, because a caller who passes an unset variable then gets more
+///   data than they meant to ask for rather than an empty page that reads like a
+///   truthful "nothing found".
+/// - **`offset` applies first, and `limit` to what remains.** So `offset = 20,
+///   limit = 0` is "skip the first 20, then every remaining item", not "skip 20,
+///   then nothing". An `offset` past the end yields an empty window rather than
+///   panicking — a page beyond the last one is empty, not an error.
+/// - A caller's reported `total` must be taken **before** this runs: every
+///   surface reports the pre-windowing population, so a cut page still says what
+///   it was cut from.
+///
+/// Ordering is the caller's job; this only removes, and only from the ends, so a
+/// deterministically-ordered input yields a deterministic window.
+///
+/// # What this deliberately does not cover
+///
+/// The **search channels** ([`search`], and the generated/memory channels behind
+/// [`search_channels`]) keep their own `limit == 0 => no hits` guard and do not
+/// call this. They are a different surface: `limit` there is *per channel* on a
+/// relevance ranking asked for by the CLI and by MCP tools that clamp it to a
+/// floor of `1`, so "unlimited" is neither expressible nor wanted by either
+/// caller, and no channel is one of the served graph list endpoints #375 is
+/// about. Aligning them is a separate, CLI-visible change; until it is made,
+/// `search`'s `0` still means "no hits".
+pub fn window<T>(items: &mut Vec<T>, offset: usize, limit: usize) {
+    // `min(len)` rather than a bounds check: `drain(..offset)` panics past the
+    // end of the vector, and "page 900 of 3" is an empty page, not a 500.
+    items.drain(..offset.min(items.len()));
+    if limit > 0 {
+        items.truncate(limit);
+    }
+}
+
 /// A compact node summary (used in listings and as the subject of an
 /// [`Explanation`]).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -456,9 +507,7 @@ pub fn debt_density(
         let (bn, bd) = metric(b);
         (bn * ad).cmp(&(an * bd)).then_with(|| a.0.cmp(&b.0))
     });
-    if limit > 0 {
-        ranked.truncate(limit);
-    }
+    window(&mut ranked, 0, limit);
 
     let items = ranked
         .into_iter()
@@ -746,9 +795,7 @@ pub fn config_secrets(store: &Store, limit: usize) -> Result<ConfigSecretReport,
     }
     let secret_named = items.len();
     items.sort_by(|a, b| (&a.path, &a.name, &a.key).cmp(&(&b.path, &b.name, &b.key)));
-    if limit > 0 {
-        items.truncate(limit);
-    }
+    window(&mut items, 0, limit);
 
     Ok(ConfigSecretReport {
         schema: SCHEMA,
@@ -998,9 +1045,7 @@ pub fn coupling(
         };
         metric(b).cmp(&metric(a)).then_with(|| a.2.cmp(b.2))
     });
-    if limit > 0 {
-        ranked.truncate(limit);
-    }
+    window(&mut ranked, 0, limit);
 
     let mut items = Vec::with_capacity(ranked.len());
     for (fan_in, fan_out, key) in ranked {
@@ -1860,7 +1905,7 @@ mod tests {
     use super::{
         ConfigSecretReport, CouplingItem, CouplingOrder, CouplingReport, DebtDensityReport,
         DensityItem, DensityOrder, RedactionState, SCHEMA, SNIPPET_MAX, config_secrets, coupling,
-        debt_density, explain, glob_match, list_kind, memory_score, path, search,
+        debt_density, explain, glob_match, list_kind, memory_score, path, search, window,
     };
     use crate::{AnchorState, Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
@@ -1882,6 +1927,63 @@ mod tests {
             ));
         store.apply_factset(&facts).expect("apply");
         store
+    }
+
+    /// [`window`] is the single definition of `limit`/`offset` for every list
+    /// lens, so its contract is pinned here rather than only through the lenses
+    /// that call it.
+    #[test]
+    fn window_reads_zero_as_unlimited_and_offsets_before_limiting() {
+        let ten = || (0..10).collect::<Vec<u8>>();
+
+        // `0` is unlimited, not empty — the whole point of #375.
+        let mut all = ten();
+        window(&mut all, 0, 0);
+        assert_eq!(all, ten(), "limit 0 keeps everything");
+
+        // A non-zero limit cuts from the end, keeping the caller's order.
+        let mut top = ten();
+        window(&mut top, 0, 3);
+        assert_eq!(top, vec![0, 1, 2]);
+
+        // A limit at or beyond the population is a no-op, so the boundary
+        // between "bounded" and "unbounded" has no step in it.
+        let mut exact = ten();
+        window(&mut exact, 0, 10);
+        assert_eq!(exact, ten());
+        let mut over = ten();
+        window(&mut over, 0, 99);
+        assert_eq!(over, ten());
+
+        // `offset` applies first and `limit` to what remains.
+        let mut paged = ten();
+        window(&mut paged, 4, 3);
+        assert_eq!(paged, vec![4, 5, 6]);
+
+        // The decision this fix had to make: offset with an unlimited limit is
+        // "skip N, then every remaining item" — not "skip N, then nothing".
+        let mut rest = ten();
+        window(&mut rest, 7, 0);
+        assert_eq!(rest, vec![7, 8, 9], "offset then unlimited");
+
+        // An offset at or past the end is an empty page, not a panic and not a
+        // wrapped-around one.
+        let mut at_end = ten();
+        window(&mut at_end, 10, 0);
+        assert!(at_end.is_empty());
+        let mut past_end = ten();
+        window(&mut past_end, 500, 0);
+        assert!(past_end.is_empty());
+        let mut past_end_limited = ten();
+        window(&mut past_end_limited, 500, 5);
+        assert!(past_end_limited.is_empty());
+
+        // An empty input stays empty under every combination.
+        let mut empty: Vec<u8> = Vec::new();
+        window(&mut empty, 0, 0);
+        window(&mut empty, 3, 0);
+        window(&mut empty, 0, 3);
+        assert!(empty.is_empty());
     }
 
     #[test]
