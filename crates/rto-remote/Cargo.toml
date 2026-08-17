@@ -18,10 +18,20 @@ authors.workspace = true
 # assembles what may be sent, decides whether it may be sent, and records that
 # it was — and takes the transport as a caller-supplied closure
 # ([`crate::Transport`]), exactly as `rto-exec` takes its [`rto_exec::Fetcher`].
-# The socket lives in the binary.
+# The socket lives in the binary: `crates/roteiro/src/remote_transport.rs`,
+# behind the off-by-default `remote` feature, one function reachable from one
+# command. That file exists as of part 2 — so this crate now sits above code
+# that really can send, which is exactly when the separation stops being
+# theoretical and starts being the guarantee.
 #
-# That is also what lets every test here exercise the whole path without a
-# network, so a test cannot accidentally become the first thing that sends data.
+# Adding an HTTP client *here* is the change that would undo it, and it would
+# not look like a mistake at review time: it would look like tidying the
+# transport up next to the policy it serves. It is the opposite of that.
+#
+# The separation is also what lets every test here exercise the whole path
+# without a network — in both directions, since `response` parses what comes
+# back and has no socket to parse it from either — so a test cannot accidentally
+# become the first thing that sends data.
 [dependencies]
 # Node identity and `meta`, which the payload allow-list reads *five named
 # fields* out of (see `payload::ContextItem::from_node`). `rto-graph` is the
