@@ -1495,11 +1495,12 @@ Five modules, one per clause:
 - **`consent`** — ADR-0019 §3's inversion. `ConfigGrant::from_layers` is the
   workspace's single implementation of "a project may deny but never grant", and
   the binary's config layering calls it, so the value `roteiro config` echoes and
-  the value the gate consults cannot drift apart. Six named `Reason`s, each with
-  a remedy — except `ProjectDenied`, whose honest remedy is *"no flag overrides
-  this; take it up with the repository"*. A discarded project grant is **reported
-  rather than swallowed**: a committed setting that silently does nothing is
-  worse than one refused out loud.
+  the value the gate consults cannot drift apart. **Seven** named `Reason`s — six
+  until part 2a split the invocation's two denial forms apart (see below) — each
+  with a remedy, except `ProjectDenied`, whose honest remedy is *"no flag
+  overrides this; take it up with the repository"*. A discarded project grant is
+  **reported rather than swallowed**: a committed setting that silently does
+  nothing is worse than one refused out loud.
 - **`payload`** — the allow-list as a *type*. `ContextItem::from_node` reads five
   named fields off a node — key, kind, name, path, and up to 1,500 characters of
   `meta.content`; every other key in its free-form `meta` is unreachable, and the
@@ -1583,6 +1584,60 @@ has not. A prompt may never stand in for the **user layer**, or the two grants
 ADR-0019 §3 requires separately collapse into one keystroke; it may never
 override a project denial; and a non-interactive stdin is **refused**, not
 assumed to agree, because a pipe cannot consent.
+
+**Two review findings on #386, both about a message that was untrue rather than
+merely unhelpful** — the class this project keeps finding, because such a message
+passes every gate.
+
+*Declining a prompt claimed you had passed a flag.* The invocation's two forms
+were collapsed into one `Option<bool>`, so answering *no* produced
+`InvocationDenied`, whose text names `--no-remote` — a flag the person never
+typed and would not find in their shell history. On the consent path especially,
+a message that misreports **how** consent was withheld undermines the thing it
+reports on. Fixed with `Invocation::{Unset, Flag, Prompt}` and a seventh
+`Reason::PromptDeclined`; `decide` keeps its `Option<bool>` flag form and became
+a thin wrapper over `decide_with`, so there is still one implementation of which
+layer outranks which. A distinct variant rather than a payload on the existing
+one, for a reason that decides it: `Reason::as_str` is the stable token in
+`remote status --json`, so a variant adds a token where a payload would change
+the shape of one readers already parse. The test asserts the **rendered text**,
+not the variant — a `Reason` that classified right while still printing the flag
+would be the same bug.
+
+*And that variant was a semver break, caught in review.* `rto-remote` had been
+published at 1.19.0 hours earlier, and `Reason` was not `#[non_exhaustive]`, so
+the seventh variant would stop a downstream exhaustive `match` from compiling.
+Three options were weighed. **Design around it**, as `StoreError` did
+(#342/#348), does not transfer: there the fact had a home outside the enum, where
+here the fact *is* which reason to report, so moving it out would leave
+`--json` emitting `invocation_denied` for a prompt and reinstate the defect one
+layer down. **Accept it and mark the commit `!`** would cut **2.0.0**, the
+version this plan reserves for Stage 27 — the mistake #341 already made by
+accident. So: `#[non_exhaustive]` went on in the same change, along with the rest
+of the crate's open enums, while the crate had nine downloads and no consumer
+that could exist. That is the workspace convention rather than a departure from
+it — `ExecError`, `SubprocessError`, `AssetError`, `AssetSource` and
+`NetworkPolicy` all carry it, and `AssetSource`'s docs record that the attribute
+"is what made adding it a non-breaking change". `StoreError` is the one that
+missed the convention and paid for it. `Trigger` and `ProducerTrust` stay
+exhaustive on purpose — closed sets, where a new member is a redesign a
+downstream `match` should be made to notice — and say so at their definitions.
+**The version number will not record the break**; `Reason`'s doc comment, the
+crate README and the commit do.
+
+*An absent `finish_reason` was read as "it finished".* `parse` only refused when
+the field was present and outside the allow-list, so silence passed — a strictly
+weaker reading than the `length` case it already refuses, since `length` at least
+says something. This is #367's rule at the other end of the same wire: *a length
+that cannot be established is not a length that checks out*. Now
+`ResponseError::Indeterminate`, and the message says why (completeness could not
+be established) rather than that a field was missing. Checked before changing it
+that nothing this tier addresses legitimately omits the field: `rto-serve`'s own
+`ChatChoice::finish_reason` is a non-optional `&'static str`, and the one shape
+that legitimately carries `null` is a **streaming delta**, which `Payload::body`'s
+pinned `"stream": false` means this tier never asks for — so a `null` here is an
+endpoint streaming at a request that said not to, which is the least complete a
+body can be.
 
 **Testing the untestable bit.** Part 1 could say the binary compiled no backend.
 That sentence is now false, so the guarantee is re-established on different
@@ -1975,13 +2030,30 @@ nothing about this exception makes them cheaper to do separately.
 **What the bump cost, measured** on a store extracted at version 11 and then
 opened by the version-12 binary: **all 275 cached fact sets re-extracted** (every
 tracked blob — the base version is unconditional, so nothing survives the key
-change), 3.2 s cold against 0.17 s warm on a debug build. The object cache is
-write-and-keep with no eviction (`crates/rto-graph/src/cache.rs`), so the
-superseded version-11 entries stay on disk: `.git/roteiro/objects` went
-**4.8 MiB → 9.7 MiB** and does not shrink again. That is per repository, per
-user, and it is the whole price —
-`.git/roteiro` is derived, so deleting it is always safe if a user would rather
-reclaim the space than keep the old entries.
+change), 3.2 s cold against 0.17 s warm on a debug build. The disk half of that
+price was open-ended when this was written: the object cache was write-and-keep
+with no eviction, so the superseded version-11 entries stayed on disk —
+`.git/roteiro/objects` went **4.8 MiB → 9.7 MiB** and did not shrink again, per
+repository, per user, for every bump.
+
+**That half is now bounded** (issue #387). `sweep_superseded`
+(`crates/rto-graph/src/sync.rs`) runs at the maintenance seam and deletes the
+generations a bump orphaned, keeping the current one and — by
+`DEFAULT_KEEP_GENERATIONS` — one behind it, so switching between a branch that
+bumped and the `main` it will merge into stays a cache hit. **So a bump costs CPU
+once and disk once, not disk for ever**, which is what the batching rule in this
+section already assumed it cost. Measured on a copy of this repository's own
+cache, where four generations had accumulated (9, 10, 11 and 12): **3,812 objects
+/ 71.6 MB → 1,876 / 40.0 MB** in one pass, and the live set verified intact by
+the only test that matters — a sync into an empty store afterwards reported 278
+blobs, **0 extracted, 278 cached**. Generation 12 alone is 594 objects / 10.0 MB,
+which is what `keep_generations: 0` leaves; the 30 MB between the two is the
+retained generation 11, and is what the insurance costs. Two things are
+deliberately *not*
+reclaimed and stay a known cost: the environment tag (`-e…`) is a hash with no
+ordering, so no tag can be shown to supersede another, and the live set itself is
+still unbounded. `.git/roteiro` remains derived, so deleting the lot is still
+always safe.
 
 ### Stages 33–35 — status
 

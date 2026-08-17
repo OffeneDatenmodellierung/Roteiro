@@ -112,7 +112,12 @@ fn truncate_chars(text: &str, max: usize) -> String {
 }
 
 /// Why a payload could not be assembled.
+/// Marked `#[non_exhaustive]` for the reason recorded on
+/// [`crate::Reason`]: this crate is published at 1.x, and error sets grow.
+/// Taken while the crate had no consumer that could exist; it will not be
+/// taken again.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PayloadError {
     /// An instruction with nothing in it.
     #[error("a remote request needs an instruction: there is nothing to ask")]

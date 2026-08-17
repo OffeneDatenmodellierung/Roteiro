@@ -62,7 +62,7 @@ pub mod record;
 pub mod response;
 pub mod trust;
 
-pub use consent::{ConfigGrant, Decision, Reason};
+pub use consent::{ConfigGrant, Decision, Invocation, Reason};
 pub use endpoint::{Endpoint, EndpointError};
 pub use escalation::{Check, LocalAttempt, Policy, Trigger};
 pub use payload::{ContextItem, Payload, PayloadError};
@@ -90,7 +90,12 @@ pub type Transport<'a> = dyn Fn(&Endpoint, &str) -> Result<String, String> + 'a;
 pub type Clock<'a> = dyn Fn() -> String + 'a;
 
 /// Why a remote call did not produce an answer.
+/// Marked `#[non_exhaustive]` for the reason recorded on
+/// [`crate::Reason`]: this crate is published at 1.x, and error sets grow.
+/// Taken while the crate had no consumer that could exist; it will not be
+/// taken again.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RemoteError {
     /// The gate is shut. Nothing was assembled, nothing was recorded, nothing
     /// was sent.
@@ -220,6 +225,169 @@ pub fn call_with(
         endpoint: endpoint.url().to_owned(),
         detail,
     })
+}
+
+/// **Every public enum here has had the `#[non_exhaustive]` question answered.**
+///
+/// Asserted against this crate's own source, not against behaviour, because
+/// "somebody thought about semver" is a property of the text rather than of any
+/// runtime value — the same reason `remote_is_not_a_default_feature` reads a
+/// `Cargo.toml`.
+///
+/// This exists because the decision was expensive to make once and would be
+/// silently unmade by the next `pub enum` added without it. `rto-remote` is
+/// published at 1.x, so a variant added to a bare public enum is a breaking
+/// change; [`Reason`] carries the full reasoning, and `rto_graph::StoreError`
+/// carries the cautionary case. A new enum passes here by taking the attribute
+/// **or** by saying in its own docs why its set is closed — either is a decision,
+/// and only silence is not.
+///
+/// # It follows re-exports, because a type that moves out of `src/` is still ours
+///
+/// A directory scan has one blind spot, and Stage 34 part 2b walked straight into
+/// it: [`ProducerTrust`] moved to `rto_graph::trust` — forced, because
+/// `rto_graph::ModelSource::Remote` carries it and `rto-remote` depends on
+/// `rto-graph` rather than the other way round — and left this crate's `src/`.
+/// It is still `rto_remote::ProducerTrust`, still public, still published, and a
+/// variant added to it is still a breaking change here; but the scan stopped
+/// seeing it, and a guard that quietly stops guarding is worse than no guard.
+///
+/// The `seen` floor below caught the loss — 9 became 8 — which is the floor doing
+/// its job, but it reports it as *"the scan stopped matching"* rather than as
+/// *"a type escaped"*, and it would not have caught the move at all if the floor
+/// had been set one lower. So [`RE_EXPORTED_SOURCES`] makes the scan follow the
+/// type instead of relying on arithmetic to notice its absence. Semver does not
+/// care which directory a file is stored in.
+#[cfg(test)]
+mod semver_posture {
+    /// Files outside this crate that define types it **re-exports**, and which the
+    /// scan must therefore read as if they were its own.
+    ///
+    /// Paths relative to `CARGO_MANIFEST_DIR`. Kept as a short explicit list
+    /// rather than derived from `pub use` lines: the derivation would have to
+    /// parse Rust to be right, and a list of one entry that must be extended by
+    /// hand is a list somebody reads when they add the second.
+    ///
+    /// A missing file here is a **failure**, not a skip — see `sources`. A
+    /// re-exported definition that has been moved or deleted is exactly the case
+    /// this list exists to notice.
+    const RE_EXPORTED_SOURCES: [&str; 1] = ["../rto-graph/src/trust.rs"];
+
+    /// Every `src/*.rs` in this crate, plus [`RE_EXPORTED_SOURCES`], as
+    /// `(display name, contents)`.
+    fn sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = root.join("src");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read this crate's src/")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .expect("a file name")
+                    .to_string_lossy()
+                    .into_owned();
+                (
+                    name,
+                    std::fs::read_to_string(&p).expect("read a source file"),
+                )
+            })
+            .collect();
+        files.sort();
+        for rel in RE_EXPORTED_SOURCES {
+            let text = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| {
+                panic!(
+                    "{rel} is re-exported by this crate but could not be read ({e}). If the type \
+                     moved again, move this entry with it; if it is no longer re-exported, drop \
+                     the entry — but do not leave the scan pointing at nothing, because that is \
+                     how a public enum stops being guarded without anyone noticing"
+                )
+            });
+            files.push((format!("(re-exported) {rel}"), text));
+        }
+        files
+    }
+
+    #[test]
+    fn every_public_enum_either_is_non_exhaustive_or_says_why_not() {
+        let mut seen = 0;
+        for (file, text) in sources() {
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(rest) = line.strip_prefix("pub enum ") else {
+                    continue;
+                };
+                seen += 1;
+                let name = rest.split_whitespace().next().unwrap_or(rest);
+
+                // Walk back over the item's attributes and doc comment, which is
+                // everything contiguous above it that is one or the other.
+                //
+                // Attributes and docs are kept **apart** on purpose. The first
+                // version of this test joined them and asked whether the block
+                // contained `#[non_exhaustive]` — which every deliberately-
+                // exhaustive enum's doc comment does, because saying "not
+                // `#[non_exhaustive]`" names the attribute. It reported `Trigger`
+                // as both marked and unmarked. A check for an attribute has to
+                // look at attribute lines.
+                let (mut attrs, mut docs) = (Vec::new(), Vec::new());
+                for above in lines[..i].iter().rev() {
+                    let t = above.trim_start();
+                    if t.starts_with("///") {
+                        docs.push(t);
+                    } else if t.starts_with("#[") || t.starts_with(')') {
+                        attrs.push(t);
+                    } else if !t.starts_with("//") || t.starts_with("//!") {
+                        // An ordinary `//` comment sits inside the block and is
+                        // skipped; anything else — including a module doc, which
+                        // means we have run off the top of the file — ends it.
+                        break;
+                    }
+                }
+
+                let marked = attrs.contains(&"#[non_exhaustive]");
+                // The opt-out has to *name* the attribute, so it reads as a
+                // refusal rather than as prose that happens to be nearby.
+                let justified = docs.iter().any(|d| d.contains("not `#[non_exhaustive]`"));
+                assert!(
+                    marked || justified,
+                    "{file}: `pub enum {name}` is neither `#[non_exhaustive]` nor documented as \
+                     deliberately exhaustive. This crate is published at 1.x, so a variant added \
+                     to it later is a breaking change — see `Reason`'s doc comment for what that \
+                     cost the last time, and `rto_graph::StoreError` for what it costs when the \
+                     decision is not made at all. Take the attribute, or say in the enum's own \
+                     docs why its set is closed."
+                );
+                assert!(
+                    !(marked && justified),
+                    "{file}: `pub enum {name}` both carries `#[non_exhaustive]` and documents \
+                     itself as deliberately not; one of the two is stale"
+                );
+            }
+        }
+        assert!(
+            seen >= 9,
+            "only found {seen} public enums — the scan stopped matching, which would let this \
+             test pass by finding nothing. If a type moved out of this crate's `src/` and is \
+             still re-exported, add its file to `RE_EXPORTED_SOURCES` rather than lowering this \
+             floor: the floor notices a loss, but it cannot tell you a public enum escaped from \
+             a scan that broke"
+        );
+        // `ProducerTrust` by name, because it is the one that has already left
+        // `src/` once. The count above would go on passing if the entry were
+        // dropped and some other enum were added in the same change; this would
+        // not, and naming it is what makes `RE_EXPORTED_SOURCES` load-bearing
+        // rather than decorative.
+        assert!(
+            sources()
+                .iter()
+                .any(|(_, text)| text.contains("pub enum ProducerTrust")),
+            "`ProducerTrust` is re-exported by this crate but no scanned source defines it — \
+             the guard has lost the type it lost once already"
+        );
+    }
 }
 
 /// Temp directories for this crate's tests. No network, no fixtures, no shared

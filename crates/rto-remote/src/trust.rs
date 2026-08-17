@@ -16,6 +16,22 @@
 //! Nothing about the decision changed with the address; the documentation of
 //! *why* a hosted model can only ever be [`ProducerTrust::VendorAsserted`] moved
 //! with the type and is worth reading there.
+//!
+//! # The exhaustiveness decision travelled too, and so did the guard
+//!
+//! PR #391 swept `#[non_exhaustive]` across this crate's public enums and left
+//! `ProducerTrust` **deliberately exhaustive**, saying so at the definition. That
+//! reasoning is not a property of the crate it happened to be written in — it is
+//! a property of the type — so it moved with it and is stated at its new
+//! definition in `rto_graph::trust`.
+//!
+//! The *guard* had to be made to follow as well.
+//! `semver_posture::every_public_enum_either_is_non_exhaustive_or_says_why_not`
+//! scans this crate's `src/`, and a type that leaves the directory leaves the
+//! scan — silently, since the test would go on passing over the enums that
+//! remain. It now also reads the files this crate **re-exports from**, because a
+//! re-exported type is part of this crate's public API whatever directory it is
+//! stored in, and semver does not care where a file lives.
 
 pub use rto_graph::trust::ProducerTrust;
 

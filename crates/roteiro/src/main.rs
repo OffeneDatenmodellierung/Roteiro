@@ -2319,10 +2319,19 @@ fn run_remote_call(
         eprintln!("{note}\n");
     }
     if !decision.granted() && remote_transport::may_prompt(decision.reason) {
-        // A prompt is the invocation, not a second chance at the config: `decide`
-        // is re-run with the answer rather than the decision being patched, so
-        // the gate stays the single implementation of who may send.
-        decision = rto_remote::consent::decide(grant, ask_to_send(&endpoint, &body, &payload)?);
+        // A prompt is the invocation, not a second chance at the config: the gate
+        // is re-run with the answer rather than the decision being patched, so it
+        // stays the single implementation of who may send.
+        //
+        // `Invocation::Prompt` rather than a bare `Some(bool)`, and that is the
+        // whole of the fix for #386's second review comment: collapsing the two
+        // forms made a declined prompt report itself as `--no-remote`, telling
+        // someone they had passed a flag they never typed. On the consent path of
+        // all places, a message that misreports *how* consent was withheld
+        // undermines the thing it is reporting on.
+        let said_yes = ask_to_send(&endpoint, &body, &payload)?;
+        decision =
+            rto_remote::consent::decide_with(grant, rto_remote::Invocation::Prompt(said_yes));
     }
 
     let ledger = remote_ledger()?;
@@ -2373,10 +2382,12 @@ fn run_remote_call(
 /// Ask this terminal to grant *this run*, having shown it exactly what would
 /// leave.
 ///
-/// Returns the invocation grant to re-decide with: `Some(true)` for a yes,
-/// `Some(false)` for anything else. A refusal is an explicit denial rather than
-/// an absence, so the gate reports `InvocationDenied` — *"you said no"* — instead
-/// of `InvocationUnset` and its advice to pass a flag the person just declined.
+/// Returns the answer alone — `true` for a yes, `false` for anything else. The
+/// caller wraps it in [`rto_remote::Invocation::Prompt`], which is what keeps a
+/// declined prompt from being reported as `--no-remote`: an answer is an explicit
+/// denial rather than an absence, so the gate reports `PromptDeclined` — *"you
+/// read it and said no"* — rather than either `InvocationUnset` and its advice to
+/// pass a flag, or `InvocationDenied` and its claim that one was passed.
 ///
 /// **A non-interactive stdin is never prompted and never granted.** A pipe
 /// cannot consent, and treating an unattended run as a yes is exactly the
@@ -2387,7 +2398,7 @@ fn ask_to_send(
     endpoint: &rto_remote::Endpoint,
     body: &str,
     payload: &rto_remote::Payload,
-) -> anyhow::Result<Option<bool>> {
+) -> anyhow::Result<bool> {
     use std::io::Write as _;
 
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -2406,7 +2417,7 @@ fn ask_to_send(
     std::io::stderr().flush().ok();
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
-    Ok(Some(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")))
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// Read the egress ledger — what left this machine, and when.
@@ -2457,6 +2468,23 @@ fn run_remote_log(limit: usize, json: bool) -> anyhow::Result<()> {
                 println!("{}  RETURNED  {} bytes", o.at, o.response_bytes);
             }
             rto_remote::Entry::Outcome(o) => println!("{}  FAILED    {}", o.at, o.detail),
+            // `Entry` is `#[non_exhaustive]`, so this arm is required. It prints
+            // rather than skips, because on an egress log a line nobody mentions
+            // reads as a line that is not there — the same "no record, so
+            // presumably nothing left" default `rto_remote::record` argues
+            // against.
+            //
+            // Today it is unreachable, and by a route worth knowing about:
+            // `Ledger::read` drops lines that will not deserialize, and an
+            // unknown `event` tag is one of those. So a future Roteiro's third
+            // line kind would vanish at the serde layer *before* reaching here.
+            // That is a gap in `read`, not in this match, and it is left for the
+            // change that introduces such a kind — which is the change that can
+            // test it.
+            other => println!(
+                "{}  ?         a line this build does not understand ({other:?})",
+                other.at()
+            ),
         }
     }
     Ok(())
@@ -3771,7 +3799,9 @@ fn report_download_event(event: rto_graph::DownloadEvent) {
 }
 
 /// Format a byte count for a human: `1.4 GiB`, `812.0 MiB`, `947 B`.
-#[cfg(feature = "models")]
+///
+/// No longer gated on `models`: the object-cache sweep reports reclaimed bytes in
+/// every build (`object_sweep_line`), so this is reachable without it.
 fn human_bytes(bytes: u64) -> String {
     #[expect(
         clippy::cast_precision_loss,
@@ -5577,6 +5607,48 @@ fn first_line(body: &str, max: usize) -> String {
     format!("{head}…")
 }
 
+/// What the object-cache sweep reclaimed, and **why it kept what it kept**.
+///
+/// Both halves are load-bearing. "0 objects freed" on a cache holding a single
+/// generation is the correct, healthy answer and reads as a failure without the
+/// retained count beside it — and the retained count is itself four different
+/// things. `sweep_superseded` keeps the live generation, the older generation it
+/// holds as insurance, anything written by a *newer* build sharing this cache,
+/// and every key it could not parse. A summary naming only the first two would
+/// be describing an irreversible operation inaccurately, which is the failure
+/// this project keeps finding: a message that reports a scope it did not act on.
+///
+/// So each class is named and counted, including the zeroes — a count that is
+/// only printed once it is non-zero is a count nobody notices becoming non-zero.
+/// Bytes are reported for the totals only: the split by class would need a second
+/// stat pass over the whole cache, which is not worth it for a status line.
+fn object_sweep_lines(reclaimed: &rto_graph::ReclaimReport) -> String {
+    let swept = &reclaimed.sweep;
+    // Never deleted, and never quietly folded into a total either: an
+    // unrecognised key is either a format this build no longer writes or a bug in
+    // the key parser, and both are things the reader would want to go and look at.
+    let advisory = if reclaimed.kept_unrecognised > 0 {
+        "\n  an unrecognised key is always kept — but it means either a format this build no \
+         longer writes, or a bug in the key parser. Both are worth a look."
+    } else {
+        ""
+    };
+    format!(
+        "object cache swept: {} superseded object(s) freed ({}), {} retained ({})\
+         \n  retained: {} at this build's generation, {} at an older generation kept as \
+         insurance, {} written by a newer build, {} whose key this build does not \
+         recognise{advisory}",
+        swept.removed,
+        human_bytes(swept.freed_bytes),
+        swept.retained,
+        human_bytes(swept.retained_bytes),
+        reclaimed.kept_current,
+        reclaimed.kept_recent,
+        reclaimed.kept_ahead,
+        reclaimed.kept_unrecognised,
+    )
+}
+
 /// Fetch a node's cached context bundle, or (`--refresh`) reconcile all cached
 /// contexts with the current graph — rebuilding stale ones and pruning entries
 /// for deleted nodes. The cache is dependency-aware: a change to a node or any of
@@ -5601,6 +5673,14 @@ fn run_context(
         // to grip it by, so `roteiro memory forget` stays the only thing that
         // removes a remembered record.
         let swept = store.sweep_agent_cache(resolve_cache_budget(None)?)?;
+        // The same seam, the other cache. The on-disk object cache is the larger
+        // of the two by an order of magnitude and had no reclaim at all: an
+        // `EXTRACT_VERSION` bump orphaned every entry and nothing ever removed one
+        // (issue #387). It hangs here rather than growing a second maintenance
+        // concept, and for the same reason the tier sweep does — `sync` is reached
+        // from `refresh_for_read` on every ordinary query, so sweeping there would
+        // put deletion back on the read path this seam exists to keep it off.
+        let reclaimed = rto_graph::sweep_superseded(&cache, rto_graph::DEFAULT_KEEP_GENERATIONS)?;
         if json {
             // The long-standing shape, unchanged: callers already parse this
             // object, and wrapping it for everyone would be a breaking change to
@@ -5622,6 +5702,15 @@ fn run_context(
                     },
                 );
             }
+            // Same rule as the tier sweep above: only when there is something
+            // to say. An unrecognised key counts as something to say — it is the
+            // one class the reader may need to act on.
+            if reclaimed.sweep.removed > 0
+                || reclaimed.sweep.failed > 0
+                || reclaimed.kept_unrecognised > 0
+            {
+                eprintln!("{}", object_sweep_lines(&reclaimed));
+            }
         } else {
             println!(
                 "context cache refreshed: {} rebuilt, {} reused, {} pruned",
@@ -5635,6 +5724,14 @@ fn run_context(
                 println!(
                     "  still over budget — what remains is pinned (this generation's own \
                      work, and the most-recently-used entry, which is always kept)"
+                );
+            }
+            println!("{}", object_sweep_lines(&reclaimed));
+            if reclaimed.sweep.failed > 0 {
+                println!(
+                    "  {} superseded object(s) could not be deleted — check permissions on \
+                     the cache directory",
+                    reclaimed.sweep.failed,
                 );
             }
         }

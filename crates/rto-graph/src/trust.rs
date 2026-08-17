@@ -40,6 +40,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Whether a producer's identity is measured or asserted.
+///
+/// **Deliberately not `#[non_exhaustive]`**, unlike most of `rto-remote`'s public
+/// enums (see `rto_remote::Reason` for that decision and its cost). This is a
+/// two-valued distinction, not a list: an identity either was verified on this
+/// machine or it was not, and [`ProducerTrust::is_verifiable`] is the whole of
+/// it. A third value would mean the distinction had changed, which is a redesign
+/// a downstream `match` should be made to notice.
+///
+/// The decision was made in `rto-remote` (PR #391) and moved here with the type,
+/// because it is a property of the distinction rather than of the directory. So
+/// did the test that enforces it: `rto-remote`'s `semver_posture` guard now reads
+/// the files that crate re-exports from, this one included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProducerTrust {

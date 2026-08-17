@@ -28,6 +28,25 @@
 //! that is not the shape it claims to be. There is no lenient mode and no
 //! salvage path: the caller consented to a remote answer, and half of one is not
 //! it.
+//!
+//! # Completeness is established positively, and silence does not establish it
+//!
+//! A response that carries **no** `finish_reason` is refused too
+//! ([`ResponseError::Indeterminate`]). This is the rule #367 already applied to
+//! the asset fetch — *"a length that cannot be established is not a length that
+//! checks out"*, so a close-delimited body is refused rather than digested and
+//! pinned — pointed at the other end of the same wire. Reading an absent field as
+//! *"it must have finished"* would be strictly weaker than the `length` case this
+//! module already refuses: `length` at least tells you something.
+//!
+//! Nothing this tier can address legitimately omits it. `rto-serve`'s own
+//! `ChatChoice::finish_reason` is a non-optional `&'static str`, always `stop` or
+//! `length` — and that is the endpoint the loopback-gateway case exists for. The
+//! one place the field is legitimately absent, or `null`, is a **streaming
+//! delta**, and [`Payload::body`](crate::Payload::body) pins `"stream": false`,
+//! so this tier structurally never asks for one. A `null` arriving here therefore
+//! means the endpoint sent a streaming chunk to a non-streaming request, which is
+//! the least complete thing a body can be.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,10 +58,12 @@ const EXCERPT: usize = 200;
 
 /// `finish_reason` values that mean the generation ran to its own end.
 ///
-/// A short list on purpose. Anything outside it — `length`, `content_filter`,
-/// a vendor's own token — is treated as an *incomplete* answer, because the
+/// A short list on purpose, and an **allow-list**: a response is complete only
+/// if it says one of these. Anything outside it — `length`, `content_filter`, a
+/// vendor's own token — is treated as an *incomplete* answer, because the
 /// alternative is deciding on a vendor's behalf that their new stop reason was
-/// benign.
+/// benign; and saying nothing at all is [`ResponseError::Indeterminate`], because
+/// an allow-list that silence passes is not one.
 const COMPLETE: [&str; 4] = ["stop", "end_turn", "eos", "complete"];
 
 /// A remote answer that arrived whole.
@@ -93,7 +114,12 @@ impl Answer {
 ///
 /// Every variant is a refusal. None of them is recoverable by using part of what
 /// arrived, and none of them falls back to a local model — see the module docs.
+/// Marked `#[non_exhaustive]` for the reason recorded on
+/// [`crate::Reason`]: this crate is published at 1.x, and error sets grow.
+/// Taken while the crate had no consumer that could exist; it will not be
+/// taken again.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ResponseError {
     /// The body is not the shape a chat completion has.
     #[error(
@@ -129,6 +155,25 @@ pub enum ResponseError {
         /// The reason the endpoint gave.
         finish_reason: String,
         /// How much text arrived before it stopped.
+        chars: usize,
+    },
+    /// The response never says whether the generation finished.
+    ///
+    /// Separate from [`ResponseError::Incomplete`] because the facts differ: that
+    /// one is an endpoint reporting that it stopped early, this one is an
+    /// endpoint reporting nothing at all. The consequence is the same, and it is
+    /// the consequence that matters — completeness that cannot be established is
+    /// not completeness.
+    #[error(
+        "the endpoint's response never says whether the generation finished — its first \
+         choice carries no `finish_reason` string, so the {chars} character(s) that arrived \
+         cannot be told apart from an answer cut short. Refusing rather than presenting \
+         bytes of unknown completeness as a whole answer; no local model was substituted. \
+         A `finish_reason` of `null` means the same thing and is refused the same way: it is \
+         what a *streaming* chunk carries, and this tier always asks for `stream: false`"
+    )]
+    Indeterminate {
+        /// How much text arrived, whole or not.
         chars: usize,
     },
     /// A completed generation that produced nothing.
@@ -179,17 +224,26 @@ pub fn parse(raw: &str) -> Result<Answer, ResponseError> {
         .ok_or_else(|| malformed("its first choice has no `message.content` string"))?
         .trim();
 
-    // Before emptiness, because "it stopped at the token limit" explains an empty
-    // answer where "it was empty" leaves a reader looking for the wrong cause.
-    if let Some(finish_reason) = choice
+    // Completeness is established before emptiness, because "it stopped at the
+    // token limit" explains an empty answer where "it was empty" leaves a reader
+    // looking for the wrong cause. And it is established *positively*: silence
+    // does not count as a yes.
+    match choice
         .get("finish_reason")
         .and_then(serde_json::Value::as_str)
-        .filter(|r| !COMPLETE.contains(&r.to_ascii_lowercase().as_str()))
     {
-        return Err(ResponseError::Incomplete {
-            finish_reason: finish_reason.to_owned(),
-            chars: text.chars().count(),
-        });
+        Some(reason) if COMPLETE.contains(&reason.to_ascii_lowercase().as_str()) => {}
+        Some(reason) => {
+            return Err(ResponseError::Incomplete {
+                finish_reason: reason.to_owned(),
+                chars: text.chars().count(),
+            });
+        }
+        None => {
+            return Err(ResponseError::Indeterminate {
+                chars: text.chars().count(),
+            });
+        }
     }
     if text.is_empty() {
         return Err(ResponseError::Empty);
@@ -289,6 +343,63 @@ mod tests {
         for reason in ["stop", "STOP", "end_turn", "eos", "complete"] {
             assert!(parse(&ok_body("done", reason)).is_ok(), "{reason}");
         }
+    }
+
+    /// **Silence does not establish completeness.** A response carrying no
+    /// `finish_reason` says nothing about whether the generation finished — less
+    /// than the `length` case above, which at least says it did not — so reading
+    /// the absence as "it must have finished" would be the weakest possible
+    /// reading of the strictest rule in this module.
+    ///
+    /// It is the rule #367 already applied at the other end of the wire: a body
+    /// whose completeness cannot be established is refused rather than digested
+    /// and pinned. Nothing this tier can address omits the field on a complete
+    /// response — `rto-serve`'s own `ChatChoice::finish_reason` is a
+    /// non-optional `&'static str` — and the one shape that legitimately carries
+    /// `null` is a streaming delta, which `Payload::body`'s pinned
+    /// `"stream": false` means this tier never asks for.
+    #[test]
+    fn a_response_that_never_says_it_finished_is_refused_rather_than_assumed_complete() {
+        for (raw, why) in [
+            // The field is simply not there.
+            (
+                r#"{"choices":[{"message":{"content":"a whole-looking answer"}}]}"#,
+                "absent",
+            ),
+            // …or there and `null`, which is what a *streaming* chunk carries —
+            // so this is an endpoint streaming at a request that said not to.
+            (
+                r#"{"choices":[{"message":{"content":"a whole-looking answer"},"finish_reason":null}]}"#,
+                "null",
+            ),
+            // …or there and not a string at all, which establishes exactly as
+            // little as the other two.
+            (
+                r#"{"choices":[{"message":{"content":"a whole-looking answer"},"finish_reason":42}]}"#,
+                "not a string",
+            ),
+        ] {
+            let err = parse(raw).expect_err("completeness was never established");
+            assert_eq!(
+                err,
+                ResponseError::Indeterminate { chars: 22 },
+                "finish_reason {why}"
+            );
+            let text = err.to_string();
+            // The message has to say *why* it was refused, not merely that a
+            // field was missing: "no `finish_reason`" is a fact about JSON, and
+            // "this cannot be told apart from an answer cut short" is the reason.
+            assert!(text.contains("cannot be told apart"), "{why}: {text}");
+            assert!(text.contains("unknown completeness"), "{why}: {text}");
+            assert!(
+                text.contains("no local model was substituted"),
+                "{why}: {text}"
+            );
+        }
+
+        // The refusal is about completeness, not about the field's presence for
+        // its own sake: a response that *does* say it finished is still fine.
+        assert!(parse(&ok_body("a whole-looking answer", "stop")).is_ok());
     }
 
     /// The stop reason is reported ahead of emptiness, because it explains the

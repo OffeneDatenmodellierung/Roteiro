@@ -74,7 +74,11 @@ pub struct LedgerError {
 
 /// One line of the ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Marked `#[non_exhaustive]` for the reason recorded on [`crate::Reason`]. A
+/// third line kind is plausible — a redaction note, a rotation marker — and an
+/// append-only log is exactly the thing that acquires them.
 #[serde(tag = "event", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Entry {
     /// Bytes are about to leave. Written *before* the transport is invoked.
     Egress(Egress),
