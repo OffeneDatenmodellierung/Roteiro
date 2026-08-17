@@ -11,7 +11,7 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-08-17
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | VERY HIGH |
 | **Domain** | Inference |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -149,6 +149,38 @@ The user layer opts *the human* in; the invocation opts *the run* in.
 A project may still switch it off for everyone — a locked-down repository is a
 legitimate thing to express, and denial has none of the problems of grant.
 
+#### What "the invocation" means for a long-lived process (v1.2)
+
+For a one-shot command the invocation is the command. For `roteiro serve` it is
+**the server process**: `serve --allow-remote` grants every Ask request handled
+for the life of that process, not one request at a time.
+
+Decided deliberately rather than inherited. The alternative — re-asking per
+request — cannot work: there is no human at an HTTP request to ask, so a
+per-request grant would either be a config value (which is the user layer again,
+not an invocation) or a prompt nobody is present to answer. A gate that cannot
+be operated is not a stricter gate, it is a broken one.
+
+**State the exposure honestly, because it is real.** A server started with
+`--allow-remote` and left running sends graph-derived context to the hosted model
+for every Ask it answers, for as long as it runs. That is a materially different
+profile from a one-shot `remote call`, and the person starting the server is
+consenting on behalf of every later request to it — including requests made by
+someone else who can reach the port.
+
+Three things bound it, and all three are already required elsewhere in this ADR:
+
+- The user layer must *also* grant, so a stray `--allow-remote` in a script
+  cannot enable egress on a machine whose owner never opted in.
+- **Every call is recorded** (§Consequences), so a session's egress is
+  enumerable afterwards rather than merely bounded in principle.
+- `serve` binds loopback by default ([[docs/adr/0006-local-model-serving.md]]),
+  so "someone else who can reach the port" is not the default posture.
+
+What this does **not** license: a remote grant surviving the process, being
+persisted anywhere, or being inferred from a previous session. It is scoped to
+one process and dies with it.
+
 This deviation must be stated in ADR-0007 itself, not only here, because a reader
 of that ADR will otherwise apply the general rule and be wrong.
 
@@ -263,5 +295,6 @@ row — never a quiet deviation in code.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.2 | 2026-08-17 | Scoped "the invocation" for long-lived processes: `serve --allow-remote` grants for the life of the server process, decided by the owner. Records why a per-request grant is unworkable (nobody is present at an HTTP request to ask), states the exposure plainly, and names the three existing bounds. No change to the grant/deny table. |
 | 1.1 | 2026-08-17 | **Accepted.** No content changed; Stage 34 is unblocked. |
 | 1.0 | 2026-08-17 | Initial. Written to unblock Stage 34. |
