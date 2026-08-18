@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.21.1...rto-graph-v1.22.0) - 2026-08-18
+
+### Added
+
+- *(review)* report the chance baseline beside recall, because 4/22 was noise
+- *(review)* the graph-context arm, built at the reviewed commit
+
 ## [1.21.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.21.0...rto-graph-v1.21.1) - 2026-08-18
 
 ### Fixed
