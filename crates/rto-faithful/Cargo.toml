@@ -1,0 +1,26 @@
+[package]
+name = "rto-faithful"
+description = "Rendering-faithfulness checking for Roteiro: every claim in a rendered summary must trace to a tool finding"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# The dependency list is part of the contract, not an implementation detail.
+# `check` must be provably free of code reading, network access and inference,
+# and the cheapest proof of that is a manifest with nothing in it that could do
+# any of those things. `dependencies_are_frozen` in `src/lib.rs` asserts this
+# list, so widening it is a deliberate edit to a test rather than a `cargo add`.
+[dependencies]
+rto-graph = { workspace = true }   # `FindingKey` only — the identity, not the store
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
