@@ -436,6 +436,11 @@ pub struct Parsed {
 /// markdown has still followed it — but a finding with no readable positive line
 /// number goes to [`Parsed::unparsed`], since an unanchored finding cannot be
 /// scored, shown to a human, or acted on.
+///
+/// Leniency stops at the description. Decoration is stripped from the line's ends
+/// and from the *structure* of each `key=value` field, never from the free-form
+/// prose a human is going to read — a parser that quietly rewrites the text it
+/// reports is editing the evidence.
 #[must_use]
 pub fn parse_findings(reviewed_sha: &str, path: &str, reply: &str) -> Parsed {
     let mut out = Parsed {
@@ -447,8 +452,13 @@ pub fn parse_findings(reviewed_sha: &str, path: &str, reply: &str) -> Parsed {
     };
     for raw in reply.lines() {
         let line = raw.trim().trim_start_matches(['-', '*', '>', '#', ' ']);
-        let line = line.trim_start_matches('`').replace("**", "");
-        let line = line.trim();
+        let line = line.trim_start_matches('`').trim_end();
+        // Whole-line decoration only. The leading trim above has already taken any
+        // opening `**`, so this closes the pair — for `**NO FINDINGS**`, and for a
+        // finding line a model has bolded end to end. Bold *inside* the line is
+        // deliberately left alone here and dealt with per-field in `parse_one`;
+        // see the note there for why the difference matters.
+        let line = line.strip_suffix("**").unwrap_or(line).trim();
         if line.eq_ignore_ascii_case(NO_FINDINGS) {
             out.declared_clean = true;
             continue;
@@ -476,28 +486,41 @@ fn parse_one(reviewed_sha: &str, path: &str, line: &str) -> Option<CandidateFind
 
     for field in line.split('|').skip(1) {
         let field = field.trim().trim_end_matches('`').trim();
-        let Some((key, value)) = field.split_once('=') else {
-            // The first field with no `key=` is the description; later ones are
-            // its continuation, because a description may itself contain a pipe.
-            if !description.is_empty() {
-                description.push_str(" | ");
-            }
-            description.push_str(field);
-            continue;
-        };
-        let value = value.trim();
-        match key.trim().to_ascii_lowercase().as_str() {
-            "line" => number = value.parse().ok().filter(|n| *n > 0),
-            "class" => class = DefectClass::from_token(&value.to_ascii_lowercase()),
-            "compile" => {
+        // **Bold is stripped for the structural read only, and only where it
+        // resolves to a field this format defines.**
+        //
+        // The line-wide `replace("**", "")` this replaces was not there to handle
+        // *leading* bold — the trim in `parse_findings` already takes that. It was
+        // there for bold *inside* the line, i.e. a model emitting
+        // `class=**contract-drift**` or `**line**=42`, which has still followed the
+        // format and must still parse. But applying it to the whole line also
+        // rewrote the description, so emphasis a model put in prose vanished from
+        // the text a human is shown and a corpus is scored against.
+        //
+        // Splitting the two reads keeps the field tolerance and drops the
+        // rewriting: `structural` exists only to decide what this token *is*, and
+        // if the answer is "not a known field" the original bytes go through
+        // untouched.
+        let structural = field.replace("**", "");
+        let key_value = structural
+            .split_once('=')
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim()));
+
+        match key_value.as_ref().map(|(k, v)| (k.as_str(), *v)) {
+            Some(("line", value)) => number = value.parse().ok().filter(|n| *n > 0),
+            Some(("class", value)) => class = DefectClass::from_token(&value.to_ascii_lowercase()),
+            Some(("compile", value)) => {
                 claims_compile_failure = matches!(
                     value.to_ascii_lowercase().as_str(),
                     "yes" | "true" | "y" | "1"
                 );
             }
-            // An unknown key is kept as prose rather than dropped: it is more
-            // likely a description containing an `=` than an invented field, and
-            // losing the description would leave a human a bare line number.
+            // Everything else is description, kept verbatim. A field with no `=`
+            // is the description proper; later ones are its continuation, because
+            // a description may itself contain a pipe. An *unknown* `key=value` is
+            // kept as prose rather than dropped: it is more likely a description
+            // containing an `=` than an invented field, and losing it would leave
+            // a human a bare line number.
             _ => {
                 if !description.is_empty() {
                     description.push_str(" | ");
@@ -884,6 +907,45 @@ here is some prose the model added";
         assert_eq!(parsed.unparsed.len(), 2, "{:?}", parsed.unparsed);
         // Prose that is not an attempted finding is not counted as a failure.
         assert!(!parsed.unparsed.iter().any(|u| u.contains("here is some")));
+    }
+
+    /// **Bold inside a field must still parse; bold inside a description must
+    /// still be there afterwards.** These pull in opposite directions and the two
+    /// halves of this test are the reason the strip is per-field rather than
+    /// per-line.
+    ///
+    /// Stripping only the line's ends would be the tidy-looking fix and would
+    /// regress the first half: `class=**contract-drift**` stops resolving and the
+    /// finding lands unclassified. Stripping the whole line — what this replaces —
+    /// buys the first half by silently editing the description a human reads.
+    #[test]
+    fn bold_is_stripped_from_fields_and_left_in_descriptions() {
+        let reply = "\
+FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remote** path is not gated
+**NO FINDINGS**";
+        let parsed = parse_findings(SHA, "src/a.rs", reply);
+        assert_eq!(parsed.findings.len(), 1, "{:?}", parsed.unparsed);
+
+        let f = &parsed.findings[0];
+        assert_eq!(f.line, 42, "a bolded key still names the line field");
+        assert_eq!(
+            f.defect_class,
+            DefectClass::from_token("contract-drift"),
+            "a bolded value still resolves to its class"
+        );
+        assert!(
+            f.claims_compile_failure,
+            "a bolded key still names `compile`"
+        );
+        assert_eq!(
+            f.description, "the **remote** path is not gated",
+            "the model's emphasis is the model's; the parser does not edit prose \
+             it is about to report"
+        );
+
+        // Whole-line bold is decoration and is closed at the ends, so the clean
+        // declaration is still recognised rather than read as unparsed prose.
+        assert!(parsed.declared_clean);
     }
 
     /// **"Found nothing" and "ignored the format" are opposite facts.** A run that
