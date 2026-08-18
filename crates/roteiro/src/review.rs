@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use rto_graph::{NodeContext, NodeKind, Store, StoreError, build_context, dependents};
+use rto_graph::{NodeContext, NodeKind, Store, StoreError, build_context, debt, dependents};
 use serde::Serialize;
 
 /// Schema tag for the `--json` review report.
@@ -106,7 +106,29 @@ pub struct Impacted {
 
 /// Assemble the review report for `changed`, using the already-synced `store`
 /// (built from the same working tree) and the authored-layer `violations` the
-/// change produced.
+/// change produced. `ignore` is the repository's `[debt] ignore` list (ADR-0007),
+/// threaded from `main` exactly as `debt`, `check`, `render` and the graph API
+/// thread it.
+///
+/// # Why the marker set comes from [`debt`] rather than from this walk
+///
+/// A review's per-file `debt` is the *same concept* `roteiro debt` reports, so it
+/// must be the same marker set — issue #409 was this file walking
+/// [`Store::nodes_by_path`] and keeping every `Marker` node it found, which made
+/// `review` report debt in files every other surface excludes. Threading the
+/// `ignore` list in and re-applying the globs here would fix that instance and
+/// leave the next one available: two copies of "which markers count" that have to
+/// be kept in step by whoever edits either.
+///
+/// So the decision is not re-made. [`debt`] is asked which markers exist under
+/// this repository's exclusions, and this walk keeps only those — the same reason
+/// [`rto_graph::debt_density`] is built from [`debt`]'s output instead of
+/// re-walking the markers itself. Adding an exclusion rule to [`debt`] reaches
+/// this surface with no edit here; there is no second filter to forget.
+///
+/// The `String`s pushed are still the marker nodes' names, not [`debt`]'s item
+/// text: [`debt`] decides *which* markers a surface may report, not how each one
+/// is rendered.
 ///
 /// # Errors
 /// Returns [`StoreError`] on a store query failure.
@@ -114,8 +136,14 @@ pub fn build(
     store: &Store,
     changed: &[rto_graph::ChangedFile],
     violations: &[rto_spec::Violation],
+    ignore: &[String],
 ) -> Result<ReviewReport, StoreError> {
     let changed_paths: BTreeSet<&str> = changed.iter().map(|c| c.path.as_str()).collect();
+    // Every marker `debt` retains under this repository's `[debt] ignore`, keyed
+    // for lookup. Whole-graph rather than per-file because `debt` is the surface
+    // that owns the question; a changed file's markers are a subset of it.
+    let inventory = debt(store, &[], ignore)?;
+    let retained: BTreeSet<&str> = inventory.items.iter().map(|i| i.key.as_str()).collect();
     let mut files = Vec::new();
     let mut changed_keys: Vec<String> = Vec::new();
 
@@ -136,7 +164,13 @@ pub fn build(
                 // The file node itself carries no reviewable neighbourhood.
                 NodeKind::File => continue,
                 NodeKind::Marker => {
-                    debt.push(node.name.clone());
+                    // Not `debt.push(...)` unconditionally: a marker `debt`
+                    // dropped is one this repository has excluded, and a review
+                    // that reported it would be the second, unreconcilable debt
+                    // figure ADR-0007 v1.1 exists to prevent.
+                    if retained.contains(node.key.as_str()) {
+                        debt.push(node.name.clone());
+                    }
                     continue;
                 }
                 _ => {}
