@@ -61,6 +61,7 @@ struct SearchArgs {
     /// Max hits to return (default 10, clamped to 1..=25 — this surface has no
     /// "unlimited": see `model_limit`).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 25))]
     limit: Option<u32>,
     /// Which hosted project to query (see `list_projects`); omit if single.
     #[serde(default)]
@@ -114,6 +115,7 @@ struct DensityArgs {
     /// Max files to return (default 20, clamped to 1..=100 — this surface has no
     /// "unlimited": see `model_limit`).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 100))]
     limit: Option<u32>,
     /// Shortest file that may be ranked (default 50; `0` ranks every file).
     #[serde(default)]
@@ -129,6 +131,7 @@ struct ConfigSecretArgs {
     /// Max keys to return (default 50, clamped to 1..=200 — this surface has no
     /// "unlimited": see `model_limit`).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 200))]
     limit: Option<u32>,
     /// Which hosted project to query (see `list_projects`); omit if single.
     #[serde(default)]
@@ -145,6 +148,7 @@ struct CouplingArgs {
     /// Max nodes to return (default 20, clamped to 1..=100 — this surface has no
     /// "unlimited": see `model_limit`).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 100))]
     limit: Option<u32>,
     /// Which hosted project to query (see `list_projects`); omit if single.
     #[serde(default)]
@@ -217,6 +221,14 @@ fn query_result<T: serde::Serialize>(r: Result<Result<T, StoreError>, String>) -
 /// the defect #393 is about is a caller asking for something and being handed
 /// silence, and no value a model can send produces silence here.
 ///
+/// That `"minimum": 1` is **declared**, on each args struct, and has to be:
+/// `#[schemars(range(min = 1, max = …))]`. Without it the derive advertises
+/// `"minimum": 0` for an unsigned field — the schema would tell a model that `0`
+/// is a legal value while this function refused to honour it, which is the
+/// contract drift #393 exists to remove, one layer further out. The bound is
+/// also stated in each tool's *description*, because a model reads that even
+/// when it does not validate against the schema.
+///
 /// So the library and the tools do not disagree about what `0` means. The
 /// library defines it; this surface does not accept it, and says so in its
 /// schema. The matching note lives on [`rto_graph::window`] and on the
@@ -269,7 +281,9 @@ impl GraphServer {
                           content (doc comments, README/ADR/blueprint prose). Returns \
                           ranked hits with keys; curated ADRs/blueprints and READMEs rank \
                           first, so it's the entry point for \"what is X / why\" questions. \
-                          Then `explain` a returned key. Args: query, optional limit."
+                          Then `explain` a returned key. Args: query, optional limit \
+                          (1-25, default 10 — there is no unlimited setting; narrow the \
+                          query instead of asking for more)."
     )]
     async fn search(&self, Parameters(args): Parameters<SearchArgs>) -> CallToolResult {
         let limit = model_limit(args.limit, 10, 25);
@@ -330,7 +344,8 @@ impl GraphServer {
                           construction. Each row carries `markers`, `lines`, `per_kloc` and a \
                           per-category split; `overall_per_kloc` is the repository baseline to \
                           read a file's figure against. Args: kind, order (density|markers|\
-                          lines), limit, min_lines. \
+                          lines), limit (1-100, default 20 — no unlimited setting), \
+                          min_lines. \
                           Two limits worth passing on to the user rather than reporting a \
                           number as a finding. The denominator is FILE LENGTH — every line, \
                           blanks and comments included — not source lines of code, so figures \
@@ -377,7 +392,8 @@ impl GraphServer {
                           before being stored (`state` = redacted | declared | present). \
                           Answers \"which of this repo's config surfaces deal in \
                           credentials\" and \"did anything unredacted get into this \
-                          graph\". Args: limit. \
+                          graph\". Args: limit (1-200, default 50 — no unlimited \
+                          setting). \
                           THIS IS NOT A SECRET SCANNER — state the limits when you \
                           report it, and never imply a security guarantee. It CANNOT \
                           find a hardcoded credential in source code: it reads config-key \
@@ -409,7 +425,8 @@ impl GraphServer {
                           calls), and `instability` = fan_out/(fan_in+fan_out). Use \
                           `order`=fan_in to find what the codebase most depends on, \
                           `order`=fan_out for the symbols that reach furthest, `total` \
-                          (default) for overall coupling. Args: order, limit. \
+                          (default) for overall coupling. Args: order, limit (1-100, \
+                          default 20 — no unlimited setting). \
                           Caveat worth passing on to the user: call edges are resolved by \
                           simple name, so a short generically-named function can absorb \
                           every call to that name and show an inflated `fan_in`. Treat a \
@@ -860,6 +877,57 @@ mod tests {
             assert_eq!(model_limit(Some(u32::MAX), default, max), largest);
             assert_eq!(model_limit(None, default, max), page);
             assert_eq!(model_limit(Some(3), default, max), 3);
+        }
+    }
+
+    /// The advertised contract, not just the clamp behind it (issue #393). A
+    /// model reads two things — the parameter schema and the description — and
+    /// both must say the same bound the code enforces.
+    ///
+    /// The schema half is load-bearing and easy to lose: `limit: Option<u32>`
+    /// derives `"minimum": 0`, which tells a model `0` is legal while
+    /// `model_limit` refuses to honour it. `#[schemars(range(...))]` is what
+    /// makes the declaration true, and this test is what keeps it there.
+    #[test]
+    fn every_limit_tool_advertises_the_bound_it_enforces() {
+        let server = seeded();
+        let tools = server.tool_router.list_all();
+        for (name, max) in [
+            ("search", 25u64),
+            ("debt_density", 100),
+            ("config_secrets", 200),
+            ("coupling", 100),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("`{name}` advertised"));
+            let limit = tool
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.get("limit"))
+                .unwrap_or_else(|| panic!("`{name}` declares a `limit` parameter"));
+            assert_eq!(
+                limit.get("minimum").and_then(serde_json::Value::as_u64),
+                Some(1),
+                "`{name}` must not advertise `0` as a legal limit",
+            );
+            assert_eq!(
+                limit.get("maximum").and_then(serde_json::Value::as_u64),
+                Some(max),
+                "`{name}` must advertise the ceiling it clamps to",
+            );
+            // And in the prose, because a model reads the description even when
+            // it does not validate against the schema.
+            let desc = tool.description.as_deref().unwrap_or_default();
+            assert!(
+                desc.contains(&format!("1-{max}")),
+                "`{name}` description must state its range: {desc}",
+            );
+            assert!(
+                desc.contains("no unlimited setting"),
+                "`{name}` description must say `0`/unlimited is not offered: {desc}",
+            );
         }
     }
 

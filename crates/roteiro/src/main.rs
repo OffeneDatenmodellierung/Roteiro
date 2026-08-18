@@ -239,7 +239,13 @@ enum Command {
     Search {
         /// Free-text query (one or more words).
         query: String,
-        /// Maximum number of hits to return, **per channel**.
+        /// Maximum number of hits to return, **per channel**; `0` is unlimited.
+        ///
+        /// Unlimited means every match, in every channel asked for — ranked as
+        /// usual and simply not cut. It is bounded by the query rather than by
+        /// the graph: every token must appear in a hit, so a second word
+        /// narrows it sharply, and a query with no tokens still matches
+        /// nothing at `0` exactly as at any other limit (issue #393).
         #[arg(long, default_value_t = 10)]
         limit: usize,
         /// Also search model-generated media content — ASR transcripts and VLM
@@ -9596,7 +9602,8 @@ fn debt_density_tool_def(
                       run lower than an SLOC tool's and flatter verbose or generated \
                       files; and the markers beneath it include prose matches (`for \
                       now`, `deferred`, `tbd`), so a design document can rank as \
-                      dense debt. This is a measurement, not a gate."
+                      dense debt. This is a measurement, not a gate. \
+                      `limit` is 1-100 (default 20) — no unlimited setting."
             .to_owned(),
         parameters: json!({
             "type": "object",
@@ -9651,7 +9658,8 @@ fn config_secrets_tool_def(
                       MEAN THERE ARE NO SECRETS — it means no config key is \
                       secret-NAMED; a credential under an innocuous key like `dsn` or \
                       `endpoint` never appears. If asked to scan for secrets, say \
-                      plainly that this tool cannot do it."
+                      plainly that this tool cannot do it. \
+                      `limit` is 1-200 (default 50) — no unlimited setting."
             .to_owned(),
         parameters: json!({
             "type": "object",
@@ -9740,7 +9748,8 @@ fn coupling_tool_def(
                       `order`=fan_out the symbols that reach furthest. Call edges \
                       are resolved by simple name, so a short generically-named \
                       function can absorb every call to that name — say so if you \
-                      report a high `fan_in` on one."
+                      report a high `fan_in` on one. \
+                      `limit` is 1-100 (default 20) — no unlimited setting."
             .to_owned(),
         parameters: json!({
             "type": "object",
@@ -9799,7 +9808,9 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                               `snippet` of the node's actual content to ground your answer; \
                               curated ADRs/blueprints and READMEs rank first, so this is the \
                               entry point for \"what is X / why\" questions. Read the `snippet`, \
-                              and call `explain` on a returned key for the full content."
+                              and call `explain` on a returned key for the full content. \
+                              `limit` is 1-25 (default 10) — there is no unlimited \
+                              setting; narrow the query instead of asking for more."
                     .to_owned(),
                 parameters: json!({
                     "type": "object",
@@ -12020,6 +12031,55 @@ mod workspace_scoped_tools {
             .map(|(_, h)| h)
             .expect("workspace present");
         GraphToolRegistry::new(handle)
+    }
+
+    /// The advertised contract on this surface, matching
+    /// `rto_render::mcp::tests::every_limit_tool_advertises_the_bound_it_enforces`
+    /// (issue #393). A model reads the parameter schema and the description, and
+    /// both must state the bound `model_limit` enforces — including that there is
+    /// no unlimited setting, which is what makes this surface's `limit` differ
+    /// from the library's without contradicting it.
+    #[test]
+    fn every_limit_tool_advertises_the_bound_it_enforces() {
+        use rto_serve::ToolRegistry as _;
+        let (set, _flat) = two_workspace_set();
+        let tools = registry_for(&set, "api").tools();
+        for (name, max) in [
+            ("search", 25u64),
+            ("debt_density", 100),
+            ("config_secrets", 200),
+            ("coupling", 100),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("`{name}` advertised"));
+            let limit = tool
+                .parameters
+                .get("properties")
+                .and_then(|p| p.get("limit"))
+                .unwrap_or_else(|| panic!("`{name}` declares a `limit` parameter"));
+            assert_eq!(
+                limit.get("minimum").and_then(serde_json::Value::as_u64),
+                Some(1),
+                "`{name}` must not advertise `0` as a legal limit",
+            );
+            assert_eq!(
+                limit.get("maximum").and_then(serde_json::Value::as_u64),
+                Some(max),
+                "`{name}` must advertise the ceiling it clamps to",
+            );
+            assert!(
+                tool.description.contains(&format!("1-{max}")),
+                "`{name}` description must state its range: {}",
+                tool.description,
+            );
+            assert!(
+                tool.description.contains("no unlimited setting"),
+                "`{name}` description must say `0`/unlimited is not offered: {}",
+                tool.description,
+            );
+        }
     }
 
     #[test]
