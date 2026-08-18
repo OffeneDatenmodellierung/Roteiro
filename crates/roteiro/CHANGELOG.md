@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.22.0...roteiro-v1.23.0) - 2026-08-18
+
+### Fixed
+
+- *(review)* apply `[debt] ignore` by taking the marker set from `debt`
+
+### Other
+
+- *(review)* drop the possessive from the debt-ignore test name
+
 ## [1.22.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.21.1...roteiro-v1.22.0) - 2026-08-18
 
 ### Added
