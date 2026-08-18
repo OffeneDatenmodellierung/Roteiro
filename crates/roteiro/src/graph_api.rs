@@ -65,6 +65,12 @@
 //! This is the whole paging story for the API. The routes' own docs point here
 //! rather than restating it, so there is one sentence to keep true.
 //!
+//! **Renaming this heading breaks eleven `](self#paging)` pointers at once**,
+//! and rustdoc will not say a word: it validates an intra-doc link's *path* and
+//! never its *fragment*, so a dead anchor builds clean (issue #397). Rename it
+//! and the pointers together; `tests/doc_anchor_fragments.rs` fails if you
+//! rename only one of them.
+//!
 //! Cross-repo semantics are read straight from the stores (so the API is fully
 //! testable over in-memory [`Workspace`]s, with no config-file scan): an inferred
 //! **external-ref** edge that still resolves to its hub node is a *match*; one
