@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
+version: "1.4"
 last-modified: 2026-08-17
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 
 ## Reference
 
@@ -58,10 +58,33 @@ Forces to reconcile: offline-first & self-contained (ADR-0001); don't become a g
 
 **llama.cpp engine + our own `/v1` layer + auto-registered graph tools (recommended).**
 
-- **CLI:** `roteiro serve --models [--addr 127.0.0.1:PORT]` behind an opt-in `serve` feature (pulls `llama-cpp-2`). Off by default; loopback bind; warns on a non-loopback address (no auth — a localhost dev tool; TLS/authn terminate at a reverse proxy, as ADR-0002 frames for MCP). *(Update, v1.5: this is now simply `roteiro serve [--addr …]` — the model endpoint is the default for `serve`, and `--models` is a redundant deprecated flag. A `serve` build with no model installed, or a build without the `serve` feature, degrades to the llama-free `/v1/graph` API + web UI (ADR-0010) instead of erroring.)*
+- **CLI:** `roteiro serve --models [--addr 127.0.0.1:PORT]` behind an opt-in `serve` feature (pulls `llama-cpp-2`). Off by default; loopback bind; warns on a non-loopback address (no auth — a localhost dev tool; TLS/authn terminate at a reverse proxy, as ADR-0002 frames for MCP). *(Update, 2026-08-14: this is now simply `roteiro serve [--addr …]` — the model endpoint is the default for `serve`, and `--models` is a redundant deprecated flag. A `serve` build with no model installed, or a build without the `serve` feature, degrades to the llama-free `/v1/graph` API + web UI (ADR-0010) instead of erroring.)*
 - **Endpoints (grow across PRs):** `/v1/chat/completions` (generation, over the same installed GGUFs), `/v1/models` (installed only), then `/v1/embeddings`. *(Embeddings note: llama.cpp embeds via GGUF embedding models; our current embedders are BERT safetensors, so embedding-serving either adds GGUF embedding entries to the registry or is served via the existing candle `LocalEmbedder` — resolved at implementation.)*
 - **Execution:** models loaded lazily on first request and kept warm in a memory-bounded LRU — the resident set is capped by a byte budget (`[serve] memory_budget_mb`, GGUF size as the footprint proxy) and the least-recently-used model is unloaded past it, so several models can stay warm and swap in real time on a machine that can afford them, while a memory-limited host keeps one. Requests are serialised through the single engine mutex (so all requests are mutually exclusive, across models as well as within one) — llama.cpp batching / per-model concurrency is a later enhancement. Serves only installed models; never downloads.
 - **Graph tools:** Roteiro's MCP tools auto-registered into the served model's function-calling; the model calls a tool → Roteiro executes it against the graph → result is fed back.
+- **HTTP/1.1 only — HTTP/2 is a non-goal.** `axum` is taken with `http1` and
+  without `http2`, so `serve` speaks no HTTP/2 and this is a decision rather than
+  an omission. Three reasons, and the first is the one that would otherwise be
+  rediscovered the expensive way. **HTTP/2 is a recurring source of
+  denial-of-service advisories** — Rapid Reset, CONTINUATION flood, and
+  RUSTSEC-2026-0258 (`h2` unbounded empty DATA frames, adopted here on an
+  approved cooldown bypass). Roteiro's exposure to that last one was *nil*
+  precisely because `http2` is off; enabling it converts that class of advisory
+  from theoretical to reachable, permanently. **Second, over loopback it buys
+  nothing** — multiplexing, HPACK and connection reuse pay off over
+  high-latency links, and the bottleneck here is model inference, not transport;
+  SSE streaming works over HTTP/1.1 and is universally supported. **Third, where
+  it would matter it is already delegated**: HTTP/2 in practice requires TLS
+  (browsers do not speak h2c), and this ADR already terminates TLS at a reverse
+  proxy — so HTTP/2 belongs exactly where TLS already belongs, in software whose
+  job is surviving hostile traffic.
+
+  What would overturn this: **a concrete client that fails over HTTP/1.1.** No
+  such client is known, and this repository records no client-compatibility
+  matrix, so the absence is unproven rather than established. If one appears,
+  that is a requirement to design against — not a reason to enable a protocol
+  speculatively.
+
 - **Acceleration:** llama.cpp's Metal backend (enabled by default on macOS in the vendored build) — this *is* the acceleration story for served models, and moots candle's quantized-Metal weakness on the serving path.
 
 ## Options considered + consequences
@@ -107,5 +130,6 @@ Project direction incorporated: **prioritise performance** (background use; deve
 |---------|------|-------|
 | 1.0 | 2026-08-09 | Accepted. Opt-in loopback OpenAI-compatible endpoint reusing installed models, warm + serialised over the ADR-0002 stack; scoped to reuse; candle-implied engine; rejected Ollama-replacement and MCP-only as the front door. |
 | 1.1 | 2026-08-09 | Revised after a head-to-head engine de-risk. **Engine → llama.cpp (`llama-cpp-2`)** — fastest, and the only candidate passing `cargo deny` unchanged (mistral.rs fails on MPL-2.0/CDLA/0BSD; candle is slower). **Serving via our own thin `/v1`** (not stock `llama-server`) so **Roteiro's graph tools auto-register** into the model (code-aware serving). Accepts a C/C++ toolchain for the opt-in `serve` feature; no `deny` change needed. States the candle→llama.cpp inference-core unify as the direction (follow-up ADR-0003 amendment). |
-| 1.3 | 2026-08-17 | Scoped, not changed. "Nothing leaves the machine" is stated of **serving**, which is what it always described; ADR-0019 adds an optional default-off remote model tier elsewhere in the product, so the sentence needed a boundary before it was read as project-wide. No decision in this ADR changed. |
 | 1.2 | 2026-08-15 | Consequence added: llama.cpp's backend is a process-global, initialised once and shared by every engine, so a long-lived `serve` process can hold more than one engine instead of silently losing every engine after the first (issue #296). No decision changed. |
+| 1.3 | 2026-08-17 | Scoped, not changed. "Nothing leaves the machine" is stated of **serving**, which is what it always described; ADR-0019 adds an optional default-off remote model tier elsewhere in the product, so the sentence needed a boundary before it was read as project-wide. No decision in this ADR changed. |
+| 1.4 | 2026-08-18 | HTTP/2 recorded as a **non-goal** rather than left as an absence: `axum` is taken with `http1` only, HTTP/2 is a recurring DoS-advisory surface (Rapid Reset, CONTINUATION flood, RUSTSEC-2026-0258 — to which this build's exposure was nil *because* `http2` is off), it buys nothing over a loopback bind, and where it matters it is already delegated to the reverse proxy this ADR terminates TLS at. What would overturn it is stated: a concrete client that fails over HTTP/1.1. Also corrected two defects found while editing — an inline note cited *(Update, v1.5)*, a version this document has never had (the change it describes landed 2026-08-14 while the document was at 1.1, and was never given a history row), now labelled by its date; and the history table listed 1.3 above 1.2, now ascending. |
