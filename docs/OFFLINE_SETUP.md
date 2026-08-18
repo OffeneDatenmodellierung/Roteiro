@@ -244,6 +244,50 @@ comparison, are the ones Stage 22/22b were developed and measured on:
 | `osv-scanner` | **2.5.0** (fixtures are real captured output at this version) |
 | `cargo-audit` | **0.22.2** (`0.21.2` for the committed report fixtures) |
 
+### `roteiro lint` is a different command with a different answer
+
+`roteiro lint <analyzer>` runs a **linter** — today `clippy` — and prints what it
+said. It is not in the table above and never will be, because it does not produce
+an artifact: no findings layer, no `lint list`, nothing for `security list` or
+`roteiro export` to show afterwards
+([ADR-0020](adr/0020-build-capable-sandboxed-execution.md) v1.1). An advisory id
+is *assigned*, and assignment is a promise — `RUSTSEC-2020-0071` will mean the
+same thing in five years. A lint name is a symbol in a compiler, renamed or
+removed at its discretion.
+
+That is why the count it prints is a point in time and not a trend, and it says
+so beneath every report:
+
+- a **renamed** lint reads as one defect fixed and one introduced;
+- a **removed** lint reads as fixed;
+- an edit to `[workspace.lints]`, or an added `#[allow]`, makes whole cohorts
+  appear or vanish — a configuration change reading as a code change.
+
+None of those touched the code. Neither does a toolchain bump or a different
+`--all-features`, which is why the report names the linter's version, the rustc
+version and host, and the feature set it resolved with.
+
+```sh
+roteiro lint clippy                    # default features
+roteiro lint clippy --all-features     # a different, also-true number
+roteiro lint clippy --json             # the same report, with `"stored": false`
+```
+
+Two things it needs, and one it does not. It needs a Rust toolchain with the
+component installed: a missing `cargo` or a toolchain without clippy is an
+**error naming what to install**, never an empty report — "no diagnostics" and
+"nothing ran" must not look the same. It does **not** need a prefetch, because a
+linter has no pinned rule set to provision: its rules *are* the toolchain plus
+this repository's own `[workspace.lints]`.
+
+It also runs **on this host with no isolation**, and unlike `security run` it
+does not ask for a flag first — the toolchain is yours and the tree is the one
+you are standing in, so `cargo clippy` here is the build you were going to run
+anyway. Reviewing somebody else's branch is the case where that is not true:
+`clippy` has `cargo check` semantics, so that branch's build scripts and proc
+macros execute on your machine. The argv and the isolation are printed before the
+run; the sandboxed builder that would answer it is ADR-0020's unbuilt work.
+
 ### Or install none of them: `roteiro security ingest`
 
 `ingest` accepts a normalized report produced **anywhere** — a CI job, a

@@ -47,6 +47,17 @@ anywhere if you would rather install none of them. Local *inference* and
 *serving* remain opt-in (`--features inference-local-models`, `--features
 serve`).
 
+`roteiro lint clippy` is the other shape, and the difference is deliberate: it
+runs the linter on this host, prints what it said, and **stores nothing** — no
+findings layer, no history, no `lint list`. An advisory id is *assigned*, and
+assignment is a promise; a lint name is a symbol in a compiler, renamed or
+removed at its discretion. The first is a durable fact about the repository, the
+second an opinion about the code as it stands today
+([ADR-0020](docs/adr/0020-build-capable-sandboxed-execution.md)). Because the
+linter compiles the tree, its build scripts and proc macros run here too — the
+report names the toolchain, the feature set and the isolation it had, since there
+is no stored run record to carry them.
+
 ### One capability sends your repository's content elsewhere. It is off.
 
 Everything above runs on your machine. **One optional feature does not**, and it

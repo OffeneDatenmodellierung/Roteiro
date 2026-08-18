@@ -128,6 +128,9 @@ http-body-util = "0.1"
 default = ["execution", "models", "exec-subprocess"]
 # The `AnalyzerRunner` seam, `roteiro security ingest|list`, and — since the
 # provisioning/execution split — `security prefetch|status` (ADR-0012, ADR-0014).
+# It also carries `roteiro lint`'s command surface, because that reads types from
+# `rto-exec`; the linter itself needs `exec-subprocess` below, and in a build
+# without it the command parses and refuses by name rather than vanishing.
 #
 # Provisioning lives here rather than behind a backend feature because it
 # executes nothing: it downloads, digests, pins and reports. Every `Command::new`
@@ -162,6 +165,19 @@ execution = ["dep:rto-exec", "dep:ureq"]
 # executing a third-party binary on this host with no isolation boundary. Do not
 # weaken it "for consistency" because the build-time gate is gone; it is carrying
 # the load the build-time gate used to share. ADR-0014 v1.1 records this.
+#
+# This feature also compiles **`roteiro lint`** (ADR-0020 v1.1), which executes on
+# this host with **no** equivalent flag — so read the sentence above precisely
+# rather than as a claim about every subprocess. What `--allow-unsandboxed` gates
+# is running a *third-party analyzer* here and filing its verdict as a stored fact
+# about the repository. `lint` runs the user's own toolchain over the tree they
+# are standing in — the build they were going to run anyway — and stores nothing
+# at all, so there is no verdict to file and no artifact to be wrong about later.
+# What it does expose is that tree's build scripts and proc macros, which is
+# disclosed per run (the argv and `isolation: none` print before it starts) and
+# spelled out in `roteiro lint --help`. Do not "restore consistency" in either
+# direction: not by putting a consent flag in front of `cargo clippy` in your own
+# checkout, and not by weakening `--allow-unsandboxed` because `lint` has none.
 #
 # Keeping it a named feature is still worth it: `--no-default-features --features
 # execution` builds a Roteiro that provisions and ingests but **cannot execute**,

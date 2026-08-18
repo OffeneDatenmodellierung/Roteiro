@@ -11,7 +11,7 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-08-18
 confluence-url:
 ---
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 | **Status** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
@@ -252,9 +252,39 @@ unanswered question: a writable build directory that does not relax the
 read-only preflight for readers, the argv and environment seam a builder needs,
 and a demonstrated refusal path that never falls back to the host.
 
+### What has landed, and what it does not claim
+
+`roteiro lint <analyzer>` ships the **reporting** half, with a `clippy` adapter,
+and it runs **on the host**.
+
+Conditions 3, 4 and 5 are built. The run records `isolation: none` and reports it
+from the code that ran the process rather than from whoever prints it; its output
+is never stored — there is no layer, no entry in the adapter registry `ingest`
+resolves against, and no path from the linter to
+`Store::replace_findings_layer`; and the three readings above are printed beneath
+every report and carried in `--json`, so a scripted consumer is told what a
+person is told. The linter is also kept out of the cross-analyzer join, which is
+checked by a test rather than left to a reviewer.
+
+Conditions 1 and 2 are **not** built, and nothing was borrowed from them. There
+is no writable build directory inside a guest and no host-produced dependency
+mount, because there is no guest: the sandboxed builder those conditions describe
+does not exist. `check_request`'s read-only preflight is **untouched** and still
+refuses every request whose worktree is writable — the linter takes a *different
+request shape* rather than a weakened one, which is why shipping this needed no
+relaxation of the invariant condition 1 is about.
+
+So the capability available today is exactly the one this document calls the
+inverted threat model, unmitigated: linting a branch you are reviewing executes
+that branch's build scripts and proc macros on your machine. It is disclosed —
+the argv and the isolation are printed before the run, and `roteiro lint --help`
+says it in a paragraph — and disclosure is not mitigation. Mitigating it is what
+conditions 1 and 2 are for, and they remain the unbuilt work.
+
 ## Document version history
 
 | Version | Date | Notes |
 |---------|------|-------|
 | 1.0 | 2026-08-18 | Initial draft. Narrows ADR-0014's `code_interpreter` non-goal to exclude only model-authored code, scopes its "security argument is weaker" reasoning to parse-only analyzers, and relaxes the read-only worktree invariant for a builder runner only. Records the measured build-script and proc-macro counts that make the case, the inverted threat model, and the five conditions — of which condition 4, the store's inability to distinguish two builds of one commit, is unresolved and blocks acceptance. |
 | 1.1 | 2026-08-18 | Condition 4 reversed on the owner's ruling that builder output is local to the person running it rather than an artifact stored for later. Storing a lint was the source of every identity problem the draft catalogued — an advisory id is *assigned* and permanent, a lint name is a symbol in a compiler — so not storing is the fix rather than a workaround. This unblocks acceptance: what remains is engineering, not an open question. Condition 5 softened accordingly, since with no stored history a renamed lint is a surprise rather than a corruption. |
+| 1.2 | 2026-08-18 | Records what landed rather than changing any decision: `roteiro lint <analyzer>`, with a `clippy` adapter that reuses the shared normalisation shape and is deliberately absent from the registry `ingest` resolves against. Conditions 3–5 are built and tested — an unstored report, an `isolation: none` read out of the runner, and the renamed / removed / `[workspace.lints]` readings surfaced in both output shapes. Conditions 1–2 are untouched: the run has no boundary, and the read-only preflight was **not** relaxed to fit a builder through it. |

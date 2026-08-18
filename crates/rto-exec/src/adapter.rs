@@ -37,6 +37,7 @@ use crate::runner::ExecError;
 use crate::snippet::SnippetSource;
 
 pub mod cargo_audit;
+pub mod clippy;
 pub mod osv_scanner;
 pub mod semgrep;
 
@@ -237,11 +238,23 @@ impl<'a> AssetPaths<'a> {
     }
 }
 
-/// Every analyzer this build knows how to normalise.
+/// Every analyzer whose findings this build can **store**.
 ///
 /// Ingest consults this table, so a report from any of them can be read in from
 /// CI whether or not this build can *execute* the analyzer — which is the whole
 /// point of ADR-0014's "ingest is always available".
+///
+/// # `clippy` is an adapter and is deliberately not here
+///
+/// [`clippy::Clippy`] implements the trait above and is reached only by
+/// `roteiro lint`, which reports and stores nothing. Membership of this table is
+/// what makes an analyzer storable — it is how `ingest` resolves `--analyzer`,
+/// and everything it resolves ends at
+/// [`rto_graph::Store::replace_findings_layer`]. Leaving a linter out is
+/// therefore the mechanism, not a note: there is no `--analyzer clippy` to
+/// accept and no layer key for two runs at different toolchains to collide over.
+/// ADR-0020 v1.1 is the decision, and [`clippy`]'s module documentation is the
+/// reasoning. **Adding it here would silently make lint output an artifact.**
 pub static ADAPTERS: &[&dyn Adapter] = &[
     &semgrep::Semgrep,
     &cargo_audit::CargoAudit,
@@ -295,8 +308,8 @@ pub fn snippet_hash_at(snippets: &dyn SnippetSource, path: &str, start: u32, end
 #[cfg(test)]
 mod tests {
     use super::{
-        AssetPaths, NO_SNIPPET, NativeContext, UNKNOWN_VERSION, adapter_for, known_analyzers,
-        snippet_hash, snippet_hash_at,
+        Adapter as _, AssetPaths, NO_SNIPPET, NativeContext, UNKNOWN_VERSION, adapter_for,
+        known_analyzers, snippet_hash, snippet_hash_at,
     };
     use rto_graph::SourceIdentity;
 
@@ -322,6 +335,27 @@ mod tests {
             assert_eq!(adapter_for(id).expect("registered").analyzer(), id);
         }
         assert!(adapter_for("no-such-analyzer").is_none());
+    }
+
+    /// Every registered analyzer is one whose findings are **stored**, so each
+    /// one must have a pinned rule set or database to decide the answer. A
+    /// linter has neither — its rules are the toolchain — which is why clippy
+    /// has an adapter and no registry entry, and why this asserts the property
+    /// rather than the name: a future storable analyzer with no asset would fail
+    /// here and have to argue its case.
+    #[test]
+    fn every_storable_analyzer_pins_what_decides_its_answer() {
+        for id in known_analyzers() {
+            let adapter = adapter_for(id).expect("registered");
+            assert!(
+                !adapter.asset_ids().is_empty(),
+                "{id} is stored but pins nothing that decides its findings"
+            );
+        }
+        assert!(
+            super::clippy::Clippy.asset_ids().is_empty(),
+            "a linter has no pinned rule set — that is why it is not stored"
+        );
     }
 
     /// Every shipped adapter claims at least one language and a summary, because

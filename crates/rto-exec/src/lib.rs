@@ -15,6 +15,16 @@
 //!
 //! # What this crate does not do
 //!
+//! It does not *always* produce something to store, either. [`lint`] runs a
+//! linter and returns a report the caller prints: no [`AnalysisRun`], no layer,
+//! no store. A lint name is a symbol in a compiler rather than an assigned
+//! identifier, so it is an opinion about the code as it stands today rather than
+//! a durable fact about the repository (ADR-0020 v1.1) — and everything below
+//! about persistence simply does not apply to it.
+//!
+//! [`AnalysisRun`]: rto_graph::AnalysisRun
+//! [`lint`]: crate::lint
+//!
 //! It does not decide how results are *stored*. Persistence lives in `rto-graph`,
 //! which files findings in their own tables — never `nodes`/`edges`, never a
 //! provenance class, never in the exported graph artifact (ADR-0012). Nothing
@@ -108,6 +118,16 @@ pub mod crossref;
 /// and the decoder have to be one file rather than two.
 pub mod file_url;
 mod ingest;
+/// Running a linter and **reporting** it, with no store anywhere in the path.
+///
+/// The other half of this crate produces artifacts; this module deliberately
+/// does not (ADR-0020 v1.1). It has no [`AnalyzerRunner`] implementation, takes
+/// no [`Consent`], and cannot reach [`rto_graph::Store`] — read its own
+/// documentation for why a lint is not a finding, and why relaxing
+/// [`check_request`] to fit a builder through the reader-class preflight is the
+/// conversion ADR-0014 warns against rather than a refactor.
+#[cfg(feature = "exec-subprocess")]
+pub mod lint;
 mod runner;
 /// The per-file digests of the extracted sandbox runtime — **generated**.
 ///
@@ -133,6 +153,10 @@ pub use adapter::{
     ADAPTERS, Adapter, AssetPaths, Invocation, NO_SNIPPET, NativeContext, UNKNOWN_VERSION,
     adapter_for, known_analyzers, snippet_hash, snippet_hash_at,
 };
+// The linter's adapter is re-exported like any other, and — unlike any other —
+// is **not** in [`ADAPTERS`], so `ingest` cannot resolve it and nothing can file
+// its output as a layer. See [`adapter::clippy`].
+pub use adapter::clippy::{Clippy, FeatureSet};
 pub use assets::{
     ASSETS, AssetKind, AssetSource, AssetSpec, AssetStatus, DownloadFile, Fetcher, InstalledAsset,
     MissingAsset, SANDBOX, asset, asset_path, asset_root, assets_for, provision, provision_with,
@@ -145,6 +169,11 @@ pub use crossref::{Correspondence, Report, cross_reference};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
     normalize_native,
+};
+#[cfg(feature = "exec-subprocess")]
+pub use lint::{
+    LINT_ANALYZERS, LintError, LintOutcome, Toolchain, invocation as lint_invocation,
+    run as run_lint,
 };
 pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,

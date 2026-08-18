@@ -608,6 +608,59 @@ enum Command {
         #[command(subcommand)]
         action: ModelAction,
     },
+    /// Run a linter over this worktree and print what it found. **Nothing is
+    /// stored** — no findings layer, no history, nothing `roteiro export` or
+    /// `roteiro security list` can see afterwards (ADR-0020 v1.1).
+    ///
+    /// That is the difference from `roteiro security run`, and it follows from
+    /// what a lint *is*. An advisory id is **assigned**, and assignment is a
+    /// promise: `RUSTSEC-2020-0071` will mean the same thing in five years. A
+    /// lint name is a **symbol in a compiler** — renamed or removed at its
+    /// discretion — so it is a tool's opinion about the code as it stands today,
+    /// for the person who asked. Read a count from this command as a point in
+    /// time and nothing more:
+    ///
+    /// - a **renamed** lint reads as one defect fixed and one introduced;
+    ///
+    /// - a **removed** lint reads as fixed;
+    ///
+    /// - an edit to `[workspace.lints]`, or an added `#[allow]`, makes whole
+    ///   cohorts appear or vanish — a configuration change reading as a code
+    ///   change.
+    ///
+    /// None of those touched the code, and a bumped toolchain or a different
+    /// `--all-features` will move the number too. The report names the
+    /// toolchain, the feature set and the isolation it had, because there is no
+    /// stored run record carrying them.
+    ///
+    /// It is a **report, not a gate**: it exits 0 whether or not it found
+    /// anything, because a lint count is not a verdict this command is in a
+    /// position to pass. The gate is `cargo clippy -- -D warnings`, which CI
+    /// already runs. When the build did not complete, the report says so — in a
+    /// line of its own, and as `build_succeeded` in `--json` — so a partial
+    /// result is never quietly a small one.
+    ///
+    /// The linter runs **on this host, with no isolation**: `cargo clippy` has
+    /// `cargo check` semantics, so it executes the tree's build scripts and
+    /// loads its proc macros. For your own tree that is the build you were going
+    /// to run anyway; for a branch you are reviewing it is somebody else's code
+    /// executing here. A sandboxed builder is ADR-0020's unbuilt work.
+    #[cfg(feature = "execution")]
+    Lint {
+        /// Which linter to run (`clippy`).
+        analyzer: String,
+        /// Resolve the build with **every** feature enabled (`--all-features`).
+        /// This changes what is compiled and therefore what is linted, so the
+        /// report names the feature set it used.
+        #[arg(long, conflicts_with = "features")]
+        all_features: bool,
+        /// Resolve the build with these features (comma- or space-separated).
+        #[arg(long, value_name = "LIST")]
+        features: Option<String>,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Analyzer findings: ingest a normalized report and list what is live
     /// (ADR-0012). Findings are a **separate artifact store** — they are never
     /// nodes or edges, never carry a provenance class, and never appear in the
@@ -1572,6 +1625,17 @@ fn main() -> anyhow::Result<()> {
         } => run_duplicates(&cfg.effective, ingest, min_similarity, limit, json),
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
+        #[cfg(feature = "execution")]
+        Command::Lint {
+            analyzer,
+            all_features,
+            features,
+            json,
+        } => run_lint(
+            &analyzer,
+            &lint_features(all_features, features.as_deref())?,
+            json,
+        ),
         #[cfg(feature = "execution")]
         Command::Security { action } => run_security(action),
         #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
@@ -8051,6 +8115,300 @@ fn advisory_db_line(db: &rto_graph::AdvisoryDb) -> String {
     }
 }
 
+/// The three readings a lint count carries that a findings count does not.
+///
+/// One list, printed by the human report and serialised into the JSON one, so
+/// the two cannot drift and a scripted consumer is told exactly what a person is
+/// told. Each is a way the number moves **without the code changing**, and none
+/// of them is a defect this command could detect on the user's behalf: with
+/// nothing stored there is no history to diff, which is the point — ADR-0020 v1.1
+/// makes these a *surprise* to be documented rather than a corruption of a
+/// stored series.
+#[cfg(feature = "execution")]
+const LINT_CAVEATS: &[&str] = &[
+    "a renamed lint reads as one defect fixed and one introduced — the compiler renamed a symbol, \
+     the code did not change",
+    "a removed lint reads as fixed — the compiler dropped the check, nobody fixed anything",
+    "an edit to `[workspace.lints]`, or an added `#[allow]`, makes whole cohorts appear or vanish \
+     — a configuration change reading as a code change",
+];
+
+/// Resolve the two feature flags into the set the build will be resolved with.
+///
+/// Split out as a pure function because it decides one of the two axes — the
+/// other being the toolchain — that move a lint count without the code moving,
+/// and the report has to name whichever it picked.
+///
+/// # Errors
+/// Returns an error when `--features` was given nothing to enable, which is
+/// almost always a shell that ate the list rather than a request for the default
+/// set.
+#[cfg(feature = "execution")]
+fn lint_features(
+    all_features: bool,
+    features: Option<&str>,
+) -> anyhow::Result<rto_exec::FeatureSet> {
+    if all_features {
+        return Ok(rto_exec::FeatureSet::All);
+    }
+    let Some(list) = features else {
+        return Ok(rto_exec::FeatureSet::Defaults);
+    };
+    let names: Vec<String> = list
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if names.is_empty() {
+        anyhow::bail!(
+            "`--features {list:?}` names no features. Drop the flag to lint each crate's default \
+             feature set, or pass `--all-features`."
+        );
+    }
+    Ok(rto_exec::FeatureSet::Explicit(names))
+}
+
+/// The `--json` shape of `roteiro lint`.
+///
+/// It carries what a stored run would have carried on its `AnalysisRun` —
+/// analyzer, version, toolchain, feature set, isolation, argv, window, exit
+/// status — because **there is no `AnalysisRun` here** and an ephemeral report
+/// still has to be honest about its inputs. It also carries `stored: false`,
+/// which is not decoration: a consumer can assert from the payload alone that
+/// this command wrote nothing, rather than having to trust the documentation.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct LintReport {
+    analyzer: String,
+    analyzer_version: String,
+    toolchain: rto_exec::Toolchain,
+    /// The feature set the build was resolved with, as a label rather than a
+    /// flag — `default` is a real answer and an empty string is not.
+    features: String,
+    isolation: rto_graph::Isolation,
+    /// The exact argv, so the run is reproducible by hand.
+    command: Vec<String>,
+    /// The workspace root that was linted.
+    worktree: String,
+    started_at: String,
+    ended_at: String,
+    exit_status: i32,
+    /// Whether the build completed. `false` with findings present means the
+    /// diagnostics are what it managed to emit, not the whole picture.
+    build_succeeded: bool,
+    /// **Always `false`.** Nothing here reaches the findings store.
+    stored: bool,
+    counts: LintCounts,
+    findings: Vec<LintFinding>,
+    /// [`LINT_CAVEATS`], verbatim.
+    caveats: Vec<String>,
+}
+
+/// What the linter's output contained besides reported findings.
+///
+/// Every field is something that did **not** become a finding, reported rather
+/// than dropped silently: a run that quietly discarded half its diagnostics
+/// would be indistinguishable from a clean tree.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct LintCounts {
+    reported: usize,
+    /// Diagnostics about files outside this worktree — a dependency's own source.
+    outside_worktree: usize,
+    /// The same diagnostic emitted once per target by `--all-targets`.
+    duplicates_collapsed: usize,
+    /// Diagnostics with no location: rustc's own "aborting due to N errors".
+    without_location: usize,
+}
+
+/// One diagnostic in the `--json` report.
+///
+/// Deliberately **not** the report's `identity` recipe: that vector orders and
+/// deduplicates an ephemeral report and is never a stored key, and serialising
+/// it would offer a consumer something that looks addressable and is not.
+#[cfg(feature = "execution")]
+#[derive(serde::Serialize)]
+struct LintFinding {
+    rule: String,
+    severity: rto_graph::Severity,
+    title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    span: Option<rto_graph::Span>,
+}
+
+/// Run a linter over this worktree and print what it said.
+///
+/// The store is never opened. That is the strongest available form of "nothing
+/// is written": there is no layer key to collide, no `replace_findings_layer`
+/// call to make, and no handle through which a later edit could add one.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn run_lint(analyzer: &str, features: &rto_exec::FeatureSet, json: bool) -> anyhow::Result<()> {
+    let dir = std::env::current_dir()?;
+    // Disclose what is about to run before it runs, exactly as `security run`
+    // does. This command executes a build on this host without a per-run consent
+    // flag — the toolchain is the user's own and the tree is the one they are
+    // standing in — so the disclosure is what keeps that from being a surprise,
+    // and it names the isolation as well as the argv.
+    //
+    // The argv comes from the same place the run will take it, and is `None` for
+    // an analyzer this build does not drive: announcing clippy's command under
+    // another analyzer's name would be a small lie printed in the one place a
+    // user is relying on being told the truth. The refusal itself comes from the
+    // run below, which owns that wording.
+    if let (false, Some(invocation)) = (json, rto_exec::lint_invocation(analyzer, features)) {
+        eprintln!(
+            "running {analyzer} (isolation none, on this host): {} {}",
+            invocation.program,
+            invocation.args.join(" ")
+        );
+    }
+    let outcome = rto_exec::run_lint(analyzer, &dir, features)?;
+
+    let findings: Vec<LintFinding> = outcome
+        .report
+        .findings
+        .iter()
+        .map(|f| LintFinding {
+            rule: f.rule.clone(),
+            severity: f.severity.clone(),
+            title: f.title.clone(),
+            message: f.message.clone(),
+            path: f.path.clone(),
+            line: f.meta.get("line").and_then(serde_json::Value::as_u64),
+            span: f.span,
+        })
+        .collect();
+    let counts = LintCounts {
+        reported: findings.len(),
+        outside_worktree: outcome.summary.outside_worktree,
+        duplicates_collapsed: outcome.summary.duplicates_collapsed,
+        without_location: outcome.summary.without_location,
+    };
+
+    if json {
+        emit_json(&LintReport {
+            analyzer: outcome.analyzer.to_owned(),
+            analyzer_version: outcome.report.analyzer_version.clone(),
+            toolchain: outcome.toolchain.clone(),
+            features: outcome.features.label(),
+            isolation: outcome.isolation,
+            command: outcome.command.clone(),
+            worktree: outcome.worktree.display().to_string(),
+            started_at: outcome.report.started_at.clone(),
+            ended_at: outcome.report.ended_at.clone(),
+            exit_status: outcome.report.exit_status,
+            build_succeeded: outcome.summary.build_succeeded,
+            // Not computed from anything: this command has no code path that
+            // could write, so the field is the contract rather than a result.
+            stored: false,
+            counts,
+            findings,
+            caveats: LINT_CAVEATS.iter().map(|c| (*c).to_owned()).collect(),
+        })?;
+        return Ok(());
+    }
+    print_lint_report(&outcome, &findings, &counts);
+    Ok(())
+}
+
+/// Render a lint report for a person.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn print_lint_report(
+    outcome: &rto_exec::LintOutcome,
+    findings: &[LintFinding],
+    counts: &LintCounts,
+) {
+    println!(
+        "{} {} — {} diagnostic(s), nothing stored",
+        outcome.analyzer, outcome.report.analyzer_version, counts.reported
+    );
+    println!(
+        "  toolchain {} on {}",
+        outcome.toolchain.rustc, outcome.toolchain.host
+    );
+    println!("  features  {}", outcome.features.label());
+    println!(
+        "  isolation {} — the linter compiled this tree on this host, so its build scripts and \
+         proc macros ran here too",
+        outcome.isolation.as_str()
+    );
+    for finding in findings {
+        let at = match (&finding.path, finding.line) {
+            (Some(path), Some(line)) => format!("{path}:{line}"),
+            (Some(path), None) => path.clone(),
+            _ => "-".to_owned(),
+        };
+        println!(
+            "  {:<8} {:<34} {at}  {}",
+            finding.severity.as_str(),
+            finding.rule,
+            finding.title
+        );
+    }
+    print_lint_footnotes(outcome, counts);
+}
+
+/// The counts of what was *not* reported, and the readings the number carries.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn print_lint_footnotes(outcome: &rto_exec::LintOutcome, counts: &LintCounts) {
+    for (count, what) in [
+        (
+            counts.outside_worktree,
+            "not reported: about a file outside this worktree (a dependency's own source)",
+        ),
+        (
+            counts.duplicates_collapsed,
+            "counted once: the same diagnostic arrived again for another target",
+        ),
+        (
+            counts.without_location,
+            "not reported: no location — rustc's own \"aborting due to …\" summaries",
+        ),
+    ] {
+        if count > 0 {
+            println!("  {count} diagnostic(s) {what}");
+        }
+    }
+    if !outcome.summary.build_succeeded {
+        println!(
+            "  the build did not complete — these diagnostics are what it managed to emit, not \
+             the whole picture"
+        );
+    }
+    println!();
+    println!("read this as a point in time, not a trend:");
+    for caveat in LINT_CAVEATS {
+        println!("  - {caveat}");
+    }
+    println!(
+        "nothing was written: `roteiro security list` and `roteiro export` are unchanged by this \
+         command, and there is no lint history to compare against."
+    );
+}
+
+/// The same command in a build without `exec-subprocess`: a refusal that names
+/// the feature and the alternative.
+///
+/// A runtime error rather than a `cfg` on the clap variant, for the reason
+/// `security run` records — gating the variant is how a documented command
+/// shipped invisible to crates.io users as `unrecognized subcommand`.
+#[cfg(all(feature = "execution", not(feature = "exec-subprocess")))]
+fn run_lint(analyzer: &str, _features: &rto_exec::FeatureSet, _json: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`roteiro lint {analyzer}` needs the `exec-subprocess` feature, which this build does not \
+         have; rebuild with `--features exec-subprocess` (it is in the default set, so this is a \
+         `--no-default-features` build). There is no ingest path to fall back on: a lint is \
+         reported and never stored, so there is no artifact for another machine to hand over."
+    );
+}
+
 /// The `--json` shape of `roteiro security prefetch`.
 #[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
@@ -11835,6 +12193,103 @@ mod asset_download {
         // A body *longer* than declared is equally wrong: it is not the resource
         // the server described.
         assert!(verify_transferred("https://example.invalid/all.zip", 10, 11).is_err());
+    }
+}
+
+// The `roteiro lint` surface: the flags, and the feature-set resolution that
+// decides one of the two axes a lint count moves on. The behaviour underneath —
+// parsing cargo's stream, refusing an absent linter, storing nothing — is tested
+// where it lives, in `rto-exec` and in `tests/lint_cli.rs`.
+#[cfg(all(test, feature = "execution"))]
+mod lint_cli {
+    use super::{Cli, Command, LINT_CAVEATS, lint_features};
+    use clap::Parser as _;
+
+    fn parse<const N: usize>(args: [&str; N]) -> Command {
+        Cli::try_parse_from(args).expect("parse").command
+    }
+
+    #[test]
+    fn lint_takes_one_analyzer_and_reports_by_default() {
+        let Command::Lint {
+            analyzer,
+            all_features,
+            features,
+            json,
+        } = parse(["roteiro", "lint", "clippy"])
+        else {
+            panic!("expected Lint");
+        };
+        assert_eq!(analyzer, "clippy");
+        assert!(!all_features);
+        assert_eq!(features, None);
+        assert!(!json);
+    }
+
+    #[test]
+    fn lint_requires_an_analyzer() {
+        assert!(Cli::try_parse_from(["roteiro", "lint"]).is_err());
+    }
+
+    /// The two feature flags are alternatives, not layers: `--all-features` with
+    /// `--features x` would leave the report unable to say which one decided the
+    /// build, so the parser refuses the pair rather than picking one.
+    #[test]
+    fn the_two_feature_flags_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "roteiro",
+                "lint",
+                "clippy",
+                "--all-features",
+                "--features",
+                "x"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn feature_flags_resolve_to_the_set_the_build_will_use() {
+        assert_eq!(
+            lint_features(false, None).expect("default"),
+            rto_exec::FeatureSet::Defaults
+        );
+        assert_eq!(
+            lint_features(true, None).expect("all"),
+            rto_exec::FeatureSet::All
+        );
+        // Comma- or space-separated, because both are what a user types and
+        // neither is worth a second flag.
+        for list in ["serve,mcp", "serve mcp", " serve , mcp "] {
+            assert_eq!(
+                lint_features(false, Some(list)).expect("explicit"),
+                rto_exec::FeatureSet::Explicit(vec!["serve".to_owned(), "mcp".to_owned()]),
+                "{list:?}"
+            );
+        }
+    }
+
+    /// A `--features` that names nothing is a shell that ate the list, not a
+    /// request for the default set — and quietly linting a different feature set
+    /// than the one asked for is exactly the kind of unstated input that makes a
+    /// count incomparable.
+    #[test]
+    fn an_empty_feature_list_is_refused_rather_than_silently_defaulted() {
+        let err = lint_features(false, Some(" , ")).expect_err("must be refused");
+        assert!(err.to_string().contains("--all-features"), "{err}");
+    }
+
+    /// The three readings ADR-0020 condition 5 requires be surfaced where a user
+    /// meets them. One list feeds both the human report and the JSON one, so a
+    /// scripted consumer cannot be told less than a person.
+    #[test]
+    fn the_caveats_name_all_three_readings_that_move_a_count() {
+        assert_eq!(LINT_CAVEATS.len(), 3);
+        let all = LINT_CAVEATS.join(" ");
+        for reading in ["renamed", "removed", "[workspace.lints]"] {
+            assert!(all.contains(reading), "no caveat covers {reading}: {all}");
+        }
     }
 }
 
