@@ -57,11 +57,24 @@ use {
 
 /// Tokens a review of one file may generate.
 ///
-/// Generous relative to `spec draft`'s 800: a file with several findings needs a
-/// line each, and a reply cut off mid-list would be scored as the reviewer having
-/// found fewer defects than it did — measuring the cap rather than the model.
+/// Generous relative to `spec draft`'s 800, and **raised from 1,200 by
+/// measurement**. A file with several findings needs a line each, and a reply cut
+/// off mid-list would be scored as the reviewer having found fewer defects than it
+/// did — measuring the cap rather than the model.
+///
+/// 1,200 was not merely tight; it was silently wrong for a whole class of model,
+/// and finding that out is the most useful thing this stage has produced.
+/// `qwen3.8-27b` is a reasoning GGUF: on the held-out commit it spent the entire
+/// budget inside `<think>` on **4 files of 4**, so the run reported *"0 finding(s)
+/// over 4 file(s)"* — a clean-looking result in which **no review had happened at
+/// all**. Scored, that would have read as zero recall and been reported as an
+/// honest negative about local reviewers.
+///
+/// [`rto_graph::reviewer::Parsed::reasoning_truncated`] is how that is now caught
+/// rather than believed, and a truncated file is reported as unreviewed rather
+/// than counted as clean.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-const REVIEW_MAX_TOKENS: u32 = 1_200;
+const REVIEW_MAX_TOKENS: u32 = 4_096;
 
 /// The context window this reviewer asks llama.cpp for.
 ///
@@ -81,7 +94,7 @@ const REVIEW_MAX_TOKENS: u32 = 1_200;
 /// materially higher. The slack absorbs that; `the_context_window_holds_the_whole_budget`
 /// holds the arithmetic.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-const REVIEW_N_CTX: u32 = 40_960;
+const REVIEW_N_CTX: u32 = 49_152;
 
 /// The estimated-token budget for one file's prompt.
 ///
@@ -113,6 +126,9 @@ pub struct FileOutcome {
     pub unparsed: usize,
     /// Whether the model declared the file clean in the required form.
     pub declared_clean: bool,
+    /// The generation stopped inside a reasoning block, so this file was never
+    /// actually reviewed — reported, never counted as a clean pass.
+    pub reasoning_truncated: bool,
     /// Diff tokens dropped to fit the budget.
     pub dropped_tokens: usize,
 }
@@ -195,6 +211,7 @@ pub fn review_file(
         suppressed: withheld,
         unparsed: parsed.unparsed.len(),
         declared_clean: parsed.declared_clean,
+        reasoning_truncated: parsed.reasoning_truncated,
         dropped_tokens: prompt.dropped_tokens,
     })
 }
@@ -369,6 +386,9 @@ pub struct ReplayReport {
     pub unparsed: usize,
     /// Files whose diff had to be truncated to fit the budget.
     pub truncated: usize,
+    /// Files whose *reply* stopped inside a reasoning block — never reviewed, and
+    /// never to be read as clean or scored as a zero.
+    pub reasoning_truncated: usize,
     /// Files carrying at least one adjudicated corpus row.
     pub anchored_files: usize,
     /// Changed paths with no reviewable diff — binary blobs, mode and rename
@@ -480,6 +500,7 @@ pub fn run_replay(
             report.unparsed += outcome.unparsed;
             report.clean += usize::from(outcome.declared_clean);
             report.truncated += usize::from(outcome.dropped_tokens > 0);
+            report.reasoning_truncated += usize::from(outcome.reasoning_truncated);
             report.anchored_files += usize::from(anchors.contains(&(*sha, file.path.as_str())));
             run.findings.extend(outcome.findings);
             run.suppressed
@@ -633,6 +654,7 @@ pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> an
 
     let mut total = 0usize;
     let mut withheld = 0usize;
+    let mut never_reviewed: Vec<&str> = Vec::new();
     for file in &files {
         let sources = |p: &str| std::fs::read_to_string(repo.join(p)).ok();
         let outcome = review_file(
@@ -643,6 +665,9 @@ pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> an
             &checks,
             &sources,
         )?;
+        if outcome.reasoning_truncated {
+            never_reviewed.push(file.path.as_str());
+        }
         if outcome.findings.is_empty() && outcome.suppressed.is_empty() {
             continue;
         }
@@ -662,6 +687,24 @@ pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> an
         "\n{total} finding(s) over {} file(s); {withheld} compile claim(s) withheld",
         files.len()
     );
+    // Printed before the caveat below and never folded into the count, because
+    // this is the line whose absence made a 0-of-4 reasoning-model run read as a
+    // clean review rather than as no review at all.
+    if !never_reviewed.is_empty() {
+        println!(
+            "\n{} of those file(s) were NOT REVIEWED — the reply stopped inside a \
+             reasoning block before reaching an answer, so a low finding count here \
+             says nothing about the code:",
+            never_reviewed.len()
+        );
+        for path in &never_reviewed {
+            println!("  {path}");
+        }
+        println!(
+            "  Use a non-reasoning model, or raise the generation cap \
+             (currently {REVIEW_MAX_TOKENS} tokens)."
+        );
+    }
     println!(
         "These are one model's opinions, unadjudicated. `docs/REVIEW_CHECKLIST.md` \
          has the triage rule; the corpus in `crates/rto-graph/tests/fixtures/review/` \
