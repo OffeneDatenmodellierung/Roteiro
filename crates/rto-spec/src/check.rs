@@ -34,6 +34,8 @@ pub enum ViolationKind {
     InactiveAdr,
     /// Two or more ADR files declare the same `adr-id`.
     DuplicateAdrId,
+    /// An ADR's version metadata disagrees with itself.
+    AdrVersionDrift,
 }
 
 impl ViolationKind {
@@ -46,6 +48,7 @@ impl ViolationKind {
             Self::UnknownAdr => "unknown-adr",
             Self::InactiveAdr => "inactive-adr",
             Self::DuplicateAdrId => "duplicate-adr-id",
+            Self::AdrVersionDrift => "adr-version-drift",
         }
     }
 }
@@ -136,6 +139,109 @@ fn duplicate_adr_ids(docs: &[AdrDoc]) -> Vec<Violation> {
         .collect()
 }
 
+/// Find ADRs whose version metadata contradicts itself.
+///
+/// An ADR states its version in three places, and nothing until now compared
+/// them. Three real defects were found by hand in this repository on
+/// 2026-08-18, all of this shape, while `check` reported 0 violations: ADR-0001
+/// carried frontmatter `1.2` over a summary row reading `1.0` (#406); ADR-0006
+/// listed 1.3 above 1.2 in its history and carried an inline note citing
+/// `(Update, v1.5)`, a version it has never had (#413). The third is the worst
+/// of them — `git log -S` put the change that note describes at 2026-08-14,
+/// when the document was at 1.1, and it never got a history row at all. A
+/// version claim nobody checks is a claim that quietly stops being true.
+///
+/// Three contradictions, reported under one kind because a caller does the same
+/// thing with all three — fail the gate and print the message — and because the
+/// message, not the label, is what tells the reader which one fired. This
+/// follows [`ViolationKind::MalformedAdr`], which likewise covers every
+/// [`crate::adr::ParseError`] behind one label and puts the specifics in prose.
+///
+/// Each message names the file and **both** conflicting values, for the reason
+/// [`duplicate_adr_ids`] names both paths: a message that reports only what it
+/// found leaves the reader to hunt for what it was compared against.
+///
+/// Deliberately *not* checked, because widening a rule that returns one hit or
+/// none is how it becomes a rule nobody reads:
+/// - that a `version:`, a summary row or a history table exists at all — the
+///   contradiction is the finding, and ADR-0011 legitimately has no history;
+/// - that the frontmatter version equals the newest history row. That gap is
+///   real and was found twice while this rule was written (ADR-0009 reached
+///   1.11 and ADR-0014 reached 1.5, neither bumped), but it is a fourth rule,
+///   not a widening of these three.
+fn adr_version_drift(docs: &[AdrDoc]) -> Vec<Violation> {
+    let mut out = Vec::new();
+    for doc in docs {
+        let path = &doc.path;
+        let facts = &doc.versions;
+
+        // 1. The two places a *current* version is written must agree. This is
+        //    the pair ADR-0001 got wrong; a reader trusting frontmatter and a
+        //    reader trusting the rendered table came away with different answers.
+        if let (Some(front), Some(row)) = (doc.meta.version, facts.summary_row)
+            && front != row
+        {
+            out.push(Violation {
+                kind: ViolationKind::AdrVersionDrift,
+                message: format!(
+                    "{path}: frontmatter says version {front} but the summary \
+                     table's **Document version** row says {row}"
+                ),
+            });
+        }
+
+        // 2. The history is a sequence, so it has to read as one. Compared
+        //    component-wise: 1.10 follows 1.9, and any ordering that puts it
+        //    first would report this repository's longest-running ADR as broken.
+        for pair in facts.history.windows(2) {
+            let (prev, next) = (pair[0], pair[1]);
+            if next > prev {
+                continue;
+            }
+            let why = if next == prev {
+                "twice"
+            } else {
+                "out of order"
+            };
+            out.push(Violation {
+                kind: ViolationKind::AdrVersionDrift,
+                message: format!(
+                    "{path}: version history lists {next} after {prev} — {why}; the \
+                     rows must ascend so the document reads as its own changelog"
+                ),
+            });
+        }
+
+        // 3. A note citing a version the history never recorded describes a
+        //    change the document cannot account for. Skipped when there is no
+        //    history table: an absent table contradicts nothing, and requiring
+        //    one is the fourth rule this deliberately is not.
+        if facts.history.is_empty() {
+            continue;
+        }
+        for reference in &facts.inline_refs {
+            if facts.history.contains(&reference.version) {
+                continue;
+            }
+            let known = facts
+                .history
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Violation {
+                kind: ViolationKind::AdrVersionDrift,
+                message: format!(
+                    "{path}:{}: an inline note cites (Update, v{}), a version this \
+                     document has never had — its history records {known}",
+                    reference.line, reference.version
+                ),
+            });
+        }
+    }
+    out
+}
+
 /// The outcome of a read-only [`validate`]: the report, plus the `authored`
 /// edges the valid links and annotations *would* weave into the graph.
 ///
@@ -212,6 +318,10 @@ pub fn validate(
         violations: duplicate_adr_ids(docs),
         ..CheckReport::default()
     };
+    // Self-contradiction inside one ADR, checked alongside the collision
+    // *between* ADRs above: neither needs the graph, both are read off the
+    // authored files exactly as they were parsed.
+    report.violations.extend(adr_version_drift(docs));
     let overlay = authored_overlay(docs, blueprints);
     let mut edges = Vec::new();
 
@@ -478,5 +588,155 @@ mod tests {
         assert!(kinds.contains(&ViolationKind::InactiveAdr));
         assert!(kinds.contains(&ViolationKind::UnknownAdr));
         assert_eq!(report.annotations_ok, 0);
+    }
+
+    /// A clean ADR carrying all three version claims in agreement, used as the
+    /// base each test below injects exactly one defect into.
+    const VERSIONED: &str = "\
+---
+adr-id: \"0006\"
+status: Accepted
+version: \"1.4\"
+---
+
+# ADR-0006
+
+| Field | Value |
+|---|---|
+| **Document version** | 1.4 |
+
+## Consequences
+
+The server moved. *(Update, v1.2: it moved again.)*
+
+Taken with `axum` v1.13.0, and boxlite v0.9.7 alongside it.
+
+## Document version history
+
+| Version | Date | Notes |
+|---------|------|-------|
+| 1.0 | 2026-08-09 | Accepted. |
+| 1.1 | 2026-08-09 | Revised. |
+| 1.2 | 2026-08-15 | Consequence added. |
+| 1.4 | 2026-08-18 | HTTP/2 is a non-goal. |
+";
+
+    fn drift(adr: &str) -> Vec<String> {
+        let mut store = Store::open_in_memory().expect("store");
+        seed_graph(&store);
+        let doc = parse_adr("docs/adr/0006-local-model-serving.md", adr).expect("parse");
+        let report = run(&mut store, &[doc], &[], &[]).expect("run");
+        report
+            .violations
+            .into_iter()
+            .inspect(|v| assert_eq!(v.kind, ViolationKind::AdrVersionDrift, "{}", v.message))
+            .map(|v| v.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_self_consistent_adr_reports_nothing() {
+        assert!(drift(VERSIONED).is_empty());
+    }
+
+    #[test]
+    fn frontmatter_disagreeing_with_the_summary_row_is_a_violation() {
+        // ADR-0001's defect, fixed by #406: frontmatter said 1.2 over a summary
+        // row still reading 1.0, so the answer depended on which one you read.
+        let msg = &drift(&VERSIONED.replace("version: \"1.4\"", "version: \"1.2\""))[0];
+        assert!(msg.contains("0006-local-model-serving.md"), "{msg}");
+        assert!(msg.contains("frontmatter says version 1.2"), "{msg}");
+        assert!(msg.contains("row says 1.4"), "{msg}");
+    }
+
+    #[test]
+    fn history_rows_out_of_order_are_a_violation() {
+        // ADR-0006's defect, fixed by #413: the table listed 1.3 above 1.2.
+        let swapped = VERSIONED.replace(
+            "| 1.1 | 2026-08-09 | Revised. |",
+            "| 1.3 | 2026-08-09 | Revised. |",
+        );
+        let msg = &drift(&swapped)[0];
+        assert!(msg.contains("lists 1.2 after 1.3"), "{msg}");
+        assert!(msg.contains("out of order"), "{msg}");
+    }
+
+    #[test]
+    fn a_version_listed_twice_is_a_violation() {
+        // ADR-0017 carried two different rows both labelled 1.2. Sorting cannot
+        // fix that, so it is reported as its own thing rather than as disorder.
+        let dup = VERSIONED.replace(
+            "| 1.1 | 2026-08-09 | Revised. |",
+            "| 1.0 | 2026-08-09 | Revised. |",
+        );
+        let msg = &drift(&dup)[0];
+        assert!(msg.contains("lists 1.0 after 1.0"), "{msg}");
+        assert!(msg.contains("twice"), "{msg}");
+    }
+
+    #[test]
+    fn an_inline_note_citing_an_unrecorded_version_is_a_violation() {
+        // ADR-0006's third defect, and the nastiest: a note citing (Update,
+        // v1.5) for a change that landed while the document was at 1.1 and was
+        // never given a history row at all. ADR-0002 carried the same note.
+        let msg = &drift(&VERSIONED.replace("(Update, v1.2:", "(Update, v1.5:"))[0];
+        assert!(msg.contains("0006-local-model-serving.md:15"), "{msg}");
+        assert!(msg.contains("(Update, v1.5)"), "{msg}");
+        assert!(msg.contains("never had"), "{msg}");
+        assert!(msg.contains("1.0, 1.1, 1.2, 1.4"), "{msg}");
+    }
+
+    #[test]
+    fn software_versions_in_prose_are_not_document_versions() {
+        // `v1.13.0` is a crate release and `v0.9.7` is boxlite's; a scan for a
+        // bare `vX.Y` reads both as document versions this ADR has never had.
+        // Over the 20 ADRs in this repository that scan matches 40+ times and
+        // the `(Update, v` marker matches 4 — this is the whole precision gap.
+        assert!(drift(VERSIONED).is_empty());
+        let extra = VERSIONED.replace(
+            "Taken with",
+            "Released in v1.11.0 and v1.12.0, superseding v0.9. Taken with",
+        );
+        assert!(drift(&extra).is_empty(), "{:?}", drift(&extra));
+    }
+
+    #[test]
+    fn a_history_row_quoting_a_bad_note_is_not_itself_one() {
+        // The false positive this rule had to be built around. #413 recorded
+        // its own fix by *quoting* the note it removed, so ADR-0006's history
+        // contains the literal `(Update, v1.5)` — inside the history section,
+        // which the scan therefore excludes.
+        let quoting = VERSIONED.replace(
+            "| 1.4 | 2026-08-18 | HTTP/2 is a non-goal. |",
+            "| 1.4 | 2026-08-18 | An inline note cited *(Update, v1.5)*, now removed. |",
+        );
+        assert!(drift(&quoting).is_empty(), "{:?}", drift(&quoting));
+    }
+
+    #[test]
+    fn ten_is_a_later_revision_than_nine() {
+        // ADR-0009 reached 1.11 one row at a time. Lexical or decimal ordering
+        // sorts 1.10 below 1.9 and reports the whole table as out of order.
+        let long = VERSIONED.replace(
+            "| 1.4 | 2026-08-18 | HTTP/2 is a non-goal. |",
+            "| 1.9 | 2026-08-12 | Step 8b. |\n| 1.10 | 2026-08-12 | Step 8c. |\n| 1.11 | 2026-08-13 | Config keys. |",
+        );
+        let long = long.replace("version: \"1.4\"", "version: \"1.11\"");
+        let long = long.replace(
+            "| **Document version** | 1.4 |",
+            "| **Document version** | 1.11 |",
+        );
+        assert!(drift(&long).is_empty(), "{:?}", drift(&long));
+    }
+
+    #[test]
+    fn an_adr_with_no_history_table_is_not_a_violation() {
+        // ADR-0011 has none. An absent table contradicts nothing.
+        let none = VERSIONED
+            .split("## Document version history")
+            .next()
+            .expect("body")
+            .to_owned();
+        assert!(drift(&none).is_empty(), "{:?}", drift(&none));
     }
 }
