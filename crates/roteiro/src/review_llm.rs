@@ -343,6 +343,29 @@ fn worktree_graph(
 /// pressure a file keeps its governing decision and loses a doc comment, which is
 /// the way round that preserves what the arm is testing.
 ///
+/// # Two measured limits on what this can ever supply
+///
+/// Both were found by running it over the corpus, and both bound the arm's power
+/// independently of any model:
+///
+/// * **An ADR under review gets nothing.** The graph stores an `adr_section` node
+///   per heading with **no body**, and no authored edge points *into* one — so a
+///   file whose own nodes are `adr_section`s has neither a governing decision to
+///   fetch nor a doc comment to quote. That is precisely the shape of the
+///   corpus's clearest ADR-drift row (frontmatter bumped to 1.3 while the summary
+///   table below still says 1.2): both halves are in the ADR, one is outside the
+///   `-U3` window, and the graph cannot reach either.
+/// * **A newly added file gets nothing, correctly.** Its whole text is already in
+///   the diff, so [`doc_already_shown`] filters every doc comment, and nothing
+///   governs a file that did not exist at the fork point. Three of the corpus's
+///   five `contract-drift` rows sit in files like this, which means the arm's
+///   prompt on them is byte-identical to the diff-only arm's and no run can
+///   separate the two.
+///
+/// Neither is a defect in this function. They are the honest ceiling on the
+/// experiment, and they are why the measurement is reported as a bound rather
+/// than as a difference between two scores.
+///
 /// # Errors
 /// If the store cannot be queried.
 #[cfg(any(feature = "serve", feature = "inference-local-models", test))]
