@@ -2072,6 +2072,53 @@ before anyone knew which way the numbers would fall, and it stands as written;
 what the measurement adds is *why* it could not be met, which is worth more than
 the miss.
 
+#### Variance: settled before any conclusion was drawn, and it is zero
+
+Stage 30 measured that llama.cpp's logits differ between batch widths, so "same
+seed, same answer" could not be assumed here — a single run of each arm would not
+have been a comparison. Measured rather than assumed: the diff-only arm was run
+twice over the first 4 corpus commits (**54 files, 29% of the corpus**), the
+second time through a **different binary** — the one carrying this PR's changes.
+
+**626 findings both times, 534 distinct both times, Jaccard 1.0000, not one
+finding different.** So two things hold at once: greedy decoding at
+`temperature 0.0` with speculation off is reproducible run to run here, and the
+refactor did not perturb the diff-only path. Stage 30's divergence needs
+`ROTEIRO_SPECULATIVE`, which no run in this stage set.
+
+Stated limit: determinism was verified on 54 of 184 files, not all of them. The
+remaining 130 were not re-run, because the finding below made a second full pass
+the wrong place to spend three hours.
+
+#### What the reviewer actually emits, which is the adoption verdict
+
+| | diff-only arm |
+|---|---|
+| findings | **1,995** over 183 files — **10.9 per file** |
+| exact duplicate lines | **346 (17.3%)** |
+| labelled `contract-drift` | **1,412 (71%)** |
+| claiming compile failure | **0** |
+| files declared clean | 127 of 183 |
+| unadjudicated | 1,990 of 1,995 |
+
+Two of those rows are results in their own right.
+
+**The reviewer says `contract-drift` about almost everything.** 71% of its output
+carries that one label, and it recovered one of the five real `contract-drift`
+rows — by chance, on the permutation test above. A classifier that answers the
+same thing to nearly every question carries no information in its answer, and it
+explains why the class the graph arm was built to help is also the class the
+model over-claims: the arm was aimed at the one place the reviewer was already
+saturating.
+
+**The compile-claim filter never fires.** 35a called it a *free precision
+filter*, on the strength of every false positive in the corpus being a compile
+claim (4 of 4). Against this model it is dead weight: **not one of 1,995 findings
+claims the code will not compile.** The filter is correct, cheap and idle. That
+is not an argument to remove it — a different model would claim differently, and
+the corpus says a human reviewer did — but it must not be counted as precision
+this reviewer is getting.
+
 #### The diff-only baseline, and the discovery that it is not a measurement
 
 The baseline this stage never had: `qwen3-coder-30b-a3b`, 15 of 15 commits, 183
