@@ -55,16 +55,33 @@ pub const SCHEMA: &str = "roteiro.query/v1";
 /// Ordering is the caller's job; this only removes, and only from the ends, so a
 /// deterministically-ordered input yields a deterministic window.
 ///
-/// # What this deliberately does not cover
+/// # The search channels call this too, and the unit there is *per channel*
 ///
-/// The **search channels** ([`search`], and the generated/memory channels behind
-/// [`search_channels`]) keep their own `limit == 0 => no hits` guard and do not
-/// call this. They are a different surface: `limit` there is *per channel* on a
-/// relevance ranking asked for by the CLI and by MCP tools that clamp it to a
-/// floor of `1`, so "unlimited" is neither expressible nor wanted by either
-/// caller, and no channel is one of the served graph list endpoints #375 is
-/// about. Aligning them is a separate, CLI-visible change; until it is made,
-/// `search`'s `0` still means "no hits".
+/// [`search`] and the generated/memory channels behind [`search_channels`] used
+/// to keep a `limit == 0 => no hits` guard of their own — a third reading of one
+/// parameter name, in the same crate as the two #375 reconciled (issue #393).
+/// They now window here like every other lens, so `limit` has one definition and
+/// not a second implementation of it, which is exactly how the first two drifted.
+///
+/// What differs is the **unit**, not the rule: a search `limit` bounds *each
+/// channel* independently, so `0` is "every match, in every channel that was
+/// asked for", not "every match overall". That is a bounded request rather than
+/// "dump the graph": a channel's ranking only *orders* a set the query has
+/// already filtered — every token must appear in a hit — and a query with no
+/// tokens returns nothing at any limit, `0` included. Measured on this
+/// repository at 6,685 nodes: an unbounded one-token search returned ~2.7k hits
+/// in 0.24 s and a two-token one returned 3, against a full-population scan that
+/// every limit pays anyway, so unlimited costs no more than the default does.
+///
+/// The **MCP tools are the one surface that cannot ask for it**, deliberately:
+/// they clamp `limit` into `1..=25` and advertise `"minimum": 1`, because their
+/// results are spent against a model's context window and `0` would be the one
+/// value that escaped the ceiling those clamps exist to impose. That is a
+/// surface declining to offer a value, not a second meaning for it — a model
+/// that sends `0` anyway gets the smallest page, never the silent empty answer
+/// this issue is about. The reasoning is restated where each clamp lives, in
+/// `rto_render::mcp::GraphServer::search` and the served-chat `search` arm in
+/// the `roteiro` binary; if this rule changes, those two must change with it.
 pub fn window<T>(items: &mut Vec<T>, offset: usize, limit: usize) {
     // `min(len)` rather than a bounds check: `drain(..offset)` panics past the
     // end of the vector, and "page 900 of 3" is an empty page, not a 500.
@@ -1292,8 +1309,12 @@ fn content_snippet(meta: &serde_json::Value) -> Option<String> {
 }
 
 /// Deterministically search nodes for `query`, ranked by relevance, returning at
-/// most `limit` hits. Case-insensitive; every whitespace/`::`-separated token must
-/// appear somewhere in the node's **name, key, path, or captured `meta.content`**
+/// most `limit` hits — or **every match when `limit == 0`**, which is [`window`]'s
+/// rule and the one every list lens follows (issue #393). An empty result
+/// therefore always means "nothing matched", never "you asked for nothing".
+///
+/// Case-insensitive; every whitespace/`::`-separated token must appear
+/// somewhere in the node's **name, key, path, or captured `meta.content`**
 /// (so a question's words find the *description*, e.g. a README/ADR, not only a
 /// same-named symbol). Scoring favours an exact name match, then a name/content
 /// substring, then per-token hits; it then **boosts curated intent** (`authored`
@@ -1304,9 +1325,6 @@ fn content_snippet(meta: &serde_json::Value) -> Option<String> {
 /// # Errors
 /// Returns [`StoreError`] on query failure.
 pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>, StoreError> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
     let q = query.trim().to_lowercase();
     // Tokens are separated by whitespace or the `::` path separator; a lone `:`
     // (as in a `sym:rust:…` key) does not split a token.
@@ -1381,7 +1399,10 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
             .cmp(&a.score)
             .then_with(|| a.node.key.cmp(&b.node.key))
     });
-    hits.truncate(limit);
+    // `window`, not `truncate`: `0` is unlimited here as it is everywhere else.
+    // The scan above is full-population at every limit, so an unbounded search
+    // costs the same as a bounded one — only the printing differs.
+    window(&mut hits, 0, limit);
     Ok(hits)
 }
 
@@ -1486,9 +1507,11 @@ pub struct SearchResults {
 /// How to search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchOptions {
-    /// Maximum hits **per channel**. Each channel is ranked and truncated
-    /// independently, so opting in to another one never displaces a graph hit,
-    /// and never silently returns fewer of them.
+    /// Maximum hits **per channel**, where `0` is unlimited ([`window`]'s rule,
+    /// applied per channel). Each channel is ranked and windowed independently,
+    /// so opting in to another one never displaces a graph hit, and never
+    /// silently returns fewer of them — and `0` is "all of each channel asked
+    /// for", not "all of them merged and then cut".
     pub limit: usize,
     /// Fold in the generated channel. Off by default (see
     /// [`SearchOptions::default`]).
@@ -1558,11 +1581,9 @@ pub fn search_channels(
 /// nothing here writes anything. Decay is fixed at [`crate::Decay::None`] so a
 /// search over an unchanged store and tree is reproducible.
 ///
-/// Ties break by newest generation, so the order is total.
+/// Ties break by newest generation, so the order is total. `limit` follows
+/// [`window`]: `0` is every matching record, not none of them.
 fn search_memory(store: &Store, query: &str, limit: usize) -> Result<Vec<MemoryHit>, StoreError> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
     let q = query.trim().to_lowercase();
     let tokens: Vec<&str> = q.split("::").flat_map(str::split_whitespace).collect();
     if tokens.is_empty() {
@@ -1602,7 +1623,7 @@ fn search_memory(store: &Store, query: &str, limit: usize) -> Result<Vec<MemoryH
         })
         .collect();
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| b.id.cmp(&a.id)));
-    hits.truncate(limit);
+    window(&mut hits, 0, limit);
     Ok(hits)
 }
 
@@ -1686,15 +1707,13 @@ fn memory_score(q: &str, tokens: &[&str], body: &str, anchor: &str, evidence: f6
 }
 
 /// Rank the generated channel alone. Ties break by `(producer, blob)` so results
-/// are stable.
+/// are stable. `limit` follows [`window`]: `0` is every matching record, not none
+/// of them.
 fn search_generated(
     store: &Store,
     query: &str,
     limit: usize,
 ) -> Result<Vec<GeneratedHit>, StoreError> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
     let q = query.trim().to_lowercase();
     let tokens: Vec<&str> = q.split("::").flat_map(str::split_whitespace).collect();
     if tokens.is_empty() {
@@ -1731,7 +1750,7 @@ fn search_generated(
             .cmp(&a.score)
             .then_with(|| (&a.producer, &a.blob).cmp(&(&b.producer, &b.blob)))
     });
-    hits.truncate(limit);
+    window(&mut hits, 0, limit);
     Ok(hits)
 }
 
@@ -1904,8 +1923,9 @@ fn placeholder_hop() -> PathHop {
 mod tests {
     use super::{
         ConfigSecretReport, CouplingItem, CouplingOrder, CouplingReport, DebtDensityReport,
-        DensityItem, DensityOrder, RedactionState, SCHEMA, SNIPPET_MAX, config_secrets, coupling,
-        debt_density, explain, glob_match, list_kind, memory_score, path, search, window,
+        DensityItem, DensityOrder, RedactionState, SCHEMA, SNIPPET_MAX, SearchOptions,
+        SearchResults, config_secrets, coupling, debt_density, explain, glob_match, list_kind,
+        memory_score, path, search, search_channels, window,
     };
     use crate::{AnchorState, Edge, EdgeKind, FactSet, Node, NodeKind, Store};
 
@@ -2014,6 +2034,169 @@ mod tests {
         // A blank query yields nothing; the limit is respected.
         assert!(search(&store, "   ", 10).expect("search").is_empty());
         assert!(search(&store, "a.rs", 1).expect("search").len() <= 1);
+    }
+
+    /// The population every issue-#393 test below works over: 12 in each of the
+    /// three channels, each matching a term only its own channel carries.
+    ///
+    /// 12 is deliberately above the default of 10, so a `limit` of `0` that had
+    /// quietly fallen back to the default could not pass for "unlimited".
+    fn three_channels(population: usize) -> Store {
+        use crate::{
+            GeneratedContent, MediaKind, MediaOutcome, MediaWrite, MemoryKind, MemoryWrite,
+            Producer,
+        };
+
+        let mut store = Store::open_in_memory().expect("store");
+        let mut facts = FactSet::new();
+        for i in 0..population {
+            facts = facts.with_node(Node::new(
+                format!("sym:rust:a.rs#quokka{i}"),
+                NodeKind::Fn,
+                format!("quokka{i}"),
+            ));
+        }
+        store.apply_factset(&facts).expect("apply");
+
+        let producer = Producer {
+            kind: MediaKind::Audio,
+            model: "voxtral-mini-3b".to_owned(),
+            model_digest: "4705be8e".to_owned(),
+            quantisation: "Q4_K_M".to_owned(),
+            mmproj_digest: "4f24c4ef".to_owned(),
+            prompt: "Transcribe this audio recording.".to_owned(),
+            temperature: 0.0,
+            max_tokens: 512,
+        };
+        for i in 0..population {
+            store
+                .record_memory(&MemoryWrite {
+                    scope: crate::DEFAULT_MEMORY_SCOPE,
+                    kind: MemoryKind::Lesson,
+                    anchor: None,
+                    body: &format!("wombat lesson number {i}"),
+                    confidence: None,
+                    supersedes: None,
+                })
+                .expect("memory write");
+            assert!(
+                store
+                    .record_media_content(&MediaWrite {
+                        blob_id: &format!("blob-{i}"),
+                        path: &format!("assets/clip{i}.wav"),
+                        producer: &producer,
+                        tool_version: "0.0.0",
+                        outcome: &MediaOutcome::Generated(GeneratedContent {
+                            text: format!("narwhal transcript number {i}"),
+                            confidence: None,
+                        }),
+                        replace: false,
+                    })
+                    .expect("media write"),
+                "each clip is a fresh record",
+            );
+        }
+        store
+    }
+
+    /// Every channel asked for, at `limit`.
+    fn all_channels(store: &Store, query: &str, limit: usize) -> SearchResults {
+        search_channels(
+            store,
+            query,
+            SearchOptions {
+                limit,
+                include_generated: true,
+                include_memory: true,
+            },
+        )
+        .expect("search")
+    }
+
+    /// Issue #393: `limit == 0` reads as **unlimited on the graph channel**, and
+    /// it is [`window`] that says so rather than a rule of `search`'s own — the
+    /// third reading of one parameter name is gone, not relocated.
+    #[test]
+    fn search_reads_zero_as_unlimited_and_only_removes_the_cut() {
+        const POPULATION: usize = 12;
+        let store = three_channels(POPULATION);
+
+        let bounded = search(&store, "quokka", 10).expect("search");
+        assert_eq!(bounded.len(), 10, "a positive limit still cuts");
+
+        let unlimited = search(&store, "quokka", 0).expect("search");
+        assert_eq!(unlimited.len(), POPULATION, "0 is every match");
+
+        // An unlimited search is the same ranking uncut, not a different one:
+        // the bounded page is the prefix of the unbounded one.
+        assert_eq!(
+            unlimited[..10]
+                .iter()
+                .map(|h| h.node.key.as_str())
+                .collect::<Vec<_>>(),
+            bounded
+                .iter()
+                .map(|h| h.node.key.as_str())
+                .collect::<Vec<_>>(),
+            "unlimited only removes the cut",
+        );
+    }
+
+    /// The unit is **per channel**: `0` is "all of each channel that was asked
+    /// for", not "all of them merged and then cut". Each channel here matches a
+    /// term the other two do not, so the three populations stay separable.
+    #[test]
+    fn each_search_channel_reads_zero_as_unlimited_over_its_own_population() {
+        const POPULATION: usize = 12;
+        let store = three_channels(POPULATION);
+
+        // Each channel matches a term the other two do not, so a bounded and an
+        // unbounded read of one says nothing about the others.
+        assert_eq!(all_channels(&store, "quokka", 10).hits.len(), 10);
+        assert_eq!(
+            all_channels(&store, "quokka", 0).hits.len(),
+            POPULATION,
+            "graph channel: 0 is unlimited",
+        );
+        assert_eq!(all_channels(&store, "wombat", 10).memory.len(), 10);
+        assert_eq!(
+            all_channels(&store, "wombat", 0).memory.len(),
+            POPULATION,
+            "memory channel: 0 is unlimited",
+        );
+        assert_eq!(all_channels(&store, "narwhal", 10).generated.len(), 10);
+        assert_eq!(
+            all_channels(&store, "narwhal", 0).generated.len(),
+            POPULATION,
+            "generated channel: 0 is unlimited",
+        );
+
+        // And the unit really is per channel: an unbounded search of one term
+        // leaves the channels it does not match empty rather than filling them.
+        let graph_only = all_channels(&store, "quokka", 0);
+        assert!(
+            graph_only.memory.is_empty() && graph_only.generated.is_empty(),
+            "unlimited is per channel, not a merged population",
+        );
+    }
+
+    /// What keeps "unlimited" from meaning "the whole store": a query with no
+    /// tokens matches nothing, at `0` exactly as at any other limit. `--limit 0`
+    /// is bounded by what was asked for, not by the population.
+    #[test]
+    fn a_tokenless_query_is_nothing_in_every_channel_at_every_limit() {
+        let store = three_channels(12);
+        for blank in ["", "   ", "\t\n"] {
+            for limit in [0, 10] {
+                let nothing = all_channels(&store, blank, limit);
+                assert!(
+                    nothing.hits.is_empty()
+                        && nothing.generated.is_empty()
+                        && nothing.memory.is_empty(),
+                    "a query with no tokens is nothing, not everything ({blank:?}, limit {limit})",
+                );
+            }
+        }
     }
 
     #[test]

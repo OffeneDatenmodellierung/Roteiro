@@ -239,7 +239,13 @@ enum Command {
     Search {
         /// Free-text query (one or more words).
         query: String,
-        /// Maximum number of hits to return, **per channel**.
+        /// Maximum number of hits to return, **per channel**; `0` is unlimited.
+        ///
+        /// Unlimited means every match, in every channel asked for — ranked as
+        /// usual and simply not cut. It is bounded by the query rather than by
+        /// the graph: every token must appear in a hit, so a second word
+        /// narrows it sharply, and a query with no tokens still matches
+        /// nothing at `0` exactly as at any other limit (issue #393).
         #[arg(long, default_value_t = 10)]
         limit: usize,
         /// Also search model-generated media content — ASR transcripts and VLM
@@ -9596,7 +9602,8 @@ fn debt_density_tool_def(
                       run lower than an SLOC tool's and flatter verbose or generated \
                       files; and the markers beneath it include prose matches (`for \
                       now`, `deferred`, `tbd`), so a design document can rank as \
-                      dense debt. This is a measurement, not a gate."
+                      dense debt. This is a measurement, not a gate. \
+                      `limit` is 1-100 (default 20) — no unlimited setting."
             .to_owned(),
         parameters: json!({
             "type": "object",
@@ -9651,7 +9658,8 @@ fn config_secrets_tool_def(
                       MEAN THERE ARE NO SECRETS — it means no config key is \
                       secret-NAMED; a credential under an innocuous key like `dsn` or \
                       `endpoint` never appears. If asked to scan for secrets, say \
-                      plainly that this tool cannot do it."
+                      plainly that this tool cannot do it. \
+                      `limit` is 1-200 (default 50) — no unlimited setting."
             .to_owned(),
         parameters: json!({
             "type": "object",
@@ -9662,13 +9670,45 @@ fn config_secrets_tool_def(
     }
 }
 
+/// The page size for one served-chat tool call: the model's `limit` if it sent a
+/// usable one, else `default`, clamped into `1..=max`.
+///
+/// # Why the floor is `1` here when the library reads `0` as unlimited
+///
+/// [`rto_graph::window`] — and, since issue #393, the search channels too — read
+/// `limit == 0` as *unlimited*. **These tools deliberately do not offer that
+/// reading**, and this is where they decline it.
+///
+/// The reason is the one the ceiling already exists for: a tool result is spent
+/// against a model's context window, so every tool here advertises a maximum
+/// (`25`, `100`, `200`). Were `0` unlimited it would be the one value that
+/// escaped that maximum — a ceiling that holds for `1_000_000` and not for `0`.
+/// Each tool's parameter schema declares `"minimum": 1`, so `0` is outside the
+/// advertised contract; this clamp is what a client that sends it anyway gets,
+/// and it is the *smallest expressible page*, never an empty result. That is the
+/// point: the defect #393 is about is a caller asking for something and being
+/// handed silence, and no value a model can send produces silence here.
+///
+/// The library and the tools therefore do not disagree about what `0` means. The
+/// library defines it; this surface does not accept it, and its schema says so.
+/// The matching notes live on [`rto_graph::window`] and on
+/// `rto_render::mcp::model_limit` — if this rule changes, all three change with it.
+#[cfg(feature = "serve")]
+fn model_limit(args: &serde_json::Value, default: usize, max: usize) -> usize {
+    args.get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(default)
+        .clamp(1, max)
+}
+
 /// The `(order, limit, min_lines)` triple for a served-chat `debt_density` call,
 /// lifted out of [`GraphToolRegistry::call`] to keep that dispatcher readable.
 ///
 /// An unrecognised `order` is an `Err` rather than a silent fall back to
 /// `density`: a model told it ranked by `markers` when it did not will state that
-/// as fact to the user. `limit` is model-controlled, so it is clamped to the
-/// advertised bound — a huge value cannot make the server do pointless work.
+/// as fact to the user. `limit` is model-controlled, so it goes through
+/// [`model_limit`], which is where the `1..=max` contract and its reasoning live.
 #[cfg(feature = "serve")]
 fn density_args(args: &serde_json::Value) -> Result<(rto_graph::DensityOrder, usize, u32), String> {
     let order = match args.get("order").and_then(serde_json::Value::as_str) {
@@ -9680,12 +9720,7 @@ fn density_args(args: &serde_json::Value) -> Result<(rto_graph::DensityOrder, us
             )
         })?,
     };
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(20)
-        .clamp(1, 100);
+    let limit = model_limit(args, 20, 100);
     let min_lines = args
         .get("min_lines")
         .and_then(serde_json::Value::as_u64)
@@ -9713,7 +9748,8 @@ fn coupling_tool_def(
                       `order`=fan_out the symbols that reach furthest. Call edges \
                       are resolved by simple name, so a short generically-named \
                       function can absorb every call to that name — say so if you \
-                      report a high `fan_in` on one."
+                      report a high `fan_in` on one. \
+                      `limit` is 1-100 (default 20) — no unlimited setting."
             .to_owned(),
         parameters: json!({
             "type": "object",
@@ -9772,7 +9808,9 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                               `snippet` of the node's actual content to ground your answer; \
                               curated ADRs/blueprints and READMEs rank first, so this is the \
                               entry point for \"what is X / why\" questions. Read the `snippet`, \
-                              and call `explain` on a returned key for the full content."
+                              and call `explain` on a returned key for the full content. \
+                              `limit` is 1-25 (default 10) — there is no unlimited \
+                              setting; narrow the query instead of asking for more."
                     .to_owned(),
                 parameters: json!({
                     "type": "object",
@@ -9849,15 +9887,11 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 let query = str_arg("query")
                     .ok_or("`search` needs a string `query`")?
                     .to_owned();
-                // `limit` is model-controlled: clamp to 1..=25 (results are
-                // truncated before feed-back anyway) so a huge value can't
-                // waste work; the schema advertises the same bound.
-                let limit = args
-                    .get("limit")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|n| usize::try_from(n).ok())
-                    .unwrap_or(10)
-                    .clamp(1, 25);
+                // `limit` is model-controlled: `model_limit` clamps it to the
+                // advertised `1..=25`. The floor is deliberate and outlives
+                // issue #393 — `rto_graph::search` now reads `0` as unlimited,
+                // and this surface still does not offer that. See `model_limit`.
+                let limit = model_limit(args, 10, 25);
                 self.run(project, |store| rto_graph::search(store, &query, limit))
             }
             "path" => {
@@ -9914,14 +9948,9 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 })
             }
             "config_secrets" => {
-                // `limit` is model-controlled: clamp to the advertised bound so a
-                // huge value cannot make the server do pointless work.
-                let limit = args
-                    .get("limit")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|n| usize::try_from(n).ok())
-                    .unwrap_or(50)
-                    .clamp(1, 200);
+                // `limit` is model-controlled: clamped to the advertised bound by
+                // `model_limit`, floor included.
+                let limit = model_limit(args, 50, 200);
                 self.run(project, |store| rto_graph::config_secrets(store, limit))
             }
             "coupling" => {
@@ -9939,14 +9968,9 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                         })?
                     }
                 };
-                // `limit` is model-controlled: clamp to the advertised bound so a
-                // huge value cannot make the server do pointless work.
-                let limit = args
-                    .get("limit")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|n| usize::try_from(n).ok())
-                    .unwrap_or(20)
-                    .clamp(1, 100);
+                // `limit` is model-controlled: clamped to the advertised bound by
+                // `model_limit`, floor included.
+                let limit = model_limit(args, 20, 100);
                 self.run(project, |store| rto_graph::coupling(store, order, limit))
             }
             other => Err(format!("unknown tool `{other}`")),
@@ -12007,6 +12031,55 @@ mod workspace_scoped_tools {
             .map(|(_, h)| h)
             .expect("workspace present");
         GraphToolRegistry::new(handle)
+    }
+
+    /// The advertised contract on this surface, matching
+    /// `rto_render::mcp::tests::every_limit_tool_advertises_the_bound_it_enforces`
+    /// (issue #393). A model reads the parameter schema and the description, and
+    /// both must state the bound `model_limit` enforces — including that there is
+    /// no unlimited setting, which is what makes this surface's `limit` differ
+    /// from the library's without contradicting it.
+    #[test]
+    fn every_limit_tool_advertises_the_bound_it_enforces() {
+        use rto_serve::ToolRegistry as _;
+        let (set, _flat) = two_workspace_set();
+        let tools = registry_for(&set, "api").tools();
+        for (name, max) in [
+            ("search", 25u64),
+            ("debt_density", 100),
+            ("config_secrets", 200),
+            ("coupling", 100),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("`{name}` advertised"));
+            let limit = tool
+                .parameters
+                .get("properties")
+                .and_then(|p| p.get("limit"))
+                .unwrap_or_else(|| panic!("`{name}` declares a `limit` parameter"));
+            assert_eq!(
+                limit.get("minimum").and_then(serde_json::Value::as_u64),
+                Some(1),
+                "`{name}` must not advertise `0` as a legal limit",
+            );
+            assert_eq!(
+                limit.get("maximum").and_then(serde_json::Value::as_u64),
+                Some(max),
+                "`{name}` must advertise the ceiling it clamps to",
+            );
+            assert!(
+                tool.description.contains(&format!("1-{max}")),
+                "`{name}` description must state its range: {}",
+                tool.description,
+            );
+            assert!(
+                tool.description.contains("no unlimited setting"),
+                "`{name}` description must say `0`/unlimited is not offered: {}",
+                tool.description,
+            );
+        }
     }
 
     #[test]
