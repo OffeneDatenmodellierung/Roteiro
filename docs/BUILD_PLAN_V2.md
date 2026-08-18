@@ -2197,6 +2197,55 @@ halves inside the *diff*. The class is not, on this corpus, cross-file. The
 premise was reasonable and it was wrong, and it was wrong in a way only a corpus
 could show.
 
+#### The graph arm, scored — and the floor, settled
+
+The graph arm completed and was scored against the same corpus with the same
+binary, so the two arms differ in exactly one variable.
+
+| | diff-only | **graph** |
+|---|---|---|
+| real rows found | 4 / 22 | **5 / 22** |
+| `contract-drift` | 1 / 5 | **1 / 5** |
+| known-false reproduced | 1 / 4 | **0 / 4** |
+| findings emitted | 1,995 | **2,059** |
+| unadjudicated | 1,990 | 2,054 |
+
+**`contract-drift` did not move, exactly as the power bound said it could not.**
+That bound was computed before the arm ran: three of the four reachable rows
+receive no context at all, and the fourth is the one the diff-only arm already
+held. Recoverable rows were zero, and zero is what changed.
+
+Against the floor pre-committed in PR 1:
+
+- **≥ 2 `contract-drift` rows recovered — FAILED (0).** Refuted in advance by
+  arithmetic, not by the run.
+- *No row lost in any other class* — **held.** Nothing was lost.
+- *0 of 4 known-false reproduced* — **held**, and improved on: the diff-only
+  arm's single "reproduction" was itself a scoring artefact (a `contract-drift`
+  claim at 2312 credited to a false compile claim at 2322), and the graph arm
+  does not reproduce it.
+
+**The one row gained is `missing-event`, a class with a single real row.** The
+scorer's own caveat says a singleton class is one bit rather than a rate and
+must not be read as a percentage. And it was gained while the finding count rose
+by 64 — so under the density explanation the baseline established, *more
+findings producing one more hit is the expected direction of noise*, not
+evidence of insight. A 4 → 5 move sits inside a null whose mean was 4.19.
+
+**Verdict: the graph arm is not adopted on this evidence, and the corpus cannot
+be made to say otherwise.** Not because the graph is useless — because at ~11
+findings per file neither arm's recall separates from chance, so a comparison
+between them has nothing to compare. What would change the answer is a reviewer
+whose finding rate falls far enough for recall to become a measurement; until
+then, more context is tuning against noise.
+
+**One gap, recorded rather than smoothed.** Scoring either run prints no chance
+baseline, though `Score::expected_by_position` was added in this PR precisely so
+a recall figure never appears without its null beside it. On these two runs the
+guard does not fire. Until that is understood, the permutation numbers above are
+the ones to trust, and the printed recall is not yet self-qualifying — which is
+the very failure the addition was meant to end.
+
 ---
 
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ⏸️ *deferred by decision*
