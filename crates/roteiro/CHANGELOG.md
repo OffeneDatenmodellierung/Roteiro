@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.21.0...roteiro-v1.21.1) - 2026-08-18
+
+### Fixed
+
+- *(test)* parse module headers instead of advertising forms it cannot
+
+### Other
+
+- Merge pull request #401 from OffeneDatenmodellierung/fix/doc-fragment-guard
+- *(docs)* fail when a `](self#anchor)` names a heading that is gone
+
 ## [1.21.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.20.0...roteiro-v1.21.0) - 2026-08-18
 
 ### Added
