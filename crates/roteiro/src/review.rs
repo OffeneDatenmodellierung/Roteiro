@@ -360,6 +360,14 @@ fn print_score(score: &rto_graph::review_score::Score) {
         "\n{}/{} real defect(s) found; {}/{} known-false claim(s) reproduced",
         score.found, score.real_in_scope, score.known_false_reproduced, score.known_false_in_scope
     );
+    // Printed on the same line of sight as the recall it qualifies, never below
+    // the caveats: a chance baseline a reader has to scroll to is one they will
+    // quote the number without.
+    if let Some(expected) = score.expected_by_position {
+        println!(
+            "  chance baseline: ~{expected:.1} would match by position alone              (see the caveat below)"
+        );
+    }
     match score.corpus_precision() {
         Some(p) => println!(
             "precision over adjudicated findings only: {:.0}% \

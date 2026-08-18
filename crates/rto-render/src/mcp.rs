@@ -33,19 +33,31 @@
 //! | `security list` | **eligible** — see the note below | read-only over stored findings; the analogue of `debt` |
 //! | `security status` | **eligible** — see the note below | read-only; asset digests, advisory-DB age, analyzer coverage |
 //! | `security ingest` | **never** | mutating: `run_security_ingest` calls [`rto_graph::Store::replace_findings_layer`] |
-//! | `security run` | **never** | mutating *and* executing — see below |
+//! | `security run` | **never** | mutating *and* executing, on **either** backend — see below |
 //! | `security prefetch` | **never** | opens the network under an explicit human consent, and writes the asset cache |
 //!
-//! `security run` is the one worth spelling out. It calls
-//! [`rto_graph::Store::replace_findings_layer`] (in `run_security_run`), so it
-//! fails the read-only rule on its own — but the decisive objection is the other
-//! half: it *executes an analyzer*, now defaulting to a microVM. **A model asking
-//! for a tool is not a human consenting to execution.** `--allow-unsandboxed` is
-//! required on every unsandboxed run and is the last gate left once the
-//! build-time one leaves the default path (see `AGENTS.md`); a tool call is
-//! exactly the shape that would route around a gate whose whole purpose is to
-//! make a person type it. Nothing on a tool surface may run an analyzer, whatever
-//! it is sandboxed in.
+//! `security run` is the one worth spelling out, and its shape changed under
+//! ADR-0019 (PR #407) — so this is written against what it does now, not what it
+//! used to.
+//!
+//! It no longer files its own findings: `run_security_run` picks a backend
+//! (`select_backend` — sandboxed unless `--allow-unsandboxed`, which selects the
+//! host outright rather than as a fallback), and **both** backends end in
+//! `execute_and_file`, which calls
+//! [`rto_graph::Store::replace_findings_layer`]. That is worth stating precisely,
+//! because it is the stronger claim: the write is on the shared path, so
+//! **sandboxing does not make the command read-only**. It fails this surface's
+//! rule whichever backend runs.
+//!
+//! And the decisive objection is still the other half: it *executes an
+//! analyzer*. **A model asking for a tool is not a human consenting to
+//! execution.** That the default is now a microVM makes the command safer for the
+//! person who typed it; it does not make a tool call into a person typing it.
+//! `--allow-unsandboxed` exists precisely so that choosing the weaker isolation
+//! is an explicit act — ADR-0019 §6 refuses even a silent *downgrade* from
+//! sandbox to host — and a tool call is exactly the shape that would route around
+//! a gate whose whole purpose is to be typed by someone. Nothing on a tool
+//! surface may run an analyzer, whatever it is isolated in.
 //!
 //! `list` and `status` are eligible and are **not implemented yet** — they are a
 //! follow-up, not an oversight. Two things have to be settled first, and both

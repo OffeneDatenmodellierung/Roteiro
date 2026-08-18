@@ -19,6 +19,14 @@ use crate::annotate::Annotation;
 use crate::blueprint::BlueprintDoc;
 use crate::check::{Violation, ViolationKind};
 
+/// Yields a blob's authored bytes, or `None` when the tree has no such file (a
+/// worktree deletion, which the caller drops).
+///
+/// Generic over the error so a caller in a crate with its own error type — the
+/// `roteiro` binary's `anyhow`, this crate's [`GitError`] — passes its own
+/// closure without converting on the way in.
+pub type BlobReader<'a, E> = dyn Fn(&BlobRef) -> Result<Option<Vec<u8>>, E> + 'a;
+
 /// The authored documents found in one tree, ready for [`crate::check::run`] or
 /// [`crate::check::validate`].
 #[derive(Debug, Default)]
@@ -51,7 +59,10 @@ pub struct AuthoredLayer {
 /// and nothing indicated that the newest decision was missing. The two layers
 /// disagreed about which tree they were describing, in one worktree, with no
 /// second worktree involved.
-fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, GitError> {
+///
+/// # Errors
+/// Returns [`GitError`] if the tree or the index cannot be walked.
+pub fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, GitError> {
     match source {
         GraphSource::Index => repo.index_files(),
         GraphSource::Committed => repo.walk_blobs(),
@@ -72,17 +83,45 @@ fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, GitE
     }
 }
 
-/// Read and parse the authored layer from the tree named by `source`.
+/// Classify and parse the authored layer out of `blobs`, reading each blob's
+/// bytes with `read`.
+///
+/// # This is the one copy of the classification rule
+///
+/// Which path is an ADR, which markdown is a blueprint, which file merely carries
+/// `@rto:` annotations, and that a malformed ADR is drift rather than a skippable
+/// warning — that is a rule with one correct answer, and it now has three callers
+/// that reach it by different routes:
+///
+/// - [`authored_layer`] below, from a [`GraphSource`] tree (`build_graph`);
+/// - `build_graph_at_rev` in the `roteiro` binary, from an arbitrary rev's blobs
+///   (the Stage 35b graph arm, which needs the ADRs *of the reviewed commit*);
+/// - [`crate::tool_check`], read-only, which cannot use either of the first two
+///   because both end in a write.
+///
+/// Copying the loop would leave them free to drift, which is the shape this
+/// repository has closed repeatedly — `[debt] ignore` honoured on three surfaces
+/// and not a fourth, `limit == 0` meaning two things across five endpoints. A
+/// graph arm whose ADRs were classified by a slightly different rule than
+/// `check`'s would be measuring its own reimplementation.
+///
+/// `read` yields a blob's authored bytes, or `None` when the tree has no such
+/// file (a worktree deletion); the caller supplies it because *where* the bytes
+/// come from is precisely what differs between a tree, a rev, and a read-only
+/// query. It is generic over its error so a caller in a crate with its own error
+/// type does not have to convert on the way in.
 ///
 /// # Errors
-/// Returns [`GitError`] if the tree cannot be walked or a source file cannot be
-/// read. A file that reads but does not *parse* is not an error: a malformed ADR
-/// lands in [`AuthoredLayer::malformed`] as a violation.
-pub fn authored_layer(repo: &Repo, source: GraphSource) -> Result<AuthoredLayer, GitError> {
+/// Returns `E` if `read` fails. A file that reads but does not *parse* is not an
+/// error: a malformed ADR lands in [`AuthoredLayer::malformed`] as a violation.
+pub fn authored_layer_from<E>(
+    blobs: Vec<BlobRef>,
+    read: &BlobReader<'_, E>,
+) -> Result<AuthoredLayer, E> {
     let mut layer = AuthoredLayer::default();
-    for blob in authored_blobs(repo, source)? {
+    for blob in blobs {
         // Parse the authored source from the same tree the derived layer used.
-        let Some(bytes) = repo.read_source(&blob, source)? else {
+        let Some(bytes) = read(&blob)? else {
             continue;
         };
         let text = String::from_utf8_lossy(&bytes);
@@ -117,4 +156,17 @@ pub fn authored_layer(repo: &Repo, source: GraphSource) -> Result<AuthoredLayer,
         }
     }
     Ok(layer)
+}
+
+/// Read and parse the authored layer from the tree named by `source`: the file
+/// set from [`authored_blobs`], the bytes from [`Repo::read_source`], and the
+/// classification from [`authored_layer_from`].
+///
+/// # Errors
+/// Returns [`GitError`] if the tree cannot be walked or a source file cannot be
+/// read.
+pub fn authored_layer(repo: &Repo, source: GraphSource) -> Result<AuthoredLayer, GitError> {
+    authored_layer_from(authored_blobs(repo, source)?, &|blob| {
+        repo.read_source(blob, source)
+    })
 }

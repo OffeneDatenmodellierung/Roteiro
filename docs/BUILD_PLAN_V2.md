@@ -1995,6 +1995,274 @@ either way: it is how any future reviewer, hosted or local, gets measured. Nothi
 in PR 1 is evidence for building PR 2 *except* the headroom finding; the finding
 rate is evidence against, and both go into the decision.
 
+### What PR 2 measured — the graph arm, and the experiment it was built for
+
+**The pre-committed floor was not cleared, and the finding that matters is that
+it could not have been.** The interesting half of this result is not a
+disappointing number; it is that three measurements taken *before* the graph arm
+ever ran bound what any run of it could possibly show, on this corpus, with any
+model. That bound is stated first because it is the durable part.
+
+#### The sequencing, and why the baseline had to come first
+
+PR 1 shipped no per-class recall deliberately — a figure from a run where
+truncation was possible is not a measurement — so there was **no baseline**, and
+"the graph arm found N contract-drift rows" would have meant nothing beside it.
+PR 2's first deliverable was therefore the **diff-only arm under the corrected
+harness**: `GraphContext::none`, the truncation guard armed, scored per class at
+each row's `reviewed_sha`. The graph arm followed as the same binary, the same
+model, the same corpus and the same reconstruction, differing in exactly one
+variable — which is now recorded *in the run document* (`RunArm`) rather than in
+a filename, because a comparison a reader cannot audit from the artifacts is not
+one.
+
+#### Three measurements that bound the experiment, taken before it ran
+
+**1. The recall ceiling is 21 of 22, not 22 of 22.** Scoring matches a finding to
+a row within `LINE_WINDOW` (±10 lines), so a row whose anchored line is not in
+the reconstructed diff cannot be found by *any* per-file diff reviewer, whatever
+the context. Measured over every row: 20 of the 22 real rows have their anchored
+line inside the shown `-U3` diff, 21 fall within the scoring window, and **one
+does not**. It is `crates/roteiro/src/config.rs:634` — the `ignore_reset`
+inherited via `.or()` — whose line sits in the gap between hunks covering 564–575
+and 984–1180. It is a `contract-drift` row, so that class's real ceiling is **4 of
+5**, not 5 of 5. The reviewer that found it originally was agentic and read the
+whole file; a per-file diff reviewer structurally cannot, and no amount of graph
+context moves a line number into a hunk.
+
+**2. The arm's dose is real, not nominal.** Over the whole corpus the assembler
+emits **922 items on 85 of the ~184 reviewable files** — 189 `authored` (governing
+ADR and blueprint sections) and 733 `derived` (doc comments from elsewhere in the
+file) — for **~152k estimated tokens**, about **1.8k per file that carries any**,
+with **2,305 further items dropped by the cap**. On a median file that roughly
+doubles the prompt. So the treatment was administered; a null result here is not
+a null dose.
+
+**3. And the one that decides it: on 3 of the 4 reachable `contract-drift` rows,
+the two arms send a byte-identical prompt.**
+
+| `contract-drift` row | reachable? | context the graph arm supplied |
+|---|---|---|
+| `rto-graph/src/engine_slot.rs:16` | yes | **none** — file *added* in that commit |
+| `rto-graph/tests/fixtures/audio/README.md:11` | yes | **none** — markdown fixture, no symbols |
+| `docs/adr/0005-image-ocr-vision-ingestion.md:16` | yes | **none** — an ADR under review |
+| `rto-graph/src/query.rs:716` | yes | 19 items (0 authored, 19 derived) |
+| `roteiro/src/config.rs:634` | **no** | 21 items (6 authored, 15 derived) |
+
+Each zero has a specific and defensible cause, and none of them is a bug in the
+assembler:
+
+- **A newly added file gets nothing, correctly.** Its whole text is in the diff,
+  so every doc comment is filtered as already shown, and nothing governs a file
+  that did not exist at the fork point. There is no missing half to supply.
+- **A markdown fixture has no symbols**, so it has neither a doc comment nor a
+  governing edge.
+- **An ADR under review gets nothing** — and this is the sharpest of the three.
+  The graph stores an `adr_section` node per heading with **no body**, and no
+  authored edge points *into* one. The row is *"frontmatter bumped to 1.3 while
+  the summary table still reports 1.2"*: both halves live in the ADR, one is
+  outside the `-U3` window, and **the authored layer cannot describe the authored
+  layer**. The corpus's clearest case of an ADR contradicting itself is the case
+  the graph is blindest to.
+
+So **at most one `contract-drift` row could ever change** — and the baseline
+below makes that bound tighter still. The single reachable row that *does* receive
+context, `query.rs:716`, is **the one row the diff-only arm already matched**. The
+graph arm therefore cannot *gain* a `contract-drift` row from any starting point;
+it can only lose the one already held. The floor — *at least 2 of the 5 recovered
+that the diff-only arm missed* — was not merely unreachable before a single token
+was generated, it was **refuted**: the number of recoverable rows is zero. That floor was chosen honestly,
+before anyone knew which way the numbers would fall, and it stands as written;
+what the measurement adds is *why* it could not be met, which is worth more than
+the miss.
+
+#### Variance: settled before any conclusion was drawn, and it is zero
+
+Stage 30 measured that llama.cpp's logits differ between batch widths, so "same
+seed, same answer" could not be assumed here — a single run of each arm would not
+have been a comparison. Measured rather than assumed: the diff-only arm was run
+twice over the first 4 corpus commits (**54 files, 29% of the corpus**), the
+second time through a **different binary** — the one carrying this PR's changes.
+
+**626 findings both times, 534 distinct both times, Jaccard 1.0000, not one
+finding different.** So two things hold at once: greedy decoding at
+`temperature 0.0` with speculation off is reproducible run to run here, and the
+refactor did not perturb the diff-only path. Stage 30's divergence needs
+`ROTEIRO_SPECULATIVE`, which no run in this stage set.
+
+Stated limit: determinism was verified on 54 of 184 files, not all of them. The
+remaining 130 were not re-run, because the finding below made a second full pass
+the wrong place to spend three hours.
+
+#### What the reviewer actually emits, which is the adoption verdict
+
+| | diff-only arm |
+|---|---|
+| findings | **1,995** over 183 files — **10.9 per file** |
+| exact duplicate lines | **346 (17.3%)** |
+| labelled `contract-drift` | **1,412 (71%)** |
+| claiming compile failure | **0** |
+| files declared clean | 127 of 183 |
+| unadjudicated | 1,990 of 1,995 |
+
+Two of those rows are results in their own right.
+
+**The reviewer says `contract-drift` about almost everything.** 71% of its output
+carries that one label, and it recovered one of the five real `contract-drift`
+rows — by chance, on the permutation test above. A classifier that answers the
+same thing to nearly every question carries no information in its answer, and it
+explains why the class the graph arm was built to help is also the class the
+model over-claims: the arm was aimed at the one place the reviewer was already
+saturating.
+
+**The compile-claim filter never fires.** 35a called it a *free precision
+filter*, on the strength of every false positive in the corpus being a compile
+claim (4 of 4). Against this model it is dead weight: **not one of 1,995 findings
+claims the code will not compile.** The filter is correct, cheap and idle. That
+is not an argument to remove it — a different model would claim differently, and
+the corpus says a human reviewer did — but it must not be counted as precision
+this reviewer is getting.
+
+#### The diff-only baseline, and the discovery that it is not a measurement
+
+The baseline this stage never had: `qwen3-coder-30b-a3b`, 15 of 15 commits, 183
+files reviewed, one file refused (`Cargo.lock`, 64,389 tokens against the
+49,152-token window) and one truncated. **4 of 22 real rows found, 1 of 4
+known-false reproduced, and 1,995 findings emitted — 10.9 per file, of which
+1,990 are unadjudicated.**
+
+Then the number was checked against a null, and it did not survive.
+
+`review_score::match_findings` credits a finding to a row on `(commit, path,
+line ±LINE_WINDOW)` and **never on what the finding says** — not its class, not a
+word of its description. That is the correct rule for a scorer that must not
+reward eloquence. Its consequence had not been measured: a reviewer emitting
+10.9 findings per file blankets the diff, and a "hit" is then explained by
+density rather than by insight.
+
+**Permutation null.** Relocate every corpus row to a uniformly random line its
+own reconstructed diff actually shows; leave the run's findings byte-for-byte as
+emitted; rescore with the same greedy one-to-one rule. Over 2,000 trials:
+
+| | observed | null mean | P(≥ observed) |
+|---|---|---|---|
+| real rows matched | **4** | **4.19** | 0.72 |
+| known-false reproduced | 1 | 0.49 | 0.49 |
+
+**The reviewer scored below chance.** A tighter null that relocates only to
+*added* lines — where 23 of the 26 rows actually sit — gives 3.98 and P = 0.62,
+so the result is robust to the obvious objection. The reimplemented matcher
+reproduces the shipped scorer's counts exactly (4 real, 1 known-false), which is
+what licenses the comparison.
+
+So **`4/22` is not a recall figure, it is arithmetic**, and the same is true of
+the `1/4` known-false "reproduction": inspected, the credited finding is a
+`contract-drift` claim about a `Range: bytes=` doc at line 2312, while the row at
+2322 is a *false compile claim*. Different claims, ten lines apart. The scorer
+cannot tell them apart and was never built to.
+
+**This is the fourth silent-zero-shaped trap in this stage, and the first that is
+silently *non*-zero.** Scoring against a PR head, against an empty diff, and
+against a truncated reasoning reply all report a clean zero that measures
+nothing; this reports a clean *positive* that measures nothing. It is now caught
+in code rather than in prose — `Score::expected_by_position` prints beside the
+recall, and `caveats()` states outright that the rate is not clearly above
+chance — on the same principle that made `reasoning_truncated` a reported outcome
+in PR 1: *a number whose null is not stated is not yet a result.*
+
+The shipped estimate is honest about being an estimate. An exact null needs the
+diff, and `review --score` is pure by design so a published score recomputes on
+any machine, so it uses the candidate's own findings as the proxy for where it
+looked. Summing the ±10 neighbourhoods over-reads at 6.2; merging them
+under-reads at 3.0 against the permutation's 4.19. It is an order-of-magnitude
+guide, the caveat fires on a 2× margin because of that, and the docs name the
+permutation as the thing to run before believing any comparison.
+
+**What this costs the experiment.** A recall comparison between two arms is only
+meaningful if either arm's recall is meaningful. At 10.9 findings per file
+neither is. The density sweep says how far that has to fall: thinning the run's
+own findings and re-running both the null and the observed match, the two stay
+within noise of each other at every rate measured — 4.19 vs 4.00 at 10.9 per
+file, 1.67 vs 2.08 at 2, 0.67 vs 0.94 at 0.5. **The reviewer's recall never
+separates convincingly from chance at any density it was run at.** PR 1 called
+the ~15-per-file rate "the number to beat"; it is worse than that — until it
+falls, the corpus cannot measure recall at all.
+
+**The premise, restated against the data.** Stage 35's central claim was that
+`contract-drift` "puts the largest class squarely on the graph: per-file review
+cannot see a doc in another file contradicting the code under review." Measured
+against the rows rather than assumed: **four of the five `contract-drift` rows
+have both halves inside the file under review**, and three of those have both
+halves inside the *diff*. The class is not, on this corpus, cross-file. The
+premise was reasonable and it was wrong, and it was wrong in a way only a corpus
+could show.
+
+#### The graph arm, scored — and the floor, settled
+
+The graph arm completed and was scored against the same corpus with the same
+binary, so the two arms differ in exactly one variable.
+
+| | diff-only | **graph** |
+|---|---|---|
+| real rows found | 4 / 22 | **5 / 22** |
+| `contract-drift` | 1 / 5 | **1 / 5** |
+| known-false reproduced | 1 / 4 | **0 / 4** |
+| findings emitted | 1,995 | **2,059** |
+| unadjudicated | 1,990 | 2,054 |
+
+**`contract-drift` did not move, exactly as the power bound said it could not.**
+That bound was computed before the arm ran: three of the four reachable rows
+receive no context at all, and the fourth is the one the diff-only arm already
+held. Recoverable rows were zero, and zero is what changed.
+
+Against the floor pre-committed in PR 1:
+
+- **≥ 2 `contract-drift` rows recovered — FAILED (0).** Refuted in advance by
+  arithmetic, not by the run.
+- *No row lost in any other class* — **held.** Nothing was lost.
+- *0 of 4 known-false reproduced* — **held**, and improved on: the diff-only
+  arm's single "reproduction" was itself a scoring artefact (a `contract-drift`
+  claim at 2312 credited to a false compile claim at 2322), and the graph arm
+  does not reproduce it.
+
+**The one row gained is `missing-event`, a class with a single real row.** The
+scorer's own caveat says a singleton class is one bit rather than a rate and
+must not be read as a percentage. And it was gained while the finding count rose
+by 64 — so under the density explanation the baseline established, *more
+findings producing one more hit is the expected direction of noise*, not
+evidence of insight. A 4 → 5 move sits inside a null whose mean was 4.19.
+
+**Verdict: the graph arm is not adopted on this evidence, and the corpus cannot
+be made to say otherwise.** Not because the graph is useless — because at ~11
+findings per file neither arm's recall separates from chance, so a comparison
+between them has nothing to compare. What would change the answer is a reviewer
+whose finding rate falls far enough for recall to become a measurement; until
+then, more context is tuning against noise.
+
+**The chance baseline fires on both arms**, which is what makes the comparison
+readable at all:
+
+```
+armA  4/22   chance baseline: ~3.0 would match by position alone
+armB  5/22   chance baseline: ~2.6 would match by position alone
+both  RECALL IS NOT CLEARLY ABOVE CHANCE AT THIS FINDING DENSITY
+```
+
+Read the estimator as the order-of-magnitude guide it says it is: it returns 3.0
+where the exact permutation null returned 4.19, the ~30% under-shoot its own
+docs predict for merged neighbourhoods. **No permutation was run for the graph
+arm**, so its 5-against-~2.6 must not be read as separation — corrected for the
+same under-shoot its null sits near 3.6, and the caveat's own instruction is to
+confirm with a permutation before comparing two candidates.
+
+*(An earlier revision of this section recorded "the guard does not fire" as a
+defect. That was wrong, and wrong in the way this document keeps cataloguing:
+the scoring was run with a binary built 09:27, two and a half hours before the
+feature landed at 11:55 — `strings` finds no trace of it in that artifact. The
+claim was checked against the wrong build, not against the code. Recorded rather
+than quietly deleted, because a false gap in a document about false measurements
+is worth one paragraph.)*
+
 ---
 
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ⏸️ *deferred by decision*

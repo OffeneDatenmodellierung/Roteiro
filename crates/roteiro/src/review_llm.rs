@@ -49,11 +49,11 @@ use rto_graph::reviewer::FileUnderReview;
 use {
     rto_graph::compile_claim::{CheckRun, suppression},
     rto_graph::review_score::{CandidateFinding, CandidateRun},
-    rto_graph::reviewer::{
-        GraphContext, SINGLE_CALL_BUDGET_TOKENS, build_prompt, claim_site, parse_findings,
-    },
-    std::collections::BTreeSet,
+    rto_graph::reviewer::{SINGLE_CALL_BUDGET_TOKENS, build_prompt, claim_site, parse_findings},
 };
+
+use rto_graph::reviewer::GraphContext;
+use std::collections::BTreeSet;
 
 /// Tokens a review of one file may generate.
 ///
@@ -113,6 +113,34 @@ const _: () = assert!(
     REVIEW_N_CTX as usize >= (REVIEW_PROMPT_BUDGET * 13 / 10) + REVIEW_MAX_TOKENS as usize,
     "REVIEW_N_CTX must hold a 30%-underestimated prompt plus the generation"
 );
+
+/// Which context the reviewer is given — **the one variable Stage 35b PR 2
+/// varies**.
+///
+/// Both arms share every other input: the same model, the same corpus, the same
+/// reconstruction, the same prompt scaffolding, the same commit of this binary.
+/// That is the whole design; a comparison in which anything else moved would
+/// measure the something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewArm {
+    /// No context at all — [`GraphContext::none`]. The baseline PR 1 shipped no
+    /// figure for, and the thing the graph arm has to beat.
+    DiffOnly,
+    /// Governing ADRs and the file's own out-of-diff doc surface, assembled by
+    /// [`graph_context_for`] from the graph **at the reviewed commit**.
+    Graph,
+}
+
+impl ReviewArm {
+    /// The tag written into [`rto_graph::review_score::RunArm::context`].
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::DiffOnly => "diff-only",
+            Self::Graph => "graph",
+        }
+    }
+}
 
 /// One file's review, before scoring.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
@@ -214,6 +242,223 @@ pub fn review_file(
         reasoning_truncated: parsed.reasoning_truncated,
         dropped_tokens: prompt.dropped_tokens,
     })
+}
+
+/// The graph as it was at `sha`, for the graph arm — or `None` for the diff-only
+/// arm, which is the absence of a store rather than an empty one.
+///
+/// In memory, and one per commit: the graph arm needs the repository as it was
+/// when the code was written, and writing that to the developer's own store would
+/// leave their graph rebuilt at a historical commit after the run.
+///
+/// # Errors
+/// If the graph at `sha` cannot be assembled.
+#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+fn graph_at(
+    repo: &rto_graph::Repo,
+    cache: &rto_graph::ObjectCache,
+    ingest: rto_graph::IngestConfig,
+    arm: ReviewArm,
+    sha: &str,
+) -> anyhow::Result<Option<rto_graph::Store>> {
+    if arm == ReviewArm::DiffOnly {
+        return Ok(None);
+    }
+    let mut store = rto_graph::Store::open_in_memory()?;
+    crate::build_graph_at_rev(repo, &mut store, cache, ingest, sha)?;
+    Ok(Some(store))
+}
+
+/// The context for one file, from an optional graph — the single place both
+/// surfaces turn an arm into a [`GraphContext`].
+///
+/// [`ReviewArm::DiffOnly`] is `None` and yields [`GraphContext::none`], so the
+/// baseline is the absence of a store rather than a store that happened to answer
+/// nothing. The two are indistinguishable in the prompt and very distinguishable
+/// in what they mean about a run.
+#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+fn context_for(
+    graph: Option<&rto_graph::Store>,
+    file: &FileUnderReview,
+    sources: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<GraphContext> {
+    match graph {
+        None => Ok(GraphContext::none()),
+        Some(store) => {
+            let annotated = rto_graph::reviewer::annotate_diff(&file.diff);
+            graph_context_for(store, file, &annotated, sources)
+        }
+    }
+}
+
+/// The graph of the **working tree** — `HEAD` plus uncommitted edits — for the
+/// live `review --llm` surface.
+///
+/// The same assembly `review` and `check` already build, and the same one
+/// [`crate::build_graph_at_rev`] performs at a historical commit: derived layer,
+/// then the authored layer over the identical file set. A live surface reviewing
+/// against a different graph than the measured one would make the replay's number
+/// a claim about something users do not run.
+///
+/// # Errors
+/// If the repository or the graph cannot be assembled.
+#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+fn worktree_graph(
+    repo: &Path,
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<rto_graph::Store> {
+    let graph_repo = rto_graph::Repo::discover(repo)?;
+    let cache =
+        rto_graph::ObjectCache::open(graph_repo.common_dir().join("roteiro").join("objects"))?;
+    let mut store = rto_graph::Store::open_in_memory()?;
+    let registry = rto_graph::Registry::new(ingest);
+    rto_graph::sync_worktree(&mut store, &graph_repo, &cache, &registry)?;
+    crate::apply_authored_layer(&mut store, graph_repo.walk_blobs()?, &|blob| {
+        Ok(graph_repo
+            .workdir()
+            .and_then(|w| std::fs::read(w.join(&blob.path)).ok()))
+    })?;
+    Ok(store)
+}
+
+/// Assemble the graph arm's context for one file (Stage 35b PR 2).
+///
+/// `store` must hold the graph **at the reviewed commit** — see
+/// [`crate::build_graph_at_rev`] for why reviewing a commit against `HEAD`'s ADRs
+/// would be a silent wrong answer of the same family as scoring against a PR head.
+/// `markdown_at` reads a repository file's text at that same commit.
+///
+/// # What is selected, in priority order
+///
+/// 1. **Governing ADR and blueprint sections** (`authored`). The one thing a
+///    per-file reviewer structurally cannot obtain, and `contract-drift`'s
+///    defining shape.
+/// 2. **Doc comments from elsewhere in this file** (`derived`), and only those the
+///    diff does not already show — see [`doc_already_shown`].
+///
+/// Callers, callees and blast radius are excluded by decision, not omission; the
+/// reasoning is on [`GraphContext`].
+///
+/// The order matters because [`GraphContext::fit`] drops from the tail: under
+/// pressure a file keeps its governing decision and loses a doc comment, which is
+/// the way round that preserves what the arm is testing.
+///
+/// # Two measured limits on what this can ever supply
+///
+/// Both were found by running it over the corpus, and both bound the arm's power
+/// independently of any model:
+///
+/// * **An ADR under review gets nothing.** The graph stores an `adr_section` node
+///   per heading with **no body**, and no authored edge points *into* one — so a
+///   file whose own nodes are `adr_section`s has neither a governing decision to
+///   fetch nor a doc comment to quote. That is precisely the shape of the
+///   corpus's clearest ADR-drift row (frontmatter bumped to 1.3 while the summary
+///   table below still says 1.2): both halves are in the ADR, one is outside the
+///   `-U3` window, and the graph cannot reach either.
+/// * **A newly added file gets nothing, correctly.** Its whole text is already in
+///   the diff, so [`doc_already_shown`] filters every doc comment, and nothing
+///   governs a file that did not exist at the fork point. Three of the corpus's
+///   five `contract-drift` rows sit in files like this, which means the arm's
+///   prompt on them is byte-identical to the diff-only arm's and no run can
+///   separate the two.
+///
+/// Neither is a defect in this function. They are the honest ceiling on the
+/// experiment, and they are why the measurement is reported as a bound rather
+/// than as a difference between two scores.
+///
+/// # Errors
+/// If the store cannot be queried.
+#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+pub fn graph_context_for(
+    store: &rto_graph::Store,
+    file: &FileUnderReview,
+    annotated_diff: &str,
+    markdown_at: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<GraphContext> {
+    use rto_graph::reviewer::{ContextItem, doc_already_shown, section_body};
+    use rto_graph::{NodeKind, Provenance};
+
+    let symbols: Vec<rto_graph::Node> = store
+        .nodes_by_path(&file.path)?
+        .into_iter()
+        // The file node carries no contract, and a marker is intent debt rather
+        // than a promise about behaviour.
+        .filter(|n| !matches!(n.kind, NodeKind::File | NodeKind::Marker))
+        .collect();
+
+    // Governing sections, and which symbols each governs. A `BTreeMap` because two
+    // symbols in a file commonly share one ADR, and because the run must be
+    // reproducible: an arm whose context order varied between runs would make the
+    // repeat-run variance check measure the assembler instead of the model.
+    let mut governing: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for sym in &symbols {
+        for edge in store.edges_to(&sym.key)? {
+            if edge.provenance == Provenance::Authored {
+                governing
+                    .entry(edge.src.clone())
+                    .or_default()
+                    .insert(sym.name.clone());
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+    for (section_key, governed) in governing {
+        let Some(node) = store.get_node(&section_key)? else {
+            continue;
+        };
+        let Some(path) = node.path.as_deref() else {
+            continue;
+        };
+        let Some(markdown) = markdown_at(path) else {
+            continue;
+        };
+        // No body means the heading the graph recorded is not in the file at this
+        // commit. Skipped rather than emitted empty: an item that says an ADR
+        // governs this code and then quotes nothing is worse than its absence.
+        let Some(body) = section_body(&markdown, &node.name) else {
+            continue;
+        };
+        if body.is_empty() {
+            continue;
+        }
+        let governed: Vec<&str> = governed.iter().map(String::as_str).collect();
+        items.push(ContextItem {
+            label: format!(
+                "{} \u{a7}{} ({}) \u{2014} governs {}",
+                node.key.split('#').next().unwrap_or(&node.key),
+                node.name,
+                path,
+                governed.join(", ")
+            ),
+            provenance: "authored".to_owned(),
+            body,
+        });
+    }
+
+    for sym in &symbols {
+        let Some(doc) = sym.meta.get("content").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if doc_already_shown(doc, annotated_diff) {
+            continue;
+        }
+        items.push(ContextItem {
+            label: format!(
+                "doc comment of {} `{}` \u{2014} elsewhere in this file, not in the diff",
+                sym.kind.as_str(),
+                sym.name
+            ),
+            provenance: "derived".to_owned(),
+            body: doc.to_owned(),
+        });
+    }
+
+    Ok(GraphContext::fit(
+        items,
+        rto_graph::reviewer::estimate_tokens(annotated_diff),
+    ))
 }
 
 /// The source of the module that declares `path`, where a file's feature gate is
@@ -438,6 +683,19 @@ pub struct ReplayReport {
     /// Changed paths with no reviewable diff — binary blobs, mode and rename
     /// records. Reported so a reduced denominator is visible rather than assumed.
     pub skipped: usize,
+    /// Context items actually sent, summed over files — the graph arm's dose.
+    ///
+    /// Reported because "the graph arm found more" is not a result if the arm
+    /// turned out to be sending nothing. A run whose context was empty on every
+    /// file is the diff-only arm under another name, and the number that says so
+    /// belongs beside the recall figure rather than in a reader's assumption.
+    pub context_items: usize,
+    /// Context items dropped to stay inside the cap.
+    pub context_dropped: usize,
+    /// Estimated tokens of context sent, summed over files.
+    pub context_tokens: usize,
+    /// Files that carried at least one context item.
+    pub files_with_context: usize,
     /// Files the engine refused (over its context window, or a decode failure).
     /// Named rather than counted: which files a budget cannot review is the
     /// actionable half, and a run that swallowed them would report coverage it
@@ -456,6 +714,8 @@ pub fn run_replay(
     out: &str,
     checks_path: Option<&str>,
     limit: Option<usize>,
+    arm: ReviewArm,
+    ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     let corpus = rto_graph::review_corpus::builtin()?;
     let main = main_ref(repo)?;
@@ -498,10 +758,23 @@ pub fn run_replay(
         None => &shas[..],
     };
 
-    let mut run = CandidateRun::default();
+    let mut run = CandidateRun {
+        arm: Some(rto_graph::review_score::RunArm {
+            context: arm.tag().to_owned(),
+            model: model.to_owned(),
+        }),
+        ..CandidateRun::default()
+    };
     let mut report = ReplayReport::default();
+    // The object cache is shared across worktrees and content-addressed, so the
+    // per-commit graph builds below re-extract only the blobs that actually differ
+    // from an already-synced tree. Opened once rather than per commit.
+    let graph_repo = rto_graph::Repo::discover(repo)?;
+    let object_cache =
+        rto_graph::ObjectCache::open(graph_repo.common_dir().join("roteiro").join("objects"))?;
     for (idx, sha) in shas.iter().enumerate() {
         let set = files_at(repo, sha, &main)?;
+        let graph = graph_at(&graph_repo, &object_cache, ingest, arm, sha)?;
         run.attempted_shas.insert((*sha).to_owned());
         report.commits += 1;
         report.skipped += set.skipped.len();
@@ -519,18 +792,16 @@ pub fn run_replay(
         );
         for file in &set.files {
             let sources = |p: &str| blob_at(repo, sha, p);
+            let context = context_for(graph.as_ref(), file, &sources)?;
+            report.context_items += context.items.len();
+            report.context_dropped += context.dropped_items;
+            report.context_tokens += context.tokens();
+            report.files_with_context += usize::from(!context.is_empty());
             // A file the engine refuses is recorded and stepped over, never fatal.
             // A three-hour pass that dies on file 140 has measured nothing, and the
             // refusals are themselves a result: they say which files this budget
             // cannot actually review.
-            let outcome = match review_file(
-                &engine,
-                model,
-                file,
-                &GraphContext::none(),
-                &checks,
-                &sources,
-            ) {
+            let outcome = match review_file(&engine, model, file, &context, &checks, &sources) {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     eprintln!("      refused {}: {e}", file.path);
@@ -583,6 +854,20 @@ fn print_replay(report: &ReplayReport, out: &str) {
         )]
         let per_file = report.findings as f64 / report.files as f64;
         println!("  {per_file:.2} finding(s) per file — the human-cost rate");
+    }
+    if report.files_with_context > 0 || report.context_dropped > 0 {
+        println!(
+            "  graph context: {} item(s), ~{} token(s), over {} of {} file(s){}",
+            report.context_items,
+            report.context_tokens,
+            report.files_with_context,
+            report.files,
+            if report.context_dropped > 0 {
+                format!("; {} item(s) dropped by the cap", report.context_dropped)
+            } else {
+                String::new()
+            }
+        );
     }
     if report.skipped > 0 {
         println!(
@@ -692,7 +977,13 @@ fn announce_unreviewable(skipped: &[String]) {
 /// # Errors
 /// If the repository, the model or git cannot be used.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> anyhow::Result<()> {
+pub fn run_llm(
+    repo: &Path,
+    base: Option<&str>,
+    checks_path: Option<&str>,
+    arm: ReviewArm,
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<()> {
     let checks = match checks_path {
         Some(p) => read_checks(p)?,
         None => Vec::new(),
@@ -732,19 +1023,22 @@ pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> an
     )
     .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
 
+    // The live surface reviews the working tree, so its graph is the working
+    // tree's — `HEAD` plus uncommitted edits, which is what `review` and `check`
+    // already build. The replay's historical-rev build is the same assembly at a
+    // different tree, not a different rule.
+    let graph = match arm {
+        ReviewArm::DiffOnly => None,
+        ReviewArm::Graph => Some(worktree_graph(repo, ingest)?),
+    };
+
     let mut total = 0usize;
     let mut withheld = 0usize;
     let mut never_reviewed: Vec<&str> = Vec::new();
     for file in &files {
         let sources = |p: &str| std::fs::read_to_string(repo.join(p)).ok();
-        let outcome = review_file(
-            &engine,
-            model,
-            file,
-            &GraphContext::none(),
-            &checks,
-            &sources,
-        )?;
+        let context = context_for(graph.as_ref(), file, &sources)?;
+        let outcome = review_file(&engine, model, file, &context, &checks, &sources)?;
         if outcome.reasoning_truncated {
             never_reviewed.push(file.path.as_str());
         }
@@ -804,7 +1098,10 @@ pub fn corpus_shas() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReviewSet, corpus_shas, files_at, fork_point, main_ref, parent_module_source};
+    use super::{
+        FileUnderReview, ReviewArm, ReviewSet, context_for, corpus_shas, files_at, fork_point,
+        graph_at, main_ref, parent_module_source,
+    };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -842,6 +1139,242 @@ mod tests {
             return false;
         }
         true
+    }
+
+    /// Open this repository and the shared, content-addressed object cache the
+    /// per-commit graph builds hit.
+    fn graph_inputs() -> Option<(rto_graph::Repo, rto_graph::ObjectCache)> {
+        let repo = rto_graph::Repo::discover(&repo()).ok()?;
+        let cache =
+            rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects")).ok()?;
+        Some((repo, cache))
+    }
+
+    /// **The graph arm must be built at the reviewed commit, not at `HEAD`.**
+    ///
+    /// This is the same silent zero as scoring against a PR head, arriving from a
+    /// fourth direction: a run assembled against today's ADRs would review 2026's
+    /// code against decisions written after it, produce a perfectly clean-looking
+    /// set of numbers, and describe a repository that never existed. Nothing about
+    /// the output would look wrong.
+    ///
+    /// Held by a count rather than by inspection: this repository has gained ADRs
+    /// since every commit the corpus covers, so a graph built at `HEAD` by mistake
+    /// carries strictly more `adr` nodes than the commit had files.
+    #[test]
+    fn the_graph_arm_is_built_at_the_reviewed_commit_not_at_head() {
+        let repo_path = repo();
+        if !history_available(&repo_path) {
+            return;
+        }
+        let Some((repo, cache)) = graph_inputs() else {
+            eprintln!("SKIP: cannot open the repository's object cache");
+            return;
+        };
+        for sha in &corpus_shas() {
+            let on_disk = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["ls-tree", "-r", "--name-only", sha, "--", "docs/adr/"])
+                .output()
+                .expect("git ls-tree runs");
+            let expected = String::from_utf8_lossy(&on_disk.stdout)
+                .lines()
+                .filter(|p| {
+                    std::path::Path::new(p)
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+                        && !p.ends_with("README.md")
+                })
+                .count();
+
+            let store = graph_at(
+                &repo,
+                &cache,
+                rto_graph::IngestConfig::default(),
+                ReviewArm::Graph,
+                sha,
+            )
+            .expect("the graph at a corpus commit assembles")
+            .expect("the graph arm yields a store");
+            let adrs = store
+                .nodes_by_kind(&rto_graph::NodeKind::Adr)
+                .expect("the store answers");
+            assert_eq!(
+                adrs.len(),
+                expected,
+                "{sha} carries {expected} ADR file(s) but the graph holds {} — \
+                 built at the wrong tree",
+                adrs.len()
+            );
+        }
+    }
+
+    /// **The arm tags are a written contract, not a display string.**
+    ///
+    /// They are recorded into every run document
+    /// ([`rto_graph::review_score::RunArm::context`]) and are how a reader tells
+    /// the two arms of this experiment apart six months from now. Renaming one
+    /// would not break a build; it would silently make old artifacts and new ones
+    /// incomparable, which is the failure this whole stage is arranged against.
+    #[test]
+    fn the_arm_tags_are_stable_and_distinct() {
+        assert_eq!(ReviewArm::DiffOnly.tag(), "diff-only");
+        assert_eq!(ReviewArm::Graph.tag(), "graph");
+        assert_ne!(ReviewArm::DiffOnly.tag(), ReviewArm::Graph.tag());
+    }
+
+    /// **The live surface and the measured surface build the same graph.**
+    ///
+    /// `review --llm --graph-context` assembles the working tree's graph and the
+    /// replay assembles a commit's, through the same derived-then-authored
+    /// sequence. If they diverged, the replay's number would be a measurement of
+    /// something users cannot run — which is the failure `ReviewSet::collect` was
+    /// introduced to close on the other half of this module.
+    #[test]
+    fn the_live_surface_builds_the_same_graph_as_the_replay() {
+        let repo_path = repo();
+        if !history_available(&repo_path) {
+            return;
+        }
+        let Ok(store) = super::worktree_graph(&repo_path, rto_graph::IngestConfig::default())
+        else {
+            eprintln!("SKIP: the working-tree graph could not be assembled here");
+            return;
+        };
+        let on_disk = std::fs::read_dir(repo_path.join("docs/adr"))
+            .expect("this repository has an ADR directory")
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                std::path::Path::new(name.as_ref())
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                    && name != "README.md"
+            })
+            .count();
+        let adrs = store
+            .nodes_by_kind(&rto_graph::NodeKind::Adr)
+            .expect("the store answers");
+        assert_eq!(
+            adrs.len(),
+            on_disk,
+            "the live graph holds {} ADR node(s) against {on_disk} on disk — the \
+             authored layer did not reach it",
+            adrs.len()
+        );
+    }
+
+    /// **The diff-only arm is the absence of a store, and must send nothing.**
+    ///
+    /// The baseline's whole meaning is that the model saw the diff and nothing
+    /// else. An arm that quietly acquired one item would make the comparison a
+    /// comparison of two graph arms.
+    #[test]
+    fn the_diff_only_arm_sends_no_context_at_all() {
+        let file = FileUnderReview {
+            reviewed_sha: "0".repeat(40),
+            path: "src/lib.rs".to_owned(),
+            diff: "@@ -1 +1 @@\n+x\n".to_owned(),
+        };
+        let context = context_for(None, &file, &|_| None).expect("no store, no work");
+        assert!(context.is_empty());
+        assert_eq!(context.dropped_items, 0);
+        assert_eq!(context.tokens(), 0);
+    }
+
+    /// **The graph arm must actually send something, or it is the diff-only arm
+    /// wearing another name.**
+    ///
+    /// A comparison whose treatment turned out to be empty reports the model's
+    /// run-to-run variance as a finding about the graph. So this asserts a
+    /// non-empty, provenance-tagged context on a real corpus file — and that
+    /// `authored` items are present, since a governing decision is the specific
+    /// thing the arm exists to supply.
+    #[test]
+    fn the_graph_arm_supplies_provenance_tagged_context_on_the_corpus() {
+        let repo_path = repo();
+        if !history_available(&repo_path) {
+            return;
+        }
+        let Some((repo, cache)) = graph_inputs() else {
+            eprintln!("SKIP: cannot open the repository's object cache");
+            return;
+        };
+        let main = main_ref(&repo_path).expect("checked above");
+        let mut files_with_context = 0usize;
+        let mut authored = 0usize;
+        let mut derived = 0usize;
+        let mut items = 0usize;
+        let mut tokens = 0usize;
+        let mut dropped = 0usize;
+        for sha in &corpus_shas() {
+            let store = graph_at(
+                &repo,
+                &cache,
+                rto_graph::IngestConfig::default(),
+                ReviewArm::Graph,
+                sha,
+            )
+            .expect("the graph at a corpus commit assembles")
+            .expect("the graph arm yields a store");
+            let set = files_at(&repo_path, sha, &main).expect("the diff reconstructs");
+            for file in &set.files {
+                let sources = |p: &str| {
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&repo_path)
+                        .args(["show", &format!("{sha}:{p}")])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                };
+                let context =
+                    context_for(Some(&store), file, &sources).expect("the context assembles");
+                assert!(
+                    context.tokens() <= rto_graph::reviewer::CONTEXT_CAP_TOKENS,
+                    "{}: {} context tokens exceeds the cap — the dose is not bounded \
+                     by the policy that was pre-registered for it",
+                    file.path,
+                    context.tokens()
+                );
+                if !context.is_empty() {
+                    files_with_context += 1;
+                    items += context.items.len();
+                    tokens += context.tokens();
+                    dropped += context.dropped_items;
+                }
+                for item in &context.items {
+                    assert!(
+                        !item.body.trim().is_empty(),
+                        "{}: an item claiming context quoted nothing",
+                        item.label
+                    );
+                    match item.provenance.as_str() {
+                        "authored" => authored += 1,
+                        "derived" => derived += 1,
+                        other => panic!("unknown provenance layer {other:?} on {}", item.label),
+                    }
+                }
+            }
+        }
+        println!(
+            "graph-arm dose over the corpus: {files_with_context} file(s) carried \
+             context, {items} item(s) ({authored} authored, {derived} derived), \
+             ~{tokens} token(s), {dropped} item(s) dropped by the cap"
+        );
+        assert!(
+            files_with_context > 0,
+            "the graph arm produced no context on any corpus file — it is the \
+             diff-only arm under another name"
+        );
+        assert!(
+            authored > 0,
+            "no governing ADR reached any file: the arm's central item is missing \
+             ({derived} derived item(s) were sent)"
+        );
     }
 
     /// **The recipe, held to the data by the shipped code rather than by a

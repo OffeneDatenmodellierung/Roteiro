@@ -37,9 +37,10 @@ requires — no C++, no cmake, no libclang — and makes no network call on its 
 It includes everything needed to *prepare* for working offline —
 `roteiro model pull` and `roteiro security prefetch|status|run` — so
 [`docs/OFFLINE_SETUP.md`](docs/OFFLINE_SETUP.md) needs no special build. Nothing
-is fetched until you say yes to it, and `security run` still requires
-`--allow-unsandboxed` on every invocation, because it executes a third-party
-analyzer on this host with no isolation boundary. **The analyzers themselves are
+is fetched until you say yes to it. `security run` is sandboxed by default and
+refuses by name when this build has no sandbox; running the analyzer **on this
+host** instead still requires `--allow-unsandboxed` on every invocation, because
+that executes a third-party analyzer here with no isolation boundary. **The analyzers themselves are
 yours to install** (`semgrep`, `osv-scanner`, `cargo install cargo-audit`) — the
 guide has the commands, and `roteiro security ingest` accepts a report produced
 anywhere if you would rather install none of them. Local *inference* and

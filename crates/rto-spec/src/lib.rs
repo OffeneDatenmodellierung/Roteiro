@@ -26,7 +26,7 @@ pub use lat::{
     LAT_REF, LatAnnotation, LatImport, LatReport, import_lat, import_lat_backlinks,
     resolve_lat_ref, scan_lat_annotations,
 };
-pub use layer::{AuthoredLayer, authored_layer};
+pub use layer::{AuthoredLayer, BlobReader, authored_blobs, authored_layer, authored_layer_from};
 pub use spec::{
     SPEC_SCHEMA, SpecContext, SymbolContext, apply_drafts, context, draft_prompt, draft_targets,
     scaffold_adr, scaffold_blueprint,
