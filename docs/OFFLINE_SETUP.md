@@ -98,18 +98,25 @@ cargo install roteiro --features serve      # + local model serving and inferenc
 ```
 
 Neither default changes when bytes move. `model pull` is still consent-gated;
-`security prefetch` still refuses to download without `--allow-download`; and a
-`security run` still refuses without `--allow-unsandboxed`, every time.
+`security prefetch` still refuses to download without `--allow-download`; and
+running an analyzer **on this host** still refuses without `--allow-unsandboxed`,
+every time.
 
-> **`--allow-unsandboxed` matters more now, not less.** `security run` executes
-> a third-party analyzer as a child process on this host with **no isolation
-> boundary** — the run's own evidence records `isolation=none`. That used to be
-> gated twice: once at build time by asking for `exec-subprocess`, and once per
-> run by the flag. The build-time half is gone now that the feature is a default,
-> so the flag is the only thing left. It is required on every invocation and will
-> not be softened. If you want a boundary, `--features exec-boxlite` runs the
-> same analyzer in a microVM (see the README); if you want neither, use
-> `roteiro security ingest` and never execute anything locally.
+`security run` is sandboxed by default: with no flag it executes the analyzer
+inside a digest-pinned OCI image in a microVM. That backend is `exec-boxlite`,
+which is *not* a default feature, so on a stock install the default path is a
+named refusal that spells out the rebuild rather than quietly running on the host
+— see the README for the provisioning order.
+
+> **`--allow-unsandboxed` matters more now, not less.** It is what selects the
+> host: a third-party analyzer as a child process here with **no isolation
+> boundary**, and the run's own evidence records `isolation=none`. That used to
+> be gated twice — once at build time by asking for `exec-subprocess`, and once
+> per run by the flag. The build-time half is gone now that the feature is a
+> default, so the flag is the only thing left. The sandbox existing does not
+> soften it either: nothing implies it, and no failure of the sandbox is ever
+> answered by falling back to it. If you want neither, use `roteiro security
+> ingest` and never execute anything locally.
 
 If you want a build that provisions and ingests but genuinely **cannot** execute
 an analyzer — a locked-down CI image, say — that is still one flag away:
