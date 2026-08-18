@@ -70,6 +70,20 @@
 //! "the report is accurate" has read it wrong, and this paragraph exists so that
 //! is a misreading rather than an honest mistake.
 //!
+//! # The public surface, and why it is written down
+//!
+//! One entry point, [`check`], plus the types it operates on —
+//! [`Rendering`]/[`Segment`] going in, [`Verdict`]/[`Defect`] coming out — and
+//! [`STRUCTURAL_EXEMPTIONS`], which a renderer must be able to read in order to
+//! emit a connective this crate will accept. Nothing else is public.
+//!
+//! That list is asserted by `the_public_surface_is_what_is_written_down` rather
+//! than merely described, because the first draft of this crate described a
+//! surface it did not have: a whitespace helper shipped `pub` while the prose
+//! said there was one public function. Prose about a contract drifting away from
+//! the contract is the defect class this crate exists to catch, so leaving it as
+//! prose would have been the wrong lesson to take from finding it.
+//!
 //! # Not stored
 //!
 //! A rendering is ephemeral — local to the person who ran the review, not an
@@ -86,7 +100,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// These are connectives: they introduce, they separate, they assert nothing
 /// about the code, the findings, or how many there are. A segment matches only
-/// by exact string equality after [`normalize`] — same characters, same case.
+/// by exact string equality once its whitespace is collapsed — leading and
+/// trailing whitespace dropped, internal runs reduced to one space — so a line
+/// wrap is forgiven and a change of case is not.
 ///
 /// # This list is FROZEN
 ///
@@ -131,8 +147,18 @@ pub const STRUCTURAL_EXEMPTIONS: [&str; 6] = [
 ///
 /// Case is **not** folded. The exemption list is frozen literals, and a renderer
 /// that must emit the literal exactly cannot drift the list by casing.
-#[must_use]
-pub fn normalize(text: &str) -> String {
+///
+/// **Private on purpose**, and it shipped `pub` in the first draft of this crate
+/// — caught in review, which is the point rather than an aside: a stated contract
+/// and a real surface had drifted apart in the crate built to detect exactly that
+/// drift. Nothing outside needs it. A renderer emits a connective from
+/// [`STRUCTURAL_EXEMPTIONS`] verbatim, and this exists so that a line wrap
+/// between here and there is forgiven; a caller that pre-normalized its own text
+/// would be matching the checker's implementation instead of the frozen list. The
+/// public surface of a new crate is free to choose now and expensive to shrink
+/// later — the same arithmetic that made `#[non_exhaustive]` worth paying for
+/// once in #391.
+fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -166,7 +192,8 @@ pub enum Segment {
     /// A connective that asserts nothing, and must appear verbatim in
     /// [`STRUCTURAL_EXEMPTIONS`].
     Structural {
-        /// The connective, matched against the frozen list after [`normalize`].
+        /// The connective, matched against [`STRUCTURAL_EXEMPTIONS`] verbatim
+        /// once its whitespace is collapsed.
         text: String,
     },
 }
@@ -559,6 +586,52 @@ mod tests {
              cannot read code, reach the network, or run a model\" is a property of the manifest \
              rather than of good intentions. Adding one is allowed — but it is a decision, and \
              this assertion is where it gets made."
+        );
+    }
+
+    /// The public surface is exactly what the crate docs say it is.
+    ///
+    /// Scans this file's top-level `pub` items — the same read-your-own-source
+    /// idiom as `dependencies_are_frozen` and the `#[non_exhaustive]` guard
+    /// below, and for the same reason: whether a type escaped is a property of
+    /// the text, not of any run.
+    ///
+    /// It exists because it caught something. `normalize` shipped `pub` in the
+    /// first draft while the crate described itself as having one public
+    /// function, and it took a human reviewer to notice. A surface is cheap to
+    /// choose while a crate is new and expensive to shrink once published, so the
+    /// decision gets a test rather than a sentence. Adding an item here is
+    /// allowed — this assertion is where it gets made deliberately.
+    #[test]
+    fn the_public_surface_is_what_is_written_down() {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .expect("read this crate's lib.rs");
+        // Column-zero `pub` only: methods and struct fields are indented, and
+        // they are reached through a type this list already names.
+        let exported: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("pub "))
+            .filter_map(|rest| rest.split_whitespace().nth(1))
+            .filter_map(|name| {
+                name.split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+            })
+            .collect();
+        assert_eq!(
+            exported,
+            vec![
+                "STRUCTURAL_EXEMPTIONS",
+                "Segment",
+                "Rendering",
+                "Defect",
+                "Verdict",
+                "check",
+            ],
+            "the public surface of `rto-faithful` changed. The crate docs say it is one entry \
+             point plus the types it operates on, and that sentence is only true while this \
+             list is. Widening it is a decision — make it here, and say it there."
         );
     }
 

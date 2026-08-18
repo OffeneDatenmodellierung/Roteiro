@@ -117,10 +117,8 @@ fn every_fixture_says_why() {
 /// same failure as having no check.
 #[test]
 fn every_defect_is_exercised_by_a_fixture() {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../rto-faithful/src/lib.rs"),
-    )
-    .expect("read rto-faithful/src/lib.rs");
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
+        .expect("read rto-faithful/src/lib.rs");
 
     let labels: Vec<String> = source
         .lines()

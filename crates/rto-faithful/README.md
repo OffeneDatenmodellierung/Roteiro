@@ -17,6 +17,14 @@ let verdict = rto_faithful::check(&findings, &rendering);
 assert!(verdict.is_faithful());
 ```
 
+The public surface is that one entry point plus the types it operates on —
+`Rendering`/`Segment` in, `Verdict`/`Defect` out — and `STRUCTURAL_EXEMPTIONS`,
+which a renderer reads in order to emit a connective the checker will accept.
+Nothing else. That sentence is asserted by a test rather than trusted, because
+the first draft of this crate described a surface it did not have: a whitespace
+helper shipped `pub` while the prose said otherwise. Prose drifting from the
+contract it describes is the defect class this crate exists to catch.
+
 ## What counts as a claim
 
 An **explicitly delimited span**. The renderer returns a sequence of segments and
