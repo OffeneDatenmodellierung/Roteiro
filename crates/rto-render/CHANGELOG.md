@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.21.0...rto-render-v1.21.1) - 2026-08-18
+
+### Fixed
+
+- *(query)* search reads `limit = 0` as unlimited, per channel, via `window`
+
+### Other
+
+- *(cli,mcp)* say what `limit` means on every surface that describes it
+
 ## [1.16.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.15.0...rto-render-v1.16.0) - 2026-08-17
 
 ### Added
