@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.2"
-last-modified: 2026-08-15
+version: "1.3"
+last-modified: 2026-08-17
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -244,7 +244,7 @@ rule that a decision and its mechanism should arrive together.
 
 | Version | Date | Change |
 |---|---|---|
-| 1.2 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
 | 1.0 | 2026-08-15 | Initial decision. |
 | 1.1 | 2026-08-15 | **48 hours restated as a floor, not a ceiling.** v1.0's title — "never newer than 48 hours" — reads as an upper bound, and implementing it literally would have configured the updater *down* to two days from Dependabot's three-day default (introduced 2026-07-14), reducing safety in order to comply with the prose. Adds the directional rule in §1, corrects the title and Summary, and records the configured value (three days). Also corrects the Summary and §3 claim that `cargo audit` shared `cargo deny`'s feature blind spot — it does not, because it reads `Cargo.lock`; this was measured, and the same error in #318 has been corrected upstream. |
 | 1.2 | 2026-08-16 | **Disclosure, not a policy change: `models` became a default feature.** §3's parenthetical "(via `webpki-roots`, under `models`)" now describes a licence in **every** shipped binary rather than an opt-in one. `CDLA-Permissive-2.0` moves into the default set along with `ISC` (`rustls-webpki`, `untrusted`, and the ISC half of `ring`'s `Apache-2.0 AND ISC`) and `BSD-3-Clause` (`subtle`). **No allow-list entry was added or amended** — all four were already allowed, and the CDLA rationale in `deny.toml` never turned on the feature being opt-in. Recorded because this ADR's subject is gates that see what the project actually *ships*, and what it ships changed. |
+| 1.3 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |

@@ -295,6 +295,6 @@ row — never a quiet deviation in code.
 
 | Version | Date | Change |
 |---|---|---|
-| 1.2 | 2026-08-17 | Scoped "the invocation" for long-lived processes: `serve --allow-remote` grants for the life of the server process, decided by the owner. Records why a per-request grant is unworkable (nobody is present at an HTTP request to ask), states the exposure plainly, and names the three existing bounds. No change to the grant/deny table. |
-| 1.1 | 2026-08-17 | **Accepted.** No content changed; Stage 34 is unblocked. |
 | 1.0 | 2026-08-17 | Initial. Written to unblock Stage 34. |
+| 1.1 | 2026-08-17 | **Accepted.** No content changed; Stage 34 is unblocked. |
+| 1.2 | 2026-08-17 | Scoped "the invocation" for long-lived processes: `serve --allow-remote` grants for the life of the server process, decided by the owner. Records why a per-request grant is unworkable (nobody is present at an HTTP request to ask), states the exposure plainly, and names the three existing bounds. No change to the grant/deny table. |
