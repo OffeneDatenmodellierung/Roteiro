@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.21.1...roteiro-v1.22.0) - 2026-08-18
+
+### Added
+
+- *(security)* run analyzers sandboxed by default, and never fall back
+
+### Other
+
+- Merge pull request #407 from OffeneDatenmodellierung/feat/security-run-sandboxed
+
 ## [1.21.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.21.0...roteiro-v1.21.1) - 2026-08-18
 
 ### Fixed

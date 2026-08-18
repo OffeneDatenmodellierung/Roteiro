@@ -58,6 +58,7 @@ source of truth:
 | `roteiro.review-score/v1` | `rto_graph::review_score::SCORE_SCHEMA` | `review --score` | The score: **per-defect-class** recall (never averaged), the known-false claims reproduced, and the findings the corpus cannot judge. `per_class` always carries every class, so two scores line up row for row. |
 | `roteiro.graph/v1` | `rto_graph::ARTIFACT_SCHEMA` | `export` (and consumed by `load`) | The portable, content-addressed graph artifact (`schema`, `tree`, `facts`). |
 | `roteiro.spec/v1` | `rto_spec::SPEC_SCHEMA` | `spec context`, `spec scaffold` | Graph-grounded spec/blueprint authoring context and skeletons. |
+| `roteiro.check/v1` | `rto_spec::TOOL_CHECK_SCHEMA` | the MCP and served-chat `check` **tools** (not `check --json`) | The authored-layer drift verdict as data: `gate` (`pass` \| `fail` \| `not-run`), a `report` (a `CheckReport`) **present only when the check ran**, `checked_against`, and `not_run_reason`. A `not-run` document carries no `report` at all, so `0 violations` and *nothing was checked* cannot be confused. The CLI's `check --json` is unchanged and still emits a bare, untagged `CheckReport` — a gate whose real answer is its exit code. |
 | `roteiro.oracle/v1` | `rto_graph::ORACLE_SCHEMA` | `import codegraph` | The codegraph validation-oracle comparison report. |
 
 ## Operational summaries (stable shape, untagged)
@@ -66,7 +67,10 @@ These `--json` outputs are human-oriented run summaries with a **stable field
 shape**, but do not (yet) carry a `schema` tag:
 
 - `sync --json` — `SyncReport` (tree id, blob/cache counts, node/edge totals).
-- `check --json` — `CheckReport` (ADR/link/annotation counts, violations).
+- `check --json` — `CheckReport` (ADR/link/annotation counts, violations). The
+  **exit code** is the verdict here; a tool surface has none, which is why the
+  `check` tool wraps this in the tagged `roteiro.check/v1` above rather than
+  returning it bare.
 - `infer --json` — the inference run summary (suggested-edge count; feature-gated).
 - `import lat|graphify --json` — the importer's migration report.
 - `config --json` — the effective merged configuration.

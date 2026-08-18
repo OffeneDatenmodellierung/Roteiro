@@ -88,7 +88,9 @@ pub use config_keys::{
     is_secret_key, is_tooling_config_path, normalize as normalize_config_key,
 };
 pub use context::{
-    ContextRefresh, NodeContext, build_context, context, dependents, refresh_contexts,
+    BoundedEdges, ContextEdge, ContextNode, ContextRefresh, NodeContext, OmittedEdges,
+    TOOL_CONTEXT_EDGE_CAP, ToolContext, build_context, context, dependents, refresh_contexts,
+    tool_context,
 };
 pub use extract::{
     Extractor, FileNodeExtractor, IngestConfig, MediaEngineGuard, Registry, RustExtractor,
@@ -100,7 +102,7 @@ pub use findings::{
     MAX_IDENTITY_PART, NetworkPolicy, RunnerKind, SECURITY_LAYER_PREFIX, Severity, SourceIdentity,
     WorktreeAccess, WorktreeId, analyzer_id_error, is_valid_analyzer_id, layer_key,
 };
-pub use git::{BlobRef, ChangeStatus, ChangedFile, GitError, Repo, Submodule};
+pub use git::{BlobRef, ChangeStatus, ChangedFile, GitError, GraphSource, Repo, Submodule};
 #[cfg(feature = "inference")]
 pub use infer::{
     DuplicateConfig, DuplicatePair, DuplicateReport, EMBED_REF, Embedder, HashEmbedder,

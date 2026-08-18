@@ -11,7 +11,7 @@
 //! two ADRs claiming one id silently discard a decision. See
 //! [`duplicate_adr_ids`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rto_graph::{Edge, EdgeKind, Store, StoreError};
 use serde::Serialize;
@@ -136,51 +136,100 @@ fn duplicate_adr_ids(docs: &[AdrDoc]) -> Vec<Violation> {
         .collect()
 }
 
-/// Apply the authored layer to `store` and validate it against the derived
-/// graph, returning a [`CheckReport`].
+/// The outcome of a read-only [`validate`]: the report, plus the `authored`
+/// edges the valid links and annotations *would* weave into the graph.
+///
+/// Splitting the edges out of the report is what lets one violation definition
+/// serve both a gate that writes ([`run`]) and a tool surface that must not
+/// ([`crate::tool_check`]). Nothing decides what counts as drift twice.
+#[derive(Debug, Clone, Default)]
+pub struct Validation {
+    /// What was checked and what drifted.
+    pub report: CheckReport,
+    /// The `authored` `references` edges the resolved links and annotations
+    /// imply. [`run`] inserts these; a read-only caller discards them.
+    pub edges: Vec<Edge>,
+}
+
+/// The nodes the authored layer *would* contribute, and each authored ADR's
+/// parsed `status`.
+///
+/// [`run`] applies these to the store before validating, so its `get_node`
+/// lookups see them. [`validate`] must reach the same verdict without writing,
+/// so it consults this overlay first and the store second — the keys come from
+/// the very same [`AdrDoc::facts`]/[`BlueprintDoc::facts`] sets `run` applies, so
+/// the two cannot disagree about what the authored layer contributes.
+///
+/// Later docs overwrite earlier ones, matching `apply_factset`'s
+/// last-writer-wins — which is exactly the lossiness [`duplicate_adr_ids`]
+/// reports separately.
+#[derive(Debug, Default)]
+struct AuthoredOverlay {
+    /// Every node key the authored layer contributes (ADRs, ADR sections,
+    /// blueprints and their sections).
+    keys: BTreeSet<String>,
+    /// Parsed status per ADR node key.
+    adr_status: BTreeMap<String, AdrStatus>,
+}
+
+fn authored_overlay(docs: &[AdrDoc], blueprints: &[BlueprintDoc]) -> AuthoredOverlay {
+    let mut overlay = AuthoredOverlay::default();
+    for doc in docs {
+        overlay
+            .keys
+            .extend(doc.facts().nodes.into_iter().map(|n| n.key));
+        overlay.adr_status.insert(doc.key(), doc.meta.status);
+    }
+    for bp in blueprints {
+        overlay
+            .keys
+            .extend(bp.facts().nodes.into_iter().map(|n| n.key));
+    }
+    overlay
+}
+
+/// Validate the authored layer against the derived graph **without writing
+/// anything**, returning the report and the edges a writing caller should weave.
+///
+/// This is the whole of the drift rule. [`run`] is this function plus the two
+/// writes it deliberately leaves out (applying the ADR/blueprint structure, and
+/// inserting the returned edges), so the CLI gate and the read-only tool surfaces
+/// cannot drift apart in what they call a violation.
 ///
 /// # Errors
-/// Returns [`StoreError`] if applying ADR facts or edges, or querying the
-/// store, fails.
-pub fn run(
-    store: &mut Store,
+/// Returns [`StoreError`] if querying the store fails.
+pub fn validate(
+    store: &Store,
     docs: &[AdrDoc],
     blueprints: &[BlueprintDoc],
     annotations: &[Annotation],
-) -> Result<CheckReport, StoreError> {
-    // 1. Detect colliding ADR ids *before* applying anything, so the report
+) -> Result<Validation, StoreError> {
+    // 1. Detect colliding ADR ids *before* anything is applied, so the report
     //    describes the authored file set rather than what survived the merge.
-    let mut duplicates = duplicate_adr_ids(docs);
-
-    // 2. Materialise ADR/blueprint section nodes so links and annotations can
-    //    reference them (and so `@rto:` targets can be looked up by key).
-    for doc in docs {
-        store.apply_factset(&doc.facts())?;
-    }
-    for bp in blueprints {
-        store.apply_factset(&bp.facts())?;
-    }
-
     let mut report = CheckReport {
         adrs: docs.len(),
         blueprints: blueprints.len(),
+        violations: duplicate_adr_ids(docs),
         ..CheckReport::default()
     };
-    report.violations.append(&mut duplicates);
+    let overlay = authored_overlay(docs, blueprints);
+    let mut edges = Vec::new();
 
-    // 3. Validate ADR and blueprint `[[…]]` links against the code graph. Both
+    // 2. Validate ADR and blueprint `[[…]]` links against the code graph. Both
     //    author `references` edges into real symbols/files and drift the same way.
     let links = docs
         .iter()
         .flat_map(|d| &d.links)
         .chain(blueprints.iter().flat_map(|b| &b.links));
     for link in links {
-        if store.get_node(&link.target_key)?.is_some() {
-            store.insert_edge(&Edge::authored(
+        // A link resolves against the derived graph, or against an ADR the
+        // authored layer is contributing in this same pass.
+        if store.get_node(&link.target_key)?.is_some() || overlay.keys.contains(&link.target_key) {
+            edges.push(Edge::authored(
                 link.from.clone(),
                 link.target_key.clone(),
                 EdgeKind::References,
-            ))?;
+            ));
             report.links_ok += 1;
         } else {
             report.violations.push(Violation {
@@ -193,10 +242,28 @@ pub fn run(
         }
     }
 
-    // 4. Validate `@rto:` annotations against ADR state.
+    // 3. Validate `@rto:` annotations against ADR state. The overlay is consulted
+    //    first: an ADR authored in this pass is the one the annotation means, and
+    //    its parsed status is what `run` would have written to the node.
     for ann in annotations {
         let key = ann.target_key();
-        let Some(adr) = store.get_node(&key)? else {
+        let status = match overlay.adr_status.get(&key) {
+            Some(status) => Some(*status),
+            None => match store.get_node(&key)? {
+                Some(adr) => Some(
+                    adr.meta
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .and_then(|s| s.parse::<AdrStatus>().ok())
+                        // A node with an unparseable status still *exists*, so it
+                        // is not `unknown-adr`; treat it as active, exactly as the
+                        // pre-split code did by leaving `status` at `None`.
+                        .unwrap_or(AdrStatus::Accepted),
+                ),
+                None => None,
+            },
+        };
+        let Some(status) = status else {
             report.violations.push(Violation {
                 kind: ViolationKind::UnknownAdr,
                 message: format!(
@@ -206,12 +273,7 @@ pub fn run(
             });
             continue;
         };
-        let status = adr
-            .meta
-            .get("status")
-            .and_then(|s| s.as_str())
-            .and_then(|s| s.parse::<AdrStatus>().ok());
-        if status.is_some_and(|s| !s.is_active()) {
+        if !status.is_active() {
             report.violations.push(Violation {
                 kind: ViolationKind::InactiveAdr,
                 message: format!(
@@ -219,10 +281,7 @@ pub fn run(
                     ann.path,
                     ann.line,
                     ann.adr_id,
-                    adr.meta
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("?")
+                    status.as_str()
                 ),
             });
             continue;
@@ -230,12 +289,44 @@ pub fn run(
         // Link the annotated file to the ADR when the file is in the graph.
         let file_key = format!("file:{}", ann.path);
         if store.get_node(&file_key)?.is_some() {
-            store.insert_edge(&Edge::authored(file_key, key, EdgeKind::References))?;
+            edges.push(Edge::authored(file_key, key, EdgeKind::References));
         }
         report.annotations_ok += 1;
     }
 
-    Ok(report)
+    Ok(Validation { report, edges })
+}
+
+/// Apply the authored layer to `store` and validate it against the derived
+/// graph, returning a [`CheckReport`].
+///
+/// The verdict itself comes from [`validate`]; this function is the writing half
+/// around it — materialising ADR/blueprint structure so links can reference it,
+/// and weaving the resolved links in as `authored` edges.
+///
+/// # Errors
+/// Returns [`StoreError`] if applying ADR facts or edges, or querying the
+/// store, fails.
+pub fn run(
+    store: &mut Store,
+    docs: &[AdrDoc],
+    blueprints: &[BlueprintDoc],
+    annotations: &[Annotation],
+) -> Result<CheckReport, StoreError> {
+    // Materialise ADR/blueprint section nodes so links and annotations can
+    // reference them (and so `@rto:` targets can be looked up by key).
+    for doc in docs {
+        store.apply_factset(&doc.facts())?;
+    }
+    for bp in blueprints {
+        store.apply_factset(&bp.facts())?;
+    }
+
+    let validation = validate(store, docs, blueprints, annotations)?;
+    for edge in &validation.edges {
+        store.insert_edge(edge)?;
+    }
+    Ok(validation.report)
 }
 
 #[cfg(test)]
