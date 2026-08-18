@@ -13,6 +13,37 @@ pub struct BlobRef {
     pub oid: String,
 }
 
+/// Which tree the graph — derived layer *and* authored layer — is built from:
+/// the committed `HEAD`, the working tree (uncommitted edits on disk), or the
+/// git index (the staged tree a commit would record).
+///
+/// It selects the sync engine ([`crate::sync`] / [`crate::sync_worktree`] /
+/// [`crate::sync_index`]) and the authored-layer source
+/// ([`Repo::read_source`]) **together**, which is the point of it being one
+/// type: the two layers disagreeing about which tree they describe is issue
+/// #330, and it was a silent wrong answer rather than a loud one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphSource {
+    /// The committed `HEAD` tree (the CI merge gate).
+    Committed,
+    /// The working tree: `HEAD` plus uncommitted edits to tracked files on disk.
+    Worktree,
+    /// The git index — exactly what a commit would record (the pre-commit gate).
+    Index,
+}
+
+impl GraphSource {
+    /// A short stable token for this source, for reports and tool documents.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::Worktree => "worktree",
+            Self::Index => "index",
+        }
+    }
+}
+
 /// Errors raised while reading from a git repository.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -337,6 +368,49 @@ impl Repo {
         // `detach()` moves the owned data out without cloning; `Object` itself
         // implements `Drop`, so the bare field cannot be moved out directly.
         Ok(self.inner.find_object(id).map_err(ge)?.detach().data)
+    }
+
+    /// The bytes of a tracked file's **authored source**, from the tree named by
+    /// `source`: the committed `HEAD` blob, the staged blob, or the file as it
+    /// stands on disk (unstaged edits included, and *not* the git index).
+    ///
+    /// The `Worktree` reading matches [`crate::sync_worktree`], which the derived
+    /// graph is built from, so the authored and derived layers stay consistent —
+    /// see [`GraphSource`] for why that pairing is one type rather than two
+    /// independent choices.
+    ///
+    /// Returns `Ok(None)` when a worktree file has been deleted, so the caller
+    /// drops it.
+    ///
+    /// # Errors
+    /// Returns [`GitError::Git`] if the blob cannot be read, or if reading the
+    /// working-tree copy fails for any reason other than the file being absent.
+    pub fn read_source(
+        &self,
+        blob: &BlobRef,
+        source: GraphSource,
+    ) -> Result<Option<Vec<u8>>, GitError> {
+        match source {
+            // Worktree: the file as it stands on disk (unstaged edits included),
+            // or `None` if it was deleted there.
+            GraphSource::Worktree => match self.workdir() {
+                Some(workdir) => match std::fs::read(workdir.join(&blob.path)) {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    // Folded into `GitError::Git` with the path rather than
+                    // carried as its own variant: `GitError` is not
+                    // `#[non_exhaustive]`, so a new variant would break every
+                    // downstream exhaustive match for a message this already
+                    // preserves.
+                    Err(e) => Err(GitError::Git(format!("reading {}: {e}", blob.path))),
+                },
+                None => Ok(Some(self.read_blob(&blob.oid)?)),
+            },
+            // Committed reads the `HEAD` blob; Index reads the staged blob — for
+            // both, `blob.oid` is already the right object (the blob list came
+            // from that tree), so read it directly.
+            GraphSource::Committed | GraphSource::Index => Ok(Some(self.read_blob(&blob.oid)?)),
+        }
     }
 
     /// Tracked files whose working-tree content differs from `HEAD` — the change

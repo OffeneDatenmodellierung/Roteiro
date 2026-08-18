@@ -405,5 +405,6 @@ mod tests {
         assert_eq!(rto_graph::ARTIFACT_SCHEMA, "roteiro.graph/v1");
         assert_eq!(rto_graph::ORACLE_SCHEMA, "roteiro.oracle/v1");
         assert_eq!(rto_spec::SPEC_SCHEMA, "roteiro.spec/v1");
+        assert_eq!(rto_spec::TOOL_CHECK_SCHEMA, "roteiro.check/v1");
     }
 }

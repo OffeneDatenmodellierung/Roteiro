@@ -5,6 +5,11 @@
 //! @rto:0001
 
 use clap::{Parser, Subcommand};
+// Which tree the graph is built from. It lives in `rto_graph` rather than
+// here because the authored-layer walk that must agree with it does too
+// (`rto_spec::authored_layer`) — see `GraphSource` for why the two are one
+// choice.
+use rto_graph::GraphSource;
 
 mod config;
 // The read-only `/v1/graph/*` JSON API. Its runtime callers are `run_explorer`
@@ -2802,48 +2807,6 @@ fn open_graph() -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph:
     Ok((repo, store, cache))
 }
 
-/// The bytes of a tracked file's authored source: the committed `HEAD` blob when
-/// `committed`, otherwise its **working-tree** copy — the file as it is on disk,
-/// which includes any unstaged edits and is *not* the git index. (This matches
-/// [`rto_graph::sync_worktree`], which the derived graph is built from, so the
-/// authored and derived layers stay consistent.) Returns `Ok(None)` when a
-/// worktree file has been deleted, so the caller drops it.
-fn read_source(
-    repo: &rto_graph::Repo,
-    blob: &rto_graph::BlobRef,
-    source: GraphSource,
-) -> anyhow::Result<Option<Vec<u8>>> {
-    match source {
-        // Worktree: the file as it stands on disk (unstaged edits included), or
-        // `None` if it was deleted there.
-        GraphSource::Worktree => match repo.workdir() {
-            Some(workdir) => match std::fs::read(workdir.join(&blob.path)) {
-                Ok(bytes) => Ok(Some(bytes)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e.into()),
-            },
-            None => Ok(Some(repo.read_blob(&blob.oid)?)),
-        },
-        // Committed reads the `HEAD` blob; Index reads the staged blob — for both,
-        // `blob.oid` is already the right object (the blob list came from that
-        // tree), so read it directly.
-        GraphSource::Committed | GraphSource::Index => Ok(Some(repo.read_blob(&blob.oid)?)),
-    }
-}
-
-/// Which tree the graph is built from: the committed `HEAD`, the working tree
-/// (uncommitted edits on disk), or the git index (the staged tree a commit would
-/// record). Selects the sync engine and the authored-layer source together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GraphSource {
-    /// The committed `HEAD` tree (the CI merge gate).
-    Committed,
-    /// The working tree: `HEAD` plus uncommitted edits to tracked files on disk.
-    Worktree,
-    /// The git index — exactly what a commit would record (the pre-commit gate).
-    Index,
-}
-
 /// Refuse to **rewrite** a graph store that a newer Roteiro has already written
 /// (issue #342).
 ///
@@ -2928,80 +2891,19 @@ fn build_graph(
     // between a correct verdict and a confident wrong one. Say so (issue #330).
     report_foreign_worktree(&sync_report);
 
-    // The authored-layer file set must match the derived tree: the staged files
-    // in Index mode (so a staged-new ADR is seen), the `HEAD` tree in Committed
-    // mode, and in Worktree mode `HEAD` **plus untracked files** — because that
-    // is precisely what `sync_worktree` overlaid into the derived layer.
-    //
-    // Getting this wrong is issue #330's observed symptom, and it is a *silent*
-    // wrong answer rather than a loud one. `sync_worktree` walks untracked files
-    // deliberately, "so the working-tree `sync`/`check`/`review` see new work
-    // that isn't staged yet" — but the authored set here read only `HEAD`, so a
-    // brand-new ADR had its symbols extracted while the file was never parsed as
-    // an ADR. `check` then reported 17 ADRs with 18 on disk, `sync` said "up to
-    // date", and nothing indicated that the newest decision was missing. The two
-    // layers disagreed about which tree they were describing, in one worktree,
-    // with no second worktree involved.
-    let blobs = match source {
-        GraphSource::Index => repo.index_files()?,
-        GraphSource::Committed => repo.walk_blobs()?,
-        GraphSource::Worktree => {
-            let mut blobs = repo.walk_blobs()?;
-            // `untracked_files` is defined against the index, so it cannot
-            // return a path already in `blobs`. The synthesized oid is unused:
-            // `read_source` reads Worktree content from disk by path, and an
-            // untracked file has no git object to read anyway. (A bare repo has
-            // no working tree, and `untracked_files` returns nothing there, so
-            // the oid-reading fallback is never reached with one of these.)
-            blobs.extend(
-                repo.untracked_files()?
-                    .into_iter()
-                    .map(|path| rto_graph::BlobRef {
-                        path,
-                        oid: String::new(),
-                    }),
-            );
-            blobs
-        }
-    };
-    let mut docs = Vec::new();
-    let mut blueprints = Vec::new();
-    let mut annotations = Vec::new();
-    let mut malformed = Vec::new();
-    for blob in blobs {
-        // Parse the authored source from the same tree the derived layer used.
-        let Some(bytes) = read_source(repo, &blob, source)? else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let file = std::path::Path::new(&blob.path);
-        let is_md = file
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
-        let name = file
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let is_adr = blob.path.starts_with("docs/adr/") && is_md && name != "README.md";
-        if is_adr {
-            match rto_spec::parse_adr(&blob.path, &text) {
-                Ok(doc) => docs.push(doc),
-                // A malformed ADR is drift, not a skippable warning: it would let
-                // the gate pass while silently dropping authored intent.
-                Err(e) => malformed.push(rto_spec::Violation {
-                    kind: rto_spec::ViolationKind::MalformedAdr,
-                    message: format!("{}: cannot parse ADR: {e}", blob.path),
-                }),
-            }
-        } else if is_md && rto_spec::is_blueprint(&blob.path, &text) {
-            // House-style blueprints (no frontmatter) author `[[…]]` links like
-            // ADRs; their links are drift-checked against the derived graph too.
-            blueprints.push(rto_spec::parse_blueprint(&blob.path, &text));
-        } else {
-            annotations.extend(rto_spec::scan_annotations(&blob.path, &text));
-        }
-    }
+    // The authored-layer file set must match the derived tree — the two layers
+    // disagreeing about which tree they describe is issue #330, and it was a
+    // silent wrong answer rather than a loud one. That rule is `authored_layer`'s,
+    // not this function's: the read-only `check` tool surfaces need the same file
+    // set, and a second copy of it here is how #330 would come back on a surface
+    // nobody thought to look at.
+    let layer = rto_spec::authored_layer(repo, source)?;
+    let rto_spec::AuthoredLayer {
+        docs,
+        blueprints,
+        annotations,
+        malformed,
+    } = layer;
 
     let mut report = rto_spec::run(store, &docs, &blueprints, &annotations)?;
     report.violations.extend(malformed);
@@ -9549,6 +9451,59 @@ fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
 /// projects (ADR-0008). When several projects are hosted, every tool takes a
 /// `project` selector and a `list_projects` tool is offered; a single-project
 /// workspace behaves exactly as before (no `project` needed).
+///
+/// # This surface and the MCP one carry the same tools
+///
+/// `rto_render::mcp` declares its own schemas — the `rmcp` macro generates them
+/// statically from the argument structs — but every tool that exists on one
+/// surface exists on the other, and the shared ones delegate to the same
+/// function rather than re-deriving an answer. `check` and `context` were added
+/// to both in one change for that reason.
+///
+/// # `roteiro security` is not on either tool surface
+///
+/// `security ingest` and `security run` both call
+/// [`rto_graph::Store::replace_findings_layer`] (in `run_security_ingest` and
+/// `run_security_run`), so both are mutating and neither may ever appear here.
+/// `security run` additionally *executes an analyzer*, defaulting to a microVM:
+/// a model asking for a tool is not a human consenting to execution, and
+/// `--allow-unsandboxed` is a gate that exists to be typed by a person.
+/// `security prefetch` opens the network under an explicit consent and writes the
+/// asset cache. All three are permanent refusals, not gaps.
+///
+/// `security list` and `security status` are read-only and *are* eligible; they
+/// are a follow-up rather than an oversight, for the reasons written out in
+/// `rto_render::mcp`'s module documentation (an empty listing that states neither
+/// "nothing found" nor "nothing ran", and `run_security_status` reading the store
+/// through `open_graph()` rather than a `project` selector).
+///
+/// # Why there is no `review` tool, here or on MCP
+///
+/// `roteiro review` is the third thing the review surface computes and is
+/// deliberately absent from both. Two reasons, and the second is the substantive
+/// one.
+///
+/// **Size.** `review --base HEAD~3` on this repository emits 435,208 bytes of
+/// JSON — roughly 109k tokens, most of a context window for one call — and unlike
+/// a ranking there is no `limit` that would make it a page: a review is *the whole
+/// change*, and a truncated one is a review that quietly skipped part of the diff.
+///
+/// **A fifth debt number.** `review`'s per-file output carries `debt`. The MCP
+/// crate cannot reach the target project's `roteiro.toml`, so it could not apply
+/// that project's `[debt] ignore` — and issue #321 is exactly the defect of one
+/// concept reporting different numbers on different surfaces, which had already
+/// recurred across three of them before it was fixed, and then once more on a
+/// fourth (`_Home`, issue #372). Adding a surface that reports a different figure
+/// again, for convenience, is how that happens a third time. The review surface
+/// stays CLI-first (`roteiro review [--json]`): it needs no server and works in
+/// any agent or CI.
+///
+/// Worth knowing separately: **`roteiro review` does not apply `[debt] ignore`
+/// today either.** `Command::Review` is never handed the list and
+/// [`review::build`] collects every marker node in a changed file
+/// unconditionally, so its `debt` is the unfiltered inventory while `roteiro
+/// debt` in the same repository is filtered. That is a defect in the CLI, not a
+/// reason to reproduce it on a tool surface.
 #[cfg(feature = "serve")]
 struct GraphToolRegistry {
     workspace: std::sync::Arc<rto_graph::Workspace>,
@@ -9702,6 +9657,25 @@ fn model_limit(args: &serde_json::Value, default: usize, max: usize) -> usize {
         .clamp(1, max)
 }
 
+/// The `categories` filter for a served-chat `debt`/`debt_density` call: the
+/// string members of the `categories` array, or empty (= all) when it is absent
+/// or holds nothing usable.
+///
+/// Lifted out of [`GraphToolRegistry::call`] because both arms need it
+/// identically — and because two copies of a filter is how the two tools would
+/// come to disagree about what a model asked for.
+#[cfg(feature = "serve")]
+fn categories_arg(args: &serde_json::Value) -> Vec<String> {
+    args.get("categories")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The `(order, limit, min_lines)` triple for a served-chat `debt_density` call,
 /// lifted out of [`GraphToolRegistry::call`] to keep that dispatcher readable.
 ///
@@ -9727,6 +9701,87 @@ fn density_args(args: &serde_json::Value) -> Result<(rto_graph::DensityOrder, us
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(rto_graph::DEFAULT_MIN_LINES);
     Ok((order, limit, min_lines))
+}
+
+/// The served-chat `context` tool definition. **Kept level with the MCP
+/// `context` tool by construction, not by memory**: both wrap
+/// [`rto_graph::tool_context`], and the bound they advertise is
+/// [`rto_graph::TOOL_CONTEXT_EDGE_CAP`] interpolated rather than typed, so the
+/// number in the description cannot fall behind the number the code enforces.
+///
+/// Note what this tool does **not** take. There is no `refresh`: `roteiro context
+/// --refresh` rebuilds stale cached bundles and *prunes* entries for deleted
+/// nodes, and both tool surfaces are read-only. And there is no `limit`: a
+/// context bundle is one node's neighbourhood, so the only honest argument is the
+/// key, and the cap is fixed.
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(feature = "serve")]
+fn context_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    let cap = rto_graph::TOOL_CONTEXT_EDGE_CAP;
+    rto_serve::ToolDef {
+        name: "context".to_owned(),
+        description: format!(
+            "Fetch a node's CONTEXT BUNDLE: the node, its metadata, and its one-hop \
+             provenance-labelled neighbourhood, with a validity `fingerprint` that moves \
+             when the node or any neighbour changes. Takes `key` and nothing else. \
+             BOUNDED, and it tells you when it bound something: each direction carries at \
+             most {cap} edges. When more exist, `truncated` is true, \
+             `outgoing.total`/`incoming.total` give the real counts, and `omitted` names \
+             each edge kind and how many of it are missing — so an absent `imports` edge \
+             means there are none, and a large file's missing definitions are counted \
+             rather than silently dropped. Read `omitted` before concluding anything from \
+             an absence."
+        ),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({ "key": { "type": "string" } })),
+            "required": ["key"],
+        }),
+    }
+}
+
+/// The served-chat `check` tool definition. The MCP surface declares its own (the
+/// `rmcp` macro generates that schema statically); both call
+/// [`rto_spec::tool_check`], so the verdict itself is defined once.
+///
+/// The description leads with `gate` on purpose. `roteiro check` is a gate whose
+/// answer is an exit code; here it is a document, and the failure mode a document
+/// has that an exit code does not is being read as clean when it never ran. See
+/// [`rto_spec::ToolCheck`].
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(feature = "serve")]
+fn check_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "check".to_owned(),
+        description: "Run the AUTHORED-LAYER DRIFT CHECK — the same gate `roteiro check` \
+                      exits non-zero on and the pre-commit hook reads — and return its \
+                      verdict as data: ADR `[[path#Symbol]]` links that no longer resolve, \
+                      `@rto:` annotations pointing at unknown or superseded ADRs, malformed \
+                      ADRs, and duplicate `adr-id`s. \
+                      READ `gate` FIRST. It is `pass`, `fail`, or `not-run`, and `not-run` \
+                      is a real outcome: a check needs the project's repository on disk and \
+                      a graph synced from the current HEAD, and when it cannot have both it \
+                      refuses rather than answering about a tree that is nobody's. A \
+                      `not-run` result carries NO `report` at all — so if you are looking \
+                      for `violations` and there is no `report`, nothing was checked and \
+                      you must say so rather than report a clean repository. \
+                      `not_run_reason` says what to fix (usually: run `roteiro sync`). \
+                      Read-only: it does not rebuild the graph, which is the one thing the \
+                      CLI gate does that this cannot."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({})),
+        }),
+    }
 }
 
 /// The served-chat `coupling` tool definition. Lifted out of
@@ -9848,6 +9903,8 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     })),
                 }),
             },
+            context_tool_def(&with_project),
+            check_tool_def(&with_project),
             debt_density_tool_def(&with_project),
             config_secrets_tool_def(&with_project),
             coupling_tool_def(&with_project),
@@ -9907,16 +9964,37 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     rto_graph::path(store, &from_bare, &to_bare)
                 })
             }
+            "context" => {
+                let key = str_arg("key").ok_or("`context` needs a string `key`")?;
+                // A project-qualified key follows a cross-repo link into that
+                // project, exactly as `explain` does (ADR-0009).
+                let (proj, bare) = qualified_or(key, project);
+                // `rto_graph::tool_context` builds on `build_context`, never on the
+                // cached `context`: that one writes an entry on a miss and *prunes*
+                // one for a deleted node, and pruning is `roteiro context
+                // --refresh`'s maintenance, kept off read paths so an ordinary
+                // query never mutates the store (ADR-0013). Hence no `refresh`
+                // argument here — there is nothing a model could send that writes.
+                self.run(proj.as_deref(), move |store| {
+                    rto_graph::tool_context(store, &bare)
+                })
+            }
+            "check" => {
+                // The *target* project's own repository, never the one this server
+                // was started in — the same rule `debt_ignore_for` follows below,
+                // for the same reason. `None` is the `not-run` case rather than a
+                // fallback: a check answered from some other repository's files is
+                // the defect, not a graceful degradation.
+                let root = self
+                    .workspace
+                    .project_root(project)
+                    .map_err(|e| e.to_string())?;
+                self.run(project, |store| {
+                    rto_spec::tool_check(store, root.as_deref())
+                })
+            }
             "debt" => {
-                let categories: Vec<String> = args
-                    .get("categories")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let categories = categories_arg(args);
                 // Same rule as the CLI and the graph API: the *target* project's
                 // own `[debt] ignore` governs its scan. A model that is told a
                 // different number than `roteiro debt` prints has no way to tell
@@ -9928,15 +10006,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 })
             }
             "debt_density" => {
-                let categories: Vec<String> = args
-                    .get("categories")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let categories = categories_arg(args);
                 let (order, limit, min_lines) = density_args(args)?;
                 // The same `[debt] ignore` rule as `debt` above, for the same
                 // reason: a density computed over a different marker set than
@@ -12209,6 +12279,319 @@ mod workspace_scoped_tools {
             .call("coupling", &serde_json::json!({ "order": "degree" }))
             .expect_err("an unknown order must be refused");
         assert!(err.contains("unknown order `degree`"), "was: {err}");
+    }
+
+    /// The served-chat registry is a **separate** registry from the MCP server's,
+    /// so a test reaching MCP proves nothing here. `context` and `check` were
+    /// added to both surfaces in one change; these are the chat side of that.
+    #[test]
+    fn context_is_advertised_and_returns_the_bounded_bundle() {
+        use rto_serve::ToolRegistry as _;
+        let reg = called_registry();
+
+        let advertised = reg.tools();
+        let def = advertised
+            .iter()
+            .find(|t| t.name == "context")
+            .expect("`context` advertised to the served model");
+        let props = def.parameters["properties"]
+            .as_object()
+            .expect("object schema");
+        // A key and nothing else. `--refresh` prunes and `limit` would be a bound
+        // this tool does not negotiate; neither may become reachable from a model.
+        assert!(props.contains_key("key"), "{props:?}");
+        assert!(props.get("refresh").is_none(), "{props:?}");
+        assert!(props.get("limit").is_none(), "{props:?}");
+        // The advertised cap is the enforced one, interpolated rather than typed.
+        assert!(
+            def.description.contains(&format!(
+                "at most {} edges",
+                rto_graph::TOOL_CONTEXT_EDGE_CAP
+            )),
+            "the description must state the cap it enforces: {}",
+            def.description
+        );
+        assert!(def.description.contains("`omitted`"), "{}", def.description);
+
+        let out = reg
+            .call(
+                "context",
+                &serde_json::json!({ "key": "sym:rust:a.rs#main" }),
+            )
+            .expect("context");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["node"]["key"], "sym:rust:a.rs#main");
+        assert_eq!(json["edge_cap"], rto_graph::TOOL_CONTEXT_EDGE_CAP);
+        assert_eq!(json["truncated"], false);
+        assert_eq!(json["outgoing"]["total"], 1, "{json}");
+        assert_eq!(json["outgoing"]["edges"][0]["node"], "sym:rust:a.rs#helper");
+    }
+
+    /// The read-only contract on this surface too: a call must neither populate
+    /// nor prune the context cache (`--refresh`'s maintenance, ADR-0013).
+    #[test]
+    fn context_never_writes_to_the_store() {
+        use rto_serve::ToolRegistry as _;
+        let reg = called_registry();
+        reg.workspace
+            .with_store(None, |store| {
+                store
+                    .context_cache_put("sym:rust:a.rs#ghost", "stale", "{}")
+                    .expect("put");
+            })
+            .expect("store");
+
+        reg.call(
+            "context",
+            &serde_json::json!({ "key": "sym:rust:a.rs#main" }),
+        )
+        .expect("context");
+        // A key with no node is where the *cached* read would prune.
+        reg.call(
+            "context",
+            &serde_json::json!({ "key": "sym:rust:a.rs#ghost" }),
+        )
+        .expect("context");
+
+        let keys = reg
+            .workspace
+            .with_store(None, |store| store.context_cache_keys().expect("keys"))
+            .expect("store");
+        assert_eq!(
+            keys,
+            vec!["sym:rust:a.rs#ghost".to_owned()],
+            "a tool read must neither populate nor prune the context cache",
+        );
+    }
+
+    /// `check` over a pre-opened store has no repository to read an authored
+    /// layer from, and the document must be unmistakable about that: `not-run`,
+    /// and no `report` for a model to read `violations: []` out of.
+    #[test]
+    fn check_is_advertised_and_reports_not_run_rather_than_a_clean_repository() {
+        use rto_serve::ToolRegistry as _;
+        let reg = called_registry();
+
+        let advertised = reg.tools();
+        let def = advertised
+            .iter()
+            .find(|t| t.name == "check")
+            .expect("`check` advertised to the served model");
+        for claim in [
+            "READ `gate` FIRST",
+            "`not-run` is a real outcome",
+            "carries NO `report`",
+            "rather than report a clean repository",
+        ] {
+            assert!(
+                def.description.contains(claim),
+                "missing `{claim}` from: {}",
+                def.description
+            );
+        }
+
+        let out = reg.call("check", &serde_json::json!({})).expect("check");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["schema"], rto_spec::TOOL_CHECK_SCHEMA);
+        assert_eq!(json["gate"], "not-run");
+        assert!(
+            json.get("report").is_none(),
+            "a not-run check must carry no report at all: {json}"
+        );
+        assert!(
+            json.pointer("/report/violations").is_none(),
+            "`0 violations` must be unreachable when nothing ran: {json}"
+        );
+        assert!(
+            json["not_run_reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty())
+        );
+    }
+
+    /// The `check` tool end to end on this surface: the registry must resolve the
+    /// **hosted project's own** repository, not the directory the server was
+    /// started in.
+    ///
+    /// Without this the only coverage is the `not-run` path, and `not-run` is what
+    /// a wrong root produces too — so a `check` that consulted the invoking
+    /// repository would look identical. (Fault injection found exactly that gap:
+    /// replacing the lookup with `Some(".")` left every other test green.)
+    #[test]
+    fn check_runs_against_the_hosted_projects_own_repository() {
+        use rto_serve::ToolRegistry as _;
+
+        let base = std::env::temp_dir().join(format!("rto-chat-check-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let dir = base.join("app");
+        std::fs::create_dir_all(dir.join("docs/adr")).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "init.defaultBranch=main",
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "pub struct Store;\n").unwrap();
+        std::fs::write(
+            dir.join("docs/adr/0001.md"),
+            "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001\n\n\
+             ## Design\n\nUses [[a.rs#Ghost]].\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "seed"]);
+
+        // A graph recorded as synced from that exact `HEAD` tree — `check`'s
+        // precondition, and the state a committed `roteiro sync` leaves behind.
+        let tree = rto_graph::Repo::discover(&dir)
+            .unwrap()
+            .head_tree_id()
+            .unwrap();
+        let store_dir = dir.join(".git").join("roteiro");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let mut store = rto_graph::Store::open(&store_dir.join("graph.db")).unwrap();
+        store
+            .rebuild(
+                &rto_graph::FactSet::new()
+                    .with_node(rto_graph::Node::new(
+                        "file:a.rs",
+                        rto_graph::NodeKind::File,
+                        "a.rs",
+                    ))
+                    .with_node(rto_graph::Node::new(
+                        "sym:rust:a.rs#Store",
+                        rto_graph::NodeKind::Struct,
+                        "Store",
+                    )),
+                Some(&tree),
+            )
+            .unwrap();
+        drop(store);
+
+        let ws = rto_graph::Workspace::from_repo_paths([dir.clone()]).unwrap();
+        let reg = GraphToolRegistry::new(std::sync::Arc::new(ws));
+        let out = reg.call("check", &serde_json::json!({})).expect("check");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(
+            json["gate"], "fail",
+            "the seeded ADR link does not resolve: {json}"
+        );
+        assert_eq!(json["report"]["adrs"], 1, "{json}");
+        assert_eq!(
+            json["report"]["violations"][0]["kind"], "broken-link",
+            "{json}"
+        );
+        assert_eq!(json["checked_against"]["tree"], tree, "{json}");
+        assert!(json.get("not_run_reason").is_none(), "{json}");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `review` is absent from this surface by decision, not by oversight — see
+    /// [`GraphToolRegistry`]'s documentation. A tool added by reflex would pass
+    /// every other test here; this is the one that notices.
+    #[test]
+    fn review_is_not_advertised_to_the_served_model() {
+        use rto_serve::ToolRegistry as _;
+        assert!(
+            !called_registry().tools().iter().any(|t| t.name == "review"),
+            "`review` must not be a served-chat tool: ~435 KB for a three-commit \
+             range, and its per-file `debt` would report a figure the project's \
+             `[debt] ignore` never touched (issue #321)",
+        );
+    }
+
+    /// The chat side of the same refusal (see `rto_render::mcp`'s tests). The two
+    /// registries are separate, so a guard on one proves nothing about the other.
+    #[test]
+    fn no_security_subcommand_is_advertised_to_the_served_model() {
+        use rto_serve::ToolRegistry as _;
+        let security: Vec<String> = called_registry()
+            .tools()
+            .into_iter()
+            .map(|t| t.name)
+            .filter(|n| n.starts_with("security"))
+            .collect();
+        assert!(
+            security.is_empty(),
+            "`security ingest`/`run`/`prefetch` are permanent refusals — mutating \
+             (`replace_findings_layer`), executing an analyzer, and network- \
+             consented respectively. Found: {security:?}",
+        );
+    }
+
+    /// The two tool surfaces must not drift apart in *which* tools they offer.
+    /// The MCP server declares its own schemas, so nothing but a test keeps the
+    /// sets level — and `[debt] ignore` across three surfaces (#321) and
+    /// `limit == 0` across five (#393) are what happens when nothing does.
+    ///
+    /// # The one tool that is not on both, and why it is not being fixed here
+    ///
+    /// `list_kind` is on MCP and not on the served-chat surface. That divergence
+    /// **predates** this test — it is not something a change introduced and left
+    /// — and it is named rather than closed, because closing it in either
+    /// direction is a decision:
+    ///
+    /// - Adding it to the chat surface propagates an unbounded tool. `list_kind`
+    ///   on `fn` returns 1,064,414 bytes in this repository — around 265k tokens,
+    ///   more than one call can spend — and giving a second surface that hazard is
+    ///   worse than the asymmetry.
+    /// - Removing it from MCP changes a contract an existing client may depend on.
+    ///
+    /// Both are worth doing; neither is a cleanup. So the exception is written
+    /// down, and the test fails if it stops being *exactly* this one tool — which
+    /// is what would happen if somebody quietly added another.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn both_tool_surfaces_offer_the_same_tools() {
+        use rto_serve::ToolRegistry as _;
+        use std::collections::BTreeSet;
+
+        /// The known, recorded asymmetry. Not a suppression list to grow: an
+        /// addition here needs the reasoning above, written out.
+        const MCP_ONLY: [&str; 1] = ["list_kind"];
+
+        let chat: BTreeSet<String> = called_registry()
+            .tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let mcp: BTreeSet<String> = rto_render::mcp::tool_names().into_iter().collect();
+
+        let mcp_only: BTreeSet<&str> = mcp
+            .difference(&chat)
+            .map(std::string::String::as_str)
+            .collect();
+        assert_eq!(
+            mcp_only,
+            MCP_ONLY.into_iter().collect::<BTreeSet<&str>>(),
+            "the MCP-only tools must be exactly the recorded exception — a new one \
+             needs the decision written down, not a longer list",
+        );
+        assert!(
+            chat.difference(&mcp).next().is_none(),
+            "the served-chat surface must offer nothing MCP does not: {:?}",
+            chat.difference(&mcp).collect::<Vec<_>>(),
+        );
+        // And the tools this change added are on both, which is the property the
+        // whole test exists for.
+        for name in ["check", "context"] {
+            assert!(chat.contains(name) && mcp.contains(name), "`{name}`");
+        }
     }
 
     /// A one-project registry with two files carrying the **same** marker count

@@ -58,6 +58,20 @@ store.
 - `path` — a shortest path between two nodes (how are these connected?).
 - `debt` — the intent-debt inventory (what's incomplete/postponed).
 - `list_kind` — every node of a kind (`fn`, `struct`, `adr`, …).
+- `context` — a node's one-hop neighbourhood, **bounded**: at most 50 edges per
+  direction. When it truncates it says so — `truncated`, per-direction `total`,
+  and `omitted` counts by edge kind — so read `omitted` before concluding
+  anything from an edge kind's absence.
+- `check` — the authored-layer drift gate as data. **Read `gate` first**: it is
+  `pass`, `fail`, or `not-run`, and `not-run` is a real outcome (the check needs
+  the repository on disk and a graph synced from `HEAD`). A `not-run` result
+  carries no `report` at all — if you were looking for `violations` and there is
+  none, nothing was checked, and reporting a clean repository would be wrong.
+
+There is **no `review` tool**. `roteiro review` is CLI-first: it is far too large
+for one tool call (~435 KB for a three-commit range) and its per-file `debt` does
+not apply the project's `[debt] ignore`. Run `roteiro review [--json]` instead —
+it needs no server.
 
 **CLI** (any agent, human, or CI — add `--json` to any command for structured output):
 
