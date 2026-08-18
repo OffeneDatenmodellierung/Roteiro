@@ -197,6 +197,17 @@ enum Command {
         /// cost a full pass.
         #[arg(long, value_name = "N", requires = "replay")]
         limit: Option<usize>,
+        /// Give the reviewer **graph context** — the ADRs governing the code under
+        /// review, and the doc comments elsewhere in the file the diff does not
+        /// show — assembled from the graph as it was at each reviewed commit.
+        ///
+        /// This is the one variable Stage 35b PR 2 varies. Without it the reviewer
+        /// sees the file's diff and nothing else, which is the baseline the graph
+        /// arm has to beat; the two runs are otherwise identical, down to the
+        /// model. The arm is recorded in the run document so a comparison can be
+        /// audited from the artifacts rather than from their filenames.
+        #[arg(long)]
+        graph_context: bool,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
@@ -1443,10 +1454,15 @@ fn main() -> anyhow::Result<()> {
             replay,
             checks,
             limit,
+            graph_context,
         } => match (score, replay, llm) {
             (Some(run), _, _) => review::run_score(&run, corpus.as_deref(), json),
-            (None, Some(out), _) => run_replay(&out, checks.as_deref(), limit),
-            (None, None, true) => run_llm_review(base.as_deref(), checks.as_deref()),
+            (None, Some(out), _) => {
+                run_replay(&out, checks.as_deref(), limit, graph_context, ingest)
+            }
+            (None, None, true) => {
+                run_llm_review(base.as_deref(), checks.as_deref(), graph_context, ingest)
+            }
             (None, None, false) => run_review(ingest, json, base.as_deref()),
         },
         Command::Query {
@@ -2901,6 +2917,115 @@ fn refresh_for_read(
     Ok(())
 }
 
+/// Parse the authored layer out of `blobs` and apply it to `store`, returning the
+/// check report.
+///
+/// # Why this is a shared function and not two similar loops
+///
+/// The authored layer's *classification* — which path is an ADR, which markdown
+/// is a blueprint, which file merely carries `@rto:` annotations, and that a
+/// malformed ADR is drift rather than a skippable warning — is a rule with one
+/// correct answer. It had one caller when there was one tree to build from
+/// ([`build_graph`]); Stage 35b PR 2 added a second ([`build_graph_at_rev`], for
+/// the graph arm's context at a historical `reviewed_sha`).
+///
+/// Copying the loop would leave the two free to drift, which is the exact shape
+/// this repository has closed three times already — the `[debt]` ignore honoured
+/// on three surfaces and not a fourth, `limit=0` meaning two things across five
+/// endpoints, and `ReviewSet::collect` in `review_llm`. So the rule lives here and
+/// there is no second copy to correct. A graph arm whose ADRs were classified by
+/// a slightly different rule than `check`'s would be measuring its own
+/// reimplementation.
+///
+/// `read` yields a blob's authored bytes, or `None` when the tree has no such file
+/// (a worktree deletion); the caller supplies it because *where* the bytes come
+/// from is precisely what differs between a tree and a rev.
+fn apply_authored_layer(
+    store: &mut rto_graph::Store,
+    blobs: Vec<rto_graph::BlobRef>,
+    read: &dyn Fn(&rto_graph::BlobRef) -> anyhow::Result<Option<Vec<u8>>>,
+) -> anyhow::Result<rto_spec::CheckReport> {
+    let mut docs = Vec::new();
+    let mut blueprints = Vec::new();
+    let mut annotations = Vec::new();
+    let mut malformed = Vec::new();
+    for blob in blobs {
+        // Parse the authored source from the same tree the derived layer used.
+        let Some(bytes) = read(&blob)? else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let file = std::path::Path::new(&blob.path);
+        let is_md = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let is_adr = blob.path.starts_with("docs/adr/") && is_md && name != "README.md";
+        if is_adr {
+            match rto_spec::parse_adr(&blob.path, &text) {
+                Ok(doc) => docs.push(doc),
+                // A malformed ADR is drift, not a skippable warning: it would let
+                // the gate pass while silently dropping authored intent.
+                Err(e) => malformed.push(rto_spec::Violation {
+                    kind: rto_spec::ViolationKind::MalformedAdr,
+                    message: format!("{}: cannot parse ADR: {e}", blob.path),
+                }),
+            }
+        } else if is_md && rto_spec::is_blueprint(&blob.path, &text) {
+            // House-style blueprints (no frontmatter) author `[[…]]` links like
+            // ADRs; their links are drift-checked against the derived graph too.
+            blueprints.push(rto_spec::parse_blueprint(&blob.path, &text));
+        } else {
+            annotations.extend(rto_spec::scan_annotations(&blob.path, &text));
+        }
+    }
+
+    let mut report = rto_spec::run(store, &docs, &blueprints, &annotations)?;
+    report.violations.extend(malformed);
+    Ok(report)
+}
+
+// Present in a build that can review (or in one running the tests that hold this
+// assembly to the corpus), and absent from a stock binary where nothing calls it.
+// `test` is in the gate deliberately: the graph arm's correctness — that it is
+// built at the reviewed commit, and that it actually sends something — is checked
+// in the build CI runs, which has no generation backend.
+/// Build the full graph **as of an arbitrary git rev** into `store` — the graph
+/// arm's context source (Stage 35b PR 2).
+///
+/// [`rto_graph::sync_tree`] gives the derived layer at `rev` and is
+/// content-addressed, so a rev sharing most blobs with an already-synced tree is
+/// nearly free. But it populates the derived layer *only*, by design: it exists
+/// for version-pin resolution, which needs no ADRs. The graph arm needs exactly
+/// the opposite — the **authored** layer is where a governing decision lives, and
+/// a governing decision is the one thing a per-file diff reviewer structurally
+/// cannot see. So the authored layer is re-applied here at the same rev, through
+/// the same classification [`build_graph`] uses.
+///
+/// Reviewing a commit against the ADRs of `HEAD` rather than of that commit would
+/// be a silent wrong answer of the same family as scoring against a PR head: the
+/// numbers would come out clean and would describe a repository that did not
+/// exist when the code was written.
+#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+fn build_graph_at_rev(
+    repo: &rto_graph::Repo,
+    store: &mut rto_graph::Store,
+    cache: &rto_graph::ObjectCache,
+    ingest: rto_graph::IngestConfig,
+    rev: &str,
+) -> anyhow::Result<()> {
+    let registry = rto_graph::Registry::new(ingest);
+    rto_graph::sync_tree(store, repo, cache, &registry, rev)?;
+    apply_authored_layer(store, repo.blobs_at(rev)?, &|blob| {
+        Ok(Some(repo.read_blob(&blob.oid)?))
+    })?;
+    Ok(())
+}
+
 /// Build the full graph into `store`: the derived code graph plus the authored
 /// ADR layer, both from the tree named by `source`. Returns the authored-layer
 /// check report (used by `check`; ignored by `query`).
@@ -2964,47 +3089,7 @@ fn build_graph(
             blobs
         }
     };
-    let mut docs = Vec::new();
-    let mut blueprints = Vec::new();
-    let mut annotations = Vec::new();
-    let mut malformed = Vec::new();
-    for blob in blobs {
-        // Parse the authored source from the same tree the derived layer used.
-        let Some(bytes) = read_source(repo, &blob, source)? else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let file = std::path::Path::new(&blob.path);
-        let is_md = file
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
-        let name = file
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let is_adr = blob.path.starts_with("docs/adr/") && is_md && name != "README.md";
-        if is_adr {
-            match rto_spec::parse_adr(&blob.path, &text) {
-                Ok(doc) => docs.push(doc),
-                // A malformed ADR is drift, not a skippable warning: it would let
-                // the gate pass while silently dropping authored intent.
-                Err(e) => malformed.push(rto_spec::Violation {
-                    kind: rto_spec::ViolationKind::MalformedAdr,
-                    message: format!("{}: cannot parse ADR: {e}", blob.path),
-                }),
-            }
-        } else if is_md && rto_spec::is_blueprint(&blob.path, &text) {
-            // House-style blueprints (no frontmatter) author `[[…]]` links like
-            // ADRs; their links are drift-checked against the derived graph too.
-            blueprints.push(rto_spec::parse_blueprint(&blob.path, &text));
-        } else {
-            annotations.extend(rto_spec::scan_annotations(&blob.path, &text));
-        }
-    }
-
-    let mut report = rto_spec::run(store, &docs, &blueprints, &annotations)?;
-    report.violations.extend(malformed);
+    let report = apply_authored_layer(store, blobs, &|blob| read_source(repo, blob, source))?;
 
     // Re-apply any persisted import layers (Graphify, lat.md, …) on top of the
     // freshly-rebuilt derived + authored graph, so imported knowledge is durable
@@ -3066,16 +3151,50 @@ fn review_repo_root() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+/// The arm a `--graph-context` flag selects.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn review_arm(graph_context: bool) -> review_llm::ReviewArm {
+    if graph_context {
+        review_llm::ReviewArm::Graph
+    } else {
+        review_llm::ReviewArm::DiffOnly
+    }
+}
+
 /// `roteiro review --llm` — review the change with the local generative model.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-fn run_llm_review(base: Option<&str>, checks: Option<&str>) -> anyhow::Result<()> {
-    review_llm::run_llm(&review_repo_root(), base, checks)
+fn run_llm_review(
+    base: Option<&str>,
+    checks: Option<&str>,
+    graph_context: bool,
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<()> {
+    review_llm::run_llm(
+        &review_repo_root(),
+        base,
+        checks,
+        review_arm(graph_context),
+        ingest,
+    )
 }
 
 /// `roteiro review --replay` — measure the reviewer against the corpus.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-fn run_replay(out: &str, checks: Option<&str>, limit: Option<usize>) -> anyhow::Result<()> {
-    review_llm::run_replay(&review_repo_root(), out, checks, limit)
+fn run_replay(
+    out: &str,
+    checks: Option<&str>,
+    limit: Option<usize>,
+    graph_context: bool,
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<()> {
+    review_llm::run_replay(
+        &review_repo_root(),
+        out,
+        checks,
+        limit,
+        review_arm(graph_context),
+        ingest,
+    )
 }
 
 /// The same two surfaces in a build with no generation backend.
@@ -3085,7 +3204,12 @@ fn run_replay(out: &str, checks: Option<&str>, limit: Option<usize>) -> anyhow::
 /// `unrecognized argument` would send someone to check their spelling instead of
 /// their features. This is the shape `models` was moved into `default` for.
 #[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
-fn run_llm_review(_base: Option<&str>, _checks: Option<&str>) -> anyhow::Result<()> {
+fn run_llm_review(
+    _base: Option<&str>,
+    _checks: Option<&str>,
+    _graph_context: bool,
+    _ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "`review --llm` needs a local generation backend, which this build does not \
          have. Rebuild with `--features serve` (or `inference-local-models`). \
@@ -3095,7 +3219,13 @@ fn run_llm_review(_base: Option<&str>, _checks: Option<&str>) -> anyhow::Result<
 
 /// See [`run_llm_review`]'s backend-less twin.
 #[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
-fn run_replay(_out: &str, _checks: Option<&str>, _limit: Option<usize>) -> anyhow::Result<()> {
+fn run_replay(
+    _out: &str,
+    _checks: Option<&str>,
+    _limit: Option<usize>,
+    _graph_context: bool,
+    _ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "`review --replay` needs a local generation backend, which this build does \
          not have. Rebuild with `--features serve` (or `inference-local-models`). \

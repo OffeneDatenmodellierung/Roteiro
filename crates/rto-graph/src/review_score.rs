@@ -130,6 +130,34 @@ pub struct CandidateRun {
     /// an explanation instead of an unexplained one.
     #[serde(default)]
     pub suppressed: Vec<CandidateFinding>,
+    /// **Which arm produced this run**, when the producer knows — the context it
+    /// was given and the model that generated it.
+    ///
+    /// Stage 35b PR 2 is a comparison of two runs that must differ in exactly one
+    /// variable, and a reader has to be able to check that claim from the
+    /// artifacts rather than from their filenames. A run document that cannot say
+    /// which arm it is makes the comparison unauditable, and mixing two up would
+    /// produce a clean, meaningless number of exactly the kind this stage is
+    /// arranged against.
+    ///
+    /// Optional, so every `v1` document written before this field existed still
+    /// parses unchanged. The reverse does not hold: `deny_unknown_fields` means a
+    /// build older than this one rejects a document carrying it. That is the
+    /// deliberate trade — a run whose provenance an old binary silently dropped
+    /// would be worse than one it refuses to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm: Option<RunArm>,
+}
+
+/// What produced a [`CandidateRun`]: the context arm and the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunArm {
+    /// The context the reviewer was given — `diff-only` or `graph`.
+    pub context: String,
+    /// The model that generated it, so a comparison across arms can be shown to
+    /// have held it fixed.
+    pub model: String,
 }
 
 /// Schema tag for a [`CandidateRun`] document.
@@ -150,6 +178,7 @@ impl Default for CandidateRun {
             attempted_shas: BTreeSet::new(),
             findings: Vec::new(),
             suppressed: Vec::new(),
+            arm: None,
         }
     }
 }

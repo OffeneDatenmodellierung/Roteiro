@@ -127,17 +127,64 @@ pub struct ContextItem {
     pub body: String,
 }
 
+/// The hard ceiling on a context block, in estimated tokens.
+///
+/// PR 1 measured ~28k of the single-call budget free on a median file, and that
+/// headroom is what made this arm testable at all. It is **permission, not an
+/// instruction**: a prompt in which the diff is 6% of the tokens is a
+/// needle-in-a-haystack task, and handing a model 28k of loosely-related text is
+/// a plausible way to make both recall *and* the finding rate worse.
+///
+/// So the cap is stated as a constant, before any number was seen, rather than
+/// discovered by watching a score move.
+pub const CONTEXT_CAP_TOKENS: usize = 4_000;
+
+/// How much context one file may carry, relative to its own diff.
+///
+/// The cap is `min(CONTEXT_CAP_TOKENS, RELATIVE * diff_tokens)`, so a two-line
+/// change does not arrive under a thousand lines of ADR. A reviewer should be
+/// reading the change, with context beside it — not the other way round.
+pub const CONTEXT_RELATIVE_TO_DIFF: usize = 2;
+
 /// The graph context handed to one file's review.
 ///
-/// Empty in PR 1 by construction: [`GraphContext::none`] is what the diff-only arm
-/// passes, and [`build_prompt`] renders no context section for it, so the
-/// baseline prompt carries no vestigial heading promising something that is not
-/// there. The type exists now so the graph arm is a filled slot rather than a
-/// re-plumb of the driver.
+/// [`GraphContext::none`] is the diff-only arm, and [`build_prompt`] renders no
+/// context section for it, so the baseline prompt carries no vestigial heading
+/// promising something that is not there.
+///
+/// # What is in it, and why those and not the rest
+///
+/// The menu `roteiro review` already computes is governing ADRs, callers,
+/// callees, blast radius and authored drift. The arm takes **two** of those and
+/// records the omission of the others as a decision:
+///
+/// * **Governing ADR and blueprint sections** (`authored`). The one thing a
+///   per-file reviewer structurally cannot obtain: a decision written in another
+///   file that the code under review contradicts. This is `contract-drift`'s
+///   defining shape and the authored layer's whole purpose.
+/// * **The file's own doc surface outside the diff** (`derived`). [`build_prompt`]
+///   instructs the model to stay silent unless *both* halves of a conflict are
+///   visible, and a `-U3` diff shows at most three lines either side. A doc
+///   comment at the top of a file and the code that betrays it 700 lines down are
+///   never both in the hunks. The graph holds each symbol's doc comment, so this
+///   makes the promise-half visible without pasting the file.
+/// * **Callers, callees and blast radius are deliberately excluded.** Measured on
+///   this repository a single changed symbol carries dozens of caller keys, and
+///   their bodies would dominate the prompt — the failure mode above, bought
+///   knowingly. Recorded here so the absence reads as a decision rather than an
+///   oversight, and so a later arm that adds them knows it is changing a
+///   pre-registered variable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphContext {
     /// The items, in the order they are rendered.
     pub items: Vec<ContextItem>,
+    /// Items dropped by [`GraphContext::fit`] to stay inside the cap.
+    ///
+    /// Counted rather than silently absorbed, for the same reason
+    /// [`Prompt::dropped_tokens`] is: a run that quietly shed the context it was
+    /// measuring would report the graph arm as having been tested when it was
+    /// partly the diff-only arm wearing its name.
+    pub dropped_items: usize,
 }
 
 impl GraphContext {
@@ -152,6 +199,175 @@ impl GraphContext {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// Estimated tokens this context will cost, by [`estimate_tokens`] over the
+    /// text [`build_prompt`] actually renders — label, provenance tag and body.
+    #[must_use]
+    pub fn tokens(&self) -> usize {
+        self.items.iter().map(ContextItem::tokens).sum()
+    }
+
+    /// Drop whole items, lowest-priority last-first, until the context fits the
+    /// cap for a diff of `diff_tokens`.
+    ///
+    /// **Whole items, never a truncated one.** A half-quoted ADR is worse than no
+    /// ADR: it reads as a complete statement of a decision and is not one, so a
+    /// model can be handed a promise whose exception was cut off and report the
+    /// code as contradicting it. [`build_prompt`] makes the same choice for the
+    /// same reason and truncates only the diff.
+    ///
+    /// Callers pass items in priority order — most valuable first — because this
+    /// drops from the tail.
+    #[must_use]
+    pub fn fit(items: Vec<ContextItem>, diff_tokens: usize) -> Self {
+        let cap = CONTEXT_CAP_TOKENS.min(CONTEXT_RELATIVE_TO_DIFF.saturating_mul(diff_tokens));
+        let mut kept: Vec<ContextItem> = Vec::new();
+        let mut spent = 0usize;
+        let mut dropped = 0usize;
+        for item in items {
+            let cost = item.tokens();
+            // A later, smaller item is still allowed in after a large one was
+            // refused: the cap is on the block, and skipping an oversized ADR
+            // should not also discard the three short doc comments behind it.
+            if spent + cost > cap {
+                dropped += 1;
+                continue;
+            }
+            spent += cost;
+            kept.push(item);
+        }
+        Self {
+            items: kept,
+            dropped_items: dropped,
+        }
+    }
+}
+
+impl ContextItem {
+    /// What this item costs in the prompt, by [`estimate_tokens`].
+    ///
+    /// Counts the rendered form — the `--- label [provenance]` heading as well as
+    /// the body — because that is what the budget actually pays for.
+    #[must_use]
+    pub fn tokens(&self) -> usize {
+        estimate_tokens(&self.label)
+            + estimate_tokens(&self.provenance)
+            + estimate_tokens(&self.body)
+            + 4
+    }
+}
+
+/// The body of one `## ` section of a markdown document, **by its heading title**.
+///
+/// The graph stores an `adr_section` node per heading but **no body text** — the
+/// node carries a slug, a title and nothing else. So the graph selects *which*
+/// decision governs the code under review, and this renders it. That split is the
+/// point: retrieval is the graph's, quoting is a string operation, and nothing
+/// here decides relevance.
+///
+/// # Matched on the title, not on the slug, and that is deliberate
+///
+/// An `adr_section` key is `adr:0005#decision` — the slug is right there, so
+/// matching on it looks like the obvious read. It would mean reimplementing
+/// `rto_spec`'s slug rule here, because that rule is `pub(crate)` and `rto-graph`
+/// does not depend on `rto-spec` at all. A second copy of a rule this crate cannot
+/// see is a rule free to drift, and the drift would be silent: a heading whose
+/// punctuation the two versions collapsed differently would simply stop resolving,
+/// and the graph arm would quietly run with one fewer ADR than it reported.
+///
+/// The node's `name` is the heading text verbatim, so comparing titles needs no
+/// shared rule and cannot drift. Where two `## ` headings share a title the first
+/// wins; nothing downstream distinguishes them either.
+///
+/// Returns everything after the heading up to the next `## `, or `None` when no
+/// heading matches.
+#[must_use]
+pub fn section_body(markdown: &str, title: &str) -> Option<String> {
+    let mut out: Option<String> = None;
+    for line in markdown.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            if out.is_some() {
+                break;
+            }
+            if heading.trim() == title.trim() {
+                out = Some(String::new());
+            }
+            continue;
+        }
+        // A `# ` title or a deeper `### ` subheading is body, not a boundary: only
+        // `## ` delimits the sections the graph made nodes for.
+        if let Some(body) = out.as_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    out.map(|b| b.trim().to_owned())
+}
+
+/// How much of a doc comment must already be visible in the diff before quoting
+/// it again is redundant.
+///
+/// Compared on the first `PROBE` significant characters rather than the whole
+/// text: the two copies are never byte-identical, because the diff's is wrapped,
+/// numbered and comment-marked while the graph's is the extracted prose.
+const DOC_PROBE_CHARS: usize = 60;
+
+/// Reduce text to the characters two copies of the same doc comment share.
+///
+/// Whitespace, `annotate_diff`'s line-number column, and Rust's comment markers
+/// all differ between the diff's rendering of a doc and the graph's, and none of
+/// them carry meaning for this comparison. Dropping them is what lets a doc
+/// wrapped across three numbered `///` lines match the single paragraph the
+/// extractor stored.
+fn doc_signature(text: &str, strip_annotation_column: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        // `annotate_diff` renders `{n:>6} +|body`, `      - |body` and
+        // `{n:>6}  |body`, so the content is whatever follows the first `|`. A
+        // source line containing its own `|` is unaffected: the column's comes
+        // first. Lines before the first hunk carry no column and are taken whole.
+        let body = if strip_annotation_column {
+            line.split_once('|').map_or(line, |(_, rest)| rest)
+        } else {
+            line
+        };
+        let body = body.trim_start();
+        let body = body
+            .strip_prefix("///")
+            .or_else(|| body.strip_prefix("//!"))
+            .or_else(|| body.strip_prefix("//"))
+            .unwrap_or(body);
+        out.extend(body.chars().filter(|c| !c.is_whitespace()));
+    }
+    out
+}
+
+/// Whether `doc` is already visible in `annotated_diff`, so quoting it again
+/// would spend budget on text the model can already read.
+///
+/// **The point of the graph arm is the doc that is *not* in the hunks.**
+/// [`build_prompt`] tells the model to stay silent unless both halves of a
+/// conflict are visible, and a `-U3` diff shows three lines either side — so a
+/// module doc at line 16 and the code that betrays it at line 700 are never both
+/// shown. Re-sending the halves that *are* shown would inflate the context block
+/// with duplicates and buy nothing; worse, on a cap that drops whole items it
+/// would evict the ones that matter.
+///
+/// `annotated_diff` is the diff **as the model sees it** — [`annotate_diff`]'s
+/// output, line-number column and all — because "already visible" is a claim about
+/// the prompt, not about the raw hunks.
+#[must_use]
+pub fn doc_already_shown(doc: &str, annotated_diff: &str) -> bool {
+    let probe: String = doc_signature(doc, false)
+        .chars()
+        .take(DOC_PROBE_CHARS)
+        .collect();
+    // Too short to identify anything, and too short to state a contract that could
+    // drift: treated as shown rather than padding the context with one-word docs.
+    if probe.chars().count() < DOC_PROBE_CHARS {
+        return true;
+    }
+    doc_signature(annotated_diff, true).contains(&probe)
 }
 
 /// An assembled prompt, with what it cost and what it had to leave out.
@@ -772,6 +988,177 @@ mod tests {
         }
     }
 
+    /// A helper for the budget tests: an item whose body is `chars` bytes long,
+    /// so its cost is predictable in `len / 4` terms.
+    fn item(label: &str, bytes: usize) -> super::ContextItem {
+        super::ContextItem {
+            label: label.to_owned(),
+            provenance: "authored".to_owned(),
+            body: "x".repeat(bytes),
+        }
+    }
+
+    /// **The cap is on the block, and it is relative to the diff.** A two-line
+    /// change must not arrive under four thousand tokens of ADR: the whole risk
+    /// this arm carries is that context drowns the change, and the guard against
+    /// it is arithmetic rather than judgement.
+    #[test]
+    fn context_is_capped_relative_to_the_diff_it_accompanies() {
+        // A 100-token diff admits at most 200 tokens of context, so the second
+        // 150-token item cannot join the first.
+        let fitted = GraphContext::fit(vec![item("a", 600), item("b", 600)], 100);
+        assert_eq!(
+            fitted.items.len(),
+            1,
+            "two 150-token items fit a 200-token cap"
+        );
+        assert_eq!(fitted.dropped_items, 1);
+        assert!(
+            fitted.tokens() <= 200,
+            "cap breached: {} tokens",
+            fitted.tokens()
+        );
+    }
+
+    /// The absolute ceiling binds even when the diff is enormous, so a huge file
+    /// cannot pull in a proportionally huge context.
+    #[test]
+    fn the_absolute_cap_binds_on_a_large_diff() {
+        // 20k diff tokens would allow 40k by the relative rule alone.
+        let fitted = GraphContext::fit(
+            (0..20).map(|i| item(&format!("adr-{i}"), 2_000)).collect(),
+            20_000,
+        );
+        assert!(
+            fitted.tokens() <= super::CONTEXT_CAP_TOKENS,
+            "the absolute cap did not bind: {} tokens",
+            fitted.tokens()
+        );
+        assert!(
+            fitted.dropped_items > 0,
+            "nothing was dropped, so nothing was capped"
+        );
+    }
+
+    /// **Whole items only.** A half-quoted ADR reads as a complete statement of a
+    /// decision and is not one, so a model can be handed a promise whose exception
+    /// was cut off. This asserts the bodies come through byte-identical.
+    #[test]
+    fn fitting_never_truncates_an_item_it_keeps() {
+        let original = item("adr", 400);
+        let fitted = GraphContext::fit(vec![original.clone(), item("big", 100_000)], 1_000);
+        assert_eq!(fitted.items, vec![original], "a kept item was rewritten");
+        assert_eq!(fitted.dropped_items, 1);
+    }
+
+    /// A large item that does not fit must not also discard the small ones behind
+    /// it — the cap is a budget, not a stopping point.
+    #[test]
+    fn an_oversized_item_does_not_evict_the_smaller_ones_after_it() {
+        let fitted = GraphContext::fit(vec![item("huge", 100_000), item("small", 40)], 1_000);
+        assert_eq!(fitted.dropped_items, 1);
+        assert_eq!(
+            fitted.items.len(),
+            1,
+            "the small item behind an oversized one was lost"
+        );
+        assert_eq!(fitted.items[0].label, "small");
+    }
+
+    /// An empty diff admits no context at all, which is the conservative
+    /// direction: `min(cap, 2 * 0) == 0`.
+    #[test]
+    fn an_empty_diff_admits_no_context() {
+        let fitted = GraphContext::fit(vec![item("adr", 40)], 0);
+        assert!(fitted.is_empty());
+        assert_eq!(fitted.dropped_items, 1, "the drop must still be counted");
+    }
+
+    /// [`ContextItem::tokens`] must charge for the heading, not just the body —
+    /// otherwise a context of many tiny items is billed as nearly free while the
+    /// prompt pays for every `--- label [provenance]` line.
+    #[test]
+    fn an_item_is_charged_for_its_heading_as_well_as_its_body() {
+        let bare = super::ContextItem {
+            label: String::new(),
+            provenance: String::new(),
+            body: "x".repeat(40),
+        };
+        let labelled = super::ContextItem {
+            label: "ADR-0019 §3 governs `resolve`".to_owned(),
+            provenance: "authored".to_owned(),
+            body: "x".repeat(40),
+        };
+        assert!(
+            labelled.tokens() > bare.tokens(),
+            "the heading was not charged: {} vs {}",
+            labelled.tokens(),
+            bare.tokens()
+        );
+    }
+
+    /// A section runs to the next `## `, and a deeper heading inside it is body.
+    #[test]
+    fn a_section_body_stops_at_the_next_sibling_heading() {
+        let md = "# ADR-0005\n\n## Context\nwhy\n\n## Decision\nthe rule\n\n### Detail\nmore\n\n## Consequences\nafter\n";
+        assert_eq!(
+            super::section_body(md, "Decision").as_deref(),
+            Some("the rule\n\n### Detail\nmore"),
+            "a `###` subheading must not end the section"
+        );
+        assert_eq!(super::section_body(md, "Context").as_deref(), Some("why"));
+        assert_eq!(super::section_body(md, "Absent"), None);
+    }
+
+    /// **The title is matched verbatim, because a slug rule would be a second
+    /// copy of one this crate cannot see.** Punctuation that a slug would collapse
+    /// must still resolve here.
+    #[test]
+    fn a_heading_with_punctuation_resolves_without_a_slug_rule() {
+        let md = "## Options considered + consequences\nbody\n\n## Next\nx\n";
+        assert_eq!(
+            super::section_body(md, "Options considered + consequences").as_deref(),
+            Some("body")
+        );
+    }
+
+    /// A doc comment already visible in the hunks is not worth re-sending: the
+    /// context block's whole value is the half the diff does *not* show.
+    #[test]
+    fn a_doc_already_in_the_diff_is_not_re_quoted() {
+        let doc = "Returns the cache entry for `key`, evicting the least recently used entry when the cache is full.";
+        let shown = format!("   12  |/// {doc}\n   13  |pub fn get(&self) {{}}\n");
+        assert!(
+            super::doc_already_shown(doc, &shown),
+            "the doc is in the diff and was not recognised"
+        );
+        assert!(
+            !super::doc_already_shown(doc, "   12  |pub fn unrelated() {}\n"),
+            "a doc absent from the diff was treated as shown"
+        );
+    }
+
+    /// The diff carries a line-number column and `+`/` ` markers the graph's copy
+    /// of the same doc does not, so the comparison must ignore whitespace — this
+    /// is the case that a naive `contains` gets wrong.
+    #[test]
+    fn the_visibility_test_ignores_the_line_number_column() {
+        let doc = "The slot lock is held only long enough to hand out an `Arc`, never across initialisation.";
+        // Wrapped across lines and numbered, exactly as `annotate_diff` renders it.
+        let shown = "    16 +|/// The slot lock is held only long enough to hand\n    17 +|/// out an `Arc`, never across initialisation.\n";
+        assert!(
+            super::doc_already_shown(doc, shown),
+            "wrapping and numbering defeated the visibility test"
+        );
+    }
+
+    /// A doc too short to state a contract is treated as already shown, so the
+    /// context block is not padded with one-word comments that cannot drift.
+    #[test]
+    fn a_doc_too_short_to_state_a_contract_is_never_carried() {
+        assert!(super::doc_already_shown("The key.", "unrelated diff text"));
+    }
+
     /// **PR 1's arm is diff-only, and the prompt must say nothing else.** An empty
     /// [`GraphContext`] renders no context heading at all, so the baseline is not
     /// quietly a reviewer told it has context and given none — which is a
@@ -795,6 +1182,7 @@ mod tests {
                     provenance: "authored".to_owned(),
                     body: "the user layer alone never suffices".to_owned(),
                 }],
+                dropped_items: 0,
             },
             30_000,
         );
