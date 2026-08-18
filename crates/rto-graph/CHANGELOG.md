@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.20.0...rto-graph-v1.21.0) - 2026-08-18
+
+### Fixed
+
+- *(review)* strip bold from fields, not from the prose a human reads
+- *(review)* a mod.rs is gated by its directory's declaration, not `mod mod;`
+
+### Other
+
+- reviewer truncation detection (rto-graph half)
+- *(review)* UNREVIEWED checkpoint - Stage 35b PR 1 in progress
+
 ## [1.20.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.19.0...rto-graph-v1.20.0) - 2026-08-17
 
 ### Fixed
