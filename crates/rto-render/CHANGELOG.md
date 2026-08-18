@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.22.0...rto-render-v1.22.1) - 2026-08-18
+
+### Fixed
+
+- *(review)* apply `[debt] ignore` by taking the marker set from `debt`
+
 ## [1.21.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.21.0...rto-render-v1.21.1) - 2026-08-18
 
 ### Fixed
