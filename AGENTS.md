@@ -22,8 +22,10 @@ orienting:
 
 For natural-language "what/why" questions, `roteiro serve` (the network HTTP
 server) exposes the same `search` plus an OpenAI-compatible `/v1` endpoint and the
-web UI; MCP agents run `roteiro mcp` and get `search`/`explain`/`path`/`debt`
-directly. The deeper operational guide (node
+web UI; MCP agents run `roteiro mcp` and get
+`search`/`explain`/`context`/`check`/`path`/`debt` directly — every one of them
+read-only, and `check` returning a `gate` of `not-run` rather than a clean
+verdict when it cannot see the repository or a current graph. The deeper operational guide (node
 keys, when to use each tool, the plan/review flows) is the installable skill at
 [`.agents/skills/roteiro/SKILL.md`](.agents/skills/roteiro/SKILL.md) — also
 mirrored to `.github/skills/roteiro/` for the Copilot reviewer.
@@ -196,7 +198,9 @@ ADRs, blast radius) rather than reading the diff in isolation.
 
 `roteiro review` is the **CLI-first, tool-agnostic** review surface — it needs no
 server and works in any agent or CI. Roteiro *also* ships an MCP server
-(`roteiro mcp`, built `--features mcp`) exposing `explain`/`path`/`debt`/`search`,
+(`roteiro mcp`, built `--features mcp`) exposing
+`explain`/`search`/`context`/`check`/`path`/`debt` (but **not** `review` — it is
+CLI-first; see `rto_render::mcp`'s module documentation for why),
 which a **local** agent (Claude Code, editors) can query during a review.
 
 Wiring the **hosted** GitHub Copilot reviewer to Roteiro's MCP is **unverified**:

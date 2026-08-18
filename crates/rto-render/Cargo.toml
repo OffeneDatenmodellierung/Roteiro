@@ -13,6 +13,9 @@ authors.workspace = true
 [dependencies]
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 rto-graph = { workspace = true }
+# The authored-layer parse and drift rule behind the MCP `check` tool. It is
+# `mcp`-only: a default `rto-render` build renders documents and needs none of it.
+rto-spec = { workspace = true, optional = true }
 # MCP-only (feature `mcp`): the official Rust MCP SDK + async runtime + HTTP.
 rmcp = { version = "3.1.2", default-features = false, features = [
     "server",
@@ -33,7 +36,7 @@ serde_json = { workspace = true }
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
 # (ADR-0002) for stdio + streamable-HTTP transports; entirely feature-gated so
 # the default build pulls none of it.
-mcp = ["dep:rmcp", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:serde_json"]
+mcp = ["dep:rmcp", "dep:rto-spec", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:serde_json"]
 
 [lints]
 workspace = true
