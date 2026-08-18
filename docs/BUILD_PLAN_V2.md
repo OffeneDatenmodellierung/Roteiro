@@ -2072,6 +2072,71 @@ before anyone knew which way the numbers would fall, and it stands as written;
 what the measurement adds is *why* it could not be met, which is worth more than
 the miss.
 
+#### The diff-only baseline, and the discovery that it is not a measurement
+
+The baseline this stage never had: `qwen3-coder-30b-a3b`, 15 of 15 commits, 183
+files reviewed, one file refused (`Cargo.lock`, 64,389 tokens against the
+49,152-token window) and one truncated. **4 of 22 real rows found, 1 of 4
+known-false reproduced, and 1,995 findings emitted — 10.9 per file, of which
+1,990 are unadjudicated.**
+
+Then the number was checked against a null, and it did not survive.
+
+`review_score::match_findings` credits a finding to a row on `(commit, path,
+line ±LINE_WINDOW)` and **never on what the finding says** — not its class, not a
+word of its description. That is the correct rule for a scorer that must not
+reward eloquence. Its consequence had not been measured: a reviewer emitting
+10.9 findings per file blankets the diff, and a "hit" is then explained by
+density rather than by insight.
+
+**Permutation null.** Relocate every corpus row to a uniformly random line its
+own reconstructed diff actually shows; leave the run's findings byte-for-byte as
+emitted; rescore with the same greedy one-to-one rule. Over 2,000 trials:
+
+| | observed | null mean | P(≥ observed) |
+|---|---|---|---|
+| real rows matched | **4** | **4.19** | 0.72 |
+| known-false reproduced | 1 | 0.49 | 0.49 |
+
+**The reviewer scored below chance.** A tighter null that relocates only to
+*added* lines — where 23 of the 26 rows actually sit — gives 3.98 and P = 0.62,
+so the result is robust to the obvious objection. The reimplemented matcher
+reproduces the shipped scorer's counts exactly (4 real, 1 known-false), which is
+what licenses the comparison.
+
+So **`4/22` is not a recall figure, it is arithmetic**, and the same is true of
+the `1/4` known-false "reproduction": inspected, the credited finding is a
+`contract-drift` claim about a `Range: bytes=` doc at line 2312, while the row at
+2322 is a *false compile claim*. Different claims, ten lines apart. The scorer
+cannot tell them apart and was never built to.
+
+**This is the fourth silent-zero-shaped trap in this stage, and the first that is
+silently *non*-zero.** Scoring against a PR head, against an empty diff, and
+against a truncated reasoning reply all report a clean zero that measures
+nothing; this reports a clean *positive* that measures nothing. It is now caught
+in code rather than in prose — `Score::expected_by_position` prints beside the
+recall, and `caveats()` states outright that the rate is not clearly above
+chance — on the same principle that made `reasoning_truncated` a reported outcome
+in PR 1: *a number whose null is not stated is not yet a result.*
+
+The shipped estimate is honest about being an estimate. An exact null needs the
+diff, and `review --score` is pure by design so a published score recomputes on
+any machine, so it uses the candidate's own findings as the proxy for where it
+looked. Summing the ±10 neighbourhoods over-reads at 6.2; merging them
+under-reads at 3.0 against the permutation's 4.19. It is an order-of-magnitude
+guide, the caveat fires on a 2× margin because of that, and the docs name the
+permutation as the thing to run before believing any comparison.
+
+**What this costs the experiment.** A recall comparison between two arms is only
+meaningful if either arm's recall is meaningful. At 10.9 findings per file
+neither is. The density sweep says how far that has to fall: thinning the run's
+own findings and re-running both the null and the observed match, the two stay
+within noise of each other at every rate measured — 4.19 vs 4.00 at 10.9 per
+file, 1.67 vs 2.08 at 2, 0.67 vs 0.94 at 0.5. **The reviewer's recall never
+separates convincingly from chance at any density it was run at.** PR 1 called
+the ~15-per-file rate "the number to beat"; it is worse than that — until it
+falls, the corpus cannot measure recall at all.
+
 **The premise, restated against the data.** Stage 35's central claim was that
 `contract-drift` "puts the largest class squarely on the graph: per-file review
 cannot see a doc in another file contradicting the code under review." Measured
