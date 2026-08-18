@@ -2239,12 +2239,29 @@ between them has nothing to compare. What would change the answer is a reviewer
 whose finding rate falls far enough for recall to become a measurement; until
 then, more context is tuning against noise.
 
-**One gap, recorded rather than smoothed.** Scoring either run prints no chance
-baseline, though `Score::expected_by_position` was added in this PR precisely so
-a recall figure never appears without its null beside it. On these two runs the
-guard does not fire. Until that is understood, the permutation numbers above are
-the ones to trust, and the printed recall is not yet self-qualifying — which is
-the very failure the addition was meant to end.
+**The chance baseline fires on both arms**, which is what makes the comparison
+readable at all:
+
+```
+armA  4/22   chance baseline: ~3.0 would match by position alone
+armB  5/22   chance baseline: ~2.6 would match by position alone
+both  RECALL IS NOT CLEARLY ABOVE CHANCE AT THIS FINDING DENSITY
+```
+
+Read the estimator as the order-of-magnitude guide it says it is: it returns 3.0
+where the exact permutation null returned 4.19, the ~30% under-shoot its own
+docs predict for merged neighbourhoods. **No permutation was run for the graph
+arm**, so its 5-against-~2.6 must not be read as separation — corrected for the
+same under-shoot its null sits near 3.6, and the caveat's own instruction is to
+confirm with a permutation before comparing two candidates.
+
+*(An earlier revision of this section recorded "the guard does not fire" as a
+defect. That was wrong, and wrong in the way this document keeps cataloguing:
+the scoring was run with a binary built 09:27, two and a half hours before the
+feature landed at 11:55 — `strings` finds no trace of it in that artifact. The
+claim was checked against the wrong build, not against the code. Recorded rather
+than quietly deleted, because a false gap in a document about false measurements
+is worth one paragraph.)*
 
 ---
 
