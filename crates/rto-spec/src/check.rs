@@ -165,10 +165,24 @@ fn duplicate_adr_ids(docs: &[AdrDoc]) -> Vec<Violation> {
 /// none is how it becomes a rule nobody reads:
 /// - that a `version:`, a summary row or a history table exists at all — the
 ///   contradiction is the finding, and ADR-0011 legitimately has no history;
-/// - that the frontmatter version equals the newest history row. That gap is
-///   real and was found twice while this rule was written (ADR-0009 reached
-///   1.11 and ADR-0014 reached 1.5, neither bumped), but it is a fourth rule,
-///   not a widening of these three.
+/// - that the frontmatter version equals the highest history row. Real: found
+///   twice while this rule was written (ADR-0009 had reached 1.11 and ADR-0014
+///   1.5, neither bumped);
+/// - that `last-modified` is no older than the newest history date. Also real,
+///   and worse — eight of the twenty lagged, and three of those were introduced
+///   by people actively repairing this same family, ADR-0006's by #413 itself.
+///   One-directional: running *ahead* is legitimate, because a typo fix or a
+///   link repair need not earn a history row.
+///
+/// Those are a fourth and a fifth rule rather than widenings of these three,
+/// and both land under this one kind — the variant was shaped so the message,
+/// not the label, says which check fired. Neither therefore reopens the semver
+/// question this enum's exhaustiveness raises. The fourth is free: `meta.version`
+/// and [`crate::adr::VersionFacts::history`] already hold everything it compares.
+/// The fifth is not quite free — nothing yet parses `last-modified`, and history
+/// rows are kept without their dates, so it wants a field on
+/// [`crate::adr::AdrMeta`] and dates alongside the history versions. That is the
+/// same already-taken API decision, not a new one.
 fn adr_version_drift(docs: &[AdrDoc]) -> Vec<Violation> {
     let mut out = Vec::new();
     for doc in docs {
