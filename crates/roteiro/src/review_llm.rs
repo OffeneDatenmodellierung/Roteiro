@@ -329,6 +329,51 @@ pub struct ReviewSet {
     pub skipped: Vec<String>,
 }
 
+impl ReviewSet {
+    /// Partition changed paths into files that can be reviewed and paths that
+    /// cannot, by the one rule both callers use.
+    ///
+    /// # Why this is a shared constructor and not a shared predicate
+    ///
+    /// The replay path filtered unreviewable diffs and the live `--llm` path did
+    /// not, so binary blobs and mode- or rename-only records were sent to the
+    /// model on one surface and not the other. The output contract is
+    /// *unachievable* for those: the reviewer must cite `line=<n>`, and
+    /// `annotate_diff` never numbered a diff with no hunk, so the best possible
+    /// reply is unparsed noise landing in the unadjudicated count.
+    ///
+    /// Exporting a `fn reviewable(diff) -> bool` for both sides to remember to
+    /// call would leave the divergence possible and merely currently-absent. This
+    /// is the same shape as the `[debt]` ignore honoured on three surfaces and not
+    /// a fourth, and as `limit=0` meaning two things across five endpoints: each
+    /// was closed by removing the room for the two answers to differ, not by
+    /// correcting the instance. So collecting the set *is* applying the rule —
+    /// there is no way to obtain a `ReviewSet` that skipped the check.
+    ///
+    /// `diff_of` returning `None` is treated as an unreadable diff rather than as
+    /// an absent file: it lands in `skipped`, where it is reported, instead of
+    /// being dropped on the floor.
+    fn collect(reviewed_sha: &str, names: &str, diff_of: &dyn Fn(&str) -> Option<String>) -> Self {
+        let mut set = Self::default();
+        for path in names.lines().filter(|p| !p.is_empty()) {
+            let diff = diff_of(path).unwrap_or_default();
+            // No hunk header means there is no text to review: git emits
+            // `Binary files a/… and b/… differ` for a blob, and a bare header for
+            // a mode or rename change.
+            if !diff.contains("@@") {
+                set.skipped.push(path.to_owned());
+                continue;
+            }
+            set.files.push(FileUnderReview {
+                reviewed_sha: reviewed_sha.to_owned(),
+                path: path.to_owned(),
+                diff,
+            });
+        }
+        set
+    }
+}
+
 /// Every file a review commit touched, with its own diff.
 ///
 /// # Errors
@@ -342,23 +387,9 @@ pub fn files_at(repo: &Path, sha: &str, main: &str) -> anyhow::Result<ReviewSet>
     );
     let names = git(repo, &["diff", "--name-only", &fork, sha])
         .ok_or_else(|| anyhow::anyhow!("git diff --name-only {fork}..{sha} failed"))?;
-    let mut set = ReviewSet::default();
-    for path in names.lines().filter(|p| !p.is_empty()) {
-        let diff = git(repo, &["diff", "-U3", &fork, sha, "--", path]).unwrap_or_default();
-        // No hunk header means there is no text to review: git emits
-        // `Binary files a/… and b/… differ` for a blob, and a bare header for a
-        // mode or rename change.
-        if !diff.contains("@@") {
-            set.skipped.push(path.to_owned());
-            continue;
-        }
-        set.files.push(FileUnderReview {
-            reviewed_sha: sha.to_owned(),
-            path: path.to_owned(),
-            diff,
-        });
-    }
-    Ok(set)
+    Ok(ReviewSet::collect(sha, &names, &|path| {
+        git(repo, &["diff", "-U3", &fork, sha, "--", path])
+    }))
 }
 
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
@@ -608,7 +639,7 @@ fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
 /// separate jobs, and only the second needs a model — which is what lets the
 /// interesting half of `run_llm` stay short enough to read.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-fn changed_files(repo: &Path, base: Option<&str>) -> Vec<FileUnderReview> {
+fn changed_files(repo: &Path, base: Option<&str>) -> ReviewSet {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
     let range: Vec<String> = match base {
         Some(b) => vec![b.to_owned(), "HEAD".to_owned()],
@@ -618,21 +649,42 @@ fn changed_files(repo: &Path, base: Option<&str>) -> Vec<FileUnderReview> {
     args.extend(range.iter().map(String::as_str));
     let names = git(repo, &args).unwrap_or_default();
 
-    names
-        .lines()
-        .filter(|p| !p.is_empty())
-        .filter_map(|path| {
-            let mut d: Vec<&str> = vec!["diff", "-U3"];
-            d.extend(range.iter().map(String::as_str));
-            d.extend(["--", path]);
-            let diff = git(repo, &d)?;
-            (!diff.is_empty()).then(|| FileUnderReview {
-                reviewed_sha: head.clone(),
-                path: path.to_owned(),
-                diff,
-            })
-        })
-        .collect()
+    // Returns a `ReviewSet` rather than a bare `Vec` so this path cannot differ
+    // from the replay path about what is reviewable: the rule lives in
+    // `ReviewSet::collect` and there is no way to build one around it. This used
+    // to filter on `!diff.is_empty()` alone, which sent binary blobs and
+    // mode-only records to the model under a contract they cannot satisfy.
+    ReviewSet::collect(&head, &names, &|path| {
+        let mut d: Vec<&str> = vec!["diff", "-U3"];
+        d.extend(range.iter().map(String::as_str));
+        d.extend(["--", path]);
+        git(repo, &d)
+    })
+}
+
+/// Say which changed paths were never put to the model, and why.
+///
+/// **Reported, not silently dropped — and reported before the findings**, so it
+/// cannot read as a footnote to a clean result. "Nothing to say about this file"
+/// and "this file was never reviewed" are different facts; a run that renders
+/// them identically is the vacuous zero this stage exists to make impossible,
+/// and is the same distinction `reasoning_truncated` carries for a reply that
+/// stopped early. A change that is *entirely* unreviewable would otherwise print
+/// `0 finding(s)` and look like a clean review.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn announce_unreviewable(skipped: &[String]) {
+    if skipped.is_empty() {
+        return;
+    }
+    println!(
+        "{} changed path(s) NOT REVIEWED — no hunk to anchor a finding to (binary \
+         blob, or a mode/rename-only change), so the model is not asked for a \
+         `line=` it could not cite:",
+        skipped.len()
+    );
+    for path in skipped {
+        println!("  {path}");
+    }
 }
 
 /// Review the working-tree change (or a `base..HEAD` range) with the model.
@@ -645,10 +697,15 @@ pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> an
         Some(p) => read_checks(p)?,
         None => Vec::new(),
     };
-    let files = changed_files(repo, base);
+    let ReviewSet { files, skipped } = changed_files(repo, base);
 
-    if files.is_empty() {
+    if files.is_empty() && skipped.is_empty() {
         println!("no changes to review");
+        return Ok(());
+    }
+    announce_unreviewable(&skipped);
+    if files.is_empty() {
+        println!("\nnothing reviewable in the change");
         return Ok(());
     }
 
@@ -747,7 +804,7 @@ pub fn corpus_shas() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{corpus_shas, files_at, fork_point, main_ref, parent_module_source};
+    use super::{ReviewSet, corpus_shas, files_at, fork_point, main_ref, parent_module_source};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -926,6 +983,57 @@ mod tests {
             REVIEW_N_CTX as usize >= worst_case,
             "a prompt `len / 4` understated by 30% plus its generation is \
              {worst_case} tokens, over the {REVIEW_N_CTX}-token window"
+        );
+    }
+
+    /// **One reviewability rule, and both paths reach it by construction.**
+    ///
+    /// The replay path filtered on `contains("@@")` and the live `--llm` path on
+    /// `!is_empty()`, so a binary blob or a mode-only record was sent to the model
+    /// on one surface and not the other — under a contract it cannot satisfy,
+    /// since `annotate_diff` numbers no line in a diff with no hunk. Both now
+    /// obtain their set only from `ReviewSet::collect`, so the rule cannot be
+    /// applied on one side and forgotten on the other; this pins what the rule
+    /// says, and the type pins that it is asked.
+    #[test]
+    fn the_reviewable_rule_is_one_rule_and_skips_are_kept() {
+        let diffs: BTreeMap<&str, &str> = [
+            ("src/real.rs", "@@ -1,2 +1,3 @@\n context\n+added\n"),
+            (
+                "assets/beep.wav",
+                "Binary files a/assets/beep.wav and b/assets/beep.wav differ\n",
+            ),
+            (
+                "scripts/run.sh",
+                "diff --git a/scripts/run.sh b/scripts/run.sh\nold mode 100644\nnew mode 100755\n",
+            ),
+        ]
+        .into_iter()
+        .collect();
+        // `gone.rs` resolves to no diff at all, which is unreadable rather than
+        // absent: it is reported, not dropped on the floor.
+        let names = "src/real.rs\nassets/beep.wav\nscripts/run.sh\ngone.rs\n";
+
+        let set = ReviewSet::collect("deadbeef", names, &|p| {
+            diffs.get(p).map(|d| (*d).to_owned())
+        });
+
+        let reviewed: Vec<&str> = set.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            reviewed,
+            vec!["src/real.rs"],
+            "only a diff with a hunk carries a citable line number"
+        );
+        assert_eq!(set.files[0].reviewed_sha, "deadbeef");
+        assert_eq!(
+            set.skipped,
+            vec![
+                "assets/beep.wav".to_owned(),
+                "scripts/run.sh".to_owned(),
+                "gone.rs".to_owned(),
+            ],
+            "a binary blob, a mode-only record and an unreadable diff are all \
+             counted rather than silently reducing the denominator"
         );
     }
 
