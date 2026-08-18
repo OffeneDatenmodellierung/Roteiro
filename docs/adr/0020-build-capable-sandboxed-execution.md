@@ -11,7 +11,7 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-08-18
 confluence-url:
 ---
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 | **Status** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
@@ -55,10 +55,10 @@ Three things are amended, and the amendments are the substance:
 3. **The read-only worktree invariant is relaxed for one runner, not removed.**
    The preflight that enforces it keeps refusing every other request.
 
-And one thing is decided that looks like an engineering detail and is not: **a
-build is not an analysis, and the findings store cannot currently tell two builds
-apart.** That gap survives fixing everything else here, and it — not the
-sandboxing — is the hard part.
+And one thing is decided that looks like an engineering detail and is not:
+**builder output is not stored.** A build is a point-in-time assessment of the
+code in front of you, produced for the person who asked. It is reported and
+discarded, not filed as a fact about the repository.
 
 ## Context
 
@@ -156,23 +156,37 @@ builder must record which it used, and a build that could not obtain its boundar
 must **fail with a named error rather than fall back to the host**. A silent
 downgrade here writes a false provenance into the findings store.
 
-### 4. The store must be able to tell two builds apart — and today it cannot
+### 4. Builder output is ephemeral — it is not stored
 
-This is the condition most likely to be skipped, and it is the one that survives
-fixing everything else.
+A builder reports to the caller and writes nothing to the findings store. No
+layer, no replacement, no history.
 
-For every analyzer shipped so far, the thing deciding the answer is a **pinned
-asset with a digest** — semgrep's rules, the RustSec checkout, the OSV databases
-— stamped into `AnalysisRun.rules_digest`. **For a builder the rule set is the
-toolchain, and there is no asset to digest.** The layer key renders
-`<prefix>:<analyzer>:<worktree-id>` and nothing else, with `analyzer_version` in
-neither the finding key nor the layer key, and the column is `UNIQUE`.
+This is the condition that makes the rest of the decision tractable, and it
+follows from what a lint *is* rather than from convenience. An advisory id is
+**assigned**, and assignment is a promise: `RUSTSEC-2020-0071` will mean the same
+thing in five years. A lint name is a **symbol in a compiler** — renamed,
+removed, or moved between groups at the compiler's discretion, with the old name
+surviving only as a deprecation alias. The first is a durable fact about the
+repository and earns a place in a store. The second is a tool's opinion about the
+code as it stands today, for the person who asked.
 
-Consequently two builds of one commit that differ in **toolchain version** or in
-**feature set** collide on one layer key and **silently replace each other**, and
-the replacement reports the displaced findings as removed — which reads as
-*fixed*. No amount of sandboxing repairs that; it is a schema question and it
-must be answered before builder findings are stored.
+Storing the second is what produced every identity problem this decision ran
+into. The layer key renders `<prefix>:<analyzer>:<worktree-id>` and nothing else,
+with `analyzer_version` in neither the finding key nor the layer key, and the
+column is `UNIQUE` — so two builds of one commit differing in toolchain version
+or feature set would collide, silently replace each other, and report the
+displaced findings as *removed*, which reads as **fixed**. For every stored
+analyzer the thing deciding the answer is a pinned asset with a digest; **for a
+builder the rule set is the toolchain, and there is no asset to digest.**
+
+**Not storing is the fix, not a workaround.** It removes the collision, the false
+"fixed", and the need to key a layer by a toolchain — none of which were problems
+worth solving, because the thing being stored did not belong there.
+
+What is given up, stated plainly rather than discovered later: no trend line over
+lint debt, no ingesting a CI clippy run to query later, and no cross-analyzer
+join with security findings. The first is largely a measurement of toolchain
+churn rather than of code; the third was already forbidden by condition 5.
 
 ### 5. Lint identity is documented, not engineered around
 
@@ -183,10 +197,13 @@ introduced; a removed lint reads as fixed; an edit to `[workspace.lints]` makes
 whole cohorts appear or vanish, so **a configuration change reads as a code
 change**.
 
-These readings are inherent and must be surfaced where a user meets them.
-Builder findings must **not** be wired into the cross-analyzer join, whose
-correctness rests on both upstreams publishing identifiers. Nobody publishes lint
-names; they are release notes.
+Because condition 4 stores nothing, these readings stop being *corruption* and
+become *surprise*: there is no stored history for a renamed lint to falsify. They
+must still be surfaced where a user meets them — a report saying "3 fewer than
+last week" after a toolchain bump misleads whether or not a database was
+involved. Builder findings must **not** be wired into the cross-analyzer join,
+whose correctness rests on both upstreams publishing identifiers. Nobody
+publishes lint names; they are release notes.
 
 ## Consequences
 
@@ -201,7 +218,8 @@ on 2–4 cores"* — so the ceiling is real, not theoretical.
 readers it is the strong argument: pinned image, pinned rules, pinned advisory
 DB, same findings anywhere. For builders the answer depends on the toolchain, the
 feature set and the resolved dependency tree, none of which a rules digest pins.
-Condition 4 exists because of this.
+Condition 4 is the answer to it: output that is never stored makes no
+reproducibility claim to break.
 
 **`--all-features` on this repository cannot be built under a denied network
 today**, because a dependency's build script fetches at build time. The
@@ -223,19 +241,20 @@ lesser path**; for most users it will remain the right one.
 
 ## Status
 
-**Draft.** The decision is taken — build-capable execution is a goal, and the
-`code_interpreter` non-goal is narrowed rather than withdrawn. What is not yet
-established is condition 4: the findings store cannot currently represent two
-builds of one commit distinctly, and that is a schema question with no proposed
-answer at the time of writing.
+**Draft.** The decision is taken: build-capable execution is a goal, the
+`code_interpreter` non-goal is narrowed rather than withdrawn, and builder output
+is reported rather than stored.
 
-This ADR should not move to `Accepted` until condition 4 has one, because
-accepting it earlier would authorise storing findings the store cannot describe
-— which is the defect [[docs/adr/0012-analyzer-findings-artifact-model.md]] exists to
-prevent.
+An earlier revision was blocked on the findings store's inability to distinguish
+two builds of one commit. **Condition 4 dissolves that** — nothing is stored, so
+nothing collides. What remains before acceptance is engineering rather than an
+unanswered question: a writable build directory that does not relax the
+read-only preflight for readers, the argv and environment seam a builder needs,
+and a demonstrated refusal path that never falls back to the host.
 
 ## Document version history
 
 | Version | Date | Notes |
 |---------|------|-------|
 | 1.0 | 2026-08-18 | Initial draft. Narrows ADR-0014's `code_interpreter` non-goal to exclude only model-authored code, scopes its "security argument is weaker" reasoning to parse-only analyzers, and relaxes the read-only worktree invariant for a builder runner only. Records the measured build-script and proc-macro counts that make the case, the inverted threat model, and the five conditions — of which condition 4, the store's inability to distinguish two builds of one commit, is unresolved and blocks acceptance. |
+| 1.1 | 2026-08-18 | Condition 4 reversed on the owner's ruling that builder output is local to the person running it rather than an artifact stored for later. Storing a lint was the source of every identity problem the draft catalogued — an advisory id is *assigned* and permanent, a lint name is a symbol in a compiler — so not storing is the fix rather than a workaround. This unblocks acceptance: what remains is engineering, not an open question. Condition 5 softened accordingly, since with no stored history a renamed lint is a surprise rather than a corruption. |
