@@ -1,0 +1,23 @@
+{
+  "why": "The shape a passing rendering has: a listed connective, then one span per finding, each naming the finding it rests on.",
+  "findings": [
+    "finding:roteiro-check:broken-link:docs/adr/0015-generated-media-content-artifact-store.md:42",
+    "finding:roteiro-check:duplicate-adr-id:0016"
+  ],
+  "rendering": {
+    "segments": [
+      { "kind": "structural", "text": "Here are the findings:" },
+      {
+        "kind": "claim",
+        "text": "ADR-0015 links to a symbol that is not in the graph, at line 42.",
+        "citations": ["finding:roteiro-check:broken-link:docs/adr/0015-generated-media-content-artifact-store.md:42"]
+      },
+      {
+        "kind": "claim",
+        "text": "Two ADR files both declare adr-id 0016, so one of the two decisions is invisible to every query.",
+        "citations": ["finding:roteiro-check:duplicate-adr-id:0016"]
+      }
+    ]
+  },
+  "expect": []
+}

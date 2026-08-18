@@ -205,6 +205,7 @@ deferred; see the ADR for the field mapping and the seam.
 
 - `crates/rto-graph` — SQLite store, provenance model, content-addressed cache, extraction, sync, query, inference
 - `crates/rto-spec` — house-style ADR/blueprint parsing, `check` (drift gate), importers, spec authoring
+- `crates/rto-faithful` — rendering faithfulness: every claim in a rendered summary must trace to a tool finding
 - `crates/rto-render` — docs site, Obsidian vault, MCP server (feature-gated)
 - `crates/rto-serve` — local OpenAI-compatible model server (llama.cpp; feature-gated)
 - `crates/rto-llama` — llama.cpp inference core (generation, embeddings, vision), shared by serving and internal uses

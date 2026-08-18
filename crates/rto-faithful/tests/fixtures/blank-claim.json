@@ -1,0 +1,14 @@
+{
+  "why": "A span with a resolving citation and no prose. It is not a fabrication, but it launders a finding into a rendering: a caller tallying which findings were mentioned counts this one as covered, and a reader sees nothing.",
+  "findings": ["finding:roteiro-check:inactive-adr:crates/rto-spec/src/check.rs:0005"],
+  "rendering": {
+    "segments": [
+      {
+        "kind": "claim",
+        "text": "   ",
+        "citations": ["finding:roteiro-check:inactive-adr:crates/rto-spec/src/check.rs:0005"]
+      }
+    ]
+  },
+  "expect": [{ "defect": "empty-claim", "segment": 0 }]
+}

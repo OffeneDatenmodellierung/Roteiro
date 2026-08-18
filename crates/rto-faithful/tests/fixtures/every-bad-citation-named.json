@@ -1,0 +1,21 @@
+{
+  "why": "One defect per bad key rather than one per claim. A claim resting on three findings of which two do not exist is two dangling references; reporting it once would leave the reader to work out which.",
+  "findings": ["finding:roteiro-check:broken-link:README.md:12"],
+  "rendering": {
+    "segments": [
+      {
+        "kind": "claim",
+        "text": "Three authored links across the tree resolve to nothing.",
+        "citations": [
+          "finding:roteiro-check:broken-link:README.md:12",
+          "finding:roteiro-check:broken-link:README.md:34",
+          "finding:roteiro-check:broken-link:README.md:56"
+        ]
+      }
+    ]
+  },
+  "expect": [
+    { "defect": "dangling-citation", "segment": 0, "citation": "finding:roteiro-check:broken-link:README.md:34" },
+    { "defect": "dangling-citation", "segment": 0, "citation": "finding:roteiro-check:broken-link:README.md:56" }
+  ]
+}
