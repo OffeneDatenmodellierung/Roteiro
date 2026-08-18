@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.22.0...rto-spec-v1.23.0) - 2026-08-18
+
+### Added
+
+- *(check)* gate ADR version metadata against itself
+
+### Other
+
+- *(check)* record what the fourth and fifth rules will cost
+
 ## [1.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.11.0...rto-spec-v1.12.0) - 2026-08-16
 
 ### Fixed
