@@ -343,7 +343,12 @@ fn main_ref(repo: &Path) -> anyhow::Result<String> {
         .into_iter()
         .find(|r| git(repo, &["rev-parse", "--verify", "--quiet", r]).is_some())
         .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("neither `origin/main` nor `main` resolves in {}", repo.display()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "neither `origin/main` nor `main` resolves in {}",
+                repo.display()
+            )
+        })
 }
 
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]

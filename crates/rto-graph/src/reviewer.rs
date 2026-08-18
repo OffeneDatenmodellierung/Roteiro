@@ -438,11 +438,13 @@ pub struct Parsed {
 /// scored, shown to a human, or acted on.
 #[must_use]
 pub fn parse_findings(reviewed_sha: &str, path: &str, reply: &str) -> Parsed {
-    let mut out = Parsed::default();
-    // Checked on the text as handed over, which a caller has already run its
-    // `</think>` strip across: an *opening* tag still present means the closing
-    // one never arrived, so the generation stopped mid-deliberation.
-    out.reasoning_truncated = reply.contains("<think>");
+    let mut out = Parsed {
+        // Checked on the text as handed over, which a caller has already run its
+        // `</think>` strip across: an *opening* tag still present means the
+        // closing one never arrived, so generation stopped mid-deliberation.
+        reasoning_truncated: reply.contains("<think>"),
+        ..Parsed::default()
+    };
     for raw in reply.lines() {
         let line = raw.trim().trim_start_matches(['-', '*', '>', '#', ' ']);
         let line = line.trim_start_matches('`').replace("**", "");
@@ -876,7 +878,10 @@ here is some prose the model added";
             "<think>\nLet me check the doc against the code. Line 12 says the cache is\n\
              unbounded, and the insert path",
         );
-        assert!(cut.reasoning_truncated, "an unterminated block is truncation");
+        assert!(
+            cut.reasoning_truncated,
+            "an unterminated block is truncation"
+        );
         assert!(!cut.declared_clean, "and it is emphatically not clean");
         assert!(cut.findings.is_empty());
 
