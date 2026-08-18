@@ -19,7 +19,7 @@
 //!
 //! # Deterministic rules over categorical signals — not a classifier
 //!
-//! Every signal here is low-cardinality: the task (six), the model's kind (five),
+//! Every signal here is low-cardinality: the task (seven), the model's kind (five),
 //! whether it is installed (two). A table over categoricals *is* the correct
 //! model for that, and it has the property a learned selector cannot have: the
 //! same inputs give the same model on every machine, forever, which is what
@@ -55,9 +55,10 @@
 //! # The remote tier is a *variant*, not a transport
 //!
 //! [`ModelSource::Remote`] is the one resolution that does not name a registry
-//! model, and it is here because ADR-0019's remote tier reaches the same two
-//! surfaces this resolver already serves ([`ModelTask::Draft`] and
-//! [`ModelTask::Chat`]). What arrives here is a **decision already taken
+//! model, and it is here because ADR-0019's remote tier reaches the generative
+//! surfaces this resolver already serves ([`ModelTask::Draft`],
+//! [`ModelTask::Chat`] and [`ModelTask::Review`]). What arrives here is a
+//! **decision already taken
 //! elsewhere**: [`RemoteTier`] is the consent gate's answer, computed by
 //! `rto-remote` from the config layers and the invocation, and this module has
 //! no way to compute it, ask for it, or change it. Nothing here opens a socket,
@@ -95,6 +96,19 @@ pub enum ModelTask {
     Draft,
     /// `roteiro serve` / the explorer's Ask panel — answer a question.
     Chat,
+    /// `roteiro review --llm` — read one changed file and report defects in it
+    /// (Stage 35b).
+    ///
+    /// A third task on the `generative` key rather than a fourth bespoke
+    /// selection rule in the reviewer: this module exists because seven surfaces
+    /// each picked a model their own way, and a reviewer that searched the
+    /// registry itself would be the next one.
+    ///
+    /// Separate from [`ModelTask::Draft`] even though the two want the same kind
+    /// of model and the same key, for the reason `Draft` and `Chat` are separate:
+    /// an operator asking *why did review use that model?* is not asking about
+    /// `spec draft`, and `roteiro config` answers per task.
+    Review,
     /// `roteiro media build` (audio) — transcribe a spoken-word clip.
     Transcribe,
     /// `roteiro media build` (vision) — describe an image.
@@ -104,10 +118,11 @@ pub enum ModelTask {
 }
 
 /// Every task, in the order `roteiro config` prints them.
-pub const TASKS: [ModelTask; 6] = [
+pub const TASKS: [ModelTask; 7] = [
     ModelTask::Embed,
     ModelTask::Draft,
     ModelTask::Chat,
+    ModelTask::Review,
     ModelTask::Transcribe,
     ModelTask::Describe,
     ModelTask::Ocr,
@@ -134,6 +149,7 @@ impl ModelTask {
             Self::Embed => "embed",
             Self::Draft => "draft",
             Self::Chat => "chat",
+            Self::Review => "review",
             Self::Transcribe => "transcribe",
             Self::Describe => "describe",
             Self::Ocr => "ocr",
@@ -149,6 +165,7 @@ impl ModelTask {
             Self::Embed => "roteiro infer",
             Self::Draft => "roteiro spec draft",
             Self::Chat => "roteiro serve / Ask",
+            Self::Review => "roteiro review --llm",
             Self::Transcribe => "roteiro media build (audio)",
             Self::Describe => "roteiro media build (vision)",
             Self::Ocr => "roteiro sync (image OCR)",
@@ -157,14 +174,14 @@ impl ModelTask {
 
     /// The `[models]` key that pins this task's model.
     ///
-    /// Not injective: `draft` and `chat` share `generative`, which is why
-    /// [`pin_accepts`] validates a pin against **every** task the key governs
+    /// Not injective: `draft`, `chat` and `review` share `generative`, which is
+    /// why [`pin_accepts`] validates a pin against **every** task the key governs
     /// rather than against one.
     #[must_use]
     pub fn config_key(self) -> &'static str {
         match self {
             Self::Embed => "embedding",
-            Self::Draft | Self::Chat => "generative",
+            Self::Draft | Self::Chat | Self::Review => "generative",
             Self::Transcribe => "audio",
             Self::Describe => "vision",
             Self::Ocr => "ocr",
@@ -183,7 +200,13 @@ impl ModelTask {
     pub fn capable(self, kind: ModelKind) -> bool {
         match self {
             Self::Embed => kind == ModelKind::Embedding,
-            Self::Draft => kind == ModelKind::Generative,
+            // `Review` is `Draft`'s shape, not `Chat`'s: it has to read code and
+            // emit a fixed line format, which is a text job. Admitting a vision
+            // model would not widen `generative` anyway — `pin_accepts`
+            // intersects over every task on the key, and `Draft` already
+            // excludes it — so it would only mean a `review` that claimed a
+            // capability the key can never hand it.
+            Self::Draft | Self::Review => kind == ModelKind::Generative,
             Self::Chat => matches!(kind, ModelKind::Generative | ModelKind::Vision),
             Self::Transcribe => kind == ModelKind::Audio,
             Self::Describe => kind == ModelKind::Vision,
@@ -193,10 +216,10 @@ impl ModelTask {
 
     /// Whether the remote model tier (ADR-0019) can serve this task at all.
     ///
-    /// Only [`ModelTask::Draft`] and [`ModelTask::Chat`] — the two generative
-    /// surfaces, which share `[models] generative` and are the two ADR-0019
-    /// names. The other four are refused **structurally rather than by policy**,
-    /// and for two separate reasons:
+    /// [`ModelTask::Draft`], [`ModelTask::Chat`] and [`ModelTask::Review`] — the
+    /// generative surfaces, which share `[models] generative`. The other four are
+    /// refused **structurally rather than by policy**, and for two separate
+    /// reasons:
     ///
     /// * [`ModelTask::Embed`] needs vectors, not text, and the remote tier
     ///   speaks one chat-completion shape.
@@ -212,9 +235,34 @@ impl ModelTask {
     /// where ADR-0019 §5's producer identity would have to become
     /// vendor-asserted — a far larger change than a resolution, and not one this
     /// stage makes.
+    ///
+    /// [`ModelTask::Review`] qualifies on exactly the test the other four fail:
+    /// it runs **at command level**, where an invocation exists for a person to
+    /// grant. `roteiro review --llm --allow-remote` is a deliberate per-run act
+    /// by someone who typed it, which is what ADR-0019 §3 requires and what a
+    /// per-blob extraction path structurally cannot offer. Its output is also not
+    /// *stored*: a finding is printed, never written to `nodes`/`edges` as a
+    /// `derived` fact, so ADR-0019 §5's producer identity has nothing here to
+    /// become vendor-asserted about.
+    ///
+    /// **The task qualifies; the surface does not ship yet, and the reason is
+    /// worth recording where the next person will look.** Reviewing remotely
+    /// means sending the diff hunks of the file under review, and ADR-0019 §4's
+    /// payload allow-list carries node identities and captured prose — its system
+    /// message says, in as many words, *"You are not given source code"*. A
+    /// remote reviewer therefore needs a **new allow-listed field**, which is an
+    /// amendment to ADR-0019 rather than a flag on this command, and taking the
+    /// "no new path" constraint seriously is precisely what forbids the shortcut.
+    ///
+    /// So `roteiro review --llm` is local-only today and rejects
+    /// `--allow-remote`, enforced by
+    /// `review_llm_has_no_allow_remote_flag_until_the_allow_list_carries_source`.
+    /// This predicate stays `true` because it answers whether the *tier* may
+    /// serve the task under ADR-0019 §3 — it may — not whether a payload for it
+    /// has been designed.
     #[must_use]
     pub fn goes_remote(self) -> bool {
-        matches!(self, Self::Draft | Self::Chat)
+        matches!(self, Self::Draft | Self::Chat | Self::Review)
     }
 
     /// Registry name of the model this task uses when nothing pins one, or `None`
@@ -231,7 +279,7 @@ impl ModelTask {
     pub fn default_model(self) -> Option<&'static str> {
         match self {
             Self::Embed => None,
-            Self::Draft | Self::Chat => Some(DEFAULT_GENERATIVE),
+            Self::Draft | Self::Chat | Self::Review => Some(DEFAULT_GENERATIVE),
             Self::Transcribe => Some(crate::media::MediaKind::Audio.model()),
             Self::Describe => Some(crate::media::MediaKind::Vision.model()),
             Self::Ocr => Some(DEFAULT_OCR),
@@ -249,9 +297,11 @@ impl std::fmt::Display for ModelTask {
 ///
 /// The intersection of [`ModelTask::capable`] over every task the key governs —
 /// derived from the one table rather than written down a second time. It matters
-/// for `generative`, which governs both `draft` and `chat`: `chat` alone would
-/// admit a vision model, but the same key also has to satisfy `spec draft`, which
-/// cannot use one. So the key accepts generative models only.
+/// for `generative`, which governs `draft`, `chat` and `review`: `chat` alone
+/// would admit a vision model, but the same key also has to satisfy `spec draft`,
+/// which cannot use one. So the key accepts generative models only — and a task
+/// added to the key later tightens this automatically rather than needing to
+/// remember to.
 #[must_use]
 pub fn pin_accepts(key: &str, kind: ModelKind) -> bool {
     let mut governs = TASKS.iter().filter(|t| t.config_key() == key).peekable();
@@ -796,6 +846,7 @@ mod tests {
             (ModelTask::Embed, None),
             (ModelTask::Draft, Some("qwen3-0.6b")),
             (ModelTask::Chat, Some("qwen3-0.6b")),
+            (ModelTask::Review, Some("qwen3-0.6b")),
             (ModelTask::Transcribe, Some("voxtral-mini-3b")),
             (ModelTask::Describe, Some("smolvlm-500m-gguf")),
             (ModelTask::Ocr, Some("ocrs-text")),
@@ -975,16 +1026,18 @@ mod tests {
         );
     }
 
-    /// **A granted tier changes exactly two surfaces.** `spec draft` and Ask are
-    /// what ADR-0019 names; the other four are refused structurally rather than
-    /// by a policy check, because there is no invocation inside extraction to
-    /// grant anything with — see [`ModelTask::goes_remote`].
+    /// **A granted tier changes exactly the generative surfaces.** `spec draft`,
+    /// Ask and `review --llm` all run at command level, where an invocation
+    /// exists to grant; the other four are refused structurally rather than by a
+    /// policy check, because there is no invocation inside extraction to grant
+    /// anything with — see [`ModelTask::goes_remote`].
     ///
     /// The negative half is the half worth having: a run that granted egress must
     /// not thereby start sending audio, images or OCR blobs it was never asked
-    /// about.
+    /// about. Written against [`ModelTask::goes_remote`] rather than a literal
+    /// list so that a task added to the table has to state which side it is on.
     #[test]
-    fn a_granted_tier_takes_the_two_generative_surfaces_and_no_others() {
+    fn a_granted_tier_takes_the_generative_surfaces_and_no_others() {
         let unset = ModelPins::default();
         for task in TASKS {
             let choice = resolve_with_remote(task, &unset, granted()).expect("resolves");
@@ -1010,12 +1063,89 @@ mod tests {
                 assert!(choice.installed.is_some(), "{task}: locally answerable");
             }
         }
-        assert!(ModelTask::Draft.goes_remote() && ModelTask::Chat.goes_remote());
+        assert!(
+            ModelTask::Draft.goes_remote()
+                && ModelTask::Chat.goes_remote()
+                && ModelTask::Review.goes_remote()
+        );
         assert!(
             !ModelTask::Embed.goes_remote()
                 && !ModelTask::Transcribe.goes_remote()
                 && !ModelTask::Describe.goes_remote()
                 && !ModelTask::Ocr.goes_remote()
+        );
+    }
+
+    /// **`Review` is an amendment to this table, not a seventh bespoke rule.**
+    /// Stage 35b's reviewer resolves its model here or not at all, so the whole
+    /// of what it adds is asserted in one place: a task on the existing
+    /// `generative` key, with `Draft`'s capability, `Draft`'s default, and its own
+    /// surface string.
+    ///
+    /// The `config_key` assertion is the load-bearing one. A `review` key of its
+    /// own would have been the fourth selection rule this module exists to have
+    /// removed, and it would have let `[models] generative` and `[models] review`
+    /// disagree about which model a generative surface uses.
+    #[test]
+    fn review_is_a_task_on_the_existing_generative_key() {
+        assert_eq!(ModelTask::Review.config_key(), "generative");
+        assert_eq!(ModelTask::Review.as_str(), "review");
+        assert_eq!(ModelTask::Review.surface(), "roteiro review --llm");
+        assert_eq!(ModelTask::Review.default_model(), Some(DEFAULT_GENERATIVE));
+
+        // Same capability as `draft`, so the shared key's intersection is
+        // unchanged by adding it — a vision model is still refused, and it is
+        // refused for `review` too rather than only for the two older tasks.
+        assert!(ModelTask::Review.capable(ModelKind::Generative));
+        assert!(!ModelTask::Review.capable(ModelKind::Vision));
+        assert!(!ModelTask::Review.capable(ModelKind::Embedding));
+        assert!(!pin_accepts("generative", ModelKind::Vision));
+        assert!(pin_accepts("generative", ModelKind::Generative));
+
+        // A pin on the shared key reaches it, and a wrong-modality one fails for
+        // it exactly as for `draft` — no separate path to keep in step.
+        let choice = resolve_with(ModelTask::Review, &pins("generative", "qwen3-8b"))
+            .expect("a generative pin resolves");
+        assert_eq!(choice.model, Some("qwen3-8b"));
+        assert_eq!(choice.source, ModelSource::Pinned);
+        assert!(
+            choice.why().contains("[models] generative"),
+            "names the key that chose it: {}",
+            choice.why()
+        );
+        let err = resolve_with(
+            ModelTask::Review,
+            &pins("generative", "bge-small-en-v1.5-gguf"),
+        )
+        .expect_err("an encoder cannot review");
+        assert!(
+            matches!(
+                err,
+                ModelChoiceError::WrongKind {
+                    key: "generative",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Every task is listed in [`TASKS`] exactly once. `TASKS` is what
+    /// `resolve_all_with` — and so `roteiro config` — iterates, so a task missing
+    /// from it resolves correctly and is invisible to the command whose whole job
+    /// is answering *why that model*.
+    #[test]
+    fn every_task_is_listed_exactly_once() {
+        let tokens: Vec<&str> = TASKS.iter().map(|t| t.as_str()).collect();
+        let mut deduped = tokens.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), tokens.len(), "TASKS repeats a task");
+        assert!(tokens.contains(&"review"), "{tokens:?}");
+        assert_eq!(
+            resolve_all_with(&ModelPins::default()).len(),
+            TASKS.len(),
+            "`roteiro config` reports every task"
         );
     }
 
