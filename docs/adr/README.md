@@ -25,6 +25,7 @@
 | [0017](0017-dependency-security-policy.md) | Dependency security — current by default, monitored, held for a minimum release age of at least 48 hours | Accepted |
 | [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | Accepted |
 | [0019](0019-remote-model-tier.md) | Remote model tier — an explicitly consented egress path, and the promises it changes | Accepted |
+| [0020](0020-build-capable-sandboxed-execution.md) | Build-capable sandboxed execution — running the repository's own build, and the non-goal it narrows | Draft |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
