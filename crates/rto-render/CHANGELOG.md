@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.21.1...rto-render-v1.22.0) - 2026-08-18
+
+### Added
+
+- *(mcp)* expose `check` and `context` as read-only tools on both surfaces
+
+### Other
+
+- Merge origin/main into feat/mcp-check-context
+
 ## [1.21.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.21.0...rto-render-v1.21.1) - 2026-08-18
 
 ### Fixed
