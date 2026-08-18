@@ -4733,6 +4733,7 @@ fn strip_thinking(text: &str) -> String {
 /// would read its scratch reasoning as findings, and a reasoning model deliberates
 /// about defects it then rejects.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[must_use]
 pub fn strip_thinking_public(text: &str) -> String {
     strip_thinking(text)
 }

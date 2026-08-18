@@ -79,6 +79,9 @@ fn unset_resolves_to_the_models_used_before_the_table_existed() {
     for (task, model) in [
         ("draft", "qwen3-0.6b"),
         ("chat", "qwen3-0.6b"),
+        // Stage 35b's `review --llm`: a third task on the `generative` key, so it
+        // inherits that key's default rather than acquiring one of its own.
+        ("review", "qwen3-0.6b"),
         ("transcribe", "voxtral-mini-3b"),
         ("describe", "smolvlm-500m-gguf"),
         ("ocr", "ocrs-text"),
@@ -108,7 +111,14 @@ fn unset_resolves_to_the_models_used_before_the_table_existed() {
     let entries = cfg["model_resolution"]
         .as_array()
         .expect("model_resolution is an array");
-    assert_eq!(entries.len(), 6, "one entry per surface: {entries:?}");
+    assert_eq!(entries.len(), 7, "one entry per surface: {entries:?}");
+    // `review` is a surface `roteiro config` answers for, on the shared key. A
+    // task the resolver knows but this command does not report would leave an
+    // operator asking "why that model?" about a surface with no row.
+    let review = entry(entries, "review");
+    assert_eq!(review["config_key"], "generative", "no bespoke key");
+    assert_eq!(review["surface"], "roteiro review --llm");
+    assert_eq!(review["model"], "qwen3-0.6b");
     let transcribe = entry(entries, "transcribe");
     assert_eq!(transcribe["model"], "voxtral-mini-3b");
     assert_eq!(transcribe["source"], "default");

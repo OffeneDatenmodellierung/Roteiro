@@ -589,16 +589,13 @@ fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
     serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("{path}: {e}"))
 }
 
-/// Review the working-tree change (or a `base..HEAD` range) with the model.
+/// The working-tree change (or a `base..HEAD` range) as one entry per file.
 ///
-/// # Errors
-/// If the repository, the model or git cannot be used.
+/// Split out of [`run_llm`] because collecting a diff and reviewing one are
+/// separate jobs, and only the second needs a model — which is what lets the
+/// interesting half of `run_llm` stay short enough to read.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> anyhow::Result<()> {
-    let checks = match checks_path {
-        Some(p) => read_checks(p)?,
-        None => Vec::new(),
-    };
+fn changed_files(repo: &Path, base: Option<&str>) -> Vec<FileUnderReview> {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
     let range: Vec<String> = match base {
         Some(b) => vec![b.to_owned(), "HEAD".to_owned()],
@@ -608,7 +605,7 @@ pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> an
     args.extend(range.iter().map(String::as_str));
     let names = git(repo, &args).unwrap_or_default();
 
-    let files: Vec<FileUnderReview> = names
+    names
         .lines()
         .filter(|p| !p.is_empty())
         .filter_map(|path| {
@@ -622,7 +619,20 @@ pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> an
                 diff,
             })
         })
-        .collect();
+        .collect()
+}
+
+/// Review the working-tree change (or a `base..HEAD` range) with the model.
+///
+/// # Errors
+/// If the repository, the model or git cannot be used.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+pub fn run_llm(repo: &Path, base: Option<&str>, checks_path: Option<&str>) -> anyhow::Result<()> {
+    let checks = match checks_path {
+        Some(p) => read_checks(p)?,
+        None => Vec::new(),
+    };
+    let files = changed_files(repo, base);
 
     if files.is_empty() {
         println!("no changes to review");
@@ -889,8 +899,13 @@ mod tests {
     #[test]
     fn the_context_window_holds_the_whole_budget() {
         use super::{REVIEW_MAX_TOKENS, REVIEW_N_CTX, REVIEW_PROMPT_BUDGET};
-        assert!(
-            REVIEW_N_CTX > 4_096,
+        // `LlamaEngine`'s own default, which `n_ctx: 0` selects and which killed
+        // the first replay run on its second file. Compared at compile time —
+        // these are all constants, so a runtime assertion over them is one that
+        // can never fail at test time, which clippy rightly objects to.
+        const ENGINE_DEFAULT_N_CTX: u32 = 4_096;
+        const _: () = assert!(
+            REVIEW_N_CTX > ENGINE_DEFAULT_N_CTX,
             "the engine default is what broke this"
         );
         let worst_case = REVIEW_PROMPT_BUDGET * 13 / 10 + REVIEW_MAX_TOKENS as usize;
