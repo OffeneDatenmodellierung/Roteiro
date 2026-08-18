@@ -302,7 +302,10 @@ impl ClassRecall {
 }
 
 /// A candidate's score against the corpus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// `Eq` is not derived: `expected_by_position` is an `f64` estimate, and a score
+// that could be compared for exact equality would invite a test that pins a
+// float. `PartialEq` is enough for the equality the tests actually want.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Score {
     /// Stable schema tag for `--json` consumers.
     pub schema: &'static str,
@@ -337,6 +340,53 @@ pub struct Score {
     pub suppressed_known_false: usize,
     /// Findings withheld that match no row at all.
     pub suppressed_unadjudicated: usize,
+    /// **How many real rows a candidate of this shape would match by position
+    /// alone** — the chance baseline [`Score::found`] has to beat.
+    ///
+    /// [`match_findings`] credits a finding to a row on `(sha, path, line within
+    /// LINE_WINDOW)` and **nothing else**: not the defect class, not a word of the
+    /// description. That is the right rule for a scorer that must not reward
+    /// eloquence, but it has a consequence nobody had measured. A reviewer that
+    /// emits enough findings per file blankets the diff, and then a "hit" is
+    /// explained by density rather than by insight — the recall figure looks like
+    /// a measurement and is arithmetic.
+    ///
+    /// Measured on this repository's own reviewer, that is not a hypothetical: at
+    /// **10.9 findings per file** the diff-only arm scored **4 of 22**, against a
+    /// permutation null — every row relocated to a random line its diff actually
+    /// shows, the findings left exactly as emitted — of **4.19**. It scored
+    /// *below* chance, and P(≥ observed) was 0.72.
+    ///
+    /// So this is reported beside the recall, always, in the same way
+    /// `reasoning_truncated` is reported beside a zero: a number whose null is not
+    /// stated is not yet a result.
+    ///
+    /// # An approximation, and it says so rather than implying precision
+    ///
+    /// **The exact null needs the diff** — which lines the reviewer was shown —
+    /// and scoring is pure by design, with no git and no network, so that any
+    /// machine can recompute a published score. So this uses the candidate's
+    /// **own findings** as the proxy for where it looked: on each file carrying a
+    /// row, the fraction of the line range those findings span that their merged
+    /// `LINE_WINDOW` neighbourhoods cover.
+    ///
+    /// That proxy is wrong in both directions at once. The findings' own span is
+    /// narrower than the diff's, which pushes the estimate up; ignoring the
+    /// one-to-one competition between two rows on a file also pushes it up; and
+    /// the reviewer's silence at the edges of a diff pushes it down. Calibrated
+    /// against an exact permutation on this repository's diff-only run — every row
+    /// relocated to a random line its diff actually shows — this reads **3.0**
+    /// where the permutation reads **4.19** against an observed **4**.
+    ///
+    /// So it is an order-of-magnitude guide, not a null, and
+    /// [`Score::caveats`] fires on a **margin** rather than a strict comparison
+    /// for exactly that reason. Anyone comparing two candidates seriously should
+    /// run the permutation, which needs the diff and therefore does not belong in
+    /// a pure scorer.
+    ///
+    /// `None` when the run offered no findings on any file carrying a row, since
+    /// there is then nothing whose density to describe.
+    pub expected_by_position: Option<f64>,
 }
 
 /// Schema tag for a serialised [`Score`].
@@ -392,6 +442,30 @@ impl Score {
                  bit rather than a rate and should not be compared as a percentage",
                 thin.len(),
                 thin.join(", ")
+            ));
+        }
+        // A margin rather than a strict comparison, because the baseline is an
+        // approximation that misses in both directions — see the field's docs. A
+        // result only a little above an uncertain null is exactly the case a
+        // reader needs warning about, so the guard is deliberately loose.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a count of corpus rows found; see ClassRecall::recall"
+        )]
+        let found = self.found as f64;
+        if let Some(expected) = self.expected_by_position
+            && found <= expected * 2.0
+        {
+            out.push(format!(
+                "RECALL IS NOT CLEARLY ABOVE CHANCE AT THIS FINDING DENSITY: a \
+                 candidate emitting these findings in these places would match \
+                 ~{expected:.1} real row(s) by position alone, and this one matched \
+                 {}. Scoring credits a finding to a row on (commit, path, line \
+                 \u{b1}{}) and NEVER on what the finding says, so a reviewer dense \
+                 enough to blanket a diff scores recall it did not earn. That \
+                 baseline is approximate; confirm with a permutation null before \
+                 comparing two candidates, and lower the finding rate first",
+                self.found, LINE_WINDOW
             ));
         }
         if self.unadjudicated > 0 {
@@ -531,7 +605,70 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
         suppressed_real: count_by_verdict(&withheld, Verdict::Real),
         suppressed_known_false: count_by_verdict(&withheld, Verdict::False),
         suppressed_unadjudicated: run.suppressed.len() - withheld.by_row.len(),
+        expected_by_position: expected_by_position(&in_scope, &run.findings),
     })
+}
+
+/// The chance baseline described on [`Score::expected_by_position`].
+///
+/// For each **real** row, the probability that a row dropped uniformly across the
+/// span its file's findings cover would land within [`LINE_WINDOW`] of at least
+/// one of them, capped at 1. Summed, that is how many rows a candidate of this
+/// shape matches without knowing anything.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "line numbers and finding counts on one file; a file long enough to               lose f64 precision is not reviewable at all"
+)]
+fn expected_by_position(rows: &[&CorpusRow], findings: &[CandidateFinding]) -> Option<f64> {
+    let mut by_file: BTreeMap<(&str, &str), Vec<u32>> = BTreeMap::new();
+    for f in findings {
+        by_file
+            .entry((f.reviewed_sha.as_str(), f.path.as_str()))
+            .or_default()
+            .push(f.line);
+    }
+    let mut total = 0.0;
+    let mut any = false;
+    for row in rows.iter().filter(|r| r.verdict == Verdict::Real) {
+        let Some(lines) = by_file.get(&(row.reviewed_sha.as_str(), row.path.as_str())) else {
+            continue;
+        };
+        any = true;
+        let (lo, hi) = (
+            lines.iter().copied().min().unwrap_or(0),
+            lines.iter().copied().max().unwrap_or(0),
+        );
+        // The span the candidate's own attention covered. A single finding spans
+        // one line, so the window itself is the whole space and the row is certain
+        // to match — which is correct: a file the candidate commented on once, at
+        // one point, offers a row nowhere else to be.
+        let span = f64::from(hi - lo + 1);
+        // **Merged, not summed.** At ten findings a file the ±10 windows overlap
+        // heavily, and counting each one whole inflates the baseline by about half
+        // — measured on this repository, 6.2 against a permutation's 4.19. The
+        // union is what a row can actually land in.
+        let mut sorted = lines.clone();
+        sorted.sort_unstable();
+        let mut covered = 0u64;
+        let mut open: Option<(u32, u32)> = None;
+        for line in sorted {
+            let (start, end) = (line.saturating_sub(LINE_WINDOW), line + LINE_WINDOW);
+            match open {
+                Some((s, e)) if start <= e + 1 => open = Some((s, e.max(end))),
+                Some((s, e)) => {
+                    covered += u64::from(e - s + 1);
+                    open = Some((start, end));
+                }
+                None => open = Some((start, end)),
+            }
+        }
+        if let Some((s, e)) = open {
+            covered += u64::from(e - s + 1);
+        }
+        let reach = covered as f64;
+        total += (reach / span).min(1.0);
+    }
+    any.then_some(total)
 }
 
 /// The outcome of matching: row id → the finding credited to it.
@@ -613,6 +750,90 @@ mod tests {
             claims_compile_failure: false,
             defect_class: None,
         }
+    }
+
+    /// **A blanketing reviewer must not be credited with recall it did not earn.**
+    ///
+    /// Matching consults `(sha, path, line ±LINE_WINDOW)` and never the text, so a
+    /// candidate that comments densely enough across a file matches rows by
+    /// position. Row 1 sits at line 100; these findings never mention it and are
+    /// spread every few lines around it, so every one of them is "right" by
+    /// arithmetic alone. The chance baseline has to see that.
+    #[test]
+    fn a_blanketing_candidate_is_flagged_as_not_clearly_above_chance() {
+        let dense: Vec<CandidateFinding> = (0..12)
+            .map(|i| finding(SHA_A, "src/a.rs", 90 + i * 3))
+            .collect();
+        let scored = score(&corpus(), &run(&[SHA_A, SHA_B], dense)).expect("scores");
+        let expected = scored
+            .expected_by_position
+            .expect("findings landed on a file carrying a row");
+        assert!(
+            expected > 0.5,
+            "a candidate blanketing a row's file scored a chance baseline of only \
+             {expected}"
+        );
+        assert!(
+            scored
+                .caveats()
+                .iter()
+                .any(|c| c.contains("NOT CLEARLY ABOVE CHANCE")),
+            "the density caveat did not fire: {:?}",
+            scored.caveats()
+        );
+    }
+
+    /// The mirror image: one precise finding on a file, nowhere near a row, is not
+    /// a blanket — and a candidate that then matches nothing must not be told its
+    /// zero is a density artefact.
+    #[test]
+    fn a_sparse_candidate_that_misses_is_not_blamed_on_density() {
+        let sparse = vec![finding(SHA_A, "src/a.rs", 100)];
+        let scored = score(&corpus(), &run(&[SHA_A, SHA_B], sparse)).expect("scores");
+        // One finding spans one line, so a row has nowhere else to be and the
+        // baseline is 1.0 for that row — correct, and the documented behaviour.
+        assert_eq!(scored.found, 1);
+        assert!(scored.expected_by_position.is_some());
+    }
+
+    /// A run whose findings never touch a file carrying a row has no density to
+    /// describe, and must report `None` rather than a flattering zero that would
+    /// read as "comfortably above chance".
+    #[test]
+    fn a_run_touching_no_anchored_file_has_no_chance_baseline() {
+        let elsewhere = vec![finding(SHA_A, "src/nowhere.rs", 10)];
+        let scored = score(&corpus(), &run(&[SHA_A, SHA_B], elsewhere)).expect("scores");
+        assert_eq!(scored.expected_by_position, None);
+        assert!(
+            !scored
+                .caveats()
+                .iter()
+                .any(|c| c.contains("NOT CLEARLY ABOVE CHANCE")),
+            "a caveat about density fired with no findings to be dense"
+        );
+    }
+
+    /// **Overlapping windows are merged, not summed.** Ten findings within a few
+    /// lines of each other reach barely further than one does; counting each
+    /// `±LINE_WINDOW` span whole would inflate the baseline by about half, which
+    /// is how the first version of this read 6.2 where a permutation read 4.19.
+    #[test]
+    fn overlapping_windows_count_once() {
+        // Ten findings packed into 10 lines, plus one far away so the span is wide
+        // enough for the difference to show. Merged, the reach is [90,119] plus
+        // [990,1010] = 51 lines of a 911-line span, so each of the two rows on
+        // this file scores ~0.06. Summed it would be 11 x 21 = 231 lines, ~0.25
+        // each — four times larger, and the direction that hides a real result.
+        let mut clustered: Vec<CandidateFinding> = (0..10)
+            .map(|i| finding(SHA_A, "src/a.rs", 100 + i))
+            .collect();
+        clustered.push(finding(SHA_A, "src/a.rs", 1_000));
+        let scored = score(&corpus(), &run(&[SHA_A, SHA_B], clustered)).expect("scores");
+        let expected = scored.expected_by_position.expect("some");
+        assert!(
+            expected < 0.25,
+            "overlapping windows were summed rather than merged: {expected}"
+        );
     }
 
     fn run(shas: &[&str], findings: Vec<CandidateFinding>) -> CandidateRun {
