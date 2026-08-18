@@ -1,0 +1,19 @@
+{
+  "why": "The evasion the frozen exemption list closes. If any sentence could be declared structural, a renderer would relabel its inventions instead of citing them and the checker would pass everything. Both segments here assert something; neither is on the list.",
+  "findings": ["finding:roteiro-check:malformed-adr:docs/adr/0007-configuration-file.md"],
+  "rendering": {
+    "segments": [
+      { "kind": "structural", "text": "Overall the repository is in good shape." },
+      {
+        "kind": "claim",
+        "text": "ADR-0007 could not be parsed.",
+        "citations": ["finding:roteiro-check:malformed-adr:docs/adr/0007-configuration-file.md"]
+      },
+      { "kind": "structural", "text": "Nothing else stood out." }
+    ]
+  },
+  "expect": [
+    { "defect": "unlisted-structural-segment", "segment": 0, "text": "Overall the repository is in good shape." },
+    { "defect": "unlisted-structural-segment", "segment": 2, "text": "Nothing else stood out." }
+  ]
+}

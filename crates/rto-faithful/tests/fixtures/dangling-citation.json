@@ -1,0 +1,25 @@
+{
+  "why": "A citation that names no finding. Either the key was invented to make a claim look supported, or it survived from a run whose findings are gone — both are dangling, and set membership cannot and need not tell them apart.",
+  "findings": ["finding:roteiro-check:unknown-adr:crates/rto-graph/src/store.rs:0099"],
+  "rendering": {
+    "segments": [
+      {
+        "kind": "claim",
+        "text": "A @rto: annotation in the store references ADR-0099, which does not exist.",
+        "citations": ["finding:roteiro-check:unknown-adr:crates/rto-graph/src/store.rs:0099"]
+      },
+      {
+        "kind": "claim",
+        "text": "A second annotation references a superseded ADR.",
+        "citations": ["finding:roteiro-check:inactive-adr:crates/rto-graph/src/audio.rs:0005"]
+      }
+    ]
+  },
+  "expect": [
+    {
+      "defect": "dangling-citation",
+      "segment": 1,
+      "citation": "finding:roteiro-check:inactive-adr:crates/rto-graph/src/audio.rs:0005"
+    }
+  ]
+}

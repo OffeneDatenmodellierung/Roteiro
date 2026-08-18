@@ -1,0 +1,17 @@
+{
+  "why": "\"Here are two findings:\" is not structural. The count is an assertion about the finding set and it can be false — here it is, there is one finding. The number-free form in the frozen list says the same thing and cannot be wrong, which is why the counting form was left off and must stay off.",
+  "findings": ["finding:roteiro-check:duplicate-adr-id:0016"],
+  "rendering": {
+    "segments": [
+      { "kind": "structural", "text": "Here are two findings:" },
+      {
+        "kind": "claim",
+        "text": "Two ADR files both declare adr-id 0016.",
+        "citations": ["finding:roteiro-check:duplicate-adr-id:0016"]
+      }
+    ]
+  },
+  "expect": [
+    { "defect": "unlisted-structural-segment", "segment": 0, "text": "Here are two findings:" }
+  ]
+}

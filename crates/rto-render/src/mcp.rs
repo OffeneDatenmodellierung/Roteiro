@@ -98,24 +98,25 @@
 //! *the whole change*, and a truncated one is a review that quietly did not look
 //! at some of the diff.
 //!
-//! **It would report a fourth, different debt figure.** `review`'s per-file
-//! output carries `debt`, and this crate cannot read the target project's
+//! **It would report a different debt figure.** `review`'s per-file output
+//! carries `debt`, and this crate cannot read the target project's
 //! `roteiro.toml` (see the note on the `debt` tool below), so it could not apply
 //! that project's `[debt] ignore`. Issue #321 was exactly this defect — one
 //! concept reporting different numbers on different surfaces — and it had already
 //! recurred across three of them before it was fixed, then again on a fourth
-//! (`_Home`, issue #372) that the fix had missed. Adding a surface that reports a
-//! *fifth* number for the same repository, on the strength of it being convenient,
-//! is how that happens a third time. Exposing `review` means first giving this
-//! crate a way to reach the project's config; until then, the honest answer is
-//! that the review surface is CLI-first (`roteiro review [--json]`), needs no
-//! server, and works in any agent.
+//! (`_Home`, issue #372) that the fix had missed, and a fifth (`roteiro review`,
+//! issue #409) that both fixes had missed. Adding a surface that reports another
+//! number for the same repository, on the strength of it being convenient, is how
+//! that recurs. Exposing `review` means first giving this crate a way to reach
+//! the project's config; until then, the honest answer is that the review surface
+//! is CLI-first (`roteiro review [--json]`), needs no server, and works in any
+//! agent.
 //!
-//! Separately, and worth knowing before anyone wires this up: **`roteiro review`
-//! does not apply `[debt] ignore` today either.** `Command::Review` is never
-//! handed the list, and `review::build` collects every marker node in a changed
-//! file unconditionally. That is a defect in the CLI, not a reason to duplicate
-//! it here.
+//! Worth knowing before anyone wires this up: `roteiro review` **does** apply
+//! `[debt] ignore`, as of issue #409 — `Command::Review` is handed the list and
+//! `review::build` keeps only the markers `rto_graph::debt` retains under it. The
+//! gap here is this crate's missing config access, not a defect in the CLI that
+//! would excuse duplicating it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -577,12 +578,15 @@ impl GraphServer {
         };
         // `ignore` is empty here for the same reason `debt` above passes none:
         // this crate has no access to the target project's `roteiro.toml`. The
-        // CLI (`debt`, `debt-density`, `check`), the graph API, the served-chat
-        // tool registry and the Obsidian `_Home` overview all apply the project's
-        // own `[debt] ignore`. That is the complete list, written out rather than
-        // summarised because `_Home` was missed when the same defect was fixed on
-        // the surfaces that happened to be reported (issues #321, #372). An MCP
-        // client sees the unfiltered inventory.
+        // CLI (`debt`, `debt-density`, `check`, `review`), the graph API, the
+        // served-chat tool registry and the Obsidian `_Home` overview all apply
+        // the project's own `[debt] ignore`. That is the complete list, written
+        // out rather than summarised because summarising is how it goes stale:
+        // `_Home` was missed when the defect was fixed on the surfaces that
+        // happened to be reported (#321, #372), and `review` was then missed by
+        // both — while this very list, omitting it, read as though the set were
+        // settled (#409). Adding a surface means adding it here. An MCP client
+        // sees the unfiltered inventory.
         query_result(self.with_project(args.project.as_deref(), |store| {
             rto_graph::debt_density(store, &args.kind, &[], order, limit, min_lines)
         }))

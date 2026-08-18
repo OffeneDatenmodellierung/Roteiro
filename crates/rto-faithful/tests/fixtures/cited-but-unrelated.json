@@ -1,0 +1,22 @@
+{
+  "why": "A limit, recorded as a fixture so it cannot be forgotten. Every claim here names a finding that exists, and every claim is about a different finding than the one it names. The verdict is clean, because set membership cannot decide aboutness. A green verdict means no claim was invented — it does not mean the summary is true.",
+  "findings": [
+    "finding:roteiro-check:broken-link:docs/adr/0012-analyzer-findings-artifact-model.md:8",
+    "finding:roteiro-check:duplicate-adr-id:0016"
+  ],
+  "rendering": {
+    "segments": [
+      {
+        "kind": "claim",
+        "text": "Two ADR files both declare adr-id 0016.",
+        "citations": ["finding:roteiro-check:broken-link:docs/adr/0012-analyzer-findings-artifact-model.md:8"]
+      },
+      {
+        "kind": "claim",
+        "text": "ADR-0012 links to a symbol that is not in the graph.",
+        "citations": ["finding:roteiro-check:duplicate-adr-id:0016"]
+      }
+    ]
+  },
+  "expect": []
+}

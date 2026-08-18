@@ -1,0 +1,15 @@
+{
+  "why": "A connective broken over lines by a formatter still matches: whitespace is collapsed before the frozen list is consulted. Case is not folded, so this fixture keeps the literal.",
+  "findings": ["finding:roteiro-check:broken-link:lat.md:3"],
+  "rendering": {
+    "segments": [
+      { "kind": "structural", "text": "  In\n  summary:  " },
+      {
+        "kind": "claim",
+        "text": "A wiki-link in lat.md resolves to nothing.",
+        "citations": ["finding:roteiro-check:broken-link:lat.md:3"]
+      }
+    ]
+  },
+  "expect": []
+}
