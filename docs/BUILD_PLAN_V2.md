@@ -2065,9 +2065,13 @@ assembler:
   layer**. The corpus's clearest case of an ADR contradicting itself is the case
   the graph is blindest to.
 
-So **at most one `contract-drift` row could ever change**, and the floor — *at
-least 2 of the 5 recovered that the diff-only arm missed* — was arithmetically
-unreachable before a single token was generated. That floor was chosen honestly,
+So **at most one `contract-drift` row could ever change** — and the baseline
+below makes that bound tighter still. The single reachable row that *does* receive
+context, `query.rs:716`, is **the one row the diff-only arm already matched**. The
+graph arm therefore cannot *gain* a `contract-drift` row from any starting point;
+it can only lose the one already held. The floor — *at least 2 of the 5 recovered
+that the diff-only arm missed* — was not merely unreachable before a single token
+was generated, it was **refuted**: the number of recoverable rows is zero. That floor was chosen honestly,
 before anyone knew which way the numbers would fall, and it stands as written;
 what the measurement adds is *why* it could not be met, which is worth more than
 the miss.
