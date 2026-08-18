@@ -17,7 +17,10 @@ mod spec;
 mod text;
 mod tool_check;
 
-pub use adr::{AdrDoc, AdrMeta, AdrStatus, ParseError, Section, WikiLink, parse_adr};
+pub use adr::{
+    AdrDoc, AdrMeta, AdrStatus, DocVersion, InlineVersionRef, ParseError, Section, VersionFacts,
+    WikiLink, parse_adr,
+};
 pub use annotate::{Annotation, scan_annotations};
 pub use blueprint::{BlueprintDoc, is_blueprint, parse_blueprint};
 pub use check::{CheckReport, Validation, Violation, ViolationKind, run, validate};

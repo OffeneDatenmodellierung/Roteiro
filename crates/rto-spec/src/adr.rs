@@ -72,6 +72,90 @@ impl std::str::FromStr for AdrStatus {
     }
 }
 
+/// A two-component ADR **document** version, e.g. `1.10`.
+///
+/// Compared component-wise rather than lexically or as a decimal, because
+/// both of those readings sort `1.10` *below* `1.9` — and this repository has
+/// an ADR that reached 1.11 one row at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DocVersion {
+    /// The part before the dot.
+    pub major: u32,
+    /// The part after it. `10` is a later revision than `9`, not an earlier one.
+    pub minor: u32,
+}
+
+impl DocVersion {
+    /// Parse a string that is *exactly* `X.Y`.
+    ///
+    /// A third component makes this `None`: `1.13.0` is a crate release, and
+    /// reading its first two parts as a document version is the mistake this
+    /// function exists to refuse.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let (major, minor) = s.split_once('.')?;
+        let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+        if !digits(major) || !digits(minor) {
+            return None;
+        }
+        Some(Self {
+            major: major.parse().ok()?,
+            minor: minor.parse().ok()?,
+        })
+    }
+
+    /// Parse a leading `X.Y` from `s`, ignoring whatever follows — but still
+    /// refusing a third `.N` component, for the reason [`Self::parse`] gives.
+    fn parse_prefix(s: &str) -> Option<Self> {
+        let b = s.as_bytes();
+        let run = |from: usize| {
+            let mut i = from;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            i
+        };
+        let major_end = run(0);
+        if major_end == 0 || b.get(major_end) != Some(&b'.') {
+            return None;
+        }
+        let minor_end = run(major_end + 1);
+        if minor_end == major_end + 1 || b.get(minor_end) == Some(&b'.') {
+            return None;
+        }
+        Self::parse(&s[..minor_end])
+    }
+}
+
+impl std::fmt::Display for DocVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+/// One `(Update, vX.Y…)` note found in an ADR body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineVersionRef {
+    /// 1-based line number **in the file**, frontmatter included.
+    pub line: usize,
+    /// The document version the note names.
+    pub version: DocVersion,
+}
+
+/// Every claim an ADR makes about its own version, gathered so
+/// [`crate::check::validate`] can cross-check them against each other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VersionFacts {
+    /// The version cell of the `| **Document version** | X.Y |` summary row.
+    pub summary_row: Option<DocVersion>,
+    /// The first cell of each version-history row, in document order.
+    pub history: Vec<DocVersion>,
+    /// `(Update, vX.Y…)` notes in the body, **excluding** the version-history
+    /// section — a history row that describes removing such a note quotes it,
+    /// and quoting it is not making the claim again.
+    pub inline_refs: Vec<InlineVersionRef>,
+}
+
 /// Metadata for one ADR, as read from its frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdrMeta {
@@ -81,6 +165,8 @@ pub struct AdrMeta {
     pub title: String,
     /// Lifecycle state.
     pub status: AdrStatus,
+    /// The `version:` frontmatter field, when it parses as `X.Y`.
+    pub version: Option<DocVersion>,
 }
 
 /// One `## ` section of an ADR body.
@@ -115,6 +201,8 @@ pub struct AdrDoc {
     pub sections: Vec<Section>,
     /// Authored `[[…]]` links in document order.
     pub links: Vec<WikiLink>,
+    /// What the document says about its own version, in three places.
+    pub versions: VersionFacts,
 }
 
 impl AdrDoc {
@@ -159,10 +247,15 @@ impl AdrDoc {
 /// [`ParseError::UnknownStatus`] if the `status` value is not a house state.
 pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
     let (frontmatter, body) = split_frontmatter(text);
+    // Violations point at the file, so the frontmatter just consumed has to be
+    // counted back in: `body` is a suffix of `text`, so its offset is the split.
+    let body_offset = text.len() - body.len();
+    let body_line1 = text[..body_offset].lines().count() + 1;
 
     let mut id = None;
     let mut status = AdrStatus::Draft;
     let mut fm_title = None;
+    let mut fm_version = None;
     for line in frontmatter.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -176,6 +269,7 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
             "adr-id" => id = Some(value.to_owned()),
             "status" if !value.is_empty() => status = value.parse()?,
             "title" => fm_title = Some(value.to_owned()),
+            "version" => fm_version = DocVersion::parse(value),
             _ => {}
         }
     }
@@ -193,9 +287,11 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
     // are not mistaken for real authored links.
     let mut sections = Vec::new();
     let mut links = Vec::new();
+    let mut versions = VersionFacts::default();
     let mut current: Option<String> = None;
     let mut in_fence = false;
-    for line in body.lines() {
+    let mut in_history = false;
+    for (offset, line) in body.lines().enumerate() {
         if line.trim_start().starts_with("```") {
             in_fence = !in_fence;
             continue;
@@ -205,9 +301,22 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
         }
         if let Some(heading) = line.strip_prefix("## ") {
             let title = heading.trim().to_owned();
+            in_history = is_version_history(&title);
             let slug = crate::text::slugify(&title);
             current = Some(slug.clone());
             sections.push(Section { slug, title });
+        }
+        if in_history {
+            versions.history.extend(history_row_version(line));
+        } else {
+            versions.summary_row = versions.summary_row.or_else(|| summary_row_version(line));
+            let file_line = body_line1 + offset;
+            versions
+                .inline_refs
+                .extend(inline_version_refs(line).map(|version| InlineVersionRef {
+                    line: file_line,
+                    version,
+                }));
         }
         for raw in crate::text::scan_wiki_links(line) {
             let from = match &current {
@@ -225,11 +334,56 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
     }
 
     Ok(AdrDoc {
-        meta: AdrMeta { id, title, status },
+        meta: AdrMeta {
+            id,
+            title,
+            status,
+            version: fm_version,
+        },
         path: rel_path.to_owned(),
         sections,
         links,
+        versions,
     })
+}
+
+/// Whether a `## ` heading opens the version-history table. Both spellings are
+/// in use across this repository's own ADRs, so both are recognised rather than
+/// one being declared canonical by a parser.
+fn is_version_history(title: &str) -> bool {
+    title.eq_ignore_ascii_case("Document version history")
+        || title.eq_ignore_ascii_case("Version history")
+}
+
+/// The version in a table row's first cell, when that cell holds a version and
+/// nothing else. The header (`| Version | …`) and separator (`|---|…`) rows fail
+/// to parse, which is exactly how they are skipped.
+fn history_row_version(line: &str) -> Option<DocVersion> {
+    let rest = line.trim_start().strip_prefix('|')?;
+    let (first, _) = rest.split_once('|')?;
+    DocVersion::parse(first.trim())
+}
+
+/// The version in the `| **Document version** | X.Y |` row of the summary table.
+fn summary_row_version(line: &str) -> Option<DocVersion> {
+    let mut cells = line.trim_start().strip_prefix('|')?.split('|');
+    if cells.next()?.trim() != "**Document version**" {
+        return None;
+    }
+    DocVersion::parse(cells.next()?.trim())
+}
+
+/// Every `(Update, vX.Y…)` note on one line.
+///
+/// Anchored on the literal marker rather than on a bare `vX.Y`, because ADR
+/// bodies are full of *software* versions — `v1.13.0` for a crate release,
+/// `v0.9.7` for boxlite — and a loose scan reads their leading components as a
+/// document version. On this repository's 20 ADRs the marker occurs 4 times and
+/// a bare `vX.Y` scan occurs over 40, nearly all of them releases.
+fn inline_version_refs(line: &str) -> impl Iterator<Item = DocVersion> + '_ {
+    const MARK: &str = "(Update, v";
+    line.match_indices(MARK)
+        .filter_map(|(i, _)| DocVersion::parse_prefix(&line[i + MARK.len()..]))
 }
 
 /// Split leading `---`-delimited frontmatter from the body. Returns
