@@ -1995,6 +1995,92 @@ either way: it is how any future reviewer, hosted or local, gets measured. Nothi
 in PR 1 is evidence for building PR 2 *except* the headroom finding; the finding
 rate is evidence against, and both go into the decision.
 
+### What PR 2 measured — the graph arm, and the experiment it was built for
+
+**The pre-committed floor was not cleared, and the finding that matters is that
+it could not have been.** The interesting half of this result is not a
+disappointing number; it is that three measurements taken *before* the graph arm
+ever ran bound what any run of it could possibly show, on this corpus, with any
+model. That bound is stated first because it is the durable part.
+
+#### The sequencing, and why the baseline had to come first
+
+PR 1 shipped no per-class recall deliberately — a figure from a run where
+truncation was possible is not a measurement — so there was **no baseline**, and
+"the graph arm found N contract-drift rows" would have meant nothing beside it.
+PR 2's first deliverable was therefore the **diff-only arm under the corrected
+harness**: `GraphContext::none`, the truncation guard armed, scored per class at
+each row's `reviewed_sha`. The graph arm followed as the same binary, the same
+model, the same corpus and the same reconstruction, differing in exactly one
+variable — which is now recorded *in the run document* (`RunArm`) rather than in
+a filename, because a comparison a reader cannot audit from the artifacts is not
+one.
+
+#### Three measurements that bound the experiment, taken before it ran
+
+**1. The recall ceiling is 21 of 22, not 22 of 22.** Scoring matches a finding to
+a row within `LINE_WINDOW` (±10 lines), so a row whose anchored line is not in
+the reconstructed diff cannot be found by *any* per-file diff reviewer, whatever
+the context. Measured over every row: 20 of the 22 real rows have their anchored
+line inside the shown `-U3` diff, 21 fall within the scoring window, and **one
+does not**. It is `crates/roteiro/src/config.rs:634` — the `ignore_reset`
+inherited via `.or()` — whose line sits in the gap between hunks covering 564–575
+and 984–1180. It is a `contract-drift` row, so that class's real ceiling is **4 of
+5**, not 5 of 5. The reviewer that found it originally was agentic and read the
+whole file; a per-file diff reviewer structurally cannot, and no amount of graph
+context moves a line number into a hunk.
+
+**2. The arm's dose is real, not nominal.** Over the whole corpus the assembler
+emits **922 items on 85 of the ~184 reviewable files** — 189 `authored` (governing
+ADR and blueprint sections) and 733 `derived` (doc comments from elsewhere in the
+file) — for **~152k estimated tokens**, about **1.8k per file that carries any**,
+with **2,305 further items dropped by the cap**. On a median file that roughly
+doubles the prompt. So the treatment was administered; a null result here is not
+a null dose.
+
+**3. And the one that decides it: on 3 of the 4 reachable `contract-drift` rows,
+the two arms send a byte-identical prompt.**
+
+| `contract-drift` row | reachable? | context the graph arm supplied |
+|---|---|---|
+| `rto-graph/src/engine_slot.rs:16` | yes | **none** — file *added* in that commit |
+| `rto-graph/tests/fixtures/audio/README.md:11` | yes | **none** — markdown fixture, no symbols |
+| `docs/adr/0005-image-ocr-vision-ingestion.md:16` | yes | **none** — an ADR under review |
+| `rto-graph/src/query.rs:716` | yes | 19 items (0 authored, 19 derived) |
+| `roteiro/src/config.rs:634` | **no** | 21 items (6 authored, 15 derived) |
+
+Each zero has a specific and defensible cause, and none of them is a bug in the
+assembler:
+
+- **A newly added file gets nothing, correctly.** Its whole text is in the diff,
+  so every doc comment is filtered as already shown, and nothing governs a file
+  that did not exist at the fork point. There is no missing half to supply.
+- **A markdown fixture has no symbols**, so it has neither a doc comment nor a
+  governing edge.
+- **An ADR under review gets nothing** — and this is the sharpest of the three.
+  The graph stores an `adr_section` node per heading with **no body**, and no
+  authored edge points *into* one. The row is *"frontmatter bumped to 1.3 while
+  the summary table still reports 1.2"*: both halves live in the ADR, one is
+  outside the `-U3` window, and **the authored layer cannot describe the authored
+  layer**. The corpus's clearest case of an ADR contradicting itself is the case
+  the graph is blindest to.
+
+So **at most one `contract-drift` row could ever change**, and the floor — *at
+least 2 of the 5 recovered that the diff-only arm missed* — was arithmetically
+unreachable before a single token was generated. That floor was chosen honestly,
+before anyone knew which way the numbers would fall, and it stands as written;
+what the measurement adds is *why* it could not be met, which is worth more than
+the miss.
+
+**The premise, restated against the data.** Stage 35's central claim was that
+`contract-drift` "puts the largest class squarely on the graph: per-file review
+cannot see a doc in another file contradicting the code under review." Measured
+against the rows rather than assumed: **four of the five `contract-drift` rows
+have both halves inside the file under review**, and three of those have both
+halves inside the *diff*. The class is not, on this corpus, cross-file. The
+premise was reasonable and it was wrong, and it was wrong in a way only a corpus
+could show.
+
 ---
 
 ### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ⏸️ *deferred by decision*
