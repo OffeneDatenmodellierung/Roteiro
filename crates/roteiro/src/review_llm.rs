@@ -219,8 +219,21 @@ pub fn review_file(
 /// The source of the module that declares `path`, where a file's feature gate is
 /// written — `src/foo.rs`'s parent is `src/lib.rs` (or `src/main.rs`), and
 /// `src/a/b.rs`'s is `src/a/mod.rs` or `src/a.rs`.
+///
+/// # `mod.rs` is declared one directory up
+///
+/// `src/a/b/mod.rs` is declared by `mod b;` in `src/a`, not in `src/a/b` — so for
+/// a `mod.rs` the search starts from the grandparent directory. Searching its own
+/// directory finds nothing (`src/a/b/b.rs` cannot exist alongside it, and
+/// `src/a/b/lib.rs` is not a thing), which returns `None`; and `None` on the
+/// features axis reads as *unconditional* in [`claim_site`]. Getting this wrong
+/// is therefore permissive, not merely lossy, which is why it is handled here
+/// rather than left to the candidate list to stumble onto.
 fn parent_module_source(path: &str, sources: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let dir = path.rsplit_once('/').map(|(d, _)| d)?;
+    let dir = match path.rsplit_once('/')? {
+        (d, "mod.rs") => d.rsplit_once('/').map_or(d, |(up, _)| up),
+        (d, _) => d,
+    };
     for candidate in [
         format!("{dir}/mod.rs"),
         format!("{dir}/lib.rs"),
@@ -938,6 +951,34 @@ mod tests {
 
         // A file at the repository root has no parent directory to look in.
         assert!(parent_module_source("main.rs", &sources).is_none());
+    }
+
+    /// **A `mod.rs`'s parent lives one directory up**, so the search must start
+    /// from the grandparent — searching its own directory finds nothing and
+    /// returns `None`, which `claim_site` reads as *unconditional*.
+    ///
+    /// Latent here (this repository has no `src/**/mod.rs`), fixed because the
+    /// failure direction is permissive: it would suppress a feature-gated file's
+    /// compile claims on the strength of a job that never built it.
+    #[test]
+    fn a_mod_rss_parent_is_searched_one_directory_up() {
+        let files: BTreeMap<&str, &str> = [
+            (
+                "crates/rto-exec/src/lib.rs",
+                "#[cfg(feature = \"exec-boxlite\")]\npub mod boxlite;",
+            ),
+            ("crates/rto-exec/src/boxlite/mod.rs", "fn run() {}"),
+        ]
+        .into_iter()
+        .collect();
+        let sources = |p: &str| files.get(p).map(|s| (*s).to_owned());
+
+        let parent = parent_module_source("crates/rto-exec/src/boxlite/mod.rs", &sources);
+        assert_eq!(
+            parent.as_deref(),
+            Some("#[cfg(feature = \"exec-boxlite\")]\npub mod boxlite;"),
+            "`boxlite/mod.rs` is declared in `src`, not in `src/boxlite`"
+        );
     }
 
     /// **`review --llm` is local-only, and that is enforced rather than

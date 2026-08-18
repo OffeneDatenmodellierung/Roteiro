@@ -596,14 +596,52 @@ fn is_test_code(path: &str, line: u32, source: &str) -> bool {
         .is_some_and(|idx| line as usize > idx + 1)
 }
 
+/// The name a file is declared under by the `mod` item in its parent.
+///
+/// For `a/b/thing.rs` that is the file stem, `thing`. For `a/b/mod.rs` it is the
+/// *directory* name, `b`: a `mod.rs` is declared by `mod b;` in `a`'s source, and
+/// never by `mod mod;`.
+///
+/// # Why this is spelled out rather than left as `file_stem`
+///
+/// Taking the stem for a `mod.rs` searches the parent for `mod mod;`, which
+/// cannot match, so the lookup returns `None` — and a `None` on the features axis
+/// reads as *unconditional*, i.e. covered by any green job. That is the
+/// permissive direction: a feature-gated module would have its compile claims
+/// suppressed by a job that never compiled it. [`claim_site`]'s contract is that
+/// every derivation errs toward establishing a requirement, so this one case has
+/// to be got right rather than left to fall through.
+fn declaring_name(path: &str) -> Option<&str> {
+    let stem = path.rsplit('/').next()?.strip_suffix(".rs")?;
+    if stem == "mod" {
+        // `a/b/mod.rs` is declared as `b`; a bare `mod.rs` with no directory
+        // above it is declared by nothing, so there is no name to look for.
+        path.rsplit('/').nth(1)
+    } else {
+        Some(stem)
+    }
+}
+
 /// The feature gate on this file's `mod` declaration in its parent, if any.
 ///
 /// Returns [`Features::All`] rather than naming the feature: the coverage model
 /// asks which *job* compiled the code, and this repository's jobs are
 /// `--all-features`, the default set, or nothing. Which named feature it is does
 /// not change the answer.
+///
+/// # Known gap: `#[path = "…"]`
+///
+/// A module declared `#[path = "elsewhere.rs"] mod name;` is not found by this
+/// lookup, because the declaring name cannot be recovered from the file path at
+/// all — the mapping lives in the attribute, in a parent this function is not
+/// given a way to search for. The result is `None`, which is the permissive
+/// direction, so this is a real (if narrow) hole rather than a tidy limitation.
+/// It is left open deliberately: closing it means scanning candidate parents for
+/// `#[path]` attributes and resolving them relative to the declaring file, which
+/// is a different shape of change from this one. This repository contains no
+/// `#[path]` attributes, so nothing here relies on it today.
 fn module_feature_gate(path: &str, parent_source: &str) -> Option<Features> {
-    let stem = path.rsplit('/').next()?.strip_suffix(".rs")?;
+    let stem = declaring_name(path)?;
     let lines: Vec<&str> = parent_source.lines().collect();
     let decl = lines.iter().position(|l| {
         let t = l.trim_start().trim_start_matches("pub ").trim_start();
@@ -983,6 +1021,54 @@ here is some prose the model added";
             Some(parent),
         );
         assert_eq!(sibling.features, None);
+    }
+
+    /// **A `mod.rs` is declared by its directory name, not by `mod mod;`.**
+    ///
+    /// Latent in this repository rather than live: it has exactly two `mod.rs`
+    /// files, both under `tests/`, and no `src/**/mod.rs` at all — so no compile
+    /// claim here has ever taken this path. It is fixed anyway because the failure
+    /// is permissive. Taking the stem searches for `mod mod;`, never matches, and
+    /// yields `features: None`, which reads as *unconditional* — a feature-gated
+    /// module would have its compile claims suppressed by a job that never
+    /// compiled it. That is the #291 shape: a build reporting coverage it did not
+    /// have. The reviewer is also scored against a 190-path corpus and pointed at
+    /// other repositories, where `src/**/mod.rs` is ordinary.
+    #[test]
+    fn a_mod_rs_is_gated_by_its_directorys_declaration() {
+        let parent = "#[cfg(feature = \"serve\")]\npub mod thing;\n";
+        let site = claim_site(
+            SHA,
+            "crates/x/src/thing/mod.rs",
+            10,
+            "fn run() {}\n",
+            Some(parent),
+        );
+        assert_eq!(
+            site.features,
+            Some(Features::All),
+            "`thing/mod.rs` is declared by `mod thing;`, so the gate on it applies"
+        );
+
+        // The stem-based lookup this replaces would find nothing and establish
+        // nothing, which is the permissive answer rather than a missing one.
+        let ungated = claim_site(
+            SHA,
+            "crates/x/src/other/mod.rs",
+            10,
+            "fn run() {}\n",
+            Some(parent),
+        );
+        assert_eq!(
+            ungated.features, None,
+            "the gate governs `thing`, not every `mod.rs`"
+        );
+
+        // A `mod.rs` with no directory above it is declared by nothing.
+        assert_eq!(
+            claim_site(SHA, "mod.rs", 1, "", Some(parent)).features,
+            None
+        );
     }
 
     /// An attribute belonging to a different item must not be read as this
