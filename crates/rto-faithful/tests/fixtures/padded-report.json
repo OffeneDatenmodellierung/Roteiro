@@ -1,0 +1,35 @@
+{
+  "why": "The measured failure this crate was built for: a real finding rendered faithfully, followed by two spans of plausible prose resting on nothing. PR #405 measured ~11 findings per file from a local reviewer, 71% carrying one label; padding is what that looks like once it reaches a summary.",
+  "findings": ["finding:roteiro-check:broken-link:docs/adr/0009-cross-repo-workspace-links.md:17"],
+  "rendering": {
+    "segments": [
+      {
+        "kind": "claim",
+        "text": "ADR-0009 links to a symbol that is not in the graph, at line 17.",
+        "citations": ["finding:roteiro-check:broken-link:docs/adr/0009-cross-repo-workspace-links.md:17"]
+      },
+      {
+        "kind": "claim",
+        "text": "The authored layer is generally well maintained, though a few links show signs of drift.",
+        "citations": []
+      },
+      {
+        "kind": "claim",
+        "text": "Consider adding a CI step to catch this class of problem earlier.",
+        "citations": []
+      }
+    ]
+  },
+  "expect": [
+    {
+      "defect": "uncited-claim",
+      "segment": 1,
+      "text": "The authored layer is generally well maintained, though a few links show signs of drift."
+    },
+    {
+      "defect": "uncited-claim",
+      "segment": 2,
+      "text": "Consider adding a CI step to catch this class of problem earlier."
+    }
+  ]
+}

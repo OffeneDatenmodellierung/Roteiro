@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rto-exec",
+    "crates/rto-faithful",
     "crates/rto-graph",
     "crates/rto-llama",
     "crates/rto-spec",
@@ -22,6 +23,7 @@ authors = ["The Roteiro Project Team"]
 
 [workspace.dependencies]
 rto-exec = { path = "crates/rto-exec", version = "1.21.1" }
+rto-faithful = { path = "crates/rto-faithful", version = "1.21.1" }
 rto-graph = { path = "crates/rto-graph", version = "1.21.1" }
 rto-llama = { path = "crates/rto-llama", version = "1.21.1" }
 rto-remote = { path = "crates/rto-remote", version = "1.21.1" }

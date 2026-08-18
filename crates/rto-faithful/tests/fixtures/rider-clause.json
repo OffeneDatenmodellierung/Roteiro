@@ -1,0 +1,14 @@
+{
+  "why": "The other limit, also recorded as a fixture. The span cites a real finding and the first clause is exactly what the tool reported; the second clause is invented and rides along inside the same span. The verdict is clean. The renderer chooses where a claim stops, and the coarser it chooses the more room a rider has — bounding that would mean deciding where the clauses are, which is the reasoning this crate exists to avoid.",
+  "findings": ["finding:roteiro-check:broken-link:docs/adr/0017-dependency-security-policy.md:71"],
+  "rendering": {
+    "segments": [
+      {
+        "kind": "claim",
+        "text": "ADR-0017 links to a symbol that is not in the graph at line 71, which means the dependency policy has silently stopped being enforced.",
+        "citations": ["finding:roteiro-check:broken-link:docs/adr/0017-dependency-security-policy.md:71"]
+      }
+    ]
+  },
+  "expect": []
+}
