@@ -31,6 +31,9 @@ fn roteiro(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
         .args(args)
         .current_dir(dir)
+        // Isolate from any real user config ($ROTEIRO_HOME/config.toml), so the
+        // `[debt] ignore` test below sees only the list the fixture writes.
+        .env("ROTEIRO_HOME", dir)
         .output()
         .expect("run roteiro")
 }
@@ -239,6 +242,117 @@ fn review_labels_untracked_files_as_added() {
     assert!(
         text.contains("fn brand_new"),
         "the overlaid file's symbol is reviewed: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Fixtures for the `[debt] ignore` test: one marker in the repository's own
+/// source, one in a vendored tree. Each literal carries a `roteiro:ignore`
+/// directive because the detector scans *this* file too, and these are test data
+/// rather than debt in this repository. They live at module scope, one literal
+/// per line, so `cargo fmt` cannot reflow the call that used to hold them and
+/// leave the directive on a different line from the marker — which silently
+/// re-arms them.
+const OWN: &str = "// TODO: wire this up\npub fn own() {}\n"; // roteiro:ignore
+const VENDORED: &str = "// FIXME: upstream bug\npub fn dep() {}\n"; // roteiro:ignore
+const OWN_EDITED: &str = "// TODO: wire this up\npub fn own() {}\npub fn own_two() {}\n"; // roteiro:ignore
+const VENDORED_EDITED: &str = "// FIXME: upstream bug\npub fn dep() {}\npub fn dep_two() {}\n"; // roteiro:ignore
+
+#[test]
+fn review_applies_the_configured_debt_ignore() {
+    // Issue #409: `review`'s per-file `debt` is `roteiro debt`'s inventory scoped
+    // to the change, so it is governed by the same `[debt] ignore` (ADR-0007).
+    // Before the fix `review::build` kept every `Marker` node in a changed file,
+    // so a repository that excluded a vendored tree everywhere else still saw it
+    // in `review` — the fifth surface to report a second debt figure for one
+    // repository (after #321 and #372).
+    let dir = fresh_dir("debt-ignore");
+    // Two tracked files, one marker each: one in our own source, one in a
+    // vendored tree. Tracked rather than untracked so `roteiro debt` — which
+    // reads the repository, not the review's change set — sees the same two
+    // files, and the cross-check at the end is a real comparison.
+    write(&dir, "src/own.rs", OWN);
+    write(&dir, "vendor/dep/lib.rs", VENDORED);
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // Edit both so the working-tree review covers them.
+    write(&dir, "src/own.rs", OWN_EDITED);
+    write(&dir, "vendor/dep/lib.rs", VENDORED_EDITED);
+
+    // Debt per changed path, from the `--json` report.
+    let debt_by_path = |dir: &Path| -> std::collections::BTreeMap<String, usize> {
+        let out = roteiro(dir, &["review", "--json"]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "review --json failed: {text}");
+        let report: serde_json::Value =
+            serde_json::from_str(&text).expect("review --json is valid JSON");
+        report["files"]
+            .as_array()
+            .expect("files array")
+            .iter()
+            .map(|f| {
+                (
+                    f["path"].as_str().expect("path").to_owned(),
+                    f["debt"].as_array().expect("debt array").len(),
+                )
+            })
+            .collect()
+    };
+
+    // With no exclusions configured, both markers are in the review.
+    let unfiltered = debt_by_path(&dir);
+    assert_eq!(
+        unfiltered.get("src/own.rs"),
+        Some(&1),
+        "our own marker is reviewed: {unfiltered:?}"
+    );
+    assert_eq!(
+        unfiltered.get("vendor/dep/lib.rs"),
+        Some(&1),
+        "with no `[debt] ignore` the vendored marker is reviewed too: {unfiltered:?}"
+    );
+
+    // Exclude the vendored tree, as `roteiro debt` in this repository would.
+    write(&dir, "roteiro.toml", "[debt]\nignore = [\"vendor/**\"]\n");
+    let filtered = debt_by_path(&dir);
+    assert_eq!(
+        filtered.get("vendor/dep/lib.rs"),
+        Some(&0),
+        "`review` must apply `[debt] ignore`: vendor/dep/lib.rs is excluded \
+         everywhere else, so a marker reported here is a second debt figure for \
+         one repository (issue #409): {filtered:?}"
+    );
+    assert_eq!(
+        filtered.get("src/own.rs"),
+        Some(&1),
+        "the exclusion is scoped to the glob — src/own.rs keeps its marker: \
+         {filtered:?}"
+    );
+
+    // The same list, on the same repository, through `roteiro debt`: the two
+    // surfaces must agree about which markers exist, which is the property the
+    // fix is for rather than `review` merely having *a* filter.
+    let out = roteiro(&dir, &["debt", "--json"]);
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("debt --json is valid JSON");
+    let paths: Vec<&str> = report["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .filter_map(|i| i["path"].as_str())
+        .collect();
+    assert!(
+        !paths.contains(&"vendor/dep/lib.rs"),
+        "`roteiro debt` excludes the vendored tree: {paths:?}"
+    );
+    assert_eq!(
+        paths.iter().filter(|p| **p == "src/own.rs").count(),
+        1,
+        "`roteiro debt` and `review` report the same marker set: {paths:?}"
     );
 
     std::fs::remove_dir_all(&dir).ok();
