@@ -457,7 +457,7 @@ cross-reference at the reporting layer for the Rust overlap.
 
 | Version | Date | Change |
 |---|---|---|
-| 1.3 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
 | 1.0 | 2026-08-15 | Initial: the analyzer→language matrix with evidence, the SQL qualification, the rule-licence position, and the three verified tool behaviours. |
 | 1.1 | 2026-08-16 | Resolves the Rust overlap left open by v1.0: keep both `cargo-audit` and `osv-scanner` findings and cross-reference them on the RUSTSEC id / alias set. Records that OSV.dev *does* carry `RustSec` informational advisories, which refutes the premise of the suppression option, and flags the database-vs-scanner distinction for Stage 22b to measure. |
 | 1.2 | 2026-08-16 | `osv-scanner` shipped (Stage 22b); the dependency column of the matrix is filled. **Corrects v1.0's options-table row**, which conflated the database with the tool: measured against osv-scanner 2.5.0, the scanner *does* report `unmaintained` and `unsound` by default; only `yanked` is unavailable to it, and structurally so. Records the measured RustSec→OSV ingestion lag (~2.5 minutes, so pin age rather than ingestion is what makes the two analyzers differ), three further undocumented tool behaviours, and the package-and-version constraint the cross-reference join turned out to need. |
+| 1.3 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
