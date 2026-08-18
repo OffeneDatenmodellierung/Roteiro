@@ -55,6 +55,14 @@
 //! inside an inline `mod` is a scope this file does not resolve, so it is
 //! refused outright rather than answered wrongly.
 //!
+//! That second refusal is only worth anything if [`module_header`] actually
+//! *sees* the module. Missing an opener does not leave a gap — it leaves the
+//! guard checking a nested link against the file's headings and passing it. So
+//! a `mod` line this parser cannot classify is treated as a boundary too,
+//! rather than as "no module here": the permissive reading is the one that
+//! manufactures a false pass, and a false pass is indistinguishable from a
+//! real one.
+//!
 //! This test is **not feature-gated** — it reads files and links against
 //! nothing — so it runs under `cargo test --workspace` on the default feature
 //! set as well as under CI's `--all-features` job. That is deliberate: the
@@ -164,23 +172,100 @@ fn doc_payload(line: &str) -> Option<(&str, bool)> {
     }
 }
 
-/// Does this line open an inline module at column 0 (`mod x {`, `pub mod x {`)?
-///
-/// `mod x;` does not — its docs live in another file, which this guard reads on
-/// its own terms.
-fn opens_inline_module(line: &str) -> bool {
-    if line.starts_with([' ', '\t']) {
-        return false;
-    }
-    let mut rest = line;
-    for prefix in ["pub(crate) ", "pub(super) ", "pub(in ", "pub "] {
-        if let Some(r) = rest.strip_prefix(prefix) {
-            rest = r;
-            break;
+/// How a column-0 `mod` declaration continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleHeader {
+    /// `mod x {` — a module written inline, so `self` below it means *it*.
+    Inline,
+    /// `mod x;` — the module's docs live in another file, which this guard
+    /// reads on its own terms. Not a scope boundary here.
+    File,
+    /// A `mod` declaration this parser cannot classify.
+    ///
+    /// Deliberately *not* folded into "no module here". Missing an opener is
+    /// the permissive direction: the guard would carry on and check links
+    /// inside that module against the file's headings, which is how a false
+    /// pass is manufactured. A false pass is worse than a gap, because it is
+    /// indistinguishable from a real one — so this is refused loudly instead.
+    Unparsed,
+}
+
+/// The index of the `)` closing the `(` that `s` starts with.
+fn balanced_paren_end(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
         }
     }
-    rest.strip_prefix("mod ")
-        .is_some_and(|r| r.trim_end().ends_with('{'))
+    None
+}
+
+/// The first `{` or `;` in `s` that is code rather than comment.
+///
+/// Both directions need this. `mod x { // a; note` opens a module even though
+/// the line does not end in `{`, and `mod x /* ; */ {` opens one even though a
+/// naive scan meets the `;` first — so neither "ends with `{`" nor "`{` before
+/// `;`" is sufficient on its own. An unterminated `/*` makes the rest of the
+/// line unknowable from here, and yields `None` so the caller refuses.
+fn first_significant(s: &str) -> Option<char> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            // A line comment ends the line; nothing after it is code.
+            b'/' if b.get(i + 1) == Some(&b'/') => return None,
+            b'/' if b.get(i + 1) == Some(&b'*') => i += 2 + s[i + 2..].find("*/")? + 2,
+            b'{' => return Some('{'),
+            b';' => return Some(';'),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Classify a column-0 `mod` declaration, or `None` if the line is not one.
+///
+/// Visibility is matched by *balancing the parenthesis* rather than by listing
+/// spellings. That is the point: the previous version listed `"pub(in "` among
+/// the prefixes it stripped but never consumed the `…)` scope that follows, so
+/// `pub(in crate::foo) mod bar {` fell through the `strip_prefix("mod ")` below
+/// and the branch never once did anything. A list can advertise a form it does
+/// not handle; balancing cannot.
+fn module_header(line: &str) -> Option<ModuleHeader> {
+    // Column 0 only. Anything indented is inside an `impl`, a function or a
+    // module, and `cargo fmt --check` (a CI gate) guarantees that indentation.
+    if line.starts_with([' ', '\t']) {
+        return None;
+    }
+    let mut rest = line;
+    if let Some(after_pub) = rest.strip_prefix("pub") {
+        rest = after_pub;
+        if rest.starts_with('(') {
+            // `pub(crate)`, `pub(super)`, `pub(self)`, `pub(in ::a::b)`.
+            let Some(close) = balanced_paren_end(rest) else {
+                return Some(ModuleHeader::Unparsed);
+            };
+            rest = &rest[close + 1..];
+        }
+    }
+    let after_mod = rest.trim_start().strip_prefix("mod")?;
+    // `mod` must be a whole token, so `mod_choice::pick()` is not a module.
+    if !after_mod.starts_with([' ', '\t']) {
+        return None;
+    }
+    match first_significant(after_mod) {
+        Some('{') => Some(ModuleHeader::Inline),
+        Some(';') => Some(ModuleHeader::File),
+        _ => Some(ModuleHeader::Unparsed),
+    }
 }
 
 /// An anchor-bearing link found in a doc comment.
@@ -303,11 +388,17 @@ fn check_file(rel: &str, src: &str) -> FileReport {
     // Links at or below the first column-0 inline module resolve `self` to that
     // module, not to the file's. Rather than replicate module resolution, this
     // guard refuses them loudly — a wrong answer that announces itself, instead
-    // of the silent false pass the whole issue is about.
-    let nested_from = src
+    // of the silent false pass the whole issue is about. A header it cannot
+    // classify is a boundary too, for the same reason: reading it as "no module
+    // here" is what turns a gap into a false pass.
+    let boundary = src
         .lines()
-        .position(opens_inline_module)
-        .map_or(usize::MAX, |i| i + 1);
+        .enumerate()
+        .find_map(|(i, line)| match module_header(line)? {
+            ModuleHeader::File => None,
+            kind => Some((i + 1, kind)),
+        });
+    let nested_from = boundary.map_or(usize::MAX, |(line_no, _)| line_no);
 
     let docs = doc_lines(src);
 
@@ -329,13 +420,25 @@ fn check_file(rel: &str, src: &str) -> FileReport {
         links += 1;
         let at = format!("{rel}:{}", link.line_no);
         if link.line_no >= nested_from {
-            problems.push(format!(
-                "{at}: `#{}` sits at or below this file's first inline `mod`, \
-                 where `self` no longer means the file's module. This guard \
-                 does not resolve nested modules; move the link above the \
-                 module, or teach `check_file` to track module scope.",
-                link.anchor
-            ));
+            let (at_line, kind) = boundary.expect("a finite boundary was found");
+            problems.push(match kind {
+                ModuleHeader::Inline => format!(
+                    "{at}: `#{}` sits at or below the inline `mod` opened on \
+                     line {at_line}, where `self` no longer means the file's \
+                     module. This guard does not resolve nested modules; move \
+                     the link above the module, or teach `check_file` to track \
+                     module scope.",
+                    link.anchor
+                ),
+                _ => format!(
+                    "{at}: `#{}` sits at or below line {at_line}, a `mod` \
+                     declaration this guard could not classify as inline or \
+                     file-level. It refuses rather than guessing: guessing \
+                     \"not a module\" would check this link against the wrong \
+                     scope and could pass it wrongly.",
+                    link.anchor
+                ),
+            });
             continue;
         }
         if !link.qualified && !link.inner {
@@ -535,4 +638,109 @@ fn doctest_hidden_lines_are_not_headings() {
     // And a link inside a fence is code, not a link.
     let fenced = "//! ```\n//! let s = \"[p](self#nope)\";\n//! ```\n";
     assert_eq!(check_file("x.rs", fenced).links, 0);
+}
+
+#[test]
+fn module_headers_are_classified_by_form() {
+    use ModuleHeader::{File, Inline, Unparsed};
+
+    // File modules: docs live in another file, so these are not a boundary.
+    assert_eq!(module_header("mod x;"), Some(File));
+    assert_eq!(module_header("pub mod x;"), Some(File));
+    assert_eq!(module_header("pub(crate) mod x;"), Some(File));
+    assert_eq!(module_header("mod x; // note"), Some(File));
+
+    // Inline modules, every visibility spelling. Listing the spellings is what
+    // went wrong before — `pub(in …)` was advertised and never consumed — so
+    // each one is asserted rather than assumed.
+    assert_eq!(module_header("mod x {"), Some(Inline));
+    assert_eq!(module_header("pub mod x {"), Some(Inline));
+    assert_eq!(module_header("pub(crate) mod x {"), Some(Inline));
+    assert_eq!(module_header("pub(super) mod x {"), Some(Inline));
+    assert_eq!(module_header("pub(self) mod x {"), Some(Inline));
+    assert_eq!(module_header("pub(in crate::foo) mod bar {"), Some(Inline));
+    assert_eq!(module_header("pub(in ::a::b::c) mod bar {"), Some(Inline));
+    assert_eq!(module_header("pub(crate)mod x {"), Some(Inline));
+
+    // A brace that is not the last thing on the line.
+    assert_eq!(module_header("mod x { // note"), Some(Inline));
+    assert_eq!(module_header("mod x { /* ; */"), Some(Inline));
+    assert_eq!(module_header("mod x { pub fn f() {} }"), Some(Inline));
+    // …and a `;` that only *looks* like a file module, being inside a comment.
+    // This is why "`{` before `;`" is not sufficient on its own.
+    assert_eq!(module_header("mod x /* ; */ {"), Some(Inline));
+
+    // Not a module declaration at all.
+    assert_eq!(module_header("    mod x {"), None);
+    assert_eq!(module_header("\tmod x {"), None);
+    assert_eq!(module_header("//! mod x {"), None);
+    assert_eq!(module_header("/// mod x {"), None);
+    assert_eq!(module_header("mod_choice::pick();"), None);
+    assert_eq!(module_header("pub struct Modifier {"), None);
+    assert_eq!(module_header("pub use crate::model;"), None);
+
+    // Unclassifiable: the brace is on another line, or a comment hides the end
+    // of the line. Refused, never silently read as "no module here".
+    assert_eq!(module_header("mod x"), Some(Unparsed));
+    assert_eq!(module_header("mod x // note"), Some(Unparsed));
+    assert_eq!(module_header("mod x /* unterminated"), Some(Unparsed));
+    assert_eq!(module_header("pub(in crate::foo mod bar {"), Some(Unparsed));
+}
+
+#[test]
+fn a_missed_module_opener_would_be_a_false_pass() {
+    // Why the two parsing defects were worth fixing rather than noting. The
+    // file's own docs carry `# Paging`; the link sits inside a module whose
+    // docs do not. Failing to *detect* the opener does not make the guard
+    // incomplete — it makes it answer, against the wrong scope, and pass. A
+    // false pass is indistinguishable from a real one.
+    for opener in [
+        "pub(in crate::foo) mod bar {",
+        "pub(in ::a::b) mod bar {",
+        "mod bar { // trailing",
+        "mod bar { /* ; */",
+        "mod bar /* ; */ {",
+    ] {
+        let src = format!(
+            "//! # Paging\n\n{opener}\n    /// [p](self#paging)\n    pub fn f() {{}}\n}}\n"
+        );
+        let report = check_file("x.rs", &src);
+        assert_eq!(report.links, 1, "{opener}");
+        assert!(
+            report.problems.iter().any(|p| p.contains("inline `mod`")),
+            "`{opener}` must be refused, not answered: {:?}",
+            report.problems
+        );
+    }
+}
+
+#[test]
+fn an_unparseable_module_header_is_refused_not_ignored() {
+    // Unsupported by choice — but loudly. Reading these as "not a module" is
+    // the permissive direction, and permissive means a false pass.
+    for opener in ["mod bar", "mod bar // brace next line", "mod bar /* open"] {
+        let src = format!(
+            "//! # Paging\n\n{opener}\n{{\n    /// [p](self#paging)\n    pub fn f() {{}}\n}}\n"
+        );
+        let report = check_file("x.rs", &src);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("could not classify")),
+            "`{opener}` must be refused loudly: {:?}",
+            report.problems
+        );
+    }
+}
+
+#[test]
+fn file_modules_are_not_a_scope_boundary() {
+    // The other direction: `mod x;` must *not* refuse links below it, or the
+    // guard would stop checking most of this workspace's files.
+    let src =
+        "//! # Paging\n\nmod helper;\npub mod other;\n\n/// [p](self#paging)\npub fn f() {}\n";
+    let report = check_file("x.rs", src);
+    assert_eq!(report.links, 1);
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
 }
