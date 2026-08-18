@@ -63,6 +63,11 @@ mod query;
 pub mod compile_claim;
 pub mod review_corpus;
 pub mod review_score;
+// Stage 35b — the reviewer's judgement, which is likewise pure: prompt assembly,
+// response parsing and the compile-claim site derivation are functions of bytes,
+// so what the reviewer *decides* is testable with no model and no network. The
+// loop that calls an engine is in the binary, where the engine already is.
+pub mod reviewer;
 mod store;
 mod sync;
 // Whether a producer's identity is measured or asserted (ADR-0019 §5). In *this*

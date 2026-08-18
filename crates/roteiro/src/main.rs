@@ -34,6 +34,13 @@ mod remote_transport;
 #[cfg(all(feature = "remote", feature = "serve"))]
 mod remote_engine;
 mod review;
+// The LLM reviewer's driver and the corpus replay that measures it (Stage 35b).
+// Present under `test` as well as under a generation backend: the diff
+// reconstruction and the parent-module lookup are pure git and string work, and
+// their tests are the ones that matter in CI — which has no model store, so the
+// backend-gated half of the module never runs there.
+#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+mod review_llm;
 // Structured logging / telemetry init (ADR-0011): the single place the tracing
 // subscriber is built — the unchanged human-text stdout layer plus an opt-in
 // rotating, OTEL-shaped JSON file layer.
@@ -166,6 +173,30 @@ enum Command {
         /// for scoring a candidate on someone else's adjudicated set.
         #[arg(long, value_name = "CORPUS.jsonl", requires = "score")]
         corpus: Option<String>,
+        /// Review the change with a local generative model, one file at a time
+        /// (Stage 35b), instead of the graph-grounded report.
+        ///
+        /// Local only. `ModelTask::Review` may use the remote tier under
+        /// ADR-0019, but a remote review would send the diff and the payload
+        /// allow-list carries no source-code field — so there is no
+        /// `--allow-remote` here until there is one there.
+        #[arg(long, conflicts_with_all = ["score", "replay"])]
+        llm: bool,
+        /// Replay the LLM reviewer over every commit the adjudicated corpus
+        /// covers, writing a `roteiro.review-run/v1` document here for `--score`
+        /// to read. The harness that turns a reviewer into a number.
+        #[arg(long, value_name = "RUN.json", conflicts_with_all = ["score", "base"])]
+        replay: Option<String>,
+        /// CI check-run evidence (a JSON array of `CheckRun`) for the
+        /// compile-claim filter. Without it nothing is refuted and nothing is
+        /// withheld: the filter is opt-in on evidence, never a blanket
+        /// suppression.
+        #[arg(long, value_name = "CHECKS.json")]
+        checks: Option<String>,
+        /// Replay only the first N corpus commits — a smoke run that does not
+        /// cost a full pass.
+        #[arg(long, value_name = "N", requires = "replay")]
+        limit: Option<usize>,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
@@ -1402,9 +1433,15 @@ fn main() -> anyhow::Result<()> {
             base,
             score,
             corpus,
-        } => match score {
-            Some(run) => review::run_score(&run, corpus.as_deref(), json),
-            None => run_review(ingest, json, base.as_deref()),
+            llm,
+            replay,
+            checks,
+            limit,
+        } => match (score, replay, llm) {
+            (Some(run), _, _) => review::run_score(&run, corpus.as_deref(), json),
+            (None, Some(out), _) => run_replay(&out, checks.as_deref(), limit),
+            (None, None, true) => run_llm_review(base.as_deref(), checks.as_deref()),
+            (None, None, false) => run_review(ingest, json, base.as_deref()),
         },
         Command::Query {
             key,
@@ -3015,6 +3052,49 @@ fn run_check(
         exit_gate_failure();
     }
     Ok(())
+}
+
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+/// The repository root a git-backed review works from.
+fn review_repo_root() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// `roteiro review --llm` — review the change with the local generative model.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn run_llm_review(base: Option<&str>, checks: Option<&str>) -> anyhow::Result<()> {
+    review_llm::run_llm(&review_repo_root(), base, checks)
+}
+
+/// `roteiro review --replay` — measure the reviewer against the corpus.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn run_replay(out: &str, checks: Option<&str>, limit: Option<usize>) -> anyhow::Result<()> {
+    review_llm::run_replay(&review_repo_root(), out, checks, limit)
+}
+
+/// The same two surfaces in a build with no generation backend.
+///
+/// A named refusal rather than a missing subcommand: `--llm` is documented in
+/// `--help` whatever the build, so a stock install that answered
+/// `unrecognized argument` would send someone to check their spelling instead of
+/// their features. This is the shape `models` was moved into `default` for.
+#[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
+fn run_llm_review(_base: Option<&str>, _checks: Option<&str>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`review --llm` needs a local generation backend, which this build does not \
+         have. Rebuild with `--features serve` (or `inference-local-models`). \
+         `roteiro review` without `--llm` needs no model and still works."
+    )
+}
+
+/// See [`run_llm_review`]'s backend-less twin.
+#[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
+fn run_replay(_out: &str, _checks: Option<&str>, _limit: Option<usize>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`review --replay` needs a local generation backend, which this build does \
+         not have. Rebuild with `--features serve` (or `inference-local-models`). \
+         `roteiro review --score <run.json>` scores an existing run with no model."
+    )
 }
 
 /// Assemble a graph-grounded review and print it (human or `--json`); exit
@@ -4646,6 +4726,16 @@ fn strip_thinking(text: &str) -> String {
         Some(end) => text[end + "</think>".len()..].trim_start().to_owned(),
         None => text.to_owned(),
     }
+}
+
+/// [`strip_thinking`] for `review_llm`, which needs it for the same reason and
+/// must not grow a second copy: a reviewer that parsed a model's `<think>` block
+/// would read its scratch reasoning as findings, and a reasoning model deliberates
+/// about defects it then rejects.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[must_use]
+pub fn strip_thinking_public(text: &str) -> String {
+    strip_thinking(text)
 }
 
 /// `spec draft` without any generation backend: guide the user to enable one.

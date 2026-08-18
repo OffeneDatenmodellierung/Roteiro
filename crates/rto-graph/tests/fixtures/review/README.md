@@ -178,11 +178,27 @@ The corpus is no longer test-only data. It is embedded into `rto-graph`
 | `rto_graph::review_corpus` | Loads it as typed rows. `deny_unknown_fields` with no optional fields, so the eleven-field schema is enforced by the type rather than by a second transcript of it in a test |
 | `rto_graph::review_score` | Scores a candidate reviewer: **per-class recall**, plus the two precision-adjacent numbers the corpus can and cannot support |
 | `rto_graph::compile_claim` | The suppression rule the `false-compile-claim` row licenses, with the coverage model that stops it becoming a "green build" check |
+| `rto_graph::reviewer` | **Stage 35b.** The reviewer's pure core: the per-file prompt, the parser that reads a model's reply into candidate findings, and the `ClaimSite` derivation that decides what configuration a compile claim needs. Reads `DefectClass`, and deliberately **not** `BUILTIN` — see below |
 
 `roteiro review --score <run.json>` is the CLI surface. It takes a
 `roteiro.review-run/v1` document — the commits a candidate was run against and what
 it said about each — and needs no model, no graph and no network, so a score can be
 recomputed anywhere.
+
+`roteiro review --replay <run.json>` is what produces one. It reconstructs each
+`reviewed_sha` by the recipe above, reviews every file that commit touched, and
+writes the run document. `roteiro review --llm` is the same per-file reviewer
+pointed at the change in front of you, so the thing measured is the thing that
+ships.
+
+### The prompt may not read this file
+
+`reviewer` depends on `DefectClass` and never on `BUILTIN`, and that is a property
+of the experiment rather than a coding preference. A prompt tuned until the known
+rows are found measures how well it was tuned; its recall would not survive the
+23rd row. **The rows are the test set.** Anything that shapes what the reviewer
+says must come from `docs/REVIEW_CHECKLIST.md` and the class vocabulary, both of
+which predate any reviewer.
 
 ### What may and may not be computed from this file
 
@@ -208,8 +224,43 @@ Reconstructing all 15 review diffs at `-U3` costs about **513k tokens in total**
 averaging **34k per commit** and reaching **103k** on PR #339. Against a measured
 single-call budget of ~30k on this repository, **9 of the 15 diffs do not fit in one
 call before any context is added**, which is why a whole-diff reviewer is not the
-shape to build; the ~79k per-file budget is. (Figures are `len(diff) / 4`, so they
-are an estimate of the same order, not a tokeniser's count.)
+shape to build. (Figures are `len(diff) / 4`, so they are an estimate of the same
+order, not a tokeniser's count.)
+
+**Per file, the budget is not the constraint at all** — measured in Stage 35b over
+all **190 changed paths**, of which **184 have a reviewable diff** (six are binary
+audio fixtures):
+
+| | raw | as sent |
+|---|---:|---:|
+| mean | 2,704 | 3,275 |
+| median | 1,476 | 1,758 |
+| p90 | 5,621 | 6,711 |
+| max | 56,538 | 69,396 |
+
+"As sent" includes the line-number column `reviewer::annotate_diff` adds, which
+costs a measured **1.21×** here — 9 characters per *line*, so ~1.2× on ordinary
+source and far more on a diff of very short lines. Even so, exactly **one of the
+190 exceeds the single-call budget**, and it is a generated JSON fixture; the next
+largest is `Cargo.lock`. **The largest reviewable *source* file-diff in the corpus
+is 14,034 tokens raw and 17,202 as sent.**
+
+So the earlier "design to the ~79k per-file budget" understates the room: the
+median file leaves ~28k of the *single-call* budget unused and the worst source
+file leaves ~12k. That is what makes the graph-context arm testable rather than
+pre-doomed — whatever the graph has to add, there is space to put it.
+
+### What the corpus can judge, and how little of it that is
+
+A replay reviews 184 files. The corpus anchors **22 rows across 22 distinct
+`(sha, path)` pairs**, so roughly one file in eight carries anything the corpus can
+adjudicate at all. Everything said about the other ~162 is *unadjudicated* by
+construction — not wrong, just unjudgeable here.
+
+That ratio, not recall, is what decides whether a reviewer is usable. A reviewer
+that finds every one of the 22 and also emits a finding on every file costs a human
+~160 investigations to deliver them. `review --replay` therefore reports findings
+per file **before** it reports anything else.
 
 ## Extending it
 

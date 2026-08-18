@@ -1861,7 +1861,15 @@ bespoke rule). Independent of Stage 34 — it can run wholly local.
 > instead of an impression, and because a "do not build" verdict needs the same
 > harness a "build it" verdict does.
 >
-> 35b — the local reviewer arm — is **not built, pending 35a's numbers**. Two
+> 35b is **cut in two at the measurement seam**, and **PR 1 is delivered**: the
+> reviewer, its two surfaces (`review --llm` and the `review --replay` harness),
+> `ModelTask::Review`, and the compile-claim suppression wired through
+> `compile_claim`'s four axes. PR 2 is the graph-context arm and the comparison
+> that is the actual experiment. **PR 1 ships no per-class recall figure** — see
+> below for why that is a result rather than an omission.
+>
+> The original 35b framing follows, and its second bullet has since been
+> overturned by measurement. Two
 > measurements from 35a constrain it, and both were taken on this repository
 > rather than assumed:
 >
@@ -1930,8 +1938,62 @@ opposite direction. The recipe is corrected and now has an executable form
 (`every_row_reconstructs_a_non_empty_reviewed_diff`), which also checks that each
 reconstructed diff touches the file its comment is anchored to.
 
+### What PR 1 measured, and the one that matters most
+
+**The budget is not the constraint — the earlier conclusion understated the room.**
+35a established that whole-diff review does not fit and named ~79k per file as the
+figure to design to. Measured across all **190 changed paths** of the corpus (of
+which **184 have a reviewable diff**; six are binary audio fixtures): mean **2,704**
+tokens raw and **3,275** as sent, median 1,476/1,758, p90 5,621/6,711. Exactly
+**one of 190** exceeds even the ~30k *single-call* budget, and it is a generated
+JSON fixture. **The largest reviewable source file-diff in the corpus is 14,034
+raw and 17,202 as sent** — under two-thirds of the single-call budget. "As sent"
+carries the line-number column the reviewer adds, a measured **1.21×** (9
+characters per *line*, so ~1.2× on source and far worse on very short lines).
+
+That is what makes PR 2 worth running at all: the median file leaves ~28k of the
+budget unused, so the graph arm has somewhere to put whatever it has to add. Had
+the budget been tight, the stage's central claim would have been untestable here
+whatever the graph contained.
+
+**The instrument had a vacuous measurement in it, and PR 1 walked into it.** A
+reasoning GGUF opens `<think>` and deliberates before answering. Run with a
+1,200-token generation cap, `qwen3.8-27b` spent the *entire* budget inside that
+block on **4 files of 4** of a held-out commit, and the harness reported **"0
+finding(s) over 4 file(s)"**. Nothing was wrong-looking about that output. Scored,
+it would have produced **zero recall across every class** and read as a clean,
+honest negative result about local reviewers — when in fact **no review had
+happened at all**.
+
+This is the same silent zero as scoring against a PR head or against an empty
+diff, arriving from a third direction, and it is worse than both because the other
+two are refused by construction. It is now detected
+(`reviewer::Parsed::reasoning_truncated`), reported on both surfaces as *not
+reviewed*, and pinned by a test; the cap is 4,096 and the context window is passed
+explicitly rather than inheriting `LlamaEngine`'s 4,096 default, which had already
+killed an earlier run outright. **A truncated file is never counted as clean and a
+run containing one is never scored.**
+
+The general lesson, for anyone measuring a reasoning model on anything: a
+generation cap does not degrade a reasoning model's answer, it removes the answer
+while leaving the response well-formed. Silence and truncation must be
+distinguishable at the instrument, not inferred afterwards from a suspicious
+number.
+
+**Not yet scored, deliberately.** PR 1 ships no per-class recall. The pass that
+would produce one had not been run under the fixed harness at the time of writing,
+and a recall figure from a run where truncation was possible is not a measurement.
+The remaining observation is honest but not a score: with `qwen3-coder-30b-a3b`
+(non-reasoning, so unaffected by the above) the reviewer emitted **60 findings
+across 4 held-out files** — ~15 per file, with visible duplicates — and **two
+prompt revisions written specifically to impose precision discipline changed that
+number not at all**. Against 22 adjudicated rows spread over 184 files, that rate
+is the number to beat, and it is the one PR 2 has to move.
+
 **"Do not build this" remains an acceptable outcome.** The corpus keeps its value
-either way: it is how any future reviewer, hosted or local, gets measured.
+either way: it is how any future reviewer, hosted or local, gets measured. Nothing
+in PR 1 is evidence for building PR 2 *except* the headroom finding; the finding
+rate is evidence against, and both go into the decision.
 
 ---
 
@@ -1987,7 +2049,7 @@ either way: it is how any future reviewer, hosted or local, gets measured.
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
 | v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
 | v1.17.0 ✅ | Stage 34 — remote model tier | **ADR-0019 Accepted.** Cut in three, all delivered. **1 — the guard** (#381): consent gate, payload allow-list, dry-run, egress ledger, in a build compiling no backend. **2a — the transport**: `ureq` behind the off-by-default `remote` feature, the TTY invocation grant (`status`/`dry-run` never prompt), the response reader that refuses a truncated generation, and the README/website promise amendments on the commit that made them false. **2b — the surfaces**: `ModelSource::Remote { trust }` with `installed: None` in the shared resolver (which forced `ProducerTrust` from `rto-remote` into `rto-graph` — one definition, or a ledger entry and a resolution could disagree about what "vendor-asserted" means), then `spec draft --allow-remote` and `serve --allow-remote` over it. Neither prompts — the flag is the only way on a surface whose default is local — and a **refused** `--allow-remote` stops the run rather than answering locally, which is the same silent downgrade a network failure would be. Both rebuild the request through the payload allow-list rather than forwarding a local prompt or a chat transcript, so the guard still assembles what leaves. Ask is wired by wrapping the served `Engine` **in the binary**, so `rto-serve` gains nothing. Project file may deny, never grant; no learned router on the local→remote edge; no reachability probe; no test can reach a network |
-| v1.18.0 🔶 | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes. No reviewer yet, and **no verdict** — only the instrument. Two findings it forced: the corpus README's reconstruction recipe yielded an *empty* diff for 13 of 15 commits, and 9 of 15 diffs exceed the single-call budget, so per-file is the only viable shape — which puts `contract-drift`, the largest class, squarely on the graph |
+| v1.18.0 🔶 | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes — the instrument, with **no verdict**. **35b PR 1 delivered**: `ModelTask::Review` on the shared `generative` key (a seventh task, not a fourth bespoke rule), the per-file reviewer, `review --llm`, and the `review --replay` harness. It overturned 35a's budget conclusion in the useful direction — per file the corpus is **mean 3,275 / median 1,758 tokens as sent**, and the largest reviewable *source* file-diff is **17,202**, so ~28k of the single-call budget is free on a median file and the graph arm of PR 2 has room to be tested. It also found a **vacuous measurement in the instrument itself**: a reasoning model spent a 1,200-token cap entirely inside `<think>` on 4 files of 4 and the run reported *"0 finding(s) over 4 file(s)"* — zero recall that measured nothing, now detected, reported as *not reviewed*, and never scored. **No per-class recall figure yet**, deliberately: the honest remaining number is ~15 findings per file against 22 adjudicated rows over 184 files, unmoved by two precision-targeted prompt revisions | 
 | **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
 
 ---
@@ -2125,10 +2187,19 @@ outlives the current stage — the stages themselves carry the detail:
   **not** sending: on a surface whose default is local there is no prompt, only
   the flag, and a `--allow-remote` the gate refuses stops the run instead of
   quietly producing a local answer.
-- **Stage 35 — `roteiro review` LLM mode.** 🔶 **35a delivered.** The corpus has
-  an instrument — `roteiro review --score`, per-class recall, `compile_claim` —
-  but **no reviewer and no verdict**. 35b is the reviewer, and *"do not build
-  this"* remains a legitimate outcome of measuring one.
+- **Stage 35 — `roteiro review` LLM mode.** 🔶 **35a delivered; 35b cut in two,
+  PR 1 delivered.** The corpus has an instrument — `roteiro review --score`,
+  per-class recall, `compile_claim` — and now a reviewer to point at it:
+  `ModelTask::Review`, the per-file `review --llm`, and the `review --replay`
+  harness. **Still no verdict, and deliberately no recall figure.** PR 1's two
+  results are that the per-file budget is far roomier than 35a concluded (median
+  1,758 tokens as sent against a ~30k single-call budget, so PR 2's graph arm has
+  space to be tested) and that the instrument could report a **vacuous zero**: a
+  reasoning model whose whole generation budget went inside `<think>` produced
+  *"0 finding(s) over 4 file(s)"*, which would have scored as zero recall and read
+  as an honest negative. That is now caught and reported rather than scored.
+  *"Do not build this"* remains a legitimate outcome, and the ~15-findings-per-file
+  rate PR 1 measured is the evidence pointing that way.
 
 ---
 
