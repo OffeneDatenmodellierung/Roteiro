@@ -1462,7 +1462,7 @@ fn main() -> anyhow::Result<()> {
             (None, None, true) => {
                 run_llm_review(base.as_deref(), checks.as_deref(), graph_context, ingest)
             }
-            (None, None, false) => run_review(ingest, json, base.as_deref()),
+            (None, None, false) => run_review(ingest, json, base.as_deref(), debt_ignore),
         },
         Command::Query {
             key,
@@ -3150,6 +3150,7 @@ fn run_review(
     ingest: rto_graph::IngestConfig,
     json: bool,
     base: Option<&str>,
+    debt_ignore: &[String],
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     // Range review is over committed history, so build the committed (HEAD)
@@ -3183,7 +3184,11 @@ fn run_review(
             changed.dedup_by(|a, b| a.path == b.path);
             changed
         };
-    let review = review::build(&store, &changed, &report.violations)?;
+    // The repository's own `[debt] ignore`, on the same footing as `debt`,
+    // `check` and the graph API: `review`'s per-file `debt` is that same
+    // inventory scoped to the change, so it must be scoped by the same list
+    // (issue #409).
+    let review = review::build(&store, &changed, &report.violations, debt_ignore)?;
 
     if json {
         emit_json(&review)?;
@@ -9826,22 +9831,21 @@ fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
 /// a ranking there is no `limit` that would make it a page: a review is *the whole
 /// change*, and a truncated one is a review that quietly skipped part of the diff.
 ///
-/// **A fifth debt number.** `review`'s per-file output carries `debt`. The MCP
-/// crate cannot reach the target project's `roteiro.toml`, so it could not apply
-/// that project's `[debt] ignore` — and issue #321 is exactly the defect of one
-/// concept reporting different numbers on different surfaces, which had already
-/// recurred across three of them before it was fixed, and then once more on a
-/// fourth (`_Home`, issue #372). Adding a surface that reports a different figure
-/// again, for convenience, is how that happens a third time. The review surface
-/// stays CLI-first (`roteiro review [--json]`): it needs no server and works in
-/// any agent or CI.
+/// **A different debt number.** `review`'s per-file output carries `debt`. The
+/// MCP crate cannot reach the target project's `roteiro.toml`, so it could not
+/// apply that project's `[debt] ignore` — and issue #321 is exactly the defect of
+/// one concept reporting different numbers on different surfaces, which had
+/// already recurred across three of them before it was fixed, then once more on a
+/// fourth (`_Home`, issue #372) and a fifth (`review` itself, issue #409). Adding
+/// a surface that reports a different figure again, for convenience, is how that
+/// recurs. The review surface stays CLI-first (`roteiro review [--json]`): it
+/// needs no server and works in any agent or CI.
 ///
-/// Worth knowing separately: **`roteiro review` does not apply `[debt] ignore`
-/// today either.** `Command::Review` is never handed the list and
-/// [`review::build`] collects every marker node in a changed file
-/// unconditionally, so its `debt` is the unfiltered inventory while `roteiro
-/// debt` in the same repository is filtered. That is a defect in the CLI, not a
-/// reason to reproduce it on a tool surface.
+/// Note that `roteiro review` **does** apply `[debt] ignore` as of issue #409:
+/// `Command::Review` is handed the list, and [`review::build`] reports only the
+/// markers [`rto_graph::debt`] retains under it. So the gap above is this
+/// registry's, and exposing `review` here would mean *introducing* a divergence
+/// the CLI no longer has — not inheriting one it still does.
 #[cfg(feature = "serve")]
 struct GraphToolRegistry {
     workspace: std::sync::Arc<rto_graph::Workspace>,

@@ -4257,6 +4257,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rto-faithful"
+version = "1.22.0"
+dependencies = [
+ "rto-graph",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rto-graph"
 version = "1.22.0"
 dependencies = [

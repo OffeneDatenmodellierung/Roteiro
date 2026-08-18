@@ -1,0 +1,19 @@
+{
+  "why": "The third limit. Four findings, one rendered. Nothing here is invented, so the verdict is clean; coverage is a different property and would need a different check. Recorded so that a caller reading a clean verdict as \"the findings were reported\" is making a documented mistake rather than a reasonable assumption.",
+  "findings": [
+    "finding:roteiro-check:broken-link:a.md:1",
+    "finding:roteiro-check:broken-link:b.md:2",
+    "finding:roteiro-check:broken-link:c.md:3",
+    "finding:roteiro-check:broken-link:d.md:4"
+  ],
+  "rendering": {
+    "segments": [
+      {
+        "kind": "claim",
+        "text": "A wiki-link in a.md resolves to nothing.",
+        "citations": ["finding:roteiro-check:broken-link:a.md:1"]
+      }
+    ]
+  },
+  "expect": []
+}
