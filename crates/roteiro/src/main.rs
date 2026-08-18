@@ -1244,43 +1244,37 @@ enum SecurityAction {
         #[arg(long)]
         json: bool,
     },
-    /// Run an analyzer against this worktree as a **child process on this
-    /// host**, with no isolation.
+    /// Run an analyzer against this worktree and file its findings.
     ///
-    /// Gated on `exec-subprocess`, which is on by default. The analyzer's own
-    /// egress is switched off and its inputs are pinned and pre-provisioned, but
-    /// a subprocess on this host can do what this host can do — so the run's
-    /// evidence records `isolation=none`, and **`--allow-unsandboxed` is
-    /// required, on every invocation**, to say you accept that. Since the
-    /// feature became a default that flag is the only gate left, so it is not
-    /// optional and will not be made so. Assets are never fetched here: a cold
-    /// cache fails and names the prefetch command.
-    #[cfg(feature = "exec-subprocess")]
+    /// **The sandbox is the default.** With no flag, the analyzer is executed
+    /// inside a digest-pinned OCI image in a microVM (`exec-boxlite`), and the
+    /// run's evidence records `isolation=microvm`. That backend is not in the
+    /// default feature set, so on a stock build this is a named refusal that
+    /// says which feature to rebuild with — never a silent absence, and never a
+    /// silent downgrade to the host.
+    ///
+    /// `--allow-unsandboxed` selects the other backend: a child process on this
+    /// host, with no boundary (`exec-subprocess`, on by default). It is required
+    /// for that path and means exactly what it has always meant — consent to
+    /// execute a third-party binary here with nothing between it and this
+    /// machine. It is not implied by anything, and the sandbox existing does not
+    /// weaken it.
+    ///
+    /// Whichever backend runs, assets are never fetched: a cold cache fails and
+    /// names the `prefetch` command, having executed nothing.
     Run {
         /// The analyzer to run (`roteiro security status` lists them).
         analyzer: String,
-        /// Accept that this run has no isolation boundary. Required.
+        /// Execute inside the sandbox. This is already the default; saying it
+        /// explicitly pins the intent so a script cannot be re-aimed at the
+        /// host by a change of defaults.
+        #[arg(long, conflicts_with = "allow_unsandboxed")]
+        sandboxed: bool,
+        /// Accept that this run has no isolation boundary, and execute the
+        /// analyzer as a child process on this host. Required for that path.
         #[arg(long)]
         allow_unsandboxed: bool,
         /// Emit the run report as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Not available in this build — rebuild with `--features exec-subprocess`.
-    ///
-    /// The variant exists purely so the answer is a sentence rather than clap's
-    /// `unrecognized subcommand`. Shipping a feature-gated command that vanishes
-    /// without explanation is the exact defect this release fixes for
-    /// `roteiro model`, and it would be perverse to reintroduce it here. Only a
-    /// `--no-default-features` build reaches this.
-    #[cfg(not(feature = "exec-subprocess"))]
-    Run {
-        /// The analyzer that would be run.
-        analyzer: String,
-        /// Accepted so the refusal names the feature rather than the flag.
-        #[arg(long)]
-        allow_unsandboxed: bool,
-        /// Accepted for the same reason.
         #[arg(long)]
         json: bool,
     },
@@ -7308,19 +7302,15 @@ fn run_security(action: SecurityAction) -> anyhow::Result<()> {
             json,
         } => run_security_ingest(&file, analyzer.as_deref(), json),
         SecurityAction::List { analyzer, json } => run_security_list(analyzer.as_deref(), json),
-        #[cfg(feature = "exec-subprocess")]
         SecurityAction::Run {
             analyzer,
+            sandboxed,
             allow_unsandboxed,
             json,
-        } => run_security_run(&analyzer, allow_unsandboxed, json),
-        #[cfg(not(feature = "exec-subprocess"))]
-        SecurityAction::Run { analyzer, .. } => anyhow::bail!(
-            "`roteiro security run {analyzer}` needs the `exec-subprocess` feature, which this \
-             build does not have; rebuild with `--features exec-subprocess` (it is in the default \
-             set, so this is a `--no-default-features` build). To get findings without executing \
-             an analyzer here, run it elsewhere and use `roteiro security ingest` — this build \
-             can still `prefetch` and `status` the assets."
+        } => run_security_run(
+            &analyzer,
+            select_backend(sandboxed, allow_unsandboxed),
+            json,
         ),
         #[cfg(feature = "execution")]
         SecurityAction::Prefetch {
@@ -7791,7 +7781,7 @@ fn print_cross_reference(cross_reference: &[SecurityCrossReference]) {
 }
 
 /// The `--json` shape of `roteiro security run`.
-#[cfg(feature = "exec-subprocess")]
+#[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
 struct SecurityRunReport {
     layer: String,
@@ -7799,6 +7789,12 @@ struct SecurityRunReport {
     analyzer_version: String,
     runner: rto_graph::RunnerKind,
     isolation: rto_graph::Isolation,
+    /// The pinned image the analyzer ran inside, absent for a host run. Carried
+    /// beside `runner` and `isolation` because those three together are the
+    /// answer to "where did this finding come from", and a consumer that had
+    /// only the first two could not tell one sandboxed run from another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_digest: Option<String>,
     /// The exact argv that was executed, so a run is reproducible by hand.
     command: Vec<String>,
     findings: usize,
@@ -7814,17 +7810,181 @@ struct SecurityRunReport {
     advisory_db: Option<rto_graph::AdvisoryDb>,
 }
 
-/// Run an analyzer as a child process on this host and file its findings.
+/// Which backend `roteiro security run` was asked for.
 ///
-/// Everything that makes this defensible happens before a process starts: the
-/// `--allow-unsandboxed` flag, the analyzer being one this build knows, and its
-/// pinned assets being provisioned. A cold cache therefore fails having executed
-/// nothing at all.
-#[cfg(feature = "exec-subprocess")]
-fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyhow::Result<()> {
-    use rto_exec::{AnalysisRequest, AnalyzerRunner, Consent, SubprocessRunner, Worktree};
+/// Named rather than a `bool` because the two are not opposites of one
+/// permission: they are different machines to run on, with different evidence,
+/// and the choice is made once — here — instead of being re-derived from flags
+/// at each place that cares.
+#[cfg(feature = "execution")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunBackend {
+    /// A pinned OCI image in a microVM.
+    Sandboxed,
+    /// A child process on this host, with no boundary.
+    Subprocess,
+}
 
-    let runner = SubprocessRunner::new(analyzer, &rto_exec::asset_root(), allow_unsandboxed)?;
+/// Resolve the two flags into the backend that will run.
+///
+/// **The sandbox is what you get for saying nothing.** `--allow-unsandboxed` is
+/// the only thing that selects the host, and it selects it outright: there is no
+/// input to this function that means "try the sandbox and settle for the host",
+/// because that is the silent downgrade ADR-0019 §6 exists to prevent. If the
+/// sandbox cannot run, the caller refuses and says why; it does not quietly
+/// produce findings stamped with an isolation boundary that was not there.
+///
+/// Split out as a pure function so the rule is testable in a build with no
+/// backend compiled in at all — the build where getting it wrong is least
+/// likely to be noticed.
+#[cfg(feature = "execution")]
+fn select_backend(sandboxed: bool, allow_unsandboxed: bool) -> RunBackend {
+    // clap's `conflicts_with` rejects both together before we are called; this
+    // says so where the assumption is relied upon, rather than leaving the
+    // precedence of an impossible combination to be inferred from the `if`.
+    debug_assert!(
+        !(sandboxed && allow_unsandboxed),
+        "`--sandboxed` and `--allow-unsandboxed` are mutually exclusive at the parser"
+    );
+    if allow_unsandboxed {
+        RunBackend::Subprocess
+    } else {
+        RunBackend::Sandboxed
+    }
+}
+
+/// Run an analyzer against this worktree and file its findings.
+///
+/// Dispatches to the backend [`select_backend`] chose. Each arm either runs on
+/// the backend that was asked for or fails naming what is missing; **no arm
+/// substitutes the other backend**, so the `runner` and `isolation` recorded on
+/// the stored layer are always the ones the user asked for.
+#[cfg(feature = "execution")]
+fn run_security_run(analyzer: &str, backend: RunBackend, json: bool) -> anyhow::Result<()> {
+    match backend {
+        RunBackend::Sandboxed => run_security_run_sandboxed(analyzer, json),
+        RunBackend::Subprocess => run_security_run_on_this_host(analyzer, json),
+    }
+}
+
+/// Execute the analyzer inside a digest-pinned OCI image in a microVM.
+///
+/// Everything refusable is refused before a guest boots: the hypervisor probe
+/// and the pinned asset cache inside [`rto_exec::BoxliteRunner::new`], then the
+/// image pull below. Each of those already carries the command that fixes it, so
+/// this adds no wording of its own — a second, paraphrased copy of a message
+/// that lives in `rto-exec` is a copy that goes stale.
+#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
+fn run_security_run_sandboxed(analyzer: &str, json: bool) -> anyhow::Result<()> {
+    use rto_exec::BoxliteRunner;
+
+    let root = rto_exec::asset_root();
+    let runner = BoxliteRunner::new(analyzer, &root)?;
+    let image = runner.image();
+
+    // Preflight the local image store. The backend checks this too, but only
+    // after it has opened a runtime and started building a box — so without
+    // this, the commonest first-run failure on a provisioned host arrives after
+    // a visible pause, looking like something broke rather than something was
+    // never fetched. `roteiro` never pulls during a run, so the answer cannot be
+    // to fetch it here.
+    if !rto_exec::boxlite::image_is_provisioned(analyzer, &root)? {
+        return Err(rto_exec::boxlite::SandboxError::ImageNotProvisioned {
+            analyzer: analyzer.to_owned(),
+            reference: image.reference,
+        }
+        .into());
+    }
+
+    let invocation = runner.invocation();
+    execute_and_file(&runner, analyzer, invocation, Some(image.reference), json)
+}
+
+/// The same command in a build without `exec-boxlite`, which is every stock
+/// build: a refusal that names the feature, the bootstrap, and the alternative.
+///
+/// Deliberately a runtime error rather than a `cfg` on the clap variant. Gating
+/// the variant is how `roteiro model rm` shipped invisible to every crates.io
+/// user — `unrecognized subcommand` for a command the documentation describes.
+/// The flag parses everywhere; only the capability is conditional, and it says
+/// so in a sentence.
+///
+/// It does **not** offer to run the analyzer on the host instead. Naming
+/// `--allow-unsandboxed` as *an* option is honest — it is a different, weaker
+/// thing the user may choose — but it is stated as a downgrade with its
+/// consequence attached, not as a fallback this command would take on its own.
+#[cfg(all(feature = "execution", not(feature = "exec-boxlite")))]
+fn run_security_run_sandboxed(analyzer: &str, _json: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "sandbox-unavailable: `roteiro security run {analyzer}` runs sandboxed by default, and \
+         this build has no sandbox backend — `exec-boxlite` was not compiled in. It is not in the \
+         default feature set, so a released binary and a plain `cargo build` both land here.\n  \
+         To get one, in this order:\n    \
+         1. roteiro security prefetch --analyzer sandbox --allow-download\n    \
+         2. export BOXLITE_RUNTIME_URL=\"file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz\"\n    \
+         3. cargo install roteiro --features exec-boxlite     (or `cargo build --features exec-boxlite`)\n    \
+         4. roteiro security prefetch --analyzer {analyzer} --allow-download   (pulls the pinned image; needs the binary from step 3)\n  \
+         Step 4 needs a binary that already has the feature, which is why it comes last.\n  \
+         Without rebuilding, the alternatives are to run the analyzer elsewhere and \
+         `roteiro security ingest` its report, or to accept an unisolated run with \
+         `--allow-unsandboxed` — that executes a third-party binary on this host with nothing \
+         between it and your machine, and its findings are recorded isolation=none. Roteiro will \
+         not make that substitution for you."
+    );
+}
+
+/// Execute the analyzer as a child process on this host, with no isolation.
+///
+/// Reached only via `--allow-unsandboxed`. The flag is the consent, and it is a
+/// separate, explicit act from asking for the run, because what is being
+/// consented to — executing a third-party binary here with no boundary — is not
+/// what "analyze my code" implies. That has not changed now that a sandbox
+/// exists; if anything the flag says more, since there is now something better
+/// to have chosen instead.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn run_security_run_on_this_host(analyzer: &str, json: bool) -> anyhow::Result<()> {
+    use rto_exec::SubprocessRunner;
+
+    // `true` is the consent the caller already collected: this function is
+    // reachable only from `RunBackend::Subprocess`, which only `--allow-unsandboxed`
+    // selects.
+    let runner = SubprocessRunner::new(analyzer, &rto_exec::asset_root(), true)?;
+    let invocation = runner.invocation();
+    execute_and_file(&runner, analyzer, invocation, None, json)
+}
+
+/// The same, in a `--no-default-features` build that dropped `exec-subprocess`.
+#[cfg(all(feature = "execution", not(feature = "exec-subprocess")))]
+fn run_security_run_on_this_host(analyzer: &str, _json: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`roteiro security run {analyzer} --allow-unsandboxed` needs the `exec-subprocess` \
+         feature, which this build does not have; rebuild with `--features exec-subprocess` (it \
+         is in the default set, so this is a `--no-default-features` build). To get findings \
+         without executing an analyzer here, run it elsewhere and use `roteiro security ingest` \
+         — this build can still `prefetch` and `status` the assets."
+    );
+}
+
+/// Run the request on `runner`, replace the analyzer's layer, and report.
+///
+/// The half of `security run` that is the same whichever backend produced the
+/// result — and it is shared rather than duplicated for a reason beyond tidiness:
+/// **every user-visible claim about isolation below is read back out of
+/// `response.run`**, the record that was just written to the store. Nothing here
+/// is told which backend ran, so nothing here can say something the stored
+/// evidence does not.
+///
+/// `image_reference` is the exception, and only for the line printed *before* the
+/// run, where there is no record yet to read.
+#[cfg(feature = "execution")]
+fn execute_and_file(
+    runner: &dyn rto_exec::AnalyzerRunner,
+    analyzer: &str,
+    invocation: rto_exec::Invocation,
+    image_reference: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use rto_exec::{AnalysisRequest, Consent, Worktree};
 
     let (repo, mut store, _cache) = open_graph()?;
     let worktree_path = repo
@@ -7835,10 +7995,6 @@ fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyh
         analyzer: analyzer.to_owned(),
         worktree: Worktree::read_only(&worktree_path)?,
         network: rto_graph::NetworkPolicy::Deny,
-        // The flag is the consent. It is a separate, explicit act from asking
-        // for the run, because what is being consented to — executing a
-        // third-party binary on this host with no boundary — is not what
-        // "analyze my code" implies.
         consent: Consent::Granted,
         source: rto_graph::SourceIdentity {
             commit: repo.head_commit_id().ok(),
@@ -7847,16 +8003,21 @@ fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyh
         },
     };
 
-    let invocation = runner.invocation();
     if !json {
         // Disclose what is about to run before it runs. A command that executes
         // a third-party binary should never leave the user guessing which one,
-        // with which arguments.
-        eprintln!(
-            "running (isolation none, on this host): {} {}",
-            invocation.program,
-            invocation.args.join(" ")
-        );
+        // with which arguments, or where.
+        let argv = format!("{} {}", invocation.program, invocation.args.join(" "));
+        match image_reference {
+            Some(reference) => eprintln!(
+                "running (isolation {}, in {reference}): {argv}",
+                runner.isolation().as_str()
+            ),
+            None => eprintln!(
+                "running (isolation {}, on this host): {argv}",
+                runner.isolation().as_str()
+            ),
+        }
     }
 
     let response = runner.run(&request)?;
@@ -7872,6 +8033,7 @@ fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyh
             analyzer_version: response.run.analyzer_version,
             runner: response.run.runner,
             isolation: response.run.isolation,
+            image_digest: response.run.image_digest,
             command,
             findings: applied.findings,
             removed: applied.removed,
@@ -7895,10 +8057,7 @@ fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyh
         response.run.runner.as_str(),
         response.run.isolation.as_str(),
     );
-    println!(
-        "  isolation none — the analyzer ran on this host. Its egress was configured off and its \
-         inputs were pinned, but nothing enforced that."
-    );
+    println!("  {}", isolation_note(&response.run));
     if let Some(digest) = &response.run.rules_digest {
         println!("  rules {digest}");
     }
@@ -7912,6 +8071,35 @@ fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyh
         );
     }
     Ok(())
+}
+
+/// One line describing the boundary a completed run actually had.
+///
+/// Derived from the [`rto_graph::AnalysisRun`] that was stored, never from which
+/// function called it, so the sentence a user reads and the row a later
+/// `security list` reads cannot disagree. A backend that reported the wrong
+/// isolation would be caught by its own output rather than described in the
+/// terms it was asked for.
+#[cfg(feature = "execution")]
+fn isolation_note(run: &rto_graph::AnalysisRun) -> String {
+    match run.isolation {
+        rto_graph::Isolation::None => "isolation none — the analyzer ran on this host. Its egress \
+                                       was configured off and its inputs were pinned, but nothing \
+                                       enforced that."
+            .to_owned(),
+        rto_graph::Isolation::MicroVm => format!(
+            "isolation microvm — the analyzer ran inside a microVM, in image {}, with the \
+             worktree mounted read-only and no network device.",
+            run.image_digest.as_deref().unwrap_or("(undeclared)")
+        ),
+        // Not reachable from this command: `security run` executes something, so
+        // it never files an ingested layer. Stated rather than `unreachable!`,
+        // because a wrong sentence is a better failure here than a panic after a
+        // scan has already been stored.
+        rto_graph::Isolation::Ingested => {
+            "isolation ingested — this layer records no local execution.".to_owned()
+        }
+    }
 }
 
 /// One line describing an advisory database's identity, publication date and
@@ -11789,13 +11977,13 @@ mod security_cli {
     }
 
     /// The flag that accepts an unsandboxed run is required, and it is a flag
-    /// rather than a default — a build with this backend must not be able to
+    /// rather than a default — a build with that backend must not be able to
     /// execute a third-party binary because somebody forgot to say no.
-    #[cfg(feature = "exec-subprocess")]
     #[test]
     fn run_requires_the_unsandboxed_flag_to_be_given_explicitly() {
         let SecurityAction::Run {
             analyzer,
+            sandboxed,
             allow_unsandboxed,
             json,
         } = action(["roteiro", "security", "run", "semgrep"])
@@ -11805,8 +11993,9 @@ mod security_cli {
         assert_eq!(analyzer, "semgrep");
         assert!(
             !allow_unsandboxed,
-            "the flag must default to off; the runner refuses without it"
+            "the flag must default to off; the host backend refuses without it"
         );
+        assert!(!sandboxed, "and neither flag is set by default");
         assert!(!json);
 
         let SecurityAction::Run {
@@ -11824,10 +12013,164 @@ mod security_cli {
         assert!(allow_unsandboxed);
     }
 
-    #[cfg(feature = "exec-subprocess")]
+    /// Saying nothing asks for the sandbox; only `--allow-unsandboxed` asks for
+    /// the host, and it asks for it outright.
+    ///
+    /// This is the whole behavioural change of this command, and it is asserted
+    /// on the pure selector so it holds in a build with **no backend compiled
+    /// in** — the build where a regression that quietly re-defaulted to the host
+    /// would be least likely to be noticed, because nothing there can run to
+    /// contradict it.
+    ///
+    /// The missing case is the point: there is deliberately no input that maps
+    /// to "sandbox, or the host if that fails". If one is ever added, this test
+    /// still passes and the constraint is gone — so the refusal tests below
+    /// exist to catch it from the other side.
+    #[test]
+    fn the_sandbox_is_what_no_flag_means() {
+        assert_eq!(
+            super::select_backend(false, false),
+            super::RunBackend::Sandboxed,
+            "a bare `security run` must ask for the sandbox, not the host"
+        );
+        assert_eq!(
+            super::select_backend(true, false),
+            super::RunBackend::Sandboxed,
+            "`--sandboxed` must mean the same as saying nothing"
+        );
+        assert_eq!(
+            super::select_backend(false, true),
+            super::RunBackend::Subprocess,
+            "`--allow-unsandboxed` selects the host outright"
+        );
+    }
+
+    /// The two flags cannot be given together, so no invocation is ambiguous
+    /// about which machine it runs on.
+    #[test]
+    fn sandboxed_and_allow_unsandboxed_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "roteiro",
+                "security",
+                "run",
+                "semgrep",
+                "--sandboxed",
+                "--allow-unsandboxed",
+            ])
+            .is_err(),
+            "asking for both an isolation boundary and no isolation boundary must be refused \
+             at the parser rather than resolved by precedence"
+        );
+        // Each alone still parses, so the conflict was declared between them
+        // and did not disable one of them.
+        for flag in ["--sandboxed", "--allow-unsandboxed"] {
+            assert!(
+                Cli::try_parse_from(["roteiro", "security", "run", "semgrep", flag]).is_ok(),
+                "`{flag}` alone must parse"
+            );
+        }
+    }
+
+    /// `run` and both of its flags parse in **every** build, whatever backends
+    /// are compiled in.
+    ///
+    /// Not a redundant parse check: the alternative — `cfg`-ing the clap variant
+    /// or the flag on the backend feature — is what shipped `roteiro model rm`
+    /// invisible to every crates.io user, answering a documented command with
+    /// `unrecognized subcommand`. This asserts the surface is constant and only
+    /// the capability is conditional; the refusal tests below assert the
+    /// capability then says so in a sentence.
+    #[test]
+    fn the_run_surface_is_the_same_in_every_build() {
+        for argv in [
+            &["roteiro", "security", "run", "semgrep"][..],
+            &["roteiro", "security", "run", "semgrep", "--sandboxed"][..],
+            &[
+                "roteiro",
+                "security",
+                "run",
+                "semgrep",
+                "--allow-unsandboxed",
+            ][..],
+            &["roteiro", "security", "run", "semgrep", "--json"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_ok(),
+                "`{}` must parse in every build",
+                argv.join(" ")
+            );
+        }
+    }
+
     #[test]
     fn run_needs_an_analyzer_named() {
         assert!(Cli::try_parse_from(["roteiro", "security", "run"]).is_err());
+    }
+
+    /// A build with no sandbox refuses the default path by name, and names the
+    /// whole bootstrap rather than only the feature.
+    ///
+    /// The provisioning order matters and is not guessable: the image pull is
+    /// itself behind `exec-boxlite`, so it can only be done by a binary that
+    /// already has the feature — which is why the rebuild sits between the two
+    /// `prefetch` runs. A message that named the feature alone would send a user
+    /// to a build that then fails on a missing image.
+    #[cfg(not(feature = "exec-boxlite"))]
+    #[test]
+    fn a_build_with_no_sandbox_refuses_and_names_the_bootstrap() {
+        let message = crate::run_security(SecurityAction::Run {
+            analyzer: "semgrep".to_owned(),
+            sandboxed: false,
+            allow_unsandboxed: false,
+            json: false,
+        })
+        .expect_err("a build with no sandbox must refuse the sandboxed path")
+        .to_string();
+
+        assert!(message.contains("exec-boxlite"), "{message}");
+        assert!(message.contains("prefetch --analyzer sandbox"), "{message}");
+        assert!(message.contains("BOXLITE_RUNTIME_URL"), "{message}");
+        assert!(
+            message.contains("prefetch --analyzer semgrep"),
+            "the image pull is a separate step and must be named: {message}"
+        );
+        assert!(message.contains("security ingest"), "{message}");
+        assert!(
+            message.contains("sandbox-unavailable"),
+            "the refusal must be greppable, like `assets-unavailable-offline`: {message}"
+        );
+
+        // And it must not have run anything instead. `--allow-unsandboxed` is
+        // named as a weaker thing the user may choose, with its consequence
+        // attached — never as something this command would substitute.
+        assert!(
+            message.contains("isolation=none"),
+            "naming the host path without naming what it costs is how a downgrade \
+             gets taken by accident: {message}"
+        );
+        assert!(
+            message.contains("will not make that substitution"),
+            "{message}"
+        );
+    }
+
+    /// `--sandboxed` is refused by the same build for the same reason: the flag
+    /// is not a different code path, it is the default said out loud.
+    #[cfg(not(feature = "exec-boxlite"))]
+    #[test]
+    fn asking_for_the_sandbox_explicitly_refuses_identically() {
+        let refuse = |sandboxed| {
+            crate::run_security(SecurityAction::Run {
+                analyzer: "semgrep".to_owned(),
+                sandboxed,
+                allow_unsandboxed: false,
+                json: false,
+            })
+            .expect_err("no sandbox in this build")
+            .to_string()
+        };
+        assert_eq!(refuse(true), refuse(false));
     }
 
     /// Provisioning is reachable from **any** `execution` build, including one
@@ -11859,26 +12202,80 @@ mod security_cli {
         assert!(!rto_exec::ASSETS.is_empty());
     }
 
-    /// `run` is the one thing an `execution`-only build must *not* be able to do
-    /// — and it must say so by name rather than as `unrecognized subcommand`.
+    /// Executing on the host is the one thing a build without `exec-subprocess`
+    /// must not be able to do — and it must say so by name rather than as
+    /// `unrecognized subcommand`.
+    ///
+    /// Reached via `--allow-unsandboxed`, because that is now the only thing
+    /// that asks for the host: without the flag this build is refused by the
+    /// sandbox arm instead, for an entirely different missing feature.
     #[cfg(not(feature = "exec-subprocess"))]
     #[test]
-    fn run_is_absent_but_names_the_feature() {
+    fn the_host_path_is_absent_but_names_the_feature() {
         let SecurityAction::Run { analyzer, .. } =
             action(["roteiro", "security", "run", "cargo-audit"])
         else {
-            panic!("expected the explanatory Run stub to parse");
+            panic!("expected Run to parse in a build with no host backend");
         };
         assert_eq!(analyzer, "cargo-audit");
         let message = crate::run_security(SecurityAction::Run {
             analyzer: "cargo-audit".to_owned(),
+            sandboxed: false,
             allow_unsandboxed: true,
             json: false,
         })
-        .expect_err("an execution-only build must refuse to run an analyzer")
+        .expect_err("a build without exec-subprocess must refuse the host path")
         .to_string();
         assert!(message.contains("exec-subprocess"), "{message}");
         assert!(message.contains("security ingest"), "{message}");
+    }
+
+    /// The sentence a user reads about isolation is read back out of the stored
+    /// run, so it cannot describe a boundary the evidence does not record.
+    ///
+    /// Asserted on the record rather than through a run because that is the
+    /// property worth protecting: the note is a function of `AnalysisRun`, with
+    /// no argument saying which backend called it, so there is no input by which
+    /// a host run can be described as isolated.
+    #[test]
+    fn the_isolation_note_is_read_out_of_the_stored_run() {
+        let base = rto_graph::AnalysisRun {
+            layer: "security:semgrep:w".to_owned(),
+            analyzer: "semgrep".to_owned(),
+            analyzer_version: "1.173.0".to_owned(),
+            runner: rto_graph::RunnerKind::Subprocess,
+            isolation: rto_graph::Isolation::None,
+            image_digest: None,
+            rules_digest: None,
+            advisory_db: None,
+            command_policy: rto_graph::CommandPolicy::default(),
+            source: rto_graph::SourceIdentity::default(),
+            started_at: "2026-08-18T00:00:00Z".to_owned(),
+            ended_at: "2026-08-18T00:00:01Z".to_owned(),
+            exit_status: 0,
+            report_digest: "sha256:0".to_owned(),
+        };
+
+        let host = super::isolation_note(&base);
+        assert!(host.contains("isolation none"), "{host}");
+        assert!(
+            host.contains("nothing enforced that"),
+            "a host run must keep saying what it did not have: {host}"
+        );
+
+        let sandboxed = super::isolation_note(&rto_graph::AnalysisRun {
+            runner: rto_graph::RunnerKind::Sandboxed,
+            isolation: rto_graph::Isolation::MicroVm,
+            image_digest: Some("sha256:abc".to_owned()),
+            ..base
+        });
+        assert!(sandboxed.contains("isolation microvm"), "{sandboxed}");
+        assert!(
+            sandboxed.contains("sha256:abc"),
+            "a sandboxed run must name the image it ran in — the digest is what makes \
+             `isolation=microvm` checkable rather than merely claimed: {sandboxed}"
+        );
+        assert_ne!(host, sandboxed);
     }
 
     /// `--analyzer sandbox` provisions the runtime archive and nothing else.

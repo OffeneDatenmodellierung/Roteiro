@@ -29,8 +29,10 @@ Feature flags gate the heavier capabilities (`inference`,
 and makes no network call on its own. It carries `models` and `exec-subprocess`,
 so the whole of "prepare once, then work offline" — `roteiro model pull` and
 `roteiro security prefetch|status|run` — exists without a rebuild. Presence is
-not activity: `pull` fetches nothing until you consent, and `security run`
-refuses without `--allow-unsandboxed` every time. See
+not activity: `pull` fetches nothing until you consent, and `security run` is
+sandboxed by default — running the analyzer on this host instead refuses without
+`--allow-unsandboxed` every time, and a build with no sandbox says so by name
+rather than silently using the host. See
 `cargo install roteiro --all-features` for everything, and
 `--no-default-features --features execution` for a build that provisions and
 ingests but cannot execute an analyzer.
