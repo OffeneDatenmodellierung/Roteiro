@@ -260,7 +260,7 @@ const OWN_EDITED: &str = "// TODO: wire this up\npub fn own() {}\npub fn own_two
 const VENDORED_EDITED: &str = "// FIXME: upstream bug\npub fn dep() {}\npub fn dep_two() {}\n"; // roteiro:ignore
 
 #[test]
-fn review_applies_the_repositorys_debt_ignore() {
+fn review_applies_the_configured_debt_ignore() {
     // Issue #409: `review`'s per-file `debt` is `roteiro debt`'s inventory scoped
     // to the change, so it is governed by the same `[debt] ignore` (ADR-0007).
     // Before the fix `review::build` kept every `Marker` node in a changed file,
