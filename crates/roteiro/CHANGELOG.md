@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.25.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.25.0...roteiro-v1.25.1) - 2026-08-19
+
+### Fixed
+
+- *(build)* compile `--no-default-features --features execution` clean
+
+### Other
+
+- *(lint)* gate `lint_cli.rs` on the backend it drives
+
 ## [1.25.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.24.0...roteiro-v1.25.0) - 2026-08-19
 
 ### Added
