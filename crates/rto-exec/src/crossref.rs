@@ -131,6 +131,18 @@ impl Correspondence {
 ///
 /// The findings themselves are neither modified nor consumed: this borrows them
 /// and describes what it saw.
+///
+/// # This does **not** suppress single-source rows
+///
+/// Nothing here counts analyzers. One dependency analyzer with N advisories yields
+/// N correspondences, each reading `confirmed_by: 1` — which is a true description
+/// of what it saw and the wrong thing to *report*, because a table in which every
+/// row says "confirmed by 1" is noise dressed as information. The suppression is
+/// [`across_analyzers`], and a caller that renders a cross-reference section wants
+/// that one. Said here rather than only there because taking this function for the
+/// reporting view is a mistake that has actually been made (PR #468 review):
+/// `security list --json` had the guard inline and the model-facing surface, added
+/// later, documented it and did not have it.
 #[must_use]
 pub fn cross_reference(layers: &[FindingsLayer]) -> Vec<Correspondence> {
     let candidates: Vec<Candidate<'_>> = layers
@@ -163,6 +175,42 @@ pub fn cross_reference(layers: &[FindingsLayer]) -> Vec<Correspondence> {
         (&a.package, &a.version, &a.advisory).cmp(&(&b.package, &b.version, &b.advisory))
     });
     out
+}
+
+/// The **reporting** view of [`cross_reference`]: the same correspondences, or
+/// empty when fewer than two analyzers contributed any of them.
+///
+/// ADR-0018 v1.1 keeps agreement between independent sources as evidence, and
+/// below two sources there is no agreement to have either way — so the section is
+/// suppressed rather than rendered with every row reading `confirmed_by: 1`.
+///
+/// # The count is of analyzers *in the correspondences*, not of layers
+///
+/// Deliberately, and the difference is load-bearing. A repository with a `semgrep`
+/// layer and a `cargo-audit` layer has two live layers and **one** analyzer on the
+/// dependency axis: `semgrep` produces no `meta.package`, so it takes no part in
+/// the join (see [`cross_reference`]) and cannot corroborate a dependency advisory.
+/// Counting layers would show a table of single-source rows and call it
+/// cross-referenced.
+///
+/// # It hides a view, never a finding
+///
+/// Every finding stays in its own layer under its own key and every total still
+/// counts it. This decides whether a *section* is rendered, and nothing else — the
+/// same guarantee [`cross_reference`] makes one level down.
+#[must_use]
+pub fn across_analyzers(layers: &[FindingsLayer]) -> Vec<Correspondence> {
+    let correspondences = cross_reference(layers);
+    let mut analyzers: Vec<&str> = correspondences
+        .iter()
+        .flat_map(Correspondence::analyzers)
+        .collect();
+    analyzers.sort_unstable();
+    analyzers.dedup();
+    if analyzers.len() < 2 {
+        return Vec::new();
+    }
+    correspondences
 }
 
 /// Partition one package's findings into groups whose identifier sets overlap,
@@ -313,7 +361,7 @@ impl<'a> Candidate<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Correspondence, cross_reference};
+    use super::{Correspondence, across_analyzers, cross_reference};
     use rto_graph::{
         AnalysisRun, CommandPolicy, EnvironmentPolicy, Finding, FindingKey, FindingsLayer,
         Isolation, NetworkPolicy, RunnerKind, Severity, SourceIdentity, WorktreeAccess,
@@ -721,5 +769,116 @@ mod tests {
         )];
         let crossref: Vec<Correspondence> = cross_reference(&layers);
         assert_eq!(crossref[0].advisory, "OSV-1");
+    }
+    /// The suppression, at the level it lives, and stated as the difference between
+    /// the two functions rather than as a property of either alone.
+    ///
+    /// This is the pairing that matters: the same input, one row out of the raw join
+    /// and nothing out of the reporting view. A future reader deciding whether the
+    /// guard is load-bearing can read it off this test instead of guessing — which
+    /// is what went wrong in PR #468, where a caller took the raw join for the
+    /// reporting view and documented the guard it did not have.
+    #[test]
+    fn one_analyzer_joins_but_is_not_reported() {
+        let layers = vec![layer(
+            "cargo-audit",
+            vec![finding(
+                "cargo-audit",
+                "RUSTSEC-2020-0071",
+                serde_json::json!({ "package": "time", "version": "0.1.44" }),
+            )],
+        )];
+
+        let raw = cross_reference(&layers);
+        assert_eq!(raw.len(), 1, "the join describes what it saw");
+        assert_eq!(raw[0].confirmed_by(), 1);
+
+        assert!(
+            across_analyzers(&layers).is_empty(),
+            "one source carries no signal about agreement either way, so the \
+             section is not rendered"
+        );
+    }
+
+    /// A second *layer* is not a second dependency analyzer.
+    ///
+    /// `semgrep` produces no `meta.package`, so it takes no part in the join and
+    /// cannot corroborate a dependency advisory. Counting layers rather than the
+    /// analyzers actually in the correspondences would render a table of
+    /// single-source rows and call it cross-referenced.
+    #[test]
+    fn a_sast_layer_does_not_make_a_second_dependency_analyzer() {
+        let layers = vec![
+            layer(
+                "cargo-audit",
+                vec![finding(
+                    "cargo-audit",
+                    "RUSTSEC-2020-0071",
+                    serde_json::json!({ "package": "time", "version": "0.1.44" }),
+                )],
+            ),
+            layer(
+                "semgrep",
+                vec![finding(
+                    "semgrep",
+                    "rules.taint",
+                    // No package/version: not on the dependency axis at all.
+                    serde_json::json!({ "cwe": "CWE-89" }),
+                )],
+            ),
+        ];
+        assert_eq!(layers.len(), 2, "two live layers");
+        assert!(
+            across_analyzers(&layers).is_empty(),
+            "still one analyzer on the dependency axis"
+        );
+    }
+
+    /// Two dependency analyzers agreeing is what the section exists for, and the
+    /// guard must pass it through untouched — including any single-source rows
+    /// alongside it, which are real advisories about a repository that does have two.
+    #[test]
+    fn two_dependency_analyzers_are_reported_including_single_source_rows() {
+        let layers = vec![
+            layer(
+                "cargo-audit",
+                vec![
+                    finding(
+                        "cargo-audit",
+                        "RUSTSEC-2020-0071",
+                        serde_json::json!({ "package": "time", "version": "0.1.44" }),
+                    ),
+                    finding(
+                        "cargo-audit",
+                        "RUSTSEC-2099-0001",
+                        serde_json::json!({ "package": "yanked-only", "version": "1.0.0" }),
+                    ),
+                ],
+            ),
+            layer(
+                "osv-scanner",
+                vec![finding(
+                    "osv-scanner",
+                    "GHSA-wcg3-cvx6-7396",
+                    serde_json::json!({
+                        "package": "time",
+                        "version": "0.1.44",
+                        "aliases": ["RUSTSEC-2020-0071"]
+                    }),
+                )],
+            ),
+        ];
+        let reported = across_analyzers(&layers);
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        let corroborated: Vec<&Correspondence> =
+            reported.iter().filter(|c| c.confirmed_by() == 2).collect();
+        assert_eq!(corroborated.len(), 1, "the agreed advisory: {reported:?}");
+        assert_eq!(corroborated[0].package, "time");
+        // The single-source row survives: `yanked` is a kind OSV cannot carry, so
+        // dropping it would hide a real finding behind a rule about agreement.
+        assert!(
+            reported.iter().any(|c| c.package == "yanked-only"),
+            "{reported:?}"
+        );
     }
 }

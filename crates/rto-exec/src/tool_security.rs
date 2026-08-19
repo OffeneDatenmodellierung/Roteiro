@@ -81,7 +81,7 @@ use serde::Serialize;
 use crate::adapter::ADAPTERS;
 use crate::assets::{AssetStatus, resolve, status};
 use crate::clock::age_in_days;
-use crate::crossref::{Correspondence, cross_reference};
+use crate::crossref::{Correspondence, across_analyzers};
 
 /// Schema tag for the tool-surface `security list` document.
 pub const TOOL_SECURITY_LIST_SCHEMA: &str = "roteiro.security.list/v1";
@@ -168,9 +168,21 @@ pub struct SecurityListReport {
     /// whole listing. Each layer says which one of them was cut, and by how much.
     pub truncated: bool,
     /// Dependency advisories seen across analyzers, most-corroborated first, and
-    /// bounded by the same page size. Empty unless more than one dependency
-    /// analyzer has a live layer, because a table in which every row reads
-    /// "confirmed by 1" is noise dressed as information.
+    /// bounded by the same page size.
+    ///
+    /// **Empty unless at least two analyzers appear on the dependency axis**, and
+    /// that emptiness is an **explicit guard**, not something the data does on its
+    /// own: [`crate::cross_reference`] happily returns one row per advisory for a
+    /// single analyzer, each reading `confirmed_by: 1`, which is noise dressed as
+    /// information. [`crate::cross_reference_across_analyzers`] is the suppression,
+    /// it is the only implementation of it, and
+    /// `a_single_dependency_analyzer_yields_no_cross_reference` is what keeps this
+    /// sentence true.
+    ///
+    /// Do not remove the guard believing the emptiness is emergent — this comment
+    /// once claimed it was, and it was wrong (PR #468 review). Do not add a second
+    /// one either: the CLI's `security list --json` reaches the same suppression
+    /// through the same function.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cross_reference: Vec<CrossReference>,
     /// How many advisories the cross-reference found in total, before the page
@@ -307,7 +319,11 @@ pub fn security_list(layers: Vec<FindingsLayer>, limit: usize) -> ToolSecurityLi
     // rather than every analyzer whose page happened to include it. A bound
     // applied first would turn agreement between two sources into a single-source
     // row — inventing a disagreement out of a page size.
-    let correspondences = cross_reference(&layers);
+    //
+    // `across_analyzers`, not `cross_reference`: the second does not suppress
+    // single-source rows, and this document says it does. The CLI reaches the same
+    // function, so there is one guard rather than one per surface.
+    let correspondences = across_analyzers(&layers);
     let cross_reference_total = correspondences.len();
     let mut cross_reference = corroborated_first(correspondences);
     cross_reference.truncate(limit);
@@ -350,6 +366,13 @@ const NO_RESULT_REASON: &str = "No analyzer has filed a findings layer here, so 
 /// between independent sources — that is the evidence ADR-0018 v1.1 exists to
 /// keep. Single-source rows are the ordinary state and are the right thing to
 /// lose first; `cross_reference_total` is what says how many were lost.
+///
+/// Single-source rows still reach here, and that is not in tension with the
+/// suppression above: [`crate::cross_reference_across_analyzers`] drops the *whole
+/// section* when no advisory has a second source, and passes everything through
+/// once one does — including the advisories only one analyzer happened to report,
+/// which are real findings about a repository that does have two dependency
+/// analyzers. This orders those last.
 fn corroborated_first(correspondences: Vec<Correspondence>) -> Vec<CrossReference> {
     let mut views: Vec<CrossReference> = correspondences.into_iter().map(Into::into).collect();
     // Stable, so `cross_reference`'s own ordering survives inside each group.
@@ -790,6 +813,15 @@ mod tests {
         }
     }
 
+    /// A finding on the **dependency axis**: `meta.package` and `meta.version` are
+    /// what `Candidate::of` requires before a finding can be cross-referenced at all.
+    fn dependency_finding(analyzer: &str, rule: &str, package: &str) -> Finding {
+        Finding {
+            meta: serde_json::json!({ "package": package, "version": "1.0.0" }),
+            ..finding(analyzer, rule, Severity::High)
+        }
+    }
+
     fn finding(analyzer: &str, rule: &str, severity: Severity) -> Finding {
         Finding {
             key: FindingKey::new(analyzer, &[rule, crate::NO_SNIPPET]).expect("key"),
@@ -916,6 +948,69 @@ mod tests {
         assert!(!report.truncated);
         assert!(!report.layers[0].truncated);
         assert_eq!(report.layers[0].omitted, 0);
+    }
+
+    /// One dependency analyzer has nothing to be corroborated *by*, so the
+    /// cross-reference is empty — which is what `SecurityListReport::cross_reference`
+    /// says.
+    ///
+    /// Written to check the claim rather than to restate it: `crossref::cross_reference`
+    /// keys one `Correspondence` per advisory-and-package for every finding on the
+    /// dependency axis, and nothing in it counts analyzers. So whether the documented
+    /// behaviour is real depends on a suppression that has to exist somewhere, and
+    /// this is what says where.
+    #[test]
+    fn a_single_dependency_analyzer_yields_no_cross_reference() {
+        let layers = vec![FindingsLayer {
+            run: run("cargo-audit", None),
+            findings: vec![
+                dependency_finding("cargo-audit", "RUSTSEC-2024-0001", "openssl"),
+                dependency_finding("cargo-audit", "RUSTSEC-2024-0002", "time"),
+            ],
+        }];
+        let report = security_list(layers, 20).report.expect("analyzed");
+        assert!(
+            report.cross_reference.is_empty(),
+            "a table in which every row reads `confirmed_by: 1` is noise dressed as \
+             information: {:?}",
+            report.cross_reference
+        );
+        assert_eq!(report.cross_reference_total, 0);
+        // And the findings are untouched by the suppression — it hides a view, never
+        // a finding.
+        assert_eq!(report.findings, 2);
+    }
+
+    /// Two dependency analyzers reporting the same advisory is the case the
+    /// cross-reference exists for, and the one it must never suppress.
+    #[test]
+    fn two_dependency_analyzers_are_cross_referenced_and_counted() {
+        let layers = vec![
+            FindingsLayer {
+                run: run("cargo-audit", None),
+                findings: vec![dependency_finding(
+                    "cargo-audit",
+                    "RUSTSEC-2024-0001",
+                    "openssl",
+                )],
+            },
+            FindingsLayer {
+                run: run("osv-scanner", None),
+                findings: vec![dependency_finding(
+                    "osv-scanner",
+                    "RUSTSEC-2024-0001",
+                    "openssl",
+                )],
+            },
+        ];
+        let report = security_list(layers, 20).report.expect("analyzed");
+        assert_eq!(report.cross_reference.len(), 1, "one advisory, two reports");
+        assert_eq!(report.cross_reference_total, 1);
+        assert_eq!(report.cross_reference[0].confirmed_by, 2);
+        assert_eq!(
+            report.findings, 2,
+            "the count is unchanged by the view (ADR-0018 v1.1)"
+        );
     }
 
     /// The two halves of a status document are separately labelled, and each

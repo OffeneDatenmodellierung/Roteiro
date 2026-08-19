@@ -217,7 +217,9 @@ pub use assets::{
 #[cfg(feature = "exec-boxlite")]
 pub use boxlite::{BoxliteRunner, SandboxError, SandboxProbe, sandbox_probe};
 pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
-pub use crossref::{Correspondence, Report, cross_reference};
+pub use crossref::{
+    Correspondence, Report, across_analyzers as cross_reference_across_analyzers, cross_reference,
+};
 pub use guidance::{Guidance, Line as GuidanceLine};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
