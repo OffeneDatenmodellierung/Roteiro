@@ -33,10 +33,64 @@ unevenly. Measured against the RustSec database:
 
 | Component | Advisories in RustSec | Verdict |
 |---|---|---|
-| llama.cpp | **none** — no advisory names any `llama*` crate | **The real gap.** Upstream has 13 published advisories, including a critical unauthenticated RCE in the RPC backend and repeated heap buffer overflows in GGUF tensor parsing. None of that reaches `cargo audit`. |
+| llama.cpp | **none** — no advisory names any `llama*` crate | **The real gap.** Upstream has 13 published advisories and **none of them reaches `cargo audit`.** Of those, **9 are reachable in the builds this project produces** — GGUF parsing, tokenizer and model loading — and **4 are not**, because the components they live in are never compiled. See *Which of the 13 this build can actually reach* below; the visibility gap is total either way. |
 | SQLite | `RUSTSEC-2022-0090` on `libsqlite3-sys`, mirroring CVE-2022-35737 | The proxy has worked at least once. There is no guarantee and no automatic link from an upstream CVE to a Rust advisory. |
 | tree-sitter | advisories exist against *some* grammar crates (`tree-sitter-pkl`, `tree-sitter-perl-next` — neither of which this project uses) | RustSec does file against grammar crates, so coverage is plausible but not systematic. |
 | `ring` | `RUSTSEC-2025-0007`, `-0009`, `-0010` | Well covered. `ring` is maintained as a Rust crate, so its advisories arrive through the normal channel; it is in this register for completeness, not because it is a blind spot. Note that since `models` became a default feature it reaches **every** shipped binary rather than only `serve` builds — which raises the stakes of that coverage without changing its quality. |
+
+### Which of the 13 this build can actually reach
+
+The visibility claim above is unconditional and permanent: `cargo audit` sees
+none of these, ever. **Reachability is a separate question**, and conflating the
+two makes the register read as 13 open exposures — which overstates today's risk
+and, worse, makes the whole list easier to discount. The nine that *are*
+reachable deserve better than that.
+
+Established from the build, not from the advisory text:
+
+```
+llama-cpp-sys-2 0.1.154   no `rpc` feature and no `server` feature exist
+build.rs:650              config.define("LLAMA_BUILD_EXAMPLES", "OFF")
+build.rs:651              config.define("LLAMA_BUILD_SERVER",  "OFF")
+```
+
+**Not reachable — 4, including both criticals.** The RPC backend and
+`llama-server` are not built, so nothing in this project can execute the code
+these describe:
+
+| Advisory | Severity | Component |
+|---|---|---|
+| `GHSA-j8rj-fmpv-wcxw` | **critical** | Unauthenticated RCE, RPC backend |
+| `GHSA-wcr5-566p-9cwj` | **critical** | Write-what-where, `rpc_server::set_tensor` |
+| `GHSA-5vm9-p64x-gqw9` | medium | Arbitrary address read, `rpc_server::get_tensor` |
+| `GHSA-8947-pfff-2f3c` | low | Out-of-bounds write, `llama-server` |
+
+**Reachable — 9.** GGUF parsing, tokenization and model loading, which is
+precisely the path a local model takes. The highest severity here is *high*:
+
+| Advisory | Severity | Component |
+|---|---|---|
+| `GHSA-p5mv-gjc5-mwqv` | high | Uninitialised variable, `gguf_init_from_file` |
+| `GHSA-49q7-2jmh-92fp` | medium | Null pointer dereference, `gguf_init_from_file` |
+| `GHSA-mqp6-7pv6-fqjf` | medium | Global buffer overflow, `ggml_type_size` |
+| `GHSA-8wwf-w4qm-gpqr` | high | Buffer overflow via malicious GGUF, vocabulary loading |
+| `GHSA-7rxv-5jhh-j6xx` | high | Tokenizer signed/unsigned heap overflow |
+| `GHSA-g4cc-763q-h9h6` | medium | Heap over-read, `llama_model_load` |
+| `GHSA-vgg9-87g3-85w8` | high | Integer overflow in the GGUF parser |
+| `GHSA-3p4r-fq3f-q74v` | high | Heap overflow via `mem_size` integer overflow |
+| `GHSA-96jg-mvhq-q7q7` | high | Heap overflow in GGUF tensor parsing |
+
+**All 13 predate the vendored commit.** The newest is `GHSA-j8rj-fmpv-wcxw`
+(2026-03-26); b10200 is 2026-07-30, four months later. So every one of them is
+fixed in the vendored build — which is the reason this register tracks *dates*
+rather than counts, and the reason the check below tests for advisories
+published **after** the vendored commit rather than for the existence of any.
+
+**Two things this reachability split does not license.** It is a property of
+*this* build: enable a feature that pulls in the server, or vendor a commit that
+predates one of these fixes, and the split changes. And it says nothing about
+advisories not yet published. It narrows what the register currently claims; it
+does not narrow the standing duty ADR-0014 imposes.
 
 llama.cpp is the one that matters. GGUF parsing takes an attacker-supplied file
 and is exactly the surface where the heap overflows keep appearing, and Roteiro
