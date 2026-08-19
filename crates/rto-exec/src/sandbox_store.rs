@@ -1972,7 +1972,17 @@ mod tests {
         let before = status(&fixture.root).expect("status");
         assert_eq!(before.attribution, Attribution::Partial);
         assert_eq!(before.unattributed.len(), 1);
-        assert_eq!(before.unattributed[0].bytes, 8192);
+        assert!(before.unattributed[0].path.ends_with("sha256-orphan"));
+        // At least the tree it holds, and deliberately not an exact figure: this
+        // entry is a **directory**, and a directory's own allocation is a property
+        // of the filesystem rather than of the store. APFS reports none for one;
+        // ext4 reports a 4 KiB block, so an `== 8192` here passed on the machine
+        // this was written on and failed on CI.
+        assert!(
+            before.unattributed[0].bytes >= 8192,
+            "the unattributed tree was measured as smaller than the file in it: {:?}",
+            before.unattributed[0]
+        );
 
         clear(&fixture.root, &Scope::Image("registry/a:1".to_owned())).expect("clear");
         assert!(
