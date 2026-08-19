@@ -15278,7 +15278,7 @@ mod workspace_scoped_tools {
     }
 
     #[test]
-    fn list_projects_returns_only_the_selected_workspaces_projects() {
+    fn list_projects_returns_only_the_projects_in_the_selected_workspace() {
         use rto_serve::ToolRegistry as _;
         let (set, flat) = two_workspace_set();
 
@@ -15543,7 +15543,7 @@ mod workspace_scoped_tools {
     /// repository would look identical. (Fault injection found exactly that gap:
     /// replacing the lookup with `Some(".")` left every other test green.)
     #[test]
-    fn check_runs_against_the_hosted_projects_own_repository() {
+    fn check_runs_against_the_repository_of_the_hosted_project_not_the_invoking_one() {
         use rto_serve::ToolRegistry as _;
 
         let base = std::env::temp_dir().join(format!("rto-chat-check-{}", std::process::id()));
