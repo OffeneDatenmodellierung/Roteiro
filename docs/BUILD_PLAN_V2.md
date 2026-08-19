@@ -1,11 +1,42 @@
 # Roteiro — Build Plan V2
 
-Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-15
+Status: **Delivered — superseded by tracked issues** · Owner: The Roteiro Project Team · Last-modified: 2026-08-19
 Governing decisions: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md),
 [ADR-0012](adr/0012-analyzer-findings-artifact-model.md),
 [ADR-0013](adr/0013-agent-memory-artifact-store.md),
 [ADR-0014](adr/0014-sandboxed-analyzer-execution.md),
 [ADR-0018](adr/0018-analyzer-coverage-matrix.md)
+
+> ## This plan is finished, and it is a record rather than a roadmap
+>
+> Every stage below is delivered. Work that was still outstanding when this was
+> closed became **tracked issues** instead, and new work should be an issue from
+> the start rather than a stage appended here.
+>
+> **Why it stops rather than continues.** In a single day this document drifted
+> from itself five times — stage headings marked delivered while the release
+> table still showed the stage pending, and a summary section describing stages
+> as blocked after they had shipped. Each time it was found by a person reading
+> it, never by a gate. Its own standing rule says why that matters:
+>
+> > *A plan that lags the tree is worse than no plan, because it is trusted.*
+>
+> The cause is structural rather than careless: the same facts live in three
+> places here — the stage headings, the milestones table, and the dependency
+> summary — and nothing holds them level. That is the shape this project has now
+> removed six times in code (`[debt] ignore` across three surfaces, `limit == 0`
+> across five endpoints and then a sixth, `[models]` reporting versus resolving,
+> the skill artifacts versus their template, the website versus the gate), and
+> every one of those fixes worked by removing the *possibility* of divergence
+> rather than the instances of it. An issue cannot drift the same way: it is open
+> or it is closed, and it lives beside the work instead of describing it from a
+> distance.
+>
+> **What is deliberately kept.** The measurements. Cost against estimate for the
+> lenses (the corrected 195–500 LOC figure was itself out by 3–8×), the negative
+> result on the review arm, the scale benchmark to 72,509 nodes, and the
+> constraint each stage settled for the next. Those cost real work to establish
+> and would have to be re-established if this were deleted.
 
 This plan succeeds [BUILD_PLAN.md](BUILD_PLAN.md), which took Roteiro from the
 v0.0.1 scaffold through Stage 20 to the released v1.9.0. V2 covers the next arc:
@@ -1849,7 +1880,7 @@ literal.
 
 ---
 
-### Stage 35 — `roteiro review` LLM mode → **v1.18.0** · effort **M–L** *(independent track)*
+### Stage 35 — `roteiro review` LLM mode → **v1.18.0** · effort **M–L** *(independent track)* ✅ *delivered — the instrument, and a negative result on the reviewer*
 
 **Depends on Stage 33** (a reviewer must resolve a model without a fourth
 bespoke rule). Independent of Stage 34 — it can run wholly local.
@@ -2265,8 +2296,33 @@ is worth one paragraph.)*
 
 ---
 
-### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ⏸️ *deferred by decision*
+### Stage 27 — v2.0 hardening & release → **v2.0.0** · effort **M** ✅ *hardening delivered; the release is held deliberately (#429)*
 
+> **The hardening audit ran; the release is held.** Those are separate, and
+> conflating them is how a stage looks unstarted when its work is done.
+>
+> **What the audit established, and it is the part worth keeping.** All eight
+> whole-graph surfaces are **linear**, measured to **72,509 nodes / 126,622
+> edges** — 25× the graph Stage 26 measured, on a real repository rather than a
+> synthetic one, worst absolute case `duplicates` at 0.89 s. Coverage went **up**
+> to 89.77% while files measured grew 64 → 94. `cargo deny --all-features` clean.
+> `VENDORED_DEPENDENCIES.md`'s version rows exact, with zero advisories published
+> since the vendored commit. That is a *"fine at both, recorded so nobody
+> re-measures it"* result and it cost a 25×-scale benchmark to get.
+>
+> **What it found became issues**, not paragraphs: #447 (`recall --limit 0`),
+> #448 (`Provenance` closed?), #449 (advisory reachability), #450 (coverage), and
+> the measured data on #431 — 66 exhaustive public enums across **nine**
+> published crates, which is the real v2.0 semver decision.
+>
+> **The release is deferred on the owner's call**, tracked at #429 with a
+> completion condition rather than open-endedly, and the `Release-plz` workflow
+> is disabled so it cannot cut by accident. The original deferral note follows,
+> recorded so a stage nobody got to and a stage somebody decided to leave stay
+> distinguishable.
+>
+> ---
+>
 > **Deferred deliberately, not merely unstarted.** The owner's call, recorded so
 > the two are distinguishable: a stage nobody has got to and a stage somebody
 > decided to leave look identical six months later, and the second should not be
@@ -2315,10 +2371,10 @@ is worth one paragraph.)*
 | v1.11.0 ✅ | Stage 30 — MTP speculative decoding | Opt-in only; 1.22–1.50× on 27B — **but output is not identical**, so default-on is blocked on §9.6 |
 | v1.11.0 ✅ | Stage 31 — model lifecycle: resumable pulls, `model rm`, high tier | Interrupted pull transfers only the remainder; checksum failure discards; pinned digest measured, not quoted |
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
-| v1.16.0 | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
+| v1.16.0 ✅ | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
 | v1.17.0 ✅ | Stage 34 — remote model tier | **ADR-0019 Accepted.** Cut in three, all delivered. **1 — the guard** (#381): consent gate, payload allow-list, dry-run, egress ledger, in a build compiling no backend. **2a — the transport**: `ureq` behind the off-by-default `remote` feature, the TTY invocation grant (`status`/`dry-run` never prompt), the response reader that refuses a truncated generation, and the README/website promise amendments on the commit that made them false. **2b — the surfaces**: `ModelSource::Remote { trust }` with `installed: None` in the shared resolver (which forced `ProducerTrust` from `rto-remote` into `rto-graph` — one definition, or a ledger entry and a resolution could disagree about what "vendor-asserted" means), then `spec draft --allow-remote` and `serve --allow-remote` over it. Neither prompts — the flag is the only way on a surface whose default is local — and a **refused** `--allow-remote` stops the run rather than answering locally, which is the same silent downgrade a network failure would be. Both rebuild the request through the payload allow-list rather than forwarding a local prompt or a chat transcript, so the guard still assembles what leaves. Ask is wired by wrapping the served `Engine` **in the binary**, so `rto-serve` gains nothing. Project file may deny, never grant; no learned router on the local→remote edge; no reachability probe; no test can reach a network |
-| v1.18.0 🔶 | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes — the instrument, with **no verdict**. **35b PR 1 delivered**: `ModelTask::Review` on the shared `generative` key (a seventh task, not a fourth bespoke rule), the per-file reviewer, `review --llm`, and the `review --replay` harness. It overturned 35a's budget conclusion in the useful direction — per file the corpus is **mean 3,275 / median 1,758 tokens as sent**, and the largest reviewable *source* file-diff is **17,202**, so ~28k of the single-call budget is free on a median file and the graph arm of PR 2 has room to be tested. It also found a **vacuous measurement in the instrument itself**: a reasoning model spent a 1,200-token cap entirely inside `<think>` on 4 files of 4 and the run reported *"0 finding(s) over 4 file(s)"* — zero recall that measured nothing, now detected, reported as *not reviewed*, and never scored. **No per-class recall figure yet**, deliberately: the honest remaining number is ~15 findings per file against 22 adjudicated rows over 184 files, unmoved by two precision-targeted prompt revisions | 
-| **v2.0.0** | Stage 27 — hardening | Full gates; semver review complete |
+| v1.18.0 ✅ | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes — the instrument, with **no verdict**. **35b PR 1 delivered**: `ModelTask::Review` on the shared `generative` key (a seventh task, not a fourth bespoke rule), the per-file reviewer, `review --llm`, and the `review --replay` harness. It overturned 35a's budget conclusion in the useful direction — per file the corpus is **mean 3,275 / median 1,758 tokens as sent**, and the largest reviewable *source* file-diff is **17,202**, so ~28k of the single-call budget is free on a median file and the graph arm of PR 2 has room to be tested. It also found a **vacuous measurement in the instrument itself**: a reasoning model spent a 1,200-token cap entirely inside `<think>` on 4 files of 4 and the run reported *"0 finding(s) over 4 file(s)"* — zero recall that measured nothing, now detected, reported as *not reviewed*, and never scored. **No per-class recall figure yet**, deliberately: the honest remaining number is ~15 findings per file against 22 adjudicated rows over 184 files, unmoved by two precision-targeted prompt revisions | 
+| **v2.0.0** ⏸️ | Stage 27 — hardening | Full gates; semver review complete — **hardening delivered**, findings filed as #431/#447–#450; the release itself is held on the owner's call (#429) and the `Release-plz` workflow is disabled so it cannot cut by accident |
 
 ---
 
