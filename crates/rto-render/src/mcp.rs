@@ -2582,7 +2582,7 @@ mod tests {
     /// without this the plumbing from `project_root` to the drift rule is untested
     /// and a `check` that always refused would look correct.
     #[tokio::test]
-    async fn check_tool_runs_against_a_hosted_projects_own_repository() {
+    async fn check_tool_runs_against_the_repository_of_a_hosted_project() {
         let base = std::env::temp_dir().join(format!("rto-mcp-check-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let dir = base.join("app");

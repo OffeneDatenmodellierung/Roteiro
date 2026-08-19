@@ -450,7 +450,7 @@ mod tests {
     /// the config. It is your own standing preference, and you may override it
     /// for one run without editing a file.
     #[test]
-    fn the_flag_overrides_the_users_own_denial_but_never_the_projects() {
+    fn the_flag_overrides_a_denial_by_the_user_but_never_by_the_project() {
         assert_eq!(
             at(None, Some(false), Requested::Host).reason,
             Reason::GrantedByInvocation
