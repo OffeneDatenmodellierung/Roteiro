@@ -23,17 +23,27 @@ tracing = "0.1"
 # The llama.cpp engine. Opt-in: pulls a C/C++ toolchain (cmake, clang, libclang)
 # to build vendored llama.cpp. The pure-Rust `Engine` trait + request/result
 # types build and are usable without it (e.g. mock engines, wire mappers).
+#
+# This entry serves the integration tests too, and that is the reason there is no
+# `[dev-dependencies]` copy of it. Cargo passes a package's *normal* dependencies
+# to its test targets as well as its dev-dependencies, so the four files in
+# `tests/` that reach past `LlamaEngine`'s API to llama.cpp itself —
+# `batch_numerics`, `batch_capacity`, `context_window`, `speculative` — can
+# `use llama_cpp_2::…` whenever `llama` is on, and cannot when it is off. That is
+# exactly right: every file in `tests/` is `#![cfg(feature = "llama")]`, so with
+# the feature off there is nothing left to compile against it.
+#
+# A `[dev-dependencies]` entry did not have that property, because
+# dev-dependencies are never feature-gated — Cargo rejects `optional` on one — so
+# `--all-targets` built vendored llama.cpp at *every* feature set,
+# `--no-default-features` included, and four CI jobs installed cmake/clang to
+# compile a C++ tree none of their test targets could name (issue #483). The
+# comment that stood here called it "inert unless a test that uses it is
+# compiled": true of linking, false of building, and it misled two workers and an
+# orchestrator before it was measured. `cargo build`/`cargo install` never paid
+# it either way.
 llama-cpp-2 = { version = "0.1.154", optional = true }
 encoding_rs = { version = "0.8", optional = true }
-
-[dev-dependencies]
-# Not a new dependency: the same `llama-cpp-2` the `llama` feature already
-# pulls, at the same version, made visible to the integration tests — which are
-# separate crates and so cannot see the library's own dependencies. It is what
-# `tests/batch_numerics.rs` needs to compare llama.cpp's logits at two batch
-# widths, a question about llama.cpp that `LlamaEngine`'s API deliberately does
-# not expose. Inert unless a test that uses it is compiled.
-llama-cpp-2 = { version = "0.1.154" }
 
 [features]
 # The real llama.cpp-backed engine. Off by default so downstream default builds
