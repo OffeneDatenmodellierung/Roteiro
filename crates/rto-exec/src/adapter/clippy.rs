@@ -187,6 +187,34 @@ impl Clippy {
         }
     }
 
+    /// The argv for a run whose network is denied **by a boundary** rather than
+    /// by good manners.
+    ///
+    /// [`Clippy::invocation`] plus `--offline`, and the two are separate
+    /// functions rather than a flag on one because they describe different
+    /// situations rather than different preferences. On the host, cargo may
+    /// legitimately reach a registry for a dependency the user has not fetched
+    /// yet; that is their machine and their choice, and `--locked` already stops
+    /// the one write into the tree that would follow. In a guest there is no
+    /// interface to reach it with, so the question is only whether cargo finds
+    /// that out from `--offline` or from a DNS timeout inside a VM.
+    ///
+    /// It is worth the flag for the error message alone. Without it a missing
+    /// crate surfaces as a network failure from inside a machine the user cannot
+    /// see; with it, cargo says *"attempting to make an HTTP request, but
+    /// --offline was specified"*, which [`crate::lint_sandbox`] turns into the
+    /// one thing that would actually help — fetch it on the host first.
+    #[must_use]
+    pub fn offline_invocation(features: &FeatureSet) -> Invocation {
+        let mut invocation = Self::invocation(features);
+        // Ahead of `--message-format`/`--quiet` only because `invocation`
+        // appends those last; cargo does not care about order, and this keeps
+        // the two argvs differing by exactly one token wherever they are printed
+        // side by side.
+        invocation.args.push("--offline".to_owned());
+        invocation
+    }
+
     /// Parse a cargo `--message-format=json` stream, returning the normalised
     /// report **and** what the stream contained besides findings.
     ///

@@ -11,7 +11,7 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.4"
+version: "1.5"
 last-modified: 2026-08-19
 confluence-url:
 ---
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.4 |
+| **Document version** | 1.5 |
 | **Status** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
@@ -191,9 +191,97 @@ The investigation that produced this ADR rejected a config-declared trusted-URL
 allowlist, and that rejection stands. A guest-side dependency fetch brings in
 bytes **that are then executed** by the build scripts counted above, and it would
 be the first install path in the system not terminating in a digest check.
-Dependencies reach the guest by a host-produced, read-only mount — for Cargo,
-`cargo vendor`, measured at 414 MB / 556 MB / 1.10 GB for this repository, and
-regenerated per lockfile change rather than per commit.
+Dependencies reach the guest by a host-produced, read-only mount.
+
+**The `cargo vendor` this condition anticipated is not needed**, and the saving is
+the largest single one in the design. v1.4 measured that a read-only `CARGO_HOME`
+suffices; v1.5 ships it. The mount is the host's **existing** package cache —
+nothing vendored, nothing regenerated per lockfile change, and none of the
+414 MB / 556 MB / 1.10 GB this condition budgeted for.
+
+**What is mounted is not `$CARGO_HOME`.** Building it revealed something the
+measurement did not, because the probe had no credentials in it: the root of a
+real `CARGO_HOME` holds `credentials.toml` — a crates.io API token — and a
+`config.toml` that may carry registry tokens of its own. Mounting the root would
+put both in front of the build scripts this whole decision exists to contain, and
+*"egress is denied"* is **not** an answer to that: the run's own output comes back
+to the host, and `cargo::warning=` is a channel a build script can write to. So
+the two subdirectories that hold *packages* are mounted and the root is not:
+
+| host | guest | mode |
+|---|---|---|
+| the worktree | `/work` | read-only |
+| a scratch outside it | `/scratch` | **writable** |
+| `$CARGO_HOME/registry` | `/cargo/registry` | read-only |
+| `$CARGO_HOME/git` | `/cargo/git` | read-only |
+
+The cost, recorded rather than left to be discovered: a `$CARGO_HOME/config.toml`
+that redirects a source is **not** seen by the guest. A project's own
+`.cargo/config.toml` is, because it is inside the worktree.
+
+**The failure mode a mounted cache has, and how it is reported.** A guest with no
+interface cannot fetch what the host does not already hold. Cargo says so from
+inside a machine the user cannot open a shell in, in two wordings that were both
+measured — `attempting to make an HTTP request, but --offline was specified` when
+the `.crate` file is absent, and `failed to unpack package` when it is present
+but unexpanded, because expanding it into a read-only mount is a write. Both have
+one remedy, and it is on the host: `cargo fetch --locked`, which downloads *and*
+unpacks. That is a **refusal that names the way forward**, not a build error
+passed through.
+
+### 2a. The image is **supplied**, and Roteiro will not choose one
+
+This was assumed rather than decided, and building it showed the assumption was
+false. `SANDBOX_IMAGES` states the rule an analyzer must meet to earn a pinned
+entry — a **published** image, addressable by digest, whose analyzer version is
+knowable — and gives the reason: *"inventing one would make Roteiro the publisher
+of a security tool's container, which is not a job it is taking on."* An official
+Rust image was expected to satisfy it unchanged.
+
+**No image satisfies it for `clippy`.** `rust-lang/docker-rust` builds **every**
+stable and nightly variant with `rustup-init --profile minimal`, which installs
+`rustc`, `cargo` and `rust-std` and stops. Verified against the Dockerfile source
+for `1.97.1/trixie`, `1.97.1/bookworm` and nightly, and then verified again from
+inside a running guest: `cargo clippy --version` in
+`docker.io/library/rust@sha256:b1b3c9c0…` answers *"'cargo-clippy' is not
+installed for the toolchain '1.97.1-aarch64-unknown-linux-gnu'"*. `rustlang/rust`
+is the same repository; `instrumentisto/rust` is archived and mirrors it.
+
+That left three options, and the owner's ruling took the third:
+
+1. **Roteiro builds and publishes one.** Refused by the rule above.
+2. **Roteiro points at a third party's** — CircleCI's `cimg/rust` and Microsoft's
+   `devcontainers/rust` both carry `clippy`, because they install rustup without
+   `--profile minimal`. Also refused, and for a sharper reason than the rule
+   states: an image is not a dependency of the analysis, it **is the boundary**.
+   It is the container somebody else's build scripts execute in. Choosing whose
+   container that is, on the user's behalf, in a default, is a security decision
+   made by Roteiro and noticed by nobody.
+3. **The user supplies it.** `[lint] image`, or `--image`, pinned by digest. An
+   image without the linter in it is a named refusal that says how to build one
+   (`docs/SANDBOXED_LINTING.md`, two lines of Dockerfile), rather than a
+   `cargo clippy` that mysteriously reports "no such command" and an empty
+   report over a tree nobody linted.
+
+**A tag is refused**, and *not* on the reproducibility argument this document
+retires for builders below. On a plainer one: a tag is a mutable pointer to the
+boundary. Whoever controls it can replace what runs, with no version change and
+no notice, and the run would go on reporting success. You may choose your own
+boundary; you may not choose one that can be swapped under you.
+
+The layering is `[remote] endpoint`'s, **not** `[lint] allow_unsandboxed`'s:
+project over user, `--image` over both. A project may choose *where* its team's
+boundary comes from without being able to decide *whether* there is one. The
+inversion belongs to the permission; a locator does not invert.
+
+**One consequence that follows from supplying the image, and is not obvious.**
+The image has to be able to *build* the tree, not merely lint it — `cargo clippy`
+has `cargo check` semantics, so every build script runs inside it. Measured on
+this repository: `--all-targets` compiles `rto-llama`'s dev-dependency on vendored
+llama.cpp, whose build script needs `libclang`, and an image carrying `cmake` but
+not `libclang` panics in `bindgen` with no diagnostic to show for it. That is
+reported as a build that produced nothing, with the cause named, rather than as
+zero findings.
 
 ### 3. The boundary is recorded, never inferred
 
@@ -242,6 +330,15 @@ compiler's discretion. A renamed lint reads as one defect fixed and one
 introduced; a removed lint reads as fixed; an edit to `[workspace.lints]` makes
 whole cohorts appear or vanish, so **a configuration change reads as a code
 change**.
+
+Conditions 1–2 add a fourth, and it is the one a person meets first: **a
+sandboxed run reports what the image's rustc said, and that is not this
+machine's.** Which lints fire is decided by that compiler, so `roteiro lint
+clippy` and `cargo clippy` in the same tree on the same day can disagree with no
+defect on either side. It is surfaced in the same list as the other three —
+printed beneath every report and carried in `--json` — because a scripted
+consumer must be told what a person is told, and it is stated again beside the
+isolation line, where the image digest it came from is printed.
 
 Because condition 4 stores nothing, these readings stop being *corruption* and
 become *surprise*: there is no stored history for a renamed lint to falsify. They
@@ -320,11 +417,20 @@ provisioning contract must reach inside the guest, or that feature set stays out
 of scope. This circularity is the sandbox's own build needing the sandbox's own
 prefetch, and it is already recorded in ADR-0014.
 
-**Parity weakens.** The current backend-parity test asserts that one analyzer
-produces identical findings via subprocess and via microVM. That holds for
-readers. It cannot hold for a builder, whose toolchain differs between host and
-image — and the test would stay green while defending a claim the feature no
-longer makes. It must be re-scoped when this lands.
+**Parity was expected to weaken, and did not.** This section predicted that the
+backend-parity test would stay green while defending a claim the feature no longer
+made, and would have to be re-scoped. It did not need to be, and the reason is
+worth keeping rather than deleting, because it is the same reason the builder
+needed no relaxation of `check_request`: **a builder is not an `AnalyzerRunner`.**
+The parity test compares two backends of the *reader* contract — one
+`AnalysisRequest`, one `AnalysisResponse`, one stored `AnalysisRun` — and
+`roteiro lint` implements none of them. There is no shared claim for a builder to
+falsify, so the test still means exactly what it says.
+
+What the prediction was right about is the *fact*: a builder's toolchain does
+differ between host and image, and the count moves with it. That is handled where
+it is met rather than by a test — condition 5 below, and the report and `--help`
+both say it.
 
 **And one thing does not change.** Ingest remains the zero-install default. A
 `cargo clippy --message-format=json` produced in CI and ingested requires no
@@ -339,11 +445,15 @@ lesser path**; for most users it will remain the right one.
 is reported rather than stored.
 
 An earlier revision was blocked on the findings store's inability to distinguish
-two builds of one commit. **Condition 4 dissolves that** — nothing is stored, so
-nothing collides. What remains before acceptance is engineering rather than an
-unanswered question: a writable build directory that does not relax the
-read-only preflight for readers, and a demonstrated refusal path that never
-falls back to the host.
+two builds of one commit. **Condition 4 dissolved that** — nothing is stored, so
+nothing collides. What was then named as the remaining engineering — *"a writable
+build directory that does not relax the read-only preflight for readers, and a
+demonstrated refusal path that never falls back to the host"* — is built, and
+demonstrated end to end: a sandboxed `cargo clippy` over a real 212-file worktree
+returning 108 diagnostics, recording `isolation: microvm` and the image digest,
+with the tree byte-identical before and after; and every refusal exercised
+against a real guest, including an image without the linter and both wordings of
+a cache too cold to build from.
 
 This list used to also name "the argv and environment seam a builder needs", and
 that was wrong in a way worth keeping rather than deleting, because the error is
@@ -368,9 +478,30 @@ needed splitting, not building.
 
 ### What has landed, and what it does not claim
 
-`roteiro lint <analyzer>` ships the **reporting** half, with a `clippy` adapter.
-Under condition 6 it runs on the host only when host execution has been granted,
-and refuses otherwise, because the sandbox it would prefer does not yet exist.
+`roteiro lint <analyzer>` ships both halves, with a `clippy` adapter. Under
+condition 6 it runs **sandboxed** unless host execution has been granted.
+
+**Every refusal on this path is built from `rto_exec::guidance`**, and that is a
+consequence of #426's rule rather than a style choice. A refusal names the way
+forward; a way forward you cannot paste is not one. Written as wrapped string
+literals, three of these leaked their own source indentation into shipped output
+— `getting          execution` — one claimed a document showed three lines where
+it showed two, and one told a reader to run `--image $ VAR`, which no shell
+expands. None of that fails to compile and none of it is visible in the source,
+which is the argument for a type: prose is authored as fragments joined with one
+space, commands are single literals rendered verbatim, and the rules are asserted
+on render so any test that prints a message checks it. The promise that nothing
+fell back to this host is appended by **one** wrapper rather than by each
+variant, for the same reason — it was per-variant, and one variant lost it.
+
+What the layers say did not change and what *"denied"* amounts to did. A project
+that denies host execution, a user config that denies it, and `--sandboxed` now
+all mean **run in the boundary**, where between v1.3 and this revision they meant
+refuse — because there was no boundary. The refusal that remains is narrower: a
+sandbox that was selected and **cannot be had**. It never becomes a host run, it
+names what is missing, and it names a way forward that would work *for that
+reason* — which is why a project denial is told to take it up with the repository
+rather than offered a flag that would not help it.
 
 Conditions 3, 4 and 5 are built. The run records `isolation: none` and reports it
 from the code that ran the process rather than from whoever prints it; its output
@@ -393,22 +524,54 @@ and carried in `--json`: roteiro overrides a `CARGO_TARGET_DIR` the caller set,
 because where a build writes is this command's guarantee and not the caller's to
 supply, and an override in silence would be its own surprise.
 
-Conditions 1 and 2 are **not** built, and nothing was borrowed from them. There
-is no writable build directory inside a guest and no host-produced dependency
-mount, because there is no guest: the sandboxed builder those conditions describe
-does not exist. `check_request`'s read-only preflight is **untouched** and still
-refuses every request whose worktree is writable — the linter takes a *different
-request shape* rather than a weakened one, which is why shipping this needed no
-relaxation of the invariant condition 1 is about.
+Conditions 1 and 2 are **built**, and the default now has something to select.
+`roteiro lint clippy` runs `cargo clippy` inside a digest-pinned OCI image in a
+microVM, against a read-only worktree, with a writable scratch outside it, a
+read-only mount of this machine's package cache, and no network interface.
 
-So the capability available today is exactly the one this document calls the
-inverted threat model, unmitigated: linting a branch you are reviewing executes
-that branch's build scripts and proc macros on your machine. It is disclosed —
-the argv and the isolation are printed before the run, and `roteiro lint --help`
-says it in a paragraph — and disclosure is not mitigation. What condition 6 adds
-is that it is no longer the *default*: an unmitigated capability may be offered,
-but it may not be the answer to a question nobody was asked. Mitigating it is
-what conditions 1 and 2 are for, and they remain the unbuilt work.
+**Condition 1 turned out smaller than this document first assumed, and the
+smallness is the point.** `check_request`'s read-only preflight is **untouched**.
+Nine tools were measured and none needed a writable source tree; a builder's
+writable surface is a **third `VolumeSpec` with `read_only: false`**, added
+beside the two that were already there and already `true`. An *added mount*
+rather than a *removed guarantee* is the whole reason this ADR could narrow
+ADR-0014's non-goal rather than withdraw it, and it is now a fact about the code
+rather than a claim about it: a test asserts the scratch is the **only** writable
+volume, and fault injection confirms the test fails when it is not.
+
+The evidence is a build script's own, since a build script is the arbitrary code
+this is all about. Run inside the guest, it reports `Linux 6.12.76 aarch64`;
+`touch /work/…` → `Read-only file system`; `touch /cargo/registry/…` →
+`Read-only file system`; `touch $CARGO_TARGET_DIR/…` → succeeds;
+`cat /cargo/credentials.toml` → `No such file or directory`; network interfaces
+`lo` and `dummy0`, and DNS resolution fails. Afterwards the worktree is
+digest-identical, by **content** rather than by listing — `Cargo.lock` is
+rewritten in place and a listing of names cannot see that (v1.4).
+
+**One thing was added that neither condition asked for**, because building both
+made it necessary: the scratch is keyed per **backend** as well as per checkout.
+Without `--target`, cargo lands both backends' artefacts in `<scratch>/debug`, and
+they are different operating systems' executables under the same names — measured,
+a guest build script is `ELF 64-bit … ARM aarch64 … GNU/Linux` where the host's is
+`Mach-O`. On a macOS host sharing one directory is churn; on a Linux host it is
+ADR-0014 v1.6's hazard run backwards, a build script compiled *inside* the
+boundary sitting where a later host lint builds. They are siblings, and a test
+says so.
+
+**The environment seam is reconciled**, which v1.4 left as two mechanisms for one
+concept. `ChildEnv` and the guest's environment now live in one module with two
+consumers, and the difference between the consumers is stated rather than tidied
+away: the `set` half applies to both, and the `inherit` half is host-only **by
+construction**. A guest shares neither this machine's filesystem nor its
+environment block, so a name carried across would point at a directory that is
+not there. In a guest, everything is set.
+
+What remains unmitigated is narrower than it was and worth naming. Host execution
+is still available, still opt-in, still records `isolation: none`, and still
+executes the tree's build scripts here. `--all-features` on **this** repository
+still cannot be built under a denied network, for the reason recorded above — a
+dependency's build script fetches at build time — so that feature set stays out
+of scope for a sandboxed run of this repository, though not for others.
 
 ## Document version history
 
@@ -419,3 +582,4 @@ what conditions 1 and 2 are for, and they remain the unbuilt work.
 | 1.2 | 2026-08-18 | Records what landed rather than changing any decision: `roteiro lint <analyzer>`, with a `clippy` adapter that reuses the shared normalisation shape and is deliberately absent from the registry `ingest` resolves against. Conditions 3–5 are built and tested — an unstored report, an `isolation: none` read out of the runner, and the renamed / removed / `[workspace.lints]` readings surfaced in both output shapes. Conditions 1–2 are untouched: the run has no boundary, and the read-only preflight was **not** relaxed to fit a builder through it. |
 | 1.3 | 2026-08-19 | Default posture set by the owner: a builder runs **sandboxed** unless host execution has been granted, and the grant is layered as ADR-0019 layers the remote tier — project `roteiro.toml` may deny it and may never grant it, because a merged line in a shared file is consent granted by someone else and noticed by nobody. Adds condition 6, including that the sandbox never silently falls back to the host. Condition 1 is strengthened rather than amended: measured, `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it, so the preflight is not relaxed at all and a builder's writable surface is an **added scratch mount** rather than a **removed guarantee**. Records the consequence that `roteiro lint` must refuse by default until conditions 1–2 exist. |
 | 1.4 | 2026-08-19 | **Corrects a claim this document's own measurement was used to justify.** v1.3 measured that `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it; `roteiro lint` then cited that result as a description of itself while *inheriting* the variable by name and never setting it — so on any shell that had not set one, the linter wrote `target/` and `Cargo.lock` into the tree it was reviewing, under a doc comment saying it did not. The module now sets `CARGO_TARGET_DIR` to a per-checkout directory outside the tree (ADR-0014 v1.6: a build scratch holds compiled build scripts and is never shared between trees) and passes `--locked` so the lockfile is not rewritten either, with a test that runs the shipped command with the variable unset and asserts the tree is unchanged — by content, not merely by filename, since `Cargo.lock` is rewritten in place and a listing of names cannot see that. A relative scratch root is refused rather than resolved, and the refusal is ordered before the containment check because that check resolves against roteiro's working directory while cargo resolves against the worktree, so on a relative path it decides a question about the wrong directory. **Condition 1's open question is answered**: measured with `CARGO_HOME` and the source tree both `chmod -R a-w`, `CARGO_TARGET_DIR` outside and `--locked --offline`, `cargo clippy` exits 0, reports `build-finished` successfully, and executes 4 build scripts compiled from the read-only cache — so a package cache can be mounted read-only rather than copied, with the honest caveat that the cache was warm and the probe was 4 crates rather than an `--all-features` build of this repository. Finally, **withdraws "the argv and environment seam a builder needs" as a blocker**: the seam existed, and was the wrong kind — a list of names to *inherit* where a builder needs pairs to *set*. Conflating the two is what produced the defect above, so they are now separate fields on one type and the blocker is a split rather than a build. |
+| 1.5 | 2026-08-19 | **Conditions 1 and 2 are built**, and one assumption in this document was false. Condition 1 needed no relaxation of `check_request` at all — a builder's writable surface is a third `VolumeSpec` with `read_only: false` beside two that stay `true`, an *added mount* rather than a *removed guarantee*, now asserted by a test rather than argued. Condition 2's `cargo vendor` is not needed either: the package cache is a read-only mount of the host's existing one, so none of the 414 MB / 556 MB / 1.10 GB is spent — but building it found what the probe could not, since the probe had no credentials in it, and **`$CARGO_HOME` itself is therefore not what is mounted**. Its root holds `credentials.toml`, and "egress is denied" does not answer that, because the run's output returns to the host and `cargo::warning=` is a channel a build script can write to; only `registry/` and `git/` are mounted, at the cost — stated here rather than discovered — that a `$CARGO_HOME/config.toml` source redirect is invisible to the guest. **The image is supplied by the user, not chosen by Roteiro**, because the assumption that an official Rust image would satisfy `SANDBOX_IMAGES`' rule is wrong: rust-lang builds every stable *and* nightly variant `--profile minimal`, so no first-party image carries `clippy`, confirmed from inside a running guest. Pointing at a third party's was declined on a sharper ground than the rule states — an image is not a dependency of the analysis, it **is the boundary**, and choosing whose container that is in a default is a security decision made here and noticed by nobody. A tag is refused for the same reason rather than for reproducibility, which this document retires for builders. Adds the fourth reading a lint count carries — a sandboxed run reports what the *image's* rustc said — to condition 5 and to both output shapes. Records that **parity did not weaken** as predicted, because a builder is not an `AnalyzerRunner` and the parity test is a reader-contract test; that the scratch is keyed per **backend** as well as per checkout, since the two put different operating systems' executables under one name; and that the environment seam is reconciled into one type whose `inherit` half is host-only by construction, a guest having no parent environment to inherit from. |

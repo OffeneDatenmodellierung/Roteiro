@@ -261,6 +261,21 @@ pub static ADAPTERS: &[&dyn Adapter] = &[
     &osv_scanner::OsvScanner,
 ];
 
+/// Every analyzer `roteiro lint` can run.
+///
+/// A separate list from [`known_analyzers`], which answers a different question
+/// — *what can be stored* — and would name `semgrep` and `cargo-audit` here,
+/// sending a caller off to ask for a lint from an analyzer that files layers.
+/// It sits beside [`ADAPTERS`] rather than in [`crate::lint`] so that the two
+/// lists are read together: they are the same shape and deliberately disjoint,
+/// and a name that drifted into both would make a lint storable by accident.
+///
+/// Ungated, unlike the linter itself, for [`crate::lint_grant`]'s reason: what
+/// `roteiro lint` *could* run is a question a build that cannot run it still has
+/// to answer, and `roteiro security prefetch --analyzer clippy` is one of the
+/// callers that asks.
+pub const LINT_ANALYZERS: &[&str] = &[clippy::ANALYZER];
+
 /// The adapter for `analyzer`, or `None` if this build has none.
 #[must_use]
 pub fn adapter_for(analyzer: &str) -> Option<&'static dyn Adapter> {

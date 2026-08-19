@@ -385,6 +385,31 @@ pub struct LintConfig {
     /// setting that governs both.
     #[serde(alias = "allow-unsandboxed")]
     pub allow_unsandboxed: Option<bool>,
+    /// The digest-pinned OCI image the sandboxed linter runs in.
+    ///
+    /// **Roteiro ships no default, and that is a decision rather than an
+    /// omission.** A builder's image has to carry the linter — for `clippy`, a
+    /// Rust toolchain *with the `clippy` component* — and no first-party image
+    /// does: `rust-lang/docker-rust` builds every stable and nightly variant
+    /// with `rustup-init --profile minimal`, which installs `rustc`, `cargo` and
+    /// `rust-std` and stops. Picking a third party's image on the user's behalf
+    /// would make somebody else's container the boundary in which somebody
+    /// else's build scripts execute, chosen by Roteiro and noticed by nobody;
+    /// building one would make Roteiro the publisher of it. Neither is a job
+    /// this project takes on, so the image is **supplied**, and an image without
+    /// the linter in it is a named refusal that says how to build one.
+    ///
+    /// # Ordinary precedence, unlike the key above it
+    ///
+    /// Project over user, and `--image` over both — `[remote] gateway`'s rule
+    /// and for the same reason: a project may choose *where* its team's boundary
+    /// comes from without being able to decide *whether* there is one. The
+    /// inversion belongs to `allow_unsandboxed`, which is a permission; this is
+    /// a locator.
+    ///
+    /// A tag is refused. An image is where somebody else's build scripts
+    /// execute, and a tag is a mutable pointer to it.
+    pub image: Option<String>,
 }
 
 impl LintConfig {
@@ -403,6 +428,10 @@ impl LintConfig {
                 self.allow_unsandboxed,
                 over.allow_unsandboxed,
             ),
+            // Ordinary key, ordinary precedence — `[remote] gateway`'s rule: a
+            // project may choose *where* its team's boundary comes from without
+            // being able to decide *whether* there is one.
+            image: over.image.clone().or(self.image.clone()),
         }
     }
 }
@@ -2139,9 +2168,11 @@ mod tests {
             for user in [None, Some(true), Some(false)] {
                 let merged = LintConfig {
                     allow_unsandboxed: user,
+                    ..LintConfig::default()
                 }
                 .overlaid_with(&LintConfig {
                     allow_unsandboxed: project,
+                    ..LintConfig::default()
                 });
                 assert_eq!(
                     merged.allow_unsandboxed,
@@ -2154,6 +2185,7 @@ mod tests {
         // and not only that two functions agree about it.
         let project_grant = LintConfig::default().overlaid_with(&LintConfig {
             allow_unsandboxed: Some(true),
+            ..LintConfig::default()
         });
         assert_eq!(
             project_grant.allow_unsandboxed, None,
@@ -2161,14 +2193,70 @@ mod tests {
         );
         let project_deny = LintConfig {
             allow_unsandboxed: Some(true),
+            ..LintConfig::default()
         }
         .overlaid_with(&LintConfig {
             allow_unsandboxed: Some(false),
+            ..LintConfig::default()
         });
         assert_eq!(
             project_deny.allow_unsandboxed,
             Some(false),
             "a committed denial must override a user grant"
+        );
+    }
+
+    /// `[lint] image` follows the **ordinary** precedence, and this is the test
+    /// that stops it being "fixed" to match its neighbour.
+    ///
+    /// The two keys sit in one table under two rules, which is unusual enough to
+    /// be worth pinning: `allow_unsandboxed` is a *permission* and inverts, so a
+    /// committed file may deny and never grant; `image` is a *locator* and does
+    /// not, so a project may choose where its team's boundary comes from — which
+    /// is `[remote] endpoint`'s rule beside `[remote] enabled`'s.
+    #[test]
+    fn the_lint_image_takes_ordinary_precedence_unlike_the_key_beside_it() {
+        let image = |user: Option<&str>, project: Option<&str>| {
+            LintConfig {
+                image: user.map(str::to_owned),
+                ..LintConfig::default()
+            }
+            .overlaid_with(&LintConfig {
+                image: project.map(str::to_owned),
+                ..LintConfig::default()
+            })
+            .image
+        };
+        assert_eq!(
+            image(Some("user@sha256:a"), Some("project@sha256:b")),
+            Some("project@sha256:b".to_owned()),
+            "a project may choose where its team's boundary comes from"
+        );
+        assert_eq!(
+            image(Some("user@sha256:a"), None),
+            Some("user@sha256:a".to_owned())
+        );
+        assert_eq!(
+            image(None, Some("project@sha256:b")),
+            Some("project@sha256:b".to_owned())
+        );
+        assert_eq!(image(None, None), None);
+
+        // And the contrast, in one assertion, because the point is the
+        // *difference*: the same project layer that supplies an image cannot
+        // supply a grant.
+        let both = LintConfig {
+            allow_unsandboxed: None,
+            image: None,
+        }
+        .overlaid_with(&LintConfig {
+            allow_unsandboxed: Some(true),
+            image: Some("project@sha256:b".to_owned()),
+        });
+        assert_eq!(both.image, Some("project@sha256:b".to_owned()));
+        assert_eq!(
+            both.allow_unsandboxed, None,
+            "the locator carries from the project layer; the permission does not"
         );
     }
 }

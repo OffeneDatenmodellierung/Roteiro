@@ -65,7 +65,9 @@ use rto_graph::{Isolation, RunnerKind};
 
 use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
 use crate::assets;
+use crate::child_env::ChildEnv;
 use crate::clock::rfc3339_utc;
+use crate::guidance::{Guidance, Line};
 use crate::ingest::assemble;
 use crate::runner::{AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_request};
 use crate::snippet::WorktreeSnippets;
@@ -237,6 +239,26 @@ fn probe_reason(raw: &str) -> String {
     raw.trim().to_owned()
 }
 
+/// Why a tag will not do, and how to get the digest instead.
+///
+/// A [`Guidance`] rather than a wrapped literal: this text is multi-line and
+/// ends in something to paste, and written the other way it leaked its own
+/// source indentation into the middle of a sentence (see [`crate::guidance`]).
+const PIN_IT: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "An image is where somebody else's build scripts execute, and a tag is a",
+        "mutable pointer to it — whoever controls the tag can replace what runs, with",
+        "no version change and no notice.",
+    ]),
+    Line::Note(&["Pin it by digest instead:"]),
+    Line::Command("image = \"docker.io/you/image@sha256:<64 hex>\""),
+    Line::Note(&[
+        "`docker buildx imagetools inspect <reference>` prints it. Use the **index**",
+        "digest — the one printed for the tag itself — so one reference resolves on",
+        "both amd64 and arm64 rather than two that can drift apart.",
+    ]),
+]);
+
 /// Something went wrong running the analyzer in a sandbox, as opposed to
 /// something being wrong with what it produced.
 #[derive(Debug, thiserror::Error)]
@@ -276,6 +298,26 @@ pub enum SandboxError {
         analyzer: String,
         /// The digest-pinned reference that is missing.
         reference: &'static str,
+    },
+    /// An image reference names a tag rather than a digest.
+    ///
+    /// Refused for user-supplied images as well as pinned ones, and the reason
+    /// is **not** the reproducibility argument ADR-0020 retires for builders. It
+    /// is that the image *is* the boundary. A builder's guest is where somebody
+    /// else's build scripts execute, and a tag is a mutable pointer to it: the
+    /// contents can be replaced by whoever controls the tag, with no version
+    /// change and no notice, and the run would go on reporting success. You may
+    /// choose your own boundary; you may not choose one that can be swapped
+    /// under you.
+    #[error(
+        "the image for {what} is {reference:?}, which is a tag rather than a digest.{}",
+        PIN_IT
+    )]
+    ImageNotPinned {
+        /// What wanted the image, so the reader knows which setting to change.
+        what: String,
+        /// The reference as it was written.
+        reference: String,
     },
     /// The sandbox itself failed at some stage.
     #[error("sandbox {stage}: {message}")]
@@ -711,22 +753,21 @@ async fn collect(stream: Option<impl futures::Stream<Item = String> + Unpin>) ->
     out
 }
 
-/// The environment the guest process gets.
+/// The environment a **reader**'s guest process gets.
 ///
-/// Built up rather than filtered down. [`crate::subprocess`] has to *remove*
-/// things, because a child process inherits its parent's environment by default
-/// and the risk is forgetting one. A guest inherits nothing, so the only
-/// variables that exist are the ones named here — which makes "no ambient
-/// credentials" structural rather than a list that has to stay complete.
+/// Nothing beyond the base every analyzer gets on either backend, because a
+/// parse-only analyzer needs nothing located and nothing constrained — it is
+/// handed a read-only tree and a rule file and told to read them.
+///
+/// It goes through [`ChildEnv`] rather than assembling a list of its own, and
+/// that is the point rather than ceremony. This function used to build its own
+/// vector while [`crate::subprocess`] had `ChildEnv`: two mechanisms for one
+/// concept, which is the shape that let `CARGO_TARGET_DIR` be listed as a name
+/// to *inherit* under a promise that it was *set* (ADR-0020 v1.4). One type,
+/// two consumers, and the difference between the consumers written down at
+/// [`ChildEnv::guest_pairs`].
 fn guest_environment() -> Vec<(String, String)> {
-    vec![
-        // Deterministic, locale-independent formatting and sorting.
-        ("LC_ALL".to_owned(), "C".to_owned()),
-        // Semgrep reads this to decide whether to phone home. It cannot reach
-        // anything from here regardless; saying so costs nothing and keeps the
-        // two backends' configurations identical.
-        ("SEMGREP_SEND_METRICS".to_owned(), "off".to_owned()),
-    ]
+    ChildEnv::default().guest_pairs()
 }
 
 /// The last few lines of an analyzer's standard error, for a failure message.
@@ -884,6 +925,137 @@ async fn image_present(
         .any(|i| i.id == image.digest || i.reference == image.reference))
 }
 
+/// The digest an image reference is pinned to, or a refusal naming what to fix.
+///
+/// The one place the rule is applied, so a user-supplied builder image and a
+/// [`SANDBOX_IMAGES`] entry are held to the same standard — the difference
+/// between them is *who chose*, never *how strong the pin is*.
+///
+/// Checked structurally rather than by looking for an `@`: a reference may carry
+/// a registry port (`host:5000/repo`) and a tag, so "contains a colon" and
+/// "names a digest" are different questions and only one of them is this one.
+///
+/// # Errors
+/// Returns [`SandboxError::ImageNotPinned`] if `reference` carries no
+/// `@sha256:<64 hex>` suffix.
+pub fn pinned_digest<'a>(what: &str, reference: &'a str) -> Result<&'a str, SandboxError> {
+    let unpinned = || SandboxError::ImageNotPinned {
+        what: what.to_owned(),
+        reference: reference.to_owned(),
+    };
+    let (_, digest) = reference.rsplit_once('@').ok_or_else(unpinned)?;
+    let hex = digest.strip_prefix("sha256:").ok_or_else(unpinned)?;
+    // Length *and* alphabet: `@sha256:` followed by anything at all would
+    // otherwise satisfy a prefix check while naming nothing.
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(digest)
+    } else {
+        Err(unpinned())
+    }
+}
+
+/// Open the local image store under `assets_root`, pulling nothing.
+///
+/// The same home directory every other entry point uses, so a test cache and
+/// the user's cache never mix and two callers can never disagree about which
+/// store the question was asked of.
+fn open_store(assets_root: &Path) -> Result<BoxliteRuntime, SandboxError> {
+    BoxliteRuntime::new(BoxliteOptions {
+        home_dir: assets_root.join("boxlite-home"),
+        image_registries: Vec::new(),
+    })
+    .map_err(|e| SandboxError::Runtime {
+        stage: "open",
+        message: e.to_string(),
+    })
+}
+
+/// A current-thread runtime for one blocking call into boxlite's async API.
+///
+/// Current-thread on purpose, for [`BoxliteRunner::new`]'s reason: these entry
+/// points are called from a CLI that has no reactor, and must not quietly
+/// acquire a thread pool.
+fn blocking<T>(
+    body: impl std::future::Future<Output = Result<T, SandboxError>>,
+) -> Result<T, SandboxError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| SandboxError::Runtime {
+            stage: "runtime",
+            message: e.to_string(),
+        })?
+        .block_on(body)
+}
+
+/// Pull a digest-pinned image into the local store.
+///
+/// The user-supplied counterpart of [`provision_image`], and it reaches a
+/// network for the same reason and under the same rule: **provisioning fetches,
+/// running reads.** No run calls this. `roteiro security prefetch
+/// --allow-download` does, having first printed the reference it is about to
+/// pull — because which registry this machine talks to is the operator's
+/// business, and an image chosen in a committed `roteiro.toml` should be named
+/// out loud before it is fetched rather than after it has run.
+///
+/// # Errors
+/// Returns [`SandboxError::ImageNotPinned`] if `reference` is not pinned by
+/// digest, or [`SandboxError::Runtime`] if the store cannot be opened or the
+/// pull fails.
+pub fn pull_reference(what: &str, reference: &str, assets_root: &Path) -> Result<(), SandboxError> {
+    pinned_digest(what, reference)?;
+    blocking(async {
+        open_store(assets_root)?
+            .images()
+            .map_err(|e| SandboxError::Runtime {
+                stage: "images",
+                message: e.to_string(),
+            })?
+            .pull(reference)
+            .await
+            .map_err(|e| SandboxError::Runtime {
+                stage: "pull",
+                message: e.to_string(),
+            })?;
+        Ok(())
+    })
+}
+
+/// Whether a digest-pinned image is already in the local store.
+///
+/// Reads the store and nothing else; asking never pulls. A store that cannot be
+/// read is an error rather than `Ok(false)` for [`image_is_provisioned`]'s
+/// reason: "definitely absent" and "could not tell" are different answers and
+/// only the first is safe to act on.
+///
+/// # Errors
+/// Returns [`SandboxError::ImageNotPinned`] if `reference` is not pinned by
+/// digest, or [`SandboxError::Runtime`] if the local store cannot be read.
+pub fn reference_is_present(
+    what: &str,
+    reference: &str,
+    assets_root: &Path,
+) -> Result<bool, SandboxError> {
+    let digest = pinned_digest(what, reference)?.to_owned();
+    blocking(async move {
+        let images = open_store(assets_root)?
+            .images()
+            .map_err(|e| SandboxError::Runtime {
+                stage: "images",
+                message: e.to_string(),
+            })?
+            .list()
+            .await
+            .map_err(|e| SandboxError::Runtime {
+                stage: "images",
+                message: e.to_string(),
+            })?;
+        Ok(images
+            .iter()
+            .any(|i| i.id == digest || i.reference == reference))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -923,6 +1095,56 @@ mod tests {
                 "{} does not say what version it carries",
                 image.analyzer
             );
+        }
+    }
+
+    /// An image reference is pinned by digest or it is refused, and this is the
+    /// one place that decides it — for a [`SANDBOX_IMAGES`] entry and for a
+    /// user-supplied builder image alike. The difference between them is *who
+    /// chose*, never *how strong the pin is*.
+    ///
+    /// The rejections matter more than the acceptance. A prefix check would let
+    /// `@sha256:` followed by anything through, and a "contains a colon" check
+    /// would reject a registry port — so both the alphabet and the length are
+    /// checked, and a port is not confused for a tag.
+    #[test]
+    fn an_image_is_pinned_by_digest_or_it_is_refused() {
+        let hex = "a".repeat(64);
+        for pinned in [
+            format!("docker.io/library/rust@sha256:{hex}"),
+            // A registry with a port, which contains a colon and is not a tag.
+            format!("registry.internal:5000/team/rust-clippy@sha256:{hex}"),
+            // A tag *and* a digest: the digest is what resolves, so this is
+            // pinned. Refusing it would reject what `docker pull` prints.
+            format!("docker.io/library/rust:1.97.1@sha256:{hex}"),
+        ] {
+            assert_eq!(
+                super::pinned_digest("test", &pinned).expect("pinned"),
+                format!("sha256:{hex}"),
+                "{pinned}"
+            );
+        }
+
+        for unpinned in [
+            "docker.io/library/rust".to_owned(),
+            "docker.io/library/rust:1.97.1".to_owned(),
+            "registry.internal:5000/team/rust-clippy:latest".to_owned(),
+            // Digest-shaped and not a digest: a prefix check would pass these.
+            "x@sha256:".to_owned(),
+            "x@sha256:deadbeef".to_owned(),
+            format!("x@sha256:{}", "a".repeat(63)),
+            format!("x@sha256:{}", "a".repeat(65)),
+            format!("x@sha256:{}z", "a".repeat(63)),
+            format!("x@sha512:{hex}"),
+        ] {
+            let err = super::pinned_digest("`[lint] image`", &unpinned)
+                .expect_err(&format!("{unpinned} must be refused"));
+            let message = err.to_string();
+            // A refusal names what to change and shows the shape it wants —
+            // this one is met by people who have only ever typed a tag.
+            assert!(message.contains("`[lint] image`"), "{message}");
+            assert!(message.contains("@sha256:"), "{message}");
+            assert!(message.contains("imagetools inspect"), "{message}");
         }
     }
 
