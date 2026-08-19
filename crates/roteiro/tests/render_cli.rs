@@ -345,12 +345,170 @@ fn a_declared_site_page_is_emitted_with_the_shared_bar() {
 }
 
 #[test]
+fn a_source_link_is_aimed_at_the_repository_at_the_rendered_commit() {
+    // Issue #456: `docs/BUILD_PLAN.md` cites code as evidence for its claims.
+    // That link is correct in a checkout and dead on the site, which publishes
+    // documents and not source — so it is re-aimed at the repository's web view,
+    // pinned to the commit the site was built from.
+    let dir = fresh_dir("sourcelink");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "website/public/index.html", "<h1>Home</h1>\n");
+    write(
+        &dir,
+        "docs/adr/0001-example.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n\n\
+         Root config: [Cargo](../../Cargo.toml).\n",
+    );
+    write(
+        &dir,
+        "docs/BUILD_PLAN.md",
+        "# Build Plan\n\nEvidence: [sync](../crates/x/src/sync.rs).\n\n\
+         Site link: [adrs](adr/).\n",
+    );
+    write(&dir, "crates/x/src/sync.rs", "pub fn f() {}\n");
+    write(&dir, "Cargo.toml", "[workspace]\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    git(&dir, &["remote", "add", "origin", "git@github.com:o/r.git"]);
+    let sha = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8");
+    let sha = sha.trim();
+
+    let out = Command::new(BIN)
+        .args(["render", "docs", "--out", "site"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render failed: {out:?}");
+
+    let plan = std::fs::read_to_string(dir.join("site/build-plan.html")).expect("plan page");
+    assert!(
+        plan.contains(&format!(
+            "href=\"https://github.com/o/r/blob/{sha}/crates/x/src/sync.rs\""
+        )),
+        "pinned to the rendered commit, not to a branch: {plan}"
+    );
+    // A link written *for* the site is correct there and must survive untouched.
+    assert!(plan.contains("href=\"adr/\""), "{plan}");
+
+    // An ADR sits one level down, so it takes two hops to leave the site — and
+    // the resolution is against the ADR's own directory, not the site root.
+    let adr = std::fs::read_to_string(dir.join("site/adr/0001-example.html")).expect("adr page");
+    assert!(
+        adr.contains(&format!(
+            "href=\"https://github.com/o/r/blob/{sha}/Cargo.toml\""
+        )),
+        "{adr}"
+    );
+}
+
+#[test]
+fn without_an_origin_remote_a_source_link_is_left_as_authored() {
+    // A rewrite that silently produced a broken URL would be worse than the link
+    // it replaces, so a repository with no mappable `origin` renders exactly the
+    // site it rendered before this existed.
+    let dir = fresh_dir("noorigin");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "website/public/index.html", "<h1>Home</h1>\n");
+    write(
+        &dir,
+        "docs/adr/0001-example.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n",
+    );
+    write(
+        &dir,
+        "docs/BUILD_PLAN.md",
+        "# Build Plan\n\nEvidence: [sync](../crates/x/src/sync.rs).\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "docs", "--out", "site"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render failed: {out:?}");
+    let plan = std::fs::read_to_string(dir.join("site/build-plan.html")).expect("plan page");
+    assert!(!plan.contains("github.com"), "nothing invented: {plan}");
+    assert!(
+        plan.contains("href=\"../crates/x/src/sync.rs\""),
+        "left exactly as authored: {plan}"
+    );
+}
+
+#[test]
+fn the_landing_pages_bar_is_rendered_over_whatever_the_file_carried() {
+    // Issue #508: `website/public/index.html` is copied verbatim, so its nav was
+    // a hand-maintained copy of the list `site_nav` derives — and a page added to
+    // one list and not the other is published, reachable, and linked from every
+    // page except the front one. The copy is now overwritten, which is why the
+    // deliberately wrong list below does not survive.
+    //
+    // Note what this does *not* buy: the original defect was a link that did not
+    // exist, and no link auditor can find one of those. This removes the second
+    // list rather than checking it.
+    let dir = fresh_dir("landingnav");
+    git(&dir, &["init", "-q"]);
+    write(
+        &dir,
+        "website/public/index.html",
+        "<h1>Roteiro</h1>\n<nav class=\"sitenav\">\n<a href=\"gone.html\">Gone</a>\n</nav>\n\
+         <p>tail</p>\n",
+    );
+    write(
+        &dir,
+        "docs/adr/0001-example.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n",
+    );
+    write(
+        &dir,
+        "website/pages/modes.md",
+        "---\nsite-page: modes\nsite-nav: Modes\nsite-order: 1\n---\n\n# Modes\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "docs", "--out", "site"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render failed: {out:?}");
+
+    let landing = std::fs::read_to_string(dir.join("site/index.html")).expect("landing page");
+    assert!(
+        !landing.contains("gone.html"),
+        "the hand-written list is overwritten, not merged: {landing}"
+    );
+    assert_eq!(
+        bar_as_seen_from(&landing, "./"),
+        vec![
+            ("Home".to_owned(), "./".to_owned()),
+            ("Modes".to_owned(), "modes.html".to_owned()),
+        ],
+        "the landing page carries the computed bar: {landing}"
+    );
+    // Only the bar is touched; the rest of the hand-written page is untouched.
+    assert!(landing.starts_with("<h1>Roteiro</h1>\n"), "{landing}");
+    assert!(landing.ends_with("<p>tail</p>\n"), "{landing}");
+}
+
+#[test]
 fn the_landing_page_carries_the_bar_the_renderer_emits() {
-    // roteiro.dev's landing page is hand-written HTML that `render docs` copies
-    // verbatim, so its site bar is the one bar nothing generates — and a bar
-    // that disagrees with the rest of the site is how a page becomes
-    // unreachable from its neighbours. This renders *this* repository and holds
-    // the two against each other.
+    // roteiro.dev's landing page is hand-written HTML whose site bar `render
+    // docs` now *replaces* with the computed one (issue #508). That makes this a
+    // guard on the replacement having happened: rename the `sitenav` marker away
+    // and the landing page keeps whatever it was carrying, silently, which is
+    // what this catches. It renders *this* repository and holds the two against
+    // each other.
     let out_dir = std::env::temp_dir().join(format!("roteiro-website-bar-{}", std::process::id()));
     std::fs::remove_dir_all(&out_dir).ok();
     let out = Command::new(BIN)
