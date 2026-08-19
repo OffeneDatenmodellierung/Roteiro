@@ -364,94 +364,14 @@ pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
     format!("\n  its stderr ended:\n  {joined}")
 }
 
-/// The two ways a variable can reach an analyzer's environment, kept apart.
-///
-/// They read alike and do opposite things, and conflating them is not
-/// hypothetical: `CARGO_TARGET_DIR` was once listed as a name to **inherit** by
-/// a module whose documentation promised it **set** one. Inheriting a name whose
-/// value nobody supplied is a no-op that looks like a configuration, so the
-/// promise held only when the invoking shell happened to make it hold — see
-/// [`crate::lint`], which is where that was found.
-///
-/// The rule the two halves encode:
-///
-/// - **Inheriting locates.** `CARGO_HOME`, `RUSTUP_HOME` — where the toolchain
-///   is on *this* machine, which only the parent environment knows. The value is
-///   the user's; this process has no opinion on it.
-/// - **Setting constrains.** `CARGO_TARGET_DIR` — where the build may write,
-///   which is a property this process guarantees and therefore must choose. A
-///   guarantee that reads its own precondition out of the ambient environment is
-///   not a guarantee.
-///
-/// A caller wanting a variable *set* must put it in [`ChildEnv::set`]. There is
-/// no way to spell it as a name and have it work, which is the point.
-#[derive(Default)]
-pub(crate) struct ChildEnv<'a> {
-    /// Names passed through from the parent when the parent has them. A name
-    /// the parent does not have reaches the child not at all — it is never
-    /// invented, and never defaulted.
-    pub(crate) inherit: &'a [&'a str],
-    /// Name/value pairs this process chooses outright, applied last so they win
-    /// over anything of the same name in [`ChildEnv::inherit`].
-    pub(crate) set: &'a [(&'a str, std::ffi::OsString)],
-}
-
-/// Give the child a minimal, explicit environment.
-///
-/// A third-party binary running on a developer's machine inherits everything by
-/// default, and a developer's environment is where `GITHUB_TOKEN`, `AWS_*`,
-/// `SEMGREP_APP_TOKEN` and an SSH agent socket live. None of that is an analyzer
-/// input, so none of it is passed. `PATH` is kept because the analyzer needs to
-/// find its own helpers, and `HOME` because tools that cannot locate a home
-/// directory fail in confusing ways; both are the parent's, unchanged.
-///
-/// This is a *reduction* in what the process can reach, not a boundary. It stops
-/// an analyzer from picking up a credential by accident; it does not stop one
-/// that goes looking.
-///
-/// [`ChildEnv::inherit`] is for a caller whose tool needs more than a parser
-/// does — the linter in [`crate::lint`] needs the variables that locate a Rust
-/// toolchain, and would otherwise be handed a `PATH` shim with no toolchain
-/// behind it. It is a **named list per caller**, not a pattern or an
-/// inherit-everything escape: each addition is a variable somebody wrote down
-/// and justified.
-///
-/// [`ChildEnv::set`] is the other seam, and the distinction between them is
-/// load-bearing rather than tidy — see that type.
-pub(crate) fn scrub_environment(command: &mut Command, env: &ChildEnv<'_>) {
-    command.env_clear();
-    for key in [
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "SystemRoot",
-        "TMPDIR",
-        "TEMP",
-    ]
-    .iter()
-    .copied()
-    .chain(env.inherit.iter().copied())
-    {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    // **After** the inherited names, so a value Roteiro chose always beats the
-    // same name arriving from the parent. A caller that both inherits and sets
-    // one variable has expressed a contradiction, and the constraint is the half
-    // that must win: inheriting is how the child finds things, setting is how
-    // this process bounds what the child may do.
-    for (key, value) in env.set {
-        command.env(key, value);
-    }
-    // Deterministic, locale-independent output from anything that formats
-    // numbers or sorts strings.
-    command.env("LC_ALL", "C");
-    // Semgrep reads this to decide whether to phone home. The argv says
-    // `--metrics=off` too; saying it twice costs nothing and the environment is
-    // the one an upgrade is less likely to rename.
-    command.env("SEMGREP_SEND_METRICS", "off");
-}
+// `ChildEnv` and `scrub_environment` used to live here, and moving them out is
+// the point rather than a tidy-up. They were this backend's, while the guest
+// backend built its environment from nothing in `boxlite.rs` — two mechanisms
+// for one concept, which is the shape that let `CARGO_TARGET_DIR` be listed as
+// a passthrough under a promise that it was configured. They are now one type
+// with two consumers in `crate::child_env`, which is also where the reason a
+// guest cannot have an `inherit` half is written down.
+pub(crate) use crate::child_env::{ChildEnv, scrub_environment};
 
 /// Ask the analyzer for its version, best effort.
 ///

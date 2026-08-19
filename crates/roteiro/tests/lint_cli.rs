@@ -542,8 +542,19 @@ fn the_report_says_what_produced_it() {
     // in the prose — a scripted consumer is told what a person is told.
     assert_eq!(
         report["caveats"].as_array().map(Vec::len),
-        Some(3),
+        Some(4),
         "{report}"
+    );
+    // A host run carries no image, and the field's absence is the claim: there
+    // was no boundary to name. `isolation: none` above says the same thing, and
+    // the two must not be able to disagree.
+    assert!(
+        report.get("image").is_none(),
+        "a host run must not name an image it did not have: {report}"
+    );
+    assert!(
+        !command.contains(&"--offline".to_owned()),
+        "the host path is unchanged by conditions 1-2: {command:?}"
     );
 }
 
@@ -606,29 +617,44 @@ fn a_storing_analyzer_is_refused_and_the_disclosure_does_not_lie_about_it() {
 }
 
 /// **The inversion, end to end.** With nothing configured and no flag,
-/// `roteiro lint` runs nothing at all (ADR-0020 §6).
+/// `roteiro lint` selects the sandbox — and with no image supplied there is no
+/// sandbox to be had, so it refuses and **runs nothing** (ADR-0020 §6).
 ///
 /// Before v1.3 this compiled the tree on the host. The assertion that carries
 /// the weight is [`Fixture::built_anything`]: an exit status alone cannot tell a
-/// refusal from a run that happened and then complained.
+/// refusal from a run that happened and then complained, and the failure this
+/// test exists to catch is a selected boundary quietly becoming a host run.
 #[test]
-fn by_default_it_refuses_and_runs_nothing() {
+fn by_default_it_selects_the_sandbox_and_never_falls_back_to_the_host() {
     let fixture = Fixture::new("default-refuses");
     let before = fixture.findings_listing();
     assert!(!fixture.built_anything(), "the fixture starts unbuilt");
 
     let out = fixture.roteiro(&["lint", "clippy"], &[]);
-    assert!(!out.status.success(), "the default must refuse: {out:?}");
+    assert!(
+        !out.status.success(),
+        "a sandbox that cannot be had must refuse: {out:?}"
+    );
     assert!(
         !fixture.built_anything(),
         "a refusal compiled the tree — nothing may fall back to the host"
     );
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // The refusal is the whole UX until the sandbox lands, so it is held to it:
-    // what happened, why, and both ways out.
-    assert!(stderr.contains("sandboxed by default"), "{stderr}");
-    assert!(stderr.contains("not built yet"), "{stderr}");
+    // What was selected, and that it was not run here.
+    assert!(stderr.contains("sandboxed"), "{stderr}");
+    assert!(
+        stderr.contains("nothing fell back to this host"),
+        "the one promise this refusal exists to keep: {stderr}"
+    );
+    // Why it could not be had, and how to fix *that* — which is the way forward
+    // a person actually wants, rather than only the way around it.
+    assert!(stderr.contains("No image is configured"), "{stderr}");
+    assert!(stderr.contains("[lint]"), "{stderr}");
+    assert!(stderr.contains("@sha256:"), "{stderr}");
+    assert!(stderr.contains("docs/SANDBOXED_LINTING.md"), "{stderr}");
+    // And the way around it, both forms, with the sentence that stops them
+    // reading as two steps.
     assert!(stderr.contains("--allow-unsandboxed"), "{stderr}");
     assert!(stderr.contains("allow_unsandboxed = true"), "{stderr}");
     assert!(stderr.contains("~/.roteiro/config.toml"), "{stderr}");
@@ -638,7 +664,8 @@ fn by_default_it_refuses_and_runs_nothing() {
     );
     assert!(
         stderr.contains("do not need both"),
-        "and that either remedy suffices — otherwise the config key reads as a          second step and nobody stops typing the flag: {stderr}"
+        "and that either remedy suffices — otherwise the config key reads as a \
+         second step and nobody stops typing the flag: {stderr}"
     );
     assert!(
         String::from_utf8_lossy(&out.stdout).trim().is_empty(),
@@ -648,6 +675,65 @@ fn by_default_it_refuses_and_runs_nothing() {
         String::from_utf8_lossy(&before),
         String::from_utf8_lossy(&fixture.findings_listing()),
         "and it still writes nothing to the store"
+    );
+}
+
+/// A **tag** is refused, wherever the image came from.
+///
+/// The image is the boundary — the container somebody else's build scripts
+/// execute in — and a tag is a mutable pointer to it. This is the one check that
+/// cannot be deferred to "it will fail later": a tag *works*, right up until the
+/// day somebody replaces what is behind it, and the run reports success either
+/// way.
+#[test]
+fn an_image_pinned_by_tag_is_refused_and_says_how_to_pin_it() {
+    let fixture = Fixture::new("tagged-image");
+    let out = fixture.roteiro(
+        &["lint", "clippy", "--image", "docker.io/you/rust:1.97.1"],
+        &[],
+    );
+    assert!(!out.status.success(), "a tag must be refused: {out:?}");
+    assert!(!fixture.built_anything(), "and nothing may have been built");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tag rather than a digest"), "{stderr}");
+    assert!(
+        stderr.contains("@sha256:"),
+        "the refusal must show the shape it wants: {stderr}"
+    );
+    assert!(
+        stderr.contains("imagetools inspect"),
+        "and how to obtain it: {stderr}"
+    );
+}
+
+/// An image that is not in the local store refuses, and **names the command that
+/// provisions it** — a run never pulls.
+///
+/// The same rule every other pinned input follows: provisioning downloads,
+/// running reads. A lint that could pull would be a lint that can fail because a
+/// registry was unreachable, or succeed by quietly fetching something new.
+#[test]
+fn an_unprovisioned_image_refuses_and_names_the_prefetch_that_obtains_it() {
+    let fixture = Fixture::new("unprovisioned-image");
+    // Digest-shaped and certainly absent, so the refusal under test is the
+    // store's rather than the pin check's.
+    let absent = format!("docker.io/you/rust-clippy@sha256:{}", "0".repeat(64));
+    let out = fixture.roteiro(&["lint", "clippy", "--image", &absent], &[]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(!fixture.built_anything(), "and nothing may have been built");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // In a build without `exec-boxlite` the refusal is the missing feature
+    // instead, and that is equally correct — what must never happen is a host
+    // run. Both branches are checked; only the wording differs.
+    assert!(
+        stderr.contains("roteiro security prefetch") || stderr.contains("exec-boxlite"),
+        "a refusal must name what is missing: {stderr}"
+    );
+    assert!(
+        stderr.contains("nothing fell back to this host") || stderr.contains("Nothing ran"),
+        "{stderr}"
     );
 }
 

@@ -104,6 +104,16 @@ pub mod asset_paths;
 pub mod assets;
 #[cfg(feature = "exec-boxlite")]
 pub mod boxlite;
+/// What an analyzer's environment is — for **both** backends, in one place.
+///
+/// Private because it is a seam between this crate's backends rather than a
+/// contract with a caller. It exists as its own module because it used to exist
+/// as two: a `ChildEnv` in [`subprocess`] and a hand-rolled list in [`boxlite`],
+/// which is how `CARGO_TARGET_DIR` came to be listed as a name to *inherit*
+/// under a promise that it was *set*. Read the module for why a guest has no
+/// `inherit` half at all.
+#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
+mod child_env;
 mod clock;
 pub mod crossref;
 /// Emitting a `file://` URL for a local path, and reading one back.
@@ -135,6 +145,22 @@ pub mod lint;
 /// is the same in a build that cannot run a linter as in one that can — see the
 /// module's own documentation.
 pub mod lint_grant;
+/// ADR-0020 conditions 1-2: the **sandboxed builder** — `roteiro lint`'s default.
+///
+/// The boundary half of [`lint`]. It adds one writable mount to what
+/// [`boxlite`] already does and removes nothing: the worktree stays read-only,
+/// [`check_request`]'s preflight is untouched, and the package cache is a
+/// read-only mount of this machine's own rather than a vendored copy. Read its
+/// documentation for why the image is supplied rather than pinned here, and why
+/// a `$CARGO_HOME` root is not what gets mounted.
+///
+/// Gated on **both** backends. The boundary does not imply the escape hatch —
+/// `exec-boxlite` still does not enable `exec-subprocess`, and enabling one must
+/// never switch on the other. This module needs both because it shares
+/// [`lint`]'s report shape and its one host-side `cargo locate-project`, which
+/// is how it learns what to mount.
+#[cfg(all(feature = "exec-boxlite", feature = "exec-subprocess"))]
+pub mod lint_sandbox;
 mod runner;
 /// The per-file digests of the extracted sandbox runtime — **generated**.
 ///
@@ -157,8 +183,8 @@ pub mod snippet;
 pub mod subprocess;
 
 pub use adapter::{
-    ADAPTERS, Adapter, AssetPaths, Invocation, NO_SNIPPET, NativeContext, UNKNOWN_VERSION,
-    adapter_for, known_analyzers, snippet_hash, snippet_hash_at,
+    ADAPTERS, Adapter, AssetPaths, Invocation, LINT_ANALYZERS, NO_SNIPPET, NativeContext,
+    UNKNOWN_VERSION, adapter_for, known_analyzers, snippet_hash, snippet_hash_at,
 };
 // The linter's adapter is re-exported like any other, and — unlike any other —
 // is **not** in [`ADAPTERS`], so `ingest` cannot resolve it and nothing can file
@@ -178,17 +204,16 @@ pub use ingest::{
     normalize_native,
 };
 #[cfg(feature = "exec-subprocess")]
-pub use lint::{
-    LINT_ANALYZERS, LintError, LintOutcome, Toolchain, invocation as lint_invocation,
-    run as run_lint,
-};
+pub use lint::{LintError, LintOutcome, Toolchain, invocation as lint_invocation, run as run_lint};
 // ADR-0020 §6's grant. Re-exported under `lint_`-prefixed names because the
 // concepts have twins in `rto-remote` (ADR-0019 §3) and a reader who meets
 // `ConfigGrant` in the binary must be able to see which of the two it is.
 pub use lint_grant::{
-    ConfigGrant as LintConfigGrant, Decision as LintDecision, Reason as LintReason,
-    Requested as LintRequested, decide as decide_lint_host,
+    Backend as LintBackend, ConfigGrant as LintConfigGrant, Decision as LintDecision,
+    Reason as LintReason, Requested as LintRequested, decide as decide_lint_host,
 };
+#[cfg(all(feature = "exec-boxlite", feature = "exec-subprocess"))]
+pub use lint_sandbox::BuilderError as LintBuilderError;
 pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,
     check_reported_path, check_request, worktree_id,

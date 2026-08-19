@@ -640,17 +640,34 @@ enum Command {
     /// line of its own, and as `build_succeeded` in `--json` — so a partial
     /// result is never quietly a small one.
     ///
-    /// **The linter runs sandboxed by default, and the sandbox is not built
-    /// yet** — so with no grant this command refuses rather than running
-    /// anything (ADR-0020 §6). That is deliberate. `cargo clippy` has `cargo
-    /// check` semantics, so running it here compiles this tree on this machine,
-    /// executing its build scripts and loading its proc macros with your
-    /// filesystem and your credentials. In your own repository that is the build
-    /// you were going to run anyway; in a branch you are reviewing it is
-    /// somebody else's code, and that the toolchain is yours does not make the
-    /// code yours.
+    /// **The linter runs sandboxed by default** (ADR-0020 §6). `cargo clippy`
+    /// has `cargo check` semantics, so running it here would compile this tree
+    /// on this machine, executing its build scripts and loading its proc macros
+    /// with your filesystem and your credentials. In your own repository that is
+    /// the build you were going to run anyway; in a branch you are reviewing it
+    /// is somebody else's code, and that the toolchain is yours does not make
+    /// the code yours.
     ///
-    /// To allow host execution, **either** is enough — you do not need both:
+    /// **You have to supply the image**, in `[lint] image` or `--image`, pinned
+    /// by digest. Roteiro ships no default and will not choose one: no
+    /// first-party Rust image carries the `clippy` component — rust-lang builds
+    /// every stable and nightly variant `--profile minimal` — and picking a
+    /// third party's would make somebody else's container the boundary your
+    /// build scripts run in, chosen here and noticed by nobody. See
+    /// `docs/SANDBOXED_LINTING.md`; it is two lines of Dockerfile.
+    ///
+    /// **The count can differ from a local `cargo clippy`, legitimately.** Which
+    /// lints fire is decided by the image's rustc, which is not this machine's,
+    /// and a lint name is a symbol in a compiler. Nothing is stored, so that is
+    /// a surprise rather than a corruption — the report names the toolchain it
+    /// used, beside the image digest it came from.
+    ///
+    /// The guest has no network interface, so it builds from a read-only mount
+    /// of this machine's cargo cache. If a dependency is not already there, the
+    /// run refuses and tells you to `cargo fetch` on the host first.
+    ///
+    /// To allow host execution instead, **either** is enough — you do not need
+    /// both:
     ///
     /// - for one run: `--allow-unsandboxed`;
     ///
@@ -670,8 +687,8 @@ enum Command {
         analyzer: String,
         /// Run the linter in the sandbox — already the default, so this pins the
         /// intent against a change of defaults, and against a user-config grant
-        /// you would rather not apply to this run. There is no sandboxed builder
-        /// yet, so today it refuses by name.
+        /// you would rather not apply to this run. If the sandbox cannot be had
+        /// it refuses by name rather than running here.
         #[arg(long, conflicts_with = "allow_unsandboxed")]
         sandboxed: bool,
         /// Accept that this run has no isolation boundary, and compile this tree
@@ -679,6 +696,13 @@ enum Command {
         /// form is `[lint] allow_unsandboxed` in your own config.
         #[arg(long)]
         allow_unsandboxed: bool,
+        /// The digest-pinned OCI image to lint inside, overriding `[lint]
+        /// image` for this run. Roteiro ships no default and will not pick one:
+        /// no first-party Rust image carries `clippy`, and choosing a third
+        /// party's would make somebody else's container the boundary your build
+        /// scripts run in. A tag is refused — see `docs/SANDBOXED_LINTING.md`.
+        #[arg(long, value_name = "REFERENCE")]
+        image: Option<String>,
         /// Resolve the build with **every** feature enabled (`--all-features`).
         /// This changes what is compiled and therefore what is linted, so the
         /// report names the feature set it used.
@@ -1379,6 +1403,14 @@ enum SecurityAction {
         /// Only this analyzer's assets. Default: all of them.
         #[arg(long, value_name = "NAME")]
         analyzer: Option<String>,
+        /// Pull this digest-pinned linter image instead of `[lint] image`.
+        ///
+        /// The counterpart of `roteiro lint --image`, and it exists so the pair
+        /// is symmetric: an image you can lint with is an image you can
+        /// provision, without having to write it into a config file first to
+        /// try it.
+        #[arg(long, value_name = "REFERENCE")]
+        image: Option<String>,
         /// Allow downloading the assets that are fetched by URL — today that is
         /// `osv-scanner`'s per-ecosystem OSV databases, roughly **260 MB**.
         ///
@@ -1660,6 +1692,7 @@ fn main() -> anyhow::Result<()> {
             analyzer,
             sandboxed,
             allow_unsandboxed,
+            image,
             all_features,
             features,
             json,
@@ -1668,9 +1701,10 @@ fn main() -> anyhow::Result<()> {
             &lint_features(all_features, features.as_deref())?,
             lint_host_decision(&cfg, sandboxed, allow_unsandboxed),
             json,
+            image.as_deref().or(cfg.effective.lint.image.as_deref()),
         ),
         #[cfg(feature = "execution")]
-        Command::Security { action } => run_security(action),
+        Command::Security { action } => run_security(action, cfg.effective.lint.image.as_deref()),
         #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
         Command::Serve {
             models,
@@ -1934,15 +1968,12 @@ fn print_remote_section(_loaded: &config::Loaded) {
 /// merged one, and each is labelled with what that layer is allowed to do.
 ///
 /// It also names the **default** in the header, because for this key the default
-/// is the whole story: unset means sandboxed, sandboxed means unbuilt, and
-/// unbuilt means `roteiro lint` refuses. A section that printed three `None`s
+/// is the whole story: unset means sandboxed, and sandboxed means the run needs
+/// an image nobody can supply but the reader. A section that printed two `None`s
 /// without saying so would be accurate and useless.
 #[cfg(feature = "execution")]
 fn print_lint_section(loaded: &config::Loaded) {
-    println!(
-        "\n[lint]  (ADR-0020 §6 — sandboxed by default; unset means `roteiro lint` refuses, \
-         because the sandboxed builder is not built yet)"
-    );
+    println!("\n[lint]  (ADR-0020 §6 — sandboxed by default; the host is opt-in)");
     println!(
         "  allow_unsandboxed = {:?}  (project: {:?} — may deny, never grant; user: {:?} — may \
          grant)",
@@ -1963,6 +1994,23 @@ fn print_lint_section(loaded: &config::Loaded) {
         "  either this key or `--allow-unsandboxed` is enough — unlike `[remote] enabled`, which \
          needs its flag as well"
     );
+    // Ordinary precedence, unlike the key above it, so the layers are printed
+    // the way `[remote] endpoint` prints them rather than the way
+    // `allow_unsandboxed` does — the two rules sitting in one table is exactly
+    // the sort of thing a reader has to be able to see rather than infer.
+    println!(
+        "  image             = {:?}  (project: {:?}; user: {:?} — ordinary precedence, project \
+         over user, `--image` over both)",
+        loaded.effective.lint.image, loaded.project.lint.image, loaded.user.lint.image,
+    );
+    if loaded.effective.lint.image.is_none() {
+        println!(
+            "  no image is set, so a sandboxed lint refuses. Roteiro ships no default: no \
+             first-party Rust image carries `clippy` (rust-lang/docker-rust builds every variant \
+             `--profile minimal`), and choosing a third party's would make somebody else's \
+             container the boundary your build scripts run in. See docs/SANDBOXED_LINTING.md."
+        );
+    }
 }
 
 /// Without `execution` there is no `roteiro lint`, and the section says so
@@ -7365,8 +7413,13 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
 }
 
 /// Dispatch a `roteiro security` action.
+///
+/// `lint_image` is the `[lint] image` the config layers settled on. It reaches
+/// `prefetch` because a builder's image is **supplied rather than pinned by
+/// Roteiro** (ADR-0020 conditions 1-2): there is no entry in `SANDBOX_IMAGES` to
+/// iterate for it, so the only place that knows what to pull is the config.
 #[cfg(feature = "execution")]
-fn run_security(action: SecurityAction) -> anyhow::Result<()> {
+fn run_security(action: SecurityAction, lint_image: Option<&str>) -> anyhow::Result<()> {
     match action {
         SecurityAction::Ingest {
             file,
@@ -7387,9 +7440,15 @@ fn run_security(action: SecurityAction) -> anyhow::Result<()> {
         #[cfg(feature = "execution")]
         SecurityAction::Prefetch {
             analyzer,
+            image,
             allow_download,
             json,
-        } => run_security_prefetch(analyzer.as_deref(), allow_download, json),
+        } => run_security_prefetch(
+            analyzer.as_deref(),
+            allow_download,
+            json,
+            image.as_deref().or(lint_image),
+        ),
         #[cfg(feature = "execution")]
         SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
     }
@@ -8218,6 +8277,10 @@ const LINT_CAVEATS: &[&str] = &[
     "a removed lint reads as fixed — the compiler dropped the check, nobody fixed anything",
     "an edit to `[workspace.lints]`, or an added `#[allow]`, makes whole cohorts appear or vanish \
      — a configuration change reading as a code change",
+    "a sandboxed run reports what the *image's* rustc said, and it is not this machine's — a lint \
+     name is a symbol in a compiler, so a different compiler legitimately fires a different set. \
+     `roteiro lint clippy` and `cargo clippy` in the same tree on the same day can disagree with \
+     no defect on either side",
 ];
 
 /// Resolve every layer into the decision `roteiro lint` runs under (ADR-0020 §6).
@@ -8320,6 +8383,13 @@ struct LintReport {
     command: Vec<String>,
     /// The workspace root that was linted.
     worktree: String,
+    /// The digest-pinned image the run happened inside, absent for a host run.
+    ///
+    /// What `isolation` is made of. A consumer that wants to know what executed
+    /// this tree's build scripts can look the digest up; without it `"micro_vm"`
+    /// is a claim with nothing behind it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
     /// The `CARGO_TARGET_DIR` roteiro set for the run, outside the worktree.
     ///
     /// Present so `command` is genuinely reproducible by hand — the argv needs
@@ -8396,6 +8466,7 @@ fn run_lint(
     features: &rto_exec::FeatureSet,
     decision: rto_exec::LintDecision,
     json: bool,
+    image: Option<&str>,
 ) -> anyhow::Result<()> {
     let dir = std::env::current_dir()?;
     // A committed grant that was discarded is reported before anything else,
@@ -8420,19 +8491,28 @@ fn run_lint(
     // another analyzer's name would be a small lie printed in the one place a
     // user is relying on being told the truth. The refusal itself comes from the
     // run below, which owns that wording.
-    if let (false, true, Some(invocation)) = (
+    if let (false, Some(invocation)) = (
         json,
-        decision.granted(),
-        rto_exec::lint_invocation(analyzer, features),
+        // The backend's own argv, not the host's: the two differ by `--offline`,
+        // and a disclosure line that is one token away from what ran is worse
+        // than none, because it is trusted.
+        rto_exec::lint_invocation(analyzer, features, decision.backend()),
     ) {
+        // Future tense, and the tense is the point. This used to say "running",
+        // which was true while the only thing that could refuse after it was the
+        // grant — and the grant was checked first, so nothing was ever announced
+        // that did not then run. A sandboxed run has refusals of its own *after*
+        // this line (no image, not provisioned, no hypervisor, a cache too cold),
+        // so "running" would announce a build that never happened. Disclosure
+        // still comes before anything executes, which is its whole job.
         eprintln!(
-            "running {analyzer} (isolation none, on this host, granted by {}): {} {}",
-            lint_grant_source(decision.reason),
+            "{analyzer} will run {}: {} {}",
+            decision.reason.explanation(),
             invocation.program,
             invocation.args.join(" ")
         );
     }
-    let outcome = rto_exec::run_lint(analyzer, &dir, features, decision)?;
+    let outcome = rto_exec::run_lint(analyzer, &dir, features, decision, image)?;
 
     let findings: Vec<LintFinding> = outcome
         .report
@@ -8464,6 +8544,7 @@ fn run_lint(
             isolation: outcome.isolation,
             command: outcome.command.clone(),
             worktree: outcome.worktree.display().to_string(),
+            image: outcome.image.clone(),
             scratch: outcome.scratch.display().to_string(),
             started_at: outcome.report.started_at.clone(),
             ended_at: outcome.report.ended_at.clone(),
@@ -8507,11 +8588,33 @@ fn print_lint_report(
         "  build dir {} — set by roteiro, outside the worktree; the tree is not written to",
         outcome.scratch.display()
     );
-    println!(
-        "  isolation {} — the linter compiled this tree on this host, so its build scripts and \
-         proc macros ran here too",
-        outcome.isolation.as_str()
-    );
+    match &outcome.image {
+        Some(image) => {
+            println!(
+                "  isolation {} — the linter compiled this tree inside a microVM with no network \
+                 interface; its build scripts and proc macros ran there, not here",
+                outcome.isolation.as_str()
+            );
+            println!("  image     {image}");
+            // Named where a user meets it rather than only in the docs. The
+            // guest's rustc decides which lints fire, and it is not this
+            // machine's — so a count from here and a count from `cargo clippy`
+            // may legitimately differ. Nothing is stored, so this is a surprise
+            // rather than a corruption (ADR-0020 v1.1), but a surprise is still
+            // something a person should be told before they go looking for the
+            // bug that is not there.
+            println!(
+                "  the toolchain above is the image's, not this machine's — which lints fire is \
+                 decided by that rustc, so this count and a local `cargo clippy` can differ \
+                 legitimately"
+            );
+        }
+        None => println!(
+            "  isolation {} — the linter compiled this tree on this host, so its build scripts \
+             and proc macros ran here too",
+            outcome.isolation.as_str()
+        ),
+    }
     for finding in findings {
         let at = match (&finding.path, finding.line) {
             (Some(path), Some(line)) => format!("{path}:{line}"),
@@ -8566,25 +8669,6 @@ fn print_lint_footnotes(outcome: &rto_exec::LintOutcome, counts: &LintCounts) {
     );
 }
 
-/// Which layer granted this run, for the disclosure line.
-///
-/// A grant is not anonymous: someone who set the key months ago and has
-/// forgotten needs to be told it was the key rather than something they typed,
-/// and someone who typed the flag needs to know the flag is why — otherwise the
-/// standing grant and the per-run one are indistinguishable at the moment they
-/// matter.
-#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
-fn lint_grant_source(reason: rto_exec::LintReason) -> &'static str {
-    match reason {
-        rto_exec::LintReason::GrantedByInvocation => "--allow-unsandboxed",
-        rto_exec::LintReason::GrantedByUserLayer => "`[lint] allow_unsandboxed` in your config",
-        // Not reachable: this is printed only when the decision granted. Stated
-        // rather than `unreachable!`, because a wrong word in a disclosure line
-        // is a better failure than a panic in front of a run that was allowed.
-        _ => "an ungranted decision (this is a bug — please report it)",
-    }
-}
-
 /// The same command in a build without `exec-subprocess`: a refusal that names
 /// the feature and the alternative.
 ///
@@ -8597,6 +8681,7 @@ fn run_lint(
     _features: &rto_exec::FeatureSet,
     _decision: rto_exec::LintDecision,
     _json: bool,
+    _image: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`roteiro lint {analyzer}` needs the `exec-subprocess` feature, which this build does not \
@@ -8758,10 +8843,22 @@ fn assets_to_prefetch(analyzer: Option<&str>) -> anyhow::Result<Vec<&'static rto
             .filter(|s| s.analyzer == name)
             .collect();
     }
+    if specs.is_empty() && rto_exec::LINT_ANALYZERS.contains(&name) {
+        // A linter has **no pinned assets at all**, and an empty list is the
+        // right answer rather than an error. Its rule set is the toolchain, and
+        // the toolchain arrives in an image the user supplies (ADR-0020
+        // conditions 1-2) — so there is nothing here to digest, and the one
+        // thing `prefetch --analyzer clippy` does have to do is pull that image,
+        // which happens further down against `[lint] image` rather than against
+        // this table. Bailing here made the natural command for provisioning a
+        // linter fail with "no assets", which is true and useless.
+        return Ok(Vec::new());
+    }
     if specs.is_empty() {
         anyhow::bail!(
-            "no assets for `{name}` in this build (analyzers: {}; shared: {})",
+            "no assets for `{name}` in this build (analyzers: {}; linters: {}; shared: {})",
             rto_exec::known_analyzers().join(", "),
+            rto_exec::LINT_ANALYZERS.join(", "),
             rto_exec::SANDBOX
         );
     }
@@ -8781,6 +8878,7 @@ fn run_security_prefetch(
     analyzer: Option<&str>,
     allow_download: bool,
     json: bool,
+    lint_image: Option<&str>,
 ) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let specs = assets_to_prefetch(analyzer)?;
@@ -8852,6 +8950,29 @@ fn run_security_prefetch(
             }
         }
     }
+
+    // The sandboxed linter's image, which is **supplied rather than pinned**
+    // (ADR-0020 conditions 1-2). It is pulled here rather than by a run for the
+    // rule that governs every other input: provisioning fetches, running reads.
+    //
+    // Named before a socket is opened, like every download above, and for a
+    // sharper reason than the others: this reference can come from a committed
+    // `roteiro.toml`, so it is the one asset a teammate may have chosen for you.
+    // Printing it is what turns that into a thing you saw.
+    #[cfg(feature = "exec-boxlite")]
+    if allow_download
+        && let Some(reference) = lint_image
+        && analyzer.is_none_or(|name| rto_exec::LINT_ANALYZERS.contains(&name))
+    {
+        if !json {
+            eprintln!("pulling the sandboxed linter's image, from `[lint] image`: {reference}");
+        }
+        if let Err(e) = rto_exec::boxlite::pull_reference("`[lint] image`", reference, &root) {
+            failures.push(format!("{e}"));
+        }
+    }
+    #[cfg(not(feature = "exec-boxlite"))]
+    let _ = lint_image;
 
     if json {
         emit_json(&SecurityPrefetchReport {
@@ -12421,6 +12542,7 @@ mod lint_cli {
             analyzer,
             sandboxed,
             allow_unsandboxed,
+            image,
             all_features,
             features,
             json,
@@ -12432,6 +12554,9 @@ mod lint_cli {
         assert!(!all_features);
         assert_eq!(features, None);
         assert!(!json);
+        // Roteiro supplies no image, and the flag defaults to none rather than
+        // to something: an image nobody chose would be a boundary nobody chose.
+        assert_eq!(image, None);
         // Saying nothing asks for neither: the *default* is decided by
         // `lint_host_decision`, not smuggled in as a flag default here.
         assert!(!sandboxed);
@@ -12514,15 +12639,18 @@ mod lint_cli {
         assert!(err.to_string().contains("--all-features"), "{err}");
     }
 
-    /// The default: `roteiro lint` with no config and no flag runs **nothing**.
+    /// The default: `roteiro lint` with no config and no flag runs **sandboxed**.
     ///
     /// This is the inversion in one assertion. Before ADR-0020 v1.3 this case
-    /// compiled the tree on the host.
+    /// compiled the tree on the host; between v1.3 and conditions 1-2 it
+    /// refused, because the sandbox it selected did not exist. It selects the
+    /// same thing now and there is something there.
     #[test]
-    fn with_nothing_configured_and_no_flag_the_host_is_not_granted() {
+    fn with_nothing_configured_and_no_flag_the_sandbox_is_selected() {
         let decision = lint_host_decision(&layers(None, None), false, false);
         assert!(!decision.granted());
-        assert_eq!(decision.reason, rto_exec::LintReason::Ungranted);
+        assert_eq!(decision.backend(), rto_exec::LintBackend::Sandbox);
+        assert_eq!(decision.reason, rto_exec::LintReason::SandboxByDefault);
     }
 
     /// The row that makes the inversion real rather than documented: a
@@ -12552,7 +12680,11 @@ mod lint_cli {
                 !decision.granted(),
                 "project denial must hold with sandboxed={sandboxed} allow={allow}"
             );
-            assert_eq!(decision.reason, rto_exec::LintReason::ProjectDenied);
+            assert_eq!(
+                decision.reason,
+                rto_exec::LintReason::SandboxByProjectDenial
+            );
+            assert_eq!(decision.backend(), rto_exec::LintBackend::Sandbox);
         }
     }
 
@@ -12573,12 +12705,13 @@ mod lint_cli {
     }
 
     /// `--sandboxed` is how somebody with a standing grant opts one run back
-    /// out, and it refuses rather than falling back.
+    /// out: it selects the boundary, and if the boundary cannot be had it
+    /// refuses rather than falling back.
     #[test]
     fn asking_for_the_sandbox_overrides_a_standing_grant() {
         let decision = lint_host_decision(&layers(None, Some(true)), true, false);
         assert!(!decision.granted());
-        assert_eq!(decision.reason, rto_exec::LintReason::InvocationDenied);
+        assert_eq!(decision.reason, rto_exec::LintReason::SandboxByInvocation);
     }
 
     /// With no flag, the gate must say exactly what the config layers say — so
@@ -12625,15 +12758,27 @@ mod lint_cli {
         }
     }
 
-    /// The three readings ADR-0020 condition 5 requires be surfaced where a user
-    /// meets them. One list feeds both the human report and the JSON one, so a
+    /// The readings ADR-0020 condition 5 requires be surfaced where a user meets
+    /// them. One list feeds both the human report and the JSON one, so a
     /// scripted consumer cannot be told less than a person.
+    ///
+    /// Four now rather than three. Conditions 1-2 add one that did not exist
+    /// while every run was a host run: a sandboxed run reports what the
+    /// **image's** rustc said, which is not this machine's, so the number moves
+    /// with the image as well as with the toolchain. It belongs in this list
+    /// rather than only beside the isolation line, because a `--json` consumer
+    /// reads this list and would otherwise be told less than a person is.
     #[test]
-    fn the_caveats_name_all_three_readings_that_move_a_count() {
-        assert_eq!(LINT_CAVEATS.len(), 3);
+    fn the_caveats_name_every_reading_that_moves_a_count() {
+        assert_eq!(LINT_CAVEATS.len(), 4);
         let all = LINT_CAVEATS.join(" ");
-        for reading in ["renamed", "removed", "[workspace.lints]"] {
+        for reading in ["renamed", "removed", "[workspace.lints]", "image"] {
             assert!(all.contains(reading), "no caveat covers {reading}: {all}");
+        }
+        // Each is a way the number moves **without the code changing**, which is
+        // the property that makes them one list rather than assorted notes.
+        for caveat in LINT_CAVEATS {
+            assert!(!caveat.trim().is_empty());
         }
     }
 }
@@ -13013,12 +13158,18 @@ mod security_cli {
     #[cfg(not(feature = "exec-boxlite"))]
     #[test]
     fn a_build_with_no_sandbox_refuses_and_names_the_bootstrap() {
-        let message = crate::run_security(SecurityAction::Run {
-            analyzer: "semgrep".to_owned(),
-            sandboxed: false,
-            allow_unsandboxed: false,
-            json: false,
-        })
+        let message = crate::run_security(
+            SecurityAction::Run {
+                analyzer: "semgrep".to_owned(),
+                sandboxed: false,
+                allow_unsandboxed: false,
+                json: false,
+            },
+            // `[lint] image` is a linter's, and this is `security run`. `None`
+            // is the honest value rather than a placeholder: a reader-class
+            // analyzer's image is pinned in `SANDBOX_IMAGES` and never supplied.
+            None,
+        )
         .expect_err("a build with no sandbox must refuse the sandboxed path")
         .to_string();
 
@@ -13055,12 +13206,15 @@ mod security_cli {
     #[test]
     fn asking_for_the_sandbox_explicitly_refuses_identically() {
         let refuse = |sandboxed| {
-            crate::run_security(SecurityAction::Run {
-                analyzer: "semgrep".to_owned(),
-                sandboxed,
-                allow_unsandboxed: false,
-                json: false,
-            })
+            crate::run_security(
+                SecurityAction::Run {
+                    analyzer: "semgrep".to_owned(),
+                    sandboxed,
+                    allow_unsandboxed: false,
+                    json: false,
+                },
+                None,
+            )
             .expect_err("no sandbox in this build")
             .to_string()
         };
@@ -13218,6 +13372,7 @@ mod security_cli {
     fn prefetch_and_status_default_to_every_analyzer() {
         let SecurityAction::Prefetch {
             analyzer,
+            image,
             allow_download,
             json,
         } = action(["roteiro", "security", "prefetch"])
@@ -13229,6 +13384,9 @@ mod security_cli {
         // Downloading is asked for, never assumed: a bare `prefetch` must not
         // start a quarter-gigabyte transfer.
         assert!(!allow_download);
+        // And no image is assumed either — `prefetch` pulls what `[lint] image`
+        // names, or what `--image` names, and invents nothing.
+        assert_eq!(image, None);
 
         let SecurityAction::Status { analyzer, json } = action([
             "roteiro",

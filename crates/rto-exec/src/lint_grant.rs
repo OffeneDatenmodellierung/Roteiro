@@ -126,11 +126,35 @@ pub enum Requested {
     Sandbox,
 }
 
-/// Which layer decided, and therefore what the person should do about it.
+/// Which backend a decision selects.
 ///
-/// Every variant is one sentence of explanation and one of remedy, because with
-/// the sandbox unbuilt a refusal **is** the command's entire user interface. A
-/// gate that only says no teaches the reader to route around it.
+/// The value that used to be a boolean called *granted*, and the rename is the
+/// substance rather than the style. While conditions 1-2 were unbuilt there were
+/// only two outcomes — run on the host, or refuse — so "granted" answered the
+/// whole question. Now there are two *backends*, and the layers choose between
+/// them rather than choosing between running and not.
+///
+/// Nothing in this type says whether the chosen backend is **available**. That
+/// is deliberate: availability is a property of the machine and the build, not
+/// of the policy, and a selection that quietly became a host run because a
+/// hypervisor was missing is the silent downgrade ADR-0020 §6 exists to prevent.
+/// The runner asks; this module only ever says which one to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Backend {
+    /// A digest-pinned image in a microVM. The default.
+    Sandbox,
+    /// This machine, with this user's toolchain, filesystem and credentials.
+    Host,
+}
+
+/// Which layer decided, and therefore what the person should be told.
+///
+/// Every variant carries one sentence of explanation, because a decision the
+/// person did not make is one they have to be able to account for — most of all
+/// when it overrules something they *did* say. `--allow-unsandboxed` in a
+/// repository that denies host execution runs sandboxed, and that has to be a
+/// sentence rather than a silence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Reason {
@@ -138,72 +162,110 @@ pub enum Reason {
     GrantedByInvocation,
     /// Host execution was granted by the user's own config, with no flag needed.
     GrantedByUserLayer,
-    /// This repository's `roteiro.toml` denied it. Nothing overrides this.
-    ProjectDenied,
-    /// `--sandboxed` was passed, and no sandbox exists to honour it.
-    InvocationDenied,
-    /// The user's own config says `false`.
-    UserLayerDenied,
-    /// Nobody granted it — **the default**, and the common case.
-    Ungranted,
+    /// Nobody asked for anything — **the default**, and the common case.
+    SandboxByDefault,
+    /// `--sandboxed` was passed.
+    SandboxByInvocation,
+    /// The user's own config says `false`, so the host is off the table.
+    SandboxByUserLayer,
+    /// This repository's `roteiro.toml` denied host execution. Nothing
+    /// overrides this, including `--allow-unsandboxed`.
+    SandboxByProjectDenial,
 }
 
 impl Reason {
+    /// Which backend this reason selects.
+    #[must_use]
+    pub fn backend(self) -> Backend {
+        match self {
+            Self::GrantedByInvocation | Self::GrantedByUserLayer => Backend::Host,
+            Self::SandboxByDefault
+            | Self::SandboxByInvocation
+            | Self::SandboxByUserLayer
+            | Self::SandboxByProjectDenial => Backend::Sandbox,
+        }
+    }
+
     /// Whether the linter may run on this host.
     #[must_use]
     pub fn granted(self) -> bool {
-        matches!(self, Self::GrantedByInvocation | Self::GrantedByUserLayer)
+        self.backend() == Backend::Host
     }
 
-    /// Why the run was refused, and exactly what to do to allow it.
+    /// One sentence naming which layer decided, for the line printed before the
+    /// run.
     ///
-    /// `None` for a grant. Every refusal names a remedy that would actually
-    /// work *for that reason* — telling someone in a repository that denies host
-    /// execution to edit their user config would waste their time, and telling
-    /// someone who typed `--sandboxed` that they forgot to opt in would be
-    /// untrue.
+    /// Phrased to complete "running clippy …", so the two backends' disclosures
+    /// read alike and a person can tell at a glance which one they got.
     #[must_use]
-    pub fn remedy(self) -> Option<&'static str> {
+    pub fn explanation(self) -> &'static str {
         match self {
-            Self::GrantedByInvocation | Self::GrantedByUserLayer => None,
-            Self::ProjectDenied => Some(
-                "this repository's `roteiro.toml` sets `[lint] allow_unsandboxed = false`, which \
-                 denies host execution for everyone working in it. Neither your own config nor \
-                 `--allow-unsandboxed` overrides that — a project may always deny. If it should \
-                 not, that is a change to the repository, not to your machine.",
-            ),
-            Self::InvocationDenied => Some(
-                "you passed `--sandboxed`, and this build has no sandboxed builder to honour it \
-                 (ADR-0020 conditions 1-2 are unbuilt). Nothing was run, and nothing fell back to \
-                 this host: asking for isolation and getting execution is the one outcome this \
-                 command will not produce.",
-            ),
-            Self::UserLayerDenied => Some(
-                "your `~/.roteiro/config.toml` sets `[lint] allow_unsandboxed = false`. Pass \
-                 `--allow-unsandboxed` to override it for this run, or change the key.",
-            ),
+            Self::GrantedByInvocation => "on this host, granted by `--allow-unsandboxed`",
+            Self::GrantedByUserLayer => {
+                "on this host, granted by `[lint] allow_unsandboxed` in your own config"
+            }
+            Self::SandboxByDefault => "sandboxed, which is the default",
+            Self::SandboxByInvocation => "sandboxed, as `--sandboxed` asked",
+            Self::SandboxByUserLayer => {
+                "sandboxed — your `~/.roteiro/config.toml` sets `[lint] allow_unsandboxed = false`"
+            }
+            Self::SandboxByProjectDenial => {
+                "sandboxed — this repository's `roteiro.toml` sets `[lint] allow_unsandboxed = \
+                 false`, which denies host execution for everyone working in it and is not \
+                 overridden by `--allow-unsandboxed`"
+            }
+        }
+    }
+
+    /// How this person could run on the host instead, if the sandbox cannot be
+    /// had — or `None` when they could not.
+    ///
+    /// Consulted only by a refusal, and it exists so that a refusal names a way
+    /// forward **that would actually work for this reason**. Telling someone in
+    /// a repository that denies host execution to pass `--allow-unsandboxed`
+    /// would waste their time, and telling someone who is already on the host
+    /// how to get there would be nonsense. Both were live bugs in the shape this
+    /// replaces (#426's refusals rule).
+    #[must_use]
+    pub fn host_escape(self) -> Option<&'static str> {
+        match self {
+            // Two reasons, one answer, and both are "there is nothing to offer":
+            //
+            // - a granted run is **already** on the host, so an escape to it
+            //   would be nonsense;
+            // - a project denial **cannot** be escaped, so offering
+            //   `--allow-unsandboxed` would waste the reader's time. The way
+            //   forward there is a change to the repository, not to a machine.
+            //
+            // They share an arm because clippy is right that the bodies are
+            // identical; they are listed separately above because a future
+            // editor changing one must not silently change the other.
+            Self::GrantedByInvocation | Self::GrantedByUserLayer | Self::SandboxByProjectDenial => {
+                None
+            }
             // Built line-by-line rather than as one wrapped string: this is the
-            // only text most users will ever see from this command, and a
-            // remedy whose indentation drifts when someone reflows a comment is
-            // a remedy that stops being copy-pasteable.
-            Self::Ungranted => Some(concat!(
-                "`roteiro lint` runs the linter sandboxed by default, and the sandboxed builder \
-                 is not built yet (ADR-0020 conditions 1-2), so there is nothing to run it in. \
-                 Nothing was run.\n",
-                "  Running it on this host instead means `cargo clippy` compiles this tree here, \
-                 which executes its build scripts and loads its proc macros with your filesystem \
-                 and your credentials. In your own repository that is the build you were going \
-                 to run anyway; in a branch you are reviewing it is somebody else's code. \
-                 Roteiro will not make that choice for you.\n",
-                "  To allow it, either one of these is enough — you do not need both:\n",
+            // text most people will ever see from this command, and a remedy
+            // whose indentation drifts when someone reflows a comment is a
+            // remedy that stops being copy-pasteable.
+            Self::SandboxByDefault => Some(concat!(
+                "Or accept an unisolated run instead. `cargo clippy` would then compile this tree                  here, executing its build scripts and loading its proc macros with your                  filesystem and your credentials. In your own repository that is the build you                  were going to run anyway; in a branch you are reviewing it is somebody else's                  code.\n",
+                "  Either one of these is enough — you do not need both:\n",
                 "    for this run:  roteiro lint <analyzer> --allow-unsandboxed\n",
-                "    standing:      add to ~/.roteiro/config.toml\n",
-                "                     [lint]\n",
-                "                     allow_unsandboxed = true\n",
-                "  A project's `roteiro.toml` cannot grant it — a committed file may deny host \
-                 execution and never grant it, because a merged line would otherwise start \
-                 running builds on every teammate's machine (ADR-0020 §6).",
+                "    standing:      add `[lint] allow_unsandboxed = true` to ~/.roteiro/config.toml\n",
+                // Kept from the refusal this replaces. Someone who has just been
+                // shown a config key will reach for the file they already edit,
+                // and `roteiro.toml` is the wrong one — silently, since a
+                // committed grant is read and discarded.
+                "  A project's `roteiro.toml` cannot grant it — a committed file may deny host                  execution and never grant it, because a merged line would otherwise start                  running builds on every teammate's machine (ADR-0020 §6).",
             )),
+            Self::SandboxByUserLayer => Some(
+                "or override your own `[lint] allow_unsandboxed = false` for this run with \
+                 `--allow-unsandboxed`, accepting that the tree is then compiled on this host.",
+            ),
+            Self::SandboxByInvocation => Some(
+                "or drop `--sandboxed` and pass `--allow-unsandboxed`, accepting that the tree is \
+                 then compiled on this host.",
+            ),
         }
     }
 }
@@ -223,6 +285,13 @@ pub struct Decision {
 }
 
 impl Decision {
+    /// Which backend this run uses. Never *whether it is available* — see
+    /// [`Backend`].
+    #[must_use]
+    pub fn backend(self) -> Backend {
+        self.reason.backend()
+    }
+
     /// Whether this run may execute the linter on this host.
     #[must_use]
     pub fn granted(self) -> bool {
@@ -264,12 +333,12 @@ impl Decision {
 #[must_use]
 pub fn decide(config: ConfigGrant, requested: Requested) -> Decision {
     let reason = match (config.project_denied(), requested, config.as_effective()) {
-        (true, _, _) => Reason::ProjectDenied,
-        (false, Requested::Sandbox, _) => Reason::InvocationDenied,
+        (true, _, _) => Reason::SandboxByProjectDenial,
+        (false, Requested::Sandbox, _) => Reason::SandboxByInvocation,
         (false, Requested::Host, _) => Reason::GrantedByInvocation,
         (false, Requested::Unset, Some(true)) => Reason::GrantedByUserLayer,
-        (false, Requested::Unset, Some(false)) => Reason::UserLayerDenied,
-        (false, Requested::Unset, None) => Reason::Ungranted,
+        (false, Requested::Unset, Some(false)) => Reason::SandboxByUserLayer,
+        (false, Requested::Unset, None) => Reason::SandboxByDefault,
     };
     debug_assert_eq!(
         reason.granted(),
@@ -286,18 +355,24 @@ pub fn decide(config: ConfigGrant, requested: Requested) -> Decision {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigGrant, Decision, Reason, Requested, decide};
+    use super::{Backend, ConfigGrant, Decision, Reason, Requested, decide};
 
     fn at(project: Option<bool>, user: Option<bool>, requested: Requested) -> Decision {
         decide(ConfigGrant::from_layers(project, user), requested)
     }
 
     /// The default, and the reason this module exists: saying nothing asks for
-    /// the sandbox, and the sandbox is unbuilt, so nothing runs.
+    /// the sandbox.
+    ///
+    /// It used to assert that saying nothing *refused*, which was true only
+    /// while conditions 1-2 were unbuilt. The layers never said "refuse" — they
+    /// said "sandbox", and refusing was what the sandbox amounted to when there
+    /// was not one. Now there is, and the same table means what it always said.
     #[test]
-    fn saying_nothing_does_not_grant_the_host() {
+    fn saying_nothing_selects_the_sandbox() {
         let decision = at(None, None, Requested::Unset);
-        assert_eq!(decision.reason, Reason::Ungranted);
+        assert_eq!(decision.reason, Reason::SandboxByDefault);
+        assert_eq!(decision.backend(), Backend::Sandbox);
         assert!(!decision.granted());
     }
 
@@ -309,13 +384,17 @@ mod tests {
     fn every_layer_combination_matches_the_adr_table() {
         for requested in [Requested::Unset, Requested::Host, Requested::Sandbox] {
             for user in [None, Some(true), Some(false)] {
-                // The project layer may deny, and its denial is absolute.
+                // The project layer may deny host execution, and its denial is
+                // absolute. What it denies is the *host*, never the run: the
+                // sandbox is what everyone in that repository gets.
+                let denied = at(Some(false), user, requested);
                 assert_eq!(
-                    at(Some(false), user, requested).reason,
-                    Reason::ProjectDenied,
+                    denied.reason,
+                    Reason::SandboxByProjectDenial,
                     "project denial must outrank user={user:?} requested={requested:?}"
                 );
-                assert!(!at(Some(false), user, requested).granted());
+                assert_eq!(denied.backend(), Backend::Sandbox);
+                assert!(!denied.granted());
 
                 // The project layer may never grant: with `project = Some(true)`
                 // the outcome must be identical to the key being absent.
@@ -361,18 +440,22 @@ mod tests {
         );
         assert_eq!(
             at(Some(false), Some(false), Requested::Host).reason,
-            Reason::ProjectDenied
+            Reason::SandboxByProjectDenial
         );
     }
 
-    /// Asking for the sandbox is a denial of the host, and it outranks a
-    /// standing grant: `--sandboxed` is how someone with the key set opts *one*
-    /// run back out.
+    /// Asking for the sandbox denies the host, and it outranks a standing grant:
+    /// `--sandboxed` is how someone with the key set opts *one* run back out.
     #[test]
     fn asking_for_the_sandbox_denies_the_host_whatever_the_config_says() {
         for user in [None, Some(true), Some(false)] {
             let decision = at(None, user, Requested::Sandbox);
-            assert_eq!(decision.reason, Reason::InvocationDenied, "user={user:?}");
+            assert_eq!(
+                decision.reason,
+                Reason::SandboxByInvocation,
+                "user={user:?}"
+            );
+            assert_eq!(decision.backend(), Backend::Sandbox);
             assert!(!decision.granted());
         }
     }
@@ -381,13 +464,13 @@ mod tests {
     /// never confused with the decision itself.
     #[test]
     fn an_ignored_project_grant_is_reported_beside_the_outcome_not_folded_into_it() {
-        let refused = at(Some(true), None, Requested::Unset);
-        assert!(!refused.granted());
-        assert!(refused.project_grant_ignored);
-        assert!(refused.ignored_project_grant_note().is_some());
+        let sandboxed = at(Some(true), None, Requested::Unset);
+        assert!(!sandboxed.granted());
+        assert!(sandboxed.project_grant_ignored);
+        assert!(sandboxed.ignored_project_grant_note().is_some());
 
-        // Also reported when the run went ahead for an unrelated reason: the
-        // committed line still did nothing, and the team still needs telling.
+        // Also reported when the run went to the host for an unrelated reason:
+        // the committed line still did nothing, and the team still needs telling.
         let granted = at(Some(true), None, Requested::Host);
         assert!(granted.granted());
         assert!(granted.project_grant_ignored);
@@ -424,114 +507,142 @@ mod tests {
         assert_eq!(ConfigGrant::from_layers(None, None).as_effective(), None);
     }
 
-    /// With the sandbox unbuilt, a refusal is this command's entire user
-    /// interface — so every refusal must carry a remedy, and no grant may.
+    /// Every reason is printed before a run, so every reason has to have
+    /// something to print — and it has to name the layer, because a decision
+    /// nobody typed is one the person has to be able to account for.
     #[test]
-    fn every_refusal_carries_a_remedy_and_no_grant_does() {
+    fn every_reason_explains_which_layer_decided() {
         for reason in [
-            Reason::Ungranted,
-            Reason::UserLayerDenied,
-            Reason::ProjectDenied,
-            Reason::InvocationDenied,
+            Reason::GrantedByInvocation,
+            Reason::GrantedByUserLayer,
+            Reason::SandboxByDefault,
+            Reason::SandboxByInvocation,
+            Reason::SandboxByUserLayer,
+            Reason::SandboxByProjectDenial,
         ] {
-            let remedy = reason
-                .remedy()
-                .unwrap_or_else(|| panic!("{reason:?} has no remedy"));
-            assert!(!remedy.is_empty());
+            let explanation = reason.explanation();
+            assert!(!explanation.trim().is_empty(), "{reason:?} says nothing");
+            let names_the_layer = explanation.contains("--allow-unsandboxed")
+                || explanation.contains("--sandboxed")
+                || explanation.contains("config")
+                || explanation.contains("roteiro.toml")
+                || explanation.contains("default");
             assert!(
-                remedy.contains("ADR-0020") || remedy.contains("--allow-unsandboxed"),
-                "{reason:?}: a refusal must point somewhere: {remedy}"
+                names_the_layer,
+                "{reason:?} does not say who decided: {explanation}"
             );
-        }
-        for reason in [Reason::GrantedByInvocation, Reason::GrantedByUserLayer] {
-            assert!(reason.remedy().is_none(), "{reason:?} was granted");
-            assert!(reason.granted());
+            // The two backends must be told apart at a glance, since this is the
+            // sentence a person reads to know what just happened to their tree.
+            match reason.backend() {
+                Backend::Host => assert!(
+                    explanation.contains("on this host"),
+                    "{reason:?}: {explanation}"
+                ),
+                Backend::Sandbox => assert!(
+                    explanation.contains("sandboxed"),
+                    "{reason:?}: {explanation}"
+                ),
+            }
         }
     }
 
-    /// Each remedy has to work *for its own reason*. Telling someone in a
-    /// denying repository to edit their user config wastes their time, and
-    /// telling someone who typed `--sandboxed` that they forgot to opt in is
-    /// untrue — so the two must not share wording.
+    /// A refusal names a way forward **that would work for this person**, and
+    /// the one person it must never offer `--allow-unsandboxed` to is the one in
+    /// a repository that denies it (#426).
+    ///
+    /// The property that used to be `remedy()`. It moved because what a refusal
+    /// has to say changed: while the sandbox was unbuilt, *every* selection of
+    /// it was a refusal and needed a remedy. Now a sandbox selection is an
+    /// ordinary run, and the escape is consulted only when the boundary cannot
+    /// be had.
     #[test]
-    fn each_remedy_names_the_layer_that_actually_refused() {
-        let ungranted = Reason::Ungranted.remedy().expect("remedy");
-        assert!(ungranted.contains("--allow-unsandboxed"), "{ungranted}");
+    fn the_host_escape_is_offered_only_to_someone_who_could_take_it() {
+        // Nothing overrides a project denial, so there is no escape to name.
         assert!(
-            ungranted.contains("[lint]"),
-            "the standing form: {ungranted}"
+            Reason::SandboxByProjectDenial.host_escape().is_none(),
+            "a project denial cannot be escaped, so offering a flag wastes the reader's time"
+        );
+        // Already on the host: there is nothing to escape to.
+        for granted in [Reason::GrantedByInvocation, Reason::GrantedByUserLayer] {
+            assert!(granted.host_escape().is_none(), "{granted:?}");
+            assert!(granted.granted());
+        }
+        // And every reason that *can* be escaped says how, in a way that fits
+        // what that person actually did.
+        let default = Reason::SandboxByDefault.host_escape().expect("escape");
+        assert!(default.contains("--allow-unsandboxed"), "{default}");
+        assert!(
+            default.contains("[lint] allow_unsandboxed = true"),
+            "{default}"
         );
         assert!(
-            ungranted.contains("~/.roteiro/config.toml"),
-            "and where it goes: {ungranted}"
+            default.contains("~/.roteiro/config.toml"),
+            "and where it goes: {default}"
         );
         assert!(
-            ungranted.contains("sandboxed by default"),
-            "and why it refused: {ungranted}"
-        );
-        assert!(
-            ungranted.contains("not built yet"),
-            "and that the intended path is unbuilt: {ungranted}"
-        );
-        assert!(
-            ungranted.contains("cannot grant"),
-            "and that roteiro.toml is not the place: {ungranted}"
+            default.contains("build scripts"),
+            "and what is being accepted: {default}"
         );
         // The asymmetry with ADR-0019, in the one place a user meets it. Two
-        // remedies listed without this sentence read as two *steps*, and someone
+        // forms listed without this sentence read as two *steps*, and someone
         // who set the config key would go on typing the flag forever — which is
         // the outcome ADR-0020 §6 gives as its reason for the asymmetry.
         assert!(
-            ungranted.contains("do not need both"),
-            "the remedy must say either one suffices: {ungranted}"
+            default.contains("do not need both"),
+            "the escape must say either one suffices: {default}"
+        );
+        assert!(
+            default.contains("cannot grant"),
+            "and that the committed file is not the place to put it: {default}"
         );
 
-        let project = Reason::ProjectDenied.remedy().expect("remedy");
-        assert!(project.contains("roteiro.toml"), "{project}");
+        let user = Reason::SandboxByUserLayer.host_escape().expect("escape");
+        assert!(user.contains("--allow-unsandboxed"), "{user}");
         assert!(
-            !project.contains("~/.roteiro/config.toml"),
-            "editing your own config would not help, so it must not be offered: {project}"
-        );
-
-        let sandboxed = Reason::InvocationDenied.remedy().expect("remedy");
-        assert!(sandboxed.contains("--sandboxed"), "{sandboxed}");
-        assert!(
-            sandboxed.contains("fell back") || sandboxed.contains("not produce"),
-            "asking for isolation and getting execution is what it must promise \
-             against: {sandboxed}"
-        );
-
-        let user = Reason::UserLayerDenied.remedy().expect("remedy");
-        assert!(user.contains("~/.roteiro/config.toml"), "{user}");
-        assert!(
-            user.contains("--allow-unsandboxed"),
+            user.contains("your own"),
             "your own denial is yours to override: {user}"
+        );
+
+        let sandboxed = Reason::SandboxByInvocation.host_escape().expect("escape");
+        assert!(sandboxed.contains("--sandboxed"), "{sandboxed}");
+        assert!(sandboxed.contains("--allow-unsandboxed"), "{sandboxed}");
+    }
+
+    /// The default escape is copy-pasteable, so its shape is pinned: an editor
+    /// that reflows the string must not silently turn the two forms into prose,
+    /// and `--allow-unsandboxed` must never be left dangling at a wrap point
+    /// where a copy would lose it.
+    #[test]
+    fn the_default_escape_keeps_each_form_on_its_own_line() {
+        let escape = Reason::SandboxByDefault.host_escape().expect("escape");
+        let lines: Vec<&str> = escape.lines().map(str::trim).collect();
+        assert!(
+            lines.contains(&"for this run:  roteiro lint <analyzer> --allow-unsandboxed"),
+            "{escape}"
+        );
+        assert!(
+            lines.contains(
+                &"standing:      add `[lint] allow_unsandboxed = true` to ~/.roteiro/config.toml"
+            ),
+            "{escape}"
         );
     }
 
-    /// The remedy is copy-pasteable, so its shape is pinned: an editor that
-    /// reflows the string must not silently turn the config snippet into prose.
+    /// `granted()` and `backend()` are two spellings of one fact, and a type
+    /// where they could disagree is a type where a caller checks the wrong one.
     #[test]
-    fn the_default_remedy_keeps_its_config_snippet_on_its_own_lines() {
-        let remedy = Reason::Ungranted.remedy().expect("remedy");
-        let snippet: Vec<&str> = remedy
-            .lines()
-            .map(str::trim)
-            .skip_while(|l| *l != "[lint]")
-            .take(2)
-            .collect();
-        assert_eq!(
-            snippet,
-            vec!["[lint]", "allow_unsandboxed = true"],
-            "the TOML must stand alone, in order, one key per line"
-        );
-        // And the flag form is a whole line too, so `--allow-unsandboxed` is
-        // never left dangling at a wrap point where a copy would lose it.
-        assert!(
-            remedy
-                .lines()
-                .any(|l| l.trim() == "for this run:  roteiro lint <analyzer> --allow-unsandboxed"),
-            "{remedy}"
-        );
+    fn granted_and_backend_can_never_disagree() {
+        for requested in [Requested::Unset, Requested::Host, Requested::Sandbox] {
+            for user in [None, Some(true), Some(false)] {
+                for project in [None, Some(true), Some(false)] {
+                    let decision = at(project, user, requested);
+                    assert_eq!(
+                        decision.granted(),
+                        decision.backend() == Backend::Host,
+                        "project={project:?} user={user:?} requested={requested:?}"
+                    );
+                }
+            }
+        }
     }
 }
