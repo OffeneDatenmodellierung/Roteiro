@@ -1147,3 +1147,161 @@ fn links_app_config_only_without_infer_or_matrix_is_rejected() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// Run `links -w one` from `cwd` and assert the scope holds each repo exactly
+/// once — the invariant behind issue #501, checked through what the command
+/// actually reports.
+#[cfg(unix)]
+fn assert_scope_holds_each_repo_once(
+    base: &Path,
+    cwd: &Path,
+    cwd_name: &str,
+    distinct_repos: usize,
+) {
+    let run = |extra: &[&str]| {
+        let mut args = vec!["links", "-w", "one"];
+        args.extend_from_slice(extra);
+        Command::new(BIN)
+            .args(&args)
+            .current_dir(cwd)
+            .env("ROTEIRO_HOME", base)
+            .output()
+            .expect("run roteiro")
+    };
+    let out = run(&["--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let report: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "links --json ({cwd_name}): {e}; stdout={stdout}; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+
+    // THE invariant: alpha declares that link once, so it is reported once.
+    // Before the fix, running from inside alpha reported it twice — once as
+    // `alpha`, once as a phantom `alpha-2`.
+    let occurrences = report
+        .iter()
+        .filter(|r| r["to"] == "beta::sym:rust:x#Y")
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "alpha declares this link once, so the workspace scope must contain alpha \
+         once and the report must show it once; got {occurrences} occurrence(s) from \
+         cwd={cwd_name} — the repo is in the scope set more than once, so its \
+         `roteiro.toml` was read and resolved more than once (issue #501). \
+         Report: {report:#?}"
+    );
+
+    // No reported repo may be a disambiguation suffix with no second repo behind
+    // it — that is the duplicate wearing a different name.
+    for label in report.iter().filter_map(|r| r["repo"].as_str()) {
+        assert!(
+            !label.ends_with("-2"),
+            "`{label}` is a disambiguation suffix invented for a repo the workspace \
+             registry holds only once — the scope set contains one repo twice \
+             (issue #501, cwd={cwd_name}). Report: {report:#?}"
+        );
+    }
+
+    // And the scope size is the number of DISTINCT repos, derived from the
+    // fixture rather than written down — a literal count passes for the wrong
+    // reason the moment the fixture changes.
+    let text = String::from_utf8_lossy(&run(&[]).stdout).into_owned();
+    assert!(
+        text.contains(&format!("across {distinct_repos} repo(s)")),
+        "the scope is the {distinct_repos} distinct repo(s) of this fixture (declared \
+         members plus the cwd repo when it is not one), from cwd={cwd_name}; got: {text}"
+    );
+}
+
+/// `roteiro links -w <name>` must put each repo in the workspace scope **exactly
+/// once**, however that repo happens to be spelled (issue #501).
+///
+/// The defect was a set defect, not a count one. `links_scope_paths` de-duplicated
+/// with a `BTreeSet<PathBuf>` over path *strings*, and the two sources spell the
+/// same repo differently: the current repo arrives fully symlink-resolved
+/// (`current_dir` is `getcwd`), while a configured member keeps whatever the
+/// config wrote. So both spellings survived — and `run_links` iterates that list
+/// directly, reading the repo's `roteiro.toml` twice and reporting each declared
+/// link twice, the second under a fabricated `<name>-2` project the workspace
+/// registry does not contain.
+///
+/// Including the current repo is correct and is asserted too — `links` resolves
+/// *this* repo's declarations against a workspace, so it must be in scope even
+/// when it is not a declared member. The bug was the missing de-duplication, not
+/// the inclusion.
+#[test]
+#[cfg(unix)]
+fn a_repo_is_in_the_links_scope_exactly_once_however_it_is_spelled() {
+    let base = std::env::temp_dir().join(format!("roteiro-links-dedup-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let real = base.join("real");
+    std::fs::create_dir_all(&real).expect("mkdir real");
+    for name in ["alpha", "beta", "gamma"] {
+        let dir = real.join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir repo");
+        git(&dir, &["init", "-q"]);
+    }
+    // A second spelling of the same directory. On a developer Mac `/tmp` and
+    // `/var` are already symlinks, so the defect reproduced there by accident; an
+    // explicit link makes the test mean the same thing on CI, where they are not.
+    let alias = base.join("alias");
+    std::os::unix::fs::symlink(&real, &alias).expect("symlink alias -> real");
+
+    // The workspace declares alpha and beta through the ALIAS. A member repo
+    // entering the scope from its own cwd arrives resolved, so the two paths
+    // differ as strings while naming one repo.
+    let members = ["alpha", "beta"];
+    let declared = members
+        .iter()
+        .map(|m| format!("\"{}\"", alias.join(m).to_str().unwrap()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let config = format!("[[workspaces]]\nname = \"one\"\nrepos = [{declared}]\n");
+    for name in ["alpha", "beta", "gamma"] {
+        std::fs::write(real.join(name).join("roteiro.toml"), &config).expect("write config");
+    }
+    // One authored link in alpha, so the report has something to double.
+    std::fs::write(
+        real.join("alpha").join("roteiro.toml"),
+        format!("{config}\n[[links]]\nfrom = \"local\"\nto = \"beta::sym:rust:x#Y\"\n"),
+    )
+    .expect("write alpha config");
+
+    for cwd_name in ["alpha", "beta", "gamma"] {
+        // Enter through the alias: the child's `getcwd` hands the command the
+        // resolved spelling, exactly as a shell would.
+        let cwd = alias.join(cwd_name);
+        let mut distinct: std::collections::BTreeSet<std::path::PathBuf> = members
+            .iter()
+            .map(|m| alias.join(m).canonicalize().expect("canonicalise member"))
+            .collect();
+        distinct.insert(cwd.canonicalize().expect("canonicalise cwd"));
+        assert_scope_holds_each_repo_once(&base, &cwd, cwd_name, distinct.len());
+    }
+
+    // The inclusion itself must not have been removed to fix the count: a
+    // non-member cwd is still in scope, which is the whole point of `links`
+    // resolving THIS repo's declarations against a workspace.
+    std::fs::write(
+        real.join("gamma").join("roteiro.toml"),
+        format!("{config}\n[[links]]\nfrom = \"local\"\nto = \"beta::sym:rust:g#H\"\n"),
+    )
+    .expect("write gamma config");
+    let out = Command::new(BIN)
+        .args(["links", "-w", "one", "--json"])
+        .current_dir(alias.join("gamma"))
+        .env("ROTEIRO_HOME", &base)
+        .output()
+        .expect("run roteiro");
+    let report: Vec<serde_json::Value> =
+        serde_json::from_slice(&out.stdout).expect("links --json (gamma)");
+    assert!(
+        report.iter().any(|r| r["to"] == "beta::sym:rust:g#H"),
+        "a non-member current repo must still be in scope — de-duplicating must not \
+         become excluding: {report:#?}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}

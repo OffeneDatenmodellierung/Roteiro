@@ -1881,13 +1881,23 @@ pub(crate) fn emit_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
 /// (`project` / `user` / `default`) — the answer to "why did it use that?".
 fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
     if json {
-        // The effective config, plus one **added** top-level key carrying the
-        // model resolution. Added rather than nested: every existing path
+        // The effective config, plus **added** top-level keys carrying the model
+        // and workspace resolutions. Added rather than nested: every existing path
         // (`infer.min_confidence`, `debt.ignore`, …) is where it was, so a
         // consumer written against the old shape keeps working.
+        //
+        // `workspace_resolution` carries what the text output carries (issue
+        // #499): the effective config already serialises the *declared*
+        // `workspace`/`workspaces`/`standalone` tables, and this adds the
+        // membership each of them resolves to, so `--json` can answer "which
+        // repos are in workspace X" without re-deriving the rule.
         let mut value = serde_json::to_value(&loaded.effective)?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert("model_resolution".to_owned(), model_resolution_json(loaded));
+            obj.insert(
+                "workspace_resolution".to_owned(),
+                serde_json::to_value(workspace_resolution(loaded))?,
+            );
         }
         emit_json(&value)?;
         return Ok(());
@@ -2003,7 +2013,7 @@ fn print_config_sections(loaded: &config::Loaded) {
     print_lint_section(loaded);
     print_debt_section(loaded);
     print_telemetry_section(e, p, u);
-    print_workspace_section(e, p, u);
+    print_workspace_section(loaded);
 }
 
 /// Print `[remote]` — the one table whose `enabled` key does **not** follow this
@@ -2999,11 +3009,23 @@ fn print_telemetry_section(e: &config::Config, p: &config::Config, u: &config::C
     );
 }
 
-/// Print the `[workspace]` and `[[links]]` config sections (ADR-0008/0009), with
-/// each value's provenance. Split out of [`print_config_sections`] to keep it
-/// under the line budget.
-fn print_workspace_section(e: &config::Config, p: &config::Config, u: &config::Config) {
-    println!("[workspace]");
+/// Print every workspace config section (ADR-0008/0009), with each value's
+/// provenance: the legacy singular `[workspace]`, the named `[[workspaces]]`, the
+/// `[standalone]` table, the **resolved** workspaces those three produce, and
+/// `[[links]]`.
+///
+/// This once printed the `[workspace]` table and nothing else, so a config
+/// declaring three workspaces via `[[workspaces]]`/`[standalone]` rendered as
+/// `roots = None` / `repos = None` — a confident "you have none" from the one
+/// command whose job is being believed about what the configuration did (issue
+/// #499). Both halves are now reported, because they answer different questions:
+/// the **declared** tables say what you wrote, and the **resolved** list says
+/// which repos that turned into, which is the only way "I declared two roots and
+/// got seven repos" is visible.
+fn print_workspace_section(loaded: &config::Loaded) {
+    let e = &loaded.effective;
+    let (p, u) = (&loaded.project, &loaded.user);
+    println!("[workspace]  (legacy singular table; folds in as the `default` workspace when set)");
     println!(
         "  roots = {:?}  ({})",
         e.workspace.roots,
@@ -3014,18 +3036,276 @@ fn print_workspace_section(e: &config::Config, p: &config::Config, u: &config::C
         e.workspace.repos,
         provenance(p.workspace.repos.is_some(), u.workspace.repos.is_some())
     );
-    if !e.links.is_empty() {
+    print_named_workspaces_section(e, p, u);
+    print_standalone_section(e, p, u);
+    print_resolved_workspaces_section(loaded);
+    print_links_section(e);
+}
+
+/// Print the declared `[[workspaces]]` entries. The array is overlaid whole (a
+/// project layer declaring any wins outright), so provenance is reported once for
+/// the array rather than per entry.
+fn print_named_workspaces_section(e: &config::Config, p: &config::Config, u: &config::Config) {
+    if e.workspaces.is_empty() {
+        println!("[[workspaces]]  (none declared)");
+        return;
+    }
+    println!(
+        "[[workspaces]]  ({} declared)  ({})",
+        e.workspaces.len(),
+        provenance(!p.workspaces.is_empty(), !u.workspaces.is_empty())
+    );
+    for w in &e.workspaces {
+        println!("  {}", w.name);
+        println!("    roots = {:?}", w.roots);
+        println!("    repos = {:?}", w.repos);
+    }
+}
+
+/// Print the declared `[standalone]` table, with per-field provenance (it merges
+/// field-by-field, project over user, like `[workspace]`).
+fn print_standalone_section(e: &config::Config, p: &config::Config, u: &config::Config) {
+    println!(
+        "[standalone]  (each discovered repo becomes its own unlinked, single-repo workspace)"
+    );
+    println!(
+        "  roots = {:?}  ({})",
+        e.standalone.roots,
+        provenance(p.standalone.roots.is_some(), u.standalone.roots.is_some())
+    );
+    println!(
+        "  repos = {:?}  ({})",
+        e.standalone.repos,
+        provenance(p.standalone.repos.is_some(), u.standalone.repos.is_some())
+    );
+}
+
+/// Print the `[[links]]` section — this repo's authored cross-repo links.
+fn print_links_section(e: &config::Config) {
+    if e.links.is_empty() {
+        return;
+    }
+    println!(
+        "[[links]]  ({} cross-repo link(s), ADR-0009)",
+        e.links.len()
+    );
+    for l in &e.links {
         println!(
-            "[[links]]  ({} cross-repo link(s), ADR-0009)",
-            e.links.len()
+            "  → {}  ({})",
+            l.to,
+            l.kind.as_deref().unwrap_or("references")
         );
-        for l in &e.links {
+    }
+}
+
+/// Print what the three declared tables actually **resolve** to: each workspace
+/// `-w <name>` can select, and the repos in it right now.
+///
+/// A group that resolves to no repos says which kind of nothing it is, because
+/// "nothing declared" and "nothing matched" are different facts and an empty list
+/// states neither. A group whose roots will not read is reported on its own line
+/// rather than failing the command: `roteiro config` is what you run *because*
+/// something else is broken, so it has to keep working when it is.
+fn print_resolved_workspaces_section(loaded: &config::Loaded) {
+    let resolution = workspace_resolution(loaded);
+    if let Some(err) = &resolution.error {
+        println!("[workspaces resolved]  UNRESOLVED — {err}");
+        println!("  the declared tables above still stand; fix the config and re-run");
+        return;
+    }
+    if resolution.workspaces.is_empty() {
+        println!(
+            "[workspaces resolved]  (none — no `[workspace]`, `[[workspaces]]` or `[standalone]` \
+             names anything, so `serve`/`explorer`/`links` fall back to the current repo alone)"
+        );
+        return;
+    }
+    println!(
+        "[workspaces resolved]  ({} workspace(s) — what `-w <name>` selects, and who is in each)",
+        resolution.workspaces.len()
+    );
+    for w in &resolution.workspaces {
+        println!(
+            "  {}  [{}]  (from {}, {})",
+            w.name,
+            if w.linked { "linked" } else { "standalone" },
+            w.declared_in,
+            w.source
+        );
+        println!(
+            "    declared: {} root(s), {} repo(s)",
+            w.declared_roots.len(),
+            w.declared_repos.len()
+        );
+        for r in &w.declared_roots {
+            println!("      root  {r}");
+        }
+        for r in &w.declared_repos {
+            println!("      repo  {r}");
+        }
+        print_resolved_members(w);
+    }
+}
+
+/// The `resolved:` lines for one workspace: its members, or which kind of nothing
+/// it came to.
+fn print_resolved_members(w: &WorkspaceReport) {
+    if let Some(err) = &w.resolution_error {
+        println!("    resolved: UNKNOWN — {err}");
+        return;
+    }
+    let Some(repos) = &w.resolved_repos else {
+        return;
+    };
+    if repos.is_empty() {
+        if w.declared_roots.is_empty() && w.declared_repos.is_empty() {
             println!(
-                "  → {}  ({})",
-                l.to,
-                l.kind.as_deref().unwrap_or("references")
+                "    resolved: 0 repo(s) — nothing DECLARED (this workspace names no roots \
+                 and no repos)"
+            );
+        } else {
+            println!(
+                "    resolved: 0 repo(s) — nothing MATCHED (the declared roots/repos above \
+                 read, but no git repo was found under them)"
             );
         }
+        return;
+    }
+    println!("    resolved: {} repo(s)", repos.len());
+    for r in repos {
+        println!("      {r}");
+    }
+}
+
+/// One workspace as `roteiro config` reports it (issue #499): the table it was
+/// declared in, the layer that table came from (ADR-0007 provenance), what was
+/// declared, and what that declaration resolves to right now.
+#[derive(serde::Serialize)]
+struct WorkspaceReport {
+    /// The selector `-w <name>` takes.
+    name: String,
+    /// `true` for a linked group (`[workspace]` / `[[workspaces]]`); `false` for a
+    /// `[standalone]` repo, which is its own single-repo workspace.
+    linked: bool,
+    /// The config table this group came from — for `[standalone]`, the field
+    /// within it, since a standalone group is one repo and came from exactly one.
+    declared_in: String,
+    /// The layer that declaration came from: `project`, `user`, or `default`.
+    /// `[workspace]` merges per field, so its two fields are reported separately
+    /// when they disagree rather than one of them being picked.
+    source: String,
+    /// Root directories as declared (before any scanning).
+    declared_roots: Vec<String>,
+    /// Explicit member repos as declared.
+    declared_repos: Vec<String>,
+    /// The member repos this group resolves to now. Absent only when resolution
+    /// failed; an empty list is a real answer (see `resolution_error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_repos: Option<Vec<String>>,
+    /// Why this group could not be resolved (e.g. an unreadable root), reported
+    /// per entry rather than failing the whole command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution_error: Option<String>,
+}
+
+/// Every workspace the config resolves to, for both the text and `--json` output
+/// of `roteiro config`.
+#[derive(serde::Serialize)]
+struct WorkspaceResolution {
+    /// The resolved groups, in resolution order (`default`, then each
+    /// `[[workspaces]]`, then each `[standalone]` repo).
+    workspaces: Vec<WorkspaceReport>,
+    /// Set when the *set* could not be resolved at all — a duplicate linked
+    /// workspace name, or an unreadable `[standalone]` root. Then `workspaces` is
+    /// empty and the declared tables are all that can honestly be reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Whether a resolved `[standalone]` group's repo was named explicitly in
+/// `[standalone] repos` (rather than discovered under `[standalone] roots`) — the
+/// two fields carry separate provenance, and the group came from one of them.
+/// Compared after `~` expansion, the same normalisation
+/// [`config::Config::resolved_workspaces`] applied on the way in.
+fn standalone_repo_is_explicit(e: &config::Config, repo: Option<&String>) -> bool {
+    let Some(repo) = repo else { return false };
+    e.standalone
+        .repos
+        .iter()
+        .flatten()
+        .any(|r| config::expand_tilde(r).as_ref() == std::path::Path::new(repo))
+}
+
+/// Build the workspace resolution report: [`config::Config::resolved_workspaces`]
+/// for the group list, and [`resolved_repo_paths`] for each group's membership —
+/// the same two functions `serve` and `explorer` use, deliberately rather than a
+/// second derivation of the rule, which is how a "what did it resolve to" report
+/// comes to disagree with what actually resolved.
+fn workspace_resolution(loaded: &config::Loaded) -> WorkspaceResolution {
+    let e = &loaded.effective;
+    let (p, u) = (&loaded.project, &loaded.user);
+    // `[[workspaces]]` is overlaid whole (project wins outright when it declares
+    // any); `[workspace]` and `[standalone]` merge per field, so each of their
+    // fields carries its own provenance and none is folded into another's.
+    let named_source = provenance(!p.workspaces.is_empty(), !u.workspaces.is_empty());
+    let ws_roots_src = provenance(p.workspace.roots.is_some(), u.workspace.roots.is_some());
+    let ws_repos_src = provenance(p.workspace.repos.is_some(), u.workspace.repos.is_some());
+    let legacy_source = if ws_roots_src == ws_repos_src {
+        ws_roots_src.to_owned()
+    } else {
+        format!("roots {ws_roots_src}, repos {ws_repos_src}")
+    };
+    let sa_roots_src = provenance(p.standalone.roots.is_some(), u.standalone.roots.is_some());
+    let sa_repos_src = provenance(p.standalone.repos.is_some(), u.standalone.repos.is_some());
+    let resolved = match e.resolved_workspaces() {
+        Ok(r) => r,
+        Err(err) => {
+            return WorkspaceResolution {
+                workspaces: Vec::new(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+    let workspaces = resolved
+        .into_iter()
+        .map(|rw| {
+            let (declared_in, source) = if rw.linked {
+                if e.workspaces.iter().any(|w| w.name == rw.name) {
+                    ("[[workspaces]]".to_owned(), named_source.to_owned())
+                } else {
+                    ("[workspace]".to_owned(), legacy_source.clone())
+                }
+            } else if standalone_repo_is_explicit(e, rw.repos.first()) {
+                // A standalone group is exactly one repo, so it came from exactly
+                // one field — attribute it to that one rather than to whichever
+                // field of the table happens to be set.
+                ("[standalone] repos".to_owned(), sa_repos_src.to_owned())
+            } else {
+                ("[standalone] roots".to_owned(), sa_roots_src.to_owned())
+            };
+            let (resolved_repos, resolution_error) =
+                match resolved_repo_paths(std::slice::from_ref(&rw), &[]) {
+                    Ok(paths) => (
+                        Some(paths.iter().map(|p| p.display().to_string()).collect()),
+                        None,
+                    ),
+                    Err(err) => (None, Some(err.to_string())),
+                };
+            WorkspaceReport {
+                name: rw.name,
+                linked: rw.linked,
+                declared_in,
+                source,
+                declared_roots: rw.roots,
+                declared_repos: rw.repos,
+                resolved_repos,
+                resolution_error,
+            }
+        })
+        .collect();
+    WorkspaceResolution {
+        workspaces,
+        error: None,
     }
 }
 
@@ -6778,7 +7058,43 @@ fn links_scope_paths(
         paths.insert(wd.to_path_buf());
     }
 
-    Ok(paths.into_iter().collect())
+    // One repo, however it is spelled, is one member (issue #501). The
+    // `BTreeSet<PathBuf>` above only collapses *identical* strings, and the two
+    // sources spell the same repo differently: the current repo arrives fully
+    // symlink-resolved (`current_dir` is `getcwd`), while a configured member
+    // keeps whatever the config wrote. So `/tmp/x` and `/private/tmp/x` both
+    // survived — and this is a set defect, not a count one: `run_links` iterates
+    // these paths directly, so it read that repo's `[[links]]` twice and reported
+    // (and counted as drift) each link twice, the second under a fabricated
+    // `<name>-2` project the workspace registry does not contain, while
+    // `--infer` could elect that phantom as the hub and match a repo against
+    // itself.
+    Ok(dedupe_repo_paths(paths))
+}
+
+/// The identity of a repo path for de-duplication: its canonical form, falling
+/// back to the path exactly as written when it will not canonicalise (it does not
+/// exist yet). The fallback keeps such a path in the set, so the error still
+/// comes from the code whose job is to report it rather than from a silent drop
+/// here.
+fn repo_path_identity(p: &std::path::Path) -> std::path::PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// De-duplicate repo paths by [`repo_path_identity`], keeping each repo's first
+/// spelling and the input order. The one place the "same repo reached by two
+/// paths" rule lives on the CLI side — shared by `roteiro links` scoping
+/// ([`links_scope_paths`]) and the serve/reload path ([`resolved_repo_paths`]) —
+/// because a second copy of the rule is how the two came to disagree.
+fn dedupe_repo_paths<I>(paths: I) -> Vec<std::path::PathBuf>
+where
+    I: IntoIterator<Item = std::path::PathBuf>,
+{
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter(|p| seen.insert(repo_path_identity(p)))
+        .collect()
 }
 
 /// Verify a workspace's authored cross-repo links (ADR-0009). For every repo in
@@ -9819,9 +10135,12 @@ struct ServeWorkspaces {
 /// additive `--workspace <ROOT>` paths — the repo set the flattened model
 /// [`rto_graph::Workspace`] hosts (and the SIGHUP reload re-scans). Discovered the
 /// same way [`rto_graph::WorkspaceSet::from_resolved`] discovers each group's repos
-/// (roots scanned + explicit repos), deduplicated by path so a repo named in two
-/// groups is hosted once.
-#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+/// (roots scanned + explicit repos), deduplicated by [`repo_path_identity`] so a
+/// repo named in two groups is hosted once.
+///
+/// Not feature-gated: `roteiro config` resolves each workspace's membership
+/// through this same function (issue #499), so what `config` *reports* and what
+/// `serve` *hosts* are the one computation and cannot drift.
 fn resolved_repo_paths(
     resolved: &[rto_graph::ResolvedWorkspace],
     cli_roots: &[String],
@@ -9832,8 +10151,7 @@ fn resolved_repo_paths(
     let mut push = |p: std::path::PathBuf, out: &mut Vec<std::path::PathBuf>| {
         // Dedupe by the canonical path where possible, so the same repo reached via
         // two groups (or a root + an explicit repo) is hosted once.
-        let key = p.canonicalize().unwrap_or_else(|_| p.clone());
-        if seen.insert(key) {
+        if seen.insert(repo_path_identity(&p)) {
             out.push(p);
         }
     };
