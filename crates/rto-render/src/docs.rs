@@ -1547,7 +1547,7 @@ mod tests {
     }
 
     #[test]
-    fn the_landing_pages_bar_is_replaced_rather_than_maintained() {
+    fn the_bar_on_the_landing_page_is_replaced_rather_than_maintained() {
         // Issue #508. The stale copy is overwritten wholesale, so there is no
         // second list left to drift out of `site-order`.
         let stale = "<h1>Roteiro</h1>\n<nav class=\"sitenav\">\n<a href=\"old.html\">Old</a>\n\
