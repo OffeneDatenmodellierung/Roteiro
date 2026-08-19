@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn the_three_slice_entry_point_still_reaches_todays_verdict() {
+    fn the_three_slice_entry_point_still_reaches_the_same_verdict_today() {
         // `run` is `run_layer` with no site pages. A caller that has not moved
         // over must see exactly the report it sees today — that is the whole
         // reason both entry points exist.

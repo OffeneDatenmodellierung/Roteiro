@@ -2670,7 +2670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debt_endpoint_applies_the_repos_own_exclusions() {
+    async fn debt_endpoint_applies_the_exclusions_declared_by_the_repo() {
         // Before the fix this endpoint called `debt(s, &[], &[])`: the ignore
         // lists were passed EMPTY, so the browser counted markers the CLI
         // excluded and the two disagreed about the same repository.
@@ -2704,7 +2704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn each_repo_is_scanned_under_its_own_config_not_the_first_ones() {
+    async fn each_repo_is_scanned_under_its_own_config_not_the_config_of_the_first() {
         // The multi-repo half (#321b): repo B's own `[debt] ignore` must govern B
         // even though the request arrives at a server that also hosts A. A
         // repository's own config governs how it is scanned, whoever is asking.
