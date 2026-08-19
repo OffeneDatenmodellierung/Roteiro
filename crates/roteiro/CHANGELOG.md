@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.23.0...roteiro-v1.24.0) - 2026-08-19
+
+### Added
+
+- *(lint)* sandboxed by default; host execution is opt-in and layered
+- *(lint)* report clippy at a point in time, and store none of it
+
 ## [1.23.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.22.0...roteiro-v1.23.0) - 2026-08-18
 
 ### Fixed
