@@ -20,6 +20,19 @@ gix = { version = "0.86.0", default-features = false, features = [
     "dirwalk",
     "revision",
 ] }
+# The heading rule (`text::first_h1` / `text::heading_text`). A heading becomes
+# three things that have to agree — a node *title* in the authored layer, a
+# section *key*, and the rendered heading's `id` — so, exactly like `slugify`
+# beside it, the rule sits here because this is the one crate `rto_spec` and
+# `rto_render` both depend on unconditionally. Reading it with the parser rather
+# than scanning source lines is what stops `{#anchor}` reaching a graph title
+# (#469), and it is the same parser `rto_render` renders with, so the two cannot
+# disagree about where an attribute block ends.
+#
+# `default-features = false` with no features selected: this is a *parse*, never a
+# render, so the HTML writer (`pulldown-cmark-escape`) is left out. MIT, already
+# on `deny.toml`'s allow-list and already in the tree via `rto-render`.
+pulldown-cmark = { version = "0.13.4", default-features = false }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
