@@ -1777,6 +1777,99 @@ fn provenance(proj: bool, usr: bool) -> &'static str {
     }
 }
 
+/// Render `[serve] max_context_tokens` as what it **means**, not as the number
+/// it is stored as.
+///
+/// `0` is a sentinel for "no ceiling of your own — each model's trained window",
+/// and printing it as the bare string `0` is the defect issues #453 and #375
+/// both name: *a sentinel rendered as itself rather than as its meaning*. Here it
+/// is at its worst, because `roteiro config` exists to answer "why did it do
+/// that?" — an operator reading `0` sees a limit of zero and concludes the
+/// opposite of the truth.
+///
+/// Unset and an explicit `0` mean the same thing but are **not** printed the
+/// same, because at this point they are still distinguishable (`None` vs
+/// `Some(0)` survive the merge) and the difference is exactly what an operator
+/// debugging a config file needs: whether the line they wrote is being read at
+/// all. Collapsing them would discard that.
+///
+/// A non-zero value is reported with the rule that actually applies to it, since
+/// the ceiling never raises a window past the model's own `n_ctx_train` — see
+/// [`rto_llama`]'s `window_for_request`.
+fn max_context_tokens_display(value: Option<u32>) -> String {
+    match value {
+        None => "unset — each model's trained window".to_owned(),
+        Some(0) => "0 — each model's trained window".to_owned(),
+        Some(n) => format!("{n} — or the model's trained window, whichever is lower"),
+    }
+}
+
+#[cfg(test)]
+mod config_render_tests {
+    use super::max_context_tokens_display;
+
+    /// The defect this guards, and the reason it is a test rather than a
+    /// comment: a bare `0` in `roteiro config` tells an operator the opposite of
+    /// the truth — that the window is zero, when `0` means "no ceiling of mine,
+    /// use each model's trained window". Same class as #453 and #375.
+    #[test]
+    fn the_zero_sentinel_is_rendered_as_its_meaning_not_as_zero() {
+        let shown = max_context_tokens_display(Some(0));
+        assert!(
+            shown.contains("trained window"),
+            "an explicit `0` must state what it means: {shown}"
+        );
+        assert_ne!(shown, "0", "`0` must never be rendered as bare `0`");
+    }
+
+    /// Unset means the same as `0`, and is also a rule rather than a number —
+    /// `None` must not surface as the literal `None` either.
+    #[test]
+    fn unset_is_rendered_as_its_meaning_not_as_none() {
+        let shown = max_context_tokens_display(None);
+        assert!(
+            shown.contains("trained window"),
+            "unset must state what it means: {shown}"
+        );
+        assert!(
+            !shown.contains("None"),
+            "unset must not surface as `None`: {shown}"
+        );
+    }
+
+    /// The two are equivalent in effect but **distinguishable in the report**,
+    /// which is the point: an operator debugging a config file needs to know
+    /// whether the line they wrote is being read at all. If the merge ever
+    /// collapses `Some(0)` into `None`, this fails and says so.
+    #[test]
+    fn unset_and_explicit_zero_read_differently() {
+        assert_ne!(
+            max_context_tokens_display(None),
+            max_context_tokens_display(Some(0)),
+            "unset and an explicit `0` must be told apart in the report"
+        );
+        assert!(max_context_tokens_display(Some(0)).starts_with('0'));
+        assert!(max_context_tokens_display(None).starts_with("unset"));
+    }
+
+    /// A real ceiling still leads with its number — the meaning is added, not
+    /// substituted, so the value an operator wrote is the first thing they see.
+    #[test]
+    fn a_real_ceiling_leads_with_its_number_and_states_the_clamp() {
+        let shown = max_context_tokens_display(Some(32_768));
+        assert!(
+            shown.starts_with("32768"),
+            "a set value must lead with itself: {shown}"
+        );
+        // The clamp is the other half of "why did it do that?": a ceiling above
+        // a model's trained window does not raise that model's window.
+        assert!(
+            shown.contains("trained window"),
+            "a set value must say it is still bounded per model: {shown}"
+        );
+    }
+}
+
 /// Print `value` as pretty JSON to stdout — the shared `--json` output path for
 /// every subcommand.
 pub(crate) fn emit_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
@@ -1893,6 +1986,18 @@ fn print_config_sections(loaded: &config::Loaded) {
         "  tools  = {:?}  ({})",
         e.serve.tools,
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
+    );
+    // Reported because this is the key an operator comes to this command to
+    // check: "why did that request get the window it got?" (issue #486). Both
+    // the unset case and an explicit `0` stand for a *rule* rather than a
+    // number, so both are spelled out — see `max_context_tokens_display`.
+    println!(
+        "  max_context_tokens = {}  ({})",
+        max_context_tokens_display(e.serve.max_context_tokens),
+        source(
+            p.serve.max_context_tokens.is_some(),
+            u.serve.max_context_tokens.is_some()
+        )
     );
     print_remote_section(loaded);
     print_lint_section(loaded);
@@ -10226,8 +10331,15 @@ fn serve_models_endpoint(
         .memory_budget_mb
         .unwrap_or(0)
         .saturating_mul(1024 * 1024);
-    let engine = rto_serve::llama::LlamaEngine::new_with_budget(served, 0, budget_bytes)
-        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    // The ceiling a request's context may grow to, not the window every request
+    // gets (issue #486). This argument was the literal `0` — which fell through
+    // to a hardcoded 4,096 that no configuration key could reach, on every model
+    // from one trained at 262,144 tokens to one trained at 512. Unset ⇒ 0 ⇒ each
+    // model's own trained window; a value bounds every served model at once.
+    let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
+    let engine =
+        rto_serve::llama::LlamaEngine::new_with_budget(served, max_context_tokens, budget_bytes)
+            .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
     let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
     // With the tier granted for this process, the hosted model joins the served
     // set as one more id — `rto-serve` is not modified, and the socket stays in

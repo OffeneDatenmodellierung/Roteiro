@@ -81,8 +81,66 @@ use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError, FinishRea
 use crate::slot::KeyedSlot;
 use crate::speculative::{Mtp, SpecCounters, SpeculativeStats, draft_head_layers};
 
-/// Default context window when the caller does not set one.
-const DEFAULT_N_CTX: u32 = 4096;
+/// The smallest window a generative request is ever given — the fixed window
+/// every request used to get, now a floor rather than a ceiling (issue #486).
+///
+/// Keeping the old constant as the floor is what makes the move to per-request
+/// sizing monotone: **no request receives a smaller window than it did before**,
+/// so nothing that fit yesterday can stop fitting today. It is only a floor for
+/// models whose own trained window is larger; a model trained at less than this
+/// (`bge-large-en-v1.5` at 512) is clamped down to what it was actually trained
+/// for, which is a correction rather than a regression — the tokens above its
+/// trained window were never usable.
+const MIN_N_CTX: u32 = 4096;
+
+/// Slack added on top of `prompt + max_tokens` when sizing a context.
+///
+/// The prompt count is exact — the context is built *after* tokenisation, from
+/// the real token vector — so this is not a fudge factor for a bad estimate. It
+/// covers the two things that legitimately need positions past the arithmetic:
+/// MTP speculative decoding verifies [`crate::speculative`]'s draft window ahead
+/// of the accepted position, and llama.cpp pads the KV cache to a granularity of
+/// its own. Small enough to be irrelevant to the memory figures, large enough
+/// that neither can run off the end.
+const WINDOW_HEADROOM: u32 = 64;
+
+/// The window a single generation gets: what the request actually needs, bounded
+/// by what the operator allows and by what the model was trained for.
+///
+/// This is the whole of issue #486's answer, and it is a *pure* function so that
+/// unit tests needing no model — the ones that therefore run in CI — can pin it.
+///
+/// **Why size per request rather than raise a fixed default.** llama.cpp
+/// allocates the KV cache eagerly in the `llama_kv_cache` constructor
+/// (`ggml_backend_alloc_ctx_tensors_from_buft`, whose own comment reads "real
+/// buffer"), and [`LlamaEngine::new_context`] builds a context **per
+/// generation**. A fixed window is therefore paid in full on every request,
+/// whatever that request asked for. Measured on `qwen3.8-27b`
+/// (`tests/context_window.rs`), a context costs 429 MiB at 4,096 and **16,466
+/// MiB at its trained 262,144** — so a fixed maximum would spend 16 GiB to
+/// answer "hello". Sizing to the request gives the *whole* trained window to a
+/// request that needs it, and the floor to one that does not.
+///
+/// `ceiling` is the operator's cap ([`LlamaEngine::new`]'s `n_ctx`), where `0`
+/// means "whatever the model was trained for". `trained` is the model's own
+/// `n_ctx_train`, read from its GGUF; it always wins, because a window past it
+/// is not a larger context but a wrong one.
+fn window_for_request(prompt_tokens: u32, max_tokens: u32, ceiling: u32, trained: u32) -> u32 {
+    // A model declaring nothing usable still has to get a context; fall back to
+    // the floor rather than asking llama.cpp for zero tokens.
+    let trained = if trained == 0 { MIN_N_CTX } else { trained };
+    let cap = if ceiling == 0 {
+        trained
+    } else {
+        ceiling.min(trained)
+    };
+    let needed = prompt_tokens
+        .saturating_add(max_tokens)
+        .saturating_add(WINDOW_HEADROOM);
+    // The floor must not push the window past the cap: on `bge` the cap (512) is
+    // below the floor (4,096), and the cap is the answer.
+    needed.max(MIN_N_CTX.min(cap)).min(cap)
+}
 
 /// How wide a batch `mtmd_helper` is asked to chunk a multimodal prompt into.
 /// llama.cpp's own default for the same call, and the value this path has always
@@ -161,7 +219,18 @@ pub struct Served {
 pub struct LlamaEngine {
     cache: Mutex<ModelCache>,
     served: Vec<Served>,
-    n_ctx: u32,
+    /// The **ceiling** a per-request context may grow to, not the size every
+    /// context is built at (issue #486). `0` — the default — means "the window
+    /// each model was trained for", so the engine offers as much as the model
+    /// supports and spends only what a request actually uses. An operator lowers
+    /// it to bound the KV cache on a smaller machine; it can only ever reduce
+    /// the window, never raise one past `n_ctx_train`.
+    n_ctx_ceiling: u32,
+    /// Trained windows already warned about, so the "ceiling above
+    /// `n_ctx_train`" message is logged once per distinct trained window (per
+    /// engine instance) rather than once per request. Not native state —
+    /// bookkeeping, so its position among the fields carries no teardown meaning.
+    warned_windows: Mutex<std::collections::BTreeSet<u32>>,
     /// How many multimodal projectors this engine has loaded since it was built;
     /// see [`LlamaEngine::projector_inits`]. Not native state — a counter, so its
     /// position among the fields carries no teardown meaning.
@@ -316,11 +385,19 @@ fn lru_evict_count(sizes_lru_to_mru: &[u64], budget_bytes: u64) -> usize {
 }
 
 impl LlamaEngine {
-    /// Build an engine serving `served`, with an `n_ctx` context window
-    /// (`0` selects the default). Keeps a single model resident; use
-    /// [`LlamaEngine::new_with_budget`] to hold several. Attaches to the
-    /// process's shared llama.cpp backend, starting it if this is the first
-    /// engine.
+    /// Build an engine serving `served`, with `n_ctx` as the **ceiling** a
+    /// request's context may grow to — `0` (the recommended value) meaning
+    /// "whatever each model was trained for".
+    ///
+    /// This is not the window every context is built at (issue #486): contexts
+    /// are per-generation and disposable, so each is sized to the request that
+    /// needs it — see [`window_for_request`]. Passing a non-zero `n_ctx` bounds
+    /// that sizing for every model this engine serves; it cannot raise a window
+    /// past a model's own `n_ctx_train`, which is clamped with a warning.
+    ///
+    /// Keeps a single model resident; use [`LlamaEngine::new_with_budget`] to
+    /// hold several. Attaches to the process's shared llama.cpp backend,
+    /// starting it if this is the first engine.
     ///
     /// # Errors
     /// Returns an error if the llama.cpp backend fails to start.
@@ -355,7 +432,13 @@ impl LlamaEngine {
         Ok(Self {
             backend,
             served,
-            n_ctx: if n_ctx == 0 { DEFAULT_N_CTX } else { n_ctx },
+            // Carried through as given: `0` stays `0`, meaning "each model's own
+            // trained window", and is resolved per model at request time rather
+            // than collapsed to one number here — which is precisely what the
+            // old `DEFAULT_N_CTX` substitution did, and what made one 4,096
+            // serve a model trained at 262,144 and another trained at 512.
+            n_ctx_ceiling: n_ctx,
+            warned_windows: Mutex::new(std::collections::BTreeSet::new()),
             projector_inits: AtomicUsize::new(0),
             speculative_enabled: crate::speculative::speculative_enabled(),
             speculative: SpecCounters::default(),
@@ -565,16 +648,86 @@ impl LlamaEngine {
             .map(|s| s.path.clone())
     }
 
-    /// A fresh context sized to `self.n_ctx`, borrowing `model`.
+    /// A fresh context sized to `n_ctx`, borrowing `model`.
     ///
     /// The parameters come from [`crate::speculative::base_params`] — the one
     /// place a generative context's shape is written down — so a plain context
     /// and the two a speculative generation builds cannot disagree about the
     /// window or the batch width they accept.
-    fn new_context<'m>(&self, model: &'m LlamaModel) -> Result<LlamaContext<'m>, EngineError> {
+    ///
+    /// The window is passed in rather than read from the engine because it is a
+    /// property of the *request* now, not of the engine (issue #486); callers
+    /// get it from [`LlamaEngine::request_window`].
+    fn new_context<'m>(
+        &self,
+        model: &'m LlamaModel,
+        n_ctx: u32,
+    ) -> Result<LlamaContext<'m>, EngineError> {
         model
-            .new_context(&self.backend, crate::speculative::base_params(self.n_ctx))
+            .new_context(&self.backend, crate::speculative::base_params(n_ctx))
             .map_err(|e| EngineError::Inference(format!("context: {e}")))
+    }
+
+    /// The window this engine will build for a request of `prompt_tokens` that
+    /// may generate `max_tokens` more, against `model`'s own trained window.
+    ///
+    /// Warns — once per process per model, so a busy server does not repeat
+    /// itself per request — when the operator's ceiling is above what the model
+    /// was trained for. That case is **clamped, not refused**: the ceiling is a
+    /// budget an operator sets across every served model at once, and the models
+    /// differ by 512× (`qwen3.8-27b` 262,144, `bge-large-en-v1.5` 512), so one
+    /// number over one model's trained window is ordinary rather than a mistake
+    /// worth failing a request over. What is *not* clamped is the request: a
+    /// prompt longer than the resulting window is refused by
+    /// [`check_batch_capacity`] as an [`EngineError::InvalidRequest`], because
+    /// silently truncating a user's prompt would answer a question they did not
+    /// ask.
+    ///
+    /// # The ceiling is load-bearing, not merely a memory guard
+    ///
+    /// **Read this before raising it.** When per-request sizing landed, the only
+    /// thing that could move `prompt_tokens` was Roteiro's own prompt — a served
+    /// tool surface this repository writes and can measure. That is no longer
+    /// the whole story: once a client may supply its own `tools` array, the
+    /// prompt is **caller-influenced**, and `prompt_tokens` is therefore an input
+    /// an outside party has a hand in. Since the window follows the prompt, so
+    /// does the allocation: at 64 KiB/token on `qwen3.8-27b`, a prompt driven up
+    /// to that model's trained 262,144 is a 16 GiB allocation.
+    ///
+    /// The bound on *that* belongs at the edge — the serving layer refuses an
+    /// oversized tool surface with a 400 before it ever reaches here — and this
+    /// function deliberately does **not** add a second clamp of its own, because
+    /// two independent bounds on one quantity drift apart and then neither can be
+    /// trusted. What this ceiling does is put a floor under that arrangement: it
+    /// is the backstop that decides the worst case a single request can reach
+    /// whatever the edge does. Raising it raises that worst case, so it is a
+    /// decision about exposure and not only about memory.
+    fn request_window(&self, model: &LlamaModel, prompt_tokens: u32, max_tokens: u32) -> u32 {
+        let trained = model.n_ctx_train();
+        if self.n_ctx_ceiling > trained && trained > 0 {
+            self.warn_ceiling_clamped(trained);
+        }
+        window_for_request(prompt_tokens, max_tokens, self.n_ctx_ceiling, trained)
+    }
+
+    /// Emit the "ceiling above `n_ctx_train`" warning at most once per distinct
+    /// trained window, so `roteiro serve` does not log it on every request.
+    fn warn_ceiling_clamped(&self, trained: u32) {
+        let mut warned = match self.warned_windows.lock() {
+            Ok(warned) => warned,
+            // A poisoned lock here means another thread panicked mid-warning.
+            // That is not a reason to fail a generation, and the worst case of
+            // carrying on is a warning logged twice.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if warned.insert(trained) {
+            tracing::warn!(
+                configured = self.n_ctx_ceiling,
+                n_ctx_train = trained,
+                "configured context-window ceiling is above what this model was \
+                 trained for; clamping to the trained window"
+            );
+        }
     }
 
     /// A context paired with `model`'s own MTP draft head (issue #320), or
@@ -595,6 +748,7 @@ impl LlamaEngine {
         &self,
         model: &'m LlamaModel,
         draft: Option<&'m LlamaModel>,
+        n_ctx: u32,
     ) -> Option<Mtp<'m>> {
         // The head is in whichever file has one: the target GGUF for a bundled
         // model, the sibling `mtp.gguf` for a split one. A model with neither
@@ -603,7 +757,7 @@ impl LlamaEngine {
         if !self.speculative_enabled || draft_head_layers(head) == 0 {
             return None;
         }
-        Mtp::try_new(&self.backend, model, draft, self.n_ctx)
+        Mtp::try_new(&self.backend, model, draft, n_ctx)
     }
 
     /// Text-only chat: apply the chat template, prime the prompt, and generate.
@@ -634,6 +788,13 @@ impl LlamaEngine {
             .map_err(|e| EngineError::Inference(format!("tokenize: {e}")))?;
         let prompt_tokens = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
 
+        // The prompt is already tokenised, so the context can be sized to this
+        // exact request rather than to a fixed maximum (issue #486) — that
+        // ordering is what makes per-request sizing possible at all, and it was
+        // already the ordering here. `max_tokens` is included because those
+        // positions are as real as the prompt's.
+        let n_ctx = self.request_window(model, prompt_tokens, req.max_tokens);
+
         // The context comes first, and the prompt is measured against it before a
         // single token is batched (issue #346). This used to run the other way
         // round — batch the whole prompt, then "let the decode call enforce it" —
@@ -641,9 +802,9 @@ impl LlamaEngine {
         // over-long batch trips a `GGML_ASSERT` inside llama.cpp and aborts the
         // process. The bound is a property of the context, so the context (plain
         // or speculative) is built first and asked what it will accept.
-        let mut decoder = match self.speculative_decoder(model, resolved.draft.as_deref()) {
+        let mut decoder = match self.speculative_decoder(model, resolved.draft.as_deref(), n_ctx) {
             Some(mtp) => Decoder::Speculative(Box::new(mtp)),
-            None => Decoder::Plain(self.new_context(model)?),
+            None => Decoder::Plain(self.new_context(model, n_ctx)?),
         };
         // Encoder-only models never reach here — `chat_stream` rejects them
         // earlier — so this is the causal bound, `n_batch`.
@@ -750,7 +911,13 @@ impl LlamaEngine {
             .map_err(|e| EngineError::Inference(format!("mtmd tokenize: {e}")))?;
         let prompt_tokens = u32::try_from(chunks.total_tokens()).unwrap_or(u32::MAX);
 
-        let mut ctx = self.new_context(model)?;
+        // Same sizing as the text path (issue #486), and available for the same
+        // reason: `mtmd` has already counted the prompt — text plus projected
+        // media embeddings — before any context exists. A projected image is
+        // worth hundreds of positions, so this path benefits from a window that
+        // follows the request rather than a fixed one it might not fit in.
+        let n_ctx = self.request_window(model, prompt_tokens, req.max_tokens);
+        let mut ctx = self.new_context(model, n_ctx)?;
         // `eval_chunks` decodes text + projected media (image/audio) embeddings
         // into the context and returns the new position to continue generating.
         //
@@ -1217,7 +1384,22 @@ impl Engine for LlamaEngine {
         // the cost of embedding a whole repo. The KV cache is cleared between
         // inputs so each is pooled independently. Pooling defaults to the model's
         // own type (CLS for BGE), giving one sentence vector per input.
-        let ctx_params = crate::speculative::base_params(self.n_ctx).with_embeddings(true);
+        // Sized to the model's own trained window rather than to a request
+        // (issue #486), because this is the one context that is *not* per
+        // request: it is built once and reused across every input, so there is
+        // no single request to size it to. Passing `0` as the prompt count asks
+        // [`window_for_request`] for the largest window this model and this
+        // operator allow.
+        //
+        // For the BERT family this serves, that is a **reduction**: `bge-large-
+        // en-v1.5` declares `n_ctx_train = 512`, and it was being given a 4,096
+        // window it could not use a quarter of. The bound that actually refuses
+        // an over-long input is `n_ubatch` (512, unchanged — see
+        // [`batch_capacity`]), so nothing an operator could embed before stops
+        // embedding now; the context simply stops reserving what the model was
+        // never trained to address.
+        let n_ctx = self.request_window(model_ref, 0, 0);
+        let ctx_params = crate::speculative::base_params(n_ctx).with_embeddings(true);
         let mut ctx = model_ref
             .new_context(&self.backend, ctx_params)
             .map_err(|e| EngineError::Inference(format!("embedding context: {e}")))?;
@@ -1284,10 +1466,145 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatTemplateError, EngineError, LlamaChatTemplate, check_batch_capacity,
-        fallback_template_name, install_native_log_bridge, is_encoder_only_arch, lru_evict_count,
-        resolve_chat_template_from,
+        ChatTemplateError, EngineError, LlamaChatTemplate, MIN_N_CTX, WINDOW_HEADROOM,
+        check_batch_capacity, fallback_template_name, install_native_log_bridge,
+        is_encoder_only_arch, lru_evict_count, resolve_chat_template_from, window_for_request,
     };
+
+    /// The trained windows of the models actually served, read from their GGUFs
+    /// (`tests/context_window.rs` prints them). They span **512×**, which is the
+    /// whole reason one engine-wide `n_ctx` could not be right.
+    const QWEN_TRAINED: u32 = 262_144;
+    const SMOL_TRAINED: u32 = 8_192;
+    const BGE_TRAINED: u32 = 512;
+
+    /// A small request does not get a large context, even on a model that could
+    /// support one — which is the point of sizing per request. Measured, a
+    /// 262,144-token context on `qwen3.8-27b` costs 16,466 MiB; paying that to
+    /// answer a fifty-token question is what this prevents.
+    #[test]
+    fn a_small_request_gets_the_floor_not_the_models_maximum() {
+        assert_eq!(
+            window_for_request(50, 512, 0, QWEN_TRAINED),
+            MIN_N_CTX,
+            "a request that fits the floor must not allocate the trained maximum"
+        );
+    }
+
+    /// A large request gets what it needs — "as large as possible" *when it is
+    /// needed*, which a fixed default cannot express in the same engine.
+    #[test]
+    fn a_large_request_grows_to_what_it_needs() {
+        let window = window_for_request(200_000, 4_096, 0, QWEN_TRAINED);
+        assert_eq!(window, 200_000 + 4_096 + WINDOW_HEADROOM);
+        assert!(
+            window <= QWEN_TRAINED,
+            "growth stops at the trained window: {window}"
+        );
+    }
+
+    /// `max_tokens` is part of the window, not an afterthought: those positions
+    /// are written to the same KV cache the prompt is. A window sized to the
+    /// prompt alone would run out exactly when the model started answering.
+    #[test]
+    fn the_generation_budget_is_counted_in_the_window() {
+        let big_answer = window_for_request(8_000, 32_000, 0, QWEN_TRAINED);
+        let small_answer = window_for_request(8_000, 16, 0, QWEN_TRAINED);
+        assert!(
+            big_answer > small_answer,
+            "a larger `max_tokens` must widen the window: {big_answer} vs {small_answer}"
+        );
+    }
+
+    /// The model's own trained window always wins — the case the issue's
+    /// "refused or clamped, never silently wrong" rule is about. Clamped here,
+    /// and the request that then does not fit is refused by
+    /// [`check_batch_capacity`] rather than quietly truncated.
+    #[test]
+    fn the_trained_window_caps_both_the_request_and_the_operator() {
+        // A request asking past the trained window is capped at it, not beyond.
+        assert_eq!(
+            window_for_request(1_000_000, 4_096, 0, SMOL_TRAINED),
+            SMOL_TRAINED
+        );
+        // And an operator ceiling above the trained window cannot raise it.
+        assert_eq!(
+            window_for_request(1_000_000, 4_096, u32::MAX, SMOL_TRAINED),
+            SMOL_TRAINED
+        );
+    }
+
+    /// The 512-token model is the one a single engine-wide number gets wrong in
+    /// the *other* direction, and the floor must not override its real ceiling —
+    /// `bge-large-en-v1.5` was being handed a 4,096-token context for a model
+    /// trained at 512.
+    #[test]
+    fn a_model_trained_below_the_floor_is_clamped_down_to_its_own_window() {
+        // Pinned at compile time rather than asserted at run time: both sides are
+        // constants, so this states a precondition of the test above rather than
+        // testing anything, and `const` is where such a claim belongs.
+        const _: () = assert!(
+            BGE_TRAINED < MIN_N_CTX,
+            "the test below is only meaningful while the floor is above bge's window"
+        );
+
+        assert_eq!(window_for_request(0, 0, 0, BGE_TRAINED), BGE_TRAINED);
+        assert_eq!(window_for_request(64, 512, 0, BGE_TRAINED), BGE_TRAINED);
+    }
+
+    /// An operator's ceiling lowers the window and never raises it — the
+    /// property that makes the config key a *value* under ADR-0007 v1.4 rather
+    /// than a capability: it can only ever spend less of the machine.
+    #[test]
+    fn the_operator_ceiling_can_only_lower_the_window() {
+        for ceiling in [0_u32, 512, 4_096, 32_768, 262_144, u32::MAX] {
+            let bounded = window_for_request(100_000, 1_024, ceiling, QWEN_TRAINED);
+            let unbounded = window_for_request(100_000, 1_024, 0, QWEN_TRAINED);
+            assert!(
+                bounded <= unbounded.max(MIN_N_CTX.min(ceiling.max(1))),
+                "ceiling {ceiling} produced {bounded}, above the unbounded {unbounded}"
+            );
+            assert!(
+                bounded > 0,
+                "ceiling {ceiling} produced a zero-token window"
+            );
+        }
+    }
+
+    /// Saturating arithmetic, not wrapping: a caller asking for `u32::MAX`
+    /// generated tokens must get the trained window, not a tiny one produced by
+    /// an overflow.
+    #[test]
+    fn an_absurd_request_saturates_rather_than_wrapping() {
+        assert_eq!(
+            window_for_request(u32::MAX, u32::MAX, 0, QWEN_TRAINED),
+            QWEN_TRAINED
+        );
+    }
+
+    /// A model whose GGUF declares no trained window still gets a usable
+    /// context. llama.cpp refuses a zero-token one, so "unknown" has to mean the
+    /// floor rather than nothing.
+    #[test]
+    fn a_model_declaring_no_trained_window_still_gets_the_floor() {
+        assert_eq!(window_for_request(0, 0, 0, 0), MIN_N_CTX);
+    }
+
+    /// Nothing shrinks. Every request that fit the old fixed 4,096 window still
+    /// gets at least 4,096 on any model trained for it — the invariant that lets
+    /// this land without a behaviour-change note for existing deployments.
+    #[test]
+    fn no_request_gets_less_than_the_window_it_used_to_get() {
+        for prompt in [0_u32, 1, 512, 2_048, 3_146, 4_000] {
+            for max_tokens in [0_u32, 16, 512] {
+                let window = window_for_request(prompt, max_tokens, 0, QWEN_TRAINED);
+                assert!(
+                    window >= MIN_N_CTX,
+                    "prompt {prompt} + {max_tokens} got {window}, below the old default"
+                );
+            }
+        }
+    }
 
     /// A prompt the size of the limit is the largest one llama.cpp accepts —
     /// `GGML_ASSERT(n_tokens_all <= cparams.n_batch)` is `<=`, not `<`. Pinning

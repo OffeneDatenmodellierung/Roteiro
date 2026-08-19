@@ -807,6 +807,43 @@ pub struct ServeConfig {
     /// resident set (proxied by GGUF size) exceeds this. Unset/`0` keeps a single
     /// model resident — set it higher to keep several warm and swap in real time.
     pub memory_budget_mb: Option<u64>,
+    /// Upper bound, in tokens, on the context window any one request may be
+    /// given (issue #486). Unset/`0` — the default — means **each model's own
+    /// trained window**, so a request may grow to as much as the model actually
+    /// supports and no further.
+    ///
+    /// This is a *ceiling*, not the window every request gets: contexts are
+    /// built per generation and sized to the request, so a short question costs
+    /// a short context whatever this is set to. Lower it to bound the KV cache
+    /// on a machine with less memory to spare — measured on `qwen3.8-27b`, a
+    /// context costs about 64 KiB per token (429 MiB at 4,096 tokens, 16,466 MiB
+    /// at its trained 262,144), so this is the key that decides the worst case a
+    /// single request can reach.
+    ///
+    /// **A value, not a capability, under ADR-0007 v1.4** — and by the ADR's own
+    /// default rule rather than by assertion. The built-in default already
+    /// grants the largest window each model supports, so setting this in a
+    /// committed project file cannot cause anything that would not otherwise
+    /// happen; it can only ever spend *less* of the machine. It therefore fails
+    /// the capability test at its first clause and takes the ordinary
+    /// CLI > project > user > default precedence. Had the key been defined the
+    /// other way round — a low default that this raises — clause 4 ("spends
+    /// materially more of the machine") would have made it a capability, and the
+    /// project layer could not have set it at all.
+    ///
+    /// Above a model's `n_ctx_train` it is **clamped, with a warning**, not
+    /// refused: one number is set across models whose trained windows span 512×,
+    /// so exceeding the smallest is ordinary rather than an error. A *request*
+    /// that does not fit the resulting window is refused as a 400.
+    ///
+    /// **This is a backstop against caller-influenced prompts, not only a memory
+    /// setting.** Where a client may supply its own tool definitions, the prompt
+    /// — and therefore the window, and therefore the allocation — is partly an
+    /// outside party's input. The bound on an oversized tool surface belongs at
+    /// the serving edge, which refuses it with a 400; this key is what decides
+    /// the worst case a single request can reach regardless. Raising it raises
+    /// that worst case.
+    pub max_context_tokens: Option<u32>,
     /// PEM certificate-chain file for in-app TLS. Set **both** this and `tls_key`
     /// and `serve --models` terminates HTTPS itself (needs `--features serve`);
     /// set **neither** and it serves plain HTTP (front with a proxy for TLS).
@@ -958,6 +995,13 @@ impl Config {
                 models: over.serve.models.clone().or(self.serve.models.clone()),
                 tools: over.serve.tools.or(self.serve.tools),
                 memory_budget_mb: over.serve.memory_budget_mb.or(self.serve.memory_budget_mb),
+                // Ordinary precedence — a value, not a capability (ADR-0007
+                // v1.4): the default already grants each model's full trained
+                // window, so this key can only lower it.
+                max_context_tokens: over
+                    .serve
+                    .max_context_tokens
+                    .or(self.serve.max_context_tokens),
                 tls_cert: over.serve.tls_cert.clone().or(self.serve.tls_cert.clone()),
                 tls_key: over.serve.tls_key.clone().or(self.serve.tls_key.clone()),
             },

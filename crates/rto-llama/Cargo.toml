@@ -13,6 +13,13 @@ authors.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# The event facade for the one warning this crate raises itself: a
+# configured context-window ceiling above what a model was trained for
+# (issue #486). No new crate enters the build — `llama-cpp-2` already
+# routes llama.cpp's native logs through `tracing`, and the binary
+# installs the subscriber (ADR-0011); this only makes the facade a
+# direct edge so the warning lands in the same place every other log does.
+tracing = "0.1"
 # The llama.cpp engine. Opt-in: pulls a C/C++ toolchain (cmake, clang, libclang)
 # to build vendored llama.cpp. The pure-Rust `Engine` trait + request/result
 # types build and are usable without it (e.g. mock engines, wire mappers).

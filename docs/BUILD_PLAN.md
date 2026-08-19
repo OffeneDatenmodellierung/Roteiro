@@ -956,6 +956,18 @@ serving), and broaden the opt-in model catalogue.
     by GGUF size) exceeds a byte budget, so a process alternating models (or
     `serve` over several) swaps them in real time instead of thrashing one slot.
     `[serve] memory_budget_mb` sets the budget (unset/`0` = one resident).
+  - **Context window — per request, per model (issue #486).** The window was a
+    hardcoded 4,096 with no configuration key anywhere, applied equally to a
+    model trained at 262,144 tokens and one trained at 512. It could not simply
+    be raised: llama.cpp allocates the KV cache eagerly and a context is built
+    per generation, so a fixed 262,144 would spend 16,466 MiB answering
+    "hello" (measured, `qwen3.8-27b`). Since the prompt is tokenised *before*
+    the context is created, each context is instead sized to its own request —
+    `prompt + max_tokens + headroom`, floored at the old 4,096 so nothing
+    shrinks, capped at the model's GGUF `n_ctx_train`. `[serve]
+    max_context_tokens` lowers that cap for every served model (unset/`0` =
+    each model's trained window). Over `n_ctx_train`: the *ceiling* is clamped
+    with a warning, a *request* is refused as a 400.
 - **Acceleration / unify direction:** performance matters for the internal uses
   too (`spec draft`, `infer`), and llama.cpp is now proven fast + `deny`-clean, so
   it is the target for the **whole inference core** — a **staged migration off
