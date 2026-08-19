@@ -818,6 +818,34 @@ fn a_build_without_the_sandbox_refuses_every_input_by_naming_the_feature() {
 /// The same rule every other pinned input follows: provisioning downloads,
 /// running reads. A lint that could pull would be a lint that can fail because a
 /// registry was unreachable, or succeed by quietly fetching something new.
+///
+/// # Why this one consults the capability probe and its neighbours do not
+///
+/// Because it is the only test here that gets far enough to need a **running
+/// guest**. The refusals are ordered cheapest-and-most-fundamental first, and
+/// that ordering is load-bearing rather than tidy:
+///
+/// | asked for | refused by | needs a hypervisor? |
+/// |---|---|---|
+/// | no image | `lint`, before the backend is entered | no |
+/// | a tag | the pin check, before the probe | no |
+/// | a pinned image | the **image store**, after the probe | **yes** |
+///
+/// So on a machine with no hypervisor the first two refuse identically to a
+/// machine with one, and this one cannot reach the store at all — it refuses
+/// with `/dev/kvm: permission denied` instead, which is correct and is *not* the
+/// sentence this test is about.
+///
+/// This is the third instance of one mistake on this branch, and the shape is
+/// worth naming: **the environment CI runs in differs from the one the author
+/// tested in, and the difference is invisible locally.** First it was the
+/// feature compiled out (#360's class). Then it was this: the feature compiled
+/// *in* and the capability absent — a second axis, which `--all-features` on a
+/// laptop with virtualisation is exactly as blind to as `--all-features` was to
+/// the `cfg`'d-out path. The invariant is asserted unconditionally; only the
+/// sentence that requires a guest is conditional, and its absence is printed
+/// rather than silently skipped.
+#[cfg(feature = "exec-boxlite")]
 #[test]
 fn an_unprovisioned_image_refuses_and_names_the_prefetch_that_obtains_it() {
     let fixture = Fixture::new("unprovisioned-image");
@@ -829,17 +857,38 @@ fn an_unprovisioned_image_refuses_and_names_the_prefetch_that_obtains_it() {
     assert!(!fixture.built_anything(), "and nothing may have been built");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // In a build without `exec-boxlite` the refusal is the missing feature
-    // instead, and that is equally correct — what must never happen is a host
-    // run. Both branches are checked; only the wording differs.
+    // The invariant, on every host: whatever was missing, nothing ran here.
     assert!(
-        stderr.contains("roteiro security prefetch") || stderr.contains("exec-boxlite"),
-        "a refusal must name what is missing: {stderr}"
+        stderr.contains("nothing fell back to this host"),
+        "the one promise this refusal exists to keep: {stderr}"
     );
-    assert!(
-        stderr.contains("nothing fell back to this host") || stderr.contains("Nothing ran"),
-        "{stderr}"
-    );
+
+    match rto_exec::sandbox_probe() {
+        rto_exec::SandboxProbe::Available => {
+            assert!(
+                stderr.contains("roteiro security prefetch --analyzer clippy --allow-download"),
+                "a run never pulls, so the refusal must name the command that does: {stderr}"
+            );
+            assert!(
+                stderr.contains(&absent),
+                "and which image it could not find: {stderr}"
+            );
+        }
+        rto_exec::SandboxProbe::Unavailable(why) => {
+            // Not a skip of the test — the invariant above was checked. What is
+            // skipped is one assertion that cannot be reached here, and saying
+            // so is the difference between covering less and covering nothing.
+            eprintln!(
+                "PARTIAL: no microVM on this host, so the run refused before it could \
+                 consult the image store: {why}\n         (the never-fell-back invariant was \
+                 still checked; the prefetch sentence needs a host that can start a guest)"
+            );
+            assert!(
+                stderr.contains("no sandbox is available on this host"),
+                "a host with no hypervisor must say so: {stderr}"
+            );
+        }
+    }
 }
 
 /// A **project** grant must not enable host execution — the row that makes the
