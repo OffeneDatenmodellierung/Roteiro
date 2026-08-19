@@ -61,6 +61,15 @@ curl -s http://127.0.0.1:8017/v1/chat/completions \
 <span class="c">#   "How does sync relate to ADR-0006?"</span>
 <span class="c">#   "What outstanding intent-debt is there?"</span></code></pre>
 
+<div class="note"><strong>&ldquo;Like any OpenAI chat endpoint&rdquo; has one important exception.</strong>
+Send no <code>tools</code> array and you get the mode above &mdash; Roteiro&rsquo;s graph tools,
+grounded in your code. Send <strong>your own</strong> <code>tools</code> array and they
+<em>replace</em> the graph tools, because a client bringing its own tools is using this
+as a general backend. Roteiro never executes a tool you supplied; it returns the call
+and stops. <a href="serving.html">The endpoint&rsquo;s full contract</a> sets out both
+modes, the declared divergences from OpenAI, and the parameters that are accepted and
+dropped.</div>
+
 <div class="note"><strong>Pick a model that can call tools.</strong> Grounded answers
 depend on the model actually invoking the graph tools. <code>qwen3-8b</code> is the
 reliable default — it tool-calls consistently and runs comfortably on a
