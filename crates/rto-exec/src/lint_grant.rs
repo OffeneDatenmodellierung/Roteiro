@@ -18,6 +18,8 @@
 //!
 //! @rto:0020
 
+use crate::guidance::{Guidance, Line};
+
 /// What the two **configuration** layers jointly say about running a linter on
 /// this host — the half of the grant that can be answered from files alone.
 ///
@@ -226,8 +228,13 @@ impl Reason {
     /// would waste their time, and telling someone who is already on the host
     /// how to get there would be nonsense. Both were live bugs in the shape this
     /// replaces (#426's refusals rule).
+    ///
+    /// A [`Guidance`] rather than a `&'static str`, because this text is
+    /// multi-line and carries commands people paste. Written as one wrapped
+    /// literal it leaked its own source indentation into shipped output; written
+    /// as lines and fragments it cannot.
     #[must_use]
-    pub fn host_escape(self) -> Option<&'static str> {
+    pub fn host_escape(self) -> Option<Guidance> {
         match self {
             // Two reasons, one answer, and both are "there is nothing to offer":
             //
@@ -243,29 +250,39 @@ impl Reason {
             Self::GrantedByInvocation | Self::GrantedByUserLayer | Self::SandboxByProjectDenial => {
                 None
             }
-            // Built line-by-line rather than as one wrapped string: this is the
-            // text most people will ever see from this command, and a remedy
-            // whose indentation drifts when someone reflows a comment is a
-            // remedy that stops being copy-pasteable.
-            Self::SandboxByDefault => Some(concat!(
-                "Or accept an unisolated run instead. `cargo clippy` would then compile this tree                  here, executing its build scripts and loading its proc macros with your                  filesystem and your credentials. In your own repository that is the build you                  were going to run anyway; in a branch you are reviewing it is somebody else's                  code.\n",
-                "  Either one of these is enough — you do not need both:\n",
-                "    for this run:  roteiro lint <analyzer> --allow-unsandboxed\n",
-                "    standing:      add `[lint] allow_unsandboxed = true` to ~/.roteiro/config.toml\n",
+            Self::SandboxByDefault => Some(Guidance::new(&[
+                Line::Note(&[
+                    "Or accept an unisolated run instead. `cargo clippy` would then compile",
+                    "this tree here, executing its build scripts and loading its proc macros",
+                    "with your filesystem and your credentials. In your own repository that is",
+                    "the build you were going to run anyway; in a branch you are reviewing it",
+                    "is somebody else's code.",
+                ]),
+                Line::Note(&["Either one of these is enough — you do not need both:"]),
+                // Aligned on purpose, and rendered verbatim so the alignment
+                // survives. These are the two lines people copy.
+                Line::Command("for this run:  roteiro lint <analyzer> --allow-unsandboxed"),
+                Line::Command(
+                    "standing:      add `[lint] allow_unsandboxed = true` to ~/.roteiro/config.toml",
+                ),
                 // Kept from the refusal this replaces. Someone who has just been
                 // shown a config key will reach for the file they already edit,
                 // and `roteiro.toml` is the wrong one — silently, since a
                 // committed grant is read and discarded.
-                "  A project's `roteiro.toml` cannot grant it — a committed file may deny host                  execution and never grant it, because a merged line would otherwise start                  running builds on every teammate's machine (ADR-0020 §6).",
-            )),
-            Self::SandboxByUserLayer => Some(
-                "or override your own `[lint] allow_unsandboxed = false` for this run with \
-                 `--allow-unsandboxed`, accepting that the tree is then compiled on this host.",
-            ),
-            Self::SandboxByInvocation => Some(
-                "or drop `--sandboxed` and pass `--allow-unsandboxed`, accepting that the tree is \
-                 then compiled on this host.",
-            ),
+                Line::Note(&[
+                    "A project's `roteiro.toml` cannot grant it — a committed file may deny",
+                    "host execution and never grant it, because a merged line would otherwise",
+                    "start running builds on every teammate's machine (ADR-0020 §6).",
+                ]),
+            ])),
+            Self::SandboxByUserLayer => Some(Guidance::new(&[Line::Note(&[
+                "Or override your own `[lint] allow_unsandboxed = false` for this run with",
+                "`--allow-unsandboxed`, accepting that the tree is then compiled on this host.",
+            ])])),
+            Self::SandboxByInvocation => Some(Guidance::new(&[Line::Note(&[
+                "Or drop `--sandboxed` and pass `--allow-unsandboxed`, accepting that the tree",
+                "is then compiled on this host.",
+            ])])),
         }
     }
 }
@@ -569,7 +586,10 @@ mod tests {
         }
         // And every reason that *can* be escaped says how, in a way that fits
         // what that person actually did.
-        let default = Reason::SandboxByDefault.host_escape().expect("escape");
+        let default = Reason::SandboxByDefault
+            .host_escape()
+            .expect("escape")
+            .to_string();
         assert!(default.contains("--allow-unsandboxed"), "{default}");
         assert!(
             default.contains("[lint] allow_unsandboxed = true"),
@@ -596,14 +616,20 @@ mod tests {
             "and that the committed file is not the place to put it: {default}"
         );
 
-        let user = Reason::SandboxByUserLayer.host_escape().expect("escape");
+        let user = Reason::SandboxByUserLayer
+            .host_escape()
+            .expect("escape")
+            .to_string();
         assert!(user.contains("--allow-unsandboxed"), "{user}");
         assert!(
             user.contains("your own"),
             "your own denial is yours to override: {user}"
         );
 
-        let sandboxed = Reason::SandboxByInvocation.host_escape().expect("escape");
+        let sandboxed = Reason::SandboxByInvocation
+            .host_escape()
+            .expect("escape")
+            .to_string();
         assert!(sandboxed.contains("--sandboxed"), "{sandboxed}");
         assert!(sandboxed.contains("--allow-unsandboxed"), "{sandboxed}");
     }
@@ -614,7 +640,10 @@ mod tests {
     /// where a copy would lose it.
     #[test]
     fn the_default_escape_keeps_each_form_on_its_own_line() {
-        let escape = Reason::SandboxByDefault.host_escape().expect("escape");
+        let escape = Reason::SandboxByDefault
+            .host_escape()
+            .expect("escape")
+            .to_string();
         let lines: Vec<&str> = escape.lines().map(str::trim).collect();
         assert!(
             lines.contains(&"for this run:  roteiro lint <analyzer> --allow-unsandboxed"),

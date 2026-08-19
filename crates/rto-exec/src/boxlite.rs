@@ -67,6 +67,7 @@ use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
 use crate::assets;
 use crate::child_env::ChildEnv;
 use crate::clock::rfc3339_utc;
+use crate::guidance::{Guidance, Line};
 use crate::ingest::assemble;
 use crate::runner::{AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_request};
 use crate::snippet::WorktreeSnippets;
@@ -238,6 +239,26 @@ fn probe_reason(raw: &str) -> String {
     raw.trim().to_owned()
 }
 
+/// Why a tag will not do, and how to get the digest instead.
+///
+/// A [`Guidance`] rather than a wrapped literal: this text is multi-line and
+/// ends in something to paste, and written the other way it leaked its own
+/// source indentation into the middle of a sentence (see [`crate::guidance`]).
+const PIN_IT: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "An image is where somebody else's build scripts execute, and a tag is a",
+        "mutable pointer to it — whoever controls the tag can replace what runs, with",
+        "no version change and no notice.",
+    ]),
+    Line::Note(&["Pin it by digest instead:"]),
+    Line::Command("image = \"docker.io/you/image@sha256:<64 hex>\""),
+    Line::Note(&[
+        "`docker buildx imagetools inspect <reference>` prints it. Use the **index**",
+        "digest — the one printed for the tag itself — so one reference resolves on",
+        "both amd64 and arm64 rather than two that can drift apart.",
+    ]),
+]);
+
 /// Something went wrong running the analyzer in a sandbox, as opposed to
 /// something being wrong with what it produced.
 #[derive(Debug, thiserror::Error)]
@@ -289,10 +310,8 @@ pub enum SandboxError {
     /// choose your own boundary; you may not choose one that can be swapped
     /// under you.
     #[error(
-        "the image for {what} is {reference:?}, which is a tag rather than a digest.\n           An image is where somebody else's build scripts execute, and a tag is a mutable \
-         pointer to it — whoever controls the tag can replace what runs, with no version \
-         change and no notice.\n           Pin it: docker.io/you/image@sha256:<64 hex>.\n           `docker buildx imagetools inspect <reference>` prints the digest; use the index \
-         digest, so one reference resolves on both amd64 and arm64."
+        "the image for {what} is {reference:?}, which is a tag rather than a digest.{}",
+        PIN_IT
     )]
     ImageNotPinned {
         /// What wanted the image, so the reader knows which setting to change.

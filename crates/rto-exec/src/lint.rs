@@ -108,6 +108,7 @@ use rto_graph::{Isolation, SourceIdentity};
 use crate::adapter::clippy::{self, Clippy, FeatureSet, Summary};
 use crate::adapter::{Invocation, LINT_ANALYZERS, NativeContext, UNKNOWN_VERSION};
 use crate::clock::rfc3339_utc;
+use crate::guidance::{Guidance, Line};
 use crate::ingest::NormalizedReport;
 use crate::runner::{ExecError, worktree_id};
 // The grant lives in its own ungated module (ADR-0020 §6 is policy, and policy
@@ -133,6 +134,23 @@ use crate::subprocess::{ChildEnv, SubprocessError, execute, scrub_environment, s
 /// outright in [`run`] instead. See [`ChildEnv`].
 const TOOLCHAIN_ENV: &[&str] = &["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"];
 
+/// The sentence every unavailable-sandbox refusal opens with.
+///
+/// A `const` rather than repeated in each variant, so the wording of *what
+/// happened* cannot drift from the wording of *what to do about it*.
+const NOT_AVAILABLE: &str =
+    "`roteiro lint` runs the linter sandboxed, and the sandbox is not available here.";
+
+/// The promise this refusal exists to keep, in the words ADR-0020 §6 uses.
+///
+/// Its own line, and last before the escape, so that the reader has been told
+/// what did **not** happen before being offered the thing that would make it
+/// happen deliberately.
+const NEVER_FELL_BACK: Guidance = Guidance::new(&[Line::Note(&[
+    "Nothing ran, and nothing fell back to this host: asking for isolation and",
+    "getting execution is the one outcome this command will not produce.",
+])]);
+
 /// Something went wrong running the linter, or working out whether it could be
 /// run at all.
 ///
@@ -152,27 +170,37 @@ pub enum LintError {
     /// would get execution, on a tree whose build scripts are the reason they
     /// asked.
     ///
-    /// `escape` is [`Reason::host_escape`] — how *this* person could run on the
-    /// host instead, or `None` when they could not, which is the case in a
-    /// repository whose `roteiro.toml` denies it. A refusal that offered
-    /// `--allow-unsandboxed` to someone it would not help is the failure #426's
-    /// refusals rule is about.
-    #[error(
-        "`roteiro lint` runs the linter sandboxed, and the sandbox is not available here.\n           {what}\n           Nothing ran, and nothing fell back to this host: asking for isolation and getting          execution is the one outcome this command will not produce.{}",
-        .escape.map(|e| format!("\n  {e}")).unwrap_or_default()
-    )]
+    /// Both bodies are [`Guidance`], so the template below is one short literal
+    /// with no wrapping in it. It used to wrap, and leaked nine columns of source
+    /// indentation into the middle of a sentence — see [`crate::guidance`].
+    #[error("{}{what}{}{}", NOT_AVAILABLE, NEVER_FELL_BACK, .escape.map(|e| e.to_string()).unwrap_or_default())]
     SandboxUnavailable {
-        /// What is missing, and what to do about it — one sentence per cause,
-        /// because "the sandbox is unavailable" is a state and not an
-        /// instruction.
-        what: String,
+        /// What is missing, and what to do about it — because "the sandbox is
+        /// unavailable" is a state and not an instruction.
+        what: Guidance,
         /// How host execution could be reached instead, if it could.
-        escape: Option<&'static str>,
+        ///
+        /// [`Reason::host_escape`], which is `None` for the person it would not
+        /// help: nothing overrides a project's denial, so offering them a flag
+        /// is the failure #426's refusals rule is about.
+        escape: Option<Guidance>,
     },
     /// A sandboxed run failed inside the boundary, or could not obtain one.
+    ///
+    /// **Deliberately not `transparent`.** Every refusal on this path ends with
+    /// the same promise — nothing ran, and nothing fell back to this host — and
+    /// one wrapper appending it is what makes that true of *all* of them,
+    /// including a variant somebody adds later without reading this. It was
+    /// per-variant for one revision and a refusal shipped without it; the test
+    /// that caught it now asserts the property here, once, rather than variant
+    /// by variant.
     #[cfg(feature = "exec-boxlite")]
-    #[error(transparent)]
-    Sandbox(#[from] crate::lint_sandbox::BuilderError),
+    #[error("{sandbox}{}", NEVER_FELL_BACK)]
+    Sandbox {
+        /// What went wrong with the boundary.
+        #[from]
+        sandbox: crate::lint_sandbox::BuilderError,
+    },
     /// `roteiro lint` was asked for an analyzer it does not drive.
     #[error(
         "`{requested}` is not a linter roteiro can run (known: {known}). \
@@ -336,7 +364,8 @@ pub enum LintError {
     /// over a run that never compiled anything.
     #[error(
         "`{command}` exited {status} without completing the build and without a single \
-         diagnostic, so there is nothing to report — this is not a clean tree.{hint}{stderr}"
+         diagnostic, so there is nothing to report — this is not a clean tree.{}{stderr}",
+        .hint.map(|h| h.to_string()).unwrap_or_default()
     )]
     BuildProducedNothing {
         /// The argv that ran.
@@ -354,7 +383,7 @@ pub enum LintError {
         /// compiles a dev-dependency on vendored llama.cpp, whose build script
         /// needs `libclang`, and an image without it panics in `bindgen` with no
         /// diagnostic to show for it.
-        hint: &'static str,
+        hint: Option<Guidance>,
         /// The tail of its standard error.
         stderr: String,
     },
@@ -537,12 +566,39 @@ fn run_sandboxed(
 ) -> Result<LintOutcome, LintError> {
     let Some(image) = image else {
         return Err(LintError::SandboxUnavailable {
-            what: crate::lint_sandbox::NO_IMAGE_CONFIGURED.to_owned(),
+            what: crate::lint_sandbox::NO_IMAGE_CONFIGURED,
             escape: reason.host_escape(),
         });
     };
     crate::lint_sandbox::run(analyzer, root, features, image)
 }
+
+/// What a build with no sandboxed backend says, and how to get one.
+///
+/// Compiled **only** into the build that needs it, so the sentence and the
+/// `cfg` that produces it cannot drift apart. The bootstrap order is spelled out
+/// rather than named because `exec-boxlite`'s build script requires the verified
+/// runtime archive at compile time — a reader told only "enable the feature"
+/// gets a build failure instead of a sandbox.
+#[cfg(not(feature = "exec-boxlite"))]
+const NO_SANDBOX_IN_THIS_BUILD: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "This build was compiled without the `exec-boxlite` feature, so it contains no",
+        "sandboxed backend at all — not one that failed, one that is not there.",
+    ]),
+    Line::Note(&["Provision the runtime first, then rebuild with the feature:"]),
+    Line::Command("roteiro security prefetch --analyzer sandbox --allow-download"),
+    Line::Command("cargo install roteiro --features exec-boxlite"),
+    Line::Note(&[
+        "That order is not arbitrary: the feature's build script verifies the runtime",
+        "archive at compile time, so a rebuild without it fails rather than degrades.",
+        "It also needs `protoc >= 3.12` on the build host.",
+    ]),
+    Line::Note(&[
+        "Or ingest a report produced elsewhere, which needs no sandbox at all:",
+        "`roteiro security ingest`.",
+    ]),
+]);
 
 /// The same function in a build with no sandboxed backend.
 ///
@@ -559,12 +615,7 @@ fn run_sandboxed(
     reason: Reason,
 ) -> Result<LintOutcome, LintError> {
     Err(LintError::SandboxUnavailable {
-        what: "This build was compiled without the `exec-boxlite` feature, so it contains no \
-               sandboxed backend at all. Rebuild with `--features exec-boxlite` (it needs \
-               `protoc >= 3.12` on the build host and a provisioned sandbox runtime — see \
-               `roteiro security prefetch --analyzer sandbox --allow-download`), or ingest a \
-               report produced elsewhere."
-            .to_owned(),
+        what: NO_SANDBOX_IN_THIS_BUILD,
         escape: reason.host_escape(),
     })
 }
@@ -633,7 +684,7 @@ fn run_on_host(
         return Err(LintError::BuildProducedNothing {
             command: command.join(" "),
             status: output.status,
-            hint: "",
+            hint: None,
             stderr: stderr_tail(&output.stderr),
         });
     }
@@ -1091,7 +1142,7 @@ pub(crate) fn parse_rustc_verbose(text: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Candidate, LINT_ANALYZERS, LintError, TOOLCHAIN_ENV, first_line, is_inside,
+        Candidate, Guidance, LINT_ANALYZERS, Line, LintError, TOOLCHAIN_ENV, first_line, is_inside,
         lockfile_refused, parse_rustc_verbose, run, scratch_path, scratch_roots_from,
         short_version,
     };
@@ -1254,7 +1305,7 @@ mod tests {
         let nothing = LintError::BuildProducedNothing {
             command: "cargo clippy".to_owned(),
             status: 101,
-            hint: "",
+            hint: None,
             stderr: String::new(),
         }
         .to_string();
@@ -1269,7 +1320,9 @@ mod tests {
         let hinted = LintError::BuildProducedNothing {
             command: "cargo clippy".to_owned(),
             status: 101,
-            hint: "\n  it ran sandboxed, so check the image first",
+            hint: Some(Guidance::new(&[Line::Note(&[
+                "It ran sandboxed, so check the image first.",
+            ])])),
             stderr: String::new(),
         }
         .to_string();
@@ -1318,6 +1371,86 @@ mod tests {
         // another one's name.
         for backend in [Backend::Host, Backend::Sandbox] {
             assert!(super::invocation("semgrep", &features, backend).is_none());
+        }
+    }
+
+    /// **Every** sandbox refusal ends with the promise, because one wrapper
+    /// appends it rather than each variant remembering to.
+    ///
+    /// Written after breaking it. The promise was per-variant, converting one of
+    /// them to a [`Guidance`] dropped it, and the refusal that shipped for a
+    /// revision said an image was missing without saying that nothing had run
+    /// here — which is the single thing ADR-0020 §6 asks this command to
+    /// guarantee.
+    ///
+    /// Driven over every variant rather than a representative one, so a variant
+    /// added later is covered by construction: it cannot reach a caller except
+    /// through [`LintError::Sandbox`].
+    #[cfg(feature = "exec-boxlite")]
+    #[test]
+    fn every_sandbox_refusal_promises_that_nothing_fell_back_to_the_host() {
+        use crate::lint_sandbox::BuilderError;
+
+        let variants: Vec<LintError> = vec![
+            BuilderError::ImageNotProvisioned {
+                analyzer: "clippy".to_owned(),
+                reference: "x@sha256:0".to_owned(),
+            }
+            .into(),
+            BuilderError::ImageLacksLinter {
+                analyzer: "clippy".to_owned(),
+                reference: "x@sha256:0".to_owned(),
+                probe: "cargo clippy --version".to_owned(),
+                stderr: String::new(),
+            }
+            .into(),
+            BuilderError::ProbeFailed {
+                probe: "rustc -vV".to_owned(),
+                reference: "x@sha256:0".to_owned(),
+                stderr: String::new(),
+            }
+            .into(),
+            BuilderError::ColdCache {
+                stderr: String::new(),
+            }
+            .into(),
+            BuilderError::NoPackageCache {
+                path: "/nowhere".to_owned(),
+            }
+            .into(),
+            BuilderError::Killed {
+                command: "cargo clippy".to_owned(),
+                signal: 9,
+                memory_mib: 4096,
+            }
+            .into(),
+            BuilderError::OutputTooLarge {
+                command: "cargo clippy".to_owned(),
+                max: 1,
+            }
+            .into(),
+            BuilderError::UnexpectedStatus {
+                analyzer: "clippy".to_owned(),
+                command: "cargo clippy".to_owned(),
+                status: 42,
+                expected: "0, 101".to_owned(),
+                stderr: String::new(),
+            }
+            .into(),
+        ];
+        for error in variants {
+            let message = error.to_string();
+            assert!(
+                message.contains("nothing fell back to this host"),
+                "a sandbox refusal that does not say nothing ran here:\n{message}"
+            );
+            // And it is said **once** — the wrapper owns it, so a variant that
+            // also says it is a duplicate a reader would read twice.
+            assert_eq!(
+                message.matches("nothing fell back to this host").count(),
+                1,
+                "said more than once:\n{message}"
+            );
         }
     }
 

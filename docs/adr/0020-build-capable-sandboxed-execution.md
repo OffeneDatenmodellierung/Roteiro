@@ -481,6 +481,19 @@ needed splitting, not building.
 `roteiro lint <analyzer>` ships both halves, with a `clippy` adapter. Under
 condition 6 it runs **sandboxed** unless host execution has been granted.
 
+**Every refusal on this path is built from `rto_exec::guidance`**, and that is a
+consequence of #426's rule rather than a style choice. A refusal names the way
+forward; a way forward you cannot paste is not one. Written as wrapped string
+literals, three of these leaked their own source indentation into shipped output
+— `getting          execution` — one claimed a document showed three lines where
+it showed two, and one told a reader to run `--image $ VAR`, which no shell
+expands. None of that fails to compile and none of it is visible in the source,
+which is the argument for a type: prose is authored as fragments joined with one
+space, commands are single literals rendered verbatim, and the rules are asserted
+on render so any test that prints a message checks it. The promise that nothing
+fell back to this host is appended by **one** wrapper rather than by each
+variant, for the same reason — it was per-variant, and one variant lost it.
+
 What the layers say did not change and what *"denied"* amounts to did. A project
 that denies host execution, a user config that denies it, and `--sandboxed` now
 all mean **run in the boundary**, where between v1.3 and this revision they meant

@@ -28,7 +28,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use rto_exec::{FeatureSet, LintConfigGrant, LintRequested, decide_lint_host};
+use rto_exec::{
+    FeatureSet, Guidance, GuidanceLine as Line, LintConfigGrant, LintRequested, decide_lint_host,
+};
 use rto_graph::Isolation;
 
 /// The environment variable that supplies the image, and the sentence a skip
@@ -38,6 +40,16 @@ use rto_graph::Isolation;
 /// loader — `[lint] image` is read by the binary — and inventing a second reader
 /// for it here would be a second implementation of a rule that has one.
 const IMAGE_VAR: &str = "ROTEIRO_TEST_LINT_IMAGE";
+
+/// The one command that provisions the image, in both skip messages.
+///
+/// One literal on one source line, because a command is pasted in one go — see
+/// [`rto_exec::guidance`], which is also where the rule that keeps it that way
+/// lives. Written with `$ROTEIRO_TEST_LINT_IMAGE` and not `$ ROTEIRO_…`: the
+/// first version of this message had the space, and the shell does not expand
+/// it.
+const PREFETCH: &str =
+    "roteiro security prefetch --analyzer clippy --allow-download --image $ROTEIRO_TEST_LINT_IMAGE";
 
 /// One diagnostic clippy has fired on since long before this test, in a crate
 /// with **no dependencies**.
@@ -148,15 +160,26 @@ fn a_sandboxed_lint_reports_from_inside_the_boundary_and_leaves_the_tree_alone()
 /// Every precondition, each printing why it skipped.
 fn preconditions() -> Option<String> {
     let Ok(image) = std::env::var(IMAGE_VAR) else {
+        // Through `Guidance` like every other way forward in this crate, and for
+        // the reason that type exists: the two commands below are meant to be
+        // pasted, and the first version of this message told the reader to run
+        // `--image $ ROTEIRO_TEST_LINT_IMAGE`, which the shell does not expand.
+        // A rule that only applied to shipped messages would not have caught it.
         eprintln!(
-            "SKIPPED: {IMAGE_VAR} is unset, so there is no image to lint inside.\n         \
-             Roteiro ships no default and will not choose one — no first-party Rust image \
-             carries the `clippy` component (rust-lang/docker-rust builds every stable and \
-             nightly variant `--profile minimal`), and picking a third party's would make \
-             somebody else's container the boundary. See docs/SANDBOXED_LINTING.md for a \
-             two-line image, then:\n           \
-             export {IMAGE_VAR}=registry/you/rust-clippy@sha256:<64 hex>\n           \
-             roteiro security prefetch --analyzer clippy --allow-download --image $ {IMAGE_VAR}"
+            "SKIPPED: {IMAGE_VAR} is unset, so there is no image to lint inside.{}",
+            Guidance::new(&[
+                Line::Note(&[
+                    "Roteiro ships no default and will not choose one — no first-party Rust",
+                    "image carries the `clippy` component (rust-lang/docker-rust builds every",
+                    "stable and nightly variant `--profile minimal`), and picking a third",
+                    "party's would make somebody else's container the boundary.",
+                ]),
+                Line::Note(&["See docs/SANDBOXED_LINTING.md for the Dockerfile, then:"]),
+                Line::Command(
+                    "export ROTEIRO_TEST_LINT_IMAGE=registry/you/rust-clippy@sha256:<64 hex>"
+                ),
+                Line::Command(PREFETCH),
+            ])
         );
         return None;
     };
@@ -180,8 +203,14 @@ fn preconditions() -> Option<String> {
         Ok(true) => {}
         Ok(false) => {
             eprintln!(
-                "SKIPPED: {image} is not in the local image store, and a run never pulls.\n         \
-                 roteiro security prefetch --analyzer clippy --allow-download --image {image}"
+                "SKIPPED: {image} is not in the local image store, and a run never pulls.{}",
+                Guidance::new(&[
+                    Line::Note(&["Provisioning fetches; running reads. Pull it first:"]),
+                    // The reference rather than the variable, because a reader
+                    // who reached this line may have set the variable in one
+                    // shell and be reading this in another.
+                    Line::Command(PREFETCH),
+                ])
             );
             return None;
         }

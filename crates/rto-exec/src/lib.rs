@@ -127,6 +127,14 @@ pub mod crossref;
 /// read the file's own comments for the measurements, and for why the encoder
 /// and the decoder have to be one file rather than two.
 pub mod file_url;
+/// How a refusal is written, so that a way forward stays one.
+///
+/// Ungated, like [`lint_grant`], and for the same kind of reason: what a refusal
+/// owes its reader is not a property of which backends were compiled in. Read
+/// the module for the failure it makes unrepresentable — three of this crate's
+/// refusals leaked source indentation into shipped output at once, which says
+/// the way they were written invited it.
+pub mod guidance;
 mod ingest;
 /// Running a linter and **reporting** it, with no store anywhere in the path.
 ///
@@ -199,6 +207,7 @@ pub use assets::{
 pub use boxlite::{BoxliteRunner, SandboxError, SandboxProbe, sandbox_probe};
 pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 pub use crossref::{Correspondence, Report, cross_reference};
+pub use guidance::{Guidance, Line as GuidanceLine};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
     normalize_native,

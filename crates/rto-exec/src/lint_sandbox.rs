@@ -121,6 +121,7 @@ use crate::boxlite::{
 };
 use crate::child_env::ChildEnv;
 use crate::clock::rfc3339_utc;
+use crate::guidance::{Guidance, Line};
 use crate::lint::{LintError, LintOutcome, Toolchain, scratch_dir};
 use crate::lint_grant::Backend;
 use crate::snippet::WorktreeSnippets;
@@ -145,43 +146,129 @@ pub const GUEST_CARGO_REGISTRY: &str = "/cargo/registry";
 /// Where the host's cache of git dependencies is mounted, read-only.
 pub const GUEST_CARGO_GIT: &str = "/cargo/git";
 
+/// The one sentence that points at the document, and the **only** place the
+/// Dockerfile's line count is claimed.
+///
+/// It was claimed in four places — this refusal, the one for an image without
+/// the linter, a test's skip message, and `roteiro lint --help` — and one of
+/// them said "three" over a document showing two. A count repeated four times is
+/// a count that will be wrong somewhere, so it is stated once, checked against
+/// the document by [`tests::the_two_line_dockerfile_claim_matches_the_document`],
+/// and referenced everywhere else. `--help` no longer states a number at all,
+/// because it is in another crate and this test cannot reach it.
+const SEE_THE_DOCUMENT: Line = Line::Note(&[
+    "See docs/SANDBOXED_LINTING.md for the two-line Dockerfile that satisfies this,",
+    "and pin the image you build by digest.",
+]);
+
+/// How to provision an image once it exists, in the words `prefetch` uses.
+const PREFETCH_THE_IMAGE: Line =
+    Line::Command("roteiro security prefetch --analyzer clippy --allow-download");
+
+/// The one command that fills a cold package cache, for the two refusals that
+/// need it. `--locked` because the tree under review is not this command's to
+/// re-resolve.
+const FETCH_ON_THE_HOST: Line = Line::Command("cargo fetch --locked");
+
 /// What [`crate::lint`] prints when the sandbox is selected and no image was
 /// supplied.
 ///
 /// It lives here rather than at the refusal because the *reason* there is no
 /// default is this module's to explain, and a build without `exec-boxlite`
-/// prints the same sentence from the same string.
-pub const NO_IMAGE_CONFIGURED: &str = concat!(
-    "No image is configured. `roteiro lint` runs the linter inside an OCI image, and roteiro \
-     ships no default: there is no first-party Rust image carrying the `clippy` component \
-     (rust-lang/docker-rust builds every stable and nightly variant `--profile minimal`), and \
-     choosing a third party's would make somebody else's container the boundary your build \
-     scripts run in — picked here and noticed by nobody.\n",
-    "  Supply one, pinned by digest:\n",
-    "    [lint]\n",
-    "    image = \"registry/you/rust-clippy@sha256:<64 hex>\"\n",
-    "  in ~/.roteiro/config.toml (yours) or the repository's roteiro.toml (your team's), then\n",
-    "    roteiro security prefetch --analyzer clippy --allow-download\n",
-    "  See docs/SANDBOXED_LINTING.md for a three-line image that satisfies this."
-);
+/// prints the same lines from the same place.
+///
+/// The line count in the last note is **checked against the document**, by
+/// `the_two_line_dockerfile_claim_matches_the_document`. It said "three-line"
+/// while the document showed two, which is the smallest possible version of the
+/// defect this whole type exists for: a way forward that is wrong about the
+/// thing it points at.
+pub const NO_IMAGE_CONFIGURED: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "No image is configured. `roteiro lint` runs the linter inside an OCI image,",
+        "and roteiro ships no default: no first-party Rust image carries the `clippy`",
+        "component (rust-lang/docker-rust builds every stable and nightly variant",
+        "`--profile minimal`), and choosing a third party's would make somebody else's",
+        "container the boundary your build scripts run in — picked here and noticed by",
+        "nobody.",
+    ]),
+    Line::Note(&["Supply one, pinned by digest:"]),
+    Line::Command("[lint]"),
+    Line::Command("image = \"registry/you/rust-clippy@sha256:<64 hex>\""),
+    Line::Note(&[
+        "in ~/.roteiro/config.toml (yours) or the repository's roteiro.toml (your",
+        "team's), then:",
+    ]),
+    PREFETCH_THE_IMAGE,
+    SEE_THE_DOCUMENT,
+]);
 
 /// What to check first when a sandboxed build produced nothing at all.
 ///
 /// The cause that is new rather than the causes a person already knows how to
 /// look for. An image has to be able to **build** the tree, not merely lint it,
 /// and a missing native build dependency fails inside a machine the reader
-/// cannot open a shell in — so it is worth one sentence at the point of failure
-/// rather than a paragraph in a document they would have to know to go and read.
+/// cannot open a shell in — so it is worth saying at the point of failure rather
+/// than in a document they would have to know to go and read.
 ///
 /// Measured on this repository: `--all-targets` compiles `rto-llama`'s
 /// dev-dependency on vendored llama.cpp, whose build script needs `libclang`, and
 /// an image carrying `cmake` but not `libclang` panics in `bindgen` with no
 /// diagnostic to show for it.
-const BUILD_DEPENDENCY_HINT: &str = "\n  It ran sandboxed, so check this first: the image has \
-     to be able to *build* your tree, not just lint it. `cargo clippy` has `cargo check` \
-     semantics, so every build script in the tree runs inside the image — and a native \
-     dependency the image lacks (libclang, cmake, a C toolchain, protoc) fails there, where you \
-     cannot open a shell. Add it to the image you supply; see docs/SANDBOXED_LINTING.md.";
+const BUILD_DEPENDENCY_HINT: Guidance = Guidance::new(&[Line::Note(&[
+    "It ran sandboxed, so check this first: the image has to be able to *build*",
+    "your tree, not just lint it. `cargo clippy` has `cargo check` semantics, so",
+    "every build script in the tree runs inside the image — and a native dependency",
+    "the image lacks (libclang, cmake, a C toolchain, protoc) fails there, where you",
+    "cannot open a shell. Add it to the image you supply; see",
+    "docs/SANDBOXED_LINTING.md.",
+])]);
+
+/// Why an official Rust image will not do, and what to supply instead.
+///
+/// The refusal this whole design turns on, so it says *why* rather than only
+/// *what*: a reader who is told "this image lacks clippy" will reach for the
+/// official Rust image next, and get here again.
+const IMAGE_LACKS_LINTER: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "An official Rust image will not do — rust-lang/docker-rust builds every stable",
+        "and nightly variant with `rustup-init --profile minimal`, which installs rustc,",
+        "cargo and rust-std and stops. The `clippy` component has to be in the image you",
+        "supply, and roteiro will not choose one for you: an image is the boundary your",
+        "build scripts run in.",
+    ]),
+    SEE_THE_DOCUMENT,
+    Line::Note(&["Then point `[lint] image` at it, and provision it:"]),
+    PREFETCH_THE_IMAGE,
+]);
+
+/// Condition 2's failure mode, and the one command that fixes it.
+///
+/// Cargo reports this from inside a machine the reader cannot open a shell in,
+/// in two wordings depending on whether the `.crate` file is missing or merely
+/// unexpanded — and neither mentions the host, which is the only place it can be
+/// fixed.
+const COLD_CACHE: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "Egress is denied by the hypervisor, and `--offline` is passed so cargo says so",
+        "rather than hanging. Fetch them on the host first, in the tree you are linting:",
+    ]),
+    FETCH_ON_THE_HOST,
+    Line::Note(&[
+        "That both downloads and unpacks, which is what a read-only cache mount needs —",
+        "a `.crate` file that is present but unexpanded fails just as a missing one does,",
+        "because expanding it would be a write. Then lint again.",
+    ]),
+    Line::Note(&["Nothing was reported, because a build that did not happen is not a clean tree."]),
+]);
+
+/// No package cache at all, which is a setup step rather than a broken build.
+const NO_CACHE: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "The guest builds from a read-only mount of this machine's cache, so there has to",
+        "be one. Create it by fetching this tree's dependencies on the host:",
+    ]),
+    FETCH_ON_THE_HOST,
+]);
 
 /// Something went wrong obtaining or using the boundary.
 ///
@@ -201,14 +288,28 @@ pub enum BuilderError {
     /// The same rule every other input follows — provisioning downloads, running
     /// reads — so that a lint can never depend on a registry being reachable,
     /// nor succeed by silently fetching something new.
+    // The reference is in the sentence, not only in a field. Converting this to
+    // a `Guidance` dropped it for one revision, and "an image is not in the
+    // store" without saying *which* image is a refusal that names no way
+    // forward — the reader has two configured layers and a flag to check.
     #[error(
-        "the image for `roteiro lint` is not in the local store, and a run never pulls one.\n  \
-         image: {reference}\n  \
-         fetch it with: roteiro security prefetch --analyzer {analyzer} --allow-download\n  \
-         Nothing ran."
+        "the image {reference} is not in the local store, and a run never pulls one.{}",
+        Guidance::new(&[
+            Line::Note(&[
+                "Provisioning fetches; running reads, so that a lint can never fail because a",
+                "registry was unreachable, nor succeed by quietly fetching something new.",
+                "Pull it first:",
+            ]),
+            PREFETCH_THE_IMAGE,
+        ])
     )]
     ImageNotProvisioned {
         /// The linter whose run was refused.
+        ///
+        /// Not in the message: `prefetch --analyzer clippy` is the command
+        /// whatever linter was asked for, because `clippy` is the only one, and
+        /// a second name in a sentence that already carries a digest is noise.
+        /// Kept because the moment there are two linters the command differs.
         analyzer: String,
         /// The digest-pinned reference that is missing.
         reference: String,
@@ -221,15 +322,9 @@ pub enum BuilderError {
     /// outcome would be an empty report over a tree nobody linted, which is the
     /// vacuous zero this project has been bitten by repeatedly.
     #[error(
-        "the image ran, and `{probe}` inside it did not work: this image does not carry \
-         `{analyzer}`.\n  \
-         image: {reference}\n  \
-         An official Rust image will not do — rust-lang/docker-rust builds every stable and \
-         nightly variant with `rustup-init --profile minimal`, which installs rustc, cargo and \
-         rust-std and stops. The `clippy` component has to be in the image you supply.\n  \
-         Build one (three lines) and pin it by digest — see docs/SANDBOXED_LINTING.md — then set \
-         `[lint] image` to it.\n  \
-         Nothing ran, and nothing fell back to this host.{stderr}"
+        "the image {reference} ran, and `{probe}` inside it did not work: it does not carry \
+         `{analyzer}`.{}{stderr}",
+        IMAGE_LACKS_LINTER
     )]
     ImageLacksLinter {
         /// The linter that is missing.
@@ -261,13 +356,8 @@ pub enum BuilderError {
     /// place the problem can be fixed.
     #[error(
         "the build needs a dependency that this machine's cargo cache does not hold, and the \
-         guest has no network to fetch it with (egress is denied by the hypervisor, and \
-         `--offline` is passed so cargo says so rather than hanging).\n  \
-         Fetch them on the host first, in the tree you are linting:\n    \
-         cargo fetch --locked\n  \
-         That both downloads and unpacks, which is what a read-only cache mount needs. Then lint \
-         again.\n  \
-         Nothing was reported, because a build that did not happen is not a clean tree.{stderr}"
+         guest has no network to fetch it with.{}{stderr}",
+        COLD_CACHE
     )]
     ColdCache {
         /// The tail of cargo's standard error, which names the crate.
@@ -275,11 +365,8 @@ pub enum BuilderError {
     },
     /// There is no package cache on this host at all.
     #[error(
-        "there is no cargo package cache to mount: {path} does not exist. The guest builds from \
-         a read-only mount of this machine's cache, so there has to be one.\n  \
-         Create it by fetching this tree's dependencies on the host:\n    \
-         cargo fetch --locked\n  \
-         Nothing ran."
+        "there is no cargo package cache to mount: {path} does not exist.{}",
+        NO_CACHE
     )]
     NoPackageCache {
         /// Where it was looked for.
@@ -668,7 +755,7 @@ impl Builder<'_> {
             return Err(LintError::BuildProducedNothing {
                 command: command.join(" "),
                 status: output.status,
-                hint: BUILD_DEPENDENCY_HINT,
+                hint: Some(BUILD_DEPENDENCY_HINT),
                 stderr: stderr_tail(&output.stderr),
             });
         }
@@ -898,7 +985,8 @@ fn stderr_tail(stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Builder, GUEST_CARGO_GIT, GUEST_CARGO_HOME, GUEST_CARGO_REGISTRY, GUEST_SCRATCH,
+        BUILD_DEPENDENCY_HINT, Builder, BuilderError, COLD_CACHE, GUEST_CARGO_GIT,
+        GUEST_CARGO_HOME, GUEST_CARGO_REGISTRY, GUEST_SCRATCH, IMAGE_LACKS_LINTER, NO_CACHE,
         NO_IMAGE_CONFIGURED, PackageCache, cold_cache, guest_environment,
     };
     use crate::boxlite::GUEST_WORKTREE;
@@ -1040,15 +1128,24 @@ mod tests {
     /// No package cache is a refusal that names the directory **and** the
     /// command that creates it — the guest builds from a mount of this
     /// machine's cache, so a missing one is a setup step, not a broken build.
+    ///
+    /// Rendered through [`crate::LintError`] rather than as a bare
+    /// [`BuilderError`], because that is the only way a person ever sees one:
+    /// the wrapper is what appends the promise that nothing fell back to this
+    /// host. Asserting on the bare error tested a string no user is shown, and
+    /// went green while the wrapper was the thing under change.
     #[test]
     fn a_missing_package_cache_refuses_and_names_the_way_forward() {
         let absent = std::env::temp_dir().join("rto-exec-no-such-cargo-home");
         std::fs::remove_dir_all(&absent).ok();
         let err = PackageCache::under(&absent).expect_err("must refuse");
-        let message = err.to_string();
+        let message = crate::LintError::from(err).to_string();
         assert!(message.contains("registry"), "{message}");
-        assert!(message.contains("cargo fetch"), "{message}");
-        assert!(message.contains("Nothing ran"), "{message}");
+        assert!(message.contains("cargo fetch --locked"), "{message}");
+        assert!(
+            message.contains("nothing fell back to this host"),
+            "{message}"
+        );
     }
 
     /// Everything is set and nothing is inherited, and the two variables set are
@@ -1096,11 +1193,149 @@ mod tests {
         assert!(!cold_cache(""));
     }
 
+    /// A refusal names the **thing it is about**, not only the category.
+    ///
+    /// Written after breaking it: moving `ImageNotProvisioned`'s body into a
+    /// [`Guidance`] dropped `{reference}` from the sentence for one revision, so
+    /// it said an image was missing without saying which. The reader has a user
+    /// config, a project config and a flag to check, and the message narrowed it
+    /// to none of them.
+    ///
+    /// A shape rule cannot catch that — the message was well formed — so this
+    /// renders each variant with a distinctive value and asserts the value comes
+    /// out the other side.
+    #[test]
+    fn every_refusal_names_the_thing_it_is_about() {
+        let reference = "registry.example/you/rust-clippy@sha256:0123456789abcdef";
+        let subjects: Vec<(String, &str)> = vec![
+            (
+                BuilderError::ImageNotProvisioned {
+                    analyzer: "clippy".to_owned(),
+                    reference: reference.to_owned(),
+                }
+                .to_string(),
+                reference,
+            ),
+            (
+                BuilderError::ImageLacksLinter {
+                    analyzer: "clippy".to_owned(),
+                    reference: reference.to_owned(),
+                    probe: "cargo clippy --version".to_owned(),
+                    stderr: String::new(),
+                }
+                .to_string(),
+                reference,
+            ),
+            (
+                BuilderError::ProbeFailed {
+                    probe: "rustc -vV".to_owned(),
+                    reference: reference.to_owned(),
+                    stderr: String::new(),
+                }
+                .to_string(),
+                reference,
+            ),
+            (
+                BuilderError::NoPackageCache {
+                    path: "/nowhere/registry".to_owned(),
+                }
+                .to_string(),
+                "/nowhere/registry",
+            ),
+            (
+                BuilderError::UnexpectedStatus {
+                    analyzer: "clippy".to_owned(),
+                    command: "cargo clippy --offline".to_owned(),
+                    status: 42,
+                    expected: "0, 101".to_owned(),
+                    stderr: String::new(),
+                }
+                .to_string(),
+                "cargo clippy --offline",
+            ),
+        ];
+        for (message, subject) in subjects {
+            assert!(
+                message.contains(subject),
+                "a refusal that does not name {subject:?} narrows nothing:\n{message}"
+            );
+        }
+    }
+
+    /// Every refusal that offers a way forward offers one that is **well
+    /// formed**, and rendering is what checks it — `Display` asserts the rules.
+    ///
+    /// So this test is mostly here to *do the rendering*: it is the thing that
+    /// drags every guidance in this module through the assertion, including ones
+    /// a future change adds and forgets to test directly.
+    #[test]
+    fn every_guidance_in_this_module_renders_without_defects() {
+        for guidance in [
+            NO_IMAGE_CONFIGURED,
+            BUILD_DEPENDENCY_HINT,
+            IMAGE_LACKS_LINTER,
+            COLD_CACHE,
+            NO_CACHE,
+        ] {
+            assert!(guidance.defects().is_empty(), "{:?}", guidance.defects());
+            assert!(!guidance.to_string().is_empty());
+        }
+    }
+
+    /// The refusal claims the Dockerfile is **two lines**, and this is what makes
+    /// the claim true rather than hopeful.
+    ///
+    /// It shipped saying *"three-line image"* over a document showing two. That
+    /// is the smallest possible version of the defect this crate's guidance
+    /// rules exist for — a way forward that is wrong about the thing it points
+    /// at — and no shape rule can catch it, because the message is perfectly
+    /// well formed. Only the document can answer, so the document is asked.
+    ///
+    /// Both directions are pinned: the count in the message and the count in the
+    /// file. Changing either alone fails here.
+    #[test]
+    fn the_two_line_dockerfile_claim_matches_the_document() {
+        let doc = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/SANDBOXED_LINTING.md")
+            .canonicalize()
+            .expect("the document the refusal points at must exist");
+        let text = std::fs::read_to_string(&doc).expect("readable");
+
+        // The first fenced dockerfile block is the one the message means.
+        let fence = text
+            .split("```dockerfile")
+            .nth(1)
+            .expect("the document must contain a dockerfile block")
+            .split("```")
+            .next()
+            .expect("an unterminated fence");
+        let lines = fence.lines().filter(|l| !l.trim().is_empty()).count();
+
+        let numeral = match lines {
+            2 => "two",
+            3 => "three",
+            4 => "four",
+            n => panic!(
+                "{} shows a {n}-line Dockerfile; teach this test the numeral",
+                doc.display()
+            ),
+        };
+        assert!(
+            NO_IMAGE_CONFIGURED
+                .to_string()
+                .contains(&format!("{numeral}-line")),
+            "{} shows a {lines}-line Dockerfile, and the refusal does not say {numeral:?}:\n{}",
+            doc.display(),
+            NO_IMAGE_CONFIGURED
+        );
+    }
+
     /// The refusal for an unconfigured image is the whole interface to that
     /// state, so it has to carry the key, a pinned example and the command that
     /// provisions it — not merely say that something is missing.
     #[test]
     fn the_unconfigured_image_refusal_says_what_to_do() {
+        let rendered = NO_IMAGE_CONFIGURED.to_string();
         for needle in [
             "[lint]",
             "image = ",
@@ -1109,7 +1344,7 @@ mod tests {
             "docs/SANDBOXED_LINTING.md",
         ] {
             assert!(
-                NO_IMAGE_CONFIGURED.contains(needle),
+                rendered.contains(needle),
                 "the refusal does not mention {needle}"
             );
         }

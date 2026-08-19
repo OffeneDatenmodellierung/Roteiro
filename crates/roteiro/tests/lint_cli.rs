@@ -617,13 +617,30 @@ fn a_storing_analyzer_is_refused_and_the_disclosure_does_not_lie_about_it() {
 }
 
 /// **The inversion, end to end.** With nothing configured and no flag,
-/// `roteiro lint` selects the sandbox — and with no image supplied there is no
-/// sandbox to be had, so it refuses and **runs nothing** (ADR-0020 §6).
+/// `roteiro lint` selects the sandbox — and when the sandbox cannot be had it
+/// refuses and **runs nothing** (ADR-0020 §6).
 ///
 /// Before v1.3 this compiled the tree on the host. The assertion that carries
 /// the weight is [`Fixture::built_anything`]: an exit status alone cannot tell a
 /// refusal from a run that happened and then complained, and the failure this
 /// test exists to catch is a selected boundary quietly becoming a host run.
+///
+/// # Why the assertions are in two parts
+///
+/// Because the *property* holds in both builds and the *reason* does not. The
+/// invariant — selects the sandbox, refuses, builds nothing, never falls back,
+/// names a way forward, writes nothing — is what this test is for, and it must
+/// be pinned wherever this command exists. What is missing differs: with
+/// `exec-boxlite` there is a backend and no image; without it there is no
+/// backend at all, and `run_sandboxed` is a *different function* that returns
+/// before an image is ever looked at.
+///
+/// This test shipped with only the first set of assertions and passed
+/// `--all-features` while failing the default set — #360's class exactly, a
+/// defect visible only where code is `cfg`'d **out**, which `--all-features` is
+/// structurally blind to. Splitting the causes is the fix; deleting them and
+/// asserting on a string that happens to match both would have been the
+/// regression.
 #[test]
 fn by_default_it_selects_the_sandbox_and_never_falls_back_to_the_host() {
     let fixture = Fixture::new("default-refuses");
@@ -641,20 +658,15 @@ fn by_default_it_selects_the_sandbox_and_never_falls_back_to_the_host() {
     );
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // What was selected, and that it was not run here.
+    // What was selected, and that it was not run here. True in every build.
     assert!(stderr.contains("sandboxed"), "{stderr}");
     assert!(
         stderr.contains("nothing fell back to this host"),
         "the one promise this refusal exists to keep: {stderr}"
     );
-    // Why it could not be had, and how to fix *that* — which is the way forward
-    // a person actually wants, rather than only the way around it.
-    assert!(stderr.contains("No image is configured"), "{stderr}");
-    assert!(stderr.contains("[lint]"), "{stderr}");
-    assert!(stderr.contains("@sha256:"), "{stderr}");
-    assert!(stderr.contains("docs/SANDBOXED_LINTING.md"), "{stderr}");
-    // And the way around it, both forms, with the sentence that stops them
-    // reading as two steps.
+    // The way *around* it, both forms, with the sentence that stops them reading
+    // as two steps. Also true in every build: the escape comes from the grant,
+    // which is ungated on purpose.
     assert!(stderr.contains("--allow-unsandboxed"), "{stderr}");
     assert!(stderr.contains("allow_unsandboxed = true"), "{stderr}");
     assert!(stderr.contains("~/.roteiro/config.toml"), "{stderr}");
@@ -667,6 +679,10 @@ fn by_default_it_selects_the_sandbox_and_never_falls_back_to_the_host() {
         "and that either remedy suffices — otherwise the config key reads as a \
          second step and nobody stops typing the flag: {stderr}"
     );
+
+    // And the way *forward*, which is the half that differs by build.
+    assert_missing_thing_is_named(&stderr);
+
     assert!(
         String::from_utf8_lossy(&out.stdout).trim().is_empty(),
         "a refusal reports nothing at all"
@@ -678,6 +694,43 @@ fn by_default_it_selects_the_sandbox_and_never_falls_back_to_the_host() {
     );
 }
 
+/// With a backend compiled in, what is missing is the **image**, and the refusal
+/// says how to supply one.
+#[cfg(feature = "exec-boxlite")]
+fn assert_missing_thing_is_named(stderr: &str) {
+    assert!(stderr.contains("No image is configured"), "{stderr}");
+    assert!(stderr.contains("[lint]"), "{stderr}");
+    assert!(stderr.contains("@sha256:"), "{stderr}");
+    assert!(stderr.contains("docs/SANDBOXED_LINTING.md"), "{stderr}");
+}
+
+/// Without one, what is missing is the **feature**, and the refusal says how to
+/// get it — including that the runtime is provisioned *first*, because the
+/// build script verifies it at compile time.
+///
+/// This is the assertion the default feature set had none of, which is why the
+/// two tests above it could rot unnoticed.
+#[cfg(not(feature = "exec-boxlite"))]
+fn assert_missing_thing_is_named(stderr: &str) {
+    assert!(stderr.contains("exec-boxlite"), "{stderr}");
+    assert!(
+        stderr.contains("no sandboxed backend at all"),
+        "a feature that is not compiled in is not a backend that failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("roteiro security prefetch --analyzer sandbox --allow-download"),
+        "the bootstrap order matters and must be spelled out: {stderr}"
+    );
+    assert!(
+        stderr.contains("cargo install roteiro --features exec-boxlite"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("roteiro security ingest"),
+        "and the path that needs no sandbox at all: {stderr}"
+    );
+}
+
 /// A **tag** is refused, wherever the image came from.
 ///
 /// The image is the boundary — the container somebody else's build scripts
@@ -685,6 +738,13 @@ fn by_default_it_selects_the_sandbox_and_never_falls_back_to_the_host() {
 /// cannot be deferred to "it will fail later": a tag *works*, right up until the
 /// day somebody replaces what is behind it, and the run reports success either
 /// way.
+///
+/// Gated, and the gate is the honest answer rather than a convenience. Without
+/// `exec-boxlite` a tag is never examined: `run_sandboxed` refuses on the
+/// missing feature before any image is looked at, which is the correct order —
+/// there is no point validating an image for a backend that does not exist. The
+/// default build's counterpart is below.
+#[cfg(feature = "exec-boxlite")]
 #[test]
 fn an_image_pinned_by_tag_is_refused_and_says_how_to_pin_it() {
     let fixture = Fixture::new("tagged-image");
@@ -704,6 +764,51 @@ fn an_image_pinned_by_tag_is_refused_and_says_how_to_pin_it() {
     assert!(
         stderr.contains("imagetools inspect"),
         "and how to obtain it: {stderr}"
+    );
+}
+
+/// In a build with no sandboxed backend, **every** sandbox-path input refuses
+/// the same way, naming the feature.
+///
+/// The default set's counterpart to the two tests above, and the thing it was
+/// missing. It is worth pinning in its own right rather than as a placeholder:
+/// with no backend there is nothing to validate an image *against*, so a run
+/// that reported "that is a tag" here would mean the command had gone looking at
+/// an image for a backend it does not have — and a person would then go and fix
+/// the tag, and get the same refusal again.
+///
+/// It also restores, for this build, the property the grant lost when the
+/// sandbox stopped being a shut gate: behind a capability that is genuinely
+/// absent, differing inputs must not produce differing answers.
+#[cfg(not(feature = "exec-boxlite"))]
+#[test]
+fn a_build_without_the_sandbox_refuses_every_input_by_naming_the_feature() {
+    let fixture = Fixture::new("no-backend");
+    let refusal = |args: &[&str]| {
+        let out = fixture.roteiro(args, &[]);
+        assert!(!out.status.success(), "{args:?} must be refused: {out:?}");
+        assert!(!fixture.built_anything(), "{args:?} built something");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let no_image = refusal(&["lint", "clippy"]);
+    let tagged = refusal(&["lint", "clippy", "--image", "docker.io/you/rust:1.97.1"]);
+    let pinned = refusal(&[
+        "lint",
+        "clippy",
+        "--image",
+        "docker.io/you/rust-clippy@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    ]);
+
+    assert_eq!(
+        no_image, tagged,
+        "a tag cannot be judged by a build with nothing to run it in"
+    );
+    assert_eq!(no_image, pinned, "nor can a digest");
+    assert_missing_thing_is_named(&no_image);
+    assert!(
+        !no_image.contains("tag rather than a digest"),
+        "no image was examined, so nothing may claim one was: {no_image}"
     );
 }
 

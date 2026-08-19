@@ -654,7 +654,7 @@ enum Command {
     /// every stable and nightly variant `--profile minimal` — and picking a
     /// third party's would make somebody else's container the boundary your
     /// build scripts run in, chosen here and noticed by nobody. See
-    /// `docs/SANDBOXED_LINTING.md`; it is two lines of Dockerfile.
+    /// `docs/SANDBOXED_LINTING.md`, which shows the Dockerfile.
     ///
     /// **The count can differ from a local `cargo clippy`, legitimately.** Which
     /// lints fire is decided by the image's rustc, which is not this machine's,
