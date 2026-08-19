@@ -34,6 +34,8 @@ pub const SCHEMA: &str = "roteiro.query/v1";
 /// [`Iterator::take`] and so returned nothing for `0` — the same parameter name
 /// with opposite meanings, and nothing that could make the disagreement visible
 /// (issue #375). A sixth list lens should call this rather than write a third.
+/// One did write a third — see *Episodic recall* below — and the warning is left
+/// standing because the next one will too.
 ///
 /// The contract:
 ///
@@ -82,6 +84,24 @@ pub const SCHEMA: &str = "roteiro.query/v1";
 /// this issue is about. The reasoning is restated where each clamp lives, in
 /// `rto_render::mcp::GraphServer::search` and the served-chat `search` arm in
 /// the `roteiro` binary; if this rule changes, those two must change with it.
+///
+/// # Episodic recall — the third implementation this doc predicted (issue #447)
+///
+/// [`crate::Store::recall_memory`] ranked, then called
+/// [`Vec::truncate`] directly, so `limit = 0` emptied the result: `recall
+/// --limit 0` returned nothing on a store where five other surfaces returned
+/// everything, and the JSON said `"live": 8000` beside `"results": []` — not a
+/// lie, and no help at all. It calls this now. Two details are worth keeping:
+///
+/// - **`None` and `Some(0)` had to collapse onto one meaning, not two.**
+///   `RecallOptions::limit` is an `Option`, so "unlimited" was already sayable
+///   twice; the fix maps `None` to `0` rather than adding a branch, because two
+///   spellings of one request are how the first divergence started.
+/// - **`memory list` cuts in SQL and so cannot call this.** `LIMIT 0` in SQL
+///   means the *opposite* of what this function means, so `memory::records`
+///   omits the clause entirely for `0`. That is the contract translated, and it
+///   is the only place in the crate where the rule is re-expressed rather than
+///   called — worth knowing if it ever has to change.
 pub fn window<T>(items: &mut Vec<T>, offset: usize, limit: usize) {
     // `min(len)` rather than a bounds check: `drain(..offset)` panics past the
     // end of the vector, and "page 900 of 3" is an empty page, not a 500.
