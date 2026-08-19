@@ -7670,19 +7670,41 @@ fn run_links_infer(
         // effective `--pinned` from an inert one: a spoke that pinned nothing
         // omits `hub_rev` entirely, so without the envelope saying the flag was in
         // effect, the JSON has the same silence the text had (#505).
-        let spokes_pinned = ready.report.iter().filter(|r| r.hub_rev.is_some()).count();
-        emit_json(&serde_json::json!({
-            "hub": ready.hub_name,
-            "hub_rev": ready.hub_rev,
+        let mut envelope = serde_json::json!({
+            "hub": &ready.hub_name,
+            "hub_rev": &ready.hub_rev,
             "pinned": opts.pin.auto,
-            "spokes_pinned": spokes_pinned,
-            "spokes": ready.report,
+            "spokes": &ready.report,
             "written": written,
-        }))?;
+        });
+        // `spokes_pinned` counts spokes that pinned a hub version **themselves**,
+        // so it is only meaningful when `--pinned` asked them. Under a global
+        // `--hub-rev` every spoke carries that one rev in `hub_rev` without having
+        // pinned anything, and counting it there reported `pinned: false` beside a
+        // non-zero count — the answer to a question nobody asked, in the field
+        // added to stop exactly that (#505 review).
+        //
+        // Omitted rather than zeroed, following #410's `check`: `0` beside
+        // `pinned: false` still reads as "we looked and none pinned", which is a
+        // different claim from "we did not ask". `pinned` is always present, so a
+        // reader has an unconditional field to branch on and never has to probe
+        // for the key to know whether to expect it — the same shape as that tool's
+        // always-present `gate` beside its omitted `report`, and the same idiom the
+        // spoke rows already use for `hub_rev` and `pin_via`.
+        if opts.pin.auto {
+            let counted = ready.report.iter().filter(|r| r.hub_rev.is_some()).count();
+            envelope["spokes_pinned"] = counted.into();
+        }
+        emit_json(&envelope)?;
     } else {
         if let Some(rev) = &ready.hub_rev {
+            // Name *whose* pin. This line is reachable only via `--hub-rev` (it
+            // conflicts with `--pinned`, and `--pinned` leaves `hub_rev` unset), so
+            // it was never wrong — but "pinned version" alone does not say which of
+            // the command's two pinning senses it means, which is the
+            // under-specification #505 is about.
             println!(
-                "resolved against {} @ {rev} (pinned version)",
+                "resolved against {} @ {rev} (pinned by --hub-rev, not by the spokes)",
                 ready.hub_name
             );
         }

@@ -1382,3 +1382,130 @@ fn pinned_reports_the_head_fallback_when_no_spoke_pins_anything() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// #535 review (Copilot): `spokes_pinned` counted `hub_rev.is_some()` across every
+/// spoke, but `resolve_infer_report` also sets `hub_rev` for the **global**
+/// `--hub-rev` case, where no spoke pinned anything. So a plain
+/// `--infer --hub-rev <rev> --json` reported `"pinned": false` beside a non-zero
+/// `spokes_pinned` — a machine reader could not tell *"seven spokes pinned their
+/// own hub version"* from *"all seven got the one rev you named"*.
+///
+/// That is #505's defect in the field added to fix #505, so it is asserted from
+/// both ends: the count is **absent** when nobody was asked, and **present** when
+/// they were. Absent rather than `0`, following #410's `check` tool — `0` beside
+/// `pinned: false` still reads as "we looked and none pinned", which is a
+/// different claim from "we did not ask".
+#[test]
+fn spokes_pinned_is_absent_unless_the_spokes_were_actually_asked() {
+    let base = std::env::temp_dir().join(format!("roteiro-hubrev-count-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let web = base.join("web");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&web).expect("mkdir web");
+
+    // Hub v1 defines `serve.tools`; v2 renames it. `v1` is the rev named below.
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    // A spoke that pins nothing of its own: no `.gitmodules`, no Dockerfile.
+    std::fs::write(web.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    git(&web, &["init", "-q"]);
+    git(&web, &["add", "."]);
+    git(&web, &["commit", "-q", "-m", "spoke"]);
+    assert!(roteiro(&web, &["sync"]).status.success(), "web sync");
+
+    let base_s = base.to_str().unwrap();
+    let run_json = |extra: &[&str]| -> serde_json::Value {
+        let mut args = vec!["links", "--infer", "--hub", "app", "--workspace", base_s];
+        args.extend_from_slice(extra);
+        args.push("--json");
+        let out = roteiro(&base, &args);
+        assert!(out.status.success(), "infer {extra:?} failed: {out:?}");
+        serde_json::from_slice(&out.stdout).expect("JSON")
+    };
+
+    // A global `--hub-rev`: every spoke carries that rev, none of them pinned it.
+    let global = run_json(&["--hub-rev", &v1]);
+    assert_eq!(
+        global["pinned"], false,
+        "`--pinned` was not passed: {global}"
+    );
+    assert_eq!(
+        global["spokes"][0]["hub_rev"], v1,
+        "the spoke still resolves against the named rev — resolution is unchanged: {global}"
+    );
+    assert!(
+        global.get("spokes_pinned").is_none(),
+        "`spokes_pinned` must be absent when no spoke was asked to pin — a count \
+         here answers a question nobody asked: {global}"
+    );
+
+    // `--pinned`: the spokes *were* asked, so the count is present and is the
+    // honest zero. Absence and zero must not be the same document.
+    let asked = run_json(&["--pinned"]);
+    assert_eq!(asked["pinned"], true, "`--pinned` was passed: {asked}");
+    assert_eq!(
+        asked["spokes_pinned"], 0,
+        "asked and none pinned is a real `0`, not an absence: {asked}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// The human-readable half of the same line. `--hub-rev` is reachable only
+/// without `--pinned` (clap rejects the pair), so this line was never *wrong* —
+/// but "pinned version" alone does not say which of the command's two pinning
+/// senses it means, and naming the source is what the rest of #505 does.
+#[test]
+fn the_hub_rev_line_names_whose_pin_it_resolved_against() {
+    let base = std::env::temp_dir().join(format!("roteiro-hubrev-text-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let web = base.join("web");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&web).expect("mkdir web");
+
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync");
+
+    std::fs::write(web.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    git(&web, &["init", "-q"]);
+    git(&web, &["add", "."]);
+    git(&web, &["commit", "-q", "-m", "spoke"]);
+    assert!(roteiro(&web, &["sync"]).status.success(), "web sync");
+
+    let base_s = base.to_str().unwrap();
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--hub-rev",
+            &v1,
+            "--workspace",
+            base_s,
+        ],
+    );
+    assert!(out.status.success(), "hub-rev infer failed: {out:?}");
+    let text = String::from_utf8(out.stdout).expect("utf8");
+    assert!(
+        text.contains("pinned by --hub-rev, not by the spokes"),
+        "the line must say whose pin the rev came from: {text}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
