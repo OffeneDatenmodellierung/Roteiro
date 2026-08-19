@@ -1,6 +1,6 @@
 [package]
 name = "rto-serve"
-description = "Roteiro local model serving: an opt-in, loopback, OpenAI-compatible /v1 endpoint over installed models (ADR-0006)"
+description = "Roteiro local model serving: an opt-in, loopback, OpenAI-compatible /v1 endpoint over installed models (ADR-0006). Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

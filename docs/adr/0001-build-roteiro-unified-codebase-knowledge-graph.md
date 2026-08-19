@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.2"
-last-modified: 2026-08-16
+version: "1.3"
+last-modified: 2026-08-19
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -115,6 +115,44 @@ other authored intent):
 - **Renderers as build-outputs of the one graph** (docs site, Obsidian vault,
   MCP) — [[crates/rto-render/src/lib.rs#Target]].
 
+### The three classes are closed, permanently
+
+`derived | authored | inferred` is not a list awaiting a fourth entry. It is the
+decision this ADR makes, and the evidence that it is closed is that the project
+has since declined to extend it three times running:
+
+- **[[docs/adr/0012-analyzer-findings-artifact-model.md]]** — an analyzer's
+  finding is not `derived` (it is not a pure function of the tree), not
+  `authored` (nobody wrote it), and not `inferred` (its severity is a tool's
+  output, not a confidence). It got its own artifact store.
+- **[[docs/adr/0013-agent-memory-artifact-store.md]]** — an agent's memory is
+  episodic and unreproducible, and re-running nothing regenerates it. Its own
+  store.
+- **[[docs/adr/0015-generated-media-content-artifact-store.md]]** — a model's description of an
+  image, or its transcript of audio, is *generated* rather than extracted; a
+  silent clip once produced a fluent lecture that was stored as a `derived` fact.
+  Its own store.
+
+Each was a candidate for a fourth variant, and each time a separate store was the
+better answer — because what did not fit was never *a fourth way of producing a
+graph fact*. It was *not a graph fact*.
+
+So `Provenance` is deliberately exhaustive in Rust and closed on the wire, and
+that is a decision rather than an oversight. Marking it `#[non_exhaustive]` would
+be **weaker documentation than the current silence**: it would tell a reader that
+a fourth variant is anticipated, when three consecutive ADRs establish that it is
+not. The precedent for stating this at the definition is
+[[crates/rto-remote/src/escalation.rs#Trigger]], whose doc comment records the
+same reasoning — exhaustiveness is the right default where a set is closed by a
+*decision* rather than by today's implementation.
+
+The cost is stated rather than hidden. `Provenance` rides every edge of every
+`roteiro.query/v1` document, so a fourth class would be simultaneously a Rust
+break and a wire break on the most-consumed document the project emits. **That is
+the point.** The break is the signal, and anything that would require one should
+first be asked whether it is a graph fact at all — which, three times out of
+three, it was not.
+
 ## Advice Received
 
 Accepted by the project team without external advisory review — single-team open-source project; future significant changes will be superseding ADRs. Naming secured: `roteiro.dev` registered, crates.io names available, repo created at `OffeneDatenmodellierung/Roteiro`. Planned: circulate v0.x for review before implementation beyond crate-name reservation.
@@ -130,3 +168,4 @@ Accepted by the project team without external advisory review — single-team op
 | 1.0 | 2026-08-07 | Accepted. Naming secured (roteiro.dev, crates.io, OffeneDatenmodellierung/Roteiro); MIT OR Apache-2.0; attribution to The Roteiro Project Team. Stage 1 bootstrap started. |
 | 1.1 | 2026-08-10 | Added an **Implementation** section linking the ADR's decisions into the code (`[[path#Symbol]]`), so `roteiro check` validates this ADR against the implementation (Stage 14 self-check). |
 | 1.2 | 2026-08-16 | Corrected the quality bar (issue #319): the 85% per-file coverage ratchet named here was an **aspiration that was never wired into CI** — `.github/workflows/ci.yml` contained no coverage tooling at all, so every stage DoD citing it was unverifiable. Coverage is now measured non-blocking; the decision to enforce a floor is deferred until the real numbers are in hand. No architectural decision in this ADR changes. (Frontmatter `version` also brought up to date — it still read 1.0 after the 1.1 amendment.) |
+| 1.3 | 2026-08-19 | **Answers a question the code had left to silence** (issue #448): is `derived \| authored \| inferred` closed on purpose, permanently? Yes, and the evidence is that the project has since declined to extend it three times running — ADR-0012 gave analyzer findings their own artifact store, ADR-0013 gave agent memory one, ADR-0015 gave generated media one. Each was a candidate for a fourth variant; each time what did not fit was not a fourth way of *producing a graph fact* but something that was **not a graph fact**. Records the consequence for anyone reaching for `#[non_exhaustive]` on this enum: it would be **weaker documentation than the current silence**, because it would imply a fourth variant is anticipated when three consecutive ADRs establish that it is not. The precedent for saying so at the definition is `rto_remote::escalation::Trigger`. The cost is stated rather than hidden — `Provenance` rides every edge of every `roteiro.query/v1` document, so a fourth class is simultaneously a Rust break and a wire break on the most-consumed document the project emits, and that break is the signal rather than the obstacle. No architectural decision changes; a standing one is written down. |

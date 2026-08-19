@@ -1,6 +1,6 @@
 [package]
 name = "rto-spec"
-description = "House-style ADR/blueprint parsing, intent interview, and drift checking for Roteiro"
+description = "House-style ADR/blueprint parsing, intent interview, and drift checking for Roteiro. Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

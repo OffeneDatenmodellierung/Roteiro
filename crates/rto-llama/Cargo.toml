@@ -1,6 +1,6 @@
 [package]
 name = "rto-llama"
-description = "Roteiro's llama.cpp inference core: the Engine trait + a llama.cpp-backed engine (generation, embeddings, vision), shared by serving and internal uses (ADR-0003/0006)"
+description = "Roteiro's llama.cpp inference core: the Engine trait + a llama.cpp-backed engine (generation, embeddings, vision), shared by serving and internal uses (ADR-0003/0006). Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

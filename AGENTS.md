@@ -168,7 +168,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - Commit messages and PR descriptions explain the **why**, not just the what.
 - **`!` is a release instruction, not a severity marker.** A `!` after the type
   (`fix(schema)!:`) or a `BREAKING CHANGE:` footer tells release-plz to bump the
-  **major version of all seven crates** — they share one
+  **major version of all nine crates** — they share one
   `[workspace.package] version`, so one `!` in one crate relabels the whole
   workspace, and crates with nothing breaking in them get the new major anyway.
   Use it only when something a consumer of a **published** crate depends on has
@@ -187,6 +187,31 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   hand. If you are unsure, leave the `!` off and say what changed in the body —
   an under-marked commit is a changelog omission, an over-marked one is a version
   the project cannot walk back.
+
+- **The `rto-*` crates are published, and are implementation details.** All eight
+  of them publish to crates.io because they have to: `crates/roteiro/Cargo.toml`
+  depends on them by version, and crates.io rejects a package with path-only
+  dependencies — so `cargo install roteiro` does not work unless they all ship.
+  Publishing them satisfies the registry. It is not an offer of a stable API.
+
+  So treat their public surface as **internal**. A change that is technically
+  breaking for an `rto-*` crate — a field's type, an enum variant, a function
+  signature — ships as a **minor** bump and does **not** take a `!`. This is the
+  standing answer to *"but this is breaking for a published crate"*: it usually
+  is, and it does not matter. The only reverse dependency on crates.io is
+  `roteiro` itself, and each version is downloaded 14–26 times, which is CI,
+  docs.rs and mirrors rather than users.
+
+  **This does not extend to `roteiro`.** Its CLI flags and their output
+  contracts, its config keys, and any on-disk format a released version wrote are
+  what people actually depend on, and a change to those is breaking in the
+  ordinary way. The distinction is *who could notice*, which is the same test the
+  bullet above applies.
+
+  Say what changed in the commit body regardless. The posture removes the
+  escalation, not the record — and it is a claim about intent rather than a
+  technical guarantee, which is why it is stated where someone can read it before
+  depending on one of these crates rather than after.
 
 - **A scratch verification branch needs its own commit.** Some CI behaviour can
   only be observed from a branch with a particular *name*: `ci.yml` skips the
