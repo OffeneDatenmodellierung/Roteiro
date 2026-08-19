@@ -7535,19 +7535,15 @@ struct SecurityCrossReferenceReport {
 /// with every row reading "confirmed by 1" — that would be noise dressed as
 /// information, and it is exactly the case where a single source carries no
 /// signal about agreement either way.
+///
+/// That suppression used to be written out here, and is now
+/// [`rto_exec::cross_reference_across_analyzers`], because writing it out here was
+/// what let the model-facing `security_list` document the guard and not have it
+/// (PR #468 review). One description with two implementations is this repository's
+/// recurring defect; one implementation with two call sites is the fix.
 #[cfg(feature = "execution")]
 fn security_cross_reference(layers: &[rto_graph::FindingsLayer]) -> Vec<SecurityCrossReference> {
-    let correspondences = rto_exec::cross_reference(layers);
-    let mut analyzers: Vec<&str> = correspondences
-        .iter()
-        .flat_map(|c| c.analyzers())
-        .collect::<Vec<_>>();
-    analyzers.sort_unstable();
-    analyzers.dedup();
-    if analyzers.len() < 2 {
-        return Vec::new();
-    }
-    correspondences
+    rto_exec::cross_reference_across_analyzers(layers)
         .into_iter()
         .map(|c| {
             // From `Correspondence::confirmed_by`, not a second count written here:
