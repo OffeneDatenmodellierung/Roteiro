@@ -64,6 +64,38 @@ blast radius) rather than the diff alone.
 - [ ] **One concern** per PR; the commit/PR explains the *why*.
 - [ ] Docs/`AGENTS.md`/website updated if the change affects usage or standards.
 
+## Refusals
+
+Roteiro refuses a great deal, deliberately: an uncompiled feature, an
+uninstalled model, an unprovisioned asset, a missing third-party binary, a
+consent gate that was never granted. Each of those is a moment where the next
+thing a person does is decided entirely by the sentence they have just read.
+
+- [ ] **The refusal names the way forward, not only the obstacle.** "`X` is not
+      installed" is half a message; `roteiro model pull X` is the other half.
+      A reader should never have to search the docs to act on an error.
+- [ ] **It names the *right kind* of way forward.** A missing **feature** wants
+      a rebuild line; a missing **model** wants a pull; a missing **asset**
+      wants a prefetch; a missing **third-party binary** wants an install
+      command or its upstream page. Telling someone to recompile when they only
+      needed to pull a model is a wrong answer that reads like a right one, and
+      it costs an hour before they doubt it. That has shipped here once.
+- [ ] **It names the alternative, where one exists.** `security run` cannot
+      proceed without the analyzer on `PATH` — but `security ingest` accepts a
+      normalized report produced anywhere, including CI. A refusal that hides
+      the escape hatch costs someone a capability they already had.
+- [ ] **It does not guess the reader's platform.** A canonical ecosystem
+      command (`cargo install …`, `pip install …`) is portable and checkable; a
+      package-manager guess is wrong for most readers and rots for the rest.
+      Where no such command exists, the upstream install page is the durable
+      answer, and a URL ages better than a command line.
+- [ ] **Naming the way forward is not permission to take it.** A refusal that
+      quietly does the thing instead — falls back to the host, to a default
+      model, to an unpinned fetch — is the silent downgrade
+      [[docs/adr/0019-remote-model-tier.md]] §6 and
+      [[docs/adr/0020-build-capable-sandboxed-execution.md]] §6 both forbid.
+      Say how; do not do it.
+
 ## Triaging an automated reviewer's comments
 
 Automated review is worth having — over twelve PRs in one day, *every* comment
