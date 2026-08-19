@@ -71,6 +71,22 @@ impl Adapter for CargoAudit {
         &[ADVISORY_DB_ASSET]
     }
 
+    fn host_programs(&self) -> &'static [&'static str] {
+        // **Both**, and `cargo-audit` is the one that matters. The invocation's
+        // program is `cargo`, which is on every Rust developer's `PATH`; `cargo
+        // audit` then resolves the subcommand to a `cargo-audit` binary on `PATH`,
+        // which is a separate install and the thing that is usually absent.
+        // Checking only `cargo` would report *ready* in exactly that case — see
+        // `Adapter::host_programs`.
+        //
+        // Worth knowing about the residual gap: a missing subcommand does not
+        // surface as `SubprocessError::BinaryNotFound`, because `cargo` itself
+        // starts and then exits non-zero, so the run reports an unexpected status
+        // instead. Naming `cargo-audit` here is what makes the *status* honest
+        // about it before a run is attempted.
+        &["cargo", "cargo-audit"]
+    }
+
     fn command(&self, assets: &AssetPaths<'_>) -> Invocation {
         Invocation {
             program: "cargo".to_owned(),

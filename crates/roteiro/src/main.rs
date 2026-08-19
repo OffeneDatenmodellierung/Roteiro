@@ -9013,12 +9013,17 @@ fn run_security_prefetch(
 ///
 /// The two row types come from [`rto_exec::tool_security`] rather than being
 /// declared here, and they used to be declared here. They moved when `security
-/// list`/`status` reached the model-facing tool surfaces (issue #435): `ready` and
-/// `possibly_stale` are judgements about evidence — "provisioned and still matching
-/// its digest", "an advisory database is involved, so never call this current" —
-/// and three copies of a judgement is three chances for one of them to say
-/// something weaker. Issue #321 is what that costs. The field order is unchanged,
-/// so this command's `--json` output is byte-identical to before the move.
+/// list`/`status` reached the model-facing tool surfaces (issue #435):
+/// `host_readiness` and `possibly_stale` are judgements about evidence — "this host
+/// could actually run it", "an advisory database is involved, so never call this
+/// current" — and three copies of a judgement is three chances for one of them to
+/// say something weaker. Issue #321 is what that costs.
+///
+/// `analyzers[].ready: bool` is **gone**, replaced by `host_readiness` plus the two
+/// facts it summarises (`assets_provisioned`, `missing_programs`). That is a
+/// breaking change to this command's `--json` and it is the point of issue #464: the
+/// boolean was named for running and computed from provisioning, so a consumer
+/// reading it could not have been right.
 #[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
 struct SecurityStatusReport {
@@ -9026,6 +9031,25 @@ struct SecurityStatusReport {
     analyzers: Vec<rto_exec::AnalyzerCoverage>,
     assets: Vec<rto_exec::AssetStatus>,
     layers: Vec<rto_exec::LayerStaleness>,
+}
+
+/// One analyzer's readiness as a display column.
+///
+/// `binary not found` carries the program name because that is the actionable part
+/// and Roteiro is not going to install it for you. The other two states are
+/// self-describing.
+///
+/// Lifted out of [`run_security_status`] so the arm that names a program and the
+/// arm that names a `prefetch` are read side by side, rather than one being a
+/// formatted string inside a `println!` argument list.
+#[cfg(feature = "execution")]
+fn analyzer_state_line(coverage: &rto_exec::AnalyzerCoverage) -> String {
+    match coverage.host_readiness {
+        rto_exec::Readiness::BinaryNotFound => {
+            format!("binary not found: {}", coverage.missing_programs.join(", "))
+        }
+        state => state.as_str().to_owned(),
+    }
 }
 
 /// Report what is provisioned, what it covers, and how old the advisory data
@@ -9065,17 +9089,32 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
     println!("asset cache: {}", root.display());
     println!("\nanalyzers");
     for coverage in &analyzers {
+        // Three states, because the remedy differs (issue #464). `ready` used to be
+        // printed on the strength of the assets alone, which is true about
+        // provisioning and reads as a claim about running.
         println!(
-            "  {:<12} {}  [{}]",
+            "  {:<12} {:<31}  [{}]",
             coverage.analyzer,
-            if coverage.ready {
-                "ready"
-            } else {
-                "not provisioned"
-            },
+            analyzer_state_line(coverage),
             coverage.languages.join(", ")
         );
         println!("               {}", coverage.summary);
+        // The remedy, named where the state is, and named only for the one Roteiro
+        // performs. `binary not found` says which program is absent and stops
+        // there: Roteiro does not install analyzers (ADR-0014), and an install
+        // command it has not verified on this host would be a way forward that does
+        // not lead anywhere — see issue #430, which is the work of establishing
+        // those commands.
+        if !coverage.missing_programs.is_empty() {
+            println!(
+                "               not on PATH: {} — Roteiro does not install analyzers; \
+                 install it yourself, or produce the report elsewhere and use `roteiro \
+                 security ingest`",
+                coverage.missing_programs.join(", ")
+            );
+        } else if !coverage.assets_provisioned {
+            println!("               run `roteiro security prefetch` to provision its assets");
+        }
     }
 
     println!("\nassets");
@@ -10749,11 +10788,27 @@ fn security_status_tool_def(
                       the distinction is the whole point of the tool — do not merge them \
                       when you report it. \
                       `machine` (scope `machine`) describes THIS HOST: the pinned-asset \
-                      cache under `asset_root`, each shipped analyzer's coverage matrix, \
-                      and whether its assets are provisioned and still match their \
-                      digests. `ready` there means this machine COULD run that analyzer. \
-                      It says nothing whatsoever about whether it has been run, and it is \
-                      identical for every project this server hosts. \
+                      cache under `asset_root`, and each shipped analyzer's coverage \
+                      matrix with its `host_readiness`. It says nothing whatsoever about \
+                      whether anything has been run, and it is identical for every project \
+                      this server hosts. \
+                      `host_readiness` is THREE states, not a boolean, because the fix \
+                      differs and only one of them is Roteiro's to perform. `ready` = \
+                      assets provisioned AND the analyzer's program on PATH. \
+                      `assets-not-provisioned` = ask the user to run `roteiro security \
+                      prefetch`. `binary-not-found` = `missing_programs` names what is \
+                      absent, and ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to \
+                      install it, or to produce a report elsewhere and `roteiro security \
+                      ingest` it. Both underlying facts (`assets_provisioned`, \
+                      `missing_programs`) are ALWAYS present, so when the state is not \
+                      `ready` read both before telling the user what to do: a host can be \
+                      missing an asset AND a binary, and `host_readiness` names only the \
+                      first remedy. \
+                      Do not read `ready` as more than it says — it is readiness to run ON \
+                      THIS HOST. The sandboxed backend supplies the analyzer from a \
+                      digest-pinned image, so `binary-not-found` does not block it, and \
+                      this tool does not inspect the image store, so it reports no sandbox \
+                      verdict at all. \
                       `repository` (scope `repository`) describes ONE PROJECT — the one \
                       named in its own `project` field, which the `project` argument \
                       selects: which findings layers are live, how many findings each \
@@ -13096,10 +13151,39 @@ mod lint_cli {
 #[cfg(all(test, feature = "execution"))]
 mod security_cli {
     use super::{
-        Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, report_analyzer,
-        security_cross_reference,
+        Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, analyzer_state_line,
+        report_analyzer, security_cross_reference,
     };
     use clap::Parser as _;
+
+    /// The `analyzers` column names the missing program, because Roteiro is not
+    /// going to install it and the reader has to know which one to go and get
+    /// (issue #464).
+    ///
+    /// Built from a `coverage_matrix_with` row rather than a hand-made struct, so
+    /// the display and the verdict cannot disagree about the same host.
+    #[test]
+    fn the_analyzer_column_names_the_missing_program() {
+        let root = std::path::Path::new("/nonexistent-asset-root");
+
+        // Assets missing: the remedy is `prefetch`, which Roteiro performs, and the
+        // column says so without naming a program.
+        let rows = rto_exec::coverage_matrix_with(root, Some("semgrep"), |_| true);
+        assert_eq!(analyzer_state_line(&rows[0]), "assets not provisioned");
+
+        // A binary missing is the state the old `ready: bool` could not express, and
+        // the only one whose column carries a name.
+        let coverage = rto_exec::AnalyzerCoverage {
+            host_readiness: rto_exec::Readiness::BinaryNotFound,
+            assets_provisioned: true,
+            missing_programs: vec!["cargo-audit"],
+            ..rows.into_iter().next().expect("one row")
+        };
+        assert_eq!(
+            analyzer_state_line(&coverage),
+            "binary not found: cargo-audit"
+        );
+    }
 
     fn parse<const N: usize>(args: [&str; N]) -> Command {
         Cli::try_parse_from(args).expect("parse").command
@@ -14394,6 +14478,36 @@ mod workspace_scoped_tools {
         }
     }
 
+    /// The chat side of `security_status_description_says_what_ready_has_checked`
+    /// (issue #464). A served model sees only this string, and the two registries
+    /// declare their descriptions separately.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn served_security_status_description_says_what_ready_has_checked() {
+        use rto_serve::ToolRegistry as _;
+        let tools = called_registry().tools();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "security_status")
+            .expect("`security_status` advertised");
+        for claim in [
+            "THREE states",
+            "assets provisioned AND the analyzer's program on PATH",
+            "assets-not-provisioned",
+            "binary-not-found",
+            "ROTEIRO NEVER INSTALLS ANALYZERS",
+            "are ALWAYS present",
+            "ON THIS HOST",
+            "does not inspect the image store",
+        ] {
+            assert!(
+                tool.description.contains(claim),
+                "missing `{claim}` from: {}",
+                tool.description
+            );
+        }
+    }
+
     /// The two tool surfaces must not drift apart in *which* tools they offer.
     /// The MCP server declares its own schemas, so nothing but a test keeps the
     /// sets level — and `[debt] ignore` across three surfaces (#321) and
@@ -14580,6 +14694,15 @@ mod workspace_scoped_tools {
         );
         assert!(json["machine"].get("project").is_none(), "{json}");
         assert!(json["repository"].get("asset_root").is_none(), "{json}");
+        // The machine half's readiness names what it has actually checked (issue
+        // #464), on this surface too — the two registries are separate, so a guard
+        // on MCP proves nothing here.
+        let analyzer = &json["machine"]["analyzers"][0];
+        assert!(analyzer["host_readiness"].is_string(), "{json}");
+        assert!(analyzer["assets_provisioned"].is_boolean(), "{json}");
+        assert!(analyzer["missing_programs"].is_array(), "{json}");
+        assert!(analyzer.get("ready").is_none(), "{json}");
+
         // No findings ingested into this fixture, so the repository half says so
         // rather than showing an empty layer list a reader could call clean.
         assert_eq!(json["repository"]["coverage"], "no-analyzer-on-record");

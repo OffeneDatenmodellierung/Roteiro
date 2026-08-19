@@ -250,9 +250,9 @@ pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
 pub use subprocess::{SubprocessError, SubprocessRunner};
 pub use tool_security::{
     AnalyzerCoverage, Coverage, CrossReference, CrossReferenceReport, LayerStaleness, MachineScope,
-    RepositoryScope, SecurityListReport, TOOL_SECURITY_LIST_SCHEMA, TOOL_SECURITY_STATUS_SCHEMA,
-    ToolFindingsLayer, ToolSecurityList, ToolSecurityStatus, coverage_matrix, layer_staleness,
-    security_list, security_status,
+    Readiness, RepositoryScope, SecurityListReport, TOOL_SECURITY_LIST_SCHEMA,
+    TOOL_SECURITY_STATUS_SCHEMA, ToolFindingsLayer, ToolSecurityList, ToolSecurityStatus,
+    coverage_matrix, coverage_matrix_with, layer_staleness, security_list, security_status,
 };
 
 /// The licence notice for the third-party binaries an `exec-boxlite` build

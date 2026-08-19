@@ -852,11 +852,27 @@ impl GraphServer {
                           the distinction is the whole point of the tool — do not merge \
                           them when you report it. \
                           `machine` (scope `machine`) describes THIS HOST: the pinned-asset \
-                          cache under `asset_root`, each shipped analyzer's coverage matrix, \
-                          and whether its assets are provisioned and still match their \
-                          digests. `ready` there means this machine COULD run that analyzer. \
-                          It says nothing whatsoever about whether it has been run, and it \
-                          is identical for every project this server hosts. \
+                          cache under `asset_root`, and each shipped analyzer's coverage \
+                          matrix with its `host_readiness`. It says nothing whatsoever about \
+                          whether anything has been run, and it is identical for every \
+                          project this server hosts. \
+                          `host_readiness` is THREE states, not a boolean, because the fix \
+                          differs and only one of them is Roteiro's to perform. `ready` = \
+                          assets provisioned AND the analyzer's program on PATH. \
+                          `assets-not-provisioned` = ask the user to run `roteiro security \
+                          prefetch`. `binary-not-found` = `missing_programs` names what is \
+                          absent, and ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to \
+                          install it, or to produce a report elsewhere and `roteiro \
+                          security ingest` it. Both underlying facts (`assets_provisioned`, \
+                          `missing_programs`) are ALWAYS present, so when the state is not \
+                          `ready` read both before telling the user what to do: a host can \
+                          be missing an asset AND a binary, and `host_readiness` names only \
+                          the first remedy. \
+                          Do not read `ready` as more than it says — it is readiness to run \
+                          ON THIS HOST. The sandboxed backend supplies the analyzer from a \
+                          digest-pinned image, so `binary-not-found` does not block it, and \
+                          this tool does not inspect the image store, so it reports no \
+                          sandbox verdict at all. \
                           `repository` (scope `repository`) describes ONE PROJECT — the one \
                           named in its own `project` field, which the `project` argument \
                           selects: which findings layers are live, how many findings each \
@@ -937,8 +953,9 @@ impl ServerHandler for GraphServer {
         #[cfg(feature = "execution")]
         instructions.push_str(
             " `security_list` lists stored analyzer findings and `security_status` \
-             reports readiness in two separately scoped halves (`machine` = this \
-             host's provisioned assets, `repository` = one project's layers) — read \
+             reports readiness in two separately scoped halves (`machine` = what this \
+             host has provisioned AND installed, `repository` = one project's \
+             layers) — read \
              `coverage` on both before concluding anything, because \
              `no-analyzer-on-record` means nothing has been analyzed and is not a \
              clean repository. Neither can run an analyzer, ingest a report or \
@@ -1847,6 +1864,16 @@ mod tests {
         );
         assert!(json["repository"].get("asset_root").is_none(), "{json}");
         assert!(json["machine"].get("project").is_none(), "{json}");
+        // The machine half's readiness names what it has actually checked (issue
+        // #464): the verdict plus both facts under it, and no `ready` boolean that
+        // was named for running and computed from provisioning.
+        let analyzer = &json["machine"]["analyzers"][0];
+        assert!(analyzer["host_readiness"].is_string(), "{json}");
+        assert!(analyzer["assets_provisioned"].is_boolean(), "{json}");
+        assert!(analyzer["host_programs"].is_array(), "{json}");
+        assert!(analyzer["missing_programs"].is_array(), "{json}");
+        assert!(analyzer.get("ready").is_none(), "{json}");
+
         // The layer half follows the project, and carries counts rather than
         // findings — which is why this tool needs no page bound.
         assert_eq!(json["repository"]["coverage"], "analyzed", "{json}");
@@ -1956,9 +1983,45 @@ mod tests {
             "TWO SEPARATELY SCOPED SECTIONS",
             "THIS HOST",
             "ONE PROJECT",
-            "COULD run",
+            // The machine half is not a has-run claim. The phrase carrying that
+            // moved when issue #464 replaced `ready: bool`; the property did not.
+            "whether anything has been run",
             "NEVER means current",
             "NOT a clean repository",
+        ] {
+            assert!(desc.contains(claim), "missing `{claim}` from: {desc}");
+        }
+    }
+
+    /// A readiness claim has to name what it has actually checked, and the model
+    /// only ever sees this string (issue #464).
+    ///
+    /// `ready` used to be computed from asset provisioning alone, so a host with the
+    /// rules installed and `semgrep` absent read as `ready` and the run then failed.
+    /// The three states exist because the remedy differs, and the one Roteiro
+    /// refuses to perform has to be stated as a refusal rather than left as a gap —
+    /// otherwise a model reads "not ready" and offers to install it.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn security_status_description_says_what_ready_has_checked() {
+        let server = seeded();
+        let tools = server.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "security_status")
+            .expect("`security_status` advertised");
+        let desc = tool.description.as_deref().unwrap_or_default();
+        for claim in [
+            "THREE states",
+            "assets provisioned AND the analyzer's program on PATH",
+            "assets-not-provisioned",
+            "binary-not-found",
+            "ROTEIRO NEVER INSTALLS ANALYZERS",
+            // Both facts, so a host missing both is not two round trips.
+            "are ALWAYS present",
+            // And the bound on the claim: this is the host, not the sandbox.
+            "ON THIS HOST",
+            "does not inspect the image store",
         ] {
             assert!(desc.contains(claim), "missing `{claim}` from: {desc}");
         }

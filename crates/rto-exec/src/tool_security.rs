@@ -48,6 +48,28 @@
 //! own section — the asset root under `machine`, the project name under
 //! `repository`. Neither half can be quoted without its scope travelling with it.
 //!
+//! # 3. A readiness claim names what it has actually checked
+//!
+//! `roteiro security status` used to label one analyzer `ready` on the strength of
+//! its *pinned assets* being provisioned. Running it needs a second thing — the
+//! analyzer's own program on `PATH` — and that is the one Roteiro deliberately
+//! **never installs** (ADR-0014). So on a host with the rules provisioned and
+//! `semgrep` absent, the old report read `semgrep  ready` and the run then failed
+//! with `analyzer binary not found on PATH`. Both statements were true about
+//! different things and only one of them used the word *ready* (issue #464).
+//!
+//! `docs/REVIEW_CHECKLIST.md` has the rule this is a corollary of — *a refusal
+//! names the way forward* — applied to a report rather than a refusal: **a
+//! readiness claim names what it has actually checked.** And it is the same shape
+//! as §1, one field over: a caller that cannot run `command -v` — which is every
+//! caller on a tool surface — will read `ready` as *this will run*.
+//!
+//! [`Readiness`] is therefore three states rather than a `bool`, because **the
+//! remedy differs**: `assets-not-provisioned` is fixed by `prefetch`, which
+//! Roteiro performs; `binary-not-found` is fixed by an install, which it refuses
+//! to perform; `ready` is both. Both underlying facts are reported alongside it,
+//! so a host missing both is fully readable in one call rather than in two.
+//!
 //! @rto:0012
 //! @rto:0018
 
@@ -372,10 +394,11 @@ pub struct ToolSecurityStatus {
 
 /// The machine-global half of a status document.
 ///
-/// Every field here is a property of the host, resolved from
-/// [`crate::asset_root`], and none of it is a property of any repository. A
-/// provisioned analyzer means this machine *could* run it; it says nothing at all
-/// about whether it has been run anywhere.
+/// Every field here is a property of the host — its asset cache under
+/// [`crate::asset_root`] and its `PATH` — and none of it is a property of any
+/// repository. A `ready` analyzer means this machine *could* run it; it says
+/// nothing at all about whether it has been run anywhere, which is the
+/// `repository` half's question.
 #[derive(Debug, Clone, Serialize)]
 pub struct MachineScope {
     /// Always `"machine"`. Redundant with this section's name on purpose: a model
@@ -384,7 +407,8 @@ pub struct MachineScope {
     /// The pinned-asset cache these digests describe.
     pub asset_root: String,
     /// What each shipped analyzer covers, read off the adapters rather than off a
-    /// document, and whether this machine has its assets.
+    /// document, and whether this machine can actually run it — **both** halves of
+    /// that, since they have different remedies (see [`Readiness`]).
     pub analyzers: Vec<AnalyzerCoverage>,
     /// Every pinned asset, its digest, its age, and whether the bytes on disk
     /// still match what was recorded.
@@ -416,12 +440,147 @@ pub struct RepositoryScope {
     pub no_result_reason: Option<String>,
 }
 
+/// Whether one analyzer can actually be run **on this host**, as one word.
+///
+/// Three states rather than a `bool`, because the two things a host run needs have
+/// different remedies and only one of them is Roteiro's to perform (issue #464):
+///
+/// | state | what is missing | the fix |
+/// | --- | --- | --- |
+/// | `ready` | nothing | — |
+/// | `assets-not-provisioned` | a pinned asset, or its bytes no longer match | `roteiro security prefetch` |
+/// | `binary-not-found` | the analyzer's own program, on `PATH` | an install; **Roteiro never does this** |
+///
+/// # Precedence, and why both facts are still reported
+///
+/// A host can be missing both. This names the asset side first, because that is
+/// the step Roteiro can take and the one a caller should take first — but a
+/// one-word verdict that names one blocker would send a caller round twice, so
+/// [`AnalyzerCoverage`] carries `assets_provisioned` and `missing_programs`
+/// alongside it. Both are always present; this is a summary of them, never a
+/// substitute.
+///
+/// # What "on this host" excludes, and it is not a caveat on the word
+///
+/// The sandboxed backend runs the analyzer inside a digest-pinned OCI image
+/// (ADR-0014/ADR-0019), which supplies the program — so `binary-not-found` does
+/// **not** block a sandboxed run, and it is the only state where the two backends
+/// disagree. This says nothing about sandbox readiness: it does not inspect the
+/// local image store, and reporting a sandbox verdict it has not checked would be
+/// issue #464 committed a second time. `security run` still refuses, naming what
+/// is missing, when the sandbox cannot run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Readiness {
+    /// Every pinned asset is provisioned and verified, and every program this
+    /// analyzer needs is on `PATH`.
+    Ready,
+    /// A pinned asset is absent, or its bytes no longer match the recorded digest.
+    /// Fixed by `roteiro security prefetch`.
+    AssetsNotProvisioned,
+    /// The assets are fine and the analyzer's own program is not on `PATH`. Fixed
+    /// by installing it — which Roteiro will not do. This is the same fact
+    /// `SubprocessError::BinaryNotFound` reports, found before a run rather than
+    /// during one.
+    BinaryNotFound,
+}
+
+impl Readiness {
+    /// The token this serialises as, for a caller that renders it as text.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::AssetsNotProvisioned => "assets not provisioned",
+            Self::BinaryNotFound => "binary not found",
+        }
+    }
+}
+
+/// The three-state verdict from the two facts it is built from.
+///
+/// A pure function so the precedence rule above is checkable without a
+/// provisioned asset cache or a controlled `PATH` — neither of which a test can
+/// arrange here, since `unsafe_code = "forbid"` rules out `std::env::set_var`.
+#[must_use]
+fn readiness(assets_provisioned: bool, missing_programs: &[&str]) -> Readiness {
+    if !assets_provisioned {
+        Readiness::AssetsNotProvisioned
+    } else if missing_programs.is_empty() {
+        Readiness::Ready
+    } else {
+        Readiness::BinaryNotFound
+    }
+}
+
+/// Whether `program` resolves to an executable file in any of `dirs`.
+///
+/// A **read**, and that is load-bearing on a tool surface: it stats candidate
+/// paths and never starts a process. Probing by running `<program> --version`
+/// would be executing a third-party binary because a model asked a question, which
+/// is the thing this whole surface refuses.
+///
+/// Split from [`on_path`] so the lookup is testable against a directory a test
+/// owns, rather than against the process environment it cannot change.
+#[must_use]
+fn program_in(dirs: &[std::path::PathBuf], program: &str) -> bool {
+    // A name containing a separator is a path rather than a `PATH` lookup — the
+    // same rule `std::process::Command::new` follows, so this agrees with what a
+    // run would actually do.
+    if std::path::Path::new(program).components().count() > 1 {
+        return is_executable_file(std::path::Path::new(program));
+    }
+    dirs.iter()
+        .any(|dir| is_executable_file(&dir.join(program)))
+}
+
+/// Whether `program` resolves to an executable file on this process's `PATH`.
+#[must_use]
+fn on_path(program: &str) -> bool {
+    let Some(var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&var).collect();
+    program_in(&dirs, program)
+}
+
+/// Whether `path` is a file this host would execute.
+///
+/// Follows symlinks, because a symlinked binary is exactly as runnable as a real
+/// one and every package manager installs one.
+#[cfg(unix)]
+#[must_use]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether `path` is a file this host would execute.
+///
+/// There are no mode bits to consult, so being a file is the whole check, and the
+/// `.exe` sibling is tried because that is what every program named by an adapter
+/// here ships as off Unix. The full `PATHEXT` set is deliberately **not** walked:
+/// none of these analyzers ships as a `.bat` or `.cmd`, and a probe that guessed
+/// wider would report a readiness it had not established — which is the defect
+/// [`Readiness`] exists to remove.
+#[cfg(not(unix))]
+#[must_use]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    if path.is_file() {
+        return true;
+    }
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => path.with_file_name(format!("{name}.exe")).is_file(),
+        None => false,
+    }
+}
+
 /// What one shipped analyzer covers — the coverage matrix, read off the code
 /// rather than off a document, so the two cannot drift apart unnoticed.
 ///
-/// `ready` is **machine-global**: it asks whether [`resolve`] finds every asset
-/// this analyzer needs in this host's cache, still matching its recorded digest.
-/// It is not a statement about any repository.
+/// Every field is **machine-global**. Nothing here is a statement about any
+/// repository: it asks what this host has provisioned and what it has installed,
+/// and the answer is the same whichever project was selected.
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalyzerCoverage {
     /// The analyzer id.
@@ -430,9 +589,19 @@ pub struct AnalyzerCoverage {
     pub summary: &'static str,
     /// The languages it produces findings for (ADR-0018's matrix).
     pub languages: &'static [&'static str],
-    /// Whether every asset it needs is provisioned **on this machine** and still
-    /// matches its digest.
-    pub ready: bool,
+    /// Whether this host could run it, and if not, which remedy applies. A
+    /// summary of the two fields below — see [`Readiness`].
+    pub host_readiness: Readiness,
+    /// Whether every pinned asset it needs is provisioned **on this machine** and
+    /// still matches its digest. Fixed by `roteiro security prefetch`.
+    pub assets_provisioned: bool,
+    /// Every program it needs on `PATH` to run on this host
+    /// ([`crate::Adapter::host_programs`]).
+    pub host_programs: &'static [&'static str],
+    /// Which of those are **not** on `PATH`. Empty exactly when all are present.
+    /// Named individually because the name is the actionable part: Roteiro does not
+    /// install these, so the reader has to know which one to go and get.
+    pub missing_programs: Vec<&'static str>,
 }
 
 /// The staleness of the advisory data behind one live findings layer.
@@ -462,21 +631,53 @@ pub struct LayerStaleness {
     pub possibly_stale: bool,
 }
 
-/// The coverage matrix for `analyzer` (or every shipped analyzer), with each
-/// one's readiness resolved against the asset cache at `root`.
+/// The coverage matrix for `analyzer` (or every shipped analyzer), with each one's
+/// readiness resolved against the asset cache at `root` **and** this process's
+/// `PATH`.
 ///
-/// Shared by the CLI's `security status` and both tool surfaces so `ready` is one
-/// computation rather than three.
+/// Shared by the CLI's `security status` and both tool surfaces, so the readiness
+/// rule is one computation rather than three — the same reason
+/// [`layer_staleness`] is shared, and the reason issue #464 was one fix rather
+/// than three.
 #[must_use]
 pub fn coverage_matrix(root: &Path, analyzer: Option<&str>) -> Vec<AnalyzerCoverage> {
+    coverage_matrix_with(root, analyzer, on_path)
+}
+
+/// [`coverage_matrix`] with the `PATH` probe supplied by the caller.
+///
+/// The probe is an argument for the reason provisioning takes its fetcher as one:
+/// it keeps the decision testable without the ambient state it would otherwise
+/// depend on. A test cannot change this process's `PATH` — `unsafe_code =
+/// "forbid"` rules out `std::env::set_var` — so without this seam two of the three
+/// [`Readiness`] states would be unreachable from a test, on a machine where
+/// whether they are reachable at all depends on what happens to be installed.
+#[must_use]
+pub fn coverage_matrix_with(
+    root: &Path,
+    analyzer: Option<&str>,
+    on_path: impl Fn(&str) -> bool,
+) -> Vec<AnalyzerCoverage> {
     ADAPTERS
         .iter()
         .filter(|a| analyzer.is_none_or(|name| a.analyzer() == name))
-        .map(|adapter| AnalyzerCoverage {
-            analyzer: adapter.analyzer(),
-            summary: adapter.summary(),
-            languages: adapter.languages(),
-            ready: resolve(root, adapter.analyzer()).is_ok(),
+        .map(|adapter| {
+            let host_programs = adapter.host_programs();
+            let missing_programs: Vec<&'static str> = host_programs
+                .iter()
+                .copied()
+                .filter(|program| !on_path(program))
+                .collect();
+            let assets_provisioned = resolve(root, adapter.analyzer()).is_ok();
+            AnalyzerCoverage {
+                analyzer: adapter.analyzer(),
+                summary: adapter.summary(),
+                languages: adapter.languages(),
+                host_readiness: readiness(assets_provisioned, &missing_programs),
+                assets_provisioned,
+                host_programs,
+                missing_programs,
+            }
         })
         .collect()
 }
@@ -561,8 +762,9 @@ pub fn security_status(
 #[cfg(test)]
 mod tests {
     use super::{
-        Coverage, TOOL_SECURITY_LIST_SCHEMA, TOOL_SECURITY_STATUS_SCHEMA, layer_staleness,
-        security_list, security_status,
+        Coverage, Readiness, TOOL_SECURITY_LIST_SCHEMA, TOOL_SECURITY_STATUS_SCHEMA,
+        coverage_matrix_with, layer_staleness, program_in, readiness, security_list,
+        security_status,
     };
     use rto_graph::{
         AdvisoryDb, AnalysisRun, CommandPolicy, Finding, FindingKey, FindingsLayer, Isolation,
@@ -763,6 +965,208 @@ mod tests {
         let json = serde_json::to_value(&clean).expect("serialise");
         assert_eq!(json["repository"]["coverage"], "analyzed");
         assert_eq!(json["repository"]["layers"][0]["findings"], 0);
+    }
+
+    /// The three states, and the precedence between them (issue #464).
+    ///
+    /// The table is exhaustive over the two facts on purpose: the defect being
+    /// fixed is one `bool` standing in for two, so the test that matters is the one
+    /// that walks all four combinations and shows that three distinct answers come
+    /// out — and that the fourth, both-missing, is not silently the same as
+    /// "binary missing".
+    #[test]
+    fn readiness_names_the_remedy_that_applies() {
+        assert_eq!(readiness(true, &[]), Readiness::Ready);
+        assert_eq!(
+            readiness(false, &[]),
+            Readiness::AssetsNotProvisioned,
+            "assets missing, binary present"
+        );
+        assert_eq!(
+            readiness(true, &["semgrep"]),
+            Readiness::BinaryNotFound,
+            "the state the old `ready: bool` could not express"
+        );
+        // Both missing names the asset side, because `prefetch` is the step Roteiro
+        // itself performs and the one to take first. The other fact is not lost —
+        // `AnalyzerCoverage` carries `missing_programs` alongside this verdict, which
+        // `coverage_matrix_reports_both_facts_not_just_the_verdict` is about.
+        assert_eq!(
+            readiness(false, &["semgrep"]),
+            Readiness::AssetsNotProvisioned,
+            "both missing must not read as a binary-only problem"
+        );
+    }
+
+    /// `ready` must mean both things, so a provisioned host with the binary absent
+    /// is `binary-not-found` and not `ready`.
+    ///
+    /// This is issue #464's actual defect, and it is **not reproducible on the
+    /// machine most likely to look for it**: a developer working on Roteiro has the
+    /// analyzers installed, so the old `ready` was accidentally true there. The
+    /// `PATH` probe is therefore injected rather than read from the environment —
+    /// `unsafe_code = "forbid"` rules out `std::env::set_var`, so a test cannot
+    /// arrange the absence any other way, and a test that depended on what happens
+    /// to be installed would pass or fail for reasons that have nothing to do with
+    /// this code.
+    #[test]
+    fn a_provisioned_analyzer_with_no_binary_is_not_ready() {
+        // An asset root that cannot resolve, so the asset axis is fixed and the only
+        // thing varying is the probe.
+        let root = std::path::Path::new("/nonexistent-asset-root");
+
+        // Every program present: the asset axis is what is left, and it decides.
+        let all_present = coverage_matrix_with(root, Some("semgrep"), |_| true);
+        assert_eq!(
+            all_present[0].host_readiness,
+            Readiness::AssetsNotProvisioned
+        );
+        assert!(all_present[0].missing_programs.is_empty());
+
+        // Nothing present: same asset state, and the verdict still names the asset
+        // remedy first — but the missing program is reported rather than hidden.
+        let none_present = coverage_matrix_with(root, Some("semgrep"), |_| false);
+        assert_eq!(
+            none_present[0].host_readiness,
+            Readiness::AssetsNotProvisioned
+        );
+        assert_eq!(none_present[0].missing_programs, vec!["semgrep"]);
+    }
+
+    /// All three states through the **public wiring**, on a genuinely provisioned
+    /// asset cache — which is the only way `ready` and `binary-not-found` are
+    /// reachable at all.
+    ///
+    /// Without this, every `coverage_matrix_with` test would run against an
+    /// unprovisioned root, so `host_readiness` would be `assets-not-provisioned`
+    /// whatever the probe said — and a `coverage_matrix_with` that ignored
+    /// `missing_programs` entirely would pass the lot. That is a guard sampling the
+    /// cheap projection instead of the claim.
+    ///
+    /// `semgrep-rules` is a *vendored* asset, so [`provision`] installs and digests
+    /// it from bytes already compiled in: no network, no fetcher, and the same
+    /// function `prefetch` calls, so what is provisioned here is what `resolve`
+    /// accepts in earnest.
+    #[test]
+    fn all_three_states_are_reachable_on_a_provisioned_cache() {
+        use crate::assets::{assets_for, provision};
+
+        let root = std::env::temp_dir().join(format!(
+            "rto-exec-readiness-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        for spec in assets_for("semgrep") {
+            provision(&root, spec).expect("vendored asset provisions with no fetcher");
+        }
+
+        // Assets provisioned, program present: `ready` now means both, which is the
+        // whole of issue #464.
+        let ready = coverage_matrix_with(&root, Some("semgrep"), |_| true);
+        assert_eq!(ready[0].host_readiness, Readiness::Ready);
+        assert!(ready[0].assets_provisioned);
+        assert!(ready[0].missing_programs.is_empty());
+
+        // Same cache, program absent. This is the case the old `ready: bool`
+        // reported as `ready`, and the run then failed with `analyzer binary not
+        // found on PATH`.
+        let no_binary = coverage_matrix_with(&root, Some("semgrep"), |_| false);
+        assert_eq!(
+            no_binary[0].host_readiness,
+            Readiness::BinaryNotFound,
+            "provisioned assets alone must not earn the word `ready`"
+        );
+        assert!(
+            no_binary[0].assets_provisioned,
+            "the asset half is still true, and still reported"
+        );
+        assert_eq!(no_binary[0].missing_programs, vec!["semgrep"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The verdict is a summary of two published facts, never a replacement for
+    /// them: a caller told only "not ready" would have to guess which remedy applies.
+    #[test]
+    fn coverage_matrix_reports_both_facts_not_just_the_verdict() {
+        let root = std::path::Path::new("/nonexistent-asset-root");
+        let rows = coverage_matrix_with(root, None, |_| false);
+        assert_eq!(rows.len(), 3, "one row per shipped analyzer");
+        for row in &rows {
+            let json = serde_json::to_value(row).expect("serialise");
+            assert_eq!(json["assets_provisioned"], false, "{json}");
+            assert!(json["host_programs"].is_array(), "{json}");
+            assert!(json["missing_programs"].is_array(), "{json}");
+            assert_eq!(json["host_readiness"], "assets-not-provisioned", "{json}");
+            // The boolean the old shape published is gone, not renamed alongside:
+            // a consumer reading `ready` was reading a claim about running computed
+            // from provisioning, and leaving it in place would keep that available.
+            assert!(json.get("ready").is_none(), "{json}");
+        }
+    }
+
+    /// `cargo-audit` declares **both** `cargo` and `cargo-audit`, and the second is
+    /// the one that decides.
+    ///
+    /// A probe built from `Invocation::program` would look for `cargo` alone, find it
+    /// on any Rust developer's machine, and report `ready` in exactly the commonest
+    /// failure — `cargo` installed, `cargo-audit` not. That is issue #464
+    /// reintroduced one level down, which is why `Adapter::host_programs` is declared
+    /// rather than derived.
+    #[test]
+    fn cargo_audit_is_not_ready_on_cargo_alone() {
+        let root = std::path::Path::new("/nonexistent-asset-root");
+        let rows = coverage_matrix_with(root, Some("cargo-audit"), |program| program == "cargo");
+        assert_eq!(rows[0].host_programs, &["cargo", "cargo-audit"]);
+        assert_eq!(
+            rows[0].missing_programs,
+            vec!["cargo-audit"],
+            "`cargo` being present must not stand in for the subcommand binary"
+        );
+    }
+
+    /// The `PATH` lookup itself: an executable file resolves, a non-executable one
+    /// does not, and an absent one does not.
+    ///
+    /// Against a directory the test owns, because it cannot change this process's
+    /// `PATH`. The middle case is the point — a readable file with no execute bit is
+    /// not something the host will run, and treating it as one would be a readiness
+    /// claim that had not been established.
+    #[test]
+    fn the_path_probe_requires_an_executable_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "rto-exec-path-probe-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let exec = dir.join("runnable");
+        std::fs::write(&exec, b"#!/bin/sh\ntrue\n").expect("write");
+        let plain = dir.join("not-runnable");
+        std::fs::write(&plain, b"data").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+        }
+
+        let dirs = vec![dir.clone()];
+        assert!(program_in(&dirs, "runnable"), "an executable file resolves");
+        assert!(!program_in(&dirs, "absent"), "a name with no file does not");
+        #[cfg(unix)]
+        assert!(
+            !program_in(&dirs, "not-runnable"),
+            "a file with no execute bit is not something this host runs"
+        );
+        // A name with a separator is a path rather than a lookup, matching what
+        // `Command::new` would do with it.
+        assert!(program_in(&[], exec.to_str().expect("utf-8")));
+        assert!(!program_in(&[], "/nonexistent/runnable"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `possibly_stale` is true whenever an advisory database is involved and
