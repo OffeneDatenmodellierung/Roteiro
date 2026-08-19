@@ -682,6 +682,26 @@ impl LlamaEngine {
     /// [`check_batch_capacity`] as an [`EngineError::InvalidRequest`], because
     /// silently truncating a user's prompt would answer a question they did not
     /// ask.
+    ///
+    /// # The ceiling is load-bearing, not merely a memory guard
+    ///
+    /// **Read this before raising it.** When per-request sizing landed, the only
+    /// thing that could move `prompt_tokens` was Roteiro's own prompt — a served
+    /// tool surface this repository writes and can measure. That is no longer
+    /// the whole story: once a client may supply its own `tools` array, the
+    /// prompt is **caller-influenced**, and `prompt_tokens` is therefore an input
+    /// an outside party has a hand in. Since the window follows the prompt, so
+    /// does the allocation: at 64 KiB/token on `qwen3.8-27b`, a prompt driven up
+    /// to that model's trained 262,144 is a 16 GiB allocation.
+    ///
+    /// The bound on *that* belongs at the edge — the serving layer refuses an
+    /// oversized tool surface with a 400 before it ever reaches here — and this
+    /// function deliberately does **not** add a second clamp of its own, because
+    /// two independent bounds on one quantity drift apart and then neither can be
+    /// trusted. What this ceiling does is put a floor under that arrangement: it
+    /// is the backstop that decides the worst case a single request can reach
+    /// whatever the edge does. Raising it raises that worst case, so it is a
+    /// decision about exposure and not only about memory.
     fn request_window(&self, model: &LlamaModel, prompt_tokens: u32, max_tokens: u32) -> u32 {
         let trained = model.n_ctx_train();
         if self.n_ctx_ceiling > trained && trained > 0 {

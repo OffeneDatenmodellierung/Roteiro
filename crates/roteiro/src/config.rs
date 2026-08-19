@@ -835,6 +835,14 @@ pub struct ServeConfig {
     /// refused: one number is set across models whose trained windows span 512×,
     /// so exceeding the smallest is ordinary rather than an error. A *request*
     /// that does not fit the resulting window is refused as a 400.
+    ///
+    /// **This is a backstop against caller-influenced prompts, not only a memory
+    /// setting.** Where a client may supply its own tool definitions, the prompt
+    /// — and therefore the window, and therefore the allocation — is partly an
+    /// outside party's input. The bound on an oversized tool surface belongs at
+    /// the serving edge, which refuses it with a 400; this key is what decides
+    /// the worst case a single request can reach regardless. Raising it raises
+    /// that worst case.
     pub max_context_tokens: Option<u32>,
     /// PEM certificate-chain file for in-app TLS. Set **both** this and `tls_key`
     /// and `serve --models` terminates HTTPS itself (needs `--features serve`);
