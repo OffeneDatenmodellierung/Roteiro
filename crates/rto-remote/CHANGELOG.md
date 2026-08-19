@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v1.26.0...rto-remote-v1.26.1) - 2026-08-19
+
+### Other
+
+- two standing decisions, so they stop arriving as escalations
+
 ## [1.20.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v1.19.0...rto-remote-v1.20.0) - 2026-08-17
 
 ### Added

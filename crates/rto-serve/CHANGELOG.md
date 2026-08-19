@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.26.0...rto-serve-v1.26.1) - 2026-08-19
+
+### Other
+
+- Merge pull request #507 from OffeneDatenmodellierung/docs/448-500-provenance-closed-and-crate-posture
+- two standing decisions, so they stop arriving as escalations
+
 ## [1.26.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.25.0...rto-serve-v1.26.0) - 2026-08-19
 
 ### Added
