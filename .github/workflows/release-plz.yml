@@ -7,6 +7,16 @@ permissions:
 on:
   push:
     branches: [main]
+  # Lets the release PR be *asked for*. The push trigger alone means a merge
+  # that should have opened the PR can be missed for good — v1.24.0 was held by
+  # disabling this workflow, and the merge that would have opened its release PR
+  # happened during the hold, so re-enabling the workflow recovered nothing and
+  # the release sat waiting on unrelated commits.
+  #
+  # This deliberately does NOT become a publish button: `release-plz-release`
+  # below is gated to the push path, because opening a PR and pushing to
+  # crates.io are not the same risk.
+  workflow_dispatch:
 
 jobs:
   # Opens/updates the release PR (version bumps + changelog) after each merge.
@@ -42,6 +52,11 @@ jobs:
   release-plz-release:
     name: Release
     runs-on: ubuntu-latest
+    # crates.io publishing and tag creation stay merge-driven. Until
+    # `workflow_dispatch` was added above, the merge path was the only way to
+    # reach this job, and that was the entire guard — this job carried no
+    # condition of its own. Now the guard is written down instead of implied.
+    if: github.event_name == 'push'
     steps:
       - name: Generate GitHub App token
         id: app-token
