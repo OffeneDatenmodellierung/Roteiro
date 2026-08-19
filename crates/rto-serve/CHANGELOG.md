@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.26.1...rto-serve-v1.26.2) - 2026-08-19
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into fix/489-xml-tool-dialect
+
 ## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.26.0...rto-serve-v1.26.1) - 2026-08-19
 
 ### Other
