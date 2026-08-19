@@ -223,9 +223,15 @@ they overlap deliberately little:
 [ADR-0018](adr/0018-analyzer-coverage-matrix.md) is the record of why, and
 `roteiro security list` cross-references them rather than double-counting.
 
-These are the commands each project's own install page documents, and they are
-the ones `security run` prints when the binary is absent — same source, so the
-two cannot disagree:
+Every command below is the one that project's own install page documents. None
+of them is invented here — which is the thing worth knowing when you are reading
+this because the tool is not yet in front of you.
+
+This block is deliberately wider than any refusal: when a binary is missing,
+`security run` prints the single hint for the program it could not find, and
+none of the alternatives below. Treat the two as the same *source*, not as the
+same *text* — only the fenced error block above is quoted verbatim from the
+code, and only that one is held there by a test.
 
 ```sh
 # semgrep — https://docs.semgrep.dev/getting-started/quickstart

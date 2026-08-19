@@ -85,23 +85,31 @@ pub const DB_ASSET: &str = "osv-db";
 
 /// How to obtain `osv-scanner`, for the refusal that finds it absent.
 ///
-/// The one hint with **no command**, and that is the honest answer rather than a
-/// gap. Upstream's install page offers scoop, winget, brew, pacman, apk, pkg,
-/// `pkg_add`, a prebuilt SLSA3 binary and `go install`, and ranks none of them:
-/// eight of those are the reader's-package-manager guess the refusals checklist
-/// forbids, and the ninth needs a Go toolchain this reader has no reason to
-/// have. So the page is the way forward, and a command invented to fill the slot
-/// would be the plausible-but-wrong answer that costs an hour before anyone
-/// doubts it.
+/// One of the two hints with **no command**, and that is the honest answer
+/// rather than a gap. Upstream's install page offers scoop, winget, brew,
+/// pacman, apk, pkg, `pkg_add`, a prebuilt SLSA3 binary and `go install`, and
+/// ranks none of them: eight of those are the reader's-package-manager guess the
+/// refusals checklist forbids, and the ninth needs a Go toolchain this reader
+/// has no reason to have. So the page is the way forward, and a command invented
+/// to fill the slot would be the plausible-but-wrong answer that costs an hour
+/// before anyone doubts it.
+///
+/// "No command" means no [`Line::Command`], which is now what the code says.
+/// This carried the URL as one for a revision, directly under the sentence
+/// denying it had a command — the same slip as
+/// [`crate::adapter::RUST_TOOLCHAIN`], the other hint with nothing to paste. The
+/// page is a `Note` prefixed [`crate::adapter::URL_PREFIX`], as in every hint
+/// that does have a command.
 const INSTALL_HINTS: &[InstallHint] = &[InstallHint {
     program: "osv-scanner",
     guidance: Guidance::new(&[
         Line::Note(&[
             "Roteiro does not install analyzers, and has not installed this one.",
             "osv-scanner documents no single install command — its page lists a",
-            "prebuilt binary and one entry per platform, so choose from:",
+            "prebuilt binary and one entry per platform, so there is nothing to",
+            "paste here; choose the entry that fits this host.",
         ]),
-        Line::Command("https://google.github.io/osv-scanner/installation/"),
+        Line::Note(&["Upstream: https://google.github.io/osv-scanner/installation/"]),
     ]),
 }];
 

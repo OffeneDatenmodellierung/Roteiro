@@ -209,13 +209,38 @@ pub struct InstallHint {
 /// rustup's installer is a different shell line on every host, and printing one
 /// of them is exactly the platform guess the refusals checklist forbids. Its
 /// front page picks the right one, which is why the page *is* the answer here.
+///
+/// So this hint has a `Note` and no [`Line::Command`], which is what "no
+/// command" has to mean if the sentence above is to be true of the code under
+/// it. It read `Line::Command("https://rustup.rs")` for one revision — a URL
+/// promoted into the slot a command would have occupied, three lines under a
+/// comment denying there was one. See [`URL_PREFIX`].
 pub const RUST_TOOLCHAIN: Guidance = Guidance::new(&[
     Line::Note(&[
         "Roteiro does not install toolchains. Install Rust — rustup's front page",
-        "selects the right installer for this host:",
+        "selects the right installer for this host, so there is nothing to paste",
+        "here.",
     ]),
-    Line::Command("https://rustup.rs"),
+    Line::Note(&["Upstream: https://rustup.rs"]),
 ]);
+
+/// How every install hint introduces its upstream page.
+///
+/// One convention, named once, because there were two. Three hints carried the
+/// URL as a `Note` reading `Upstream: …` and two promoted it into a
+/// [`Line::Command`] — and both of the two were the hints whose prose said they
+/// had *no* command, so the odd rendering and the contradicted comment were the
+/// same mistake seen from either end.
+///
+/// The `Note` is the right side of that split. [`Line::Command`] renders one
+/// step further in, as the thing to copy and run; a page is a thing to *read*,
+/// and the label is what says which of the two a reader is looking at. Reserving
+/// the command slot for commands is also what lets a hint say "there is nothing
+/// to paste here" and be visibly telling the truth.
+///
+/// `tests::every_hint_renders_its_upstream_page_the_same_way` holds it, so a
+/// fifth adapter cannot introduce a third convention.
+pub const URL_PREFIX: &str = "Upstream: ";
 
 /// One analyzer's native output format and invocation.
 pub trait Adapter: Sync + std::fmt::Debug {
@@ -457,9 +482,9 @@ pub fn snippet_hash_at(snippets: &dyn SnippetSource, path: &str, start: u32, end
 #[cfg(test)]
 mod tests {
     use super::{
-        Adapter as _, AssetPaths, Guidance, LINT_ANALYZERS, NO_SNIPPET, NativeContext,
-        UNKNOWN_VERSION, adapter_for, every_adapter, install_hint, known_analyzers, snippet_hash,
-        snippet_hash_at,
+        Adapter as _, AssetPaths, Guidance, LINT_ANALYZERS, Line, NO_SNIPPET, NativeContext,
+        UNKNOWN_VERSION, URL_PREFIX, adapter_for, every_adapter, install_hint, known_analyzers,
+        snippet_hash, snippet_hash_at,
     };
     use rto_graph::SourceIdentity;
 
@@ -557,6 +582,63 @@ mod tests {
                          reader's platform",
                         hint.program
                     );
+                }
+            }
+        }
+    }
+
+    /// One convention for the upstream page, asserted on the [`Line`]s rather
+    /// than on rendered text.
+    ///
+    /// Two of the five hints used to promote the URL into a [`Line::Command`],
+    /// and both were the hints whose prose said they had *no* command — so the
+    /// inconsistent rendering and the contradicted comment were one mistake, and
+    /// a reviewer met it as the comment. The convention is now: the page is a
+    /// `Note` beginning [`URL_PREFIX`], and the command slot holds commands.
+    ///
+    /// Structural, because that is what a fifth adapter would evade. A test on
+    /// rendered text would pass on a hint that put the URL anywhere at all — it
+    /// is the *shape* that has drifted here, not the presence of the string, and
+    /// `every_install_hint_carries_upstream_and_guesses_no_package_manager`
+    /// already checks the presence.
+    #[test]
+    fn every_hint_renders_its_upstream_page_the_same_way() {
+        for adapter in every_adapter() {
+            for hint in adapter.install_hints() {
+                let pages: Vec<&str> = hint
+                    .guidance
+                    .lines()
+                    .iter()
+                    .filter_map(|line| match line {
+                        Line::Note(fragments) => fragments
+                            .iter()
+                            .copied()
+                            .find(|f| f.starts_with(URL_PREFIX)),
+                        Line::Command(_) => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    pages.len(),
+                    1,
+                    "the hint for `{}` must introduce its upstream page exactly once, as a \
+                     note beginning {URL_PREFIX:?} — found {pages:?}",
+                    hint.program
+                );
+
+                // The other half, and the one that caught the real defect: a URL
+                // in the command slot. `Line::Command` renders one step further
+                // in as the thing to copy and run, so a page there reads as a
+                // command — and in both hints where it happened, the prose three
+                // lines above said there was no command at all.
+                for line in hint.guidance.lines() {
+                    if let Line::Command(command) = line {
+                        assert!(
+                            !command.contains("://"),
+                            "the hint for `{}` puts a URL in the command slot ({command:?}) — \
+                             a page is read, not run; introduce it with {URL_PREFIX:?}",
+                            hint.program
+                        );
+                    }
                 }
             }
         }
