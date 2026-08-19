@@ -2,10 +2,35 @@
 * { box-sizing: border-box; }
 body { font-family: Georgia, 'Times New Roman', serif; color: var(--ink);
        background: var(--paper); max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem; line-height: 1.6; }
+/* One sticky bar's box height, named once because every offset below is derived
+   from it. Read off the shared metrics of nav.sitenav/nav.toc, which are
+   deliberately identical: .6rem padding twice, a .82rem line box at the
+   inherited line-height 1.6 (= 1.312rem), and a 1px bottom border — 2.5745rem,
+   rounded up to 2.6rem to clear it. --bar-gap is the breathing room a heading
+   gets *below* the bar it clears.
+   These two were previously written out as 2.6rem and 3.5rem, which reads like
+   one quantity measured twice. It is not: 3.5 = 2.6 + 0.9, a bar plus the gap.
+   They were never in conflict — they were coupled, with nothing saying so, so a
+   change to the bar's padding or font-size would have silently invalidated the
+   second. Deriving both is what stops that. */
+:root { --bar-h: 2.6rem; --bar-gap: .9rem; }
+
 /* Offset in-page anchor jumps so the sticky nav (below) never hides a heading.
    Deep links into these anchors are the whole reason the renderer emits an `id`
    on every heading, so landing under the bar would defeat the mechanism. */
-h1, h2, h3, h4 { scroll-margin-top: 3.5rem; }
+h1, h2, h3, h4 { scroll-margin-top: calc(var(--bar-h) + var(--bar-gap)); }
+/* A page carrying both bars stacks them, so a heading must clear twice the
+   height. Selected structurally rather than by a class on <body>: a class would
+   have to be emitted by the renderer, and the renderer never emits nav.toc at
+   all — the only pages that have one are the hand-written website/public/*.html
+   it merely copies. So the renderer cannot know, and the markup can.
+   The condition is the *same adjacency* the stacking rule below uses, so the two
+   cannot disagree about what "stacked" means; and where :has() is unsupported
+   the fallback is the single-bar offset above, which is today's behaviour rather
+   than none. */
+body:has(nav.sitenav + nav.toc) :is(h1, h2, h3, h4) {
+  scroll-margin-top: calc(var(--bar-h) * 2 + var(--bar-gap));
+}
 h1 { font-size: 2.4rem; margin-bottom: .25rem; line-height: 1.15; }
 h2 { font-size: 1.5rem; margin-top: 3rem; border-bottom: 1px solid var(--line); padding-bottom: .25rem; }
 h3 { font-size: 1.18rem; margin-top: 1.8rem; margin-bottom: .3rem; }
@@ -43,8 +68,13 @@ nav.sitenav a:hover { color: var(--accent); }
 /* The current page is unlinked, so it needs to read as "you are here" rather
    than as a link that stopped working. */
 nav.sitenav [aria-current="page"] { color: var(--ink); font-weight: bold; white-space: nowrap; }
-/* A page carrying both bars stacks them; the toc must clear the site bar. */
-nav.sitenav + nav.toc { top: 2.6rem; }
+/* A page carrying both bars stacks them; the toc must clear the site bar. The
+   one caveat both this and the scroll offsets share: nav.sitenav is a wrapping
+   flex row, so on a viewport narrow enough to wrap it, its real height grows by
+   a row and a static offset under-clears. Measuring it exactly needs script,
+   which this site does not have and is not getting (ADR-0010). Pre-existing —
+   this rule already assumed one row — and unchanged here. */
+nav.sitenav + nav.toc { top: var(--bar-h); }
 
 /* Provenance pills */
 .pill { display: inline-block; font-family: ui-monospace, monospace; font-size: .78rem;
