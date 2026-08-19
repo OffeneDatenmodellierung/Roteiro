@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.5](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.26.4...rto-render-v1.26.5) - 2026-08-19
+
+### Other
+
+- *(render)* parse with the shared Markdown dialect, and pin that it stays shared
+
 ## [1.26.4](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.26.3...rto-render-v1.26.4) - 2026-08-19
 
 ### Fixed
