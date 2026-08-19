@@ -29,6 +29,15 @@ boxlite = { version = "=0.9.7", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 # `exec-boxlite` only: boxlite streams a command's stdout/stderr as `Stream`s.
 futures = { version = "0.3", optional = true }
+# The sandbox image store's index (`sandbox_store`). The name -> digest mapping
+# `roteiro sandbox status|clear` needs lives only in `boxlite`'s own SQLite
+# database, and there is no filesystem-only route to it — see the module.
+#
+# Ungated, like `assets`, and for the same kind of reason: reclaiming 8.5 GB a
+# previous build cached must not require rebuilding with the backend that cached
+# it. Adds an edge, not a crate: `rto-graph` is already a dependency and already
+# depends on this exact workspace pin.
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
