@@ -236,20 +236,20 @@ jobs:
   # version would reproduce the exact failure it exists to prevent — a signal
   # nobody is obliged to read.
   #
-  # It needs cmake + libclang, and that is worth understanding before anyone
-  # "tidies" the install step away as a copy-paste from `checks`. It is NOT
-  # because the default *library* build pulls llama.cpp — it does not; the
-  # `llama` feature is off by default exactly so downstream default builds stay
-  # pure-Rust. It is because `--all-targets` compiles test targets, which pulls
-  # dev-dependencies, and `rto-llama` declares a NON-optional dev-dependency on
-  # `llama-cpp-2`. So `llama-cpp-sys-2` builds vendored llama.cpp here even at
-  # the default feature set. (`cargo tree --edges normal,dev -i llama-cpp-sys-2`
-  # shows the one path: llama-cpp-2 → [dev] rto-llama.) The comment on that
-  # dev-dependency calls it "inert unless a test that uses it is compiled" — true
-  # of linking, not of building, and this job is where the difference shows up.
+  # It needs NO cmake/libclang, and that is a change from how this job started
+  # (#483). It used to install them, because `rto-llama` declared a NON-optional
+  # dev-dependency on `llama-cpp-2` — and dev-dependencies are never
+  # feature-gated, so `--all-targets` built vendored llama.cpp here even at the
+  # default feature set, where no test target could name the crate. That entry is
+  # gone; the optional `[dependencies]` one, which Cargo already passes to test
+  # targets, serves them instead. `cargo tree --edges normal,dev -i
+  # llama-cpp-sys-2` at this feature set now reports no such package at all, and
+  # a cold `--all-targets` run compiles neither bindgen, clang-sys, cmake, nor
+  # llama-cpp-sys-2. Do not re-add the install step without first checking that
+  # command still says so.
   #
-  # `cargo build`/`cargo install` at the default set genuinely needs none of
-  # this; the cost is confined to `--all-targets`.
+  # `cargo build`/`cargo install` at the default set never paid this either way;
+  # the cost was confined to `--all-targets`, i.e. to CI.
   #
   # protoc and the sandbox runtime are NOT needed and deliberately absent:
   # `exec-boxlite` is off in `rto-exec`'s default set, so nothing here trips
@@ -267,9 +267,6 @@ jobs:
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
-      - name: Install C/C++ toolchain (`rto-llama` dev-dependency, see above)
-        if: env.RELEASE_PR != 'true'
-        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
       # The whole of a release PR's verification in this job — see the
       # `RELEASE_PR` comment at the top of this file.
       - name: Manifests and lockfile agree (release PR)
@@ -314,12 +311,14 @@ jobs:
   # `not(exec-subprocess)` and so runs in **no other job** — it is where #445's
   # E0061 lived, and a clippy-only job would compile it and still never run it.
   #
-  # The C/C++ toolchain is needed here for exactly the reason `default-features`
-  # needs it, and not for `serve`: `rto-llama` takes `llama-cpp-2` as an
-  # unconditional **dev-dependency**, so `--all-targets` builds vendored
-  # llama.cpp at every feature set. Do not drop these packages on the reasoning
-  # that this set has no `serve` — it does not have it, and that is not what
-  # pulls llama.cpp in.
+  # No cmake/libclang, for the reason spelled out on `default-features` above:
+  # `rto-llama`'s unconditional dev-dependency on `llama-cpp-2` used to drag
+  # vendored llama.cpp into every feature set's `--all-targets` build, and it is
+  # gone (#483). This job was the worst-hit — it is the feature set that should
+  # contain no llama.cpp at all, and it was building the whole C++ tree. Measured
+  # on a cold target dir at `--no-default-features --features execution`:
+  # 35.5s → 14.1s wall, 235s → 63s of CPU. Nothing left in this graph needs more
+  # than the `cc` the runner already ships (tree-sitter, libsqlite3-sys, ring).
   #
   # protoc and the sandbox runtime are NOT needed and are deliberately absent:
   # `--no-default-features` leaves `exec-boxlite` off in every workspace member,
@@ -337,9 +336,6 @@ jobs:
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
-      - name: Install C/C++ toolchain (`rto-llama` dev-dependency, see above)
-        if: env.RELEASE_PR != 'true'
-        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
       # The whole of a release PR's verification in this job — see the
       # `RELEASE_PR` comment at the top of this file. The reason this job exists
       # is that turning features *off* finds defects the other jobs are blind
