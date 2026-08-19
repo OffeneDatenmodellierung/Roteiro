@@ -24,6 +24,15 @@ permissions:
 
 # Serialise on the branch and cancel superseded runs, so two close-together
 # merges can't race and leave `graph-latest` pointing at the older artifact.
+#
+# `cancel-in-progress: true` here is UNCONDITIONAL, and deliberately unlike
+# `ci.yml` and `website.yml`, which scope it to `${{ github.event_name ==
+# 'pull_request' }}` so that a `push` to `main` is never discarded. The reason
+# they differ: those two produce a *verdict*, and cancelling a push-triggered run
+# destroys the record that a merged commit was green. This workflow produces an
+# *artifact*, where latest-wins is the correct semantic — an older run finishing
+# after a newer one is precisely the race the group exists to prevent, so
+# cancelling the superseded push is the point rather than a cost.
 concurrency:
   group: graph-artifact-${{ github.ref }}
   cancel-in-progress: true

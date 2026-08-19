@@ -5,6 +5,38 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel a superseded run, but only when nobody wants its result.
+#
+# `cancel-in-progress` is an expression, not `true`, and the distinction is the
+# whole point:
+#
+# - `pull_request` -> CANCEL. A new push to a PR makes the previous run's
+#   verdict worthless. Four of twelve in-flight runs were once found to be for
+#   already-merged PRs, two of them `in_progress` for 151 and 167 minutes,
+#   holding runners rather than merely queued.
+# - `push` to `main` -> KEEP. These runs are the record that a merged commit was
+#   green. A cancelled run leaves no such record, and cancelling it to save a
+#   runner trades the evidence for the change. `release-plz.yml` sets `false`
+#   for the same reason.
+# - `workflow_dispatch` -> KEEP. Somebody asked for this run by hand.
+#
+# On the branch-protection interaction, which is load-bearing now that `checks`,
+# `default-features` and `msrv` are required checks: a cancelled job reports
+# `status=completed, conclusion=cancelled`, which is terminal and is NOT a
+# success, so it does not satisfy a required check. That is safe here only
+# because a cancellation is always *caused by* a superseding run in the same
+# group, and the last run in any such chain is by definition not cancelled — it
+# completes and reports on what is then the PR's head commit, which is the only
+# commit branch protection evaluates. The stale `cancelled` results are left
+# behind on commits that are no longer the head.
+#
+# The consequence to respect: never cancel a run without a successor to report
+# in its place. That is why this is scoped to the event type and not to, say, a
+# schedule or a manual sweep.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -187,6 +219,24 @@ jobs:
   # a gate that times out is not.
   coverage:
     runs-on: ubuntu-latest
+    # PULL REQUESTS ONLY, and that is deliberate — this is NOT an oversight to
+    # be "fixed" back to matching `checks` and `default-features` above.
+    #
+    # This is the most expensive job in the matrix, and per the comment above it
+    # measures a number that nothing gates on: there is no ratchet (#319), and it
+    # is deliberately not a required status check. A PR is where that number is
+    # actually read, by someone deciding whether a change carries its tests. A
+    # push to `main` has no reader and no consequence — the merge has already
+    # happened, and nobody acts on a coverage delta within the minute.
+    #
+    # `checks` and `default-features` keep running on `push` for a reason that
+    # does not apply to coverage: they are the only detectors for two PRs that
+    # were green apart and red together, which is exactly how #316/#317's
+    # `EXTRACT_VERSION` collision broke `main`. Branch protection is now
+    # `strict`, so a branch must be up to date before merging and that class of
+    # break is much less likely — but less likely is not impossible, and those
+    # two jobs are cheap. This one is not.
+    if: github.event_name == 'pull_request'
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
