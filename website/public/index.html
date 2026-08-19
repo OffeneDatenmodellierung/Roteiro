@@ -20,6 +20,21 @@ Discovery — accumulated route knowledge that made navigation repeatable.
 Roteiro does the same for software: <strong>structure, intent, and context in one
 queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents alike.</p>
 
+<nav class="sitenav">
+<span aria-current="page">Home</span>
+<a href="build.html">Install</a>
+<a href="adopt.html">Use it</a>
+<a href="modes.html">Modes</a>
+<a href="ask.html">Ask</a>
+<a href="plan.html">Plan</a>
+<a href="models.html">Models</a>
+<a href="config.html">Config</a>
+<a href="cross-repo.html">Cross-repo</a>
+<a href="offline.html">Offline</a>
+<a href="build-plan-v2.html">Roadmap</a>
+<a href="json-schema.html">JSON schemas</a>
+</nav>
+
 <nav class="toc">
   <a href="#what">What it is</a>
   <a href="#replaces">What it replaces</a>
@@ -178,500 +193,51 @@ release:
 Both are build-outputs — regenerate either locally at any commit with
 <code>roteiro render obsidian</code> / <code>roteiro export</code>.</div>
 
+
 <h2 id="build">Install &amp; build</h2>
 
-<p>Roteiro is a Rust workspace (MSRV 1.94). Install the lean default build from
-crates.io, or build from source with the feature tiers you want.</p>
-
-<pre><code><span class="c"># Lean default build — pure Rust, no network call of its own,</span>
-<span class="c"># and `roteiro model pull` included (--locked uses the published lockfile)</span>
-cargo install roteiro --locked
-
-<span class="c"># Pin a specific release</span>
-cargo install roteiro@1.1.0 --locked
-
-<span class="c"># Pick the capabilities you want</span>
-cargo install roteiro --features "inference,mcp" --locked
-
-<span class="c"># Everything on — MCP, serving, local models, PDF/OCR/vision.</span>
-<span class="c"># Needs a C/C++ toolchain (the inference-local-models/serve/image-vision features build llama.cpp).</span>
-cargo install roteiro --all-features --locked
-
-<span class="c"># …or build from source</span>
-git clone https://github.com/OffeneDatenmodellierung/Roteiro
-cd Roteiro
-cargo build --release --all-features</code></pre>
-
-<h3>Feature tiers</h3>
-<table>
-<tr><th>Feature</th><th>Adds</th></tr>
-<tr><td><em>(default)</em></td><td>Graph build, query, check, render, the <code>roteiro model</code> registry, and <code>roteiro security ingest|list|prefetch|status|run</code> — smallest binary, no C++/cmake toolchain, and no network call unless you consent to a <code>pull</code> or a <code>prefetch --allow-download</code>.</td></tr>
-<tr><td><code>inference</code></td><td><code>roteiro infer</code> / <code>duplicates</code> with a pure-Rust hashing embedder. Still fully offline; no download.</td></tr>
-<tr><td><code>models</code> <em>(default)</em></td><td>The <code>roteiro model</code> registry: list and consent-gated <code>pull</code> of local models. On by default — <code>pull</code> is the prerequisite for working offline, so a stock install has it.</td></tr>
-<tr><td><code>inference-local-models</code></td><td>Run pulled GGUF embedding &amp; generative models via the shared llama.cpp engine.</td></tr>
-<tr><td><code>pdf-text</code> · <code>image-ocr</code> · <code>image-vision</code></td><td>Ingest text from PDFs, OCR text from images, and describe images with a local vision model.</td></tr>
-<tr><td><code>exec-subprocess</code> <em>(default)</em></td><td>Runs an analyzer (<code>semgrep</code>, <code>osv-scanner</code>, <code>cargo audit</code>) as a child process on this host. You install the analyzer; Roteiro never does. <code>security run</code> is <strong>sandboxed by default</strong>, so a build without <code>exec-boxlite</code> refuses and tells you how to get one; <code>--allow-unsandboxed</code> is how you choose this host instead, and it records <code>isolation=none</code>. Use <code>--no-default-features --features execution</code> for a build that provisions and ingests but cannot execute.</td></tr>
-<tr><td><code>exec-boxlite</code></td><td>The same analyzers inside a digest-pinned OCI image in a microVM — read-only worktree, no egress. Needs <code>protoc</code> and a provisioned runtime; see the README.</td></tr>
-<tr><td><code>serve</code></td><td>An OpenAI-compatible <code>/v1</code> model endpoint over your installed models (llama.cpp).</td></tr>
-<tr><td><code>remote</code></td><td><strong>The one feature that can send your repository's content off this machine</strong> — <code>roteiro remote status|dry-run|call|log</code> against a hosted model, plus <code>spec draft --allow-remote</code> and <code>serve --allow-remote</code> (Ask), which take the same gate (ADR-0019). Off by default and staying off. Compiling it does not enable it: a run needs your <code>~/.roteiro/config.toml</code> <em>and</em> the invocation, and a committed <code>roteiro.toml</code> may deny it but never grant it. <a href="#remote-tier">Read the note above</a> before turning it on.</td></tr>
-<tr><td><code>mcp</code></td><td>The MCP graph server, exposing the graph to AI agents (stdio or HTTP).</td></tr>
-<tr><td><code>--all-features</code></td><td>Every capability above at once — the largest build. Requires a C/C++ toolchain because the serving and vision features compile llama.cpp. <strong>This includes <code>remote</code></strong>, so such a build <em>can</em> call a hosted model once you grant it in your user config and per run; it still cannot without both.</td></tr>
-</table>
+<p><code>cargo install roteiro --locked</code> gets the lean default build — pure Rust,
+no C++ toolchain, and no network call of its own. The feature tiers add inference,
+serving, MCP, PDF/OCR/vision and the sandboxed analyzer backend. <a href="build.html">Install &amp; build →</a></p>
 
 <h2 id="adopt">Use it in your project</h2>
 
-<p>Adopting Roteiro in your own repository is one command. <code>roteiro init</code>
-scaffolds the store, installs the git hooks that keep it fresh and gate drift,
-and writes an <code>AGENTS.md</code> snippet so your AI agents are graph-aware.</p>
-
-<pre><code><span class="c"># From the root of your git repository</span>
-roteiro init
-<span class="c">#   builds the initial graph (stored under .git/, not committed)</span>
-<span class="c">#   installs managed git hooks (see below)</span>
-<span class="c">#   writes/updates an AGENTS.md section pointing agents at the graph</span></code></pre>
-
-<h3>What <code>init</code> sets up</h3>
-<table>
-<tr><th>Piece</th><th>What it does</th></tr>
-<tr><td>The store</td><td>A content-addressed graph under <code>.git/</code> — per-worktree, shared cache, never committed.</td></tr>
-<tr><td><code>post-checkout</code> · <code>post-merge</code> · <code>post-commit</code> hooks</td><td>Keep the graph fresh automatically as <code>HEAD</code> moves — no manual <code>sync</code>.</td></tr>
-<tr><td><code>pre-commit</code> hook</td><td>Runs <code>roteiro check</code> and <strong>blocks a commit that introduces drift</strong> (a dangling ADR link or a stale <code>@rto:</code> annotation). Skip once with <code>git commit --no-verify</code>.</td></tr>
-<tr><td><code>AGENTS.md</code></td><td>A managed section telling agents to query the graph and to run <code>roteiro review</code>/<code>check</code> — the cross-tool standard many agents read.</td></tr>
-</table>
-
-<h3>The everyday loop</h3>
-<p>After <code>init</code>, the hooks keep the graph current for you. As you work:</p>
-<pre><code><span class="c"># Review your change against the graph — not just the diff:</span>
-<span class="c"># each touched symbol's callers/callees, the ADRs governing it, the</span>
-<span class="c"># drift &amp; intent-debt it adds, and the dependents to re-check.</span>
-roteiro review
-
-<span class="c"># Verify authored intent still holds (the pre-commit hook runs this too):</span>
-roteiro check
-
-<span class="c"># Explain any node, or trace how two are connected:</span>
-roteiro query 'sym:rust:src/lib.rs#Thing'
-roteiro path 'file:src/main.rs' 'adr:0001'</code></pre>
-
-<h3>In CI</h3>
-<p>Make the graph a merge gate — <code>check</code> exits non-zero on drift, so a PR
-that breaks an ADR link or annotation fails the build:</p>
-<pre><code><span class="c"># In your pipeline (validates the committed HEAD tree)</span>
-cargo install roteiro --locked <span class="c"># or download a release binary</span>
-roteiro check --committed</code></pre>
-
-<div class="note"><strong>Authoring intent.</strong> Link decisions to code with ADRs
-(<code>[[path#Symbol]]</code> wiki-links) and inline <code>// @rto:&lt;adr-id&gt;</code>
-annotations. <code>check</code> keeps them honest; <code>roteiro spec</code> helps you
-draft house-style, graph-grounded ADRs to begin with.</div>
+<p><code>roteiro init</code> scaffolds the store, installs the git hooks that keep the
+graph fresh and gate drift, and writes an <code>AGENTS.md</code> snippet so your AI
+agents are graph-aware. <a href="adopt.html">Use it in your project →</a></p>
 
 <h2 id="modes">The five ways to run it</h2>
 
-<h3>1 · Offline mode <span style="font-weight:normal;color:var(--sub)">— the default</span></h3>
-<p>No models, no network. Build the graph, query it, verify authored intent, and
-render docs. This alone is a complete tool.</p>
-<pre><code><span class="c"># Scaffold the store, git hooks, an AGENTS.md block and an agent skill</span>
-<span class="c"># (.agents/skills/roteiro/SKILL.md; also .github/skills when the repo uses .github)</span>
-roteiro init
-
-<span class="c"># Build / incrementally update the graph for the working tree</span>
-roteiro sync
-
-<span class="c"># Explain a node — its provenance-labelled neighbourhood</span>
-roteiro query 'sym:rust:crates/rto-graph/src/store.rs#Store'
-roteiro query --kind fn                 <span class="c"># list every function node</span>
-
-<span class="c"># Verify authored links against the code; non-zero exit on drift (CI gate)</span>
-roteiro check
-
-<span class="c"># Shortest path between two nodes, and outstanding intent-debt markers</span>
-roteiro path 'file:src/main.rs' 'adr:0001'
-roteiro debt
-
-<span class="c"># Render the graph to a docs site or an Obsidian vault</span>
-roteiro render docs
-roteiro render obsidian</code></pre>
-
-<h3>2 · Online mode <span style="font-weight:normal;color:var(--sub)">— richer inference with local models</span></h3>
-<p>Pull a real embedding or generative model <em>once</em> (with consent), then run
-everything locally — the “online” is a one-time, explicit download, after which
-inference is offline again. Requires <code>--features inference-local-models</code>.</p>
-<pre><code><span class="c"># See models curated for THIS machine's resources, then pull one</span>
-roteiro model list
-roteiro model pull bge-small-en-v1.5-gguf
-<span class="c">#   Download bge-small-en-v1.5-gguf (~65 MB, MIT) from …? [y/N]</span>
-
-<span class="c"># Suggest inferred similarity edges using the pulled embedding model</span>
-roteiro infer --model bge-small-en-v1.5-gguf --min-confidence 0.5
-
-<span class="c"># Report likely-duplicate content (same blob, or near-identical embeddings)</span>
-roteiro duplicates --min-similarity 0.9
-
-<span class="c"># Draft a house-style, graph-grounded ADR/blueprint with a generative model</span>
-roteiro spec scaffold "rate limiting" --kind adr
-roteiro spec draft draft-adr.md         <span class="c"># fills placeholder sections</span></code></pre>
-
-<div class="note"><strong>“Online mode” means the download, not the inference.</strong>
-The one-time <code>model pull</code> is the only thing that touches the network here; after
-it, every model above runs on this machine and nothing you ask is sent anywhere. The
-separate, default-off capability that <em>does</em> call a hosted model at use time is the
-<a href="#remote-tier"><strong>remote model tier</strong></a> — a different feature, a
-different name, and a consent model of its own. If you enabled
-<code>inference-local-models</code>, you did not enable that.</div>
-
-<h3>3 · Serving mode <span style="font-weight:normal;color:var(--sub)">— the network HTTP server</span></h3>
-<p><code>roteiro serve</code> is the networked server: an OpenAI-compatible
-<code>/v1</code> API over your installed models, the read-only <code>/v1/graph</code>
-API and the <a href="#modes">explorer</a> web UI — all on one loopback port. Built with
-<code>--features serve</code> and a model installed, it also enables the <strong>Ask</strong>
-tab; without the model feature (or none installed) it degrades gracefully to the
-model-free graph API + UI. Binds <code>[serve] addr</code> (default
-<code>127.0.0.1:8017</code>); set <code>[serve] tls_cert</code>/<code>tls_key</code> for
-in-process HTTPS.</p>
-<pre><code><span class="c"># Network server on 127.0.0.1:8017 — /v1 + /v1/graph + the web UI</span>
-roteiro serve                            <span class="c"># → prints the URL to open</span>
-
-<span class="c"># Call /v1 on that default bind like any OpenAI endpoint</span>
-curl http://127.0.0.1:8017/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"hello"}]}'
-
-<span class="c"># Or override the bind address/port and terminate TLS in-process (then use https://…)</span>
-roteiro serve --addr 0.0.0.0:8443 --tls-cert fullchain.pem --tls-key privkey.pem</code></pre>
-<div class="note"><strong>No auth on <code>/v1</code>.</strong> A non-loopback bind like
-<code>0.0.0.0:8443</code> is warned about — use in-process TLS
-(<code>[serve] tls_cert</code>/<code>tls_key</code>) or a reverse proxy. In-process TLS is a
-<code>serve</code> feature; <code>roteiro explorer</code> serves plain HTTP only.</div>
-
-<h3>4 · MCP mode <span style="font-weight:normal;color:var(--sub)">— the graph, for AI agents</span></h3>
-<p>Expose the knowledge graph to an MCP-capable agent (Claude, editors, custom
-tooling). Agents get typed tools to query nodes, fetch a node's context bundle,
-find paths and list debt — grounded in the <em>same</em> graph humans review.
-Requires <code>--features mcp</code>.</p>
-<pre><code><span class="c"># Default: the MCP graph server over stdio (for a local agent to spawn)</span>
-roteiro mcp
-
-<span class="c"># Or networked over streamable HTTP (terminate TLS at a reverse proxy)</span>
-roteiro mcp --http 127.0.0.1:8080</code></pre>
-<div class="note"><strong>Renamed in v1.5.</strong> The MCP graph server moved from
-<code>roteiro serve</code> to <code>roteiro mcp</code>; bare <code>roteiro serve</code> is now
-the <a href="#modes">network HTTP server</a>. The old <code>serve --http</code> and
-<code>serve --models</code> spellings still work as deprecated aliases (with a notice).</div>
-
-<h3>5 · Explorer mode <span style="font-weight:normal;color:var(--sub)">— the graph, in your browser</span></h3>
-<p>An interactive web view of the graph. Start at a workspace overview — the
-cross-repo topology, the config override matrix and drift — then click any repo
-to drop into its own node/edge graph: hotspots, intent-debt with reasons, a node
-detail panel, and a <em>follow-the-link</em> hop that jumps from a spoke's config
-key straight to the hub struct that defines it. Fully offline and model-free;
-requires <code>--features explorer</code>.</p>
-<pre><code><span class="c"># Serve the explorer UI on loopback (no model needed)</span>
-roteiro explorer                        <span class="c"># → prints the URL to open in your browser</span>
-
-<span class="c"># Pick a workspace by name, or default to the repo you're in</span>
-roteiro explorer --workspace-name payments</code></pre>
-<div class="note"><strong>Chat to your graph in the browser.</strong> Build with
-<code>--features serve,explorer</code> and run <code>roteiro serve</code>:
-it serves the same explorer UI <em>and</em> the model endpoint on one port, which
-enables the <strong>Ask</strong> tab — natural-language questions answered by a
-local model calling the graph's tools. <code>roteiro explorer</code> on its own
-stays model-free, with Ask disabled.</div>
+<p>Offline (the default), online with local models, the network HTTP server, MCP for
+AI agents, and the explorer in your browser. <a href="modes.html">The five ways to run it →</a></p>
 
 <h2 id="ask">Ask questions of your code</h2>
 
-<p>Two ways to interrogate the graph: <strong>structured queries</strong> that need no
-model and run fully offline, and <strong>natural-language questions</strong> answered by
-a local model that calls the graph's tools for you. Both read the <em>same</em>
-provenance-tagged store, so answers are grounded in your actual code and decisions
-— not the model's training data.</p>
-
-<div class="note">The natural-language path is also the <strong>Ask</strong> tab in the <a href="#modes">graph explorer</a> — same tools, same grounding, in your browser.</div>
-
-<h3>Structured — offline, no model</h3>
-<p>Precise lookups straight against the graph. Deterministic, instant, and
-scriptable (add <code>--json</code> to any of these).</p>
-<pre><code><span class="c"># Find, then explain: ranked text search — curated ADRs/blueprints rank first</span>
-roteiro search "provenance model"
-
-<span class="c"># Explain a returned node: its provenance-labelled neighbourhood</span>
-roteiro query 'sym:rust:crates/rto-graph/src/store.rs#Store'
-
-<span class="c"># Everything relevant to a symbol — callers, callees, governing ADRs</span>
-roteiro context 'sym:rust:crates/rto-graph/src/sync.rs#sync'
-
-<span class="c"># How are two things connected? Shortest path between nodes</span>
-roteiro path 'file:src/main.rs' 'adr:0006'
-
-<span class="c"># What decisions and docs exist? List by kind, or find open debt</span>
-roteiro query --kind adr
-roteiro debt
-
-<span class="c"># What changed on this branch, and does it drift from authored intent?</span>
-roteiro review --base main</code></pre>
-
-<h3>Natural language — via a local model</h3>
-<p>Serve your installed models over the OpenAI-compatible <code>/v1</code> endpoint, then
-ask in plain English. The server runs an agent loop that calls the graph's
-<code>search</code>, <code>context</code> and <code>path</code> tools and answers from what it
-finds — so <em>“what should this project be used for?”</em> is answered from your ADRs
-and blueprints, not guessed. Requires <code>--features serve</code>.</p>
-<pre><code><span class="c"># Start the network server (loopback; pick another port with --addr if 8017 is taken)</span>
-roteiro serve
-
-<span class="c"># Ask it like any OpenAI chat endpoint — grounded in your graph</span>
-curl -s http://127.0.0.1:8017/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{"model":"qwen3-8b","messages":[{"role":"user",
-       "content":"What should Roteiro be used for?"}]}' \
-  | jq -r '.choices[0].message.content'
-
-<span class="c"># More examples — each triggers a grounded tool call</span>
-<span class="c">#   "Where is the git-native store implemented?"</span>
-<span class="c">#   "How does sync relate to ADR-0006?"</span>
-<span class="c">#   "What outstanding intent-debt is there?"</span></code></pre>
-
-<div class="note"><strong>Pick a model that can call tools.</strong> Grounded answers
-depend on the model actually invoking the graph tools. <code>qwen3-8b</code> is the
-reliable default — it tool-calls consistently and runs comfortably on a
-<strong>16&nbsp;GB MacBook Air (M3)</strong>. The tiny <code>qwen3-0.6b</code> is great for
-<code>spec draft</code> but too small for agentic tool use — it tends to answer from
-memory and hallucinate. Set it once in <code>roteiro.toml</code> under
-<code>[models] generative = "qwen3-8b"</code>, or name it per request as above.</div>
-
-<div class="note"><strong>Already using an AI agent?</strong> Skip curl entirely — run
-<code>roteiro mcp</code> and your agent gets the same <code>search</code> /
-<code>context</code> / <code>path</code> / <code>debt</code> tools natively, grounded in the same
-graph. See <a href="#modes">MCP mode</a> above. <code>roteiro init</code> also drops an
-<strong>agent skill</strong> at <code>.agents/skills/roteiro/SKILL.md</code> (the portable,
-cross-tool location; also <code>.github/skills/</code> for GitHub Copilot when the repo
-already uses <code>.github</code>) that teaches any agent how to drive the graph — when
-to <code>search</code> vs <code>query</code> vs <code>context</code>, the provenance model, and
-the plan/review flows.</div>
-
-<div class="note"><strong>Many repos, one server.</strong> <code>roteiro serve
---workspace ~/code</code> (or a <code>[workspace]</code> config) hosts every repo under a
-root from a <em>single</em> process — the model is loaded once and each project's
-graph is opened on demand (ADR-0008). The graph tools gain a <code>project</code>
-argument and a <code>list_projects</code> tool, so one endpoint answers questions about
-any of your projects: <em>"in <code>beta</code>, where is auth handled?"</em>. Omit
-<code>--workspace</code> for the single-repo default.</div>
+<p>Structured queries that need no model and run fully offline, and natural-language
+questions answered by a local model calling the graph&#39;s own tools. <a href="ask.html">Ask questions of your code →</a></p>
 
 <h2 id="plan">Plan a change</h2>
 
-<p>Asking questions is one half; the other is <strong>writing intent down</strong>. The
-<code>spec</code> workflow turns a topic into a house-style, drift-checked ADR or
-blueprint, <em>grounded in the graph</em> — so a decision links to the real symbols it
-governs and <code>roteiro check</code> can hold code to it later. Four steps; only one
-needs a model.</p>
-
-<pre><code><span class="c"># 1 · Gather grounded context for a topic — the symbols, files and</span>
-<span class="c">#     ADRs already related to it, straight from the graph (offline)</span>
-roteiro spec context "rate limiting"
-
-<span class="c"># 2 · Scaffold a house-style, check-clean skeleton with resolving</span>
-<span class="c">#     links and an interview checklist — no model needed (offline)</span>
-roteiro spec scaffold "rate limiting" --kind adr --out draft-adr.md
-
-<span class="c"># 3 · Draft the prose with a local generative model, filling the</span>
-<span class="c">#     placeholders from the graph context (needs --features serve</span>
-<span class="c">#     or inference-local-models, then a pulled model)</span>
-roteiro spec draft draft-adr.md
-
-<span class="c"># Then verify the authored links hold against the code (CI gate)</span>
-roteiro check</code></pre>
-
-<p>What <code>spec context</code> surfaces is real: for <em>“concurrency”</em> in this repo it
-returns the <code>Engine</code> trait, the concurrency test symbols that exercise it,
-and the blueprint section that governs them — the exact material a good ADR should
-cite. The skeleton it scaffolds is already <code>check</code>-clean, so you are filling in
-reasoning, not wiring up metadata.</p>
-
-<div class="note"><strong>Offline gets you most of the way.</strong>
-<code>spec context</code> and <code>spec scaffold</code> run with no model at all;
-only <code>spec draft</code> (the prose generation) needs a generative model. On a
-<strong>16&nbsp;GB MacBook Air (M3)</strong>, <code>qwen3-8b</code> drafts comfortably;
-<code>qwen3-0.6b</code> is the tiny built-in default if you just want a first pass.</div>
+<p><code>roteiro spec</code> turns a topic into a house-style, drift-checked ADR or
+blueprint, grounded in the graph. Four steps, and only one of them needs a model. <a href="plan.html">Plan a change →</a></p>
 
 <h2 id="models">Recommended local models</h2>
 
-<p>Models are <strong>pluggable and platform-aware</strong>: <code>roteiro model list</code>
-recommends a pick per section tuned to your machine (Apple-silicon Metal builds
-on macOS, standard GGUF elsewhere) — treat it as the source of truth. All local
-models are GGUF, run through the shared llama.cpp engine. A rough guide:</p>
-
-<h3>Embedding <span style="font-weight:normal;color:var(--sub)">— for <code>infer</code> / <code>duplicates</code></span></h3>
-<table>
-<tr><th>Model</th><th>Size</th><th>Dim</th><th>Best for</th></tr>
-<tr><td><code>bge-small-en-v1.5-gguf</code></td><td>~65 MB</td><td>384</td><td>Any laptop — the recommended default.</td></tr>
-<tr><td><code>bge-base-en-v1.5</code></td><td>~200 MB</td><td>768</td><td>Stronger recall on a moderate machine.</td></tr>
-<tr><td><code>bge-large-en-v1.5</code></td><td>~640 MB</td><td>1024</td><td>Best quality, for a workstation.</td></tr>
-</table>
-
-<h3>Generative <span style="font-weight:normal;color:var(--sub)">— for <code>spec draft</code> / serving</span></h3>
-<table>
-<tr><th>Model</th><th>Size</th><th>Role</th><th>Best for</th></tr>
-<tr><td><code>qwen3-0.6b</code></td><td>~380 MB</td><td>instruct</td><td>Tiny, offline — the <code>spec draft</code> default.</td></tr>
-<tr><td><code>qwen3-8b</code></td><td>~4.8 GB</td><td>instruct</td><td>Stronger drafting on a ~16 GB machine.</td></tr>
-<tr><td><code>qwen3-32b</code></td><td>~18 GB</td><td>instruct</td><td>Best drafting, for a workstation.</td></tr>
-<tr><td><code>qwen2.5-coder-3b</code></td><td>~1.8 GB</td><td>coding</td><td>Code completion &amp; code Q&amp;A.</td></tr>
-<tr><td><code>deepseek-r1-distill-qwen-1.5b</code></td><td>~1.0 GB</td><td>reasoning</td><td>Small chain-of-thought reasoning.</td></tr>
-</table>
-
-<h3>Vision &amp; OCR <span style="font-weight:normal;color:var(--sub)">— for image ingestion</span></h3>
-<table>
-<tr><th>Model</th><th>Size</th><th>Best for</th></tr>
-<tr><td><code>ocrs-text</code></td><td>~12 MB</td><td>Pure-Rust OCR — literal text in screenshots (<code>image-ocr</code>).</td></tr>
-<tr><td><code>smolvlm-500m-gguf</code></td><td>~520 MB</td><td>Describing diagrams &amp; photos (<code>image-vision</code>).</td></tr>
-</table>
+<p><code>roteiro model list</code> recommends a pick per section tuned to this machine.
+All local models are GGUF, run through the shared llama.cpp engine. <a href="models.html">Recommended local models →</a></p>
 
 <h2 id="config">Configuration</h2>
 
-<p>Defaults are sensible, so a config file is optional. When you want to pin
-choices, Roteiro merges two layers: a per-user <code>~/.roteiro/config.toml</code>
-and a per-project <code>roteiro.toml</code> at the repository root (project wins).
-<code>roteiro config</code> prints the effective, merged values and labels which
-layer set each one. <strong>One key inverts that</strong>: <code>[remote]
-enabled</code>, which opens Roteiro's only egress path, may be switched
-<em>off</em> by the committed project file but never <em>on</em> — see below.</p>
-
-<pre><code><span class="c"># roteiro.toml — every key is optional; shown with its default</span>
-
-[models]                                <span class="c"># unset ⇒ offline defaults; `roteiro config` shows what each surface resolved to</span>
-embedding  = "bge-small-en-v1.5-gguf"   <span class="c"># embedding model for `infer`</span>
-generative = "qwen3-0.6b"               <span class="c"># model for `spec draft` / serving / Ask</span>
-vision     = "smolvlm-500m-gguf"        <span class="c"># image description for `media build`</span>
-audio      = "voxtral-mini-3b"          <span class="c"># speech transcription for `media build`</span>
-ocr        = "ocrs-text"                <span class="c"># literal image text for `sync`</span>
-
-[remote]                                <span class="c"># the optional remote model tier — OFF by default, and the one key</span>
-enabled  = false                        <span class="c"># whose precedence inverts: roteiro.toml may set this false for</span>
-                                        <span class="c"># everyone, and may NEVER set it true. Only your own</span>
-                                        <span class="c"># ~/.roteiro/config.toml can grant it — and a run still needs</span>
-                                        <span class="c"># --allow-remote. Both are required; neither alone is enough.</span>
-endpoint = "https://…/v1/chat/completions"  <span class="c"># ordinary key: either layer may choose the destination</span>
-model    = "vendor/model-name"          <span class="c"># a vendor model string is a mutable pointer, so anything recorded</span>
-                                        <span class="c"># from this tier is `vendor_asserted`, never digest-pinned</span>
-
-[ingest]                                <span class="c"># which blob content `sync` embeds</span>
-prose  = true                           <span class="c"># Markdown / plain text bodies</span>
-pdf    = true                           <span class="c"># PDF text   (needs the pdf-text feature)</span>
-ocr    = true                           <span class="c"># image OCR  (needs the image-ocr feature)</span>
-vision = true                           <span class="c"># image description (needs image-vision)</span>
-
-[infer]
-min_confidence = 0.4                     <span class="c"># cosine-similarity floor for a suggestion</span>
-top_k          = 5                       <span class="c"># max suggestions per node</span>
-
-[duplicates]
-min_similarity = 0.9                     <span class="c"># floor for a near-duplicate pair</span>
-limit          = 50                      <span class="c"># max pairs reported</span>
-
-[serve]                                  <span class="c"># the network server (roteiro serve): /v1 + graph API + UI</span>
-addr   = "127.0.0.1:8017"               <span class="c"># bind address/port (CLI --addr overrides)</span>
-models = ["qwen3-0.6b"]                 <span class="c"># which installed models to expose (default: all)</span>
-tools  = true                            <span class="c"># expose graph tools to the model</span>
-tls_cert = "/etc/roteiro/tls/fullchain.pem"  <span class="c"># in-process HTTPS (with tls_key); omit both for plain HTTP</span>
-tls_key  = "/etc/roteiro/tls/privkey.pem"    <span class="c"># PEM private key paired with tls_cert</span>
-
-[workspace]                              <span class="c"># host many repos from one server (ADR-0008)</span>
-roots = ["~/code"]                       <span class="c"># scan for repos (each becomes a project)</span>
-repos = []                               <span class="c"># …or list explicit repo paths</span>
-
-[[workspaces]]                          <span class="c"># several named workspaces (a hub + its spokes)</span>
-name  = "payments"                      <span class="c"># select with --workspace-name, or by cwd</span>
-repos = ["~/work/app", "~/work/deploy"]
-
-[standalone]                            <span class="c"># repos with no cross-repo links (each its own graph)</span>
-repos = ["~/code/dotfiles"]
-
-[[links]]                                <span class="c"># authored cross-repo link (ADR-0009)</span>
-to = "app::sym:rust:src/config.rs#ServeConfig"  <span class="c"># a &lt;project&gt;::&lt;key&gt; in another repo</span>
-from = "file:k8s/deployment.yaml"       <span class="c"># optional local anchor in this repo</span>
-
-[pins]                                   <span class="c"># map a deployed artifact → a hub git ref</span>
-app = "release-{tag}"                    <span class="c"># image app:1.4 → git ref release-1.4</span></code></pre>
-
-<div class="note"><strong>Interlink a hub app with its deployment repos.</strong> The
-<code>[[links]]</code> and <code>[pins]</code> tables belong to Roteiro's cross-repo
-layer — see <a href="#crossrepo">Cross-repo: a hub and its spokes</a> below.</div>
-
-<div class="note"><strong>Many workspaces, one install.</strong> A lone <code>[workspace]</code> is the default workspace; add <code>[[workspaces]]</code> for several named hub-and-spoke groups and <code>[standalone]</code> for repos that stand alone. <code>roteiro links</code>, <code>roteiro serve</code>, <code>roteiro mcp</code> and the <a href="#modes">explorer</a> pick one with <code>--workspace-name</code> (or the workspace containing your current directory).</div>
-
-<div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
-extracts, so affected blobs are re-processed on the next run — the content-addressed
-cache folds the ingestion config into its key.</div>
+<p>A config file is optional. Roteiro merges a per-user <code>~/.roteiro/config.toml</code>
+with a per-project <code>roteiro.toml</code> (project wins) — except
+<code>[remote] enabled</code>, which the committed file may switch <em>off</em> but
+never <em>on</em>. <a href="config.html">Configuration →</a></p>
 
 <h2 id="crossrepo">Cross-repo: a hub and its spokes</h2>
 
-<p>A common shape: one <strong>hub</strong> application repo, and many <strong>spoke</strong>
-deployment/config repos that each pin a version of it and override its configuration.
-Roteiro joins their per-repo graphs at the workspace — <strong>a query-time join, never a
-merged store</strong>, so each repo's isolation holds — and answers the questions that
-boundary raises: <em>which deployment overrides <code>serve.addr</code>, and to what?
-which reference config keys the app no longer defines? and are they drifting from the version
-they actually deploy?</em> (<a href="adr/">ADR-0009</a>).</p>
-
-<h3>A spoke, as Roteiro sees it</h3>
-<p>A deployment repo is mostly config plus a pinned version — nothing to hand-author.
-<code>roteiro sync</code> extracts it into graph nodes:</p>
-<pre><code><span class="c"># deploy-web/ — a spoke repo</span>
-prod.env               <span class="c"># SERVE_ADDR, SERVE_TOOLS, …    → config_key nodes</span>
-k8s/deployment.yaml    <span class="c"># image, env, ConfigMap data    → config_key nodes</span>
-Dockerfile             <span class="c"># FROM registry/app:1.4         → image_ref  (the version it pins)</span>
-app/ (+ .gitmodules)   <span class="c"># the hub vendored @ &lt;sha&gt;       → submodule  (a version pin)</span>
-roteiro.toml           <span class="c"># [[links]] and [pins]          (optional)</span></code></pre>
-<p>YAML is <em>mined</em>, not blindly flattened: a Kubernetes manifest yields the
-container <code>image</code>, its literal <code>env</code>, and ConfigMap/Secret
-<code>data</code> — the settings a deployment actually overrides — while a Helm
-<code>values.yaml</code> flattens like any config. Secret values are redacted. Inspect
-exactly what was extracted with <code>roteiro query --kind config_key</code> (or
-<code>--kind image_ref</code> / <code>--kind submodule</code>).</p>
-
-<h3>See the overrides &amp; drift at a glance</h3>
-<p>Point <code>links</code> at your workspace. <code>--matrix</code> renders every hub key
-against each spoke that overrides it, plus a drift list of keys the app no longer defines —
-as a text table, <code>--json</code>, or a self-contained <code>--html</code> page you open
-in a browser:</p>
-<pre><code>roteiro links --matrix --hub app --workspace ~/code
-
-<span class="c"># cross-repo config overrides (hub: app, 2 spoke(s))</span>
-<span class="c">#</span>
-<span class="c">#   serve.addr = 127.0.0.1:8017</span>
-<span class="c">#     ≠ deploy-web:   0.0.0.0:8443     (0.90)   ← a real override</span>
-<span class="c">#     = deploy-batch: 127.0.0.1:8017   (0.98)   ← redundant restatement</span>
-<span class="c">#</span>
-<span class="c">#   drift — 1 orphan key(s):</span>
-<span class="c">#     deploy-web: DB_PASSWORD = &lt;redacted&gt;      ← the app doesn't define it</span></code></pre>
-
-<h3>Gate it in CI, or let it infer</h3>
-<p>For links that must never silently drift (a TLS path, the served model), declare them
-in the spoke and fail the build when a target vanishes — the authored-vs-reality check of
-<code>roteiro check</code>, run <em>between</em> repos:</p>
-<pre><code>roteiro links --workspace ~/code   <span class="c"># resolves every [[links]] entry; exits non-zero on drift</span>
-
-<span class="c"># Or skip the authoring — match config keys automatically:</span>
-roteiro links --infer --hub app    <span class="c"># correspondences + orphan (drift) keys, confidence-scored</span>
-roteiro links --infer --write      <span class="c"># …and persist them as durable inferred</span>
-                                   <span class="c">#    cross-repo edges that survive re-sync</span></code></pre>
-
-<h3>Resolve against the version actually deployed</h3>
-<p>A spoke rarely runs the hub's latest — it deploys a <em>pinned</em> version. Measuring
-drift against the hub's <code>HEAD</code> is then wrong twice: a key renamed since the spoke
-deployed looks like drift when it's fine, and a key the deployed version dropped is missed.
-<code>--pinned</code> reads each spoke's own pin (its submodule sha, or its Docker image tag)
-and resolves that spoke against exactly the hub version it vendors — materialising the hub
-graph at that commit <strong>in memory, no checkout</strong>:</p>
-<pre><code>roteiro links --infer --pinned --hub app --workspace ~/code
-
-<span class="c"># deploy-web — 4 match(es), 0 orphan(s)  @ 4e0d5a6afd (via submodule app)</span>
-
-<span class="c"># …or pin one explicit version for the whole workspace:</span>
-roteiro links --infer --hub app --hub-rev v1.4</code></pre>
-<p>When image tags don't match your git tags, map them in <code>[pins]</code>
-(<code>app = "release-{tag}"</code>, shown in <a href="#config">Config</a> above). And if the
-hub's CI publishes a graph artifact per release, resolution loads that instead of
-re-extracting — so it resolves even against a shallow clone that lacks the pinned commit's
-blobs.</p>
+<p>One hub application repo and many spoke deployment repos that each pin a version of
+it and override its configuration — joined at query time, never merged into one
+store. <a href="cross-repo.html">Cross-repo: a hub and its spokes →</a></p>
 
 <h2 id="languages">Languages</h2>
 

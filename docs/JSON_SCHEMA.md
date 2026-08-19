@@ -1,3 +1,9 @@
+---
+site-page: json-schema
+site-nav: JSON schemas
+site-order: 31
+---
+
 # `--json` output schemas
 
 Most Roteiro reporting commands accept `--json` for machine consumption (some —

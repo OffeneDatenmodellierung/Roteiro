@@ -3060,14 +3060,14 @@ fn apply_authored_layer(
     blobs: Vec<rto_graph::BlobRef>,
     read: &dyn Fn(&rto_graph::BlobRef) -> anyhow::Result<Option<Vec<u8>>>,
 ) -> anyhow::Result<rto_spec::CheckReport> {
-    let rto_spec::AuthoredLayer {
-        docs,
-        blueprints,
-        annotations,
-        malformed,
-    } = rto_spec::authored_layer_from(blobs, read)?;
-    let mut report = rto_spec::run(store, &docs, &blueprints, &annotations)?;
-    report.violations.extend(malformed);
+    // `authored_docs_from` rather than `authored_layer_from`: the latter is the
+    // former with the site pages thrown away, and the whole point of the website
+    // becoming a document class is that `check` sees it. `run_layer` is the same
+    // pairing on the writing side — one call over every class, so a new one
+    // cannot be added to the parser and forgotten here.
+    let docs = rto_spec::authored_docs_from(blobs, read)?;
+    let mut report = rto_spec::run_layer(store, &docs)?;
+    report.violations.extend(docs.layer.malformed);
     Ok(report)
 }
 
@@ -3186,9 +3186,10 @@ fn run_check(
             eprintln!("drift [{}]: {}", v.kind.label(), v.message);
         }
         println!(
-            "checked {} ADR(s), {} blueprint(s): {} link(s) ok, {} annotation(s) ok, {} violation(s)",
+            "checked {} ADR(s), {} blueprint(s), {} site page(s): {} link(s) ok, {} annotation(s) ok, {} violation(s)",
             report.adrs,
             report.blueprints,
+            report.site_pages,
             report.links_ok,
             report.annotations_ok,
             report.violations.len(),
@@ -10959,8 +10960,145 @@ fn run_render(
     }
 }
 
-/// Render the documentation site: copy static assets, then render each ADR and
-/// the ADR index into `<out>` (default `website/dist`).
+/// A path's file name, or `""` — every path here comes from `read_dir`, which
+/// does not yield one without.
+fn doc_file_name(path: &std::path::Path) -> &str {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+}
+
+/// A path's file stem, or `fallback` for a name that is not valid UTF-8.
+fn doc_stem<'a>(path: &'a std::path::Path, fallback: &'a str) -> &'a str {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(fallback)
+}
+
+/// Everything the docs site is about to publish, discovered before a byte of it
+/// is written.
+///
+/// Two of the outputs need the whole site up front, which is why this is a phase
+/// of its own rather than work done as each page is rendered: the navigation bar
+/// is the same on every page, and a `.md` link on the first page can point at
+/// the last one.
+struct SiteSources {
+    /// ADR sources, in a deterministic order.
+    adrs: Vec<std::path::PathBuf>,
+    /// The Build Plan, when the repository has one.
+    build_plan: Option<std::path::PathBuf>,
+    /// House-style blueprint sources (ADR-0004).
+    blueprints: Vec<std::path::PathBuf>,
+    /// Documents that declare themselves published (`site-page:`).
+    pages: Vec<rto_spec::SitePage>,
+    /// What the site serves each source document as.
+    published: rto_render::PublishedPages,
+    /// The one navigation bar, in `site_nav` order.
+    nav: Vec<rto_render::NavEntry>,
+}
+
+/// Discover every source the docs site publishes, and derive the two things
+/// that have to be known site-wide: [`SiteSources::published`] and
+/// [`SiteSources::nav`].
+fn discover_site_sources(
+    repo: &rto_graph::Repo,
+    root: &std::path::Path,
+) -> anyhow::Result<SiteSources> {
+    // Each ADR (skip the directory README), in a deterministic order.
+    let mut adrs: Vec<_> = std::fs::read_dir(root.join("docs/adr"))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter(|p| doc_file_name(p) != "README.md")
+        .collect();
+    adrs.sort();
+
+    let build_plan = Some(root.join("docs/BUILD_PLAN.md")).filter(|p| p.is_file());
+
+    // Blueprints live under docs/blueprint(s)/ (ADR-0004); the overall project
+    // blueprint is one. Each is rendered to a root-level page like the Build Plan.
+    let mut blueprints: Vec<std::path::PathBuf> = Vec::new();
+    for dir in ["docs/blueprint", "docs/blueprints"] {
+        let bp_dir = root.join(dir);
+        if !bp_dir.is_dir() {
+            continue;
+        }
+        let mut bps: Vec<_> = std::fs::read_dir(&bp_dir)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .filter(|p| doc_file_name(p) != "README.md")
+            .collect();
+        bps.sort();
+        blueprints.append(&mut bps);
+    }
+
+    // The documents that declare themselves published. Read through the one
+    // classification rule in `rto-spec`, so the pages this emits are exactly the
+    // pages `roteiro check` gates. `Worktree` rather than `Committed` because
+    // everything else here reads the working tree from disk, and a preview that
+    // rendered `HEAD` while claiming to render your edits would be the
+    // two-layers-disagreeing bug of issue #330 with a public URL on it.
+    let pages = rto_spec::authored_docs(repo, GraphSource::Worktree)?.site;
+
+    // What the site serves each source document as. A slug is URL-safe by
+    // construction, so a page's published name need not resemble its file name —
+    // and rewriting `../BUILD_PLAN_V2.md` to `../BUILD_PLAN_V2.html` aimed four
+    // correct repository links at a page that is never emitted (issue #446).
+    let mut published = rto_render::PublishedPages::new();
+    for path in &adrs {
+        published.publish(
+            doc_file_name(path),
+            &format!("{}.html", doc_stem(path, "adr")),
+        );
+    }
+    if build_plan.is_some() {
+        published.publish("BUILD_PLAN.md", "build-plan.html");
+    }
+    for path in &blueprints {
+        published.publish(
+            doc_file_name(path),
+            &format!("{}.html", doc_stem(path, "blueprint")),
+        );
+    }
+    for page in &pages {
+        let name = page.path.rsplit('/').next().unwrap_or(&page.path);
+        published.publish(name, &page.href());
+    }
+
+    // One bar, built once and handed to every page, so the site cannot disagree
+    // with itself about where its pages are. `site_nav` is the ordering the check
+    // reports, not a second sort. The landing page is `./`: it is hand-written
+    // HTML copied from `website/public` rather than a rendered page, so it
+    // carries its own copy of this bar — held to this one by the
+    // `the_landing_page_carries_the_bar_the_renderer_emits` test.
+    let nav = std::iter::once(rto_render::NavEntry {
+        href: "./".to_owned(),
+        label: "Home".to_owned(),
+    })
+    .chain(
+        rto_spec::site_nav(&pages)
+            .into_iter()
+            .map(|p| rto_render::NavEntry {
+                href: p.href(),
+                label: p.nav.clone(),
+            }),
+    )
+    .collect();
+
+    Ok(SiteSources {
+        adrs,
+        build_plan,
+        blueprints,
+        pages,
+        published,
+        nav,
+    })
+}
+
+/// Render the documentation site: copy static assets, then render each ADR, the
+/// lifetime docs and every published site page into `<out>` (default
+/// `website/dist`).
 fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let repo = rto_graph::Repo::discover(&cwd)?;
@@ -10969,27 +11107,19 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("cannot render docs in a bare repository"))?;
     let out = out.map_or_else(|| root.join("website/dist"), std::path::PathBuf::from);
 
+    let src = discover_site_sources(&repo, root)?;
+
     if out.exists() {
         std::fs::remove_dir_all(&out)?;
     }
     std::fs::create_dir_all(out.join("adr"))?;
     copy_dir(&root.join("website/public"), &out)?;
 
-    // Render each ADR (skip the directory README), in a deterministic order.
-    let adr_dir = root.join("docs/adr");
-    let mut files: Vec<_> = std::fs::read_dir(&adr_dir)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
-        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("README.md"))
-        .collect();
-    files.sort();
-
     let mut entries = Vec::new();
-    for path in &files {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("adr");
+    for path in &src.adrs {
+        let stem = doc_stem(path, "adr");
         let md = std::fs::read_to_string(path)?;
-        let rendered = rto_render::render_adr(&md, stem);
+        let rendered = rto_render::render_adr(&md, stem, &src.published);
         std::fs::write(out.join("adr").join(format!("{stem}.html")), &rendered.html)?;
         entries.push(rto_render::IndexEntry {
             href: format!("{stem}.html"),
@@ -11002,10 +11132,9 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     // Their `[[docs/adr/…]]` links resolve into the `adr/` subdirectory (the
     // `render_doc` prefix), which is correct for a root-level page.
     let mut lifetime = Vec::new();
-    let build_plan = root.join("docs/BUILD_PLAN.md");
-    if build_plan.is_file() {
-        let md = std::fs::read_to_string(&build_plan)?;
-        let rendered = rto_render::render_doc(&md, "Build Plan");
+    if let Some(build_plan) = &src.build_plan {
+        let md = std::fs::read_to_string(build_plan)?;
+        let rendered = rto_render::render_doc(&md, "Build Plan", &src.published);
         std::fs::write(out.join("build-plan.html"), &rendered.html)?;
         lifetime.push(rto_render::IndexEntry {
             // The index lives under adr/, so link up one level.
@@ -11013,33 +11142,25 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
             title: rendered.title,
         });
     }
-    // Blueprints live under docs/blueprint(s)/ (ADR-0004); the overall project
-    // blueprint is one. Render each to a root-level page like the Build Plan.
-    for dir in ["docs/blueprint", "docs/blueprints"] {
-        let bp_dir = root.join(dir);
-        if !bp_dir.is_dir() {
-            continue;
-        }
-        let mut bps: Vec<_> = std::fs::read_dir(&bp_dir)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
-            .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("README.md"))
-            .collect();
-        bps.sort();
-        for path in &bps {
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("blueprint");
-            let md = std::fs::read_to_string(path)?;
-            let rendered = rto_render::render_doc(&md, stem);
-            std::fs::write(out.join(format!("{stem}.html")), &rendered.html)?;
-            lifetime.push(rto_render::IndexEntry {
-                href: format!("../{stem}.html"),
-                title: rendered.title,
-            });
-        }
+    for path in &src.blueprints {
+        let stem = doc_stem(path, "blueprint");
+        let md = std::fs::read_to_string(path)?;
+        let rendered = rto_render::render_doc(&md, stem, &src.published);
+        std::fs::write(out.join(format!("{stem}.html")), &rendered.html)?;
+        lifetime.push(rto_render::IndexEntry {
+            href: format!("../{stem}.html"),
+            title: rendered.title,
+        });
+    }
+
+    // The published site pages, each written as `<slug>.html` — the slug is the
+    // URL, which is why it is validated rather than derived.
+    for page in &src.pages {
+        let md = std::fs::read_to_string(root.join(&page.path))?;
+        let href = page.href();
+        let rendered =
+            rto_render::render_site_page(&md, &page.title, &src.nav, &href, &src.published);
+        std::fs::write(out.join(&href), &rendered.html)?;
     }
 
     std::fs::write(
@@ -11048,10 +11169,11 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     )?;
 
     println!(
-        "rendered docs → {} ({} ADR page(s), {} lifetime doc(s))",
+        "rendered docs → {} ({} ADR page(s), {} lifetime doc(s), {} site page(s))",
         out.display(),
         entries.len(),
         lifetime.len(),
+        src.pages.len(),
     );
     Ok(())
 }

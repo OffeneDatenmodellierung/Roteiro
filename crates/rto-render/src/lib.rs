@@ -9,8 +9,8 @@ mod obsidian;
 pub mod mcp;
 
 pub use docs::{
-    IndexEntry, NavEntry, RenderedAdr, markdown_to_html, render_adr, render_adr_index, render_doc,
-    render_nav, render_site_page,
+    IndexEntry, NavEntry, PublishedPages, RenderedAdr, markdown_to_html, render_adr,
+    render_adr_index, render_doc, render_nav, render_site_page,
 };
 pub use obsidian::{
     AdrEntry, ConfigSecretSummary, CouplingEntry, DensityEntry, HOME_NOTE, VaultNote, VaultSummary,

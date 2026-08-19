@@ -5,6 +5,38 @@ each ADR (and the Build Plan) with a real CommonMark parser and copies the stati
 theme from `website/public` into `website/dist`. `website/build.sh` wraps that
 call (bootstrapping the pinned Rust toolchain if needed).
 
+## Pages
+
+The site is assembled from two kinds of source.
+
+**`website/public/`** is the hand-written landing page and the static theme,
+copied verbatim. Because it is copied rather than rendered, `index.html` carries
+its own hand-written copy of the site navigation bar; the
+`the_landing_page_carries_the_bar_the_renderer_emits` test renders this
+repository and fails if that copy stops agreeing with the bar the renderer emits.
+
+**Any markdown document whose frontmatter declares a `site-page:` slug** is
+published as `<slug>.html`, listed in the navigation bar, and drift-checked by
+`roteiro check` exactly like an ADR:
+
+```markdown
+---
+site-page: modes        # the slug — publishes as modes.html; [a-z0-9-] only
+site-nav: Modes         # short label for the bar (defaults to the page title)
+site-order: 3           # position in the bar (unset sorts last, then by slug)
+---
+```
+
+Publication is **declared, never inferred from a path**, so a document can gain a
+public page *in place*: `docs/OFFLINE_SETUP.md`, `docs/BUILD_PLAN_V2.md` and
+`docs/JSON_SCHEMA.md` are published where they already were, keeping every
+existing link to their repository paths. The pages that were split out of the
+landing page live in `website/pages/`.
+
+A heading may carry an explicit anchor — `## Heading {#modes}` — which is how the
+sections that moved off the landing page kept the URLs that predate the move.
+Every other heading gets the slug of its own text.
+
 ## Deployment
 
 Two paths exist; **exactly one** should be active to avoid double deploys.
