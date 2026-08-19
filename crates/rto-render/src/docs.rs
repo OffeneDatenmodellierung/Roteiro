@@ -23,6 +23,61 @@ pub struct RenderedAdr {
     pub html: String,
 }
 
+/// Where each source document is **actually published**: the file the site
+/// serves, keyed by the source markdown's file name.
+///
+/// [`rewrite_doc_link`] used to derive a link's target from the link's own
+/// spelling — `../BUILD_PLAN_V2.md` → `../BUILD_PLAN_V2.html` — which is correct
+/// only while every document is served under its own stem. Site pages ended
+/// that: a page is published as its declared `site-page:` slug, and a slug is
+/// URL-safe by construction (`[a-z0-9-]+`), so `docs/BUILD_PLAN_V2.md` is served
+/// as `build-plan-v2.html`. The rewrite then pointed four correct repository
+/// links at a page that is never emitted — issue #446, live on roteiro.dev.
+///
+/// So the served name is *looked up* rather than guessed. The renderer is handed
+/// the index of what the site emits, which is the only thing that knows the
+/// answer.
+///
+/// Keyed by file name rather than by full path because the site mirrors the
+/// repository's layout — `docs/*.md` at the root, `docs/adr/*.md` under `adr/` —
+/// so a link's directory hops are already correct and only the final segment can
+/// differ. A file name claimed by two published documents is recorded as
+/// **ambiguous** and left unrewritten: guessing which one a link meant is how a
+/// link silently points at the wrong page, which is worse than the 404 it
+/// replaces.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PublishedPages(BTreeMap<String, Option<String>>);
+
+impl PublishedPages {
+    /// An empty index: every `.md` link falls back to its own stem.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `source_file` (a markdown file name, e.g. `BUILD_PLAN_V2.md`)
+    /// is served as `served_as` (e.g. `build-plan-v2.html`).
+    ///
+    /// A second, differing claim on one file name makes it ambiguous; see the
+    /// type's documentation for why that is left unrewritten.
+    pub fn publish(&mut self, source_file: &str, served_as: &str) {
+        self.0
+            .entry(source_file.to_owned())
+            .and_modify(|slot| {
+                if slot.as_deref() != Some(served_as) {
+                    *slot = None;
+                }
+            })
+            .or_insert_with(|| Some(served_as.to_owned()));
+    }
+
+    /// The file `source_file` is served as, or `None` when it is unknown or
+    /// ambiguous.
+    fn served(&self, source_file: &str) -> Option<&str> {
+        self.0.get(source_file)?.as_deref()
+    }
+}
+
 /// One page in the site navigation bar: where it goes and what it is called.
 ///
 /// Built by the caller from the authored site pages (`rto_spec::site_nav` puts
@@ -50,15 +105,19 @@ pub struct IndexEntry {
 /// Convert `CommonMark` `md` to an HTML fragment (GitHub tables + strikethrough,
 /// and Roteiro `[[wiki-links]]` resolved). Resolves ADR links relative to the
 /// ADR directory; use [`render_doc`] for root-level pages.
+///
+/// A fragment renderer has no site to be a part of, so it carries no
+/// [`PublishedPages`]: a `.md` link is rewritten to its own stem, which is right
+/// for an ADR and a guess for anything published under a slug.
 #[must_use]
 pub fn markdown_to_html(md: &str) -> String {
-    render_markdown(md, "")
+    render_markdown(md, "", &PublishedPages::new())
 }
 
 /// Render `md` to HTML: resolve `[[wiki-links]]` (ADR links use `adr_prefix` as
 /// their href prefix), rewrite ordinary `[…](*.md)` links to their rendered
 /// `.html` targets, then run `CommonMark` with GitHub tables/strikethrough.
-fn render_markdown(md: &str, adr_prefix: &str) -> String {
+fn render_markdown(md: &str, adr_prefix: &str, pages: &PublishedPages) -> String {
     let pre = rewrite_wiki_links(md, adr_prefix);
     let ids = heading_ids(&pre);
     let mut next_id = 0usize;
@@ -73,7 +132,7 @@ fn render_markdown(md: &str, adr_prefix: &str) -> String {
             id,
         }) => Event::Start(Tag::Link {
             link_type,
-            dest_url: rewrite_doc_link(&dest_url).map_or(dest_url, CowStr::from),
+            dest_url: rewrite_doc_link(&dest_url, pages).map_or(dest_url, CowStr::from),
             title,
             id,
         }),
@@ -169,7 +228,7 @@ fn heading_ids(md: &str) -> Vec<String> {
 /// HTML page the site serves, preserving any `#fragment`. Returns `None` for
 /// external, protocol-relative, `mailto:`, pure-anchor, or non-`.md` links, which
 /// are left unchanged.
-fn rewrite_doc_link(dest: &str) -> Option<String> {
+fn rewrite_doc_link(dest: &str, pages: &PublishedPages) -> Option<String> {
     if dest.starts_with("http://")
         || dest.starts_with("https://")
         || dest.starts_with("//")
@@ -181,10 +240,21 @@ fn rewrite_doc_link(dest: &str) -> Option<String> {
     let (path, frag) = dest
         .split_once('#')
         .map_or((dest, None), |(p, f)| (p, Some(f)));
-    let stem = path.strip_suffix(".md")?;
+    path.strip_suffix(".md")?;
+    // Only the final segment can differ between the repository and the site, so
+    // the link's own directory hops are kept verbatim; see [`PublishedPages`].
+    let (dir, file) = path.rsplit_once('/').map_or(("", path), |(d, f)| (d, f));
+    let served = match pages.served(file) {
+        Some(served) => served.to_owned(),
+        // Unknown or ambiguous: fall back to the stem rewrite this has always
+        // done, which is right for every ADR (each is served under its own
+        // stem) and no worse than before for anything else.
+        None => format!("{}.html", file.trim_end_matches(".md")),
+    };
+    let sep = if dir.is_empty() { "" } else { "/" };
     Some(match frag {
-        Some(frag) => format!("{stem}.html#{frag}"),
-        None => format!("{stem}.html"),
+        Some(frag) => format!("{dir}{sep}{served}#{frag}"),
+        None => format!("{dir}{sep}{served}"),
     })
 }
 
@@ -192,10 +262,10 @@ fn rewrite_doc_link(dest: &str) -> Option<String> {
 /// frontmatter is stripped; the title is the first `# ` heading, or `fallback`
 /// if there is none. ADR `[[…]]` links resolve to sibling ADR pages.
 #[must_use]
-pub fn render_adr(markdown: &str, fallback_title: &str) -> RenderedAdr {
+pub fn render_adr(markdown: &str, fallback_title: &str, pages: &PublishedPages) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "");
+    let content = render_markdown(body, "", pages);
     let nav = "<p class=\"nav\"><a href=\"../\">← Roteiro home</a> · \
                <a href=\"./\">All ADRs</a> · <a href=\"../build-plan.html\">Build Plan</a></p>";
     let html = page(&format!("{title} — Roteiro"), "../", nav, &content);
@@ -205,10 +275,10 @@ pub fn render_adr(markdown: &str, fallback_title: &str) -> RenderedAdr {
 /// Render a root-level "lifetime doc" (e.g. the Build Plan) to a themed page.
 /// Its `[[docs/adr/…]]` links resolve into the `adr/` subdirectory.
 #[must_use]
-pub fn render_doc(markdown: &str, fallback_title: &str) -> RenderedAdr {
+pub fn render_doc(markdown: &str, fallback_title: &str, pages: &PublishedPages) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "adr/");
+    let content = render_markdown(body, "adr/", pages);
     let nav = "<p class=\"nav\"><a href=\"./\">← Roteiro home</a> · \
                <a href=\"adr/\">ADRs</a></p>";
     let html = page(&format!("{title} — Roteiro"), "./", nav, &content);
@@ -233,10 +303,11 @@ pub fn render_site_page(
     fallback_title: &str,
     nav: &[NavEntry],
     current_href: &str,
+    pages: &PublishedPages,
 ) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "adr/");
+    let content = render_markdown(body, "adr/", pages);
     let bar = render_nav(nav, current_href);
     let html = page(&format!("{title} — Roteiro"), "./", &bar, &content);
     RenderedAdr { title, html }
@@ -470,9 +541,15 @@ fn escape_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexEntry, NavEntry, markdown_to_html, render_adr, render_adr_index, render_doc,
-        render_nav, render_site_page,
+        IndexEntry, NavEntry, PublishedPages, markdown_to_html, render_adr, render_adr_index,
+        render_doc, render_markdown, render_nav, render_site_page,
     };
+
+    /// The site index most tests do not exercise: with it empty, a `.md` link
+    /// falls back to its own stem, which is what every assertion below predates.
+    fn no_pages() -> PublishedPages {
+        PublishedPages::new()
+    }
 
     fn nav() -> Vec<NavEntry> {
         vec![
@@ -586,6 +663,7 @@ mod tests {
         let r = render_doc(
             "# Build Plan\n\nGoverned by [[docs/adr/0001-x.md]].\n",
             "Build Plan",
+            &no_pages(),
         );
         assert_eq!(r.title, "Build Plan");
         assert!(
@@ -608,7 +686,7 @@ mod tests {
 
     #[test]
     fn render_adr_strips_frontmatter_and_themes() {
-        let r = render_adr(ADR, "fallback");
+        let r = render_adr(ADR, "fallback", &no_pages());
         assert_eq!(r.title, "ADR-0001: Example");
         // Frontmatter is gone; heading + section rendered.
         assert!(!r.html.contains("adr-id"));
@@ -640,7 +718,7 @@ mod tests {
 
     #[test]
     fn render_adr_falls_back_without_h1() {
-        let r = render_adr("no frontmatter, no heading\n", "slug-name");
+        let r = render_adr("no frontmatter, no heading\n", "slug-name", &no_pages());
         assert_eq!(r.title, "slug-name");
     }
 
@@ -732,6 +810,7 @@ mod tests {
             "fallback",
             &nav(),
             "modes.html",
+            &no_pages(),
         );
         assert_eq!(r.title, "The five ways to run it");
         // Frontmatter is chrome for the graph, not content for the reader.
@@ -767,16 +846,63 @@ mod tests {
     }
 
     #[test]
+    fn a_link_resolves_to_the_page_the_site_actually_serves() {
+        // Issue #446: four ADRs link `../BUILD_PLAN_V2.md`, which is correct in
+        // the repository. Published under a `site-page:` slug, that document is
+        // served as `build-plan-v2.html` — so rewriting the link to its own stem
+        // aims it at a page that is never emitted.
+        let mut pages = PublishedPages::new();
+        pages.publish("BUILD_PLAN_V2.md", "build-plan-v2.html");
+        let html = render_markdown("See [V2](../BUILD_PLAN_V2.md).\n", "", &pages);
+        assert!(
+            html.contains("href=\"../build-plan-v2.html\""),
+            "served name, and the link's own hop kept: {html}"
+        );
+        // A fragment survives the substitution.
+        let frag = render_markdown("[s](../BUILD_PLAN_V2.md#stage-21)\n", "", &pages);
+        assert!(
+            frag.contains("href=\"../build-plan-v2.html#stage-21\""),
+            "{frag}"
+        );
+        // An unpublished document still falls back to its stem, unchanged.
+        let other = render_markdown("[x](../REVIEW_CHECKLIST.md)\n", "", &pages);
+        assert!(
+            other.contains("href=\"../REVIEW_CHECKLIST.html\""),
+            "{other}"
+        );
+    }
+
+    #[test]
+    fn a_file_name_two_documents_claim_is_left_alone() {
+        // Guessing which one a link meant would silently point it at the wrong
+        // page — worse than the 404 the lookup exists to remove.
+        let mut pages = PublishedPages::new();
+        pages.publish("GUIDE.md", "guide.html");
+        pages.publish("GUIDE.md", "other-guide.html");
+        let html = render_markdown("[g](GUIDE.md)\n", "", &pages);
+        assert!(html.contains("href=\"GUIDE.html\""), "unrewritten: {html}");
+        // Re-publishing the *same* target is not a conflict.
+        let mut same = PublishedPages::new();
+        same.publish("GUIDE.md", "guide.html");
+        same.publish("GUIDE.md", "guide.html");
+        let html = render_markdown("[g](GUIDE.md)\n", "", &same);
+        assert!(html.contains("href=\"guide.html\""), "{html}");
+    }
+
+    #[test]
     fn site_pages_render_deterministically() {
         let md = "---\nsite-page: a\n---\n\n# A\n\n## S\n";
         assert_eq!(
-            render_site_page(md, "f", &nav(), "a.html"),
-            render_site_page(md, "f", &nav(), "a.html")
+            render_site_page(md, "f", &nav(), "a.html", &no_pages()),
+            render_site_page(md, "f", &nav(), "a.html", &no_pages())
         );
     }
 
     #[test]
     fn rendering_is_deterministic() {
-        assert_eq!(render_adr(ADR, "f"), render_adr(ADR, "f"));
+        assert_eq!(
+            render_adr(ADR, "f", &no_pages()),
+            render_adr(ADR, "f", &no_pages())
+        );
     }
 }

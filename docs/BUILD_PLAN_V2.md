@@ -1,3 +1,9 @@
+---
+site-page: build-plan-v2
+site-nav: Roadmap
+site-order: 30
+---
+
 # Roteiro — Build Plan V2
 
 Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-15

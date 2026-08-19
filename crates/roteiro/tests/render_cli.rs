@@ -177,3 +177,145 @@ fn render_obsidian_home_scopes_debt_by_the_ignore_config() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The ordered labels of a page's site bar, with the current page's unlinked
+/// marker flattened to its label — so two pages' bars compare equal when they
+/// list the same pages in the same order.
+fn bar_labels(html: &str) -> Vec<String> {
+    let Some(start) = html.find("<nav class=\"sitenav\">") else {
+        return Vec::new();
+    };
+    let bar = &html[start..];
+    let bar = &bar[..bar.find("</nav>").map_or(bar.len(), |i| i)];
+    bar.split('<')
+        .filter_map(|chunk| chunk.split_once('>'))
+        .map(|(_, text)| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .collect()
+}
+
+#[test]
+fn a_declared_site_page_is_emitted_with_the_shared_bar() {
+    let dir = fresh_dir("sitepage");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "website/public/style.css", "body{color:#111}\n");
+    write(&dir, "website/public/index.html", "<h1>Home</h1>\n");
+    write(
+        &dir,
+        "docs/adr/0001-example.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n",
+    );
+    // Publication is a frontmatter marker, not a path, so these three sit in
+    // three different places on purpose.
+    write(
+        &dir,
+        "website/pages/modes.md",
+        "---\nsite-page: modes\nsite-nav: Modes\nsite-order: 2\n---\n\n\
+         # The five ways to run it {#modes}\n\n## Offline mode\n\nNo models, no network.\n",
+    );
+    write(
+        &dir,
+        "docs/GUIDE.md",
+        "---\nsite-page: guide\nsite-nav: Guide\nsite-order: 1\n---\n\n\
+         # A guide\n\nSequenced in [the plan](BUILD_PLAN_V2.md).\n",
+    );
+    write(
+        &dir,
+        "docs/BUILD_PLAN_V2.md",
+        "---\nsite-page: build-plan-v2\nsite-nav: Roadmap\nsite-order: 3\n---\n\n# Roadmap\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "docs", "--out", "site"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render failed: {out:?}");
+    let site = dir.join("site");
+
+    // Each declared page is published as `<slug>.html` — the slug is the URL.
+    let modes = std::fs::read_to_string(site.join("modes.html")).expect("modes page");
+    assert!(
+        site.join("guide.html").exists(),
+        "docs/GUIDE.md → guide.html"
+    );
+    assert!(site.join("build-plan-v2.html").exists());
+
+    // The anchor the section carried out of the landing page still lands.
+    assert!(
+        modes.contains("id=\"modes\""),
+        "explicit anchor preserved: {modes}"
+    );
+    assert!(!modes.contains("site-page"), "frontmatter is not content");
+
+    // One bar, in `site-order`, identical on every page and marking the current.
+    let expected = ["Home", "Guide", "Modes", "Roadmap"];
+    for page in ["modes.html", "guide.html", "build-plan-v2.html"] {
+        let html = std::fs::read_to_string(site.join(page)).expect("page");
+        assert_eq!(bar_labels(&html), expected, "bar on {page}");
+    }
+    assert!(
+        modes.contains("<span aria-current=\"page\">Modes</span>"),
+        "current page unlinked: {modes}"
+    );
+
+    // Issue #446: a link correct in the repository must resolve to the page the
+    // site actually serves, which is the slug — not the source's file name.
+    let guide = std::fs::read_to_string(site.join("guide.html")).expect("guide page");
+    assert!(
+        guide.contains("href=\"build-plan-v2.html\""),
+        "link resolved to the published slug: {guide}"
+    );
+    assert!(
+        !guide.contains("BUILD_PLAN_V2.html"),
+        "the file-name guess is gone: {guide}"
+    );
+}
+
+#[test]
+fn the_landing_page_carries_the_bar_the_renderer_emits() {
+    // roteiro.dev's landing page is hand-written HTML that `render docs` copies
+    // verbatim, so its site bar is the one bar nothing generates — and a bar
+    // that disagrees with the rest of the site is how a page becomes
+    // unreachable from its neighbours. This renders *this* repository and holds
+    // the two against each other.
+    let out_dir = std::env::temp_dir().join(format!("roteiro-website-bar-{}", std::process::id()));
+    std::fs::remove_dir_all(&out_dir).ok();
+    let out = Command::new(BIN)
+        .args(["render", "docs", "--out"])
+        .arg(&out_dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render failed: {out:?}");
+
+    let landing = std::fs::read_to_string(out_dir.join("index.html")).expect("landing page");
+    let landing_bar = bar_labels(&landing);
+    assert!(
+        !landing_bar.is_empty(),
+        "the landing page carries a site bar"
+    );
+
+    // Every rendered page's bar is built once from the published pages, so any
+    // one of them is the authority the hand-written copy must match.
+    let rendered = std::fs::read_dir(&out_dir)
+        .expect("read site")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("html")
+                && p.file_name().and_then(|n| n.to_str()) != Some("index.html")
+                && std::fs::read_to_string(p).is_ok_and(|h| h.contains("<nav class=\"sitenav\">"))
+        })
+        .expect("at least one rendered site page");
+    let emitted = bar_labels(&std::fs::read_to_string(&rendered).expect("rendered page"));
+    assert_eq!(
+        landing_bar,
+        emitted,
+        "website/public/index.html's site bar disagrees with the bar {} carries",
+        rendered.display()
+    );
+    std::fs::remove_dir_all(&out_dir).ok();
+}

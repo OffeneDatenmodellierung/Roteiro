@@ -1,3 +1,9 @@
+---
+site-page: offline
+site-nav: Offline
+site-order: 20
+---
+
 # Working offline
 
 Roteiro is **offline-capable, not offline-only**. Nothing it does at *use* time
