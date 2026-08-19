@@ -36,7 +36,8 @@
 
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 
-use crate::adr::{Section, WikiLink, clean_value, first_h1, resolve_target, split_frontmatter};
+use crate::adr::{Section, WikiLink, clean_value, resolve_target, split_frontmatter};
+use crate::text::{first_h1, heading_text};
 
 /// The frontmatter field that declares a document published, and carries its
 /// slug. Its presence is the whole classification rule.
@@ -237,21 +238,6 @@ pub fn site_nav(pages: &[SitePage]) -> Vec<&SitePage> {
     nav
 }
 
-/// The visible text of a heading, with a trailing `{#explicit-anchor}` attribute
-/// removed.
-///
-/// Site pages carry explicit anchors so URLs that predate this mechanism keep
-/// resolving (see `rto_render`); the anchor is markup, not part of the section's
-/// name, and leaving it in would put `{#modes}` in the graph's section titles.
-fn heading_text(heading: &str) -> String {
-    let heading = heading.trim();
-    let stripped = heading
-        .strip_suffix('}')
-        .and_then(|h| h.rfind("{#").map(|i| &h[..i]))
-        .unwrap_or(heading);
-    stripped.trim().to_owned()
-}
-
 /// Read one frontmatter field's cleaned value, case-insensitively on the key.
 /// Returns `None` when there is no frontmatter or no such field.
 fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
@@ -325,6 +311,45 @@ mod tests {
         let bare =
             parse_site_page("p.md", "---\nsite-page: build\n---\n\nno heading\n").expect("parse");
         assert_eq!(bare.title, "build");
+    }
+
+    #[test]
+    fn an_anchored_h1_does_not_put_its_anchor_in_the_graph() {
+        // #469: with no `title:` in frontmatter the H1 is the title, and that
+        // value becomes a `site:` node title — so it reaches `roteiro search`
+        // and everything else that reads the store. The rendered page never
+        // showed it, which is exactly why it survived.
+        let p = parse_site_page(
+            "website/pages/modes.md",
+            "---\nsite-page: modes\n---\n\n# The five ways to run it {#modes}\n",
+        )
+        .expect("parse");
+        assert_eq!(p.title, "The five ways to run it");
+        assert_eq!(
+            p.nav, "The five ways to run it",
+            "nav defaults to the title"
+        );
+        assert!(
+            !p.title.contains("{#"),
+            "the anchor reached the node title: {:?}",
+            p.title
+        );
+    }
+
+    #[test]
+    fn section_keys_are_unchanged_by_reading_headings_with_the_parser() {
+        // The site pages carry markup in `## ` headings; folding the hand-written
+        // stripper into the shared rule must not silently re-key their sections,
+        // because a section key is a graph key, not display text.
+        let p = parse_site_page(
+            "website/pages/modes.md",
+            "---\nsite-page: modes\n---\n\n# T\n\n## 1 · Offline mode — the default {#offline}\n\n## What `init` sets up\n",
+        )
+        .expect("parse");
+        let slugs: Vec<_> = p.sections.iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(slugs, ["1-offline-mode-the-default", "what-init-sets-up"]);
+        // The title is now the text a reader sees, markup and all removed.
+        assert_eq!(p.sections[1].title, "What init sets up");
     }
 
     #[test]

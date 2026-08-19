@@ -26,6 +26,17 @@ pub(crate) fn lang_for(path: &str) -> String {
 /// argument.
 pub(crate) use rto_graph::slugify;
 
+/// The visible text of a document's first `# ` heading, and of a `## ` heading's
+/// source content.
+///
+/// Re-exported from [`rto_graph`] for the same reason as [`slugify`] above, and
+/// they are two halves of one rule: the title these return is what `slugify`
+/// then turns into a key. Read with the Markdown parser rather than scanned, so
+/// an `{#anchor}`, a code span or an inline link ends where the *dialect* says it
+/// does — and so a heading cannot mean one thing in a graph node title and
+/// another in the rendered page. See those functions for the full argument.
+pub(crate) use rto_graph::{first_h1, heading_text};
+
 /// Extract the inner text of every `[[…]]` on `line`, ignoring any inside an
 /// inline code span (so `` `[[path#Symbol]]` `` written as a documentation
 /// example is not treated as a real link). Shared by the ADR and lat.md parsers.

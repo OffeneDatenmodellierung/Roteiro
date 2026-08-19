@@ -12,7 +12,8 @@
 
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 
-use crate::adr::{Section, WikiLink, first_h1, resolve_target};
+use crate::adr::{Section, WikiLink, resolve_target};
+use crate::text::first_h1;
 
 /// The house-style marker in a blueprint's H1 (from `roteiro spec … blueprint`),
 /// including the leading em dash so a doc whose H1 merely mentions the phrase in
@@ -178,6 +179,61 @@ mod tests {
             ),
             "phrase without the em-dash marker is not a blueprint"
         );
+    }
+
+    #[test]
+    fn detection_reads_the_h1_the_parser_sees_not_the_line() {
+        // `is_blueprint` is a *predicate*, not a title, so reading the H1 through
+        // the parser changes it — in four ways, each of which is a fix. The
+        // marker itself survives an attribute block untouched: an em dash and
+        // spaces cannot appear inside a parsed `{#id}`.
+        assert!(
+            is_blueprint(
+                "docs/plans/a.md",
+                "# Token flow — Technical Implementation Plan {#plan}\n"
+            ),
+            "an attribute block must not hide the marker"
+        );
+        assert!(
+            is_blueprint(
+                "docs/plans/b.md",
+                "# Token flow — Technical *Implementation* Plan\n"
+            ),
+            "emphasis is markup; the marker is still in the text a reader sees"
+        );
+        assert!(
+            is_blueprint(
+                "docs/plans/c.md",
+                "Token flow — Technical Implementation Plan\n===\n"
+            ),
+            "a setext heading is an H1"
+        );
+        // The two that narrow: a fenced `#` is a code sample. A document *about*
+        // the blueprint scaffold quoting its H1 is not itself a blueprint.
+        assert!(
+            !is_blueprint(
+                "docs/notes/d.md",
+                "# How to write one\n\n```\n# Widget — Technical Implementation Plan\n```\n"
+            ),
+            "a fenced example must not classify the document that quotes it"
+        );
+        assert!(
+            !is_blueprint(
+                "docs/notes/e.md",
+                "```\n# Widget — Technical Implementation Plan\n```\n"
+            ),
+            "a fenced `#` is not a heading at all"
+        );
+    }
+
+    #[test]
+    fn a_blueprint_title_falling_back_to_its_h1_carries_no_markup() {
+        let bp = parse_blueprint(
+            "docs/plans/token.md",
+            "# Token flow — Technical Implementation Plan {#plan}\n",
+        );
+        assert_eq!(bp.title, "Token flow — Technical Implementation Plan");
+        assert!(!bp.title.contains("{#"));
     }
 
     #[test]
