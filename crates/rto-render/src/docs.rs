@@ -259,21 +259,41 @@ fn render_markdown(
     out
 }
 
-/// The `CommonMark` dialect the whole site is parsed with: GitHub tables and
-/// strikethrough, plus **heading attributes** (`## Heading {#anchor}`).
+/// The `CommonMark` dialect the whole site is parsed with — [`rto_graph`]'s, not
+/// a copy of it.
 ///
-/// Heading attributes are how a URL outlives a restructure. A page split out of
-/// the old single-page site keeps the anchor the old page published — the
-/// heading declares `{#modes}` and lands at `#modes` — instead of silently
-/// becoming whatever the new heading text happens to slugify to. External links
-/// point at those anchors and cannot be updated, so the alternative is not a
-/// tidier URL; it is a dead one.
+/// This used to build its own `Options` with the same three flags. It was the
+/// same set by agreement rather than by construction, which is the arrangement
+/// [`rto_graph::markdown_dialect`] exists to end: a different option set is a
+/// different language, and two parsers that disagree about it do not fail — they
+/// quietly disagree about where a heading's text ends, which is the defect #469
+/// was. That crate could not finish the consolidation while this file was held
+/// open by the work in #456/#457/#508; this is the remaining half.
+///
+/// What the dialect buys *this* renderer, and why the heading-attribute flag in
+/// particular is load-bearing here: **heading attributes are how a URL outlives a
+/// restructure.** A page split out of the old single-page site keeps the anchor
+/// the old page published — the heading declares `{#modes}` and lands at
+/// `#modes` — instead of silently becoming whatever the new heading text happens
+/// to slugify to. External links point at those anchors and cannot be updated, so
+/// the alternative is not a tidier URL; it is a dead one.
 fn options() -> Options {
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
-    opts
+    // Keep this body a single delegation. It is the shape that invites a
+    // "just for rendering" flag, and the shape where adding one leaves nothing
+    // to notice it by — the duplicate that used to sit here is gone, so a
+    // divergence introduced now is invisible rather than merely unnoticed.
+    //
+    // A flag this renderer sets and `rto-graph`'s extractors do not is a flag
+    // that changes what a heading's text *is* on one surface and not the other.
+    // That is the #469 defect again, with the evidence removed.
+    //
+    // So a renderer-only flag belongs in `markdown_dialect` or nowhere, and "or
+    // nowhere" is not rhetoric: the claim that some future flag cannot reach
+    // heading text is an argument, not an observation, and an argument belongs
+    // in `rto-graph` beside the flag it licenses, where every surface reads it.
+    //
+    // `the_dialect_is_not_extended_here` fails if this body grows a flag.
+    rto_graph::markdown_dialect()
 }
 
 /// The `id` for every heading in `md`, in document order.
@@ -840,7 +860,7 @@ fn escape_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexEntry, NavEntry, PublishedPages, SourceBase, escape_html, markdown_to_html,
+        IndexEntry, NavEntry, PublishedPages, SourceBase, escape_html, markdown_to_html, options,
         render_adr, render_adr_index, render_doc, render_markdown, render_nav, render_site_page,
         replace_site_nav,
     };
@@ -1385,6 +1405,22 @@ mod tests {
         same.publish("GUIDE.md", "guide.html");
         let html = render_markdown("[g](GUIDE.md)\n", "", &same, None, 0);
         assert!(html.contains("href=\"guide.html\""), "{html}");
+    }
+
+    #[test]
+    fn the_dialect_is_not_extended_here() {
+        // `options` exists to hold renderer-specific rationale, not to add
+        // flags. This reads as a tautology against the body as written, and that
+        // is exactly its job: it has no failure mode until someone gives the
+        // body one, and that single edit is the only thing the comment beside it
+        // can ask against rather than prevent.
+        //
+        // Note what it pins — the *dialect*, not the shape of the body. A
+        // rewrite that still yields this option set is harmless and keeps
+        // passing; every divergence that would change what a heading's text is
+        // fails. That is the invariant worth holding, and it is a wider one than
+        // "stay a single delegation".
+        assert_eq!(options(), rto_graph::markdown_dialect());
     }
 
     /// A source base for a document in `dir`, at a fixed sha.
