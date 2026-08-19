@@ -11373,12 +11373,37 @@ fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
 #[cfg(feature = "serve")]
 struct GraphToolRegistry {
     workspace: std::sync::Arc<rto_graph::Workspace>,
+    /// The pinned-asset cache this registry reports on and, for `sandbox_clear`,
+    /// deletes from — **held rather than resolved at the call**.
+    ///
+    /// The same field, for the same reason, as `rto_render::mcp`'s `GraphServer`:
+    /// `rto_exec::asset_root()` resolves from the process environment, and
+    /// `unsafe_code = "forbid"` means a test cannot redirect it — so a test that
+    /// reaches the one mutating tool reaches the developer's own cache. That is
+    /// not hypothetical; fault-injecting the refusal, to prove the test catches
+    /// its absence, cleared 8.7 GB on the machine this was written on.
+    #[cfg(feature = "execution")]
+    asset_root: std::path::PathBuf,
 }
 
 #[cfg(feature = "serve")]
 impl GraphToolRegistry {
     fn new(workspace: std::sync::Arc<rto_graph::Workspace>) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            #[cfg(feature = "execution")]
+            asset_root: rto_exec::asset_root(),
+        }
+    }
+
+    /// Point this registry's asset-cache reads and removals at `root`.
+    ///
+    /// Test-only, and it is what lets a test exercise the one tool here that
+    /// deletes without deleting the developer's cache.
+    #[cfg(all(test, feature = "execution"))]
+    fn with_asset_root(mut self, root: std::path::PathBuf) -> Self {
+        self.asset_root = root;
+        self
     }
 
     /// Resolve `project` (if hosting several) and run `query` against its store,
@@ -11441,10 +11466,9 @@ impl GraphToolRegistry {
         // halves never come from different questions.
         let project_name = self.workspace.resolve(project).map_err(|e| e.to_string())?;
         // Machine-global, and read outside `run` because it is not the project's to
-        // answer: `asset_root` resolves from this host's environment whichever
-        // project was selected. The document's two `scope` fields are what say so to
-        // the model.
-        let root = rto_exec::asset_root();
+        // answer: the asset root describes this host whichever project was
+        // selected. The document's two `scope` fields are what say so to the model.
+        let root = self.asset_root.clone();
         let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
         self.run(project, move |store| {
             store.findings_layers(analyzer.as_deref()).map(|layers| {
@@ -11464,9 +11488,8 @@ impl GraphToolRegistry {
     /// The store errors [`rto_exec::StoreError`] carries, or a serialisation
     /// failure.
     #[cfg(feature = "execution")]
-    fn sandbox_status() -> Result<String, String> {
-        let report =
-            rto_exec::sandbox_status(&rto_exec::asset_root()).map_err(|e| e.to_string())?;
+    fn sandbox_status(&self) -> Result<String, String> {
+        let report = rto_exec::sandbox_status(&self.asset_root).map_err(|e| e.to_string())?;
         serde_json::to_string(&report).map_err(|e| e.to_string())
     }
 
@@ -11476,7 +11499,7 @@ impl GraphToolRegistry {
     /// A scope that names neither selector or both, the store errors
     /// [`rto_exec::StoreError`] carries, or a serialisation failure.
     #[cfg(feature = "execution")]
-    fn sandbox_clear(args: &serde_json::Value) -> Result<String, String> {
+    fn sandbox_clear(&self, args: &serde_json::Value) -> Result<String, String> {
         let image = args
             .get("image")
             .and_then(serde_json::Value::as_str)
@@ -11507,15 +11530,14 @@ impl GraphToolRegistry {
                 );
             }
         };
-        let root = rto_exec::asset_root();
         let report = if args
             .get("dry_run")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
         {
-            rto_exec::sandbox_plan(&root, &scope).map(|(report, _doomed)| report)
+            rto_exec::sandbox_plan(&self.asset_root, &scope).map(|(report, _doomed)| report)
         } else {
-            rto_exec::sandbox_clear(&root, &scope)
+            rto_exec::sandbox_clear(&self.asset_root, &scope)
         }
         .map_err(|e| e.to_string())?;
         serde_json::to_string(&report).map_err(|e| e.to_string())
@@ -12320,9 +12342,9 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             // Neither takes `project`: one sandbox store per asset root, shared by
             // every hosted project, so there is nothing for a selector to select.
             #[cfg(feature = "execution")]
-            "sandbox_status" => Self::sandbox_status(),
+            "sandbox_status" => self.sandbox_status(),
             #[cfg(feature = "execution")]
-            "sandbox_clear" => Self::sandbox_clear(args),
+            "sandbox_clear" => self.sandbox_clear(args),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -15765,7 +15787,22 @@ mod workspace_scoped_tools {
     fn the_served_sandbox_pair_takes_no_project_and_refuses_an_ungiven_scope() {
         use rto_serve::ToolRegistry as _;
 
-        let registry = called_registry();
+        // A disposable asset root, for the one tool here that deletes. Every test
+        // that can reach `sandbox_clear` goes through this, including the ones
+        // that only expect a refusal: a refusal is one edit away from not being
+        // one, and finding that out with the ambient root costs the developer's
+        // whole image cache — see `GraphToolRegistry::asset_root`.
+        let root =
+            std::env::temp_dir().join(format!("roteiro-chat-sandbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("boxlite-home").join("images").join("layers"))
+            .expect("a store root");
+        std::fs::write(
+            root.join("boxlite-home/images/layers/sha256-spare.tar.gz"),
+            vec![b'x'; 4096],
+        )
+        .expect("a spare blob");
+        let registry = called_registry().with_asset_root(root.clone());
         let tools = registry.tools();
         for name in ["sandbox_status", "sandbox_clear"] {
             let tool = tools
@@ -15800,6 +15837,25 @@ mod workspace_scoped_tools {
                 )
                 .is_err(),
             "`image` and `everything` are different requests and must not combine"
+        );
+
+        // And when it is given a scope it does act, reports what it freed, and
+        // stays inside the root it was handed. That last one is what fails if the
+        // registry ever goes back to resolving the asset root from the process
+        // environment — the arrangement that let a fault injection clear a real
+        // 8.7 GB cache.
+        let out = registry
+            .call("sandbox_clear", &serde_json::json!({ "everything": true }))
+            .expect("a named scope must be acted on");
+        let document: serde_json::Value = serde_json::from_str(&out).expect("a clear document");
+        assert_eq!(document["scope"], "machine", "{document}");
+        assert_eq!(document["freed_bytes"], 4096, "{document}");
+        assert!(
+            document["store"]
+                .as_str()
+                .expect("a store path")
+                .starts_with(root.to_str().expect("a utf-8 root")),
+            "the tool cleared a store outside the root it was given: {document}"
         );
     }
 

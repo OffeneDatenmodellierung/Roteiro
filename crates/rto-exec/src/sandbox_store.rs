@@ -1748,12 +1748,34 @@ mod tests {
         )
         .expect("write index manifest");
 
+        // The load-bearing assertion, and it is this one rather than "the file is
+        // still there after a per-image clear" — nothing in a per-image clear
+        // could ever reach it, so that assertion would pass with the association
+        // removed entirely. What the association actually decides is whether these
+        // files are **claimed**: an index manifest nobody claims is spare, and
+        // `everything` removes spare bytes.
+        let before = status(&fixture.root).expect("status");
+        assert!(
+            before.unattributed.is_empty(),
+            "an index manifest a cached image resolves through was reported as \
+             unattributed, which is one `--everything` away from being deleted while its \
+             image survives: {:?}",
+            before.unattributed
+        );
+
         clear(&fixture.root, &Scope::Image("registry/a:1".to_owned())).expect("clear");
+        assert!(!go.exists(), "the dropped image's index manifest was kept");
+        let after = status(&fixture.root).expect("status");
+        assert!(
+            after.unattributed.is_empty(),
+            "the survivor's index manifest stopped being attributed once the other image \
+             was dropped: {:?}",
+            after.unattributed
+        );
         assert!(
             keep.exists(),
             "the index manifest `registry/b:1` resolves through was deleted"
         );
-        assert!(!go.exists(), "the dropped image's index manifest was kept");
     }
 
     /// Something under the store root this module cannot classify stops the clear.
@@ -1768,7 +1790,8 @@ mod tests {
         fixture.image("registry/a:1", &["only-a"], 4096);
         std::fs::create_dir_all(fixture.store().join("provenance")).expect("mystery dir");
 
-        let error = clear(&fixture.root, &Scope::Everything).expect_err("a refusal");
+        let error = clear(&fixture.root, &Scope::Everything)
+            .expect_err("an entry this module cannot classify must stop the clear");
         assert!(
             matches!(&error, StoreError::UnrecognisedEntry { entry } if entry == "provenance"),
             "expected the unrecognised entry to be named, got: {error}"
@@ -1800,7 +1823,8 @@ mod tests {
             )
             .expect("insert base row");
 
-        let error = clear(&fixture.root, &Scope::Everything).expect_err("a refusal");
+        let error = clear(&fixture.root, &Scope::Everything)
+            .expect_err("a base disk outside the store root must stop the clear");
         assert!(
             matches!(&error, StoreError::BaseOutsideStore { path, .. } if path.contains("graph.db")),
             "expected the escaping path to be named, got: {error}"
@@ -1878,7 +1902,8 @@ mod tests {
             )
             .expect("insert box row");
 
-        let error = clear(&fixture.root, &Scope::Everything).expect_err("a refusal");
+        let error = clear(&fixture.root, &Scope::Everything)
+            .expect_err("a registered box must stop the clear");
         assert!(
             matches!(error, StoreError::LiveBoxes { boxes: 1 }),
             "expected a live-box refusal, got: {error}"
@@ -1924,8 +1949,8 @@ mod tests {
         let fixture = Fixture::new("unknown-image");
         fixture.image("registry/a:1", &["only-a"], 4096);
 
-        let error =
-            clear(&fixture.root, &Scope::Image("registry/a:2".to_owned())).expect_err("a refusal");
+        let error = clear(&fixture.root, &Scope::Image("registry/a:2".to_owned()))
+            .expect_err("a reference the store is not holding must be refused");
         assert!(
             matches!(&error, StoreError::UnknownImage { known, .. } if known == "registry/a:1"),
             "expected the cached references to be named, got: {error}"

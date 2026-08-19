@@ -455,6 +455,24 @@ fn checked_analyzer(given: Option<&str>) -> Result<Option<&str>, String> {
 #[derive(Clone)]
 struct GraphServer {
     workspace: SharedWorkspace,
+    /// The pinned-asset cache this server reports on and, for `sandbox_clear`,
+    /// deletes from — **held rather than resolved at the call**.
+    ///
+    /// It used to be `rto_exec::asset_root()` read inside each handler, which was
+    /// harmless while every tool was read-only and is not any more. A test that
+    /// exercises `sandbox_clear` cannot redirect an ambient read: `asset_root`
+    /// resolves from the process environment and `unsafe_code = "forbid"` rules
+    /// out `std::env::set_var`, so the only asset root such a test could ever
+    /// reach is the developer's own. **This is not hypothetical** — fault-injecting
+    /// `sandbox_clear_refuses_a_scope_it_was_not_given`, to prove that test
+    /// catches a missing refusal, cleared the 8.7 GB store on the machine this
+    /// was written on. The bytes were re-obtainable, which is the whole ADR-0014
+    /// v1.6 argument; a test reaching outside its fixture at all is the defect.
+    ///
+    /// So the root is a field, `new` fills it from the environment exactly as
+    /// before, and the tests point it somewhere disposable.
+    #[cfg(feature = "execution")]
+    asset_root: std::path::PathBuf,
     // Populated by the `#[tool_router]` macro and consumed by the
     // `#[tool_handler]`-generated routing; not read by hand.
     #[allow(dead_code)]
@@ -465,8 +483,21 @@ impl GraphServer {
     fn new(workspace: SharedWorkspace) -> Self {
         Self {
             workspace,
+            #[cfg(feature = "execution")]
+            asset_root: rto_exec::asset_root(),
             tool_router: Self::routes(),
         }
+    }
+
+    /// Point this server's asset-cache reads and removals at `root`.
+    ///
+    /// Test-only, and it is what lets a test exercise the one tool here that
+    /// deletes without deleting the developer's cache — see
+    /// [`GraphServer::asset_root`].
+    #[cfg(all(test, feature = "execution"))]
+    fn with_asset_root(mut self, root: std::path::PathBuf) -> Self {
+        self.asset_root = root;
+        self
     }
 
     /// Every route this server advertises: the always-present graph tools, plus
@@ -986,9 +1017,9 @@ impl GraphServer {
             Err(e) => return tool_error(&e.to_string()),
         };
         // Machine-global, and read outside `with_project` because it is not the
-        // project's to answer: `asset_root` resolves from this host's environment,
-        // whichever project was selected. The document is what says so.
-        let root = rto_exec::asset_root();
+        // project's to answer: the asset root describes this host, whichever
+        // project was selected. The document is what says so.
+        let root = self.asset_root.clone();
         let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
         query_result(self.with_project(project, |store| {
             store.findings_layers(analyzer).map(|layers| {
@@ -1050,7 +1081,7 @@ impl GraphServer {
         // Machine-global, and read from this host's environment rather than from a
         // project's store — there is no `with_project` here because there is no
         // project in the question.
-        match rto_exec::sandbox_status(&rto_exec::asset_root()) {
+        match rto_exec::sandbox_status(&self.asset_root) {
             Ok(report) => json_result(&report),
             Err(e) => tool_error(&e.to_string()),
         }
@@ -1112,11 +1143,10 @@ impl GraphServer {
                 );
             }
         };
-        let root = rto_exec::asset_root();
         let outcome = if args.dry_run.unwrap_or(false) {
-            rto_exec::sandbox_plan(&root, &scope).map(|(report, _doomed)| report)
+            rto_exec::sandbox_plan(&self.asset_root, &scope).map(|(report, _doomed)| report)
         } else {
-            rto_exec::sandbox_clear(&root, &scope)
+            rto_exec::sandbox_clear(&self.asset_root, &scope)
         };
         match outcome {
             Ok(report) => json_result(&report),
@@ -2146,10 +2176,26 @@ mod tests {
     /// and requires neither, so the enforcement is at the call — which is what
     /// this checks, both ways round, and it reaches the refusal without touching
     /// the filesystem because the scope is resolved before the store is opened.
+    /// A disposable asset root, for the one tool here that deletes.
+    ///
+    /// Every test that can reach [`GraphServer::sandbox_clear`] goes through this,
+    /// including the ones that only expect a refusal: a refusal is one edit away
+    /// from not being one, and the cost of finding that out with the ambient root
+    /// is the developer's whole image cache. See [`GraphServer::asset_root`].
+    #[cfg(feature = "execution")]
+    fn disposable_asset_root(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("rto-render-sandbox-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("boxlite-home").join("images").join("layers"))
+            .expect("a store root");
+        root
+    }
+
     #[cfg(feature = "execution")]
     #[tokio::test]
     async fn sandbox_clear_refuses_a_scope_it_was_not_given() {
-        let server = seeded();
+        let server = seeded().with_asset_root(disposable_asset_root("refusal"));
 
         let neither = server
             .sandbox_clear(Parameters(SandboxClearArgs::default()))
@@ -2170,6 +2216,50 @@ mod tests {
             }))
             .await;
         assert_eq!(both.is_error, Some(true), "{both:?}");
+    }
+
+    /// It reports what it freed, and it never leaves the root it was given.
+    ///
+    /// Two assertions that belong together. ADR-0014 v1.6's first obligation for a
+    /// mutating tool is that it **reports what it freed**, so the cost appears in
+    /// the transcript rather than turning up later as an unexplained re-pull. The
+    /// second is this test's own safety: `store` must be under the fixture root,
+    /// which is what fails if the handler ever goes back to resolving the asset
+    /// root from the process environment — the arrangement that let a fault
+    /// injection clear a real 8.7 GB cache.
+    #[cfg(feature = "execution")]
+    #[tokio::test]
+    async fn sandbox_clear_reports_what_it_freed_and_stays_inside_the_root_it_was_given() {
+        let root = disposable_asset_root("freed");
+        std::fs::write(
+            root.join("boxlite-home/images/layers/sha256-spare.tar.gz"),
+            vec![b'x'; 4096],
+        )
+        .expect("a spare blob");
+        let server = seeded().with_asset_root(root.clone());
+
+        let result = server
+            .sandbox_clear(Parameters(SandboxClearArgs {
+                image: None,
+                everything: Some(true),
+                dry_run: None,
+            }))
+            .await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let document: serde_json::Value =
+            serde_json::from_str(&text_of(&result)).expect("a clear document");
+
+        assert_eq!(document["scope"], "machine", "{document}");
+        assert_eq!(document["requested"], "everything", "{document}");
+        assert_eq!(document["applied"], true, "{document}");
+        assert_eq!(document["freed_bytes"], 4096, "{document}");
+        assert!(
+            document["store"]
+                .as_str()
+                .expect("a store path")
+                .starts_with(root.to_str().expect("a utf-8 root")),
+            "the tool cleared a store outside the root it was given: {document}"
+        );
     }
 
     /// The mutating tool's description carries what a model has to do with it.
