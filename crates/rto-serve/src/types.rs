@@ -10,6 +10,31 @@ use crate::tools::ToolDef;
 /// Default token budget when a request omits `max_tokens`.
 const DEFAULT_MAX_TOKENS: u32 = 512;
 
+/// Max entries in a client's `tools` array. OpenAI's own documented ceiling, so
+/// a client written against their API cannot trip this without already having
+/// tripped theirs.
+const MAX_CLIENT_TOOLS: usize = 128;
+
+/// Max total bytes of client tool names, descriptions and schemas — the payload
+/// that reaches the prompt verbatim via `tool_system_prompt`.
+///
+/// **This bound exists because of the interaction with per-request context
+/// sizing (#496), not because large prompts are untidy.** That change sizes the
+/// context window to the prompt (`window_for_request`: `prompt_tokens +
+/// max_tokens + headroom`, capped at the model's `n_ctx_train`). Together, an
+/// unbounded `tools` array would let a *caller* choose Roteiro's allocation: on
+/// `qwen3.8-27b` the trained window is 262,144 tokens and KV runs ~64 KiB/token,
+/// so driving the prompt to the ceiling reserves ~16.4 GiB for one request.
+/// Neither change has that reach alone — before #496 the window is a fixed
+/// 4,096, and before this one Roteiro only ever sizes to prompts it built
+/// itself.
+///
+/// 32 KiB is roughly 8k tokens, which keeps the tool surface's contribution to
+/// `prompt_tokens` about 32x below that ceiling. Raising it re-opens the same
+/// hole in proportion, so treat it as a security bound rather than a tuning
+/// knob.
+const MAX_CLIENT_TOOL_BYTES: usize = 32 * 1024;
+
 /// A `POST /v1/chat/completions` request body.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -34,15 +59,19 @@ pub struct ChatCompletionRequest {
     /// call and never runs it.
     #[serde(default)]
     pub tools: Option<Vec<ToolSpec>>,
-    /// OpenAI `tool_choice`. **Accepted and carried, not enforced** — forcing a
+    /// OpenAI `tool_choice`. **Accepted and parsed, then discarded** — forcing a
     /// named function is grammar-constrained sampling, which lands with the
-    /// grammar work (#485 PR 2). Declared as a divergence in the crate README
-    /// rather than half-implemented, so a client is not told it was honoured.
+    /// grammar work (#485 PR 2). It is carried as far as
+    /// [`NormalisedChat::tool_choice`] so the "accepted, not forced" claim is
+    /// checkable at the type boundary, and [`crate::server`] explicitly drops it
+    /// from there; nothing reports it back to the client. Declared as a
+    /// divergence in the crate README rather than half-implemented.
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
-    /// OpenAI `parallel_tool_calls`. **Accepted and carried, not enforced** —
+    /// OpenAI `parallel_tool_calls`. **Accepted and parsed, then discarded** —
     /// [`crate::tools`] parses at most one call per turn today, so a turn never
-    /// carries more than one regardless of this field. Declared in the README.
+    /// carries more than one regardless of this field. Carried and dropped
+    /// exactly as [`Self::tool_choice`] is. Declared in the README.
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
 }
@@ -225,12 +254,74 @@ pub struct NormalisedChat {
     /// The client's tools, in request order. Non-empty means Roteiro's graph
     /// tools are suppressed for this request.
     pub client_tools: Vec<ToolDef>,
-    /// The request's `tool_choice`, carried through unenforced so the server can
-    /// report what it received. See [`ChatCompletionRequest::tool_choice`].
+    /// The request's `tool_choice`, parsed but **not** acted on. It reaches this
+    /// struct so the accepted-not-forced boundary is visible and testable in one
+    /// place; [`crate::server`] discards it. Nothing echoes it to the client.
+    /// See [`ChatCompletionRequest::tool_choice`].
     pub tool_choice: Option<serde_json::Value>,
-    /// The request's `parallel_tool_calls`, carried through unenforced. See
+    /// The request's `parallel_tool_calls`, parsed but **not** acted on, exactly
+    /// as [`Self::tool_choice`] is. See
     /// [`ChatCompletionRequest::parallel_tool_calls`].
     pub parallel_tool_calls: Option<bool>,
+}
+
+/// Validate a client's `tools` array and convert it to the loop's [`ToolDef`]s.
+///
+/// Enforces both bounds ([`MAX_CLIENT_TOOLS`], [`MAX_CLIENT_TOOL_BYTES`]) and the
+/// tool kind. Every failure is a rejection rather than a repair: an oversized
+/// array is refused, not trimmed, and an unknown `type` is refused, not coerced.
+///
+/// # Errors
+/// Returns a human-readable message when the array is over either bound or
+/// carries a tool whose `type` is not `function`.
+fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
+    if specs.len() > MAX_CLIENT_TOOLS {
+        return Err(format!(
+            "too many tools: {} (max {MAX_CLIENT_TOOLS})",
+            specs.len()
+        ));
+    }
+    let mut client_tools: Vec<ToolDef> = Vec::with_capacity(specs.len());
+    let mut advertised_bytes: usize = 0;
+    for t in specs {
+        // Only `function` exists in OpenAI's tool envelope. Anything else is
+        // rejected rather than coerced: silently advertising a `retrieval` tool
+        // as a function would tell the client it was understood.
+        if t.kind != "function" {
+            return Err(format!(
+                "unsupported tool type `{}` (only `function` is supported)",
+                t.kind
+            ));
+        }
+        let name = t.function.name;
+        let description = t.function.description.unwrap_or_default();
+        // A tool with no schema still has to advertise an argument shape; an
+        // empty object is the honest "takes no known arguments".
+        let parameters = t
+            .function
+            .parameters
+            .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+        advertised_bytes = advertised_bytes
+            .saturating_add(name.len())
+            .saturating_add(description.len())
+            .saturating_add(serde_json::to_string(&parameters).map_or(0, |p| p.len()));
+        // Refused, never truncated: trimming a client's schemas would leave the
+        // model calling tools whose arguments no longer match what the client
+        // will execute — corrupting exactly the correlation the `tool_call_id`
+        // handling elsewhere is careful to preserve.
+        if advertised_bytes > MAX_CLIENT_TOOL_BYTES {
+            return Err(format!(
+                "`tools` is too large: over {MAX_CLIENT_TOOL_BYTES} bytes of tool \
+                 names, descriptions and schemas"
+            ));
+        }
+        client_tools.push(ToolDef {
+            name,
+            description,
+            parameters,
+        });
+    }
+    Ok(client_tools)
 }
 
 /// Render one replayed [`ToolCallDto`] back into the in-band `<tool_call>` form
@@ -278,21 +369,7 @@ impl ChatCompletionRequest {
         if self.messages.is_empty() {
             return Err("`messages` must not be empty".to_owned());
         }
-        let client_tools: Vec<ToolDef> = self
-            .tools
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| ToolDef {
-                name: t.function.name,
-                description: t.function.description.unwrap_or_default(),
-                // A tool with no schema still has to advertise an argument shape;
-                // an empty object is the honest "takes no known arguments".
-                parameters: t
-                    .function
-                    .parameters
-                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
-            })
-            .collect();
+        let client_tools = client_tools_from(self.tools.unwrap_or_default())?;
         let (tool_choice, parallel_tool_calls) = (self.tool_choice, self.parallel_tool_calls);
         // Images are placed at the last `user` turn (where the vision path inserts
         // the media markers), so images may only appear there — anywhere else the
@@ -469,20 +546,25 @@ pub struct Delta {
     /// A piece of generated text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Client tool calls. **Divergence:** Roteiro emits one complete chunk at
-    /// `index: 0` carrying whole `arguments`, where OpenAI fragments `arguments`
-    /// across chunks with a per-call `index`. One-shot is legal and accumulates
-    /// correctly in mainstream clients; declared in the crate README.
+    /// Client tool calls. **Divergence:** every call arrives complete in a single
+    /// chunk, where OpenAI fragments `arguments` across several. The `index` is
+    /// the call's position and is not part of the divergence — a client
+    /// accumulating by `index` gets a correct result either way, which is why
+    /// one-shot is legal and works in mainstream clients. Declared in the crate
+    /// README.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
 /// One streamed `tool_calls` entry — a [`ToolCallDto`] plus the per-call `index`
-/// OpenAI's streaming shape requires. Always `0`, and always complete: see
-/// [`Delta::tool_calls`].
+/// OpenAI's streaming shape requires. `arguments` is always complete rather than
+/// fragmented (see [`Delta::tool_calls`]); `index` is the call's position in the
+/// turn, which is `0` for every call Roteiro emits today only because
+/// `parse_tool_calls` yields at most one.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCallDelta {
-    /// The call's position in the turn's `tool_calls` array.
+    /// The call's position in the turn's `tool_calls` array — assigned from the
+    /// call's actual position, not pinned to a constant.
     pub index: u32,
     /// Correlation id.
     pub id: String,
@@ -618,6 +700,75 @@ mod tests {
         assert_eq!(
             normalised.client_tools[1].parameters,
             serde_json::json!({"type": "object"})
+        );
+    }
+
+    fn with_tools(tools: &serde_json::Value) -> Result<super::NormalisedChat, String> {
+        parse(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": tools.clone(),
+        }))
+        .normalise()
+    }
+
+    fn tool(name: &str, description: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {"name": name, "description": description},
+        })
+    }
+
+    #[test]
+    fn a_tool_type_other_than_function_is_rejected_not_coerced() {
+        // `type` defaults to `function` when omitted, but an explicit unknown
+        // kind is refused: advertising a `retrieval` tool to the model as a
+        // function would tell the client it was understood.
+        let err = with_tools(&serde_json::json!([{
+            "type": "retrieval",
+            "function": {"name": "lookup"},
+        }]))
+        .expect_err("must be rejected");
+        assert!(err.contains("retrieval"), "{err}");
+        assert!(err.contains("function"), "names what IS supported: {err}");
+    }
+
+    #[test]
+    fn too_many_tools_is_rejected() {
+        let many: Vec<serde_json::Value> = (0..=super::MAX_CLIENT_TOOLS)
+            .map(|i| tool(&format!("t{i}"), ""))
+            .collect();
+        let err = with_tools(&serde_json::Value::Array(many)).expect_err("must be rejected");
+        assert!(err.contains("too many tools"), "{err}");
+
+        // The limit itself is fine — the bound rejects only past it.
+        let at_limit: Vec<serde_json::Value> = (0..super::MAX_CLIENT_TOOLS)
+            .map(|i| tool(&format!("t{i}"), ""))
+            .collect();
+        assert!(with_tools(&serde_json::Value::Array(at_limit)).is_ok());
+    }
+
+    #[test]
+    fn an_oversized_tools_array_is_rejected_rather_than_truncated() {
+        // A caller must not be able to choose Roteiro's context allocation by
+        // sending arbitrarily large schemas — see `MAX_CLIENT_TOOL_BYTES` for why
+        // that matters once the context window sizes to the prompt (#496).
+        //
+        // The refusal is the point: truncating would leave the model calling
+        // tools whose arguments no longer match what the client will run.
+        let huge = "x".repeat(super::MAX_CLIENT_TOOL_BYTES + 1);
+        let err =
+            with_tools(&serde_json::json!([tool("big", &huge)])).expect_err("must be rejected");
+        assert!(err.contains("too large"), "{err}");
+
+        // Spread across many tools, the *total* is what is bounded — not each one.
+        let chunk = "y".repeat(super::MAX_CLIENT_TOOL_BYTES / 4);
+        let spread: Vec<serde_json::Value> =
+            (0..5).map(|i| tool(&format!("t{i}"), &chunk)).collect();
+        assert!(
+            with_tools(&serde_json::Value::Array(spread))
+                .expect_err("the total is bounded, not the per-tool size")
+                .contains("too large")
         );
     }
 

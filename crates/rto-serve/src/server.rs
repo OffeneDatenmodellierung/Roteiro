@@ -592,10 +592,11 @@ enum StreamMsg {
     Role,
     /// A piece of generated text.
     Delta(String),
-    /// The model called the **client's** tools: one complete chunk carrying every
-    /// call, which Roteiro returns without executing. **Divergence:** OpenAI
-    /// fragments `arguments` across chunks with a per-call `index`; this emits
-    /// whole `arguments` at `index: 0` (see [`ToolCallDelta`]).
+    /// The model called the **client's** tools: one chunk carrying every call,
+    /// which Roteiro returns without executing. **Divergence:** OpenAI fragments
+    /// `arguments` across several chunks; each call here arrives with its
+    /// `arguments` complete. Each still carries its positional `index`, so a
+    /// client accumulating by index is unaffected (see [`ToolCallDelta`]).
     ToolCalls(Vec<ToolCallDto>),
     /// Generation finished cleanly with this wire reason (`stop` | `length` |
     /// `tool_calls`).
@@ -2065,5 +2066,53 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("\"content\":\"a plain answer\""), "{text}");
         assert!(!text.contains("tool_calls"), "omitted, not null: {text}");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_or_malformed_tools_array_is_a_400() {
+        // The bounds and the `type` check have to be visible on the wire as a
+        // refusal, not swallowed into a truncated tool set — a client that sent
+        // too much must be told, because the alternative is a model calling
+        // tools whose schemas the client no longer recognises.
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "over the byte bound",
+                serde_json::json!([{
+                    "type": "function",
+                    "function": {"name": "big", "description": "z".repeat(64 * 1024)},
+                }]),
+            ),
+            (
+                "over the count bound",
+                serde_json::Value::Array(
+                    (0..200)
+                        .map(|i| {
+                            serde_json::json!({
+                                "type": "function",
+                                "function": {"name": format!("t{i}")},
+                            })
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "an unsupported tool type",
+                serde_json::json!([{"type": "retrieval", "function": {"name": "lookup"}}]),
+            ),
+        ];
+        for (what, tools) in cases {
+            let engine = ScriptedServeEngine::new(&["unreachable"]);
+            let resp = app(engine)
+                .oneshot(chat_body(&serde_json::json!({
+                    "model": "echo",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "tools": tools,
+                })))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{what}");
+            let json = body_json(resp).await;
+            assert_eq!(json["error"]["type"], "invalid_request_error", "{what}");
+        }
     }
 }

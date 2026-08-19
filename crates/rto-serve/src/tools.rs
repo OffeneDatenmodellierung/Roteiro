@@ -130,6 +130,40 @@ fn disposition(calls: &[ToolCall], client_names: &HashSet<&str>) -> Disposition 
     }
 }
 
+/// A registry that advertises nothing and **can execute nothing**.
+///
+/// This is the structural half of suppression. Emptying the advertised tool list
+/// stops the graph schemas reaching the prompt, but it does not stop a *call*:
+/// the model is primed toward `search` and `explain` by name in
+/// [`tool_system_prompt`]'s own instruction prose, and a call to one of those
+/// would otherwise take the execute branch and run a graph tool the request
+/// deliberately did not advertise.
+///
+/// So under suppression the loop does not hold an executable registry at all —
+/// the caller's is swapped for this one, and both the advertised list and the
+/// execute branch read from the *same* binding. They cannot diverge, because
+/// there is only one of them. That is the same shape as the guarantee in the
+/// other direction ("Roteiro never executes a client's tool"): unreachable by
+/// construction rather than guarded by a membership test a later edit can drop.
+struct SuppressedTools;
+
+impl ToolRegistry for SuppressedTools {
+    fn tools(&self) -> Vec<ToolDef> {
+        Vec::new()
+    }
+
+    fn call(&self, name: &str, _arguments: &serde_json::Value) -> Result<String, String> {
+        // Fed back to the model, which then has a round to correct itself. The
+        // message says *why* rather than "unknown tool": the tool exists, it is
+        // out of scope for this request, and a model told the truth about that
+        // stops trying.
+        Err(format!(
+            "tool `{name}` is not available: this request supplied its own tools, \
+             so Roteiro's graph tools are not in scope"
+        ))
+    }
+}
+
 /// A process-unique id for a returned tool call, so a client can correlate its
 /// `tool_call_id` results. Uniqueness for the process lifetime is all a client
 /// needs — it matches ids against the turn it just received — and a counter gets
@@ -184,13 +218,18 @@ pub fn chat_with_client_tools(
     max_rounds: usize,
 ) -> Result<ToolLoopOutcome, EngineError> {
     // Rule 1: client tools suppress the graph tools entirely — not merged, not
-    // appended. `registry` is left unconsulted rather than advertised-but-inert,
-    // so its schemas never reach the prompt and never cost context.
-    let graph_tools = if client_tools.is_empty() {
-        registry.tools()
+    // appended. Suppression is applied by *replacing the registry*, not by
+    // emptying a list: past this line the caller's registry is unreachable from
+    // the loop, so a graph tool cannot be executed however the model names it.
+    // See [`SuppressedTools`].
+    let registry: &dyn ToolRegistry = if client_tools.is_empty() {
+        registry
     } else {
-        Vec::new()
+        &SuppressedTools
     };
+    // Derived from the same binding the execute branch calls, so what is
+    // advertised and what is executable cannot drift apart.
+    let graph_tools = registry.tools();
     let client_names: HashSet<&str> = client_tools.iter().map(|t| t.name.as_str()).collect();
     // The client's tools come first, so a graph tool sharing a name is shadowed
     // rather than executed in its place.
@@ -369,7 +408,9 @@ fn parse_tool_call(text: &str) -> Option<ToolCall> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Disposition, ToolCall, disposition, parse_tool_call, tool_system_prompt};
+    use super::{
+        Disposition, SuppressedTools, ToolCall, disposition, parse_tool_call, tool_system_prompt,
+    };
     use crate::engine::{
         ChatRequest, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
     };
@@ -448,6 +489,20 @@ mod tests {
     /// full loop (inject → call → execute → feed back → answer) is exercised.
     struct ScriptedEngine {
         turns: Mutex<Vec<String>>,
+        seen: Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl ScriptedEngine {
+        fn new<S: AsRef<str>>(turns: &[S]) -> Self {
+            Self {
+                turns: Mutex::new(turns.iter().map(|t| t.as_ref().to_owned()).collect()),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+        /// The messages handed to generation number `round` (0-based).
+        fn round(&self, round: usize) -> Vec<Message> {
+            self.seen.lock().unwrap()[round].clone()
+        }
     }
 
     impl Engine for ScriptedEngine {
@@ -458,9 +513,10 @@ mod tests {
         }
         fn chat_stream(
             &self,
-            _req: &ChatRequest,
+            req: &ChatRequest,
             on_token: &mut dyn FnMut(&str),
         ) -> Result<CompletionStats, EngineError> {
+            self.seen.lock().unwrap().push(req.messages.clone());
             let next = self.turns.lock().unwrap().remove(0);
             on_token(&next);
             Ok(CompletionStats {
@@ -491,13 +547,10 @@ mod tests {
 
     #[test]
     fn loop_executes_a_tool_then_returns_the_final_answer() {
-        let engine = ScriptedEngine {
-            turns: Mutex::new(vec![
-                "<tool_call>{\"name\":\"echo\",\"arguments\":{\"key\":\"abc\"}}</tool_call>"
-                    .to_owned(),
-                "the node abc is a function".to_owned(),
-            ]),
-        };
+        let engine = ScriptedEngine::new(&[
+            "<tool_call>{\"name\":\"echo\",\"arguments\":{\"key\":\"abc\"}}</tool_call>",
+            "the node abc is a function",
+        ]);
         let req = ChatRequest {
             model: "scripted".to_owned(),
             messages: vec![Message {
@@ -526,9 +579,7 @@ mod tests {
                 Err("unused".to_owned())
             }
         }
-        let engine = ScriptedEngine {
-            turns: Mutex::new(vec!["direct answer".to_owned()]),
-        };
+        let engine = ScriptedEngine::new(&["direct answer"]);
         let req = ChatRequest {
             model: "scripted".to_owned(),
             messages: vec![Message {
@@ -551,6 +602,9 @@ mod tests {
     /// A graph registry that advertises `name` and **panics if executed**. Every
     /// test below that must not run a tool asserts it by construction rather than
     /// by inspecting a flag afterwards: an execution fails the test outright.
+    ///
+    /// It guards both directions — Roteiro never runs a *client's* tool, and
+    /// under suppression it never runs a *graph* tool either.
     struct NeverCalled(&'static str);
 
     impl ToolRegistry for NeverCalled {
@@ -562,7 +616,11 @@ mod tests {
             }]
         }
         fn call(&self, name: &str, _arguments: &serde_json::Value) -> Result<String, String> {
-            panic!("executed `{name}` — Roteiro must never execute a client's tool");
+            panic!(
+                "executed `{name}` — this registry is unreachable by construction: \
+                 Roteiro never runs a client's tool, and under suppression never \
+                 runs a graph tool either"
+            );
         }
     }
 
@@ -648,9 +706,7 @@ mod tests {
 
     #[test]
     fn a_client_tool_call_ends_the_loop_and_is_never_executed() {
-        let engine = ScriptedEngine {
-            turns: Mutex::new(vec![call_markup("get_weather", r#"{"city":"Berlin"}"#)]),
-        };
+        let engine = ScriptedEngine::new(&[call_markup("get_weather", r#"{"city":"Berlin"}"#)]);
         let out = chat_with_client_tools(
             &engine,
             &NeverCalled("graph_only_tool"),
@@ -755,9 +811,7 @@ mod tests {
     fn a_client_tool_shadows_a_graph_tool_of_the_same_name() {
         // The client wins its own namespace. `NeverCalled` panics if executed, so
         // resolving `echo` to the graph registry instead would fail the test.
-        let engine = ScriptedEngine {
-            turns: Mutex::new(vec![call_markup("echo", r#"{"key":"abc"}"#)]),
-        };
+        let engine = ScriptedEngine::new(&[call_markup("echo", r#"{"key":"abc"}"#)]);
         let out = chat_with_client_tools(
             &engine,
             &NeverCalled("echo"),
@@ -776,12 +830,10 @@ mod tests {
         // A client-tool call there must still be returned structurally — handing
         // the raw `<tool_call>` markup back as the assistant's answer is the
         // silent-wrong-answer shape #489 describes.
-        let engine = ScriptedEngine {
-            turns: Mutex::new(vec![
-                call_markup("nope", "{}"),
-                call_markup("get_weather", r#"{"city":"Berlin"}"#),
-            ]),
-        };
+        let engine = ScriptedEngine::new(&[
+            call_markup("nope", "{}"),
+            call_markup("get_weather", r#"{"city":"Berlin"}"#),
+        ]);
         let out = chat_with_client_tools(
             &engine,
             &NoGraphTools,
@@ -792,6 +844,63 @@ mod tests {
         .expect("outcome");
         assert_eq!(out.client_tool_calls.len(), 1);
         assert_eq!(out.client_tool_calls[0].name, "get_weather");
+    }
+
+    #[test]
+    fn a_graph_tool_call_under_suppression_is_refused_not_executed() {
+        // The mirror of "Roteiro never executes a client's tool", and the one
+        // that suppression-by-empty-list did NOT provide: the graph tools are
+        // unadvertised, but `tool_system_prompt`'s own prose names `search` and
+        // `explain`, so a model is primed to call exactly those. Under
+        // suppression such a call must be refused, not executed.
+        //
+        // `NeverCalled` panics if executed, so this asserts the guarantee by
+        // construction — reverting the registry swap in `chat_with_client_tools`
+        // makes this test abort inside the registry rather than fail an
+        // assertion.
+        let engine = ScriptedEngine::new(&[
+            call_markup("search", r#"{"query":"secrets"}"#),
+            "I could not use that tool.".to_owned(),
+        ]);
+        let out = chat_with_client_tools(
+            &engine,
+            &NeverCalled("search"),
+            &[client_tool("get_weather")],
+            &user_request(),
+            4,
+        )
+        .expect("outcome");
+
+        // Not returned to the client either: `search` is not the client's tool.
+        assert!(out.client_tool_calls.is_empty());
+        assert_eq!(out.completion.content, "I could not use that tool.");
+
+        // The refusal was fed back, and it says why rather than "unknown tool" —
+        // the tool exists, it is out of scope for this request.
+        let second = engine.round(1);
+        // Matched on the `user` turn specifically: the system prompt also mentions
+        // `<tool_response>`, in the prose telling the model to expect one.
+        let refusal = second
+            .iter()
+            .find(|m| m.role == "user" && m.content.starts_with("<tool_response>"))
+            .expect("a tool response was fed back");
+        assert!(refusal.content.contains("not available"), "{refusal:?}");
+        assert!(
+            refusal.content.contains("supplied its own tools"),
+            "{refusal:?}"
+        );
+    }
+
+    #[test]
+    fn the_suppressed_registry_advertises_and_executes_nothing() {
+        // The two halves of suppression read from one binding, so they cannot
+        // drift apart. Pin both on the type directly.
+        assert!(SuppressedTools.tools().is_empty());
+        let refused = SuppressedTools
+            .call("search", &serde_json::json!({}))
+            .expect_err("must never succeed");
+        assert!(refused.contains("search"), "{refused}");
+        assert!(refused.contains("not available"), "{refused}");
     }
 
     #[test]
