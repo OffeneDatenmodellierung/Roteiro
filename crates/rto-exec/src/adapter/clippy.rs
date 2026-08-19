@@ -158,6 +158,19 @@ impl Clippy {
             "clippy".to_owned(),
             "--workspace".to_owned(),
             "--all-targets".to_owned(),
+            // Not a reproducibility flourish — a write. Without it cargo creates
+            // or updates `Cargo.lock` when the manifest and the lockfile
+            // disagree, and it does that **in the tree being linted**, which is
+            // the tree `roteiro lint` promises to leave as it found it. Pointing
+            // `CARGO_TARGET_DIR` outside the worktree moves the build artefacts
+            // and does nothing about the lockfile; this is the other half of the
+            // same guarantee.
+            //
+            // The cost is real and is the correct one to pay: a tree whose
+            // lockfile is missing or stale now refuses to lint rather than
+            // silently being modified into a lintable one. `LintError::
+            // LockfileWouldBeWritten` is where that refusal is explained.
+            "--locked".to_owned(),
         ];
         args.extend(features.args());
         args.push("--message-format=json".to_owned());

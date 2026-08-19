@@ -221,7 +221,12 @@ impl AnalyzerRunner for SubprocessRunner {
 
         let invocation = self.invocation();
         let started_at = rfc3339_utc(std::time::SystemTime::now());
-        let output = execute(&invocation, &request.worktree.path, &request.analyzer, &[])?;
+        let output = execute(
+            &invocation,
+            &request.worktree.path,
+            &request.analyzer,
+            &ChildEnv::default(),
+        )?;
         let ended_at = rfc3339_utc(std::time::SystemTime::now());
 
         let snippets = WorktreeSnippets::new(&request.worktree.path);
@@ -266,13 +271,15 @@ pub(crate) struct Captured {
 
 /// Run the analyzer and capture its stdout.
 ///
-/// `extra_env` names variables to pass through **in addition** to the scrubbed
-/// minimum; see [`scrub_environment`]. A reader-class analyzer passes none.
+/// `env` says what reaches the child beyond the scrubbed minimum — which names
+/// are inherited, and which variables Roteiro sets outright; see [`ChildEnv`]
+/// for why those are two lists rather than one. A reader-class analyzer needs
+/// neither and passes the default.
 pub(crate) fn execute(
     invocation: &Invocation,
     worktree: &std::path::Path,
     analyzer: &str,
-    extra_env: &[&str],
+    env: &ChildEnv<'_>,
 ) -> Result<Captured, SubprocessError> {
     let mut command = Command::new(&invocation.program);
     command
@@ -281,7 +288,7 @@ pub(crate) fn execute(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    scrub_environment(&mut command, extra_env);
+    scrub_environment(&mut command, env);
 
     let output = command.output().map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
@@ -357,6 +364,38 @@ pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
     format!("\n  its stderr ended:\n  {joined}")
 }
 
+/// The two ways a variable can reach an analyzer's environment, kept apart.
+///
+/// They read alike and do opposite things, and conflating them is not
+/// hypothetical: `CARGO_TARGET_DIR` was once listed as a name to **inherit** by
+/// a module whose documentation promised it **set** one. Inheriting a name whose
+/// value nobody supplied is a no-op that looks like a configuration, so the
+/// promise held only when the invoking shell happened to make it hold — see
+/// [`crate::lint`], which is where that was found.
+///
+/// The rule the two halves encode:
+///
+/// - **Inheriting locates.** `CARGO_HOME`, `RUSTUP_HOME` — where the toolchain
+///   is on *this* machine, which only the parent environment knows. The value is
+///   the user's; this process has no opinion on it.
+/// - **Setting constrains.** `CARGO_TARGET_DIR` — where the build may write,
+///   which is a property this process guarantees and therefore must choose. A
+///   guarantee that reads its own precondition out of the ambient environment is
+///   not a guarantee.
+///
+/// A caller wanting a variable *set* must put it in [`ChildEnv::set`]. There is
+/// no way to spell it as a name and have it work, which is the point.
+#[derive(Default)]
+pub(crate) struct ChildEnv<'a> {
+    /// Names passed through from the parent when the parent has them. A name
+    /// the parent does not have reaches the child not at all — it is never
+    /// invented, and never defaulted.
+    pub(crate) inherit: &'a [&'a str],
+    /// Name/value pairs this process chooses outright, applied last so they win
+    /// over anything of the same name in [`ChildEnv::inherit`].
+    pub(crate) set: &'a [(&'a str, std::ffi::OsString)],
+}
+
 /// Give the child a minimal, explicit environment.
 ///
 /// A third-party binary running on a developer's machine inherits everything by
@@ -370,12 +409,16 @@ pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
 /// an analyzer from picking up a credential by accident; it does not stop one
 /// that goes looking.
 ///
-/// `extra_env` is for a caller whose tool needs more than a parser does — the
-/// linter in [`crate::lint`] needs the variables that locate a Rust toolchain,
-/// and would otherwise be handed a `PATH` shim with no toolchain behind it. It
-/// is a **named list per caller**, not a pattern or an inherit-everything
-/// escape: each addition is a variable somebody wrote down and justified.
-pub(crate) fn scrub_environment(command: &mut Command, extra_env: &[&str]) {
+/// [`ChildEnv::inherit`] is for a caller whose tool needs more than a parser
+/// does — the linter in [`crate::lint`] needs the variables that locate a Rust
+/// toolchain, and would otherwise be handed a `PATH` shim with no toolchain
+/// behind it. It is a **named list per caller**, not a pattern or an
+/// inherit-everything escape: each addition is a variable somebody wrote down
+/// and justified.
+///
+/// [`ChildEnv::set`] is the other seam, and the distinction between them is
+/// load-bearing rather than tidy — see that type.
+pub(crate) fn scrub_environment(command: &mut Command, env: &ChildEnv<'_>) {
     command.env_clear();
     for key in [
         "PATH",
@@ -387,11 +430,19 @@ pub(crate) fn scrub_environment(command: &mut Command, extra_env: &[&str]) {
     ]
     .iter()
     .copied()
-    .chain(extra_env.iter().copied())
+    .chain(env.inherit.iter().copied())
     {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
+    }
+    // **After** the inherited names, so a value Roteiro chose always beats the
+    // same name arriving from the parent. A caller that both inherits and sets
+    // one variable has expressed a contradiction, and the constraint is the half
+    // that must win: inheriting is how the child finds things, setting is how
+    // this process bounds what the child may do.
+    for (key, value) in env.set {
+        command.env(key, value);
     }
     // Deterministic, locale-independent output from anything that formats
     // numbers or sorts strings.
@@ -426,7 +477,7 @@ fn analyzer_version(invocation: &Invocation, worktree: &std::path::Path) -> Opti
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    scrub_environment(&mut command, &[]);
+    scrub_environment(&mut command, &ChildEnv::default());
 
     let output = command.output().ok()?;
     if !output.status.success() {
@@ -444,7 +495,8 @@ fn analyzer_version(invocation: &Invocation, worktree: &std::path::Path) -> Opti
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_OUTPUT_BYTES, SubprocessError, SubprocessRunner, scrub_environment, stderr_tail,
+        ChildEnv, MAX_OUTPUT_BYTES, SubprocessError, SubprocessRunner, scrub_environment,
+        stderr_tail,
     };
     use crate::assets;
     use crate::runner::ExecError;
@@ -546,7 +598,7 @@ mod tests {
     #[test]
     fn the_child_environment_carries_no_ambient_credentials() {
         let mut command = std::process::Command::new("true");
-        scrub_environment(&mut command, &[]);
+        scrub_environment(&mut command, &ChildEnv::default());
         let passed: Vec<String> = command
             .get_envs()
             .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().into_owned()))
@@ -596,7 +648,13 @@ mod tests {
 
         let passed = |extra: &[&str]| -> Vec<String> {
             let mut command = std::process::Command::new("true");
-            scrub_environment(&mut command, extra);
+            scrub_environment(
+                &mut command,
+                &ChildEnv {
+                    inherit: extra,
+                    ..ChildEnv::default()
+                },
+            );
             command
                 .get_envs()
                 .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().into_owned()))
@@ -613,6 +671,71 @@ mod tests {
         // Naming something that does not exist invents nothing.
         assert!(
             !passed(&["ROTEIRO_NO_SUCH_VARIABLE"]).contains(&"ROTEIRO_NO_SUCH_VARIABLE".to_owned())
+        );
+    }
+
+    /// The distinction [`ChildEnv`] exists to draw, pinned at the seam that
+    /// implements it. Naming a variable can only ever pass the parent's value
+    /// along — so a caller that needs a *particular* value and spells it as a
+    /// name gets whatever the invoking shell had, including nothing at all.
+    /// That is the defect this type was split to make unspellable, and this is
+    /// the test that fails if the halves are merged back together.
+    #[test]
+    fn inheriting_a_name_cannot_set_a_value_and_setting_beats_inheriting() {
+        let value = |env: &ChildEnv<'_>| -> Option<std::ffi::OsString> {
+            let mut command = std::process::Command::new("true");
+            scrub_environment(&mut command, env);
+            command
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new("ROTEIRO_SEAM_PROBE"))
+                .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string))
+        };
+
+        // Naming a variable the parent does not have configures nothing. This
+        // is the exact shape of the `CARGO_TARGET_DIR` defect: a passthrough
+        // entry that reads as a setting and is a no-op.
+        assert_eq!(
+            value(&ChildEnv {
+                inherit: &["ROTEIRO_SEAM_PROBE"],
+                ..ChildEnv::default()
+            }),
+            None,
+            "inheriting an unset name invented a value"
+        );
+
+        // Setting it does configure it, with no help from the parent.
+        let chosen = [("ROTEIRO_SEAM_PROBE", std::ffi::OsString::from("/chosen"))];
+        assert_eq!(
+            value(&ChildEnv {
+                set: &chosen,
+                ..ChildEnv::default()
+            }),
+            Some(std::ffi::OsString::from("/chosen"))
+        );
+
+        // And when a caller says both, the constraint wins over the ambient
+        // value — `HOME` stands in for "a name the parent really does have".
+        let home = [("HOME", std::ffi::OsString::from("/chosen-home"))];
+        let mut command = std::process::Command::new("true");
+        scrub_environment(
+            &mut command,
+            &ChildEnv {
+                inherit: &["HOME"],
+                set: &home,
+            },
+        );
+        let passed: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = command
+            .get_envs()
+            .filter(|(k, _)| *k == std::ffi::OsStr::new("HOME"))
+            .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+        assert_eq!(
+            passed,
+            vec![(
+                std::ffi::OsString::from("HOME"),
+                Some(std::ffi::OsString::from("/chosen-home"))
+            )],
+            "an inherited name overrode a value this process chose"
         );
     }
 
