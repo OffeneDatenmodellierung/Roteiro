@@ -39,6 +39,77 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Is this run a release-plz version-bump PR?
+  #
+  # release-plz opens a PR whose entire diff is version fields and changelog
+  # prose — for v1.25.0 (#479) exactly five files: `Cargo.toml`, `Cargo.lock`
+  # and three `CHANGELOG.md`, 9 lines changed in each manifest and pure
+  # additions in the changelogs. Building the full matrix for that cost 888
+  # job-seconds on the `pull_request` event alone (checks 240s, coverage 452s,
+  # default-features 145s, msrv 51s). And it recurs: release-plz opens a NEW PR
+  # on a NEW timestamped branch every time `main` moves and closes the previous
+  # one — three in eight minutes on 2026-08-19 — each firing the whole matrix.
+  #
+  # THE CONSTRAINT THAT SHAPES EVERYTHING BELOW. `main` requires the status
+  # checks `checks`, `default-features` and `msrv`. Per GitHub's documentation,
+  # a workflow skipped by path, branch or commit-message filtering leaves its
+  # "associated checks ... in a 'Pending' state" and "a pull request that
+  # requires those checks to be successful will be blocked from merging". So a
+  # workflow-level `paths-ignore`/`branches-ignore` here would not save runner
+  # time, it would make every future release PR permanently unmergeable without
+  # an admin bypass, with nothing showing red to explain why. That is the same
+  # trap that disqualified `website.yml`'s path-filtered jobs from being
+  # required checks. Do not reach for a workflow-level filter.
+  #
+  # A job-level `if:` would in fact be safe — GitHub documents that "a job that
+  # is skipped will report its status as 'Success'. It will not prevent a pull
+  # request from merging, even if it is a required check", and lists `skipped`
+  # among the successful check statuses alongside `success` and `neutral`. That
+  # was checked rather than assumed, precisely because the failure mode is
+  # permanent.
+  #
+  # These three jobs nonetheless RUN on a release PR, and skip at the STEP
+  # level, for a reason that is not timidity about the above: skipping the whole
+  # job would mean verifying nothing, and a version bump is not a no-op. It can
+  # desynchronise `Cargo.lock` from the manifests, and it can move a `version =`
+  # constraint on a workspace path dependency ahead of the member it points at.
+  # release-plz rewrites the workspace `version` AND the pinned `version =` on
+  # all eight path dependencies in `Cargo.toml`, so that shape is not
+  # hypothetical. `cargo metadata --locked` catches both in well under a second
+  # without compiling anything, and it can only run if the job runs.
+  #
+  # Both halves were confirmed by injecting them into this workspace:
+  #   - workspace `version` bumped, `Cargo.lock` left behind
+  #     -> "cannot update the lock file ... because --locked was passed", exit 101
+  #   - `rto-exec`'s path-dependency constraint moved to 1.26.0, member at 1.25.0
+  #     -> "failed to select a version for the requirement `rto-exec = ^1.26.0`",
+  #        exit 101
+  #
+  # So the required contexts are satisfied by a genuine `success` from a job
+  # that actually verified something, rather than by `skipped`-counts-as-success
+  # semantics. The premium is roughly ten seconds of runner setup per job.
+  #
+  # What is deliberately NOT re-verified, and why it is proportionate: the
+  # compile-and-test steps below cannot be affected by changelog prose, and
+  # `roteiro.toml` already excludes `**/CHANGELOG.md` and `**/Cargo.toml` from
+  # the debt scan that `roteiro check` runs — the project's own gate declares
+  # exactly these files out of scope. `cargo audit`/`cargo deny` read
+  # `Cargo.lock`, but a release bump changes only this workspace's own version
+  # entries, never a third-party dependency, so no advisory surface moves.
+  #
+  # On the predicate: verified against the real branch names, which look like
+  # `release-plz-2026-08-19T09-59-50Z`. `github.head_ref` is empty on `push`, so
+  # the `event_name` guard makes this false on `main` regardless. Note that
+  # `env` is NOT available in a job-level `if:` — only in step-level ones — so
+  # the `coverage` job below spells the predicate out longhand. Do not "tidy"
+  # that into `env.RELEASE_PR`; it would silently stop matching.
+  #
+  # If a human pushes a real change onto a release-plz branch, it rides this
+  # cheap path and is NOT fully tested. In practice release-plz regenerates the
+  # branch from scratch on the next merge, so such edits are transient and get
+  # discarded rather than merged — but the gap is real, and the answer is to
+  # move the change to its own branch, where the full matrix runs.
+  RELEASE_PR: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-') }}
 
 jobs:
   checks:
@@ -60,13 +131,18 @@ jobs:
       # (`--all-features`), `default-features`, `msrv` (1.94) and `coverage`
       # (`-C instrument-coverage`) produce genuinely different artefacts, and a
       # `shared-key` across them would thrash.
+      # Restoring (and re-saving) ~1.4 GB of build artefacts to run `cargo
+      # metadata` would cost far more than the check it serves, so a release PR
+      # skips the cache entirely rather than warming one it will not use.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
       # The opt-in `serve` feature builds vendored llama.cpp (ADR-0006), which
       # `--all-features` below pulls in. cmake + libclang (bindgen) are required;
       # the compiled artefacts are cached by rust-cache across runs.
       - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
+        if: env.RELEASE_PR != 'true'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
       # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
       # brings two build requirements that are real and not optional.
@@ -88,16 +164,29 @@ jobs:
       # a 26 MB download out of three jobs' critical path. Do not remove this on
       # the grounds that the build now works without it.
       - name: Install protoc (`exec-boxlite` feature)
+        if: env.RELEASE_PR != 'true'
         run: sudo apt-get install -y protobuf-compiler
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
+        if: env.RELEASE_PR != 'true'
         run: python3 scripts/provision-sandbox-runtime.py --github-env
+      # The whole of a release PR's verification in this job. See the
+      # `RELEASE_PR` comment at the top of this file for what it catches, what
+      # it deliberately does not, and why the job runs at all rather than being
+      # skipped outright.
+      - name: Manifests and lockfile agree (release PR)
+        if: env.RELEASE_PR == 'true'
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Format
+        if: env.RELEASE_PR != 'true'
         run: cargo fmt --all --check
       - name: Clippy
+        if: env.RELEASE_PR != 'true'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
+        if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --all-features
       - name: Dogfood (roteiro check)
+        if: env.RELEASE_PR != 'true'
         run: cargo run -p roteiro -- check
       # DO NOT "fix" this to match the deny step below. `cargo audit` reads
       # **Cargo.lock**, which lists every optional dependency regardless of which
@@ -111,6 +200,7 @@ jobs:
       # `unmaintained` advisories, so `cargo deny check advisories` — which exits
       # 1 on them — is the enforcing gate of the two.
       - name: Audit
+        if: env.RELEASE_PR != 'true'
         run: |
           cargo install cargo-audit --locked
           cargo audit
@@ -121,6 +211,7 @@ jobs:
       # anything — so this does **not** build llama.cpp or the tree-sitter
       # grammars and costs under a second on top of the install (ADR-0017).
       - name: Deny (licenses, bans, advisories) across the feature matrix
+        if: env.RELEASE_PR != 'true'
         run: |
           cargo install cargo-deny --locked
           cargo deny --all-features check
@@ -170,19 +261,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: rustfmt, clippy
-      # A failed run must still save its cache, as above.
+      # A failed run must still save its cache, as above. Skipped on a release
+      # PR for the reason given in the `checks` job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
       - name: Install C/C++ toolchain (`rto-llama` dev-dependency, see above)
+        if: env.RELEASE_PR != 'true'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+      # The whole of a release PR's verification in this job — see the
+      # `RELEASE_PR` comment at the top of this file.
+      - name: Manifests and lockfile agree (release PR)
+        if: env.RELEASE_PR == 'true'
+        run: cargo metadata --locked --format-version 1 > /dev/null
       # rustfmt does not evaluate `cfg`, so this cannot differ from the `checks`
       # job's formatting step. Kept anyway: it costs seconds, and it makes this
       # job a complete statement of "the default set is healthy" rather than one
       # that quietly depends on another job having run.
       - name: Format
+        if: env.RELEASE_PR != 'true'
         run: cargo fmt --all --check
       - name: Clippy (default features)
+        if: env.RELEASE_PR != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
       # `--no-fail-fast` because plain `cargo test` stops at the first failing
       # test binary, which makes the aggregate pass/fail counts a lower bound
@@ -190,6 +291,7 @@ jobs:
       # extra minutes when the whole point of the job is to find out what state
       # this feature set is in.
       - name: Test (default features)
+        if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-fail-fast
 
   # Test coverage — MEASURING, NOT BLOCKING (issue #319).
@@ -236,7 +338,21 @@ jobs:
     # `strict`, so a branch must be up to date before merging and that class of
     # break is much less likely — but less likely is not impossible, and those
     # two jobs are cheap. This one is not.
-    if: github.event_name == 'pull_request'
+    #
+    # The release-plz exclusion added alongside it closes the hole that gating
+    # on `pull_request` alone left open: a release PR IS a pull request, so this
+    # job — the single most expensive in the matrix at 452s — ran in full on
+    # every version bump. Gating out the `push` half removed the cheap
+    # duplication and kept the expensive half. There is no coverage delta to
+    # read on a diff of version fields and changelog prose.
+    #
+    # This one is a JOB-level `if:`, unlike the step-level gates in the three
+    # jobs above, and that asymmetry is deliberate: `coverage` is not a required
+    # status check, so nothing here depends on how branch protection treats a
+    # skipped job. It can be skipped outright for the full saving. The predicate
+    # is spelled out longhand because the `env` context is not available in a
+    # job-level `if:` — `env.RELEASE_PR` would silently never match here.
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -309,11 +425,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.94"
-      # A failed run must still save its cache, as above.
+      # A failed run must still save its cache, as above. Skipped on a release
+      # PR for the reason given in the `checks` job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
       - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
+        if: env.RELEASE_PR != 'true'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
       # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
       # brings two build requirements that are real and not optional.
@@ -335,12 +454,26 @@ jobs:
       # a 26 MB download out of three jobs' critical path. Do not remove this on
       # the grounds that the build now works without it.
       - name: Install protoc (`exec-boxlite` feature)
+        if: env.RELEASE_PR != 'true'
         run: sudo apt-get install -y protobuf-compiler
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
+        if: env.RELEASE_PR != 'true'
         run: python3 scripts/provision-sandbox-runtime.py --github-env
+      # The whole of a release PR's verification in this job — see the
+      # `RELEASE_PR` comment at the top of this file. Running it on the 1.94
+      # toolchain rather than stable earns this job something the other two
+      # cannot: it proves the `Cargo.lock` release-plz just rewrote is still
+      # parseable by MSRV cargo. A lockfile regenerated in a newer format is a
+      # real way for a version bump to break the MSRV build, and it is exactly
+      # what this job exists to notice.
+      - name: Manifests and lockfile agree, on MSRV cargo (release PR)
+        if: env.RELEASE_PR == 'true'
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Build on MSRV
+        if: env.RELEASE_PR != 'true'
         run: cargo check --workspace --all-features
       - name: Audit on MSRV lockfile
+        if: env.RELEASE_PR != 'true'
         run: |
           cargo install cargo-audit --locked
           cargo audit
