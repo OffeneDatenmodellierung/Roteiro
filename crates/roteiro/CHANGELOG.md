@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.23.0...roteiro-v1.24.0) - 2026-08-19
+
+### Added
+
+- *(lint)* the sandboxed builder, so sandbox-by-default has something to select
+- *(lint)* sandboxed by default; host execution is opt-in and layered
+- *(lint)* report clippy at a point in time, and store none of it
+
+### Fixed
+
+- *(lint)* a refusal has two axes to be blind to, not one
+- *(lint)* build refusals from lines, and test the default feature set
+- *(lint)* refuse a relative scratch root; snapshot contents, not names
+- *(lint)* set the scratch target dir rather than inheriting it
+
+### Other
+
+- Merge pull request #455 from OffeneDatenmodellierung/feat/sandboxed-builder
+- Merge pull request #444 from OffeneDatenmodellierung/feat/website-rendered-pages
+
 ## [1.23.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.22.0...roteiro-v1.23.0) - 2026-08-18
 
 ### Fixed

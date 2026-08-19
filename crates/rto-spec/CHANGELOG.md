@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.23.0...rto-spec-v1.24.0) - 2026-08-19
+
+### Added
+
+- *(check)* the website becomes a document class the gate can see
+
 ## [1.23.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.22.0...rto-spec-v1.23.0) - 2026-08-18
 
 ### Added
