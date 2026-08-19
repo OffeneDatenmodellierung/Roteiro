@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.5"
-last-modified: 2026-08-18
+version: "1.6"
+last-modified: 2026-08-19
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Security Tooling |
-| **Document version** | 1.5 |
+| **Document version** | 1.6 |
 
 ## Reference
 
@@ -187,6 +187,80 @@ An optional feature that pulls images or refreshes advisory databases must not b
 described as "offline"; it is **offline-capable once provisioned**, and the docs
 must say so in those words.
 
+### The cache is reused, and dropped on demand — never on a schedule
+
+The asset cache exists to be **reused**. Provisioning a sandbox is expensive —
+2.9 GB of image and runtime on the machine this was written on — and a boundary
+that costs minutes on every run is a boundary people switch off. Reuse is the
+feature that makes the default in [[docs/adr/0020-build-capable-sandboxed-execution.md]] §6
+survivable, not an optimisation on top of it.
+
+But reuse with no way out is a trap, and today there is no way out. `prefetch`
+obtains and `status` reports; **nothing removes**. Someone who wants a clean
+build, or who distrusts a cached layer, or who simply wants the disk back, has
+`rm -rf` and a guess about which directory. So provisioning gains its third verb
+— `clear` alongside `prefetch` and `status` — governed by three rules.
+
+**It is a command, not a setting.** There is no config key for it, deliberately.
+A key that drops a cache is a *standing instruction to throw work away*, and it
+would fire when nobody was looking; the entire value of the verb is that it
+happens at a moment a person chose. This is the distinction
+[[docs/adr/0013-agent-memory-artifact-store.md]] already draws for the memory
+cache tier — eviction is a **maintenance act, not a preference** — and it is why
+this key is absent from the classification in
+[[docs/adr/0007-configuration-file.md]] rather than being a value in it.
+
+**It is safe by construction, not by care.** Everything under the asset cache is
+re-obtainable from a pinned digest, so clearing costs time and never
+information: ADR-0013's *re-derivable ⇒ evictable*. That property is what makes a
+destructive verb acceptable at all, and it is therefore also its **limit** — the
+verb may never reach anything that is not re-obtainable. A findings layer is not
+re-obtainable; neither is a memory record. `clear` does not touch the store.
+
+**And what may be shared is decided per artifact, not once.** The word "shared"
+hides two different things:
+
+- **Content-addressed and verified → shareable across repositories.** A pinned
+  image, a runtime archive, a package cache whose entries carry checksums the
+  toolchain verifies. A poisoned entry fails verification rather than executing,
+  so sharing costs nothing.
+- **Not content-addressed, and holding executables → per repository.** A build
+  scratch directory holds *compiled build scripts*. Sharing one across
+  repositories would let a build script from one repository leave something a
+  build in another picks up — which is the execution boundary this ADR exists
+  to draw, defeated through a cache rather than through a mount. Cheap to get
+  right up front and very hard to notice once wrong.
+
+Which package caches actually satisfy the first test is per-ecosystem and is
+**not settled here**: Cargo verifies registry checksums, npm records integrity
+hashes, and other ecosystems are weaker. An ecosystem whose cache cannot be
+verified gets the second treatment, not the benefit of the doubt.
+
+### `clear` on the MCP surface, and the line it crosses
+
+The MCP tools are read-only, and `security run` was refused partly for mutating.
+`clear` mutates too, and is nevertheless offered — which is a line worth crossing
+deliberately rather than by extension.
+
+The rule the read-only stance was really protecting is that **a model must not
+change what the graph says**. `clear` changes nothing the graph says. It makes
+the next run slower and that is the whole of its effect, because everything it
+touches is re-obtainable by digest. `security run` is genuinely different: it
+writes a findings layer, which *is* a change to what Roteiro reports about your
+code.
+
+So the boundary for a mutating MCP tool is stated positively rather than as an
+exception: **a tool may drop state that is re-obtainable from a pinned digest,
+and may drop nothing else.** That is the same test that makes the CLI verb safe,
+applied unchanged, which is what stops it becoming a precedent for a second
+mutating tool that is not safe for the same reason.
+
+Two obligations follow. The tool **reports what it freed**, so the cost appears
+in the transcript rather than being discovered later as an unexplained re-pull.
+And it is **not offered a scope it cannot justify** — clearing an analyzer's
+assets and clearing everything are different requests and should be different
+arguments, so a model asking for one cannot receive the other.
+
 ### The sandbox runtime: verified where it enters the artifact
 
 `boxlite` compiled from crates.io does not build a hypervisor. Its own build
@@ -293,3 +367,4 @@ be.
 | 1.3 | 2026-08-17 | **The sandbox runtime is verified where it enters the artifact: the extracted files, not the archive.** `boxlite`'s own build script is what fetches, it reads `BOXLITE_RUNTIME_URL` from its own environment, and cargo runs it before `rto-exec`'s — so requiring that variable could never have been what kept the fetch honest, only what kept the build from completing. Measured: with the build script patched to proceed and the variable unset, the build succeeds and `boxlite` embeds 58.4 MB fetched over the network while the verified local archive is never opened. `rto-exec/build.rs` now verifies every file in `DEP_BOXLITE_RUNTIME_DIR` against per-file digests derived from the pinned archives (`scripts/derive-runtime-file-pins.py`), refusing a mismatch, a missing file, an unpinned extra file, or a runtime that was never extracted. **The guarantee is unchanged in strength and now attaches to the bytes that are actually built in** — but it is taken after extraction rather than before the download, and that trade, including the residual path-traversal exposure it opens on the default path, is stated in full above rather than left implicit. Enabling `exec-boxlite` (or `--all-features`) is the consent for the fetch; the disclosure rides `cargo:warning=`, which cargo shows for a dependency's build script on success under both `cargo build` and `cargo install`. `BOXLITE_RUNTIME_URL` remains the strict, no-egress path and is what CI uses. |
 | 1.4 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
 | 1.5 | 2026-08-18 | **The sandboxed backend becomes reachable, and becomes the default path of `security run`.** Since Stage 24 `BoxliteRunner` was built, tested (`crates/rto-exec/tests/backend_parity.rs`) and specified here, but `run_security_run` hard-coded `SubprocessRunner` — the isolation boundary this ADR exists to provide could not be asked for from the CLI at all. `security run` now selects the sandbox when **no** flag is given; `--allow-unsandboxed` is what selects the host, and it selects it outright. Three obligations follow and are tested: (a) **no fallback, in either direction.** There is deliberately no input meaning "sandbox, or the host if that fails" — a missing feature, an unpulled image, an unprovisioned asset or an absent hypervisor is a named refusal naming the fix, never a quiet host run, because `RunnerKind`/`isolation` on the stored layer would then be a false statement about how those findings were produced (ADR-0019 §6). (b) **`--allow-unsandboxed` is untouched.** v1.2's warning holds without amendment: it is still required per invocation for the host path, still records `isolation=none`, and the sandbox existing is not a reason to imply or retire it. (c) **`exec-boxlite` stays off by default and the CLI surface does not move with it.** `run` and both flags parse in every build; only the capability is conditional, and it refuses in a sentence that names the feature and the four-step bootstrap. Gating the clap variant instead is how `roteiro model rm` shipped invisible to crates.io users, and is not repeated here. The human line describing isolation is now read back out of the stored `AnalysisRun` rather than from the calling function, so the sentence a user reads and the row `security list` returns cannot disagree. |
+| 1.6 | 2026-08-19 | **Provisioning gains its third verb.** `prefetch` obtains and `status` reports; nothing removed, so a user wanting a clean build or the disk back had `rm -rf` and a guess — against 2.9 GB of cached image and runtime. Records that the cache exists to be **reused**, because a boundary costing minutes per run is one people switch off, and that `clear` is a **command and never a config key**: a setting that drops a cache is a standing instruction to throw work away that fires when nobody is looking, where ADR-0013 already holds eviction to be a maintenance act rather than a preference. Its safety and its limit are the same property — everything under the asset cache is re-obtainable from a pinned digest, so `clear` costs time and never information, and may therefore never reach the store. Distinguishes **content-addressed, verified** artifacts (shareable across repositories) from a **build scratch holding compiled build scripts** (per repository, because sharing one would defeat this ADR's execution boundary through a cache rather than through a mount); which package caches qualify is per-ecosystem and deliberately unsettled. Finally, admits `clear` to the MCP surface as its **first mutating tool**, with the permission stated positively so it does not become a precedent by extension: a tool may drop state re-obtainable from a pinned digest and nothing else, must report what it freed, and must not be given a scope wider than the request. |
