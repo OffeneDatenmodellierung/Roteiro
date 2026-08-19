@@ -1,5 +1,7 @@
 //! Small text helpers shared across the crates that build and render the graph.
 
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
 /// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`,
 /// trimmed of leading/trailing `-`.
 ///
@@ -33,9 +35,79 @@ pub fn slugify(s: &str) -> String {
     out.trim_matches('-').to_owned()
 }
 
+/// The Markdown dialect every heading rule in the project reads with.
+///
+/// It must stay the set `rto_render` renders with, because the whole point of
+/// reading a heading through the parser is that the *dialect* decides where its
+/// text ends. `ENABLE_HEADING_ATTRIBUTES` is what makes `{#anchor}` an attribute
+/// block rather than four literal characters; the other two are here because a
+/// `~~strikethrough~~` inside a heading has to reduce to the same text on both
+/// surfaces, not because a heading contains a table.
+fn heading_options() -> Options {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
+    opts
+}
+
+/// The visible text of the first `# ` heading in `md`, or `None` when there is
+/// none — including a `#` that opens an empty heading, which names nothing and
+/// so defers to whatever fallback the caller has (a slug, a file stem, `ADR-nnnn`).
+///
+/// # Why this lives here rather than in either caller
+///
+/// The same argument as [`slugify`] directly above, one step earlier in the
+/// pipeline: a document's H1 becomes both a **node title** in the authored layer
+/// (`rto_spec` puts it on `site:`/`blueprint:` nodes, which is what `roteiro
+/// search` prints) and the **`<title>`/`<h1>`** of the rendered page
+/// (`rto_render`). Neither crate can borrow the other's copy — `rto_render`
+/// depends on `rto_spec` only under `mcp` — so this is the one place the rule can
+/// sit and be the only copy of itself.
+///
+/// **Read with the parser, never scanned.** A line scan cannot know that `#`
+/// inside a fenced block is a code sample rather than a heading, that
+/// `Title` over `===` *is* an H1, or where an attribute block ends — and it is
+/// the last of those that put a literal `{#modes}` into graph node titles (#469).
+#[must_use]
+pub fn first_h1(md: &str) -> Option<String> {
+    let mut text: Option<String> = None;
+    for event in Parser::new_ext(md, heading_options()) {
+        match event {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) => text = Some(String::new()),
+            // Only accumulates once an H1 has opened; a code span is part of the
+            // heading's text, exactly as it is for the heading's id.
+            Event::Text(t) | Event::Code(t) => {
+                if let Some(text) = text.as_mut() {
+                    text.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(HeadingLevel::H1)) => break,
+            _ => {}
+        }
+    }
+    text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
+}
+
+/// The visible text of a heading whose Markdown *source content* is `source` —
+/// the part after the `## `, with the markup that produced it removed.
+///
+/// The same rule as [`first_h1`] and literally the same code path: `source` is
+/// read back as a heading, so an attribute block, a code span or an inline link
+/// reduces here exactly as it does for the document's H1 and for the heading
+/// `rto_render` emits. Callers pass one line (a `## ` heading cannot span lines);
+/// anything after a newline in `source` is a separate block and is ignored.
+#[must_use]
+pub fn heading_text(source: &str) -> String {
+    first_h1(&format!("# {source}")).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::slugify;
+    use super::{first_h1, heading_text, slugify};
 
     #[test]
     fn collapses_punctuation_and_trims() {
@@ -50,5 +122,80 @@ mod tests {
             "cross-repo-a-hub-and-its-spokes"
         );
         assert_eq!(slugify("!!!"), "");
+    }
+
+    #[test]
+    fn an_attribute_block_is_markup_not_part_of_the_title() {
+        // The defect behind #469: a line scan yields `… {#modes}`, and that
+        // string became a `site:` node title — invisible in the rendered page,
+        // present in everything that reads the graph.
+        let title = first_h1("# The five ways to run it {#modes}\n").expect("an h1");
+        assert_eq!(title, "The five ways to run it");
+        assert!(
+            !title.contains("{#"),
+            "an attribute block must not survive into a title: {title:?}"
+        );
+    }
+
+    #[test]
+    fn both_entry_points_agree_on_where_a_heading_ends() {
+        // Not a literal assertion, deliberately. `# Sets like {#1, #2}` is a real
+        // ambiguity and the *dialect* decides it — so what is worth pinning is
+        // that the document rule and the `## `-heading rule cannot decide it
+        // differently, whichever way the parser goes.
+        for source in [
+            "The five ways to run it {#modes}",
+            "Sets like {#1, #2}",
+            "The `--json` flag",
+            "See [the docs](x.md)",
+            "A ~~retracted~~ claim",
+            "Install & build",
+            "",
+        ] {
+            assert_eq!(
+                first_h1(&format!("# {source}")).unwrap_or_default(),
+                heading_text(source),
+                "the two entry points disagreed about {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_heading_inside_a_fence_is_a_code_sample() {
+        // A line scan cannot tell these apart; it is why a document *about*
+        // blueprints could classify itself as one.
+        let md = "```\n# Widget — Technical Implementation Plan\n```\n\n# Real title\n";
+        assert_eq!(first_h1(md).as_deref(), Some("Real title"));
+        assert_eq!(
+            first_h1("```\n# Fenced only\n```\n"),
+            None,
+            "a fenced `#` is not a heading at all"
+        );
+    }
+
+    #[test]
+    fn a_setext_heading_is_an_h1() {
+        assert_eq!(
+            first_h1("Underlined title\n===\n").as_deref(),
+            Some("Underlined title")
+        );
+    }
+
+    #[test]
+    fn an_empty_heading_names_nothing() {
+        // Defers to the caller's fallback (a slug, a file stem, `ADR-nnnn`)
+        // rather than titling a node with the empty string.
+        assert_eq!(first_h1("#\n\n# Second\n"), None);
+        assert_eq!(heading_text(""), "");
+    }
+
+    #[test]
+    fn heading_text_feeds_slugify_the_text_a_reader_sees() {
+        // The two rules in this module are one pipeline: the section key is the
+        // slug of the visible text, so markup must be gone before slugify runs.
+        assert_eq!(
+            slugify(&heading_text("1 · Offline mode — the default {#offline}")),
+            "1-offline-mode-the-default"
+        );
     }
 }

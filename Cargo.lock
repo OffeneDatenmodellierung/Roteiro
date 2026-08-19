@@ -4274,6 +4274,7 @@ dependencies = [
  "image",
  "ocrs",
  "pdf-extract",
+ "pulldown-cmark",
  "rten",
  "rto-llama",
  "rusqlite",

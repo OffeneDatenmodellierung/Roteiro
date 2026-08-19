@@ -279,7 +279,7 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
 
     let title = fm_title
         .filter(|s| !s.is_empty())
-        .or_else(|| first_h1(body))
+        .or_else(|| crate::text::first_h1(body))
         .unwrap_or_else(|| format!("ADR-{id}"));
 
     // Walk the body, tracking the current section so links are attributed to it.
@@ -401,13 +401,6 @@ pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
             None => ("", text),
         },
     }
-}
-
-/// The text of the first `# ` heading in `body`, if any. Shared with
-/// [`crate::blueprint`] for title extraction and blueprint detection.
-pub(crate) fn first_h1(body: &str) -> Option<String> {
-    body.lines()
-        .find_map(|l| l.strip_prefix("# ").map(|h| h.trim().to_owned()))
 }
 
 /// Clean a raw frontmatter value: trim, drop a trailing ` #…` inline comment
@@ -542,5 +535,17 @@ mod tests {
             "options-considered-consequences"
         );
         assert_eq!(slugify("  Reference  "), "reference");
+    }
+
+    #[test]
+    fn an_adr_title_falling_back_to_its_h1_carries_no_markup() {
+        // `title:` in frontmatter wins; without it the H1 is the ADR node's
+        // title, and an anchored or emphasised H1 must still name the decision.
+        let adr = parse_adr(
+            "docs/adr/0021-x.md",
+            "---\nadr-id: 0021\nstatus: Accepted\n---\n\n# Sandboxed *linting* {#lint}\n",
+        )
+        .expect("parse");
+        assert_eq!(adr.meta.title, "Sandboxed linting");
     }
 }
