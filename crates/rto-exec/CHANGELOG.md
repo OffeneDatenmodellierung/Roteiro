@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.23.0...rto-exec-v1.24.0) - 2026-08-19
+
+### Added
+
+- *(lint)* the sandboxed builder, so sandbox-by-default has something to select
+- *(lint)* sandboxed by default; host execution is opt-in and layered
+- *(lint)* report clippy at a point in time, and store none of it
+
+### Fixed
+
+- *(lint)* build refusals from lines, and test the default feature set
+- *(lint)* refuse a relative scratch root; snapshot contents, not names
+- *(lint)* set the scratch target dir rather than inheriting it
+
 ## [1.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.14.0...rto-exec-v1.15.0) - 2026-08-17
 
 ### Added

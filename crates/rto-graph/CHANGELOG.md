@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.23.0...rto-graph-v1.24.0) - 2026-08-19
+
+### Added
+
+- *(check)* the website becomes a document class the gate can see
+
+### Fixed
+
+- *(memory)* recall reads `limit = 0` the way every other lens does
+
 ## [1.22.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.21.1...rto-graph-v1.22.0) - 2026-08-18
 
 ### Added
