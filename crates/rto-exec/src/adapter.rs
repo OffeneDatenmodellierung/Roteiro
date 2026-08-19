@@ -181,6 +181,29 @@ pub trait Adapter: Sync + std::fmt::Debug {
     /// [`crate::assets`]). An empty slice means it needs none.
     fn asset_ids(&self) -> &'static [&'static str];
 
+    /// Which programs must be on `PATH` for this analyzer to run **on this host**,
+    /// in the order a reader would install them.
+    ///
+    /// The counterpart of [`Adapter::asset_ids`], and the reason both exist:
+    /// asset ids are what Roteiro *provisions*, and these are what it
+    /// deliberately **never installs** (ADR-0014). `roteiro security status`
+    /// reports the two separately because their remedies differ — `prefetch` for
+    /// the first, an install the host owner performs for the second — and
+    /// collapsing them into one word is issue #464.
+    ///
+    /// # Why this is declared and not read off [`Adapter::command`]
+    ///
+    /// Because [`Invocation::program`] is not always the thing to look for.
+    /// `cargo-audit`'s program is `cargo`, and `cargo audit` dispatches to a
+    /// separate `cargo-audit` binary on `PATH` — so probing `Invocation::program`
+    /// would find `cargo` on any Rust developer's machine and report *ready* in
+    /// precisely the commonest failure, `cargo` installed and `cargo-audit` not.
+    /// That is the defect #464 is about, reintroduced one level down. An adapter
+    /// therefore states its own requirement.
+    ///
+    /// Empty means the analyzer needs nothing on `PATH`.
+    fn host_programs(&self) -> &'static [&'static str];
+
     /// The argv that makes the analyzer emit the native format
     /// [`Adapter::normalize`] parses, with egress configured off.
     ///

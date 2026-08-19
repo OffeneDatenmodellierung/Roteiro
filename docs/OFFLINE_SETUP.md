@@ -366,6 +366,25 @@ roteiro security status           # each asset: digest, when fetched, DB age
 asset's digest and fetch time, and how old the advisory database is — a stale DB
 still runs, but every result is marked possibly-stale rather than current.
 
+Read the `analyzers` block, not only the `assets` block. Each analyzer reports one
+of three states, because provisioning and installing are different things with
+different fixes:
+
+```
+analyzers
+  semgrep      ready                          [rust, python, …]
+  cargo-audit  binary not found: cargo-audit  [rust]
+               not on PATH: cargo-audit — Roteiro does not install analyzers; …
+  osv-scanner  assets not provisioned         [python, java, …]
+               run `roteiro security prefetch` to provision its assets
+```
+
+`ready` means both: the pinned assets are provisioned **and** the analyzer's own
+program is on `PATH`. `roteiro security prefetch` fixes the second row's
+neighbour and cannot fix the second row — Roteiro never installs an analyzer, so
+that one is yours to install before you unplug. This is the check worth doing on
+the ground: `prefetch` needs the network, and so does whatever you would install.
+
 A run **never** provisions. On a cold cache it refuses and names the fix rather
 than reaching for the network or falling back to whatever the host happens to
 have installed:

@@ -118,6 +118,10 @@ impl Adapter for OsvScanner {
         &[DB_ASSET]
     }
 
+    fn host_programs(&self) -> &'static [&'static str] {
+        &["osv-scanner"]
+    }
+
     fn command(&self, assets: &AssetPaths<'_>) -> Invocation {
         Invocation {
             program: "osv-scanner".to_owned(),
