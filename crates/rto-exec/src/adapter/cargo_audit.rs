@@ -30,7 +30,8 @@
 
 use serde::Deserialize;
 
-use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
+use crate::adapter::{Adapter, AssetPaths, InstallHint, Invocation, NativeContext, RUST_TOOLCHAIN};
+use crate::guidance::{Guidance, Line};
 use crate::ingest::{NormalizedReport, REPORT_SCHEMA, ReportFinding};
 use crate::runner::ExecError;
 use rto_graph::{AdvisoryDb, Severity};
@@ -40,6 +41,39 @@ pub const ANALYZER: &str = "cargo-audit";
 
 /// Asset id of the pinned `RustSec` advisory database.
 pub const ADVISORY_DB_ASSET: &str = "rustsec-advisory-db";
+
+/// How to obtain each of this adapter's two programs.
+///
+/// **Two hints, because they are two different problems.** A reader missing
+/// `cargo-audit` has cargo already and wants one `cargo install`; a reader
+/// missing `cargo` has neither and wants rustup. Sending the first to an
+/// installer they do not need is the wrong *kind* of way forward — the failure
+/// `docs/REVIEW_CHECKLIST.md` records as having cost an hour here — so the hints
+/// are keyed by program and this is the clearest case of why.
+///
+/// Upstream's README documents exactly `cargo install cargo-audit`, and **not**
+/// `--locked`. The flag is a plausible improvement and is not what upstream
+/// says, so it is not what is printed: this is the command that is known to
+/// work. That README's remaining entries are `apk`, `pacman`, `brew` and
+/// `pkg_add` — four platform guesses — which is why the ecosystem command is the
+/// one worth printing and the page is carried alongside it.
+const INSTALL_HINTS: &[InstallHint] = &[
+    InstallHint {
+        program: "cargo",
+        guidance: RUST_TOOLCHAIN,
+    },
+    InstallHint {
+        program: "cargo-audit",
+        guidance: Guidance::new(&[
+            Line::Note(&[
+                "Roteiro does not install analyzers, and has not installed this one.",
+                "`cargo audit` is a cargo subcommand, installed with:",
+            ]),
+            Line::Command("cargo install cargo-audit"),
+            Line::Note(&["Upstream: https://github.com/rustsec/rustsec/tree/main/cargo-audit"]),
+        ]),
+    },
+];
 
 /// Stands in for the lockfile blob in a finding's identity when the caller could
 /// not determine one.
@@ -85,6 +119,10 @@ impl Adapter for CargoAudit {
         // instead. Naming `cargo-audit` here is what makes the *status* honest
         // about it before a run is attempted.
         &["cargo", "cargo-audit"]
+    }
+
+    fn install_hints(&self) -> &'static [InstallHint] {
+        INSTALL_HINTS
     }
 
     fn command(&self, assets: &AssetPaths<'_>) -> Invocation {

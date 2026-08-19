@@ -50,6 +50,7 @@ use rto_graph::{Isolation, RunnerKind};
 use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
 use crate::assets;
 use crate::clock::rfc3339_utc;
+use crate::guidance::{Guidance, Line};
 use crate::ingest::assemble;
 use crate::runner::{AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_request};
 use crate::snippet::WorktreeSnippets;
@@ -60,6 +61,31 @@ use crate::snippet::WorktreeSnippets;
 /// parsed; this bounds it before, so a runaway analyzer cannot exhaust memory on
 /// the way there.
 pub const MAX_OUTPUT_BYTES: usize = 256 << 20;
+
+/// ADR-0014's seam (c), said where it is needed rather than where it is
+/// documented.
+///
+/// Appended to the missing-binary refusal **after** the install hint, and never
+/// instead of it: the two answer different readers. Someone who wants the
+/// analyzer here needs the install command; someone whose CI already runs it
+/// needs to know that a normalized report from anywhere reads in through the
+/// same adapter and produces the same findings. The old message had this half
+/// and only this half, which is the part of it worth keeping.
+const INGEST_INSTEAD: Guidance = Guidance::new(&[Line::Note(&[
+    "Or run the analyzer elsewhere — CI, a colleague's machine — and read its",
+    "report in with `roteiro security ingest`, which needs nothing on PATH and",
+    "produces the same findings as a local run.",
+])]);
+
+/// What the missing-binary refusal says when no adapter declares the program.
+///
+/// Unreachable for anything shipped, and deliberately a *shorter* message rather
+/// than a guessed command: a refusal that does not know the way forward should
+/// say less, not invent. See [`SubprocessError::BinaryNotFound`].
+const NO_HINT: Guidance = Guidance::new(&[Line::Note(&[
+    "Roteiro does not install analyzers, and has not installed this one; this",
+    "build knows no install command for that program.",
+])]);
 
 /// Something went wrong executing the analyzer, as opposed to something being
 /// wrong with what it produced.
@@ -80,16 +106,32 @@ pub enum SubprocessError {
         analyzer: String,
     },
     /// The analyzer binary is not on `PATH`.
+    ///
+    /// The refusal issue #430 is about. It used to end at "install it yourself",
+    /// which is the obstacle stated twice and the way forward stated never — so
+    /// it now carries the adapter's own [`crate::adapter::InstallHint`] for the
+    /// program that is missing, and ADR-0014's seam (c) after it. Both halves
+    /// matter: `security run` genuinely cannot proceed here, and `security
+    /// ingest` genuinely can, so a message that named only the install would
+    /// take a capability away from a reader who has a report already.
+    ///
+    /// `install` is `None` only for a program no adapter declares, which no
+    /// shipped invocation reaches — see [`crate::adapter::install_hint`]. The
+    /// fallback sentence is what a future one would get, and says less rather
+    /// than guessing.
     #[error(
-        "analyzer binary `{program}` not found on PATH (needed to run `{analyzer}`). Roteiro does \
-         not install analyzers; install it yourself, or produce the report elsewhere and use \
-         `roteiro security ingest`."
+        "analyzer binary `{program}` not found on PATH (needed to run `{analyzer}`), so nothing \
+         ran.{}{}",
+        .install.map_or(NO_HINT, |hint| hint),
+        INGEST_INSTEAD
     )]
     BinaryNotFound {
         /// The program that was looked for.
         program: String,
         /// The analyzer it belongs to.
         analyzer: String,
+        /// How to obtain `program`, as its adapter declares it.
+        install: Option<Guidance>,
     },
     /// The analyzer could not be started, for a reason other than not existing.
     #[error("could not execute `{program}`: {source}")]
@@ -295,6 +337,12 @@ pub(crate) fn execute(
             SubprocessError::BinaryNotFound {
                 program: invocation.program.clone(),
                 analyzer: analyzer.to_owned(),
+                // Looked up by program, not by analyzer: `cargo-audit`'s
+                // invocation is `cargo`, and its hint is rustup's page rather
+                // than `cargo install cargo-audit`. Handing the reader the
+                // second when the first is what is missing would be a way
+                // forward that does not lead anywhere.
+                install: crate::adapter::install_hint(&invocation.program),
             }
         } else {
             SubprocessError::Spawn {
@@ -681,5 +729,134 @@ mod tests {
     #[test]
     fn the_output_ceiling_is_a_ceiling_not_a_target() {
         assert_eq!(MAX_OUTPUT_BYTES, 256 << 20);
+    }
+
+    /// Issue #430, asserted on the text the reader actually gets.
+    ///
+    /// Three things at once, because the refusal has to do all three and the
+    /// checklist's failure modes are each of them alone: name the obstacle, name
+    /// the *install* (not a rebuild, not a prefetch — this is a third-party
+    /// binary), and keep the alternative that needs no install at all.
+    #[test]
+    fn a_missing_binary_names_the_install_and_keeps_the_ingest_alternative() {
+        let message = SubprocessError::BinaryNotFound {
+            program: "semgrep".to_owned(),
+            analyzer: "semgrep".to_owned(),
+            install: crate::adapter::install_hint("semgrep"),
+        }
+        .to_string();
+
+        assert!(message.contains("not found on PATH"), "{message}");
+        assert!(message.contains("so nothing ran"), "{message}");
+        assert!(message.contains("pipx install semgrep"), "{message}");
+        assert!(
+            message.contains("https://docs.semgrep.dev/getting-started/quickstart"),
+            "a command ages; the page it came from does not: {message}"
+        );
+        assert!(
+            message.contains("roteiro security ingest"),
+            "seam (c) is the best part of the old message and must survive: {message}"
+        );
+        // The rule that separates naming a way forward from taking it. Nothing
+        // here runs an installer, and the message must not read as though
+        // something did.
+        assert!(message.contains("has not installed this one"), "{message}");
+    }
+
+    /// The refusal follows the program, not the analyzer.
+    ///
+    /// `cargo-audit`'s invocation is `cargo`, so this is the message a reader
+    /// with no Rust toolchain gets — and `cargo install cargo-audit` would be
+    /// useless to them. The wrong *kind* of way forward is the failure that has
+    /// shipped here before, so it is asserted rather than assumed.
+    #[test]
+    fn the_hint_follows_the_missing_program_not_the_analyzer() {
+        let message = SubprocessError::BinaryNotFound {
+            program: "cargo".to_owned(),
+            analyzer: "cargo-audit".to_owned(),
+            install: crate::adapter::install_hint("cargo"),
+        }
+        .to_string();
+
+        assert!(message.contains("https://rustup.rs"), "{message}");
+        assert!(
+            !message.contains("cargo install cargo-audit"),
+            "a reader with no cargo cannot run a cargo subcommand install: {message}"
+        );
+    }
+
+    /// `docs/OFFLINE_SETUP.md` quotes this refusal **verbatim**, so the message
+    /// and the document are one contract and this is what holds them together.
+    ///
+    /// The document whose job is telling someone how to prepare is the worst
+    /// place for a stale quote: it is read by a person who cannot check it,
+    /// because they are reading it precisely because the tool is not in front of
+    /// them yet. Editing the message alone fails here, which is the point —
+    /// `lint_sandbox`'s Dockerfile-count test is the same guard for the same
+    /// reason.
+    ///
+    /// **The quoted block, not the file.** The first version of this searched
+    /// the whole document for each line, and passed over a corrupted quote
+    /// because the same install command appears further down in the
+    /// install-commands block — a guard that sampled something cheaper than what
+    /// it claimed to check. The block is located by its opening line and
+    /// compared whole.
+    #[test]
+    fn the_document_quotes_this_refusal_as_it_is_now() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/OFFLINE_SETUP.md")
+            .canonicalize()
+            .expect("the document that quotes the refusal must exist");
+        let text = std::fs::read_to_string(&doc).expect("readable");
+
+        let rendered = SubprocessError::BinaryNotFound {
+            program: "semgrep".to_owned(),
+            analyzer: "semgrep".to_owned(),
+            install: crate::adapter::install_hint("semgrep"),
+        }
+        .to_string();
+
+        let quoted = text
+            .split("```")
+            .find(|block| block.trim_start().starts_with("Error: analyzer binary"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} no longer quotes this refusal at all — the document that tells \
+                     someone how to prepare must show what they will actually see",
+                    doc.display()
+                )
+            })
+            .trim();
+
+        assert_eq!(
+            quoted,
+            format!("Error: {rendered}").trim(),
+            "the quote in {} has drifted from the message",
+            doc.display()
+        );
+
+        // The sentence the old quote ended on, anywhere in the file. A reader
+        // who finds it has been told to install something and not told how,
+        // which is the whole of #430.
+        assert!(
+            !text.contains("install it yourself"),
+            "{} still carries the refusal wording #430 replaced",
+            doc.display()
+        );
+    }
+
+    /// A program no adapter declares says less rather than guessing — and still
+    /// keeps the alternative, because that one is true regardless.
+    #[test]
+    fn an_unknown_program_admits_it_rather_than_inventing_a_command() {
+        let message = SubprocessError::BinaryNotFound {
+            program: "some-future-analyzer".to_owned(),
+            analyzer: "future".to_owned(),
+            install: crate::adapter::install_hint("some-future-analyzer"),
+        }
+        .to_string();
+
+        assert!(message.contains("knows no install command"), "{message}");
+        assert!(message.contains("roteiro security ingest"), "{message}");
     }
 }

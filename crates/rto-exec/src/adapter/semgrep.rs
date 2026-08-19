@@ -29,7 +29,10 @@
 
 use serde::Deserialize;
 
-use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext, snippet_hash_at};
+use crate::adapter::{
+    Adapter, AssetPaths, InstallHint, Invocation, NativeContext, snippet_hash_at,
+};
+use crate::guidance::{Guidance, Line};
 use crate::ingest::{NormalizedReport, REPORT_SCHEMA, ReportFinding};
 use crate::runner::ExecError;
 use rto_graph::{Severity, Span};
@@ -39,6 +42,27 @@ pub const ANALYZER: &str = "semgrep";
 
 /// Asset id of the pinned rule set this adapter runs with.
 pub const RULES_ASSET: &str = "semgrep-rules";
+
+/// How to obtain `semgrep`, for the refusal that finds it absent.
+///
+/// `pipx` is what upstream's install page lists first, ahead of `uv tool install
+/// semgrep`. `brew install semgrep` is on the same page and carries upstream's
+/// own warning that it "often lags behind the latest release", so it is not the
+/// one to print — and it would be a platform guess besides. Read off
+/// <https://docs.semgrep.dev/getting-started/quickstart> rather than recalled:
+/// the `pip install semgrep` an older reader remembers is no longer what that
+/// page recommends.
+const INSTALL_HINTS: &[InstallHint] = &[InstallHint {
+    program: "semgrep",
+    guidance: Guidance::new(&[
+        Line::Note(&[
+            "Roteiro does not install analyzers, and has not installed this one.",
+            "Semgrep's own install page recommends:",
+        ]),
+        Line::Command("pipx install semgrep"),
+        Line::Note(&["Upstream: https://docs.semgrep.dev/getting-started/quickstart"]),
+    ]),
+}];
 
 /// The adapter.
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +97,10 @@ impl Adapter for Semgrep {
 
     fn host_programs(&self) -> &'static [&'static str] {
         &["semgrep"]
+    }
+
+    fn install_hints(&self) -> &'static [InstallHint] {
+        INSTALL_HINTS
     }
 
     fn command(&self, assets: &AssetPaths<'_>) -> Invocation {

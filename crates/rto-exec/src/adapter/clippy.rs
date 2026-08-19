@@ -54,7 +54,10 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext, snippet_hash_at};
+use crate::adapter::{
+    Adapter, AssetPaths, InstallHint, Invocation, NativeContext, RUST_TOOLCHAIN, snippet_hash_at,
+};
+use crate::guidance::{Guidance, Line};
 use crate::ingest::{NormalizedReport, REPORT_SCHEMA, ReportFinding};
 use crate::runner::{ExecError, check_reported_path};
 use rto_graph::{Severity, Span};
@@ -62,6 +65,45 @@ use rto_graph::{Severity, Span};
 /// The analyzer id. It names a **reporting** analyzer, and is never the first
 /// component of a stored key, because nothing this adapter produces is stored.
 pub const ANALYZER: &str = "clippy";
+
+/// The command that adds the linter to an already-installed toolchain.
+///
+/// Named once because two refusals print it: this adapter's install hint, and
+/// [`crate::lint::LintError::AnalyzerNotInstalled`], which is raised by the
+/// probe that finds `cargo clippy --version` failing on a toolchain that has
+/// `cargo`. They are the same instruction reached two ways, and a literal in
+/// each is how they would come to disagree.
+///
+/// Documented at <https://doc.rust-lang.org/clippy/installation.html>, whose
+/// full form is `rustup component add clippy [--toolchain=<name>]`; the optional
+/// part is dropped because a hint has to be pasteable as printed.
+pub const COMPONENT_ADD: &str = "rustup component add clippy";
+
+/// How to obtain each of this linter's two programs.
+///
+/// The clearest case for keying hints by program rather than by analyzer: the
+/// *other* program here wants rustup's front page, and this one wants a
+/// component add. Handing a reader whose toolchain is fine an installer link is
+/// the wrong *kind* of way forward — the failure `docs/REVIEW_CHECKLIST.md`
+/// names — and is why [`RUST_TOOLCHAIN`] is reused for `cargo` and pointedly not
+/// for `cargo-clippy`.
+const INSTALL_HINTS: &[InstallHint] = &[
+    InstallHint {
+        program: "cargo",
+        guidance: RUST_TOOLCHAIN,
+    },
+    InstallHint {
+        program: "cargo-clippy",
+        guidance: Guidance::new(&[
+            Line::Note(&[
+                "Roteiro does not install toolchain components, and has not installed",
+                "this one. Clippy ships with the toolchain and is added to it with:",
+            ]),
+            Line::Command(COMPONENT_ADD),
+            Line::Note(&["Upstream: https://doc.rust-lang.org/clippy/installation.html"]),
+        ]),
+    },
+];
 
 /// The rule recorded for a diagnostic that carries no lint code — a parse error,
 /// say. Such a diagnostic still has a location and still matters, so it is
@@ -327,6 +369,10 @@ impl Adapter for Clippy {
         // it. Declared because the trait requires an answer and a wrong one here
         // would be waiting for whoever wires a lint status later.
         &["cargo", "cargo-clippy"]
+    }
+
+    fn install_hints(&self) -> &'static [InstallHint] {
+        INSTALL_HINTS
     }
 
     fn command(&self, _assets: &AssetPaths<'_>) -> Invocation {

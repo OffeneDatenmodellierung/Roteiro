@@ -32,6 +32,7 @@
 
 use rto_graph::SourceIdentity;
 
+use crate::guidance::{Guidance, Line};
 use crate::ingest::NormalizedReport;
 use crate::runner::ExecError;
 use crate::snippet::SnippetSource;
@@ -162,6 +163,60 @@ pub struct Invocation {
     pub success_statuses: Vec<i32>,
 }
 
+/// How to obtain one program from [`Adapter::host_programs`], for the refusal
+/// that discovers it is absent.
+///
+/// The counterpart of the refusal rule in `docs/REVIEW_CHECKLIST.md`: a refusal
+/// names the way forward, and *this* is the way forward for the one obstacle
+/// Roteiro will never clear on the reader's behalf. It is keyed **by program and
+/// not by analyzer** because a single analyzer's programs are obtained
+/// differently — `cargo-audit` needs `cargo` from rustup *and* `cargo-audit`
+/// from crates.io, and one hint covering both would be right about at most one
+/// of them. That is the "right *kind* of way forward" check, which is the one
+/// that has shipped wrong here before.
+///
+/// # What may go in one, and what may not
+///
+/// - **The command is upstream's, verbatim, or there is none.** Every command
+///   below was read off the tool's own install page at the time it was written,
+///   not recalled. Where upstream documents no single command — `osv-scanner`
+///   offers eight platform-specific ones and ranks none — the hint says so and
+///   gives the page. A plausible command that fails is worse than a URL.
+/// - **Never the reader's package manager.** No `brew`, no `apt`, unless
+///   upstream itself names one as *the* way. A canonical ecosystem command is
+///   portable and checkable; a package-manager guess is wrong for most readers.
+/// - **Always the upstream page.** A URL ages better than a command line, so
+///   even a hint with a good command carries the page that would correct it.
+/// - **Saying how is not doing it.** Nothing reads a hint and runs it. Roteiro
+///   installs no analyzer (ADR-0014), and a refusal that quietly installed one
+///   is the silent downgrade ADR-0019 §6 and ADR-0020 §6 forbid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallHint {
+    /// The program this obtains — an entry in the same adapter's
+    /// [`Adapter::host_programs`], which is what
+    /// `tests::every_host_program_has_an_install_hint` pairs them by.
+    pub program: &'static str,
+    /// What to tell the reader, rendered by [`Guidance`] so a message built from
+    /// it cannot lose its own indentation. See [`crate::guidance`].
+    pub guidance: Guidance,
+}
+
+/// Obtaining `cargo` or `rustc`: the toolchain itself, not a tool installed with
+/// it.
+///
+/// Shared by the two adapters that shell out to cargo, so the answer to "how do
+/// I get cargo" cannot drift into two answers. **Deliberately no command:**
+/// rustup's installer is a different shell line on every host, and printing one
+/// of them is exactly the platform guess the refusals checklist forbids. Its
+/// front page picks the right one, which is why the page *is* the answer here.
+pub const RUST_TOOLCHAIN: Guidance = Guidance::new(&[
+    Line::Note(&[
+        "Roteiro does not install toolchains. Install Rust — rustup's front page",
+        "selects the right installer for this host:",
+    ]),
+    Line::Command("https://rustup.rs"),
+]);
+
 /// One analyzer's native output format and invocation.
 pub trait Adapter: Sync + std::fmt::Debug {
     /// The analyzer id — the value that appears in every layer key and finding
@@ -203,6 +258,20 @@ pub trait Adapter: Sync + std::fmt::Debug {
     ///
     /// Empty means the analyzer needs nothing on `PATH`.
     fn host_programs(&self) -> &'static [&'static str];
+
+    /// How to obtain each of [`Adapter::host_programs`], one hint per program.
+    ///
+    /// Required rather than defaulted, and that is the whole point of it being
+    /// on the trait: a fifth analyzer cannot compile without answering, so it
+    /// cannot ship a refusal that names the obstacle and trails off. The
+    /// *pairing* is what
+    /// `tests::every_host_program_has_an_install_hint` checks — a hint for
+    /// some other program would satisfy the compiler and not the reader.
+    ///
+    /// Order and duplication do not matter; [`install_hint`] looks up by
+    /// program. Empty is correct only for an analyzer that needs nothing on
+    /// `PATH`, which no shipped adapter is.
+    fn install_hints(&self) -> &'static [InstallHint];
 
     /// The argv that makes the analyzer emit the native format
     /// [`Adapter::normalize`] parses, with egress configured off.
@@ -299,10 +368,52 @@ pub static ADAPTERS: &[&dyn Adapter] = &[
 /// callers that asks.
 pub const LINT_ANALYZERS: &[&str] = &[clippy::ANALYZER];
 
+/// The adapters behind [`LINT_ANALYZERS`].
+///
+/// [`LINT_ANALYZERS`] names them and this one *is* them, because the callers
+/// differ: `prefetch` and the CLI want ids, and anything asking how to obtain a
+/// linter's binary wants the adapter. Kept in step by
+/// `tests::the_lint_tables_name_the_same_analyzers` rather than derived from
+/// each other, since neither can be `const`-derived from the other and a silent
+/// divergence would cost a linter its install hint.
+static LINT_ADAPTERS: &[&dyn Adapter] = &[&clippy::Clippy];
+
 /// The adapter for `analyzer`, or `None` if this build has none.
+///
+/// Storable analyzers only, deliberately: this is what `ingest` resolves
+/// `--analyzer` through, so answering for `clippy` here would make lint output
+/// storable — see [`ADAPTERS`]. Use [`every_adapter`] to ask a question that is
+/// about the tool rather than about the store.
 #[must_use]
 pub fn adapter_for(analyzer: &str) -> Option<&'static dyn Adapter> {
     ADAPTERS.iter().copied().find(|a| a.analyzer() == analyzer)
+}
+
+/// Every adapter this build has, storable or not.
+///
+/// The set an install hint has to exist for, which is a wider set than
+/// [`ADAPTERS`]: `roteiro lint` reaches the same subprocess machinery, so a
+/// missing `cargo-clippy` produces the same refusal as a missing `semgrep` and
+/// deserves the same answer. Kept distinct from [`adapter_for`] so that widening
+/// *this* can never widen what `ingest` accepts.
+pub fn every_adapter() -> impl Iterator<Item = &'static dyn Adapter> {
+    ADAPTERS.iter().chain(LINT_ADAPTERS).copied()
+}
+
+/// How to obtain `program`, as declared by the adapter that needs it.
+///
+/// `None` for a program no adapter declares — which a refusal must then print
+/// without an install clause rather than with a guessed one. It cannot happen
+/// for a program reached through [`Adapter::command`], because
+/// `tests::every_host_program_has_an_install_hint` pairs the two lists and
+/// `tests::every_invoked_program_is_declared_on_path` ties the invocation to
+/// them.
+#[must_use]
+pub fn install_hint(program: &str) -> Option<Guidance> {
+    every_adapter()
+        .flat_map(Adapter::install_hints)
+        .find(|hint| hint.program == program)
+        .map(|hint| hint.guidance)
 }
 
 /// Every analyzer id this build can normalise, sorted — for error messages that
@@ -346,8 +457,9 @@ pub fn snippet_hash_at(snippets: &dyn SnippetSource, path: &str, start: u32, end
 #[cfg(test)]
 mod tests {
     use super::{
-        Adapter as _, AssetPaths, NO_SNIPPET, NativeContext, UNKNOWN_VERSION, adapter_for,
-        known_analyzers, snippet_hash, snippet_hash_at,
+        Adapter as _, AssetPaths, Guidance, LINT_ANALYZERS, NO_SNIPPET, NativeContext,
+        UNKNOWN_VERSION, adapter_for, every_adapter, install_hint, known_analyzers, snippet_hash,
+        snippet_hash_at,
     };
     use rto_graph::SourceIdentity;
 
@@ -373,6 +485,203 @@ mod tests {
             assert_eq!(adapter_for(id).expect("registered").analyzer(), id);
         }
         assert!(adapter_for("no-such-analyzer").is_none());
+    }
+
+    /// The guard issue #430 asks for, and the reason the hint lives on the trait
+    /// rather than in a table beside it.
+    ///
+    /// What cannot be tested offline is that a command *works* — this machine
+    /// may have no network and certainly should not install anything to find
+    /// out. What can be tested is that none is **missing**, and missing is the
+    /// failure that shipped: a refusal that names the obstacle and stops. So a
+    /// fifth analyzer that declares a program and no hint for it fails here,
+    /// rather than reaching a reader as a message that trails off.
+    ///
+    /// Paired **by program**, not counted: an adapter with two programs and two
+    /// hints for one of them would satisfy a count and leave the other reader
+    /// with nothing.
+    #[test]
+    fn every_host_program_has_an_install_hint() {
+        for adapter in every_adapter() {
+            for program in adapter.host_programs() {
+                let hint = adapter
+                    .install_hints()
+                    .iter()
+                    .find(|hint| hint.program == *program);
+                assert!(
+                    hint.is_some(),
+                    "{} needs `{program}` on PATH and says nothing about how to get it — \
+                     see `Adapter::install_hints`",
+                    adapter.analyzer()
+                );
+            }
+            for hint in adapter.install_hints() {
+                assert!(
+                    adapter.host_programs().contains(&hint.program),
+                    "{} hints at installing `{}`, which it does not need on PATH — a hint \
+                     for a program no refusal names is one nobody reads",
+                    adapter.analyzer(),
+                    hint.program
+                );
+            }
+        }
+    }
+
+    /// A hint is a *way forward*, so this asserts the shape that makes it one.
+    ///
+    /// `Guidance` checks its own prose whenever it renders ([`crate::guidance`]),
+    /// which covers the collapsed-continuation defect. What it cannot know is
+    /// that a hint about obtaining a program must carry the upstream page —
+    /// #430's durability rule, because a URL ages better than a command line —
+    /// and must not print a package manager that upstream did not name, which is
+    /// the platform guess `docs/REVIEW_CHECKLIST.md` forbids.
+    #[test]
+    fn every_install_hint_carries_upstream_and_guesses_no_package_manager() {
+        for adapter in every_adapter() {
+            for hint in adapter.install_hints() {
+                let rendered = hint.guidance.to_string();
+                assert!(
+                    rendered.contains("https://"),
+                    "the hint for `{}` names no upstream page",
+                    hint.program
+                );
+                // Not a blanket ban on the words: an analyzer whose upstream
+                // *does* name one as canonical would state so here and this
+                // would have to be argued with. None of the shipped four does,
+                // and every one of them has an ecosystem command or a page
+                // instead.
+                for guess in ["brew ", "apt ", "apt-get ", "yum ", "dnf ", "choco "] {
+                    assert!(
+                        !rendered.contains(guess),
+                        "the hint for `{}` reaches for `{guess}`, which guesses the \
+                         reader's platform",
+                        hint.program
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two adapters needing the same program must answer the same way.
+    ///
+    /// `cargo` is needed by `cargo-audit` and by `clippy`, and
+    /// [`install_hint`] resolves by program alone — so it returns whichever is
+    /// found first, and the two disagreeing would make the message depend on
+    /// table order. They share [`RUST_TOOLCHAIN`] for that reason, and this is
+    /// what says so.
+    #[test]
+    fn a_program_two_adapters_need_is_obtained_one_way() {
+        let mut seen: Vec<(&str, Guidance)> = Vec::new();
+        for adapter in every_adapter() {
+            for hint in adapter.install_hints() {
+                if let Some((_, first)) = seen.iter().find(|(name, _)| *name == hint.program) {
+                    assert_eq!(
+                        *first, hint.guidance,
+                        "`{}` is obtained two different ways depending on which adapter \
+                         asked — `install_hint` resolves by program, so one of them would \
+                         never be printed",
+                        hint.program
+                    );
+                } else {
+                    seen.push((hint.program, hint.guidance));
+                }
+            }
+        }
+    }
+
+    /// The program a refusal actually names is the one an invocation runs, so
+    /// that is the one that must resolve to a hint.
+    ///
+    /// [`every_host_program_has_an_install_hint`] pairs the two *declared*
+    /// lists; this ties them to the third thing, which is what
+    /// `SubprocessError::BinaryNotFound` looks up. `cargo-audit` is why it is a
+    /// separate assertion: its invocation is `cargo`, so a hint table covering
+    /// only `cargo-audit` would pass the pairing and still leave the commonest
+    /// refusal without an answer.
+    #[test]
+    fn every_invoked_program_is_declared_on_path() {
+        let empty = AssetPaths::default();
+        for adapter in every_adapter() {
+            let program = adapter.command(&empty).program;
+            assert!(
+                adapter.host_programs().contains(&program.as_str()),
+                "{} invokes `{program}`, which it does not declare in `host_programs` — \
+                 a refusal naming it would find no install hint",
+                adapter.analyzer()
+            );
+            assert!(
+                install_hint(&program).is_some(),
+                "`{program}` is invoked and has no install hint"
+            );
+        }
+    }
+
+    /// [`LINT_ANALYZERS`] and `LINT_ADAPTERS` are two spellings of one list, and
+    /// this is what keeps them one. A linter present in the first and absent
+    /// from the second would lose its install hint silently — the refusal would
+    /// still print, just without the half that says what to do.
+    #[test]
+    fn the_lint_tables_name_the_same_analyzers() {
+        let from_adapters: Vec<&str> = super::LINT_ADAPTERS.iter().map(|a| a.analyzer()).collect();
+        assert_eq!(from_adapters, LINT_ANALYZERS.to_vec());
+    }
+
+    /// The lookup is by program and answers for every shipped one, including the
+    /// two that are toolchain components rather than analyzers.
+    #[test]
+    fn the_lookup_answers_for_a_known_program_and_not_an_unknown_one() {
+        for program in [
+            "semgrep",
+            "cargo-audit",
+            "osv-scanner",
+            "cargo",
+            "cargo-clippy",
+        ] {
+            assert!(install_hint(program).is_some(), "no hint for `{program}`");
+        }
+        assert!(install_hint("no-such-binary").is_none());
+    }
+
+    /// The two hints that could most easily become the same wrong answer.
+    ///
+    /// A reader missing `cargo-audit` has cargo already; a reader missing
+    /// `cargo` has neither. Collapsing them onto one hint would send the first
+    /// to an installer they do not need, which is the "wrong *kind* of way
+    /// forward" the refusals checklist says has cost an hour here before. This
+    /// asserts the distinction survives, and asserts it on rendered text because
+    /// that is what the reader gets.
+    #[test]
+    fn the_toolchain_and_the_subcommand_are_obtained_differently() {
+        let toolchain = install_hint("cargo").expect("cargo").to_string();
+        let subcommand = install_hint("cargo-audit")
+            .expect("cargo-audit")
+            .to_string();
+        assert!(toolchain.contains("https://rustup.rs"), "{toolchain}");
+        assert!(
+            !toolchain.contains("cargo install cargo-audit"),
+            "{toolchain}"
+        );
+        assert!(
+            subcommand.contains("cargo install cargo-audit"),
+            "{subcommand}"
+        );
+        assert!(!subcommand.contains("https://rustup.rs"), "{subcommand}");
+        // Verified against upstream's README, which documents no `--locked`.
+        assert!(!subcommand.contains("--locked"), "{subcommand}");
+    }
+
+    /// The analyzer with no honest single command says so, rather than reaching
+    /// for one of the eight platform-specific ones upstream lists.
+    #[test]
+    fn an_analyzer_without_one_canonical_command_says_so() {
+        let hint = install_hint("osv-scanner")
+            .expect("osv-scanner")
+            .to_string();
+        assert!(
+            hint.contains("https://google.github.io/osv-scanner/installation/"),
+            "{hint}"
+        );
+        assert!(hint.contains("no single install command"), "{hint}");
     }
 
     /// Every registered analyzer is one whose findings are **stored**, so each

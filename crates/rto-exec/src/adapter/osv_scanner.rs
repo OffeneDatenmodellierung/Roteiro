@@ -71,7 +71,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
+use crate::adapter::{Adapter, AssetPaths, InstallHint, Invocation, NativeContext};
+use crate::guidance::{Guidance, Line};
 use crate::ingest::{NormalizedReport, REPORT_SCHEMA, ReportFinding};
 use crate::runner::ExecError;
 use rto_graph::Severity;
@@ -81,6 +82,28 @@ pub const ANALYZER: &str = "osv-scanner";
 
 /// Asset id of the pinned per-ecosystem OSV databases.
 pub const DB_ASSET: &str = "osv-db";
+
+/// How to obtain `osv-scanner`, for the refusal that finds it absent.
+///
+/// The one hint with **no command**, and that is the honest answer rather than a
+/// gap. Upstream's install page offers scoop, winget, brew, pacman, apk, pkg,
+/// `pkg_add`, a prebuilt SLSA3 binary and `go install`, and ranks none of them:
+/// eight of those are the reader's-package-manager guess the refusals checklist
+/// forbids, and the ninth needs a Go toolchain this reader has no reason to
+/// have. So the page is the way forward, and a command invented to fill the slot
+/// would be the plausible-but-wrong answer that costs an hour before anyone
+/// doubts it.
+const INSTALL_HINTS: &[InstallHint] = &[InstallHint {
+    program: "osv-scanner",
+    guidance: Guidance::new(&[
+        Line::Note(&[
+            "Roteiro does not install analyzers, and has not installed this one.",
+            "osv-scanner documents no single install command — its page lists a",
+            "prebuilt binary and one entry per platform, so choose from:",
+        ]),
+        Line::Command("https://google.github.io/osv-scanner/installation/"),
+    ]),
+}];
 
 /// Stands in for the manifest path in a finding's identity when the reported
 /// path could not be placed inside the worktree.
@@ -120,6 +143,10 @@ impl Adapter for OsvScanner {
 
     fn host_programs(&self) -> &'static [&'static str] {
         &["osv-scanner"]
+    }
+
+    fn install_hints(&self) -> &'static [InstallHint] {
+        INSTALL_HINTS
     }
 
     fn command(&self, assets: &AssetPaths<'_>) -> Invocation {
