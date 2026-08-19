@@ -186,6 +186,14 @@ pub mod runtime_file_pins;
 /// documentation lives here instead. Read the file's own comments for what is
 /// pinned and why it has to be.
 pub mod runtime_pins;
+/// The **sandbox image store**: what it is holding, and dropping it safely.
+///
+/// Ungated, like [`assets`], and the argument is the same one that moved
+/// provisioning off the backend features: reclaiming the bytes a previous build
+/// cached must not require rebuilding with the backend that cached them. Nothing
+/// here executes anything — it reads an index, measures files, and removes what
+/// a pinned digest re-obtains (ADR-0014 v1.6).
+pub mod sandbox_store;
 pub mod snippet;
 #[cfg(feature = "exec-subprocess")]
 pub mod subprocess;
@@ -246,6 +254,12 @@ pub use runtime_file_pins::{
 pub use runtime_pins::{
     PinnedArchive, RUNTIME_ARCHIVES, RUNTIME_ASSET, RUNTIME_FILE, RUNTIME_VERSION, archive_for,
     runtime_target,
+};
+pub use sandbox_store::{
+    Attribution, CachedImage, ClearReport, ImageBytes, Objects, Preserved, RemovedImage,
+    SANDBOX_CLEAR_SCHEMA, SANDBOX_STATUS_SCHEMA, SANDBOX_STORE_DIR, SandboxStatus, Scope,
+    StoreError, Unattributed, VerifiedImage, clear as sandbox_clear, plan as sandbox_plan,
+    status as sandbox_status, store_root as sandbox_store_root,
 };
 pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
 #[cfg(feature = "exec-subprocess")]

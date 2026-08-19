@@ -14,7 +14,7 @@
 //! graph. Each tool takes an optional `project` selector for a multi-repo
 //! workspace (ADR-0008). See ADR-0002 for the decision to adopt `rmcp`.
 //!
-//! # Every tool here is READ-ONLY
+//! # Every tool here answers from the graph and none of them changes it
 //!
 //! A tool call answers from the graph; it never rebuilds or mutates it. That is
 //! why `context` here takes a node key and nothing else — `roteiro context
@@ -22,6 +22,43 @@
 //! nodes, and the CLI keeps that on a maintenance seam precisely so ordinary
 //! reads do not mutate the store (ADR-0013). It is also why `check` refuses,
 //! rather than rebuilds, when the graph does not match `HEAD`.
+//!
+//! This heading used to read *every tool here is READ-ONLY*, and `sandbox_clear`
+//! is why it no longer can. **The rule the read-only stance was protecting is
+//! that a model must not change what the graph says**, and that rule is
+//! unweakened: `sandbox_clear` deletes cached container images, changes nothing
+//! the graph says, and makes the next sandboxed run slower and nothing else.
+//! ADR-0014 v1.6 admits it as this surface's first mutating tool and states the
+//! permission positively so it cannot become a precedent by extension: **a tool
+//! may drop state that is re-obtainable from a pinned digest, and may drop
+//! nothing else.** That is the same test that makes the CLI verb safe, applied
+//! unchanged — so the next candidate has to pass it rather than cite this one.
+//!
+//! Two obligations come with it, and both are checked by test rather than
+//! trusted. It **reports what it freed** (`freed_bytes`, and the store's size
+//! before and after), so an 8.5 GB re-pull appears in the transcript rather than
+//! turning up later as an unexplained slow run. And it is **not offered a scope
+//! it cannot justify**: `image` and `everything` are different arguments, neither
+//! defaults, and supplying nothing is a refusal rather than the destructive
+//! reading of silence.
+//!
+//! `security run` remains refused, and the contrast is the point: it writes a
+//! findings layer — a change to what Roteiro reports about your code — *and* it
+//! executes an analyzer. Sandboxing does not make it read-only, because
+//! `execute_and_file` is on the shared path of both its backends.
+//!
+//! # `roteiro sandbox`, subcommand by subcommand
+//!
+//! | subcommand | on this surface | why |
+//! | --- | --- | --- |
+//! | `sandbox status` | **`sandbox_status`** | read-only; what the machine-global image store is holding, per image, with sizes |
+//! | `sandbox clear` | **`sandbox_clear`** | mutating, and admitted: everything it drops is re-obtainable from a pinned digest (ADR-0014 v1.6) |
+//!
+//! Neither takes a `project`. The sandbox store is **machine-global** — one per
+//! asset root, shared by every repository the server hosts — and unlike
+//! `security_status` there is no per-repository half for a selector to choose
+//! between. Both documents carry `scope: "machine"` anyway, because a document
+//! that gets quoted has to bring its scope with it.
 //!
 //! # `roteiro security`, subcommand by subcommand
 //!
@@ -353,6 +390,42 @@ struct SecurityStatusArgs {
     project: Option<String>,
 }
 
+/// Arguments for the `sandbox_status` tool: none.
+///
+/// No `project`, because the sandbox image store is machine-global — one per
+/// asset root, shared by every repository this server hosts — and there is no
+/// per-repository half for a selector to choose between. No `limit` either: this
+/// is one row per cached image, so its size is fixed by what has been pulled
+/// rather than by how much was found.
+#[cfg(feature = "execution")]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct SandboxStatusArgs {}
+
+/// Arguments for the `sandbox_clear` tool: **two selectors, and neither has a
+/// default**.
+///
+/// ADR-0014 v1.6's second obligation for the first mutating tool on this surface.
+/// "Clear this image" and "clear everything" are different requests, so they are
+/// different arguments — a model asking for one must not be able to receive the
+/// other, and *supplying neither must not resolve to either*, least of all to the
+/// destructive one. Both are therefore `Option`/`Option<bool>` with an explicit
+/// refusal behind them rather than a `bool` that reads `false` as "the other one".
+#[cfg(feature = "execution")]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct SandboxClearArgs {
+    /// Drop this image, by the `reference` `sandbox_status` lists it under.
+    #[serde(default)]
+    image: Option<String>,
+    /// Drop every cached image, and the bytes under the store root no image
+    /// claims. Mutually exclusive with `image`; supplying neither is an error.
+    #[serde(default)]
+    everything: Option<bool>,
+    /// Report what would be removed and remove nothing. The result's `applied`
+    /// field says which of the two happened.
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
 /// Validate a model-supplied `analyzer` against the shipped adapter set.
 ///
 /// An unknown name is a **tool error**, not a listing with nothing in it. That is
@@ -382,6 +455,24 @@ fn checked_analyzer(given: Option<&str>) -> Result<Option<&str>, String> {
 #[derive(Clone)]
 struct GraphServer {
     workspace: SharedWorkspace,
+    /// The pinned-asset cache this server reports on and, for `sandbox_clear`,
+    /// deletes from — **held rather than resolved at the call**.
+    ///
+    /// It used to be `rto_exec::asset_root()` read inside each handler, which was
+    /// harmless while every tool was read-only and is not any more. A test that
+    /// exercises `sandbox_clear` cannot redirect an ambient read: `asset_root`
+    /// resolves from the process environment and `unsafe_code = "forbid"` rules
+    /// out `std::env::set_var`, so the only asset root such a test could ever
+    /// reach is the developer's own. **This is not hypothetical** — fault-injecting
+    /// `sandbox_clear_refuses_a_scope_it_was_not_given`, to prove that test
+    /// catches a missing refusal, cleared the 8.7 GB store on the machine this
+    /// was written on. The bytes were re-obtainable, which is the whole ADR-0014
+    /// v1.6 argument; a test reaching outside its fixture at all is the defect.
+    ///
+    /// So the root is a field, `new` fills it from the environment exactly as
+    /// before, and the tests point it somewhere disposable.
+    #[cfg(feature = "execution")]
+    asset_root: std::path::PathBuf,
     // Populated by the `#[tool_router]` macro and consumed by the
     // `#[tool_handler]`-generated routing; not read by hand.
     #[allow(dead_code)]
@@ -392,12 +483,25 @@ impl GraphServer {
     fn new(workspace: SharedWorkspace) -> Self {
         Self {
             workspace,
+            #[cfg(feature = "execution")]
+            asset_root: rto_exec::asset_root(),
             tool_router: Self::routes(),
         }
     }
 
+    /// Point this server's asset-cache reads and removals at `root`.
+    ///
+    /// Test-only, and it is what lets a test exercise the one tool here that
+    /// deletes without deleting the developer's cache — see
+    /// [`GraphServer::asset_root`].
+    #[cfg(all(test, feature = "execution"))]
+    fn with_asset_root(mut self, root: std::path::PathBuf) -> Self {
+        self.asset_root = root;
+        self
+    }
+
     /// Every route this server advertises: the always-present graph tools, plus
-    /// the two `security_*` tools when this build has `execution`.
+    /// the `security_*` and `sandbox_*` tools when this build has `execution`.
     ///
     /// The `security_*` pair lives in a **second** `#[tool_router]` block because
     /// the macro emits one `.with_route(Self::<handler>)` per `#[tool]` fn
@@ -414,6 +518,8 @@ impl GraphServer {
         let routes = Self::tool_router();
         #[cfg(feature = "execution")]
         let routes = routes + Self::security_tool_router();
+        #[cfg(feature = "execution")]
+        let routes = routes + Self::sandbox_tool_router();
         routes
     }
 
@@ -911,15 +1017,141 @@ impl GraphServer {
             Err(e) => return tool_error(&e.to_string()),
         };
         // Machine-global, and read outside `with_project` because it is not the
-        // project's to answer: `asset_root` resolves from this host's environment,
-        // whichever project was selected. The document is what says so.
-        let root = rto_exec::asset_root();
+        // project's to answer: the asset root describes this host, whichever
+        // project was selected. The document is what says so.
+        let root = self.asset_root.clone();
         let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
         query_result(self.with_project(project, |store| {
             store.findings_layers(analyzer).map(|layers| {
                 rto_exec::security_status(&root, analyzer, &project_name, &layers, &now)
             })
         }))
+    }
+}
+
+/// The sandbox image store's two tools, in a **third** `#[tool_router]` block for
+/// the same reason the `security_*` pair has a second one — see
+/// [`GraphServer::routes`].
+///
+/// Their own block rather than the `security_*` one because of what they are, not
+/// only how they are gated: `sandbox_clear` is the first tool on this surface that
+/// **mutates**, and ADR-0014 v1.6 admits it by a rule (*a tool may drop state
+/// re-obtainable from a pinned digest, and may drop nothing else*) rather than as
+/// an exception. Keeping it visibly apart is what stops the next mutating tool
+/// arriving by proximity. `the_only_mutating_tool_is_the_one_the_adr_admits` is
+/// what fails if one does.
+#[cfg(feature = "execution")]
+#[tool_router(router = sandbox_tool_router)]
+impl GraphServer {
+    /// What the machine-global sandbox image store is holding.
+    #[tool(
+        description = "Report what the SANDBOX IMAGE STORE on THIS MACHINE is holding: one \
+                          row per cached container image, with its reference, its digests, \
+                          how many layers it has, how many of its objects are on disk, and \
+                          its size broken down into layers, extracted trees, the derived \
+                          ext4 disk image and the guest base. \
+                          MACHINE-GLOBAL, and `scope` says so. There is one of these per \
+                          asset root and EVERY repository this server hosts shares it, so \
+                          never attribute a size here to the project you are discussing. It \
+                          takes no `project` argument because it has no per-repository half \
+                          — `security_status` is the tool with two scopes. \
+                          `bytes.total` is what an image references; `bytes.exclusive` is \
+                          what dropping THAT IMAGE ALONE would free. They differ when \
+                          another cached image shares a layer, so quote `exclusive` when \
+                          you tell a user what clearing one image would give back. \
+                          `objects` counts the PULLED content — manifest, config, one per \
+                          distinct layer. The extracted trees and disk images are built on \
+                          first run and are a cache below this cache, so an image that has \
+                          only ever been pulled is complete without them and \
+                          `disk_image_built`/`base_disk_built` say whether it has run. \
+                          `unattributed` is bytes no cached image claims; `preserved` is \
+                          state no pinned digest re-obtains, which `sandbox_clear` will \
+                          never remove. \
+                          Read this BEFORE `sandbox_clear` and show the user the numbers: a \
+                          destructive verb with no way to see what it will destroy is \
+                          invoked blind. Every `reference` here is a value `sandbox_clear` \
+                          accepts as `image`. \
+                          It needs no `limit`: one row per cached image, counts and sizes, \
+                          never findings. Read-only."
+    )]
+    async fn sandbox_status(
+        &self,
+        Parameters(_args): Parameters<SandboxStatusArgs>,
+    ) -> CallToolResult {
+        // Machine-global, and read from this host's environment rather than from a
+        // project's store — there is no `with_project` here because there is no
+        // project in the question.
+        match rto_exec::sandbox_status(&self.asset_root) {
+            Ok(report) => json_result(&report),
+            Err(e) => tool_error(&e.to_string()),
+        }
+    }
+
+    /// Drop cached images, and say what that freed.
+    #[tool(
+        description = "DELETE cached container images from the SANDBOX IMAGE STORE on THIS \
+                          MACHINE, and report what that freed. This is the ONE tool here \
+                          that changes anything, and what makes it admissible is also its \
+                          limit: everything it drops is re-obtainable from a pinned digest, \
+                          so it costs a re-download and NEVER information. It cannot reach a \
+                          findings layer, a memory record or the graph. \
+                          MACHINE-GLOBAL. There is one store per asset root and EVERY \
+                          repository this server hosts shares it, so clearing on behalf of \
+                          one project slows the next sandboxed run for all of them. It takes \
+                          no `project` argument, and `scope` in the result says `machine`. \
+                          TELL THE USER FIRST. Call `sandbox_status` and show them what is \
+                          cached and what it is costing; a re-pull is minutes to tens of \
+                          minutes and several gigabytes of download. \
+                          `image` and `everything` are DIFFERENT REQUESTS and neither has a \
+                          default: pass `image` with a reference from `sandbox_status`, or \
+                          `everything: true`. Supplying neither is an ERROR and does not \
+                          mean everything; supplying both is an error too. `dry_run: true` \
+                          reports what would go and removes nothing — the result's `applied` \
+                          field says which happened. \
+                          REPORT WHAT IT FREED. `freed_bytes` is the accounting, \
+                          `store_bytes_before`/`store_bytes_after` are the store measured \
+                          either side, and they agree to within the index itself. Quote a \
+                          figure rather than saying it worked. \
+                          `retained` is every surviving image re-checked against the disk \
+                          AFTER the deletion, with `complete` per image. If any `complete` \
+                          is false, SAY SO PROMINENTLY — that is a damaged store, not a \
+                          successful clear, and `roteiro security prefetch` is the repair. \
+                          It refuses rather than guessing: a registered box, an entry under \
+                          the store root it does not recognise, or an index row pointing \
+                          outside that root all stop it with nothing removed."
+    )]
+    async fn sandbox_clear(
+        &self,
+        Parameters(args): Parameters<SandboxClearArgs>,
+    ) -> CallToolResult {
+        // Neither argument defaults to the other, and `None`/`false` is not a
+        // request — it is the absence of one. ADR-0014 v1.6: a model asking for one
+        // scope must not receive the other, and silence is not a scope at all.
+        let scope = match (args.image, args.everything.unwrap_or(false)) {
+            (Some(_), true) => {
+                return tool_error(
+                    "`image` and `everything` are different requests; pass exactly one.",
+                );
+            }
+            (None, true) => rto_exec::Scope::Everything,
+            (Some(reference), false) => rto_exec::Scope::Image(reference),
+            (None, false) => {
+                return tool_error(
+                    "nothing was named to drop. Pass `image` with a reference from \
+                     `sandbox_status`, or `everything: true`. Supplying neither does not \
+                     mean everything.",
+                );
+            }
+        };
+        let outcome = if args.dry_run.unwrap_or(false) {
+            rto_exec::sandbox_plan(&self.asset_root, &scope).map(|(report, _doomed)| report)
+        } else {
+            rto_exec::sandbox_clear(&self.asset_root, &scope)
+        };
+        match outcome {
+            Ok(report) => json_result(&report),
+            Err(e) => tool_error(&e.to_string()),
+        }
     }
 }
 
@@ -952,6 +1184,17 @@ impl ServerHandler for GraphServer {
         );
         #[cfg(feature = "execution")]
         instructions.push_str(
+            " `sandbox_status` reports what the MACHINE-GLOBAL container-image cache \
+             is holding and what it costs; `sandbox_clear` deletes from it and is the \
+             ONE tool here that changes anything — everything it drops is re-obtainable \
+             from a pinned digest, so it costs a re-download and never information. Show \
+             the user `sandbox_status` before calling it, quote the bytes it reports \
+             freeing, and pass exactly one of `image` and `everything` — neither has a \
+             default and supplying neither is an error rather than a request to clear \
+             everything.",
+        );
+        #[cfg(feature = "execution")]
+        instructions.push_str(
             " `security_list` lists stored analyzer findings and `security_status` \
              reports readiness in two separately scoped halves (`machine` = what this \
              host has provisioned AND installed, `repository` = one project's \
@@ -961,10 +1204,22 @@ impl ServerHandler for GraphServer {
              clean repository. Neither can run an analyzer, ingest a report or \
              prefetch an asset; ask the user to run those.",
         );
+        // Two spellings of one rule, because under `execution` the flat one is no
+        // longer true: `sandbox_clear` changes something. The rule the read-only
+        // stance protects — a model must not change what the graph says — is
+        // unweakened, and stating it with its exception named is the difference
+        // between a rule and a claim a model can catch the server out on.
+        #[cfg(feature = "execution")]
         instructions.push_str(
-            " Every tool here is read-only. There is no `review` tool — `roteiro \
-             review` is CLI-first and needs no server; see this module's \
-             documentation for why it is not exposed.",
+            " Every tool here answers from the graph and none of them changes it, with \
+             exactly one exception: `sandbox_clear` deletes cached container images — \
+             bytes a pinned digest re-obtains — and changes nothing the graph says.",
+        );
+        #[cfg(not(feature = "execution"))]
+        instructions.push_str(" Every tool here is read-only.");
+        instructions.push_str(
+            " There is no `review` tool — `roteiro review` is CLI-first and needs no \
+             server; see this module's documentation for why it is not exposed.",
         );
         info.instructions = Some(instructions);
         info
@@ -1066,7 +1321,7 @@ mod tests {
         GraphServer, ListKindArgs, PathArgs, SearchArgs, model_limit,
     };
     #[cfg(feature = "execution")]
-    use super::{SecurityListArgs, SecurityStatusArgs};
+    use super::{SandboxClearArgs, SecurityListArgs, SecurityStatusArgs};
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
     use std::sync::Arc;
@@ -1842,6 +2097,203 @@ mod tests {
         assert_eq!(audit["page"][0]["severity"], "critical", "{audit}");
     }
 
+    /// The one tool on this surface that changes anything is the one ADR-0014
+    /// v1.6 admits, and it stays the only one.
+    ///
+    /// The read-only stance was never a rule about the word *read*; it was a rule
+    /// that **a model must not change what the graph says**, and `sandbox_clear`
+    /// crosses it deliberately without weakening it. A test cannot decide from a
+    /// tool's name whether it mutates — so this reads the vocabulary a mutating
+    /// tool would have to be named in, and fails on any second one. A tool that
+    /// genuinely belongs here has to pass the ADR's test and then be added to this
+    /// list, which is exactly the deliberation the ADR asks for.
+    #[test]
+    fn the_only_mutating_tool_is_the_one_the_adr_admits() {
+        use std::collections::BTreeSet;
+
+        const REMOVES: [&str; 7] = [
+            "clear", "delete", "remove", "prune", "evict", "purge", "reset",
+        ];
+
+        let server = seeded();
+        let mutating: BTreeSet<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .filter(|name| REMOVES.iter().any(|verb| name.contains(verb)))
+            .collect();
+
+        #[cfg(feature = "execution")]
+        let allowed: BTreeSet<String> = ["sandbox_clear"].into_iter().map(str::to_owned).collect();
+        #[cfg(not(feature = "execution"))]
+        let allowed: BTreeSet<String> = BTreeSet::new();
+
+        assert_eq!(
+            mutating, allowed,
+            "ADR-0014 v1.6 admits exactly one mutating tool, by a rule and not as an \
+             exception: a tool may drop state re-obtainable from a pinned digest and may \
+             drop nothing else. A second one is a decision, not a cleanup",
+        );
+    }
+
+    /// `sandbox_status` is offered beside the verb that destroys, and neither
+    /// takes a `project`.
+    ///
+    /// Two ADR obligations in one place. A destructive verb with no way to see
+    /// what it will destroy is invoked blind (v1.6's third rule), and the store is
+    /// machine-global — offering a `project` selector would imply an answer that
+    /// changes with it, which is the confusion `security_status`'s two scopes
+    /// exist to prevent, arrived at from the other direction.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn the_sandbox_pair_is_offered_together_and_takes_no_project() {
+        let server = seeded();
+        let tools = server.tool_router.list_all();
+        for name in ["sandbox_status", "sandbox_clear"] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("`{name}` advertised"));
+            let props = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            assert!(
+                props.is_none_or(|props| !props.contains_key("project")),
+                "`{name}` must not offer a `project` selector: the sandbox store is \
+                 machine-global and the argument would imply an answer that changes with \
+                 it. Schema: {:?}",
+                tool.input_schema,
+            );
+        }
+    }
+
+    /// `image` and `everything` are different arguments, and neither defaults.
+    ///
+    /// ADR-0014 v1.6's second obligation for a mutating tool: a model asking for
+    /// one scope must not be able to receive the other. The schema declares both
+    /// and requires neither, so the enforcement is at the call — which is what
+    /// this checks, both ways round, and it reaches the refusal without touching
+    /// the filesystem because the scope is resolved before the store is opened.
+    /// A disposable asset root, for the one tool here that deletes.
+    ///
+    /// Every test that can reach [`GraphServer::sandbox_clear`] goes through this,
+    /// including the ones that only expect a refusal: a refusal is one edit away
+    /// from not being one, and the cost of finding that out with the ambient root
+    /// is the developer's whole image cache. See [`GraphServer::asset_root`].
+    #[cfg(feature = "execution")]
+    fn disposable_asset_root(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("rto-render-sandbox-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("boxlite-home").join("images").join("layers"))
+            .expect("a store root");
+        root
+    }
+
+    #[cfg(feature = "execution")]
+    #[tokio::test]
+    async fn sandbox_clear_refuses_a_scope_it_was_not_given() {
+        let server = seeded().with_asset_root(disposable_asset_root("refusal"));
+
+        let neither = server
+            .sandbox_clear(Parameters(SandboxClearArgs::default()))
+            .await;
+        assert_eq!(neither.is_error, Some(true), "{neither:?}");
+        let message = format!("{:?}", neither.content);
+        assert!(
+            message.contains("does not") && message.contains("everything"),
+            "silence must be refused, and the refusal must say it is not a request to \
+             clear everything: {message}"
+        );
+
+        let both = server
+            .sandbox_clear(Parameters(SandboxClearArgs {
+                image: Some("registry/a:1".to_owned()),
+                everything: Some(true),
+                dry_run: None,
+            }))
+            .await;
+        assert_eq!(both.is_error, Some(true), "{both:?}");
+    }
+
+    /// It reports what it freed, and it never leaves the root it was given.
+    ///
+    /// Two assertions that belong together. ADR-0014 v1.6's first obligation for a
+    /// mutating tool is that it **reports what it freed**, so the cost appears in
+    /// the transcript rather than turning up later as an unexplained re-pull. The
+    /// second is this test's own safety: `store` must be under the fixture root,
+    /// which is what fails if the handler ever goes back to resolving the asset
+    /// root from the process environment — the arrangement that let a fault
+    /// injection clear a real 8.7 GB cache.
+    #[cfg(feature = "execution")]
+    #[tokio::test]
+    async fn sandbox_clear_reports_what_it_freed_and_stays_inside_the_root_it_was_given() {
+        let root = disposable_asset_root("freed");
+        std::fs::write(
+            root.join("boxlite-home/images/layers/sha256-spare.tar.gz"),
+            vec![b'x'; 4096],
+        )
+        .expect("a spare blob");
+        let server = seeded().with_asset_root(root.clone());
+
+        let result = server
+            .sandbox_clear(Parameters(SandboxClearArgs {
+                image: None,
+                everything: Some(true),
+                dry_run: None,
+            }))
+            .await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let document: serde_json::Value =
+            serde_json::from_str(&text_of(&result)).expect("a clear document");
+
+        assert_eq!(document["scope"], "machine", "{document}");
+        assert_eq!(document["requested"], "everything", "{document}");
+        assert_eq!(document["applied"], true, "{document}");
+        assert_eq!(document["freed_bytes"], 4096, "{document}");
+        assert!(
+            document["store"]
+                .as_str()
+                .expect("a store path")
+                .starts_with(root.to_str().expect("a utf-8 root")),
+            "the tool cleared a store outside the root it was given: {document}"
+        );
+    }
+
+    /// The mutating tool's description carries what a model has to do with it.
+    ///
+    /// A model reads only this string. The three obligations that do not survive
+    /// living in a doc comment are: look before you destroy, pass exactly one
+    /// scope, and quote what was freed — plus the scope label, since the store is
+    /// shared by every repository the server hosts.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn the_mutating_tool_states_its_obligations_where_a_model_reads_them() {
+        let server = seeded();
+        let tools = server.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "sandbox_clear")
+            .expect("`sandbox_clear` advertised");
+        let description = tool.description.as_deref().unwrap_or_default();
+        for obligation in [
+            "sandbox_status",
+            "freed_bytes",
+            "DIFFERENT REQUESTS",
+            "MACHINE-GLOBAL",
+            "re-obtainable",
+            "retained",
+        ] {
+            assert!(
+                description.contains(obligation),
+                "`sandbox_clear`'s description must carry `{obligation}` — it is the only \
+                 thing a model reads: {description}"
+            );
+        }
+    }
+
     /// The decision this issue was filed for: the two scopes are labelled in the
     /// document, not merely explained in a doc comment a model cannot read.
     #[cfg(feature = "execution")]
@@ -2078,11 +2530,23 @@ mod tests {
             "the instructions must name `security_list` exactly when the build \
              offers it: {instructions}",
         );
-        // The read-only rule is stated whichever way that went.
-        assert!(
-            instructions.contains("Every tool here is read-only"),
-            "{instructions}"
-        );
+        // The read-only rule is stated whichever way that went — and under
+        // `execution` it is stated *with its exception named*, because a flat "every
+        // tool here is read-only" beside a `sandbox_clear` that deletes is a claim a
+        // model can catch its own server out on.
+        if cfg!(feature = "execution") {
+            assert!(
+                instructions.contains("none of them changes it, with exactly one exception")
+                    && instructions.contains("`sandbox_clear`")
+                    && instructions.contains("changes nothing the graph says"),
+                "{instructions}"
+            );
+        } else {
+            assert!(
+                instructions.contains("Every tool here is read-only"),
+                "{instructions}"
+            );
+        }
     }
 
     #[test]
