@@ -178,19 +178,78 @@ fn render_obsidian_home_scopes_debt_by_the_ignore_config() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The ordered labels of a page's site bar, with the current page's unlinked
-/// marker flattened to its label — so two pages' bars compare equal when they
-/// list the same pages in the same order.
-fn bar_labels(html: &str) -> Vec<String> {
+/// Stands in for the destination of the current page's entry, which is an
+/// unlinked `<span aria-current="page">` and so has none.
+///
+/// A sentinel rather than a skipped entry: "this one is deliberately not a link"
+/// is the whole of the you-are-here marker, and dropping it would leave a hole in
+/// the comparison exactly where that marker lives.
+const CURRENT_PAGE: &str = "<marked current, not a link>";
+
+/// The ordered `(label, destination)` pairs of a page's site bar.
+///
+/// Both halves, because where a link *goes* is most of what a navigation bar is.
+/// An earlier version of this compared labels alone and was blind to the
+/// destinations — it passed against a landing page whose `Modes` entry pointed at
+/// a page that does not exist, which is precisely the defect this whole change
+/// set exists to prevent (issue #446 was five links correct where they were
+/// written and broken where they were served).
+fn bar_entries(html: &str) -> Vec<(String, String)> {
     let Some(start) = html.find("<nav class=\"sitenav\">") else {
         return Vec::new();
     };
     let bar = &html[start..];
     let bar = &bar[..bar.find("</nav>").map_or(bar.len(), |i| i)];
-    bar.split('<')
-        .filter_map(|chunk| chunk.split_once('>'))
-        .map(|(_, text)| text.trim().to_owned())
-        .filter(|text| !text.is_empty())
+
+    let mut entries = Vec::new();
+    let mut rest = bar;
+    // Walk `<tag …>text` pairs. The bar is one element per line on the
+    // hand-written landing page and all on one line when rendered, so this reads
+    // the markup rather than the layout.
+    while let Some(open) = rest.find('<') {
+        let Some((tag, after)) = rest[open + 1..].split_once('>') else {
+            break;
+        };
+        let label: String = after.chars().take_while(|c| *c != '<').collect();
+        let label = label.trim().to_owned();
+        if !label.is_empty() {
+            let dest = tag
+                .split_once("href=\"")
+                .and_then(|(_, r)| r.split_once('"'))
+                .map_or_else(|| CURRENT_PAGE.to_owned(), |(href, _)| href.to_owned());
+            entries.push((label, dest));
+        }
+        rest = after;
+    }
+    entries
+}
+
+/// [`bar_entries`], with the marked entry resolved to `own_href` — the one
+/// destination a page cannot state about itself, supplied by the caller that
+/// knows which page it is reading.
+///
+/// Asserts the marker appears exactly once on the way through: a bar that marks
+/// no page, or two, is broken in its own right and would otherwise be normalised
+/// into looking fine.
+fn bar_as_seen_from(html: &str, own_href: &str) -> Vec<(String, String)> {
+    let entries = bar_entries(html);
+    let marked = entries
+        .iter()
+        .filter(|(_, dest)| dest == CURRENT_PAGE)
+        .count();
+    assert_eq!(
+        marked, 1,
+        "the bar on {own_href} marks {marked} pages as current, expected exactly 1: {entries:?}"
+    );
+    entries
+        .into_iter()
+        .map(|(label, dest)| {
+            if dest == CURRENT_PAGE {
+                (label, own_href.to_owned())
+            } else {
+                (label, dest)
+            }
+        })
         .collect()
 }
 
@@ -251,10 +310,21 @@ fn a_declared_site_page_is_emitted_with_the_shared_bar() {
     assert!(!modes.contains("site-page"), "frontmatter is not content");
 
     // One bar, in `site-order`, identical on every page and marking the current.
-    let expected = ["Home", "Guide", "Modes", "Roadmap"];
+    // The destinations are asserted as well as the labels: they are where the
+    // declared slug shows up in the navigation, so `docs/GUIDE.md → guide.html`
+    // is pinned here and not merely in the file names on disk.
+    let expected: Vec<(String, String)> = [
+        ("Home", "./"),
+        ("Guide", "guide.html"),
+        ("Modes", "modes.html"),
+        ("Roadmap", "build-plan-v2.html"),
+    ]
+    .into_iter()
+    .map(|(label, dest)| (label.to_owned(), dest.to_owned()))
+    .collect();
     for page in ["modes.html", "guide.html", "build-plan-v2.html"] {
         let html = std::fs::read_to_string(site.join(page)).expect("page");
-        assert_eq!(bar_labels(&html), expected, "bar on {page}");
+        assert_eq!(bar_as_seen_from(&html, page), expected, "bar on {page}");
     }
     assert!(
         modes.contains("<span aria-current=\"page\">Modes</span>"),
@@ -292,7 +362,9 @@ fn the_landing_page_carries_the_bar_the_renderer_emits() {
     assert!(out.status.success(), "render failed: {out:?}");
 
     let landing = std::fs::read_to_string(out_dir.join("index.html")).expect("landing page");
-    let landing_bar = bar_labels(&landing);
+    // The landing page is served at the site root, so that is what its own
+    // marked entry points at.
+    let landing_bar = bar_as_seen_from(&landing, "./");
     assert!(
         !landing_bar.is_empty(),
         "the landing page carries a site bar"
@@ -310,11 +382,19 @@ fn the_landing_page_carries_the_bar_the_renderer_emits() {
                 && std::fs::read_to_string(p).is_ok_and(|h| h.contains("<nav class=\"sitenav\">"))
         })
         .expect("at least one rendered site page");
-    let emitted = bar_labels(&std::fs::read_to_string(&rendered).expect("rendered page"));
+    let rendered_href = rendered
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("rendered page name");
+    let emitted = bar_as_seen_from(
+        &std::fs::read_to_string(&rendered).expect("rendered page"),
+        rendered_href,
+    );
     assert_eq!(
         landing_bar,
         emitted,
-        "website/public/index.html's site bar disagrees with the bar {} carries",
+        "website/public/index.html's site bar disagrees with the bar {} carries \
+         (labels *and* destinations are compared)",
         rendered.display()
     );
     std::fs::remove_dir_all(&out_dir).ok();
