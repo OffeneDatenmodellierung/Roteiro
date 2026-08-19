@@ -46,13 +46,26 @@ two makes the register read as 13 open exposures — which overstates today's ri
 and, worse, makes the whole list easier to discount. The nine that *are*
 reachable deserve better than that.
 
-Established from the build, not from the advisory text:
+Established from the build, not from the advisory text. The evidence is in
+**`llama-cpp-sys-2`'s own `build.rs` and `Cargo.toml`** — the vendored crate's,
+not this repository's, which has no `build.rs` at all — so it is quoted here with
+the command that re-reads it. Line numbers are pinned to 0.1.154 and will move on
+a bump; the command will not:
 
+```console
+$ S=$(find ~/.cargo/registry/src -maxdepth 2 -name 'llama-cpp-sys-2-0.1.154' -type d | head -1)
+
+$ grep -nE 'LLAMA_BUILD_SERVER|LLAMA_BUILD_EXAMPLES' "$S/build.rs"
+650:    config.define("LLAMA_BUILD_EXAMPLES", "OFF");
+651:    config.define("LLAMA_BUILD_SERVER", "OFF");
+
+$ grep -A20 '^\[features\]' "$S/Cargo.toml" | grep -iE 'rpc|server'
+                        # no output: neither is a Cargo feature of this crate
 ```
-llama-cpp-sys-2 0.1.154   no `rpc` feature and no `server` feature exist
-build.rs:650              config.define("LLAMA_BUILD_EXAMPLES", "OFF")
-build.rs:651              config.define("LLAMA_BUILD_SERVER",  "OFF")
-```
+
+So the RPC backend and `llama-server` are excluded twice over — there is no
+**Cargo feature** that could switch them on, and the CMake build is told to skip
+them regardless.
 
 **Not reachable — 4, including both criticals.** The RPC backend and
 `llama-server` are not built, so nothing in this project can execute the code
