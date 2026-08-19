@@ -12399,6 +12399,11 @@ struct SiteSources {
     published: rto_render::PublishedPages,
     /// The one navigation bar, in `site_nav` order.
     nav: Vec<rto_render::NavEntry>,
+    /// Web blob base for the commit being rendered — where a link that leaves
+    /// the site points instead (issue #456). `None` when the repository has no
+    /// `origin` remote, or one whose URL maps to no web view; links are then
+    /// left exactly as authored. See [`rto_render::SourceBase`].
+    blob_base: Option<String>,
 }
 
 /// Discover every source the docs site publishes, and derive the two things
@@ -12490,6 +12495,18 @@ fn discover_site_sources(
     )
     .collect();
 
+    // Where a link out of the site points instead. Pinned to the rendered
+    // commit, exactly as the vault renderer's Source links are — GitHub serves a
+    // blob by sha forever, so the link survives the file being renamed, and one
+    // repository with two answers to "which commit does a source link mean"
+    // would be its own defect. `None` (no `origin`, or an unmappable one) leaves
+    // every link as authored; `rto_render::SourceBase` says why that beats both
+    // refusing and degrading to plain text.
+    let blob_base = match (repo.origin_url().as_deref(), repo.head_commit_id().ok()) {
+        (Some(remote), Some(commit)) => source_blob_base(remote, &commit),
+        _ => None,
+    };
+
     Ok(SiteSources {
         adrs,
         build_plan,
@@ -12497,6 +12514,7 @@ fn discover_site_sources(
         pages,
         published,
         nav,
+        blob_base,
     })
 }
 
@@ -12519,11 +12537,25 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     std::fs::create_dir_all(out.join("adr"))?;
     copy_dir(&root.join("website/public"), &out)?;
 
+    // The landing page is the one page nothing renders — `website/public` is
+    // copied verbatim — so its navigation bar was a hand-maintained copy of the
+    // list `site_nav` derives (issue #508). Overwrite that copy with the real
+    // bar, so there is no second list left to drift. `replace_site_nav` explains
+    // why a page with no bar is left alone, and why no link auditor could have
+    // found the bug this removes.
+    let landing = out.join("index.html");
+    if let Ok(html) = std::fs::read_to_string(&landing)
+        && let Some(rendered) = rto_render::replace_site_nav(&html, &src.nav, "./")
+    {
+        std::fs::write(&landing, rendered)?;
+    }
+
     let mut entries = Vec::new();
     for path in &src.adrs {
         let stem = doc_stem(path, "adr");
         let md = std::fs::read_to_string(path)?;
-        let rendered = rto_render::render_adr(&md, stem, &src.published);
+        let source = doc_source_base(src.blob_base.as_deref(), root, path);
+        let rendered = rto_render::render_adr(&md, stem, &src.published, source.as_ref());
         std::fs::write(out.join("adr").join(format!("{stem}.html")), &rendered.html)?;
         entries.push(rto_render::IndexEntry {
             href: format!("{stem}.html"),
@@ -12538,7 +12570,8 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     let mut lifetime = Vec::new();
     if let Some(build_plan) = &src.build_plan {
         let md = std::fs::read_to_string(build_plan)?;
-        let rendered = rto_render::render_doc(&md, "Build Plan", &src.published);
+        let source = doc_source_base(src.blob_base.as_deref(), root, build_plan);
+        let rendered = rto_render::render_doc(&md, "Build Plan", &src.published, source.as_ref());
         std::fs::write(out.join("build-plan.html"), &rendered.html)?;
         lifetime.push(rto_render::IndexEntry {
             // The index lives under adr/, so link up one level.
@@ -12549,7 +12582,8 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     for path in &src.blueprints {
         let stem = doc_stem(path, "blueprint");
         let md = std::fs::read_to_string(path)?;
-        let rendered = rto_render::render_doc(&md, stem, &src.published);
+        let source = doc_source_base(src.blob_base.as_deref(), root, path);
+        let rendered = rto_render::render_doc(&md, stem, &src.published, source.as_ref());
         std::fs::write(out.join(format!("{stem}.html")), &rendered.html)?;
         lifetime.push(rto_render::IndexEntry {
             href: format!("../{stem}.html"),
@@ -12560,10 +12594,18 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     // The published site pages, each written as `<slug>.html` — the slug is the
     // URL, which is why it is validated rather than derived.
     for page in &src.pages {
-        let md = std::fs::read_to_string(root.join(&page.path))?;
+        let path = root.join(&page.path);
+        let md = std::fs::read_to_string(&path)?;
         let href = page.href();
-        let rendered =
-            rto_render::render_site_page(&md, &page.title, &src.nav, &href, &src.published);
+        let source = doc_source_base(src.blob_base.as_deref(), root, &path);
+        let rendered = rto_render::render_site_page(
+            &md,
+            &page.title,
+            &src.nav,
+            &href,
+            &src.published,
+            source.as_ref(),
+        );
         std::fs::write(out.join(&href), &rendered.html)?;
     }
 
@@ -12842,6 +12884,26 @@ fn source_blob_base(remote: &str, commit: &str) -> Option<String> {
         "/blob/"
     };
     Some(format!("{root}{infix}{commit}"))
+}
+
+/// The [`rto_render::SourceBase`] for the document at `path`: the commit's blob
+/// base plus the document's own directory, repository-relative.
+///
+/// The directory is what makes a link resolvable — `../crates/x.rs` means
+/// `crates/x.rs` from `docs/` and `docs/crates/x.rs` from `docs/adr/` — and it is
+/// read from the path being rendered rather than assumed, because the three
+/// kinds of source document (`docs/`, `docs/blueprint/`, `website/pages/`) sit in
+/// three different places on purpose.
+///
+/// `None` when there is no blob base, or when `path` is somehow not under the
+/// repository root; links are then left exactly as authored.
+fn doc_source_base(
+    blob_base: Option<&str>,
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<rto_render::SourceBase> {
+    let dir = path.parent()?.strip_prefix(root).ok()?;
+    rto_render::SourceBase::new(blob_base, &dir.to_string_lossy().replace('\\', "/"))
 }
 
 /// Recursively copy the contents of `src` into `dst`.

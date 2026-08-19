@@ -78,6 +78,97 @@ impl PublishedPages {
     }
 }
 
+/// Where a link that leaves the site points instead: the repository's own web
+/// view, at the commit the site was built from.
+///
+/// The Build Plan cites code as evidence for its claims — `[sync](../crates/…
+/// /sync.rs)` — which is correct in a checkout and dead on roteiro.dev, because
+/// `render docs` publishes documents and not source. Six such links were live on
+/// the site (issue #456). This is the answer chosen for them: keep the link's
+/// affordance and move its target to the one place the file is actually served.
+///
+/// # Pinned to a commit, not to a branch
+///
+/// `blob` carries a sha (`…/blob/<sha>`), not `…/blob/main`. GitHub serves a
+/// blob by sha forever, so the link keeps resolving after the file is renamed or
+/// deleted; a `main` link 404s on the next rename, and this is a *retired* plan
+/// whose citations describe the code as it stood, so drifting them onto today's
+/// `main` would be wrong even when it resolved. It is also the rule the vault
+/// renderer already ships (`source_blob_base` + `head_commit_id`), and one repo
+/// with two answers to "which commit does a source link mean" is its own defect.
+///
+/// The cost is stated rather than hidden: a site rendered from a commit that was
+/// never pushed yields links the host has never heard of. That is a local
+/// preview, not the published site — the Website workflow renders from a commit
+/// GitHub already has.
+///
+/// # No mappable origin
+///
+/// Construction goes through [`SourceBase::new`], which yields `None` when the
+/// caller has no blob base to offer — no `origin` remote, or a remote whose URL
+/// does not map to a web view. Links are then left exactly as they are: still
+/// correct in a checkout, still dead on the site. That is deliberate and is the
+/// least-bad of the three: refusing to render would break `render docs` in any
+/// repository without an `origin` (every test fixture, every fresh `git init`),
+/// and demoting the link to plain text would destroy information to hide a
+/// problem the reader can otherwise route around.
+///
+/// # Can the class recur?
+///
+/// Not while a base exists: the rule is structural, not a list of the six links
+/// that were found. *Any* link climbing above the site root is re-aimed, so a new
+/// citation added to any rendered document is handled the day it is written, and
+/// `a_link_out_of_the_site_goes_to_the_repository` is what fails if that stops.
+///
+/// It recurs silently in exactly one case — a site rendered where no base can be
+/// derived — and nothing catches that, because the output is the *authored* link
+/// and there is no rendered-site link gate (issue #459) to notice. That case is
+/// the one the deploy does not hit: the Website workflow checks out with an
+/// `origin` on `github.com`, and `without_an_origin_remote_a_source_link_is_left_as_authored`
+/// pins the behaviour rather than the absence of a gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBase {
+    /// Web blob base, no trailing slash — e.g.
+    /// `https://github.com/owner/repo/blob/<sha>`.
+    blob: String,
+    /// The rendered document's own directory, repository-relative and with no
+    /// trailing slash: `docs`, `docs/adr`, `website/pages`. A link is resolved
+    /// against this to get the path the repository serves.
+    dir: String,
+}
+
+impl SourceBase {
+    /// A source base for a document at repository-relative directory `dir`,
+    /// served from `blob`. `None` when `blob` is `None` — see the type's
+    /// documentation for why that leaves links alone rather than failing.
+    #[must_use]
+    pub fn new(blob: Option<&str>, dir: &str) -> Option<Self> {
+        Some(Self {
+            blob: blob?.trim_end_matches('/').to_owned(),
+            dir: dir.trim_matches('/').to_owned(),
+        })
+    }
+
+    /// The web URL for `path` — a link written relative to this document —
+    /// carrying `frag` through unchanged (`#L12` is a GitHub line anchor, and
+    /// the site has no better guess than the author's).
+    ///
+    /// `None` when `path` climbs out of the repository altogether, which no base
+    /// can name.
+    fn blob_url(&self, path: &str, frag: Option<&str>) -> Option<String> {
+        let joined = format!("{}/{}", self.dir, path);
+        let (up, segs) = resolve_relative(&joined);
+        if up > 0 || segs.is_empty() {
+            return None;
+        }
+        let repo_path = segs.join("/");
+        Some(match frag {
+            Some(frag) => format!("{}/{repo_path}#{frag}", self.blob),
+            None => format!("{}/{repo_path}", self.blob),
+        })
+    }
+}
+
 /// One page in the site navigation bar: where it goes and what it is called.
 ///
 /// Built by the caller from the authored site pages (`rto_spec::site_nav` puts
@@ -106,18 +197,27 @@ pub struct IndexEntry {
 /// and Roteiro `[[wiki-links]]` resolved). Resolves ADR links relative to the
 /// ADR directory; use [`render_doc`] for root-level pages.
 ///
-/// A fragment renderer has no site to be a part of, so it carries no
-/// [`PublishedPages`]: a `.md` link is rewritten to its own stem, which is right
-/// for an ADR and a guess for anything published under a slug.
+/// A fragment renderer has no site to be a part of, so it carries neither
+/// [`PublishedPages`] nor [`SourceBase`]: a `.md` link is rewritten to its own
+/// stem, which is right for an ADR and a guess for anything published under a
+/// slug, and a link out of the site is left alone.
 #[must_use]
 pub fn markdown_to_html(md: &str) -> String {
-    render_markdown(md, "", &PublishedPages::new())
+    render_markdown(md, "", &PublishedPages::new(), None, 0)
 }
 
 /// Render `md` to HTML: resolve `[[wiki-links]]` (ADR links use `adr_prefix` as
 /// their href prefix), rewrite ordinary `[…](*.md)` links to their rendered
-/// `.html` targets, then run `CommonMark` with GitHub tables/strikethrough.
-fn render_markdown(md: &str, adr_prefix: &str, pages: &PublishedPages) -> String {
+/// `.html` targets and links out of the site to `source`, then run `CommonMark`
+/// with GitHub tables/strikethrough. `depth` is the page's own depth below the
+/// site root; see [`rewrite_doc_link`].
+fn render_markdown(
+    md: &str,
+    adr_prefix: &str,
+    pages: &PublishedPages,
+    source: Option<&SourceBase>,
+    depth: usize,
+) -> String {
     let pre = rewrite_wiki_links(md, adr_prefix);
     let ids = heading_ids(&pre);
     let mut next_id = 0usize;
@@ -132,7 +232,8 @@ fn render_markdown(md: &str, adr_prefix: &str, pages: &PublishedPages) -> String
             id,
         }) => Event::Start(Tag::Link {
             link_type,
-            dest_url: rewrite_doc_link(&dest_url, pages).map_or(dest_url, CowStr::from),
+            dest_url: rewrite_doc_link(&dest_url, pages, source, depth)
+                .map_or(dest_url, CowStr::from),
             title,
             id,
         }),
@@ -188,6 +289,35 @@ fn options() -> Options {
 /// spread over several inline events, and `#` inside a fenced block is not a
 /// heading at all. Parsing twice costs a document-sized pass and cannot be wrong
 /// about what the renderer will see, because it is the same parser.
+///
+/// # This rule is not GitHub's, and deliberately stays that way
+///
+/// A document in `docs/` is read in two places under two slug rules: GitHub
+/// renders `**v0.10.x**` as `v010x` and this renders it as `v0-10-x`, so an
+/// anchor hand-written against one is dead in the other. That is real, and it is
+/// the *second* half of issue #457 — the six anchors that issue found were dead
+/// under **both** rules, because the heading text had changed under them.
+///
+/// It is not fixed by aligning this rule to GitHub's, and that is not a
+/// deferral. [`rto_graph::slugify`] is the *one* rule, shared on purpose:
+/// `rto_spec` builds every section node key with it (`adr:0001#design`,
+/// `site:modes#offline-mode`) and this builds the matching `id`, which is the
+/// only reason a `[[doc#section]]` wiki-link resolves through one and lands
+/// through the other. Re-keying it to GitHub's would re-key every section node in
+/// the graph and break every authored wiki-link `roteiro check` gates — to fix
+/// anchors in one retired document. rustdoc is a *third* rule already in play,
+/// so there is no single rule to converge on in any case.
+///
+/// Note what does **not** protect this: #397's guard (`doc_anchor_fragments.rs`)
+/// replicates rustdoc's rule in its own private `slugify` and never calls
+/// [`rto_graph::slugify`], so changing this rule would not have made it fail. It
+/// is not a guard on this code path, and treating it as one was the mistake worth
+/// recording here.
+///
+/// So the divergence is left, documented, and the affected anchors were given
+/// explicit ids that neither rule touches (see `docs/BUILD_PLAN.md`). **Nothing
+/// currently checks an intra-document anchor** in either rendering — not
+/// `roteiro check`, not this crate. Issue #459 is where that check belongs.
 fn heading_ids(md: &str) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
@@ -224,34 +354,102 @@ fn heading_ids(md: &str) -> Vec<String> {
     ids
 }
 
-/// Rewrite a relative link to a local Markdown file so it points at the rendered
-/// HTML page the site serves, preserving any `#fragment`. Returns `None` for
-/// external, protocol-relative, `mailto:`, pure-anchor, or non-`.md` links, which
-/// are left unchanged.
-fn rewrite_doc_link(dest: &str, pages: &PublishedPages) -> Option<String> {
+/// Split a relative path into the number of hops it takes **above** its own
+/// directory and the segments that remain, resolving `.` and `..` the way a
+/// browser and a filesystem both do.
+///
+/// `../crates/x.rs` is `(1, ["crates", "x.rs"])`; `adr/../guide.md` is
+/// `(0, ["guide.md"])`. The hop count is the whole escape test in
+/// [`rewrite_doc_link`]: a link that climbs further than the page sits below the
+/// site root is a link to something outside the site.
+fn resolve_relative(path: &str) -> (usize, Vec<&str>) {
+    let mut up = 0usize;
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if segs.pop().is_none() {
+                    up += 1;
+                }
+            }
+            s => segs.push(s),
+        }
+    }
+    (up, segs)
+}
+
+/// Rewrite a relative link so it points at what the **site** serves, preserving
+/// any `#fragment`. Returns `None` for external, protocol-relative, `mailto:`,
+/// pure-anchor and root-relative links, and for anything the site already serves
+/// under the spelling the link uses — all of which are left unchanged.
+///
+/// `depth` is how far below the site root the page being rendered sits: 0 for a
+/// root-level page, 1 for an ADR under `adr/`. It is supplied by the entry point
+/// rather than by the caller, because the entry point is the thing that knows.
+///
+/// Two rewrites live here, and the order between them is the interesting part:
+///
+/// * a `.md` link is aimed at the page the site publishes it as
+///   ([`PublishedPages`]) — checked **first**, so a document that happens to be
+///   reached by a path climbing out of its own directory still lands on its
+///   published page rather than being treated as unpublished (issue #446);
+/// * a link that climbs above the site root and is *not* published is aimed at
+///   the repository's web view ([`SourceBase`]) — issue #456.
+fn rewrite_doc_link(
+    dest: &str,
+    pages: &PublishedPages,
+    source: Option<&SourceBase>,
+    depth: usize,
+) -> Option<String> {
     if dest.starts_with("http://")
         || dest.starts_with("https://")
         || dest.starts_with("//")
         || dest.starts_with("mailto:")
         || dest.starts_with('#')
+        || dest.starts_with('/')
     {
         return None;
     }
     let (path, frag) = dest
         .split_once('#')
         .map_or((dest, None), |(p, f)| (p, Some(f)));
-    path.strip_suffix(".md")?;
     // Only the final segment can differ between the repository and the site, so
     // the link's own directory hops are kept verbatim; see [`PublishedPages`].
     let (dir, file) = path.rsplit_once('/').map_or(("", path), |(d, f)| (d, f));
-    let served = match pages.served(file) {
-        Some(served) => served.to_owned(),
-        // Unknown or ambiguous: fall back to the stem rewrite this has always
-        // done, which is right for every ADR (each is served under its own
-        // stem) and no worse than before for anything else.
-        None => format!("{}.html", file.trim_end_matches(".md")),
-    };
+    // `strip_suffix` rather than `ends_with`: the extension is matched exactly as
+    // it is written, which is the rule every document in this repository follows.
+    let is_markdown = path.strip_suffix(".md").is_some();
     let sep = if dir.is_empty() { "" } else { "/" };
+
+    // A page the site publishes, under the name it publishes it as (issue #446).
+    // First, so a document reached by a path that climbs out of its own
+    // directory still lands on its page rather than being read as unpublished.
+    if let Some(served) = is_markdown.then(|| pages.served(file)).flatten() {
+        return Some(match frag {
+            Some(frag) => format!("{dir}{sep}{served}#{frag}"),
+            None => format!("{dir}{sep}{served}"),
+        });
+    }
+
+    // Not published, and climbing above the site root: no rewrite *within* the
+    // site can make this resolve, so hand it to the repository (issue #456).
+    // When there is no base to hand it to, fall through — everything below is
+    // the behaviour that predates this, unchanged, so a repository with no
+    // mappable `origin` renders exactly the site it rendered before.
+    if resolve_relative(path).0 > depth
+        && let Some(url) = source.and_then(|s| s.blob_url(path, frag))
+    {
+        return Some(url);
+    }
+
+    if !is_markdown {
+        return None;
+    }
+    // Unknown or ambiguous: fall back to the stem rewrite this has always done,
+    // which is right for every ADR (each is served under its own stem) and no
+    // worse than before for anything else.
+    let served = format!("{}.html", file.trim_end_matches(".md"));
     Some(match frag {
         Some(frag) => format!("{dir}{sep}{served}#{frag}"),
         None => format!("{dir}{sep}{served}"),
@@ -261,11 +459,20 @@ fn rewrite_doc_link(dest: &str, pages: &PublishedPages) -> Option<String> {
 /// Render one ADR markdown document to a themed HTML page. Leading YAML
 /// frontmatter is stripped; the title is the first `# ` heading, or `fallback`
 /// if there is none. ADR `[[…]]` links resolve to sibling ADR pages.
+///
+/// An ADR page is served one directory below the site root (`adr/`), which is
+/// the `1` below: a `../…` link from an ADR still lands inside the site, and only
+/// a second hop leaves it. See [`SourceBase`] for `source`.
 #[must_use]
-pub fn render_adr(markdown: &str, fallback_title: &str, pages: &PublishedPages) -> RenderedAdr {
+pub fn render_adr(
+    markdown: &str,
+    fallback_title: &str,
+    pages: &PublishedPages,
+    source: Option<&SourceBase>,
+) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "", pages);
+    let content = render_markdown(body, "", pages, source, 1);
     let nav = "<p class=\"nav\"><a href=\"../\">← Roteiro home</a> · \
                <a href=\"./\">All ADRs</a> · <a href=\"../build-plan.html\">Build Plan</a></p>";
     let html = page(&format!("{title} — Roteiro"), "../", nav, &content);
@@ -274,11 +481,19 @@ pub fn render_adr(markdown: &str, fallback_title: &str, pages: &PublishedPages) 
 
 /// Render a root-level "lifetime doc" (e.g. the Build Plan) to a themed page.
 /// Its `[[docs/adr/…]]` links resolve into the `adr/` subdirectory.
+///
+/// The page is served *at* the site root — the `0` below — so any `../…` link
+/// leaves the site; see [`SourceBase`] for where those go.
 #[must_use]
-pub fn render_doc(markdown: &str, fallback_title: &str, pages: &PublishedPages) -> RenderedAdr {
+pub fn render_doc(
+    markdown: &str,
+    fallback_title: &str,
+    pages: &PublishedPages,
+    source: Option<&SourceBase>,
+) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "adr/", pages);
+    let content = render_markdown(body, "adr/", pages, source, 0);
     let nav = "<p class=\"nav\"><a href=\"./\">← Roteiro home</a> · \
                <a href=\"adr/\">ADRs</a></p>";
     let html = page(&format!("{title} — Roteiro"), "./", nav, &content);
@@ -304,10 +519,11 @@ pub fn render_site_page(
     nav: &[NavEntry],
     current_href: &str,
     pages: &PublishedPages,
+    source: Option<&SourceBase>,
 ) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "adr/", pages);
+    let content = render_markdown(body, "adr/", pages, source, 0);
     let bar = render_nav(nav, current_href);
     let html = page(&format!("{title} — Roteiro"), "./", &bar, &content);
     RenderedAdr { title, html }
@@ -340,6 +556,51 @@ pub fn render_nav(nav: &[NavEntry], current_href: &str) -> String {
     }
     out.push_str("</nav>");
     out
+}
+
+/// The marker whose contents [`replace_site_nav`] owns.
+const SITENAV_OPEN: &str = "<nav class=\"sitenav\">";
+
+/// Replace the `<nav class="sitenav">…</nav>` block in a **hand-written** page
+/// with the bar the renderer computes, returning `None` when the page carries no
+/// such block.
+///
+/// # Why this exists
+///
+/// `website/public/index.html` is the one page of roteiro.dev nothing renders —
+/// it is copied verbatim — and it used to carry a *hand-maintained copy* of the
+/// list the renderer derives from `site-order` (issue #508). Adding
+/// `docs/SERVING.md` appeared in every rendered page's bar automatically and had
+/// to be typed into the landing page by hand.
+///
+/// The failure that made it worth removing rather than remembering is silent and
+/// points the wrong way: a new page is published, reachable, and linked from
+/// every page **except the front one**. Nothing errors and `roteiro check`
+/// passes, because everything that is there resolves.
+///
+/// **That is also why no link auditor could have caught it, and why none will
+/// catch the next one of its shape.** The defect is a link that does *not*
+/// exist; auditing what is there cannot find what is missing. This removes the
+/// possibility instead — after this, the landing page has no independent list to
+/// disagree with. What still guards the seam is
+/// `the_landing_page_carries_the_bar_the_renderer_emits`, which now checks that
+/// the replacement *happened*: a landing page whose marker was renamed away
+/// keeps its stale bar silently, and that test is what fails.
+///
+/// # Why `None` rather than an error
+///
+/// A landing page with no `sitenav` is not claiming a bar, and a site is allowed
+/// not to have one — every `render docs` fixture writes a one-line `index.html`.
+/// The caller leaves such a page alone.
+#[must_use]
+pub fn replace_site_nav(html: &str, nav: &[NavEntry], current_href: &str) -> Option<String> {
+    let open = html.find(SITENAV_OPEN)?;
+    let close = html[open..].find("</nav>")? + open + "</nav>".len();
+    let mut out = String::with_capacity(html.len());
+    out.push_str(&html[..open]);
+    out.push_str(&render_nav(nav, current_href));
+    out.push_str(&html[close..]);
+    Some(out)
 }
 
 /// Render the docs index: any `lifetime` docs (Build Plan, …) then the ADRs.
@@ -579,8 +840,9 @@ fn escape_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexEntry, NavEntry, PublishedPages, escape_html, markdown_to_html, render_adr,
-        render_adr_index, render_doc, render_markdown, render_nav, render_site_page,
+        IndexEntry, NavEntry, PublishedPages, SourceBase, escape_html, markdown_to_html,
+        render_adr, render_adr_index, render_doc, render_markdown, render_nav, render_site_page,
+        replace_site_nav,
     };
 
     /// The site index most tests do not exercise: with it empty, a `.md` link
@@ -702,6 +964,7 @@ mod tests {
             "# Build Plan\n\nGoverned by [[docs/adr/0001-x.md]].\n",
             "Build Plan",
             &no_pages(),
+            None,
         );
         assert_eq!(r.title, "Build Plan");
         assert!(
@@ -724,7 +987,7 @@ mod tests {
 
     #[test]
     fn render_adr_strips_frontmatter_and_themes() {
-        let r = render_adr(ADR, "fallback", &no_pages());
+        let r = render_adr(ADR, "fallback", &no_pages(), None);
         assert_eq!(r.title, "ADR-0001: Example");
         // Frontmatter is gone; heading + section rendered.
         assert!(!r.html.contains("adr-id"));
@@ -756,7 +1019,12 @@ mod tests {
 
     #[test]
     fn render_adr_falls_back_without_h1() {
-        let r = render_adr("no frontmatter, no heading\n", "slug-name", &no_pages());
+        let r = render_adr(
+            "no frontmatter, no heading\n",
+            "slug-name",
+            &no_pages(),
+            None,
+        );
         assert_eq!(r.title, "slug-name");
     }
 
@@ -851,6 +1119,7 @@ mod tests {
             &nav(),
             "modes.html",
             &no_pages(),
+            None,
         );
         // The heading was always right; the title is the side that was wrong.
         assert!(
@@ -880,7 +1149,7 @@ mod tests {
         // One extractor serves all three renderers, so all three are checked:
         // a fix that reached only the page the issue named would leave the ADR
         // index quoting `{#…}` back at the reader.
-        let adr = render_adr("# ADR-0001: Example {#adr1}\n", "slug", &no_pages());
+        let adr = render_adr("# ADR-0001: Example {#adr1}\n", "slug", &no_pages(), None);
         assert_eq!(adr.title, "ADR-0001: Example");
         assert!(
             adr.html
@@ -892,6 +1161,7 @@ mod tests {
             "# Roteiro — Build Plan {#plan}\n",
             "Build Plan",
             &no_pages(),
+            None,
         );
         assert_eq!(doc.title, "Roteiro — Build Plan");
         assert!(!doc.html.contains("{#"), "{}", doc.html);
@@ -909,6 +1179,7 @@ mod tests {
             "# Why `{#anchor}` outlives a restructure\n",
             "fallback",
             &no_pages(),
+            None,
         );
         assert_eq!(coded.title, "Why {#anchor} outlives a restructure");
         assert!(
@@ -924,6 +1195,7 @@ mod tests {
             "# Anchors are written {#id}, in prose\n",
             "fallback",
             &no_pages(),
+            None,
         );
         assert_eq!(mid.title, "Anchors are written {#id}, in prose");
     }
@@ -943,7 +1215,7 @@ mod tests {
             "# What `init` sets up\n",
             "# Sets like {#1, #2}\n",
         ] {
-            let r = render_doc(md, "fallback", &no_pages());
+            let r = render_doc(md, "fallback", &no_pages(), None);
             let inner = r
                 .html
                 .split_once("<h1")
@@ -977,7 +1249,7 @@ mod tests {
     fn the_title_is_the_heading_the_reader_sees() {
         // Inline markup contributes its text, not its punctuation — the same
         // rule the heading's own id already follows.
-        let code = render_doc("# What `init` sets up\n", "fallback", &no_pages());
+        let code = render_doc("# What `init` sets up\n", "fallback", &no_pages(), None);
         assert_eq!(code.title, "What init sets up");
         // A line scan called this document's title `Not a title`; the parser
         // knows a fenced hash is not a heading at all.
@@ -985,11 +1257,12 @@ mod tests {
             "```\n# Not a title\n```\n\n# The real one\n",
             "fallback",
             &no_pages(),
+            None,
         );
         assert_eq!(fenced.title, "The real one");
         // And a heading spelled the other way is still a heading: the page shows
         // an `<h1>`, so the tab has to show its words rather than the file stem.
-        let setext = render_doc("Underlined\n==========\n", "fallback", &no_pages());
+        let setext = render_doc("Underlined\n==========\n", "fallback", &no_pages(), None);
         assert!(
             setext.html.contains("<h1 id=\"underlined\">"),
             "{}",
@@ -1009,6 +1282,7 @@ mod tests {
             &nav(),
             "modes.html",
             &no_pages(),
+            None,
         );
         assert_eq!(none.title, "The five ways to run it");
         assert!(
@@ -1019,10 +1293,10 @@ mod tests {
         );
         // An H1 with nothing in it names nothing, so it defers to the fallback
         // rather than emitting `<title> — Roteiro</title>`.
-        let empty = render_doc("#\n\nBody.\n", "build-plan", &no_pages());
+        let empty = render_doc("#\n\nBody.\n", "build-plan", &no_pages(), None);
         assert_eq!(empty.title, "build-plan");
         // A lower heading is not the document's title.
-        let sub = render_doc("## Only a section {#s}\n", "build-plan", &no_pages());
+        let sub = render_doc("## Only a section {#s}\n", "build-plan", &no_pages(), None);
         assert_eq!(sub.title, "build-plan");
     }
 
@@ -1034,6 +1308,7 @@ mod tests {
             &nav(),
             "modes.html",
             &no_pages(),
+            None,
         );
         assert_eq!(r.title, "The five ways to run it");
         // Frontmatter is chrome for the graph, not content for the reader.
@@ -1076,19 +1351,19 @@ mod tests {
         // aims it at a page that is never emitted.
         let mut pages = PublishedPages::new();
         pages.publish("BUILD_PLAN_V2.md", "build-plan-v2.html");
-        let html = render_markdown("See [V2](../BUILD_PLAN_V2.md).\n", "", &pages);
+        let html = render_markdown("See [V2](../BUILD_PLAN_V2.md).\n", "", &pages, None, 0);
         assert!(
             html.contains("href=\"../build-plan-v2.html\""),
             "served name, and the link's own hop kept: {html}"
         );
         // A fragment survives the substitution.
-        let frag = render_markdown("[s](../BUILD_PLAN_V2.md#stage-21)\n", "", &pages);
+        let frag = render_markdown("[s](../BUILD_PLAN_V2.md#stage-21)\n", "", &pages, None, 0);
         assert!(
             frag.contains("href=\"../build-plan-v2.html#stage-21\""),
             "{frag}"
         );
         // An unpublished document still falls back to its stem, unchanged.
-        let other = render_markdown("[x](../REVIEW_CHECKLIST.md)\n", "", &pages);
+        let other = render_markdown("[x](../REVIEW_CHECKLIST.md)\n", "", &pages, None, 0);
         assert!(
             other.contains("href=\"../REVIEW_CHECKLIST.html\""),
             "{other}"
@@ -1102,30 +1377,177 @@ mod tests {
         let mut pages = PublishedPages::new();
         pages.publish("GUIDE.md", "guide.html");
         pages.publish("GUIDE.md", "other-guide.html");
-        let html = render_markdown("[g](GUIDE.md)\n", "", &pages);
+        let html = render_markdown("[g](GUIDE.md)\n", "", &pages, None, 0);
         assert!(html.contains("href=\"GUIDE.html\""), "unrewritten: {html}");
         // Re-publishing the *same* target is not a conflict.
         let mut same = PublishedPages::new();
         same.publish("GUIDE.md", "guide.html");
         same.publish("GUIDE.md", "guide.html");
-        let html = render_markdown("[g](GUIDE.md)\n", "", &same);
+        let html = render_markdown("[g](GUIDE.md)\n", "", &same, None, 0);
         assert!(html.contains("href=\"guide.html\""), "{html}");
+    }
+
+    /// A source base for a document in `dir`, at a fixed sha.
+    fn source(dir: &str) -> SourceBase {
+        SourceBase::new(Some("https://github.com/o/r/blob/abc123"), dir).expect("base")
+    }
+
+    #[test]
+    fn a_link_out_of_the_site_goes_to_the_repository() {
+        // Issue #456: the Build Plan cites code as evidence — correct in a
+        // checkout, dead on the site, which publishes documents and not source.
+        let base = source("docs");
+        let html = render_markdown(
+            "[sync](../crates/rto-graph/src/sync.rs) and [wf](../.github/workflows/website.yml)\n",
+            "adr/",
+            &no_pages(),
+            Some(&base),
+            0,
+        );
+        assert!(
+            html.contains(
+                "href=\"https://github.com/o/r/blob/abc123/crates/rto-graph/src/sync.rs\""
+            ),
+            "resolved against the document's own directory: {html}"
+        );
+        assert!(
+            html.contains(
+                "href=\"https://github.com/o/r/blob/abc123/.github/workflows/website.yml\""
+            ),
+            "a dotted directory is a directory, not a `.` segment: {html}"
+        );
+        // A line anchor is the author's, and travels.
+        let frag = render_markdown(
+            "[l](../crates/roteiro/src/init.rs#L12)\n",
+            "adr/",
+            &no_pages(),
+            Some(&base),
+            0,
+        );
+        assert!(
+            frag.contains("blob/abc123/crates/roteiro/src/init.rs#L12\""),
+            "{frag}"
+        );
+    }
+
+    #[test]
+    fn a_link_that_stays_inside_the_site_is_left_alone() {
+        // The whole discrimination is the hop count: `ask.html` and `adr/` are
+        // written *for* the site and are correct there, so rewriting them to the
+        // repository would break links that work today.
+        let base = source("docs");
+        let html = render_markdown(
+            "[a](ask.html), [d](adr/), [s](./style.css) and [r](/abs.html)\n",
+            "adr/",
+            &no_pages(),
+            Some(&base),
+            0,
+        );
+        assert!(!html.contains("github.com"), "none rewritten: {html}");
+        for href in [
+            "\"ask.html\"",
+            "\"adr/\"",
+            "\"./style.css\"",
+            "\"/abs.html\"",
+        ] {
+            assert!(html.contains(href), "{href} kept verbatim: {html}");
+        }
+    }
+
+    #[test]
+    fn an_adr_may_climb_one_level_and_still_be_inside_the_site() {
+        // An ADR page is served at `adr/<slug>.html`, so `../x` lands at the site
+        // root. Treating that as an escape would send every ADR's back-link to
+        // GitHub. The second hop does leave.
+        let base = source("docs/adr");
+        let inside = render_markdown("[b](../build-plan.html)\n", "", &no_pages(), Some(&base), 1);
+        assert!(!inside.contains("github.com"), "{inside}");
+        let outside = render_markdown("[c](../../Cargo.toml)\n", "", &no_pages(), Some(&base), 1);
+        assert!(
+            outside.contains("href=\"https://github.com/o/r/blob/abc123/Cargo.toml\""),
+            "{outside}"
+        );
+    }
+
+    #[test]
+    fn a_published_page_beats_the_escape_rule() {
+        // Order matters: #446's lookup runs first, so a document reached by a
+        // path that climbs out of its own directory still lands on the page the
+        // site publishes it as, rather than being handed to the repository.
+        let mut pages = PublishedPages::new();
+        pages.publish("BUILD_PLAN_V2.md", "build-plan-v2.html");
+        let base = source("website/pages");
+        let html = render_markdown(
+            "[v2](../../docs/BUILD_PLAN_V2.md)\n",
+            "adr/",
+            &pages,
+            Some(&base),
+            0,
+        );
+        assert!(
+            html.contains("href=\"../../docs/build-plan-v2.html\""),
+            "still the site's page: {html}"
+        );
+        assert!(!html.contains("github.com"), "{html}");
+    }
+
+    #[test]
+    fn without_a_source_base_the_link_is_left_as_authored() {
+        // No `origin`, or one that maps to no web view. Leaving the link is the
+        // deliberate choice: it stays correct in a checkout, and a rewrite that
+        // silently produced a broken URL would be worse than the link it replaced.
+        assert_eq!(SourceBase::new(None, "docs"), None);
+        let html = render_markdown(
+            "[s](../crates/rto-graph/src/sync.rs)\n",
+            "adr/",
+            &no_pages(),
+            None,
+            0,
+        );
+        assert!(
+            html.contains("href=\"../crates/rto-graph/src/sync.rs\""),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn the_landing_pages_bar_is_replaced_rather_than_maintained() {
+        // Issue #508. The stale copy is overwritten wholesale, so there is no
+        // second list left to drift out of `site-order`.
+        let stale = "<h1>Roteiro</h1>\n<nav class=\"sitenav\">\n<a href=\"old.html\">Old</a>\n\
+                     </nav>\n<p>after</p>\n";
+        let out = replace_site_nav(stale, &nav(), "./").expect("marker found");
+        assert!(
+            !out.contains("old.html"),
+            "the hand-written list is gone: {out}"
+        );
+        assert!(
+            out.contains("<a href=\"modes.html\">Modes &amp; Co</a>"),
+            "the computed bar took its place: {out}"
+        );
+        assert!(
+            out.starts_with("<h1>Roteiro</h1>\n") && out.ends_with("<p>after</p>\n"),
+            "only the bar is touched: {out}"
+        );
+        // A page that claims no bar is left alone rather than failing: every
+        // `render docs` fixture writes a one-line landing page.
+        assert_eq!(replace_site_nav("<h1>Home</h1>\n", &nav(), "./"), None);
     }
 
     #[test]
     fn site_pages_render_deterministically() {
         let md = "---\nsite-page: a\n---\n\n# A\n\n## S\n";
         assert_eq!(
-            render_site_page(md, "f", &nav(), "a.html", &no_pages()),
-            render_site_page(md, "f", &nav(), "a.html", &no_pages())
+            render_site_page(md, "f", &nav(), "a.html", &no_pages(), None),
+            render_site_page(md, "f", &nav(), "a.html", &no_pages(), None)
         );
     }
 
     #[test]
     fn rendering_is_deterministic() {
         assert_eq!(
-            render_adr(ADR, "f", &no_pages()),
-            render_adr(ADR, "f", &no_pages())
+            render_adr(ADR, "f", &no_pages(), None),
+            render_adr(ADR, "f", &no_pages(), None)
         );
     }
 }

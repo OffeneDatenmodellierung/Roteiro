@@ -20,21 +20,14 @@ Discovery — accumulated route knowledge that made navigation repeatable.
 Roteiro does the same for software: <strong>structure, intent, and context in one
 queryable, provenance-tagged knowledge graph</strong>, for humans and AI agents alike.</p>
 
-<nav class="sitenav">
-<span aria-current="page">Home</span>
-<a href="build.html">Install</a>
-<a href="adopt.html">Use it</a>
-<a href="modes.html">Modes</a>
-<a href="ask.html">Ask</a>
-<a href="plan.html">Plan</a>
-<a href="models.html">Models</a>
-<a href="config.html">Config</a>
-<a href="cross-repo.html">Cross-repo</a>
-<a href="offline.html">Offline</a>
-<a href="serving.html">Serving</a>
-<a href="build-plan-v2.html">Roadmap</a>
-<a href="json-schema.html">JSON schemas</a>
-</nav>
+<!-- The site navigation bar is RENDERED, not hand-written: `roteiro render
+     docs` replaces this whole element with the bar it computes from
+     `site-order`, the same one every other page carries (issue #508).
+     Do not list pages here — a page added by hand to one list and not the
+     other is exactly the drift this removed. The element must keep its
+     `class="sitenav"`: that is the marker the renderer looks for, and a
+     page it cannot find is left alone rather than failing. -->
+<nav class="sitenav"></nav>
 
 <nav class="toc">
   <a href="#what">What it is</a>
