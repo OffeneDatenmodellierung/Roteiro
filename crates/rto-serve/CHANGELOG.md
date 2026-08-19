@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.25.0...rto-serve-v1.26.0) - 2026-08-19
+
+### Added
+
+- *(serve)* honour a client's `tools` on `/v1/chat/completions`
+
+### Fixed
+
+- *(serve)* close the graph-tool suppression gap; bound the client tool surface
+
 ## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.12.0...rto-serve-v1.13.0) - 2026-08-16
 
 ### Other

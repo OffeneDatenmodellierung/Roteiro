@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.25.0...rto-llama-v1.26.0) - 2026-08-19
+
+### Added
+
+- *(llama)* size the context window per request, per model
+
+### Fixed
+
+- *(config)* render `max_context_tokens`'s `0` as its meaning, not as `0`
+
+### Other
+
+- Potential fix for pull request finding
+
 ## [1.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.12.0...rto-llama-v1.13.0) - 2026-08-16
 
 ### Fixed

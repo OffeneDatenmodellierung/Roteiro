@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.25.0...roteiro-v1.26.0) - 2026-08-19
+
+### Added
+
+- *(llama)* size the context window per request, per model
+
+### Fixed
+
+- *(config)* render `max_context_tokens`'s `0` as its meaning, not as `0`
+- *(build)* compile `--no-default-features --features execution` clean
+
+### Other
+
+- Merge pull request #497 from OffeneDatenmodellierung/feat/openai-client-tools
+- *(lint)* gate `lint_cli.rs` on the backend it drives
+
 ## [1.25.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.24.0...roteiro-v1.25.0) - 2026-08-19
 
 ### Added
