@@ -221,7 +221,7 @@ impl AnalyzerRunner for SubprocessRunner {
 
         let invocation = self.invocation();
         let started_at = rfc3339_utc(std::time::SystemTime::now());
-        let output = execute(&invocation, &request.worktree.path, &request.analyzer)?;
+        let output = execute(&invocation, &request.worktree.path, &request.analyzer, &[])?;
         let ended_at = rfc3339_utc(std::time::SystemTime::now());
 
         let snippets = WorktreeSnippets::new(&request.worktree.path);
@@ -254,16 +254,25 @@ impl AnalyzerRunner for SubprocessRunner {
 }
 
 /// What a completed analyzer run produced.
-struct Captured {
-    stdout: Vec<u8>,
-    status: i32,
+pub(crate) struct Captured {
+    pub(crate) stdout: Vec<u8>,
+    /// Kept even on a successful run, because a caller may need to explain an
+    /// *empty* success: a tool that exited cleanly and said nothing has usually
+    /// said why on its standard error, and that is the difference between "no
+    /// findings" and "did not run".
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) status: i32,
 }
 
 /// Run the analyzer and capture its stdout.
-fn execute(
+///
+/// `extra_env` names variables to pass through **in addition** to the scrubbed
+/// minimum; see [`scrub_environment`]. A reader-class analyzer passes none.
+pub(crate) fn execute(
     invocation: &Invocation,
     worktree: &std::path::Path,
     analyzer: &str,
+    extra_env: &[&str],
 ) -> Result<Captured, SubprocessError> {
     let mut command = Command::new(&invocation.program);
     command
@@ -272,7 +281,7 @@ fn execute(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    scrub_environment(&mut command);
+    scrub_environment(&mut command, extra_env);
 
     let output = command.output().map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
@@ -315,6 +324,7 @@ fn execute(
 
     Ok(Captured {
         stdout: output.stdout,
+        stderr: output.stderr,
         status,
     })
 }
@@ -323,7 +333,7 @@ fn execute(
 ///
 /// Bounded, because a failing analyzer can be extremely talkative and a wall of
 /// output in an error message hides the error.
-fn stderr_tail(stderr: &[u8]) -> String {
+pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
     const MAX_LINES: usize = 8;
     const MAX_BYTES: usize = 4_000;
     let text = String::from_utf8_lossy(stderr);
@@ -359,7 +369,13 @@ fn stderr_tail(stderr: &[u8]) -> String {
 /// This is a *reduction* in what the process can reach, not a boundary. It stops
 /// an analyzer from picking up a credential by accident; it does not stop one
 /// that goes looking.
-fn scrub_environment(command: &mut Command) {
+///
+/// `extra_env` is for a caller whose tool needs more than a parser does — the
+/// linter in [`crate::lint`] needs the variables that locate a Rust toolchain,
+/// and would otherwise be handed a `PATH` shim with no toolchain behind it. It
+/// is a **named list per caller**, not a pattern or an inherit-everything
+/// escape: each addition is a variable somebody wrote down and justified.
+pub(crate) fn scrub_environment(command: &mut Command, extra_env: &[&str]) {
     command.env_clear();
     for key in [
         "PATH",
@@ -368,7 +384,11 @@ fn scrub_environment(command: &mut Command) {
         "SystemRoot",
         "TMPDIR",
         "TEMP",
-    ] {
+    ]
+    .iter()
+    .copied()
+    .chain(extra_env.iter().copied())
+    {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
@@ -406,7 +426,7 @@ fn analyzer_version(invocation: &Invocation, worktree: &std::path::Path) -> Opti
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    scrub_environment(&mut command);
+    scrub_environment(&mut command, &[]);
 
     let output = command.output().ok()?;
     if !output.status.success() {
@@ -526,7 +546,7 @@ mod tests {
     #[test]
     fn the_child_environment_carries_no_ambient_credentials() {
         let mut command = std::process::Command::new("true");
-        scrub_environment(&mut command);
+        scrub_environment(&mut command, &[]);
         let passed: Vec<String> = command
             .get_envs()
             .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().into_owned()))
@@ -547,6 +567,53 @@ mod tests {
             "the child still needs PATH"
         );
         assert!(passed.contains(&"LC_ALL".to_owned()));
+    }
+
+    /// The extra pass-through is **by name**, so a caller that needs a variable
+    /// the base list does not carry gets that one and no more. The linter needs
+    /// this for `CARGO_HOME`/`RUSTUP_HOME`; nothing else may ride along.
+    #[test]
+    fn extra_variables_are_passed_through_only_when_named() {
+        let base = [
+            "PATH",
+            "HOME",
+            "USERPROFILE",
+            "SystemRoot",
+            "TMPDIR",
+            "TEMP",
+            "LC_ALL",
+            "SEMGREP_SEND_METRICS",
+        ];
+        // Any variable this process really has that the base list does not
+        // carry, so the assertion is about the mechanism rather than about one
+        // machine's environment.
+        let Some(candidate) = std::env::vars()
+            .map(|(key, _)| key)
+            .find(|key| !base.contains(&key.as_str()))
+        else {
+            return; // an environment with nothing else in it proves nothing
+        };
+
+        let passed = |extra: &[&str]| -> Vec<String> {
+            let mut command = std::process::Command::new("true");
+            scrub_environment(&mut command, extra);
+            command
+                .get_envs()
+                .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().into_owned()))
+                .collect()
+        };
+        assert!(
+            !passed(&[]).contains(&candidate),
+            "{candidate} reached the child without being named"
+        );
+        assert!(
+            passed(&[candidate.as_str()]).contains(&candidate),
+            "{candidate} was named and still did not reach the child"
+        );
+        // Naming something that does not exist invents nothing.
+        assert!(
+            !passed(&["ROTEIRO_NO_SUCH_VARIABLE"]).contains(&"ROTEIRO_NO_SUCH_VARIABLE".to_owned())
+        );
     }
 
     #[test]

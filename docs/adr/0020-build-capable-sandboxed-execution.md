@@ -11,8 +11,8 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
-last-modified: 2026-08-18
+version: "1.3"
+last-modified: 2026-08-19
 confluence-url:
 ---
 
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.1 |
+| **Document version** | 1.3 |
 | **Status** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
@@ -127,17 +127,31 @@ The Roteiro Project Team.
 
 ## Recommended option
 
-Adopt build-capable execution as a **distinct runner class**, subject to five
+Adopt build-capable execution as a **distinct runner class**, subject to six
 conditions. Each is stated as a requirement because each is a way this decision
 turns into the failure ADR-0014 predicted.
 
-### 1. The read-only invariant is relaxed for builders only
+### 1. Read-only stays the standard, including for builders
 
 `check_request` refuses any request whose worktree is not read-only, and a test
-pins it. That preflight **stays**, and keeps refusing reader-class requests. A
-builder gets a writable *build directory* — ideally an overlay or a separate
-mount — and the source tree stays read-only wherever the toolchain permits.
-A blanket relaxation of the preflight is the conversion ADR-0014 warns about.
+pins it. That preflight **stays** — for readers *and* for builders.
+
+The first draft of this condition hedged: the source tree stays read-only
+"wherever the toolchain permits". Measured, the toolchain permits it. With
+`CARGO_TARGET_DIR` pointing outside the tree and `--locked`, `cargo clippy`
+completes against a source tree on which every write is refused. So the writable
+surface a builder needs is a **scratch build directory**, not your code.
+
+That is the difference between this decision and the one ADR-0014 warned about,
+and it is a large one: an *additional mount* rather than a *removed guarantee*.
+A malicious build script gets a directory that is discarded when the run ends.
+It does not get your working tree. A blanket relaxation of the preflight remains
+the conversion ADR-0014 predicted, and this condition now forecloses it rather
+than rationing it.
+
+One thing is unestablished and belongs to condition 2 rather than here: the
+probe above had no dependencies, so it never read or wrote `CARGO_HOME`. Whether
+a package cache can be mounted read-only, or needs a writable copy, is open.
 
 ### 2. Egress stays denied; inputs are mounted, not fetched
 
@@ -205,6 +219,53 @@ involved. Builder findings must **not** be wired into the cross-analyzer join,
 whose correctness rests on both upstreams publishing identifiers. Nobody
 publishes lint names; they are release notes.
 
+### 6. Sandboxed is the default; the host is opt-in
+
+A builder runs in the sandbox unless the person running it has said otherwise.
+This reverses what `roteiro lint` first shipped with, and the reverse is the
+correct way round: linting a tree you did not write executes that tree's build
+scripts and proc macros with your filesystem and your credentials. That the
+*toolchain* is yours does not make the *code* yours.
+
+Host execution is therefore **permitted, not assumed**, and the permission is
+layered exactly as ADR-0019 layers the remote tier — for the same reason, which
+is that `roteiro.toml` is committed and shared:
+
+| Layer | May deny | May grant |
+|---|---|---|
+| Built-in default | sandboxed by default | — |
+| Project `roteiro.toml` | **yes** | **no** |
+| User `~/.roteiro/config.toml` | yes | **yes** |
+| Invocation (flag) | yes | **yes** |
+
+A merged line in a shared file that starts running builds on every teammate's
+machine is consent by pull request: granted by someone else, noticed by nobody.
+The project layer may switch the sandbox *on* for everyone, and may never switch
+it *off* for anyone.
+
+It differs from ADR-0019 in one respect, deliberately. There, the user layer and
+the invocation must **both** grant. Here **either suffices**. Remote egress sends
+your source elsewhere and is worth re-consenting to per run; running a build on
+your own machine with your own toolchain is a standing preference a person may
+reasonably express once. Requiring both would make the config key useless, since
+you would still type the flag on every run.
+
+**There is no fallback.** If the sandbox is selected and unavailable — feature
+not compiled, runtime not provisioned, image absent — the run refuses and names
+what is missing. It does not quietly become a host run. A boundary that vanishes
+while the command still reports success is the silent downgrade ADR-0019 §6
+exists to prevent, and it would be worse here than there: the person asked for
+isolation and would get execution.
+
+Until conditions 1 and 2 are built the default has nothing to select, so
+`roteiro lint` refuses unless host execution has been granted. That is the honest
+state rather than an awkward one — the command says the sandbox is the intended
+path and is not yet built, and anyone who wants it on their own machine says so
+once, in one place. Shipping the opposite default *because* the sandbox is
+unfinished would be precisely the conversion this document spends its length
+refusing: the availability of a capability quietly deciding a question that was
+supposed to be decided deliberately.
+
 ## Consequences
 
 **This is a larger product surface than an analyzer backend.** A writable
@@ -252,9 +313,43 @@ unanswered question: a writable build directory that does not relax the
 read-only preflight for readers, the argv and environment seam a builder needs,
 and a demonstrated refusal path that never falls back to the host.
 
+### What has landed, and what it does not claim
+
+`roteiro lint <analyzer>` ships the **reporting** half, with a `clippy` adapter.
+Under condition 6 it runs on the host only when host execution has been granted,
+and refuses otherwise, because the sandbox it would prefer does not yet exist.
+
+Conditions 3, 4 and 5 are built. The run records `isolation: none` and reports it
+from the code that ran the process rather than from whoever prints it; its output
+is never stored — there is no layer, no entry in the adapter registry `ingest`
+resolves against, and no path from the linter to
+`Store::replace_findings_layer`; and the three readings above are printed beneath
+every report and carried in `--json`, so a scripted consumer is told what a
+person is told. The linter is also kept out of the cross-analyzer join, which is
+checked by a test rather than left to a reviewer.
+
+Conditions 1 and 2 are **not** built, and nothing was borrowed from them. There
+is no writable build directory inside a guest and no host-produced dependency
+mount, because there is no guest: the sandboxed builder those conditions describe
+does not exist. `check_request`'s read-only preflight is **untouched** and still
+refuses every request whose worktree is writable — the linter takes a *different
+request shape* rather than a weakened one, which is why shipping this needed no
+relaxation of the invariant condition 1 is about.
+
+So the capability available today is exactly the one this document calls the
+inverted threat model, unmitigated: linting a branch you are reviewing executes
+that branch's build scripts and proc macros on your machine. It is disclosed —
+the argv and the isolation are printed before the run, and `roteiro lint --help`
+says it in a paragraph — and disclosure is not mitigation. What condition 6 adds
+is that it is no longer the *default*: an unmitigated capability may be offered,
+but it may not be the answer to a question nobody was asked. Mitigating it is
+what conditions 1 and 2 are for, and they remain the unbuilt work.
+
 ## Document version history
 
 | Version | Date | Notes |
 |---------|------|-------|
 | 1.0 | 2026-08-18 | Initial draft. Narrows ADR-0014's `code_interpreter` non-goal to exclude only model-authored code, scopes its "security argument is weaker" reasoning to parse-only analyzers, and relaxes the read-only worktree invariant for a builder runner only. Records the measured build-script and proc-macro counts that make the case, the inverted threat model, and the five conditions — of which condition 4, the store's inability to distinguish two builds of one commit, is unresolved and blocks acceptance. |
 | 1.1 | 2026-08-18 | Condition 4 reversed on the owner's ruling that builder output is local to the person running it rather than an artifact stored for later. Storing a lint was the source of every identity problem the draft catalogued — an advisory id is *assigned* and permanent, a lint name is a symbol in a compiler — so not storing is the fix rather than a workaround. This unblocks acceptance: what remains is engineering, not an open question. Condition 5 softened accordingly, since with no stored history a renamed lint is a surprise rather than a corruption. |
+| 1.2 | 2026-08-18 | Records what landed rather than changing any decision: `roteiro lint <analyzer>`, with a `clippy` adapter that reuses the shared normalisation shape and is deliberately absent from the registry `ingest` resolves against. Conditions 3–5 are built and tested — an unstored report, an `isolation: none` read out of the runner, and the renamed / removed / `[workspace.lints]` readings surfaced in both output shapes. Conditions 1–2 are untouched: the run has no boundary, and the read-only preflight was **not** relaxed to fit a builder through it. |
+| 1.3 | 2026-08-19 | Default posture set by the owner: a builder runs **sandboxed** unless host execution has been granted, and the grant is layered as ADR-0019 layers the remote tier — project `roteiro.toml` may deny it and may never grant it, because a merged line in a shared file is consent granted by someone else and noticed by nobody. Adds condition 6, including that the sandbox never silently falls back to the host. Condition 1 is strengthened rather than amended: measured, `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it, so the preflight is not relaxed at all and a builder's writable surface is an **added scratch mount** rather than a **removed guarantee**. Records the consequence that `roteiro lint` must refuse by default until conditions 1–2 exist. |

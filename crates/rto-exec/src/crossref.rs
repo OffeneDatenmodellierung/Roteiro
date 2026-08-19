@@ -362,6 +362,87 @@ mod tests {
         }
     }
 
+    /// A layer built from **real** linter output, to check the join against what
+    /// the adapter actually emits rather than against a hand-made stand-in.
+    fn lint_layer() -> FindingsLayer {
+        use crate::adapter::NativeContext;
+        use crate::adapter::clippy::Clippy;
+
+        let source = SourceIdentity::default();
+        let ctx = NativeContext {
+            started_at: "2026-08-18T09:00:00Z".to_owned(),
+            ended_at: "2026-08-18T09:01:00Z".to_owned(),
+            analyzer_version: Some("0.1.94".to_owned()),
+            exit_status: 0,
+            source: &source,
+            rules_digest: None,
+            advisory_db: None,
+            worktree: None,
+            snippets: &crate::snippet::NoSnippets,
+        };
+        let native = concat!(
+            r#"{"reason":"compiler-message","message":{"message":"unused import: `time`","#,
+            r#""code":{"code":"unused_imports"},"level":"warning","spans":[{"#,
+            r#""file_name":"src/lib.rs","byte_start":0,"byte_end":11,"line_start":1,"#,
+            r#""line_end":1,"column_start":1,"is_primary":true}]}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#
+        );
+        let (report, _) = Clippy::parse(native.as_bytes(), &ctx).expect("parse");
+        let findings = report
+            .findings
+            .iter()
+            .map(|f| Finding {
+                key: FindingKey::new("clippy", &f.identity).expect("key"),
+                rule: f.rule.clone(),
+                severity: f.severity.clone(),
+                title: f.title.clone(),
+                message: f.message.clone(),
+                path: f.path.clone(),
+                span: f.span,
+                meta: f.meta.clone(),
+            })
+            .collect();
+        layer("clippy", findings)
+    }
+
+    /// Requirement of ADR-0020 condition 5: a lint never enters the
+    /// cross-analyzer join. The join's correctness rests on both upstreams
+    /// publishing identifiers, and **nobody publishes lint names** — they are
+    /// release notes. `roteiro lint` stores nothing, so no such layer can exist
+    /// today; this checks the join would refuse one anyway, because the guard
+    /// that matters is the absent `package`/`version` pair in the adapter's
+    /// `meta` rather than the current absence of a caller.
+    #[test]
+    fn a_lint_finding_cannot_enter_the_dependency_join() {
+        assert!(
+            cross_reference(&[lint_layer()]).is_empty(),
+            "a linter is not on the dependency axis at all"
+        );
+
+        // …and it does not attach itself to a real advisory about a package it
+        // happens to mention in a message, either.
+        let advisory = layer(
+            "cargo-audit",
+            vec![finding(
+                "cargo-audit",
+                "RUSTSEC-2020-0071",
+                serde_json::json!({
+                    "package": "time", "version": "0.2.22",
+                    "aliases": ["CVE-2020-26235"], "related": []
+                }),
+            )],
+        );
+        let joined = cross_reference(&[lint_layer(), advisory]);
+        assert_eq!(joined.len(), 1, "only the advisory takes part");
+        assert_eq!(joined[0].analyzers(), vec!["cargo-audit"]);
+        for correspondence in &joined {
+            for report in &correspondence.reports {
+                assert_ne!(report.analyzer, "clippy");
+            }
+        }
+    }
+
     /// The headline case: the same Rust advisory from both analyzers, named by
     /// different ids, joined on the RUSTSEC id both of them publish. One
     /// advisory, confirmed twice — and both keys still addressable.

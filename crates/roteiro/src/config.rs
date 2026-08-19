@@ -153,9 +153,12 @@ pub struct Config {
     /// `roteiro debt` tuning (paths excluded from the intent-debt scan).
     pub debt: DebtConfig,
     /// `[remote]` — the optional, default-off remote model tier (ADR-0019).
-    /// **The one table whose `enabled` key does not follow this file's
-    /// precedence**; see [`RemoteConfig`].
+    /// **One of the two tables whose grant key does not follow this file's
+    /// precedence**; see [`RemoteConfig`], and [`LintConfig`] for the other.
     pub remote: RemoteConfig,
+    /// `[lint]` — whether `roteiro lint` may run a linter on this host
+    /// (ADR-0020 §6). **The other inverted key**; see [`LintConfig`].
+    pub lint: LintConfig,
     /// Filesystem locations (the model store).
     pub paths: PathsConfig,
     /// `[telemetry]` — opt-in structured file logging (ADR-0011). Unset ⇒ stdout
@@ -291,6 +294,26 @@ pub struct RemoteConfig {
     pub model: Option<String>,
 }
 
+impl ModelsConfig {
+    /// Overlay the project layer (`over`) on the user layer (`self`).
+    ///
+    /// Five ordinary keys, ordinary precedence. It became its own function when
+    /// `[lint]` was added and [`Config::overlaid_with`] crossed the length limit
+    /// — but it belongs here regardless: `[remote]`, `[lint]` and `[telemetry]`
+    /// already overlay themselves, and the largest table in the file was the odd
+    /// one out for no reason beyond the order things were written in.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        let pick = |over: &Option<String>, own: &Option<String>| over.clone().or(own.clone());
+        Self {
+            embedding: pick(&over.embedding, &self.embedding),
+            generative: pick(&over.generative, &self.generative),
+            vision: pick(&over.vision, &self.vision),
+            audio: pick(&over.audio, &self.audio),
+            ocr: pick(&over.ocr, &self.ocr),
+        }
+    }
+}
+
 impl RemoteConfig {
     /// Overlay the project layer (`over`) on the user layer (`self`).
     ///
@@ -312,6 +335,100 @@ impl RemoteConfig {
             model: over.model.clone().or_else(|| self.model.clone()),
         }
     }
+}
+
+/// `[lint]` — whether `roteiro lint` may run a linter **on this host**
+/// (ADR-0020 §6), and the second table in this file whose key does not follow
+/// the module's precedence.
+///
+/// # `allow_unsandboxed` inverts the layering, for [`RemoteConfig`]'s reason
+///
+/// `roteiro lint` runs the linter sandboxed by default. `cargo clippy` has
+/// `cargo check` semantics, so running it on the host executes the tree's build
+/// scripts and loads its proc macros with the invoking user's filesystem and
+/// credentials — and that the *toolchain* is yours does not make the *code*
+/// yours when you are linting a branch you are reviewing. So the host is
+/// permitted rather than assumed, and the permission layers as ADR-0019 §3
+/// layers egress, because `roteiro.toml` is committed and shared:
+///
+/// | Layer | May deny | May grant |
+/// |---|---|---|
+/// | Built-in default | sandboxed by default | — |
+/// | Project `roteiro.toml` | **yes** | **no** |
+/// | User `~/.roteiro/config.toml` | yes | **yes** |
+/// | Invocation (`--allow-unsandboxed` / `--sandboxed`) | yes | **yes** |
+///
+/// A merged line that starts running builds on every teammate's machine is
+/// consent granted by someone else and noticed by nobody.
+///
+/// # It differs from `[remote] enabled` in one respect, deliberately
+///
+/// There, the user layer and the invocation must **both** grant. Here **either
+/// suffices** (ADR-0020 §6). Remote egress sends your source elsewhere and is
+/// worth re-consenting to per run; building on your own machine with your own
+/// toolchain is a standing preference a person may reasonably express once —
+/// and requiring both would make this key useless, since you would still type
+/// the flag on every run. Do not reconcile the two.
+///
+/// The whole difference lives in `rto_exec::lint::decide`, not here: this table
+/// contributes the *config* half, which is the half the two tiers agree on.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LintConfig {
+    /// Whether *this layer* permits `roteiro lint` to run a linter on this host.
+    ///
+    /// Meaningful per layer rather than merged like a scalar — see the type's
+    /// docs, and [`lint_allow_unsandboxed_effective`] for the merge. Named after
+    /// `security run --allow-unsandboxed` because it is the same concept and a
+    /// reader should not have to learn a second word for it; scoped to *this*
+    /// command by the table it sits in, which is what stops it reading as a
+    /// setting that governs both.
+    #[serde(alias = "allow-unsandboxed")]
+    pub allow_unsandboxed: Option<bool>,
+}
+
+impl LintConfig {
+    /// Overlay the project layer (`over`) on the user layer (`self`).
+    ///
+    /// Its own function for [`RemoteConfig::overlaid_with`]'s reason: the rule
+    /// this applies is not the rule the rest of the merge applies, and that
+    /// belongs where it is applied rather than in a comment far away.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            // ADR-0020 §6. `over.allow_unsandboxed.or(self.allow_unsandboxed)` —
+            // the shape every ordinary scalar uses — would let a merged line in
+            // a committed `roteiro.toml` start running builds on every
+            // teammate's machine.
+            allow_unsandboxed: lint_allow_unsandboxed_effective(
+                self.allow_unsandboxed,
+                over.allow_unsandboxed,
+            ),
+        }
+    }
+}
+
+/// The `[lint] allow_unsandboxed` the config layers jointly produce, before the
+/// invocation is consulted.
+///
+/// Delegates to `rto_exec::lint::ConfigGrant`, so the value `roteiro config`
+/// echoes and the value the gate consults cannot drift apart — the same
+/// arrangement [`remote_enabled_effective`] has with `rto_remote`.
+#[cfg(feature = "exec-subprocess")]
+fn lint_allow_unsandboxed_effective(user: Option<bool>, project: Option<bool>) -> Option<bool> {
+    rto_exec::LintConfigGrant::from_layers(project, user).as_effective()
+}
+
+/// Without a linter to run, the effective value is unset whatever the layers
+/// say.
+///
+/// Reported as unset rather than echoed back, for the reason
+/// [`remote_enabled_effective`]'s counterpart gives: echoing
+/// `allow_unsandboxed = true` from a build that cannot run a linter would
+/// describe a permission that permits nothing. The key still **parses**, so a
+/// config shared with a fuller build is never rejected by a leaner one.
+#[cfg(not(feature = "exec-subprocess"))]
+fn lint_allow_unsandboxed_effective(_user: Option<bool>, _project: Option<bool>) -> Option<bool> {
+    None
 }
 
 /// The `[remote] enabled` the config layers jointly produce, before the
@@ -783,21 +900,7 @@ impl Config {
     /// [`merge_ignore`]).
     fn overlaid_with(&self, over: &Config) -> Config {
         Config {
-            models: ModelsConfig {
-                embedding: over
-                    .models
-                    .embedding
-                    .clone()
-                    .or(self.models.embedding.clone()),
-                generative: over
-                    .models
-                    .generative
-                    .clone()
-                    .or(self.models.generative.clone()),
-                vision: over.models.vision.clone().or(self.models.vision.clone()),
-                audio: over.models.audio.clone().or(self.models.audio.clone()),
-                ocr: over.models.ocr.clone().or(self.models.ocr.clone()),
-            },
+            models: self.models.overlaid_with(&over.models),
             infer: InferConfig {
                 min_confidence: over.infer.min_confidence.or(self.infer.min_confidence),
                 top_k: over.infer.top_k.or(self.infer.top_k),
@@ -848,10 +951,12 @@ impl Config {
                 // inherited pattern was plainly still present.
                 ignore_reset: over.debt.ignore_reset,
             },
-            // The one table in this merge whose `enabled` key does **not**
-            // follow the project-over-user rule every line above uses; see
-            // [`RemoteConfig::overlaid_with`] (ADR-0019 §3).
+            // The two tables in this merge whose grant key does **not** follow
+            // the project-over-user rule every line above uses; see
+            // [`RemoteConfig::overlaid_with`] (ADR-0019 §3) and
+            // [`LintConfig::overlaid_with`] (ADR-0020 §6).
             remote: self.remote.overlaid_with(&over.remote),
+            lint: self.lint.overlaid_with(&over.lint),
             paths: PathsConfig {
                 model_store: over
                     .paths
@@ -1180,7 +1285,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Config, NamedWorkspace, WorkspaceConfig, expand_tilde_with, find_project_config, load_from,
+        Config, LintConfig, NamedWorkspace, WorkspaceConfig, expand_tilde_with,
+        find_project_config, load_from,
     };
 
     /// **The two sides of a `[models]` key must agree about whether it is set.**
@@ -2018,5 +2124,51 @@ mod tests {
                 assert!(!p.starts_with('~'), "unexpanded tilde survived: {p}");
             }
         }
+    }
+    /// The `[lint]` merge must apply ADR-0020 §6's inversion, and must apply it
+    /// by **delegating** rather than by re-deriving it: `rto_exec` owns the rule
+    /// and this file owns the keys.
+    ///
+    /// Its counterpart in `main.rs` pins the *gate* to the same type, so the
+    /// value this report echoes and the value that decides a run are the same
+    /// value without either test needing the other's internals.
+    #[cfg(feature = "exec-subprocess")]
+    #[test]
+    fn the_lint_merge_delegates_the_inversion_rather_than_repeating_it() {
+        for project in [None, Some(true), Some(false)] {
+            for user in [None, Some(true), Some(false)] {
+                let merged = LintConfig {
+                    allow_unsandboxed: user,
+                }
+                .overlaid_with(&LintConfig {
+                    allow_unsandboxed: project,
+                });
+                assert_eq!(
+                    merged.allow_unsandboxed,
+                    rto_exec::LintConfigGrant::from_layers(project, user).as_effective(),
+                    "project={project:?} user={user:?}"
+                );
+            }
+        }
+        // Spelled out at the two cells that matter, so a reader sees the rule
+        // and not only that two functions agree about it.
+        let project_grant = LintConfig::default().overlaid_with(&LintConfig {
+            allow_unsandboxed: Some(true),
+        });
+        assert_eq!(
+            project_grant.allow_unsandboxed, None,
+            "a committed grant must not become effective"
+        );
+        let project_deny = LintConfig {
+            allow_unsandboxed: Some(true),
+        }
+        .overlaid_with(&LintConfig {
+            allow_unsandboxed: Some(false),
+        });
+        assert_eq!(
+            project_deny.allow_unsandboxed,
+            Some(false),
+            "a committed denial must override a user grant"
+        );
     }
 }

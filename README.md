@@ -47,6 +47,22 @@ anywhere if you would rather install none of them. Local *inference* and
 *serving* remain opt-in (`--features inference-local-models`, `--features
 serve`).
 
+`roteiro lint clippy` is the other shape, and it differs twice over
+([ADR-0020](docs/adr/0020-build-capable-sandboxed-execution.md)). It **stores
+nothing** — no findings layer, no history, no `lint list` — because an advisory
+id is *assigned* and assignment is a promise, while a lint name is a symbol in a
+compiler, renamed or removed at its discretion: the first is a durable fact about
+the repository, the second an opinion about the code as it stands today. And it
+is **sandboxed by default**, which today means it refuses: linting compiles the
+tree, so it runs that tree's build scripts and proc macros here, and that the
+toolchain is yours does not make the code yours when you are reviewing somebody
+else's branch. The sandboxed builder is unbuilt, so until it lands you opt into
+host execution explicitly — `--allow-unsandboxed` for one run, or `[lint]
+allow_unsandboxed = true` in **your own** `~/.roteiro/config.toml` as a standing
+preference. A project's committed `roteiro.toml` may deny it for everyone and may
+never grant it. Nothing ever falls back: asking for the sandbox and getting a
+host run is the one thing this command will not do.
+
 ### One capability sends your repository's content elsewhere. It is off.
 
 Everything above runs on your machine. **One optional feature does not**, and it

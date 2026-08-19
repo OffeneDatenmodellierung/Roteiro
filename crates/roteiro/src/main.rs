@@ -608,6 +608,89 @@ enum Command {
         #[command(subcommand)]
         action: ModelAction,
     },
+    /// Run a linter over this worktree and print what it found. **Nothing is
+    /// stored** — no findings layer, no history, nothing `roteiro export` or
+    /// `roteiro security list` can see afterwards (ADR-0020 v1.1).
+    ///
+    /// That is the difference from `roteiro security run`, and it follows from
+    /// what a lint *is*. An advisory id is **assigned**, and assignment is a
+    /// promise: `RUSTSEC-2020-0071` will mean the same thing in five years. A
+    /// lint name is a **symbol in a compiler** — renamed or removed at its
+    /// discretion — so it is a tool's opinion about the code as it stands today,
+    /// for the person who asked. Read a count from this command as a point in
+    /// time and nothing more:
+    ///
+    /// - a **renamed** lint reads as one defect fixed and one introduced;
+    ///
+    /// - a **removed** lint reads as fixed;
+    ///
+    /// - an edit to `[workspace.lints]`, or an added `#[allow]`, makes whole
+    ///   cohorts appear or vanish — a configuration change reading as a code
+    ///   change.
+    ///
+    /// None of those touched the code, and a bumped toolchain or a different
+    /// `--all-features` will move the number too. The report names the
+    /// toolchain, the feature set and the isolation it had, because there is no
+    /// stored run record carrying them.
+    ///
+    /// It is a **report, not a gate**: it exits 0 whether or not it found
+    /// anything, because a lint count is not a verdict this command is in a
+    /// position to pass. The gate is `cargo clippy -- -D warnings`, which CI
+    /// already runs. When the build did not complete, the report says so — in a
+    /// line of its own, and as `build_succeeded` in `--json` — so a partial
+    /// result is never quietly a small one.
+    ///
+    /// **The linter runs sandboxed by default, and the sandbox is not built
+    /// yet** — so with no grant this command refuses rather than running
+    /// anything (ADR-0020 §6). That is deliberate. `cargo clippy` has `cargo
+    /// check` semantics, so running it here compiles this tree on this machine,
+    /// executing its build scripts and loading its proc macros with your
+    /// filesystem and your credentials. In your own repository that is the build
+    /// you were going to run anyway; in a branch you are reviewing it is
+    /// somebody else's code, and that the toolchain is yours does not make the
+    /// code yours.
+    ///
+    /// To allow host execution, **either** is enough — you do not need both:
+    ///
+    /// - for one run: `--allow-unsandboxed`;
+    ///
+    /// - standing, for you: `[lint] allow_unsandboxed = true` in
+    ///   `~/.roteiro/config.toml`.
+    ///
+    /// A project's `roteiro.toml` may **deny** host execution for everyone
+    /// working in the repository, and may never grant it: that file is committed,
+    /// so a merged line granting it would be consent given by someone else and
+    /// noticed by nobody. `roteiro config` shows which layer decided.
+    ///
+    /// Nothing ever falls back. If the sandbox is asked for and unavailable the
+    /// command says so and stops; it does not quietly run on the host instead.
+    #[cfg(feature = "execution")]
+    Lint {
+        /// Which linter to run (`clippy`).
+        analyzer: String,
+        /// Run the linter in the sandbox — already the default, so this pins the
+        /// intent against a change of defaults, and against a user-config grant
+        /// you would rather not apply to this run. There is no sandboxed builder
+        /// yet, so today it refuses by name.
+        #[arg(long, conflicts_with = "allow_unsandboxed")]
+        sandboxed: bool,
+        /// Accept that this run has no isolation boundary, and compile this tree
+        /// on this host. Grants host execution for this run alone; the standing
+        /// form is `[lint] allow_unsandboxed` in your own config.
+        #[arg(long)]
+        allow_unsandboxed: bool,
+        /// Resolve the build with **every** feature enabled (`--all-features`).
+        /// This changes what is compiled and therefore what is linted, so the
+        /// report names the feature set it used.
+        #[arg(long, conflicts_with = "features")]
+        all_features: bool,
+        /// Resolve the build with these features (comma- or space-separated).
+        #[arg(long, value_name = "LIST")]
+        features: Option<String>,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Analyzer findings: ingest a normalized report and list what is live
     /// (ADR-0012). Findings are a **separate artifact store** — they are never
     /// nodes or edges, never carry a provenance class, and never appear in the
@@ -1573,6 +1656,20 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "models")]
         Command::Model { action } => run_model(action),
         #[cfg(feature = "execution")]
+        Command::Lint {
+            analyzer,
+            sandboxed,
+            allow_unsandboxed,
+            all_features,
+            features,
+            json,
+        } => run_lint(
+            &analyzer,
+            &lint_features(all_features, features.as_deref())?,
+            lint_host_decision(&cfg, sandboxed, allow_unsandboxed),
+            json,
+        ),
+        #[cfg(feature = "execution")]
         Command::Security { action } => run_security(action),
         #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
         Command::Serve {
@@ -1764,6 +1861,7 @@ fn print_config_sections(loaded: &config::Loaded) {
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
     );
     print_remote_section(loaded);
+    print_lint_section(loaded);
     print_debt_section(loaded);
     print_telemetry_section(e, p, u);
     print_workspace_section(e, p, u);
@@ -1823,6 +1921,59 @@ fn print_remote_section(_loaded: &config::Loaded) {
     println!(
         "\n[remote]  (ADR-0019 — not built: this binary has no remote model tier, so nothing \
          here can send anything, whatever the keys say)"
+    );
+}
+
+/// Print `[lint]` — the **other** table whose key does not follow this report's
+/// `project > user` rule (ADR-0020 §6).
+///
+/// Its own function, beside [`print_remote_section`] and for the same reason: a
+/// reader who applies the general precedence here will be wrong, and being wrong
+/// about this key means believing builds run on your machine when they do not,
+/// or the reverse. So the per-layer values are printed rather than only the
+/// merged one, and each is labelled with what that layer is allowed to do.
+///
+/// It also names the **default** in the header, because for this key the default
+/// is the whole story: unset means sandboxed, sandboxed means unbuilt, and
+/// unbuilt means `roteiro lint` refuses. A section that printed three `None`s
+/// without saying so would be accurate and useless.
+#[cfg(feature = "execution")]
+fn print_lint_section(loaded: &config::Loaded) {
+    println!(
+        "\n[lint]  (ADR-0020 §6 — sandboxed by default; unset means `roteiro lint` refuses, \
+         because the sandboxed builder is not built yet)"
+    );
+    println!(
+        "  allow_unsandboxed = {:?}  (project: {:?} — may deny, never grant; user: {:?} — may \
+         grant)",
+        loaded.effective.lint.allow_unsandboxed,
+        loaded.project.lint.allow_unsandboxed,
+        loaded.user.lint.allow_unsandboxed,
+    );
+    if loaded.project.lint.allow_unsandboxed == Some(true) {
+        println!(
+            "  note: the project file's `allow_unsandboxed = true` was read and ignored — a \
+             committed file may deny host execution but never grant it"
+        );
+    }
+    // The one line that stops this section from being read as `[remote]`'s
+    // twin. The two tables look identical and differ in exactly this, so the
+    // difference is stated where someone is looking at both.
+    println!(
+        "  either this key or `--allow-unsandboxed` is enough — unlike `[remote] enabled`, which \
+         needs its flag as well"
+    );
+}
+
+/// Without `execution` there is no `roteiro lint`, and the section says so
+/// rather than being absent — an omitted section reads as "no such setting",
+/// which would leave someone with `allow_unsandboxed = true` in their config
+/// believing it was honoured.
+#[cfg(not(feature = "execution"))]
+fn print_lint_section(_loaded: &config::Loaded) {
+    println!(
+        "\n[lint]  (ADR-0020 §6 — not built: this binary has no `roteiro lint`, so nothing here \
+         permits anything, whatever the keys say)"
     );
 }
 
@@ -8051,6 +8202,393 @@ fn advisory_db_line(db: &rto_graph::AdvisoryDb) -> String {
     }
 }
 
+/// The three readings a lint count carries that a findings count does not.
+///
+/// One list, printed by the human report and serialised into the JSON one, so
+/// the two cannot drift and a scripted consumer is told exactly what a person is
+/// told. Each is a way the number moves **without the code changing**, and none
+/// of them is a defect this command could detect on the user's behalf: with
+/// nothing stored there is no history to diff, which is the point — ADR-0020 v1.1
+/// makes these a *surprise* to be documented rather than a corruption of a
+/// stored series.
+#[cfg(feature = "execution")]
+const LINT_CAVEATS: &[&str] = &[
+    "a renamed lint reads as one defect fixed and one introduced — the compiler renamed a symbol, \
+     the code did not change",
+    "a removed lint reads as fixed — the compiler dropped the check, nobody fixed anything",
+    "an edit to `[workspace.lints]`, or an added `#[allow]`, makes whole cohorts appear or vanish \
+     — a configuration change reading as a code change",
+];
+
+/// Resolve every layer into the decision `roteiro lint` runs under (ADR-0020 §6).
+///
+/// A thin adapter, not a second implementation: the layering rule lives in
+/// `rto_exec::lint`, so the answer this produces and the answer
+/// `roteiro config`'s `[lint]` section echoes come from the same code. What it
+/// adds is the translation from two clap booleans to the three-state
+/// [`rto_exec::LintRequested`] — a pair of bools has a fourth state the flags
+/// cannot express, and turning it into an enum here is what keeps the impossible
+/// combination out of the gate.
+///
+/// Split out as a pure function so all four rows of the ADR's table are testable
+/// without running a linter, in a build that has no linter to run.
+#[cfg(feature = "execution")]
+fn lint_host_decision(
+    cfg: &config::Loaded,
+    sandboxed: bool,
+    allow_unsandboxed: bool,
+) -> rto_exec::LintDecision {
+    // clap's `conflicts_with` rejects both together before we are called; this
+    // says so where the assumption is relied upon rather than leaving the
+    // precedence of an impossible combination to be inferred from the match.
+    debug_assert!(
+        !(sandboxed && allow_unsandboxed),
+        "`--sandboxed` and `--allow-unsandboxed` are mutually exclusive at the parser"
+    );
+    let requested = match (allow_unsandboxed, sandboxed) {
+        (true, _) => rto_exec::LintRequested::Host,
+        (_, true) => rto_exec::LintRequested::Sandbox,
+        _ => rto_exec::LintRequested::Unset,
+    };
+    rto_exec::decide_lint_host(
+        rto_exec::LintConfigGrant::from_layers(
+            cfg.project.lint.allow_unsandboxed,
+            cfg.user.lint.allow_unsandboxed,
+        ),
+        requested,
+    )
+}
+
+/// Resolve the two feature flags into the set the build will be resolved with.
+///
+/// Split out as a pure function because it decides one of the two axes — the
+/// other being the toolchain — that move a lint count without the code moving,
+/// and the report has to name whichever it picked.
+///
+/// # Errors
+/// Returns an error when `--features` was given nothing to enable, which is
+/// almost always a shell that ate the list rather than a request for the default
+/// set.
+#[cfg(feature = "execution")]
+fn lint_features(
+    all_features: bool,
+    features: Option<&str>,
+) -> anyhow::Result<rto_exec::FeatureSet> {
+    if all_features {
+        return Ok(rto_exec::FeatureSet::All);
+    }
+    let Some(list) = features else {
+        return Ok(rto_exec::FeatureSet::Defaults);
+    };
+    let names: Vec<String> = list
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if names.is_empty() {
+        anyhow::bail!(
+            "`--features {list:?}` names no features. Drop the flag to lint each crate's default \
+             feature set, or pass `--all-features`."
+        );
+    }
+    Ok(rto_exec::FeatureSet::Explicit(names))
+}
+
+/// The `--json` shape of `roteiro lint`.
+///
+/// It carries what a stored run would have carried on its `AnalysisRun` —
+/// analyzer, version, toolchain, feature set, isolation, argv, window, exit
+/// status — because **there is no `AnalysisRun` here** and an ephemeral report
+/// still has to be honest about its inputs. It also carries `stored: false`,
+/// which is not decoration: a consumer can assert from the payload alone that
+/// this command wrote nothing, rather than having to trust the documentation.
+// Gated on the *backend*, not just on `execution`: every field below is read out
+// of an `rto_exec` type that needs `exec-subprocess`, so an `execution`-only
+// build has no linter to report on and no types to report it with.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+#[derive(serde::Serialize)]
+struct LintReport {
+    analyzer: String,
+    analyzer_version: String,
+    toolchain: rto_exec::Toolchain,
+    /// The feature set the build was resolved with, as a label rather than a
+    /// flag — `default` is a real answer and an empty string is not.
+    features: String,
+    isolation: rto_graph::Isolation,
+    /// The exact argv, so the run is reproducible by hand.
+    command: Vec<String>,
+    /// The workspace root that was linted.
+    worktree: String,
+    started_at: String,
+    ended_at: String,
+    exit_status: i32,
+    /// Whether the build completed. `false` with findings present means the
+    /// diagnostics are what it managed to emit, not the whole picture.
+    build_succeeded: bool,
+    /// **Always `false`.** Nothing here reaches the findings store.
+    stored: bool,
+    counts: LintCounts,
+    findings: Vec<LintFinding>,
+    /// [`LINT_CAVEATS`], verbatim.
+    caveats: Vec<String>,
+}
+
+/// What the linter's output contained besides reported findings.
+///
+/// Every field is something that did **not** become a finding, reported rather
+/// than dropped silently: a run that quietly discarded half its diagnostics
+/// would be indistinguishable from a clean tree.
+// Gated on the *backend*, not just on `execution`: every field below is read out
+// of an `rto_exec` type that needs `exec-subprocess`, so an `execution`-only
+// build has no linter to report on and no types to report it with.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+#[derive(serde::Serialize)]
+struct LintCounts {
+    reported: usize,
+    /// Diagnostics about files outside this worktree — a dependency's own source.
+    outside_worktree: usize,
+    /// The same diagnostic emitted once per target by `--all-targets`.
+    duplicates_collapsed: usize,
+    /// Diagnostics with no location: rustc's own "aborting due to N errors".
+    without_location: usize,
+}
+
+/// One diagnostic in the `--json` report.
+///
+/// Deliberately **not** the report's `identity` recipe: that vector orders and
+/// deduplicates an ephemeral report and is never a stored key, and serialising
+/// it would offer a consumer something that looks addressable and is not.
+// Gated on the *backend*, not just on `execution`: every field below is read out
+// of an `rto_exec` type that needs `exec-subprocess`, so an `execution`-only
+// build has no linter to report on and no types to report it with.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+#[derive(serde::Serialize)]
+struct LintFinding {
+    rule: String,
+    severity: rto_graph::Severity,
+    title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    span: Option<rto_graph::Span>,
+}
+
+/// Run a linter over this worktree and print what it said.
+///
+/// The store is never opened. That is the strongest available form of "nothing
+/// is written": there is no layer key to collide, no `replace_findings_layer`
+/// call to make, and no handle through which a later edit could add one.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn run_lint(
+    analyzer: &str,
+    features: &rto_exec::FeatureSet,
+    decision: rto_exec::LintDecision,
+    json: bool,
+) -> anyhow::Result<()> {
+    let dir = std::env::current_dir()?;
+    // A committed grant that was discarded is reported before anything else,
+    // whichever way the decision went: a team that wrote `allow_unsandboxed =
+    // true` into `roteiro.toml` is doing something reasonable and ineffective,
+    // and silence would leave them believing it worked.
+    if let Some(note) = decision.ignored_project_grant_note() {
+        eprintln!("{note}");
+    }
+    // Disclose what is about to run before it runs, exactly as `security run`
+    // does — and only once the grant is in hand, so a refused run never prints a
+    // command line it did not execute.
+    //
+    // Host execution is now something a person opted into, per run or standing
+    // (ADR-0020 §6), so this is no longer the *only* thing standing between the
+    // user and a build on their machine. It is still worth printing: a grant
+    // given once in a config file is not a memory of which argv it authorised,
+    // and the isolation is named beside it because that is what was consented to.
+    //
+    // The argv comes from the same place the run will take it, and is `None` for
+    // an analyzer this build does not drive: announcing clippy's command under
+    // another analyzer's name would be a small lie printed in the one place a
+    // user is relying on being told the truth. The refusal itself comes from the
+    // run below, which owns that wording.
+    if let (false, true, Some(invocation)) = (
+        json,
+        decision.granted(),
+        rto_exec::lint_invocation(analyzer, features),
+    ) {
+        eprintln!(
+            "running {analyzer} (isolation none, on this host, granted by {}): {} {}",
+            lint_grant_source(decision.reason),
+            invocation.program,
+            invocation.args.join(" ")
+        );
+    }
+    let outcome = rto_exec::run_lint(analyzer, &dir, features, decision)?;
+
+    let findings: Vec<LintFinding> = outcome
+        .report
+        .findings
+        .iter()
+        .map(|f| LintFinding {
+            rule: f.rule.clone(),
+            severity: f.severity.clone(),
+            title: f.title.clone(),
+            message: f.message.clone(),
+            path: f.path.clone(),
+            line: f.meta.get("line").and_then(serde_json::Value::as_u64),
+            span: f.span,
+        })
+        .collect();
+    let counts = LintCounts {
+        reported: findings.len(),
+        outside_worktree: outcome.summary.outside_worktree,
+        duplicates_collapsed: outcome.summary.duplicates_collapsed,
+        without_location: outcome.summary.without_location,
+    };
+
+    if json {
+        emit_json(&LintReport {
+            analyzer: outcome.analyzer.to_owned(),
+            analyzer_version: outcome.report.analyzer_version.clone(),
+            toolchain: outcome.toolchain.clone(),
+            features: outcome.features.label(),
+            isolation: outcome.isolation,
+            command: outcome.command.clone(),
+            worktree: outcome.worktree.display().to_string(),
+            started_at: outcome.report.started_at.clone(),
+            ended_at: outcome.report.ended_at.clone(),
+            exit_status: outcome.report.exit_status,
+            build_succeeded: outcome.summary.build_succeeded,
+            // Not computed from anything: this command has no code path that
+            // could write, so the field is the contract rather than a result.
+            stored: false,
+            counts,
+            findings,
+            caveats: LINT_CAVEATS.iter().map(|c| (*c).to_owned()).collect(),
+        })?;
+        return Ok(());
+    }
+    print_lint_report(&outcome, &findings, &counts);
+    Ok(())
+}
+
+/// Render a lint report for a person.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn print_lint_report(
+    outcome: &rto_exec::LintOutcome,
+    findings: &[LintFinding],
+    counts: &LintCounts,
+) {
+    println!(
+        "{} {} — {} diagnostic(s), nothing stored",
+        outcome.analyzer, outcome.report.analyzer_version, counts.reported
+    );
+    println!(
+        "  toolchain {} on {}",
+        outcome.toolchain.rustc, outcome.toolchain.host
+    );
+    println!("  features  {}", outcome.features.label());
+    println!(
+        "  isolation {} — the linter compiled this tree on this host, so its build scripts and \
+         proc macros ran here too",
+        outcome.isolation.as_str()
+    );
+    for finding in findings {
+        let at = match (&finding.path, finding.line) {
+            (Some(path), Some(line)) => format!("{path}:{line}"),
+            (Some(path), None) => path.clone(),
+            _ => "-".to_owned(),
+        };
+        println!(
+            "  {:<8} {:<34} {at}  {}",
+            finding.severity.as_str(),
+            finding.rule,
+            finding.title
+        );
+    }
+    print_lint_footnotes(outcome, counts);
+}
+
+/// The counts of what was *not* reported, and the readings the number carries.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn print_lint_footnotes(outcome: &rto_exec::LintOutcome, counts: &LintCounts) {
+    for (count, what) in [
+        (
+            counts.outside_worktree,
+            "not reported: about a file outside this worktree (a dependency's own source)",
+        ),
+        (
+            counts.duplicates_collapsed,
+            "counted once: the same diagnostic arrived again for another target",
+        ),
+        (
+            counts.without_location,
+            "not reported: no location — rustc's own \"aborting due to …\" summaries",
+        ),
+    ] {
+        if count > 0 {
+            println!("  {count} diagnostic(s) {what}");
+        }
+    }
+    if !outcome.summary.build_succeeded {
+        println!(
+            "  the build did not complete — these diagnostics are what it managed to emit, not \
+             the whole picture"
+        );
+    }
+    println!();
+    println!("read this as a point in time, not a trend:");
+    for caveat in LINT_CAVEATS {
+        println!("  - {caveat}");
+    }
+    println!(
+        "nothing was written: `roteiro security list` and `roteiro export` are unchanged by this \
+         command, and there is no lint history to compare against."
+    );
+}
+
+/// Which layer granted this run, for the disclosure line.
+///
+/// A grant is not anonymous: someone who set the key months ago and has
+/// forgotten needs to be told it was the key rather than something they typed,
+/// and someone who typed the flag needs to know the flag is why — otherwise the
+/// standing grant and the per-run one are indistinguishable at the moment they
+/// matter.
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
+fn lint_grant_source(reason: rto_exec::LintReason) -> &'static str {
+    match reason {
+        rto_exec::LintReason::GrantedByInvocation => "--allow-unsandboxed",
+        rto_exec::LintReason::GrantedByUserLayer => "`[lint] allow_unsandboxed` in your config",
+        // Not reachable: this is printed only when the decision granted. Stated
+        // rather than `unreachable!`, because a wrong word in a disclosure line
+        // is a better failure than a panic in front of a run that was allowed.
+        _ => "an ungranted decision (this is a bug — please report it)",
+    }
+}
+
+/// The same command in a build without `exec-subprocess`: a refusal that names
+/// the feature and the alternative.
+///
+/// A runtime error rather than a `cfg` on the clap variant, for the reason
+/// `security run` records — gating the variant is how a documented command
+/// shipped invisible to crates.io users as `unrecognized subcommand`.
+#[cfg(all(feature = "execution", not(feature = "exec-subprocess")))]
+fn run_lint(
+    analyzer: &str,
+    _features: &rto_exec::FeatureSet,
+    _decision: rto_exec::LintDecision,
+    _json: bool,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`roteiro lint {analyzer}` needs the `exec-subprocess` feature, which this build does not \
+         have; rebuild with `--features exec-subprocess` (it is in the default set, so this is a \
+         `--no-default-features` build). There is no ingest path to fall back on: a lint is \
+         reported and never stored, so there is no artifact for another machine to hand over."
+    );
+}
+
 /// The `--json` shape of `roteiro security prefetch`.
 #[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
@@ -11835,6 +12373,251 @@ mod asset_download {
         // A body *longer* than declared is equally wrong: it is not the resource
         // the server described.
         assert!(verify_transferred("https://example.invalid/all.zip", 10, 11).is_err());
+    }
+}
+
+// The `roteiro lint` surface: the flags, and the feature-set resolution that
+// decides one of the two axes a lint count moves on. The behaviour underneath —
+// parsing cargo's stream, refusing an absent linter, storing nothing — is tested
+// where it lives, in `rto-exec` and in `tests/lint_cli.rs`.
+#[cfg(all(test, feature = "execution"))]
+mod lint_cli {
+    use super::{Cli, Command, LINT_CAVEATS, config, lint_features, lint_host_decision};
+    use clap::Parser as _;
+
+    /// A [`config::Loaded`] whose two layers say exactly what a test asks them
+    /// to, so the ADR-0020 §6 table can be exercised without touching a disk.
+    fn layers(project: Option<bool>, user: Option<bool>) -> config::Loaded {
+        let mut loaded = config::Loaded::default();
+        loaded.project.lint.allow_unsandboxed = project;
+        loaded.user.lint.allow_unsandboxed = user;
+        loaded
+    }
+
+    fn parse<const N: usize>(args: [&str; N]) -> Command {
+        Cli::try_parse_from(args).expect("parse").command
+    }
+
+    #[test]
+    fn lint_takes_one_analyzer_and_reports_by_default() {
+        let Command::Lint {
+            analyzer,
+            sandboxed,
+            allow_unsandboxed,
+            all_features,
+            features,
+            json,
+        } = parse(["roteiro", "lint", "clippy"])
+        else {
+            panic!("expected Lint");
+        };
+        assert_eq!(analyzer, "clippy");
+        assert!(!all_features);
+        assert_eq!(features, None);
+        assert!(!json);
+        // Saying nothing asks for neither: the *default* is decided by
+        // `lint_host_decision`, not smuggled in as a flag default here.
+        assert!(!sandboxed);
+        assert!(!allow_unsandboxed);
+    }
+
+    /// The two isolation flags are alternatives. Accepting both would leave the
+    /// gate deciding which of two contradictory instructions the user meant.
+    #[test]
+    fn the_two_isolation_flags_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "roteiro",
+                "lint",
+                "clippy",
+                "--sandboxed",
+                "--allow-unsandboxed",
+            ])
+            .is_err()
+        );
+        for flag in ["--sandboxed", "--allow-unsandboxed"] {
+            assert!(
+                Cli::try_parse_from(["roteiro", "lint", "clippy", flag]).is_ok(),
+                "{flag} alone must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn lint_requires_an_analyzer() {
+        assert!(Cli::try_parse_from(["roteiro", "lint"]).is_err());
+    }
+
+    /// The two feature flags are alternatives, not layers: `--all-features` with
+    /// `--features x` would leave the report unable to say which one decided the
+    /// build, so the parser refuses the pair rather than picking one.
+    #[test]
+    fn the_two_feature_flags_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "roteiro",
+                "lint",
+                "clippy",
+                "--all-features",
+                "--features",
+                "x"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn feature_flags_resolve_to_the_set_the_build_will_use() {
+        assert_eq!(
+            lint_features(false, None).expect("default"),
+            rto_exec::FeatureSet::Defaults
+        );
+        assert_eq!(
+            lint_features(true, None).expect("all"),
+            rto_exec::FeatureSet::All
+        );
+        // Comma- or space-separated, because both are what a user types and
+        // neither is worth a second flag.
+        for list in ["serve,mcp", "serve mcp", " serve , mcp "] {
+            assert_eq!(
+                lint_features(false, Some(list)).expect("explicit"),
+                rto_exec::FeatureSet::Explicit(vec!["serve".to_owned(), "mcp".to_owned()]),
+                "{list:?}"
+            );
+        }
+    }
+
+    /// A `--features` that names nothing is a shell that ate the list, not a
+    /// request for the default set — and quietly linting a different feature set
+    /// than the one asked for is exactly the kind of unstated input that makes a
+    /// count incomparable.
+    #[test]
+    fn an_empty_feature_list_is_refused_rather_than_silently_defaulted() {
+        let err = lint_features(false, Some(" , ")).expect_err("must be refused");
+        assert!(err.to_string().contains("--all-features"), "{err}");
+    }
+
+    /// The default: `roteiro lint` with no config and no flag runs **nothing**.
+    ///
+    /// This is the inversion in one assertion. Before ADR-0020 v1.3 this case
+    /// compiled the tree on the host.
+    #[test]
+    fn with_nothing_configured_and_no_flag_the_host_is_not_granted() {
+        let decision = lint_host_decision(&layers(None, None), false, false);
+        assert!(!decision.granted());
+        assert_eq!(decision.reason, rto_exec::LintReason::Ungranted);
+    }
+
+    /// The row that makes the inversion real rather than documented: a
+    /// **project** grant must not enable host execution. `roteiro.toml` is
+    /// committed, so a merged line would otherwise start running builds on every
+    /// teammate's machine.
+    #[test]
+    fn a_project_grant_does_not_enable_host_execution() {
+        let decision = lint_host_decision(&layers(Some(true), None), false, false);
+        assert!(
+            !decision.granted(),
+            "a committed file may never grant host execution"
+        );
+        // …and it is reported rather than swallowed, so a team is not left
+        // wondering why their committed setting does nothing.
+        assert!(decision.project_grant_ignored);
+        assert!(decision.ignored_project_grant_note().is_some());
+    }
+
+    /// The other row that matters: a **project deny** overrides a user grant,
+    /// and the flag too. A locked-down repository stays locked down.
+    #[test]
+    fn a_project_deny_overrides_a_user_grant_and_the_flag() {
+        for (sandboxed, allow) in [(false, false), (false, true), (true, false)] {
+            let decision = lint_host_decision(&layers(Some(false), Some(true)), sandboxed, allow);
+            assert!(
+                !decision.granted(),
+                "project denial must hold with sandboxed={sandboxed} allow={allow}"
+            );
+            assert_eq!(decision.reason, rto_exec::LintReason::ProjectDenied);
+        }
+    }
+
+    /// Either layer suffices — the asymmetry with ADR-0019 that ADR-0020 §6
+    /// takes deliberately, because requiring both would make the key useless.
+    #[test]
+    fn either_the_user_config_or_the_flag_grants_on_its_own() {
+        assert_eq!(
+            lint_host_decision(&layers(None, Some(true)), false, false).reason,
+            rto_exec::LintReason::GrantedByUserLayer,
+            "the standing preference needs no flag"
+        );
+        assert_eq!(
+            lint_host_decision(&layers(None, None), false, true).reason,
+            rto_exec::LintReason::GrantedByInvocation,
+            "the flag needs no standing preference"
+        );
+    }
+
+    /// `--sandboxed` is how somebody with a standing grant opts one run back
+    /// out, and it refuses rather than falling back.
+    #[test]
+    fn asking_for_the_sandbox_overrides_a_standing_grant() {
+        let decision = lint_host_decision(&layers(None, Some(true)), true, false);
+        assert!(!decision.granted());
+        assert_eq!(decision.reason, rto_exec::LintReason::InvocationDenied);
+    }
+
+    /// With no flag, the gate must say exactly what the config layers say — so
+    /// the value `roteiro config` prints and the value that decides a run cannot
+    /// drift apart.
+    ///
+    /// Anchored to `LintConfigGrant` rather than to the config merge directly,
+    /// because that type is the workspace's single implementation of the rule
+    /// and the merge is pinned to it separately in `config.rs`. Two tests, one
+    /// source of truth, no private access.
+    #[test]
+    fn with_no_flag_the_gate_says_what_the_config_layers_say() {
+        for project in [None, Some(true), Some(false)] {
+            for user in [None, Some(true), Some(false)] {
+                assert_eq!(
+                    lint_host_decision(&layers(project, user), false, false).granted(),
+                    rto_exec::LintConfigGrant::from_layers(project, user).as_effective()
+                        == Some(true),
+                    "project={project:?} user={user:?}: the gate and the echoed value disagree"
+                );
+            }
+        }
+    }
+
+    /// The two inverted keys in this workspace implement one rule twice, because
+    /// `rto-remote` is optional and off by default while `lint` ships in the
+    /// default set — so the rule could not be shared and has to be *checked*
+    /// instead. This pins the **config half**, where they agree exactly.
+    ///
+    /// They deliberately differ on the invocation half (ADR-0019 needs the flag
+    /// as well; ADR-0020 §6 does not), which is why this compares
+    /// `as_effective` and not the decisions.
+    #[cfg(feature = "remote")]
+    #[test]
+    fn the_two_inverted_keys_apply_the_same_rule_to_their_config_layers() {
+        for project in [None, Some(true), Some(false)] {
+            for user in [None, Some(true), Some(false)] {
+                assert_eq!(
+                    rto_exec::LintConfigGrant::from_layers(project, user).as_effective(),
+                    rto_remote::ConfigGrant::from_layers(project, user).as_effective(),
+                    "ADR-0020 §6 and ADR-0019 §3 disagree at project={project:?} user={user:?}"
+                );
+            }
+        }
+    }
+
+    /// The three readings ADR-0020 condition 5 requires be surfaced where a user
+    /// meets them. One list feeds both the human report and the JSON one, so a
+    /// scripted consumer cannot be told less than a person.
+    #[test]
+    fn the_caveats_name_all_three_readings_that_move_a_count() {
+        assert_eq!(LINT_CAVEATS.len(), 3);
+        let all = LINT_CAVEATS.join(" ");
+        for reading in ["renamed", "removed", "[workspace.lints]"] {
+            assert!(all.contains(reading), "no caveat covers {reading}: {all}");
+        }
     }
 }
 

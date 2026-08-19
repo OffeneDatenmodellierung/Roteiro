@@ -128,6 +128,9 @@ http-body-util = "0.1"
 default = ["execution", "models", "exec-subprocess"]
 # The `AnalyzerRunner` seam, `roteiro security ingest|list`, and — since the
 # provisioning/execution split — `security prefetch|status` (ADR-0012, ADR-0014).
+# It also carries `roteiro lint`'s command surface, because that reads types from
+# `rto-exec`; the linter itself needs `exec-subprocess` below, and in a build
+# without it the command parses and refuses by name rather than vanishing.
 #
 # Provisioning lives here rather than behind a backend feature because it
 # executes nothing: it downloads, digests, pins and reports. Every `Command::new`
@@ -162,6 +165,25 @@ execution = ["dep:rto-exec", "dep:ureq"]
 # executing a third-party binary on this host with no isolation boundary. Do not
 # weaken it "for consistency" because the build-time gate is gone; it is carrying
 # the load the build-time gate used to share. ADR-0014 v1.1 records this.
+#
+# This feature also compiles **`roteiro lint`**, which under ADR-0020 v1.3 is
+# sandboxed by default and — since no sandboxed builder exists yet — **refuses**
+# unless host execution has been granted. An earlier revision of this note said
+# `lint` ran here with no equivalent gate, on the reasoning that it is your own
+# toolchain over the tree you are standing in. The owner overruled that, and
+# correctly: that the *toolchain* is yours does not make the *code* yours when
+# you are linting a branch you are reviewing, and `cargo clippy` has `cargo
+# check` semantics, so it runs that branch's build scripts here.
+#
+# So both commands now gate host execution, and they gate it differently on
+# purpose. `security run --allow-unsandboxed` is invocation-only: there is no
+# config key, and a run files its verdict into the store as a fact about the
+# repository. `roteiro lint` also accepts a standing grant — `[lint]
+# allow_unsandboxed` in the *user's own* config, never a committed `roteiro.toml`
+# — because it stores nothing and a person may reasonably say once that builds on
+# their own machine are fine. Do not collapse the two into one key without
+# deciding, in an ADR, whether a standing grant should also reach `security run`;
+# that would make an invocation-only gate reachable without the invocation.
 #
 # Keeping it a named feature is still worth it: `--no-default-features --features
 # execution` builds a Roteiro that provisions and ingests but **cannot execute**,
