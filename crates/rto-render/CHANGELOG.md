@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.25.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.24.0...rto-render-v1.25.0) - 2026-08-19
+
+### Added
+
+- *(mcp)* expose the two read-only `security` subcommands, scoped and bounded
+
+### Fixed
+
+- *(security)* `ready` must mean ready, not "its assets are provisioned"
+
+### Other
+
+- Merge pull request #468 from OffeneDatenmodellierung/feat/mcp-security-list-status
+
 ## [1.24.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.23.0...rto-render-v1.24.0) - 2026-08-19
 
 ### Added
