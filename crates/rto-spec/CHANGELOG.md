@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.4](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.26.3...rto-spec-v1.26.4) - 2026-08-19
+
+### Fixed
+
+- *(spec)* read a heading with the parser, not a line scan ([#469](https://github.com/OffeneDatenmodellierung/Roteiro/pull/469))
+
 ## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.26.0...rto-spec-v1.26.1) - 2026-08-19
 
 ### Other
