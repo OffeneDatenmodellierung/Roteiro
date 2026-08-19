@@ -1,6 +1,6 @@
 [package]
 name = "rto-faithful"
-description = "Rendering-faithfulness checking for Roteiro: every claim in a rendered summary must trace to a tool finding"
+description = "Rendering-faithfulness checking for Roteiro: every claim in a rendered summary must trace to a tool finding. Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

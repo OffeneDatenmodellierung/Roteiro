@@ -147,4 +147,13 @@ again** — that is what the `#[non_exhaustive]` was bought for.
 `Trigger` and `ProducerTrust` are deliberately left exhaustive; their own doc
 comments say why.
 
+## Stability
+
+This crate is **an implementation detail of the `roteiro` CLI**. It is published
+only because crates.io requires a published package's dependencies to be registry
+packages, so `roteiro` cannot ship unless it does.
+
+Its public API carries **no stability guarantee** — breaking changes ship as minor
+version bumps. If you depend on it directly, pin an exact version.
+
 Licensed under MIT OR Apache-2.0.

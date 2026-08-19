@@ -1,6 +1,6 @@
 [package]
 name = "rto-graph"
-description = "Provenance-tagged codebase knowledge graph store for Roteiro"
+description = "Provenance-tagged codebase knowledge graph store for Roteiro. Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

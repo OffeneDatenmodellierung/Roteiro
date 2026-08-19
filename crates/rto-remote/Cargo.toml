@@ -1,6 +1,6 @@
 [package]
 name = "rto-remote"
-description = "The remote model tier's consent gate, payload allow-list and egress record (ADR-0019) — the policy half of Roteiro's one explicitly-consented egress path, with no transport of its own"
+description = "The remote model tier's consent gate, payload allow-list and egress record (ADR-0019) — the policy half of Roteiro's one explicitly-consented egress path, with no transport of its own. Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

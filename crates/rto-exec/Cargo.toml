@@ -1,6 +1,6 @@
 [package]
 name = "rto-exec"
-description = "Analyzer execution contract for Roteiro: one normalized findings result whether ingested from a CI report or produced by a future sandboxed run"
+description = "Analyzer execution contract for Roteiro: one normalized findings result whether ingested from a CI report or produced by a future sandboxed run. Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
