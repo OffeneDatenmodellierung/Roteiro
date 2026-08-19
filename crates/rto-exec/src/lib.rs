@@ -189,6 +189,17 @@ pub mod runtime_pins;
 pub mod snippet;
 #[cfg(feature = "exec-subprocess")]
 pub mod subprocess;
+/// The **read-only documents** `security list` / `security status` return over a
+/// model-facing tool surface.
+///
+/// Ungated, like [`guidance`] and [`lint_grant`], and for a related reason: what
+/// a read owes its reader is not a property of which backends were compiled in.
+/// It is also the one place either document is built — the CLI's `security
+/// status` shares its coverage matrix and staleness rows from here, so
+/// `possibly_stale` and `ready` are one computation rather than three. Read the
+/// module for the two hazards it exists to remove: an empty listing that reads as
+/// a clean one, and a status blob whose two halves have different scopes.
+pub mod tool_security;
 
 pub use adapter::{
     ADAPTERS, Adapter, AssetPaths, Invocation, LINT_ANALYZERS, NO_SNIPPET, NativeContext,
@@ -237,6 +248,12 @@ pub use runtime_pins::{
 pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
 #[cfg(feature = "exec-subprocess")]
 pub use subprocess::{SubprocessError, SubprocessRunner};
+pub use tool_security::{
+    AnalyzerCoverage, Coverage, CrossReference, CrossReferenceReport, LayerStaleness, MachineScope,
+    RepositoryScope, SecurityListReport, TOOL_SECURITY_LIST_SCHEMA, TOOL_SECURITY_STATUS_SCHEMA,
+    ToolFindingsLayer, ToolSecurityList, ToolSecurityStatus, coverage_matrix, layer_staleness,
+    security_list, security_status,
+};
 
 /// The licence notice for the third-party binaries an `exec-boxlite` build
 /// embeds, compiled in so it cannot be separated from what it describes.

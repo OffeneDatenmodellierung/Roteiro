@@ -7,8 +7,9 @@
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
 //! same tools — `search`, `explain`, `context`, `check`, `list_kind`, `path`,
-//! `debt`, `debt_density`, `coupling`, `config_secrets`, and `list_projects` — as
-//! thin wrappers over the
+//! `debt`, `debt_density`, `coupling`, `config_secrets`, `list_projects`, and (with
+//! the `execution` feature) `security_list` / `security_status` — as thin wrappers
+//! over the
 //! matching [`rto_graph`] query primitives, so agents and the CLI see the same
 //! graph. Each tool takes an optional `project` selector for a multi-repo
 //! workspace (ADR-0008). See ADR-0002 for the decision to adopt `rmcp`.
@@ -30,8 +31,8 @@
 //!
 //! | subcommand | on this surface | why |
 //! | --- | --- | --- |
-//! | `security list` | **eligible** — see the note below | read-only over stored findings; the analogue of `debt` |
-//! | `security status` | **eligible** — see the note below | read-only; asset digests, advisory-DB age, analyzer coverage |
+//! | `security list` | **`security_list`** — see the note below | read-only over stored findings; the analogue of `debt` |
+//! | `security status` | **`security_status`** — see the note below | read-only; asset digests, advisory-DB age, analyzer coverage |
 //! | `security ingest` | **never** | mutating: `run_security_ingest` calls [`rto_graph::Store::replace_findings_layer`] |
 //! | `security run` | **never** | mutating *and* executing, on **either** backend — see below |
 //! | `security prefetch` | **never** | opens the network under an explicit human consent, and writes the asset cache |
@@ -59,9 +60,10 @@
 //! a gate whose whole purpose is to be typed by someone. Nothing on a tool
 //! surface may run an analyzer, whatever it is isolated in.
 //!
-//! `list` and `status` are eligible and are **not implemented yet** — they are a
-//! follow-up, not an oversight. Two things have to be settled first, and both
-//! were established rather than assumed:
+//! `list` and `status` are here, as `security_list` and `security_status`, behind
+//! `all(feature = "mcp", feature = "execution")` (issue #435). Three things had to
+//! be settled before either could be correct rather than merely available, and the
+//! record of how is kept because each one is a way to get this wrong again:
 //!
 //! - **An empty listing states neither fact.** `security list --json` is 36 bytes
 //!   on a repository no analyzer has ever run against: `{"layers": [], "findings":
@@ -69,22 +71,46 @@
 //!   opposite facts, and `findings: 0` reads as the second while meaning the
 //!   first. The data does distinguish them (a clean run leaves a layer with no
 //!   findings; never running leaves no layer), but the *document* does not say so.
-//!   The fix is the shape `check` already uses here: a discriminator that is
-//!   always present, and the payload omitted entirely in the case that has no
-//!   answer.
+//!   The fix is the shape `check` already uses here, and it is now
+//!   [`rto_exec::Coverage`]: a discriminator that is always present, and the
+//!   payload omitted entirely in the case that has no answer. So `coverage:
+//!   "no-analyzer-on-record"` carries **no `report` at all**, while a clean run is
+//!   `coverage: "analyzed"` with `findings: 0`.
 //! - **`security status` does not take a project.** `run_security_status` reads
 //!   the store via `open_graph()`, which discovers a repository from the
 //!   *process's* working directory, while every tool on this surface selects one
 //!   with `project` (ADR-0008). Its asset half is machine-global
 //!   (`rto_exec::asset_root()`) and its `layers` half is per-repository, so the
 //!   tool has to say which of the two each half describes before it can be
-//!   correct in a multi-project workspace.
+//!   correct in a multi-project workspace. `security_status` therefore returns
+//!   **two named sections** — `machine` and `repository` — each carrying an
+//!   explicit `scope`, with the asset root inside the first and the resolved
+//!   project name inside the second. A model that quotes one section still carries
+//!   its scope; a doc comment could not have achieved that, because a model does
+//!   not read this file.
+//! - **`security list` is unbounded, and every other tool here is not.** A
+//!   listing is every finding in every layer, and a tool result is spent against a
+//!   context window — so it takes `limit`, clamped by [`model_limit`] like every
+//!   ranking here, with `"minimum": 1` declared in the schema because `0` means
+//!   *unlimited* on the `rto_graph` surfaces and this one must not offer that. The
+//!   bound is **per layer** rather than per document: a document-wide bound spends
+//!   its budget on the first layer in key order and reports the second as empty,
+//!   which reads as "that analyzer found nothing" — the first bullet's defect,
+//!   arrived at from the other direction. See [`rto_exec::security_list`] for why
+//!   the page is ordered by severity when the store's listing is not.
 //!
-//! Both also need `rto-exec`'s types, which currently live in the `roteiro`
-//! binary behind `#[cfg(feature = "execution")]` — so this crate would gain an
-//! `execution` notion it has no other use for, and the two tool surfaces would
-//! diverge under feature combinations that do not exist today. That is a
-//! deliberate design step, not a wiring job.
+//! Both are thin wrappers, as every tool here is: the documents are built by
+//! [`rto_exec::tool_security`], which the CLI's `security status` also draws its
+//! coverage matrix and staleness rows from. That shared home is the point rather
+//! than a convenience — `possibly_stale` and `ready` are judgements about
+//! evidence, and issue #321 is what three copies of one judgement costs.
+//!
+//! This crate gains its own `execution` feature to reach those types, and the
+//! `roteiro` binary's `execution` feature forwards it. That forwarding is
+//! load-bearing: the served-chat registry's two `security_*` tools are gated on
+//! `all(serve, execution)` and these on `all(mcp, execution)`, so the pair appears
+//! and disappears on both surfaces together. `both_tool_surfaces_offer_the_same_tools`
+//! in the `roteiro` binary is what fails if that ever comes apart.
 //!
 //! # Why `review` is NOT a tool here
 //!
@@ -285,6 +311,70 @@ struct CouplingArgs {
     project: Option<String>,
 }
 
+/// Arguments for the `security_list` tool.
+#[cfg(feature = "execution")]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct SecurityListArgs {
+    /// Restrict to one analyzer's layer (`cargo-audit`, `osv-scanner`,
+    /// `semgrep`). An unknown name is an error, not an empty listing.
+    #[serde(default)]
+    analyzer: Option<String>,
+    /// Max findings **per layer** (default 20, clamped to 1..=100 — this surface
+    /// has no "unlimited": see `model_limit`).
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+    /// Which hosted project to query (see `list_projects`); omit if single.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Arguments for the `security_status` tool.
+///
+/// No `limit`, and that is a property of the answer rather than an omission: a
+/// status document carries one row per shipped analyzer, one per pinned asset, and
+/// one per live findings layer — **counts, never findings** — so its size is fixed
+/// by what is installed rather than by how much was found. There is no schema
+/// field for a bound to be declared in, so
+/// `security_status_states_why_it_needs_no_bound` is what keeps the description
+/// honest about it, exactly as `every_context_tool_states_its_fixed_bound` does for
+/// `context`.
+#[cfg(feature = "execution")]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct SecurityStatusArgs {
+    /// Restrict both halves to one analyzer (`cargo-audit`, `osv-scanner`,
+    /// `semgrep`). An unknown name is an error.
+    #[serde(default)]
+    analyzer: Option<String>,
+    /// Which hosted project's layers to report (see `list_projects`); omit if
+    /// single. It selects the `repository` half only — the `machine` half is the
+    /// same whichever project is named.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Validate a model-supplied `analyzer` against the shipped adapter set.
+///
+/// An unknown name is a **tool error**, not a listing with nothing in it. That is
+/// the difference between the CLI and this surface: on the CLI an unrecognised
+/// `--analyzer` prints "no findings ingested for `<name>`" to the person who typed
+/// it and can see their own typo, whereas a document saying no result is on record
+/// for a name a model invented reads as "that analyzer has never been run here".
+/// It is the same rule the `order` arguments follow — a model told something that
+/// is not so will state it as fact — and here the fact in question is a security
+/// result.
+#[cfg(feature = "execution")]
+fn checked_analyzer(given: Option<&str>) -> Result<Option<&str>, String> {
+    match given {
+        None => Ok(None),
+        Some(name) if rto_exec::known_analyzers().contains(&name) => Ok(Some(name)),
+        Some(name) => Err(format!(
+            "unknown analyzer `{name}` (expected {})",
+            rto_exec::known_analyzers().join("|")
+        )),
+    }
+}
+
 /// The MCP server handler over a [`Workspace`] of one or more project graphs
 /// (ADR-0008). Every tool takes an optional `project` selector and a
 /// `list_projects` tool enumerates the hosted projects; a single-project
@@ -302,8 +392,29 @@ impl GraphServer {
     fn new(workspace: SharedWorkspace) -> Self {
         Self {
             workspace,
-            tool_router: Self::tool_router(),
+            tool_router: Self::routes(),
         }
+    }
+
+    /// Every route this server advertises: the always-present graph tools, plus
+    /// the two `security_*` tools when this build has `execution`.
+    ///
+    /// The `security_*` pair lives in a **second** `#[tool_router]` block because
+    /// the macro emits one `.with_route(Self::<handler>)` per `#[tool]` fn
+    /// unconditionally — a `#[cfg]` on the handler would leave the generated
+    /// router referring to a method that does not exist. Two routers merged here
+    /// is the composition rmcp offers for exactly this, and it keeps the cfg on
+    /// the whole feature-gated block rather than sprinkled through one.
+    ///
+    /// This is also the single definition of the advertised set: `new` stores it,
+    /// `tool_names` reads it, and `#[tool_handler(router = Self::routes())]`
+    /// dispatches against it — so a tool cannot be listed and unroutable, or
+    /// routable and unlisted.
+    fn routes() -> ToolRouter<Self> {
+        let routes = Self::tool_router();
+        #[cfg(feature = "execution")]
+        let routes = routes + Self::security_tool_router();
+        routes
     }
 
     /// Run `f` against the selected project's store. Returns the inner query
@@ -670,7 +781,133 @@ impl GraphServer {
     }
 }
 
-#[tool_handler]
+/// The two `security` subcommands that read and never write (issue #435).
+///
+/// A separate `#[tool_router]` block so the whole pair can be `#[cfg]`-gated — see
+/// [`GraphServer::routes`] for why one cfg per handler would not compile. The other
+/// three subcommands are permanent refusals, with their reasons in this module's
+/// disposition table; `the_three_mutating_security_subcommands_are_never_exposed`
+/// is what fails if one of them is ever added here.
+#[cfg(feature = "execution")]
+#[tool_router(router = security_tool_router)]
+impl GraphServer {
+    /// List stored security findings, bounded, with the never-run case named.
+    #[tool(
+        description = "List the SECURITY FINDINGS stored for this repository — every live \
+                          findings layer with the run evidence behind it (analyzer, version, \
+                          backend, isolation, advisory database, report digest) and a page of \
+                          its findings. \
+                          READ `coverage` FIRST. It is `analyzed` or \
+                          `no-analyzer-on-record`, and the second is a real outcome that is \
+                          NOT a clean repository: it means no analyzer result is on record \
+                          here. A `no-analyzer-on-record` result carries NO `report` at all — \
+                          so if you are looking for `findings` and there is no `report`, \
+                          nothing was checked and you must say so rather than report zero \
+                          findings. An analyzer that ran and found nothing is the OTHER \
+                          case: `coverage` is `analyzed` and `findings` is 0. \
+                          BOUNDED, and it tells you when it bound something. `limit` \
+                          (1-100, default 20 — no unlimited setting) is findings PER LAYER; \
+                          each layer carries its true `findings` count, the `page` actually \
+                          returned, `truncated`, and how many were `omitted`. A page keeps \
+                          the most severe findings first, so what is omitted is the least \
+                          severe — never conclude a severity is absent from a truncated \
+                          page. \
+                          `cross_reference` is a VIEW over those findings, not a \
+                          replacement: it groups dependency advisories both analyzers \
+                          reported, `confirmed_by` says how many said so, `1` is a normal \
+                          state rather than a discrepancy, and the `findings` total above is \
+                          unchanged by it. Every finding named there is still addressable \
+                          under its own key. \
+                          This is read-only: it cannot run an analyzer, and it cannot \
+                          ingest a report. Ask the user to run `roteiro security run` or \
+                          `roteiro security ingest` — a tool call is not a person consenting \
+                          to execution."
+    )]
+    async fn security_list(
+        &self,
+        Parameters(args): Parameters<SecurityListArgs>,
+    ) -> CallToolResult {
+        let analyzer = match checked_analyzer(args.analyzer.as_deref()) {
+            Ok(analyzer) => analyzer,
+            Err(e) => return tool_error(&e),
+        };
+        // No `[debt] ignore`-shaped hazard here, and that is what makes this one
+        // genuinely eligible rather than eligible-looking: a listing is a pure
+        // read over stored findings and a pure cross-reference over them, with no
+        // project configuration in the path at all. `debt` has one and passes an
+        // empty list because this crate cannot reach `roteiro.toml`; there is
+        // nothing equivalent for this tool to be missing.
+        let limit = model_limit(args.limit, 20, 100);
+        query_result(self.with_project(args.project.as_deref(), |store| {
+            store
+                .findings_layers(analyzer)
+                .map(|layers| rto_exec::security_list(layers, limit))
+        }))
+    }
+
+    /// What this machine has provisioned, and what this repository has analyzed —
+    /// as two labelled scopes.
+    #[tool(
+        description = "Report SECURITY READINESS in TWO SEPARATELY SCOPED SECTIONS, and \
+                          the distinction is the whole point of the tool — do not merge \
+                          them when you report it. \
+                          `machine` (scope `machine`) describes THIS HOST: the pinned-asset \
+                          cache under `asset_root`, each shipped analyzer's coverage matrix, \
+                          and whether its assets are provisioned and still match their \
+                          digests. `ready` there means this machine COULD run that analyzer. \
+                          It says nothing whatsoever about whether it has been run, and it \
+                          is identical for every project this server hosts. \
+                          `repository` (scope `repository`) describes ONE PROJECT — the one \
+                          named in its own `project` field, which the `project` argument \
+                          selects: which findings layers are live, how many findings each \
+                          holds, and how old the advisory database behind each one is. \
+                          `possibly_stale` is `true` whenever an advisory database is \
+                          involved and NEVER means current; `false` means only that the \
+                          result has no advisory-data axis. \
+                          READ `repository.coverage` before concluding anything. It is \
+                          `analyzed` or `no-analyzer-on-record`; the second carries no \
+                          `layers` at all and means nothing has been analyzed in that \
+                          project, which is NOT a clean repository. \
+                          It needs no `limit`: this is one row per shipped analyzer, one \
+                          per pinned asset and one per live layer — COUNTS, NEVER FINDINGS. \
+                          Use `security_list` for the findings themselves. \
+                          This is read-only: it cannot provision an asset. `roteiro \
+                          security prefetch` opens the network under an explicit human \
+                          consent and is not available here — ask the user to run it."
+    )]
+    async fn security_status(
+        &self,
+        Parameters(args): Parameters<SecurityStatusArgs>,
+    ) -> CallToolResult {
+        let analyzer = match checked_analyzer(args.analyzer.as_deref()) {
+            Ok(analyzer) => analyzer,
+            Err(e) => return tool_error(&e),
+        };
+        let project = args.project.as_deref();
+        // The **resolved** name, not the argument: a bare call omits `project`, and
+        // a `repository` half labelled `null` would be a section whose scope the
+        // reader has to guess — which is the defect this shape exists to remove.
+        // Resolving here also fails an unknown/ambiguous `project` before any
+        // machine-global work is reported, so a caller never gets a document whose
+        // two halves came from different questions.
+        let project_name = match self.workspace.resolve(project) {
+            Ok(name) => name,
+            Err(e) => return tool_error(&e.to_string()),
+        };
+        // Machine-global, and read outside `with_project` because it is not the
+        // project's to answer: `asset_root` resolves from this host's environment,
+        // whichever project was selected. The document is what says so.
+        let root = rto_exec::asset_root();
+        let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
+        query_result(self.with_project(project, |store| {
+            store.findings_layers(analyzer).map(|layers| {
+                rto_exec::security_status(&root, analyzer, &project_name, &layers, &now)
+            })
+        }))
+    }
+}
+
+#[tool_handler(router = Self::routes())]
 impl ServerHandler for GraphServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` is `#[non_exhaustive]`; build from default then set fields.
@@ -678,7 +915,11 @@ impl ServerHandler for GraphServer {
         info.protocol_version = ProtocolVersion::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("roteiro", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some(
+        // Assembled rather than a single literal because the `security_*` pair is
+        // feature-gated: a server that does not offer them must not announce them,
+        // and a model told a tool exists and then handed "unknown tool" has been
+        // misinformed by its own server.
+        let mut instructions = String::from(
             "Roteiro codebase knowledge graph. Start with `search` to find nodes by \
              text (it searches captured content too — README/ADR/blueprint prose — \
              and ranks curated docs first, so it answers \"what is X / why\"); then \
@@ -691,11 +932,24 @@ impl ServerHandler for GraphServer {
              not a secret scan — see its description), and `check` runs the \
              authored-layer drift gate and returns its verdict as data (read its \
              `gate` field: `not-run` is a real outcome and is not a clean \
-             repository). Every tool here is read-only. There is no `review` tool — \
-             `roteiro review` is CLI-first and needs no server; see this module's \
-             documentation for why it is not exposed."
-                .into(),
+             repository).",
         );
+        #[cfg(feature = "execution")]
+        instructions.push_str(
+            " `security_list` lists stored analyzer findings and `security_status` \
+             reports readiness in two separately scoped halves (`machine` = this \
+             host's provisioned assets, `repository` = one project's layers) — read \
+             `coverage` on both before concluding anything, because \
+             `no-analyzer-on-record` means nothing has been analyzed and is not a \
+             clean repository. Neither can run an analyzer, ingest a report or \
+             prefetch an asset; ask the user to run those.",
+        );
+        instructions.push_str(
+            " Every tool here is read-only. There is no `review` tool — `roteiro \
+             review` is CLI-first and needs no server; see this module's \
+             documentation for why it is not exposed.",
+        );
+        info.instructions = Some(instructions);
         info
     }
 }
@@ -712,7 +966,7 @@ impl ServerHandler for GraphServer {
 /// (#393) are what that costs.
 #[must_use]
 pub fn tool_names() -> Vec<String> {
-    let mut names: Vec<String> = GraphServer::tool_router()
+    let mut names: Vec<String> = GraphServer::routes()
         .list_all()
         .into_iter()
         .map(|t| t.name.to_string())
@@ -794,6 +1048,8 @@ mod tests {
         CheckArgs, ConfigSecretArgs, ContextArgs, CouplingArgs, DebtArgs, DensityArgs, ExplainArgs,
         GraphServer, ListKindArgs, PathArgs, SearchArgs, model_limit,
     };
+    #[cfg(feature = "execution")]
+    use super::{SecurityListArgs, SecurityStatusArgs};
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
     use std::sync::Arc;
@@ -1124,14 +1380,26 @@ mod tests {
     /// makes the declaration true, and this test is what keeps it there.
     #[test]
     fn every_limit_tool_advertises_the_bound_it_enforces() {
+        /// The one bounded tool this build gains under `execution`. Empty otherwise,
+        /// so the table below needs no `mut` in a build with nothing to add — and
+        /// the rule is the same either way: a tool that pages must advertise the
+        /// page it enforces. `security_list` bounds findings per layer.
+        #[cfg(feature = "execution")]
+        const GATED: &[(&str, u64)] = &[("security_list", 100)];
+        #[cfg(not(feature = "execution"))]
+        const GATED: &[(&str, u64)] = &[];
         let server = seeded();
         let tools = server.tool_router.list_all();
-        for (name, max) in [
+        let bounded: Vec<(&str, u64)> = [
             ("search", 25u64),
             ("debt_density", 100),
             ("config_secrets", 200),
             ("coupling", 100),
-        ] {
+        ]
+        .into_iter()
+        .chain(GATED.iter().copied())
+        .collect();
+        for (name, max) in bounded {
             let tool = tools
                 .iter()
                 .find(|t| t.name == name)
@@ -1314,32 +1582,59 @@ mod tests {
         );
     }
 
-    /// No `security` subcommand is a tool, and two of them never can be.
+    /// The `security*` tool set is **exactly** the two read-only subcommands, and
+    /// the other three can never join it.
     ///
-    /// `ingest` and `run` both call `Store::replace_findings_layer`, and `run`
-    /// additionally executes an analyzer — a model asking for a tool is not a
-    /// human consenting to execution. `prefetch` opens the network under a human
-    /// consent. Completing the set is the failure mode this test exists to
-    /// prevent, so it fails on *any* `security*` tool: the two read-only ones
-    /// (`list`, `status`) are eligible but need the design step recorded in this
-    /// module's documentation, and adding them should mean reading that first.
+    /// `ingest` and `run` both call `Store::replace_findings_layer` — `run` through
+    /// `execute_and_file`, which **both** of its backends share, so ADR-0019's
+    /// sandboxed default did not make it read-only — and `run` additionally
+    /// executes an analyzer: a model asking for a tool is not a human consenting to
+    /// execution. `prefetch` opens the network under an explicit human consent.
+    ///
+    /// Completing the set is the failure mode this test exists to prevent, and it
+    /// checks that two ways round. The set equality fails on *any* unexpected
+    /// `security*` tool, whatever it is called; the named loop then fails with the
+    /// specific refusal that was broken, so a future change that loosens the first
+    /// assertion still trips over the second. Issue #435 added `list` and `status`
+    /// here and deliberately left this test in place rather than deleting it.
     #[test]
-    fn no_security_subcommand_is_exposed() {
+    fn the_three_mutating_security_subcommands_are_never_exposed() {
+        use std::collections::BTreeSet;
+
         let server = seeded();
-        let security: Vec<String> = server
+        let security: BTreeSet<String> = server
             .tool_router
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())
             .filter(|n| n.starts_with("security"))
             .collect();
-        assert!(
-            security.is_empty(),
-            "`security ingest`/`run`/`prefetch` are permanent refusals (mutating, \
-             executing, network-consented); `list`/`status` are eligible but need \
-             the never-run-vs-clean discriminator and a `project` selector first. \
-             Found: {security:?}",
+
+        // The pair is feature-gated on `execution`, so the expected set is too — a
+        // build without it offers no `security*` tool at all, which is the same
+        // property stated at a different feature set rather than a weaker one.
+        #[cfg(feature = "execution")]
+        let allowed: BTreeSet<String> = ["security_list", "security_status"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        #[cfg(not(feature = "execution"))]
+        let allowed: BTreeSet<String> = BTreeSet::new();
+
+        assert_eq!(
+            security, allowed,
+            "the `security*` tools must be exactly the read-only pair: `ingest` and \
+             `run` mutate (both of `run`'s backends end in `replace_findings_layer`) \
+             and `run` executes; `prefetch` opens the network under a human consent. \
+             All three are permanent refusals, not gaps",
         );
+        for refused in ["ingest", "run", "prefetch"] {
+            assert!(
+                !security.iter().any(|n| n.contains(refused)),
+                "`security {refused}` is a permanent refusal and must never be a \
+                 tool. Found in: {security:?}",
+            );
+        }
     }
 
     /// The sibling of `every_limit_tool_advertises_the_bound_it_enforces`, for the
@@ -1393,6 +1688,338 @@ mod tests {
                 "`context` must say it reports its truncation (`{claim}`): {desc}",
             );
         }
+    }
+
+    /// A store holding one live layer per analyzer, so the `analyzed` path can be
+    /// exercised against a real `findings_layers` read rather than a hand-built
+    /// document.
+    ///
+    /// Two layers on purpose: the per-layer page bound is the thing most likely to
+    /// be quietly changed to a per-document one, and a single layer cannot tell the
+    /// two apart.
+    #[cfg(feature = "execution")]
+    fn seeded_with_findings() -> GraphServer {
+        use rto_graph::{
+            AnalysisRun, CommandPolicy, Finding, FindingKey, Isolation, RunnerKind, Severity,
+            SourceIdentity,
+        };
+
+        let mut store = Store::open_in_memory().expect("store");
+        let run = |analyzer: &str| AnalysisRun {
+            layer: format!("security:{analyzer}:wt"),
+            analyzer: analyzer.to_owned(),
+            analyzer_version: "1.0.0".to_owned(),
+            runner: RunnerKind::Ingested,
+            isolation: Isolation::Ingested,
+            image_digest: None,
+            rules_digest: None,
+            advisory_db: None,
+            command_policy: CommandPolicy::default(),
+            source: SourceIdentity::default(),
+            started_at: "2026-08-01T00:00:00Z".to_owned(),
+            ended_at: "2026-08-01T00:00:01Z".to_owned(),
+            exit_status: 1,
+            report_digest: "deadbeef".to_owned(),
+        };
+        let finding = |analyzer: &str, rule: &str, severity: Severity| Finding {
+            key: FindingKey::new(analyzer, &[rule, "no-snippet"]).expect("key"),
+            rule: rule.to_owned(),
+            severity,
+            title: format!("{rule} title"),
+            message: format!("{rule} message"),
+            path: None,
+            span: None,
+            meta: serde_json::Value::Null,
+        };
+        store
+            .replace_findings_layer(
+                &run("cargo-audit"),
+                &[
+                    finding("cargo-audit", "RUSTSEC-2024-0001", Severity::Critical),
+                    finding("cargo-audit", "RUSTSEC-2024-0002", Severity::Low),
+                ],
+            )
+            .expect("cargo-audit layer");
+        store
+            .replace_findings_layer(
+                &run("semgrep"),
+                &[finding("semgrep", "rules.taint", Severity::High)],
+            )
+            .expect("semgrep layer");
+        GraphServer::new(Arc::new(Workspace::single("test", store)))
+    }
+
+    /// The trap: `security_list` on a repository no analyzer has run against must
+    /// not produce a document a model can read as "no security findings".
+    ///
+    /// `seeded()` is exactly that repository — it has a graph and no findings — so
+    /// this is the shape a first call against a fresh project actually returns.
+    #[cfg(feature = "execution")]
+    #[tokio::test]
+    async fn security_list_distinguishes_nothing_ran_from_nothing_found() {
+        let out = text_of(
+            &seeded()
+                .security_list(Parameters(SecurityListArgs::default()))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["coverage"], "no-analyzer-on-record", "{json}");
+        // The two fields a model would reach for are ABSENT, not zero: `0` is the
+        // good answer for both, which is why neither may appear in this document.
+        assert!(json.get("report").is_none(), "{json}");
+        assert!(!out.contains("\"findings\""), "{out}");
+        assert!(
+            json["no_result_reason"]
+                .as_str()
+                .expect("reason")
+                .contains("NOT a clean result"),
+            "{json}"
+        );
+
+        // And the opposite fact reads as the opposite document, which is what makes
+        // the discriminator worth having.
+        let out = text_of(
+            &seeded_with_findings()
+                .security_list(Parameters(SecurityListArgs::default()))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["coverage"], "analyzed", "{json}");
+        assert_eq!(json["report"]["findings"], 3, "{json}");
+        assert_eq!(json["report"]["truncated"], false, "{json}");
+    }
+
+    /// The page bound is per layer, so a bound of 1 still reaches every layer.
+    ///
+    /// A document-wide bound would return the first layer's single finding and
+    /// report `semgrep` as absent — "that analyzer found nothing", which is the
+    /// same defect as the empty listing above, one level down.
+    #[cfg(feature = "execution")]
+    #[tokio::test]
+    async fn security_list_bounds_per_layer_and_reports_what_it_cut() {
+        let out = text_of(
+            &seeded_with_findings()
+                .security_list(Parameters(SecurityListArgs {
+                    limit: Some(1),
+                    ..SecurityListArgs::default()
+                }))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        let report = &json["report"];
+        assert_eq!(report["findings"], 3, "the true total survives: {json}");
+        assert_eq!(report["returned"], 2, "one from each of two layers: {json}");
+        assert_eq!(report["truncated"], true);
+        let layers = report["layers"].as_array().expect("layers");
+        assert_eq!(layers.len(), 2, "no layer is dropped by the bound: {json}");
+        // The truncated layer keeps its worst finding, not its alphabetically
+        // luckiest: `RUSTSEC-2024-0001` is critical and `…0002` is low, so key
+        // order and severity order agree on this pair only if severity wins.
+        let audit = layers
+            .iter()
+            .find(|l| l["run"]["analyzer"] == "cargo-audit")
+            .expect("cargo-audit layer");
+        assert_eq!(audit["findings"], 2, "true per-layer count: {audit}");
+        assert_eq!(audit["omitted"], 1);
+        assert_eq!(audit["truncated"], true);
+        assert_eq!(audit["page"][0]["severity"], "critical", "{audit}");
+    }
+
+    /// The decision this issue was filed for: the two scopes are labelled in the
+    /// document, not merely explained in a doc comment a model cannot read.
+    #[cfg(feature = "execution")]
+    #[tokio::test]
+    async fn security_status_labels_which_half_describes_what() {
+        let out = text_of(
+            &seeded_with_findings()
+                .security_status(Parameters(SecurityStatusArgs::default()))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["machine"]["scope"], "machine", "{json}");
+        assert_eq!(json["repository"]["scope"], "repository", "{json}");
+        // Each scope's identifying value is inside its own half, so a model that
+        // quotes one section cannot lose the scope it belongs to.
+        assert!(json["machine"]["asset_root"].is_string(), "{json}");
+        assert_eq!(
+            json["repository"]["project"], "test",
+            "the RESOLVED project, not the omitted argument: {json}"
+        );
+        assert!(json["repository"].get("asset_root").is_none(), "{json}");
+        assert!(json["machine"].get("project").is_none(), "{json}");
+        // The layer half follows the project, and carries counts rather than
+        // findings — which is why this tool needs no page bound.
+        assert_eq!(json["repository"]["coverage"], "analyzed", "{json}");
+        let layers = json["repository"]["layers"].as_array().expect("layers");
+        assert_eq!(layers.len(), 2, "{json}");
+        assert!(
+            layers.iter().all(|l| l.get("page").is_none()),
+            "a status row must not carry findings: {json}"
+        );
+
+        // And the repository half carries the same discriminator as the listing, so
+        // an unanalyzed project is not a clean one here either.
+        let out = text_of(
+            &seeded()
+                .security_status(Parameters(SecurityStatusArgs::default()))
+                .await,
+        );
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["repository"]["coverage"], "no-analyzer-on-record");
+        assert!(json["repository"].get("layers").is_none(), "{json}");
+        // The machine half is still answered: it never depended on the project.
+        assert!(json["machine"]["asset_root"].is_string(), "{json}");
+    }
+
+    /// An unknown `analyzer` is a tool error, never a document saying no result is
+    /// on record — which would read as "that analyzer has never run here".
+    #[cfg(feature = "execution")]
+    #[tokio::test]
+    async fn an_unknown_analyzer_is_an_error_on_both_security_tools() {
+        let server = seeded_with_findings();
+        let list = server
+            .security_list(Parameters(SecurityListArgs {
+                analyzer: Some("semgrepp".into()),
+                ..SecurityListArgs::default()
+            }))
+            .await;
+        assert_eq!(list.is_error, Some(true), "{list:?}");
+        assert!(
+            text_of(&list).contains("unknown analyzer `semgrepp`"),
+            "{list:?}"
+        );
+
+        let status = server
+            .security_status(Parameters(SecurityStatusArgs {
+                analyzer: Some("semgrepp".into()),
+                ..SecurityStatusArgs::default()
+            }))
+            .await;
+        assert_eq!(status.is_error, Some(true), "{status:?}");
+        assert!(
+            text_of(&status).contains("unknown analyzer `semgrepp`"),
+            "{status:?}"
+        );
+
+        // A known one narrows rather than erroring, so the check is a spelling gate
+        // and not a refusal to filter.
+        let ok = server
+            .security_list(Parameters(SecurityListArgs {
+                analyzer: Some("semgrep".into()),
+                ..SecurityListArgs::default()
+            }))
+            .await;
+        assert_ne!(ok.is_error, Some(true), "{ok:?}");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&ok)).expect("json");
+        assert_eq!(json["report"]["layers"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["report"]["layers"][0]["run"]["analyzer"], "semgrep");
+    }
+
+    /// The sibling of `check_tool_description_refuses_the_advisory_reading`: the
+    /// never-run reading has to be refused where a model will read it.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn security_list_description_refuses_the_clean_reading() {
+        let server = seeded();
+        let tools = server.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "security_list")
+            .expect("`security_list` advertised");
+        let desc = tool.description.as_deref().unwrap_or_default();
+        for claim in [
+            "READ `coverage` FIRST",
+            "NOT a clean repository",
+            "carries NO `report`",
+            "rather than report zero findings",
+            "PER LAYER",
+            "most severe findings first",
+        ] {
+            assert!(desc.contains(claim), "missing `{claim}` from: {desc}");
+        }
+    }
+
+    /// `security_status`'s two halves have to be separated in its description as
+    /// well as in its output: a model reads the description once and may act on it
+    /// without re-reading the document's `scope` fields.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn security_status_description_separates_its_two_scopes() {
+        let server = seeded();
+        let tools = server.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "security_status")
+            .expect("`security_status` advertised");
+        let desc = tool.description.as_deref().unwrap_or_default();
+        for claim in [
+            "TWO SEPARATELY SCOPED SECTIONS",
+            "THIS HOST",
+            "ONE PROJECT",
+            "COULD run",
+            "NEVER means current",
+            "NOT a clean repository",
+        ] {
+            assert!(desc.contains(claim), "missing `{claim}` from: {desc}");
+        }
+    }
+
+    /// The sibling of `every_context_tool_states_its_fixed_bound`, for the other
+    /// tool that answers without a `limit`.
+    ///
+    /// `security_status` reports counts rather than findings, so its size is fixed
+    /// by what is installed and what has run rather than by how much was found.
+    /// There is no schema field for that to be declared in, so the declaration
+    /// lives in the description — and this is what keeps it there. Without it, the
+    /// obvious "add a `limit` for consistency" change would advertise a bound
+    /// nothing honours, which is the drift #402 fixed once already.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn security_status_states_why_it_needs_no_bound() {
+        let server = seeded();
+        let tools = server.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "security_status")
+            .expect("`security_status` advertised");
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("`security_status` declares properties");
+        assert!(
+            props.get("limit").is_none(),
+            "`security_status` must not advertise a `limit` it does not honour: \
+             {props:?}",
+        );
+        let desc = tool.description.as_deref().unwrap_or_default();
+        for claim in ["needs no `limit`", "COUNTS, NEVER FINDINGS"] {
+            assert!(desc.contains(claim), "missing `{claim}` from: {desc}");
+        }
+    }
+
+    /// A server that does not offer the `security_*` pair must not announce it.
+    ///
+    /// The instructions string is assembled rather than a single literal precisely
+    /// so this can hold, and it is the kind of thing that goes wrong silently: a
+    /// model told a tool exists and then handed `unknown tool` has been misinformed
+    /// by its own server.
+    #[test]
+    fn the_instructions_announce_the_security_tools_exactly_when_they_exist() {
+        let info = seeded().get_info();
+        let instructions = info.instructions.unwrap_or_default();
+        let announced = instructions.contains("`security_list`");
+        assert_eq!(
+            announced,
+            cfg!(feature = "execution"),
+            "the instructions must name `security_list` exactly when the build \
+             offers it: {instructions}",
+        );
+        // The read-only rule is stated whichever way that went.
+        assert!(
+            instructions.contains("Every tool here is read-only"),
+            "{instructions}"
+        );
     }
 
     #[test]

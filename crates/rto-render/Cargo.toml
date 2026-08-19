@@ -13,6 +13,13 @@ authors.workspace = true
 [dependencies]
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 rto-graph = { workspace = true }
+# `execution`-only: the shared `security list` / `security status` tool documents
+# (`rto_exec::tool_security`), which the MCP `security_*` tools are thin wrappers
+# over. Nothing here executes anything — the module is ungated in `rto-exec`
+# precisely because a read owes its reader the same answer whichever analyzer
+# backend was compiled in, and every `Command::new` in that crate is behind
+# `exec-subprocess`/`exec-boxlite`, neither of which this enables.
+rto-exec = { workspace = true, optional = true }
 # The authored-layer parse and drift rule behind the MCP `check` tool. It is
 # `mcp`-only: a default `rto-render` build renders documents and needs none of it.
 rto-spec = { workspace = true, optional = true }
@@ -37,6 +44,18 @@ serde_json = { workspace = true }
 # (ADR-0002) for stdio + streamable-HTTP transports; entirely feature-gated so
 # the default build pulls none of it.
 mcp = ["dep:rmcp", "dep:rto-spec", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:serde_json"]
+# The `security_list` / `security_status` MCP tools, which need `rto-exec`'s
+# document types. Named `execution` to match the feature that carries the same
+# surface in the `roteiro` binary, and forwarded from there — see that crate's
+# `execution` entry — so the MCP surface and the served-chat surface gain and lose
+# these two tools together. `both_tool_surfaces_offer_the_same_tools` is what
+# fails if they ever come apart.
+#
+# It deliberately does **not** imply `mcp`, and the tools are gated on
+# `all(mcp, execution)`. A default `rto-render` build renders documents; enabling
+# this alone adds a dependency edge to a crate the `roteiro` default build already
+# compiles, and no code at all.
+execution = ["dep:rto-exec"]
 
 [lints]
 workspace = true
