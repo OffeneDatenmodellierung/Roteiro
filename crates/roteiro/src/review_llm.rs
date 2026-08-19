@@ -1653,6 +1653,15 @@ mod tests {
         );
         // And the task itself still qualifies, so this is a missing payload rather
         // than a task ruled out — the two are different facts and the fix differs.
+        //
+        // Gated because `ModelTask` is re-exported behind `rto-graph/models`,
+        // which only this crate's `models` feature turns on — so in a
+        // `--no-default-features --features execution` build the type does not
+        // exist and this line was a compile error (issue #445). The gate is on
+        // the assertion alone rather than on the test, because the flag
+        // assertions above are the property under protection and they hold in
+        // *every* build, including the one with no remote tier to offer.
+        #[cfg(feature = "models")]
         assert!(rto_graph::ModelTask::Review.goes_remote());
     }
 }

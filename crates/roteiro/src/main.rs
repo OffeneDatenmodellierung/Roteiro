@@ -5579,7 +5579,21 @@ fn resolved_media_model(kind: rto_graph::MediaKind) -> Result<(String, String), 
 /// Without the registry there is nothing to resolve against — and nothing a pin
 /// could be honoured *with* — so the modality's built-in default is both the
 /// only answer available and the correct one.
+///
+/// The `Result` is therefore always `Ok` here, and that is the point rather than
+/// an oversight: it is the signature the `models` twin above needs, so the one
+/// caller can stay feature-agnostic and keep reporting an unhonourable pin as
+/// itself. Removing the wrapper would split the call site in two along a seam
+/// that has nothing to do with what `media status` prints.
+///
+/// `expect` rather than `allow` so this stays honest in both directions: the
+/// item exists *only* where the lint fires, so if the twin ever gains a failure
+/// this build can share, the unfulfilled expectation says so.
 #[cfg(not(feature = "models"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Result is the cfg-parallel twin's signature, not this arm's"
+)]
 fn resolved_media_model(kind: rto_graph::MediaKind) -> Result<(String, String), String> {
     Ok((kind.model().to_owned(), String::new()))
 }
@@ -7911,7 +7925,14 @@ fn print_cross_reference(cross_reference: &[SecurityCrossReference]) {
 }
 
 /// The `--json` shape of `roteiro security run`.
-#[cfg(feature = "execution")]
+///
+/// Gated on having a backend rather than on `execution`, because the only thing
+/// that constructs it is [`execute_and_file`] — see there for why the two arms
+/// of the `any` are named separately instead of collapsed to `exec-subprocess`.
+#[cfg(all(
+    feature = "execution",
+    any(feature = "exec-boxlite", feature = "exec-subprocess")
+))]
 #[derive(serde::Serialize)]
 struct SecurityRunReport {
     layer: String,
@@ -8106,7 +8127,24 @@ fn run_security_run_on_this_host(analyzer: &str, _json: bool) -> anyhow::Result<
 ///
 /// `image_reference` is the exception, and only for the line printed *before* the
 /// run, where there is no record yet to read.
-#[cfg(feature = "execution")]
+///
+/// Gated on **having a backend**, not on `execution`. Its two callers are
+/// `run_security_run_sandboxed` (`exec-boxlite`) and
+/// `run_security_run_on_this_host` (`exec-subprocess`), and an `execution`-only
+/// build compiles neither — both are replaced there by refusal arms that bail
+/// before anything runs. So in that build this function, `SecurityRunReport` and
+/// `isolation_note` were genuinely dead and `-D warnings` said so (issue #445).
+///
+/// The `any` is written out rather than collapsed to `exec-subprocess`, which
+/// today implies it: the union of the two call sites is what makes the gate
+/// correct, and `crates/roteiro/Cargo.toml` records that `exec-boxlite`'s
+/// implication of `exec-subprocess` is CLI plumbing "worth untangling" later. If
+/// that happens, an `exec-boxlite`-only build still needs this and the `any`
+/// still says so.
+#[cfg(all(
+    feature = "execution",
+    any(feature = "exec-boxlite", feature = "exec-subprocess")
+))]
 fn execute_and_file(
     runner: &dyn rto_exec::AnalyzerRunner,
     analyzer: &str,
@@ -8210,7 +8248,13 @@ fn execute_and_file(
 /// `security list` reads cannot disagree. A backend that reported the wrong
 /// isolation would be caught by its own output rather than described in the
 /// terms it was asked for.
-#[cfg(feature = "execution")]
+///
+/// Gated with [`execute_and_file`], its only caller — a build with no backend
+/// files no run, so there is no stored record for this to read out.
+#[cfg(all(
+    feature = "execution",
+    any(feature = "exec-boxlite", feature = "exec-subprocess")
+))]
 fn isolation_note(run: &rto_graph::AnalysisRun) -> String {
     match run.isolation {
         rto_graph::Isolation::None => "isolation none — the analyzer ran on this host. Its egress \
@@ -8269,7 +8313,13 @@ fn advisory_db_line(db: &rto_graph::AdvisoryDb) -> String {
 /// nothing stored there is no history to diff, which is the point — ADR-0020 v1.1
 /// makes these a *surprise* to be documented rather than a corruption of a
 /// stored series.
-#[cfg(feature = "execution")]
+///
+/// Gated with the linter it annotates. `run_lint` and `print_lint_footnotes`,
+/// the only two things that read this list, are
+/// `all(execution, exec-subprocess)`; an `execution`-only build gets the
+/// `run_lint` that refuses by name and never prints a count, so there is no
+/// count for these readings to qualify (issue #445).
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
 const LINT_CAVEATS: &[&str] = &[
     "a renamed lint reads as one defect fixed and one introduced — the compiler renamed a symbol, \
      the code did not change",
@@ -12877,8 +12927,14 @@ mod asset_download {
 // where it lives, in `rto-exec` and in `tests/lint_cli.rs`.
 #[cfg(all(test, feature = "execution"))]
 mod lint_cli {
-    use super::{Cli, Command, LINT_CAVEATS, config, lint_features, lint_host_decision};
+    use super::{Cli, Command, config, lint_features, lint_host_decision};
     use clap::Parser as _;
+
+    // The caveats exist only where the linter that prints them does; the rest of
+    // this module tests the flags and the ADR-0020 §6 table, which an
+    // `execution`-only build still has.
+    #[cfg(feature = "exec-subprocess")]
+    use super::LINT_CAVEATS;
 
     /// A [`config::Loaded`] whose two layers say exactly what a test asks them
     /// to, so the ADR-0020 §6 table can be exercised without touching a disk.
@@ -12891,6 +12947,39 @@ mod lint_cli {
 
     fn parse<const N: usize>(args: [&str; N]) -> Command {
         Cli::try_parse_from(args).expect("parse").command
+    }
+
+    /// Linting is the one thing a build without `exec-subprocess` must not be
+    /// able to do — and, like the host path of `security run`, it must say so by
+    /// name rather than as `unrecognized subcommand`.
+    ///
+    /// This is the coverage `tests/lint_cli.rs` cannot carry: that file drives a
+    /// linter that ran, so it is gated on the opposite arm. Exactly one of the
+    /// two is compiled in any build, and this is the arm a
+    /// `--no-default-features --features execution` build gets (issue #445).
+    #[cfg(not(feature = "exec-subprocess"))]
+    #[test]
+    fn the_lint_path_is_absent_but_names_the_feature() {
+        // Parsing is unconditional on purpose — the clap variant is never gated,
+        // for the reason `run_lint`'s refusal arm records — so the refusal has
+        // to come from the dispatch, not from the parser.
+        assert!(matches!(
+            parse(["roteiro", "lint", "clippy"]),
+            Command::Lint { .. }
+        ));
+        let message = super::run_lint(
+            "clippy",
+            &lint_features(false, None).expect("the default feature set resolves"),
+            lint_host_decision(&layers(None, None), false, false),
+            false,
+            None,
+        )
+        .expect_err("a build without exec-subprocess must refuse to lint")
+        .to_string();
+        assert!(message.contains("exec-subprocess"), "{message}");
+        // And it must not offer ingest as a way out: a lint is reported and
+        // never stored, so there is no artifact another machine could hand over.
+        assert!(message.contains("no ingest path"), "{message}");
     }
 
     #[test]
@@ -13125,6 +13214,7 @@ mod lint_cli {
     /// with the image as well as with the toolchain. It belongs in this list
     /// rather than only beside the isolation line, because a `--json` consumer
     /// reads this list and would otherwise be told less than a person is.
+    #[cfg(feature = "exec-subprocess")]
     #[test]
     fn the_caveats_name_every_reading_that_moves_a_count() {
         assert_eq!(LINT_CAVEATS.len(), 4);
@@ -13652,12 +13742,20 @@ mod security_cli {
             panic!("expected Run to parse in a build with no host backend");
         };
         assert_eq!(analyzer, "cargo-audit");
-        let message = crate::run_security(SecurityAction::Run {
-            analyzer: "cargo-audit".to_owned(),
-            sandboxed: false,
-            allow_unsandboxed: true,
-            json: false,
-        })
+        // `None` is the `[lint] image` the dispatch forwards to `prefetch`; the
+        // host path never reads it. `run_security` grew that second argument
+        // without this call site following, and nothing caught it: the test is
+        // gated on `not(exec-subprocess)`, which is precisely the configuration
+        // no job compiled (issue #445).
+        let message = crate::run_security(
+            SecurityAction::Run {
+                analyzer: "cargo-audit".to_owned(),
+                sandboxed: false,
+                allow_unsandboxed: true,
+                json: false,
+            },
+            None,
+        )
         .expect_err("a build without exec-subprocess must refuse the host path")
         .to_string();
         assert!(message.contains("exec-subprocess"), "{message}");
@@ -13671,6 +13769,11 @@ mod security_cli {
     /// property worth protecting: the note is a function of `AnalysisRun`, with
     /// no argument saying which backend called it, so there is no input by which
     /// a host run can be described as isolated.
+    ///
+    /// Gated with the function: a build with no execution backend files no run,
+    /// so the sentence has no record to be read out of and `isolation_note` is
+    /// not compiled there (issue #445).
+    #[cfg(any(feature = "exec-boxlite", feature = "exec-subprocess"))]
     #[test]
     fn the_isolation_note_is_read_out_of_the_stored_run() {
         let base = rto_graph::AnalysisRun {
