@@ -188,6 +188,27 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   an under-marked commit is a changelog omission, an over-marked one is a version
   the project cannot walk back.
 
+- **A scratch verification branch needs its own commit.** Some CI behaviour can
+  only be observed from a branch with a particular *name*: `ci.yml` skips the
+  expensive work on release PRs behind `startsWith(github.head_ref,
+  'release-plz-')`, and that predicate is unreachable from any other branch. The
+  technique is to push a temporary branch matching it, open a **draft** PR, read
+  what the required contexts report, then close the PR and delete the branch.
+
+  The trap is that **check runs attach to a commit SHA, not to a branch.** Push
+  the scratch branch at the same commit as the branch under test and both PRs'
+  runs land on one SHA, where branch protection reads whichever reported first.
+  This has already happened: on #490 the required `msrv` context went green from
+  the scratch branch's 21-second cheap-path run while the branch's own full run
+  was still `in_progress`, and the PR merged on it. The diff was one YAML file so
+  nothing was actually at risk — but the green did not mean what it looked like,
+  and it would not always be a YAML file.
+
+  So give the scratch branch its own commit; an empty one is enough. Delete it
+  when you are done — and if `git push --delete` is refused by the harness's
+  blast-radius policy, **say so in your report** rather than leaving the branch
+  stranded for someone else to find.
+
 ## Reviewing a change
 
 Use [`docs/REVIEW_CHECKLIST.md`](docs/REVIEW_CHECKLIST.md), and run `roteiro
