@@ -29,6 +29,21 @@ on:
       - ".github/workflows/website.yml"
   workflow_dispatch:
 
+# Cancel a superseded run, but only when nobody wants its result. See the fuller
+# reasoning on the same block in `ci.yml`; the short version is that a PR run's
+# verdict is worthless once a newer commit exists, while a `push` run is a record
+# and a `workflow_dispatch` run was asked for by hand.
+#
+# The stakes are higher here than in `ci.yml`, which is why this is an expression
+# and not `true`: on `push` this workflow's `deploy` job Direct-Uploads the site
+# to Cloudflare Pages. Cancelling that mid-upload risks a half-published site,
+# and no runner saving is worth that. `pull_request` only reaches the `build`
+# job, which renders the site as a guard and produces nothing outside the runner
+# — entirely safe to discard.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
