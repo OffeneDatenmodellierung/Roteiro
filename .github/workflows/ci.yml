@@ -68,15 +68,27 @@ env:
   # was checked rather than assumed, precisely because the failure mode is
   # permanent.
   #
-  # These three jobs nonetheless RUN on a release PR, and skip at the STEP
-  # level, for a reason that is not timidity about the above: skipping the whole
-  # job would mean verifying nothing, and a version bump is not a no-op. It can
-  # desynchronise `Cargo.lock` from the manifests, and it can move a `version =`
-  # constraint on a workspace path dependency ahead of the member it points at.
-  # release-plz rewrites the workspace `version` AND the pinned `version =` on
-  # all eight path dependencies in `Cargo.toml`, so that shape is not
-  # hypothetical. `cargo metadata --locked` catches both in well under a second
-  # without compiling anything, and it can only run if the job runs.
+  # The jobs that ARE required checks nonetheless RUN on a release PR, and skip
+  # at the STEP level, for a reason that is not timidity about the above:
+  # skipping the whole job would mean verifying nothing, and a version bump is
+  # not a no-op. It can desynchronise `Cargo.lock` from the manifests, and it
+  # can move a `version =` constraint on a workspace path dependency ahead of
+  # the member it points at. release-plz rewrites the workspace `version` AND
+  # the pinned `version =` on all eight path dependencies in `Cargo.toml`, so
+  # that shape is not hypothetical. `cargo metadata --locked` catches both in
+  # well under a second without compiling anything, and it can only run if the
+  # job runs.
+  #
+  # WHICH jobs those are is deliberately not written down here. That is a fact
+  # about branch protection rather than about this file, and a count in prose
+  # beside a set the file itself defines goes stale in silence: this sentence
+  # said "these three jobs" for a while after there were four, which is the
+  # same rot one level down from the defect #494 is about.
+  # `crates/roteiro/tests/ci_release_pr_parity.rs` holds the list, names branch
+  # protection as its source and says how to re-read it, and fails if a
+  # required job loses either arm or if a job appears here that nobody
+  # classified as required or not. Add a job below and that test will tell you
+  # what it needs.
   #
   # Both halves were confirmed by injecting them into this workspace:
   #   - workspace `version` bumped, `Cargo.lock` left behind
@@ -409,12 +421,13 @@ jobs:
     # duplication and kept the expensive half. There is no coverage delta to
     # read on a diff of version fields and changelog prose.
     #
-    # This one is a JOB-level `if:`, unlike the step-level gates in the three
-    # jobs above, and that asymmetry is deliberate: `coverage` is not a required
-    # status check, so nothing here depends on how branch protection treats a
-    # skipped job. It can be skipped outright for the full saving. The predicate
-    # is spelled out longhand because the `env` context is not available in a
-    # job-level `if:` — `env.RELEASE_PR` would silently never match here.
+    # This one is a JOB-level `if:`, unlike the step-level gates in the jobs
+    # that are required checks, and that asymmetry is deliberate: `coverage` is
+    # not a required status check, so nothing here depends on how branch
+    # protection treats a skipped job. It can be skipped outright for the full
+    # saving. The predicate is spelled out longhand because the `env` context
+    # is not available in a job-level `if:` — `env.RELEASE_PR` would silently
+    # never match here.
     if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')
     continue-on-error: true
     steps:
