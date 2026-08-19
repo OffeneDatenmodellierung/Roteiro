@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.0...roteiro-v1.26.1) - 2026-08-19
+
+### Fixed
+
+- show every workspace form, and count each repo once
+
 ## [1.26.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.25.0...roteiro-v1.26.0) - 2026-08-19
 
 ### Added
