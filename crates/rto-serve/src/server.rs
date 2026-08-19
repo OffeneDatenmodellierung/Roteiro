@@ -17,12 +17,14 @@ use axum::routing::{get, post};
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason};
-use crate::tools::{ToolRegistry, chat_with_tools};
+use crate::engine::{ChatRequest, Engine, EngineError};
+use crate::tools::{
+    ClientToolCall, ToolDef, ToolLoopOutcome, ToolRegistry, chat_with_client_tools,
+};
 use crate::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessageDto,
     ChunkChoice, Delta, EmbeddingObject, EmbeddingRequest, EmbeddingResponse, ErrorResponse,
-    ModelList, ModelObject, Usage,
+    FunctionCallDto, ModelList, ModelObject, ToolCallDelta, ToolCallDto, Usage,
 };
 
 /// How many tool round-trips a single request may take before the model's last
@@ -113,6 +115,21 @@ fn router(state: Shared) -> Router {
             post(chat_completions_workspace_scoped),
         )
         .with_state(state)
+}
+
+/// A [`ToolRegistry`] advertising nothing — the stand-in when a server was built
+/// with no graph tools but the request still needs the tool loop because the
+/// *client* supplied tools of its own.
+struct NoTools;
+
+impl ToolRegistry for NoTools {
+    fn tools(&self) -> Vec<ToolDef> {
+        Vec::new()
+    }
+
+    fn call(&self, name: &str, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err(format!("no tool `{name}` is registered"))
+    }
 }
 
 /// A [`ToolRegistry`] that pre-binds a `project` for `/v1/{project}/…` requests:
@@ -357,10 +374,21 @@ async fn chat_completions_workspace_scoped(
 /// path, carrying the tool scope for the tool loop.
 async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) -> Response {
     let stream = body.stream == Some(true);
-    let req = match body.into_engine_request() {
-        Ok(req) => req,
+    let normalised = match body.normalise() {
+        Ok(n) => n,
         Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
     };
+    // Destructured field-by-field on purpose: `tool_choice` and
+    // `parallel_tool_calls` are parsed and carried but deliberately NOT enforced
+    // (see their field docs and the crate README's divergence table), and naming
+    // every field here means a future one cannot be added and silently dropped —
+    // which is the #488 defect this endpoint is trying to stop repeating.
+    let crate::types::NormalisedChat {
+        request: req,
+        client_tools,
+        tool_choice: _,
+        parallel_tool_calls: _,
+    } = normalised;
     // Validate the model up front so the streaming and non-streaming paths agree:
     // an unknown model is a 404 either way, not a 200 SSE that fails mid-stream.
     if !state.engine.models().iter().any(|m| m.id == req.model) {
@@ -371,21 +399,27 @@ async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) 
         );
     }
     if stream {
-        stream_chat(state, req, scope)
+        stream_chat(state, req, scope, client_tools)
     } else {
-        chat_json(state, req, scope).await
+        chat_json(state, req, scope, client_tools).await
     }
 }
 
 /// Non-streaming path: run one blocking completion on a worker thread and return
 /// a single JSON body. With tools registered, the model may call them first.
-async fn chat_json(state: Shared, req: ChatRequest, scope: ChatScope) -> Response {
+async fn chat_json(
+    state: Shared,
+    req: ChatRequest,
+    scope: ChatScope,
+    client_tools: Vec<ToolDef>,
+) -> Response {
     let model = req.model.clone();
     // Inference blocks (llama.cpp decode loop); keep it off the async runtime.
-    let result = tokio::task::spawn_blocking(move || complete(&state, &req, &scope)).await;
+    let result =
+        tokio::task::spawn_blocking(move || complete(&state, &req, &scope, &client_tools)).await;
 
     match result {
-        Ok(Ok(completion)) => Json(build_response(&model, &completion)).into_response(),
+        Ok(Ok(outcome)) => Json(build_response(&model, &outcome)).into_response(),
         Ok(Err(EngineError::UnknownModel(m))) => error(
             StatusCode::NOT_FOUND,
             EngineError::UnknownModel(m).to_string(),
@@ -423,28 +457,34 @@ fn complete(
     state: &AppState,
     req: &ChatRequest,
     scope: &ChatScope,
-) -> Result<Completion, EngineError> {
-    // A workspace-scoped request runs over its own (already-confined) registry;
-    // the default and project-scoped requests share the server's `tools`.
-    if let ChatScope::Workspace(tools) = scope {
-        if tools.tools().is_empty() {
-            return state.engine.chat(req);
-        }
-        return chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS);
-    }
-    let Some(tools) = &state.tools else {
-        return state.engine.chat(req);
-    };
+    client_tools: &[ToolDef],
+) -> Result<ToolLoopOutcome, EngineError> {
+    let engine = state.engine.as_ref();
+    // Suppression is decided inside `chat_with_client_tools`, which also falls
+    // back to a plain `Engine::chat` when neither tool set has anything in it —
+    // so every scope resolves to one call and the empty cases are not special.
     match scope {
-        ChatScope::Project(project) => {
-            let scoped = ScopedTools {
-                inner: tools.as_ref(),
-                project: project.clone(),
-            };
-            chat_with_tools(state.engine.as_ref(), &scoped, req, MAX_TOOL_ROUNDS)
+        // A workspace-scoped request runs over its own (already-confined)
+        // registry; the default and project-scoped requests share `state.tools`.
+        ChatScope::Workspace(tools) => {
+            chat_with_client_tools(engine, tools.as_ref(), client_tools, req, MAX_TOOL_ROUNDS)
         }
-        // `Default` (and, unreachable here, `Workspace`) use the plain registry.
-        _ => chat_with_tools(state.engine.as_ref(), tools.as_ref(), req, MAX_TOOL_ROUNDS),
+        ChatScope::Project(project) => match &state.tools {
+            Some(tools) => {
+                let scoped = ScopedTools {
+                    inner: tools.as_ref(),
+                    project: project.clone(),
+                };
+                chat_with_client_tools(engine, &scoped, client_tools, req, MAX_TOOL_ROUNDS)
+            }
+            None => chat_with_client_tools(engine, &NoTools, client_tools, req, MAX_TOOL_ROUNDS),
+        },
+        ChatScope::Default => match &state.tools {
+            Some(tools) => {
+                chat_with_client_tools(engine, tools.as_ref(), client_tools, req, MAX_TOOL_ROUNDS)
+            }
+            None => chat_with_client_tools(engine, &NoTools, client_tools, req, MAX_TOOL_ROUNDS),
+        },
     }
 }
 
@@ -552,8 +592,14 @@ enum StreamMsg {
     Role,
     /// A piece of generated text.
     Delta(String),
-    /// Generation finished cleanly with this reason.
-    Done(FinishReason),
+    /// The model called the **client's** tools: one complete chunk carrying every
+    /// call, which Roteiro returns without executing. **Divergence:** OpenAI
+    /// fragments `arguments` across chunks with a per-call `index`; this emits
+    /// whole `arguments` at `index: 0` (see [`ToolCallDelta`]).
+    ToolCalls(Vec<ToolCallDto>),
+    /// Generation finished cleanly with this wire reason (`stop` | `length` |
+    /// `tool_calls`).
+    Done(&'static str),
     /// Generation failed part-way; carry the message for a final error event.
     Failed(String),
 }
@@ -561,7 +607,12 @@ enum StreamMsg {
 /// Streaming path: run generation on a blocking worker that feeds token deltas
 /// over a channel, and surface them as OpenAI `chat.completion.chunk` SSE events
 /// terminated by `data: [DONE]`.
-fn stream_chat(state: Shared, req: ChatRequest, scope: ChatScope) -> Response {
+fn stream_chat(
+    state: Shared,
+    req: ChatRequest,
+    scope: ChatScope,
+    client_tools: Vec<ToolDef>,
+) -> Response {
     let id = format!("chatcmpl-{}", next_id());
     let created = unix_seconds();
     let model = req.model.clone();
@@ -575,15 +626,25 @@ fn stream_chat(state: Shared, req: ChatRequest, scope: ChatScope) -> Response {
         // actually advertises tools — an empty registry falls back to
         // `engine.chat` in `complete`, so match that here and keep token-by-token
         // streaming.
-        let use_tools = scope_has_tools(&state, &scope);
+        // Client tools force the tool loop even on a server with no graph tools:
+        // the model has to be told about them, and a call to one must terminate
+        // the stream with `tool_calls` rather than stream as prose.
+        let use_tools = !client_tools.is_empty() || scope_has_tools(&state, &scope);
         if use_tools {
             // The tool loop runs multiple generations, so it is resolved fully
             // and then the final answer is emitted as one delta (tool-mode
             // streaming is not token-incremental).
-            match complete(&state, &req, &scope) {
-                Ok(completion) => {
-                    let _ = tx.send(StreamMsg::Delta(completion.content));
-                    let _ = tx.send(StreamMsg::Done(completion.finish_reason));
+            match complete(&state, &req, &scope, &client_tools) {
+                Ok(outcome) if !outcome.client_tool_calls.is_empty() => {
+                    let _ = tx.send(StreamMsg::ToolCalls(tool_call_dtos(
+                        &outcome.client_tool_calls,
+                    )));
+                    let _ = tx.send(StreamMsg::Done("tool_calls"));
+                }
+                Ok(outcome) => {
+                    let reason = outcome.completion.finish_reason.as_str();
+                    let _ = tx.send(StreamMsg::Delta(outcome.completion.content));
+                    let _ = tx.send(StreamMsg::Done(reason));
                 }
                 Err(e) => {
                     let _ = tx.send(StreamMsg::Failed(e.to_string()));
@@ -595,7 +656,7 @@ fn stream_chat(state: Shared, req: ChatRequest, scope: ChatScope) -> Response {
             };
             match state.engine.chat_stream(&req, &mut on_token) {
                 Ok(usage) => {
-                    let _ = tx.send(StreamMsg::Done(usage.finish_reason));
+                    let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
                 }
                 Err(e) => {
                     let _ = tx.send(StreamMsg::Failed(e.to_string()));
@@ -608,13 +669,12 @@ fn stream_chat(state: Shared, req: ChatRequest, scope: ChatScope) -> Response {
         let data = match msg {
             StreamMsg::Role => chunk_json(&id, created, &model, role_delta(), None),
             StreamMsg::Delta(text) => chunk_json(&id, created, &model, content_delta(text), None),
-            StreamMsg::Done(reason) => chunk_json(
-                &id,
-                created,
-                &model,
-                Delta::default(),
-                Some(reason.as_str()),
-            ),
+            StreamMsg::ToolCalls(calls) => {
+                chunk_json(&id, created, &model, tool_calls_delta(calls), None)
+            }
+            StreamMsg::Done(reason) => {
+                chunk_json(&id, created, &model, Delta::default(), Some(reason))
+            }
             StreamMsg::Failed(message) => {
                 serde_json::to_string(&ErrorResponse::new(message, "inference_error"))
                     .unwrap_or_else(|_| "{\"error\":{\"message\":\"stream failed\"}}".to_owned())
@@ -632,6 +692,7 @@ fn role_delta() -> Delta {
     Delta {
         role: Some("assistant"),
         content: None,
+        tool_calls: None,
     }
 }
 
@@ -640,7 +701,45 @@ fn content_delta(text: String) -> Delta {
     Delta {
         role: None,
         content: Some(text),
+        tool_calls: None,
     }
+}
+
+/// The single, complete `tool_calls` delta — see [`StreamMsg::ToolCalls`] for the
+/// declared divergence from OpenAI's fragmented streaming shape.
+fn tool_calls_delta(calls: Vec<ToolCallDto>) -> Delta {
+    Delta {
+        role: None,
+        content: None,
+        tool_calls: Some(
+            calls
+                .into_iter()
+                .enumerate()
+                .map(|(index, c)| ToolCallDelta {
+                    index: u32::try_from(index).unwrap_or(u32::MAX),
+                    id: c.id,
+                    kind: "function",
+                    function: c.function,
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Render the loop's client tool calls into their wire form. `arguments` is a
+/// JSON **string** on the OpenAI wire, not an object.
+fn tool_call_dtos(calls: &[ClientToolCall]) -> Vec<ToolCallDto> {
+    calls
+        .iter()
+        .map(|c| ToolCallDto {
+            id: c.id.clone(),
+            kind: "function".to_owned(),
+            function: FunctionCallDto {
+                name: c.name.clone(),
+                arguments: serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".to_owned()),
+            },
+        })
+        .collect()
 }
 
 /// Serialise one streamed chunk to its JSON `data:` payload.
@@ -665,8 +764,27 @@ fn chunk_json(
     serde_json::to_string(&chunk).unwrap_or_default()
 }
 
-/// Assemble the OpenAI response body from an engine [`Completion`].
-fn build_response(model: &str, completion: &crate::engine::Completion) -> ChatCompletionResponse {
+/// Assemble the OpenAI response body from a tool-loop [`ToolLoopOutcome`].
+///
+/// A turn that called the client's tools reports `finish_reason: "tool_calls"`
+/// with `content: null` and the structured calls — the model's raw `<tool_call>`
+/// markup is *not* passed through as the assistant's answer, which is exactly the
+/// silent-wrong-answer shape #489 describes.
+fn build_response(model: &str, outcome: &ToolLoopOutcome) -> ChatCompletionResponse {
+    let completion = &outcome.completion;
+    let (content, tool_calls, finish_reason) = if outcome.client_tool_calls.is_empty() {
+        (
+            Some(completion.content.clone()),
+            None,
+            completion.finish_reason.as_str(),
+        )
+    } else {
+        (
+            None,
+            Some(tool_call_dtos(&outcome.client_tool_calls)),
+            "tool_calls",
+        )
+    };
     ChatCompletionResponse {
         id: format!("chatcmpl-{}", next_id()),
         object: "chat.completion",
@@ -676,9 +794,10 @@ fn build_response(model: &str, completion: &crate::engine::Completion) -> ChatCo
             index: 0,
             message: ChatMessageDto {
                 role: "assistant".to_owned(),
-                content: completion.content.clone(),
+                content,
+                tool_calls,
             },
-            finish_reason: completion.finish_reason.as_str(),
+            finish_reason,
         }],
         usage: Usage {
             prompt_tokens: completion.prompt_tokens,
@@ -708,7 +827,7 @@ fn next_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::app;
+    use super::{app, app_with_tools};
     use crate::engine::{
         ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo,
     };
@@ -1615,5 +1734,336 @@ mod tests {
             msg.contains("cert") || msg.contains("tls"),
             "error should name the certificate: {err}"
         );
+    }
+
+    // ---------------------------------------------------------------- #485 ---
+    // Client-supplied `tools` on the wire. `POST /v1/chat/completions` is
+    // OpenAI's path, so a client's `tools` array is honoured — by returning the
+    // call, never by executing it.
+
+    /// An engine that emits a fixed script of turns and records the messages it
+    /// was handed, so a test can assert both what the model was told and what the
+    /// loop did with what it said.
+    struct ScriptedServeEngine {
+        turns: std::sync::Mutex<Vec<String>>,
+        seen: std::sync::Mutex<Vec<Vec<crate::engine::Message>>>,
+    }
+
+    impl ScriptedServeEngine {
+        fn new(turns: &[&str]) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                turns: std::sync::Mutex::new(turns.iter().map(|s| (*s).to_owned()).collect()),
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn first_system_prompt(&self) -> String {
+            self.seen.lock().unwrap()[0][0].content.clone()
+        }
+    }
+
+    impl Engine for ScriptedServeEngine {
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo {
+                id: "echo".to_owned(),
+            }]
+        }
+        fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            self.seen.lock().unwrap().push(req.messages.clone());
+            let next = self.turns.lock().unwrap().remove(0);
+            on_token(&next);
+            Ok(CompletionStats {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    /// A graph registry advertising `graph_only_tool` that panics if executed —
+    /// so "the client's tools suppressed these" is asserted by construction.
+    struct PanicRegistry;
+
+    impl crate::tools::ToolRegistry for PanicRegistry {
+        fn tools(&self) -> Vec<crate::tools::ToolDef> {
+            vec![crate::tools::ToolDef {
+                name: "graph_only_tool".to_owned(),
+                description: "a graph tool".to_owned(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]
+        }
+        fn call(&self, name: &str, _a: &serde_json::Value) -> Result<String, String> {
+            panic!("executed `{name}` — a suppressed graph tool must never run");
+        }
+    }
+
+    /// The client's `tools` array, OpenAI-shaped.
+    fn weather_tools() -> serde_json::Value {
+        serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "current weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }])
+    }
+
+    fn chat_body(body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    const WEATHER_CALL: &str =
+        "<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Berlin\"}}</tool_call>";
+
+    #[tokio::test]
+    async fn a_client_tool_call_is_returned_with_finish_reason_tool_calls() {
+        let engine = ScriptedServeEngine::new(&[WEATHER_CALL]);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "weather in Berlin?"}],
+                "tools": weather_tools(),
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let choice = &json["choices"][0];
+
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        // The one wire-visible change reaching existing callers: `content` is now
+        // nullable, and a tool-call turn serialises an explicit `null` (OpenAI's
+        // shape) rather than omitting the field.
+        assert!(choice["message"]["content"].is_null(), "{text}");
+        assert!(text.contains("\"content\":null"), "explicit null: {text}");
+
+        let call = &choice["message"]["tool_calls"][0];
+        assert_eq!(call["type"], "function");
+        assert_eq!(call["function"]["name"], "get_weather");
+        assert!(
+            call["id"].as_str().is_some_and(|s| !s.is_empty()),
+            "a correlation id for `tool_call_id`: {text}"
+        );
+        // `arguments` is a JSON **string** on the OpenAI wire, not an object.
+        let arguments = call["function"]["arguments"].as_str().expect("a string");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(arguments).unwrap(),
+            serde_json::json!({"city": "Berlin"})
+        );
+    }
+
+    #[tokio::test]
+    async fn client_tools_suppress_the_graph_tools_over_http() {
+        let engine = ScriptedServeEngine::new(&["I cannot help with that."]);
+        let router = app_with_tools(engine.clone(), std::sync::Arc::new(PanicRegistry));
+        let resp = router
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "weather in Berlin?"}],
+                "tools": weather_tools(),
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let prompt = engine.first_system_prompt();
+        assert!(prompt.contains("get_weather"), "{prompt}");
+        assert!(
+            !prompt.contains("graph_only_tool"),
+            "a client sending its own tools does not also get Roteiro's: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_tools_still_run_when_the_client_sends_no_tools() {
+        // Suppression must not leak into the Ask path, which sends no `tools`.
+        struct GraphOnly;
+        impl crate::tools::ToolRegistry for GraphOnly {
+            fn tools(&self) -> Vec<crate::tools::ToolDef> {
+                vec![crate::tools::ToolDef {
+                    name: "graph_only_tool".to_owned(),
+                    description: "a graph tool".to_owned(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }]
+            }
+            fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+                Ok("the graph said so".to_owned())
+            }
+        }
+        let engine = ScriptedServeEngine::new(&[
+            "<tool_call>{\"name\":\"graph_only_tool\",\"arguments\":{}}</tool_call>",
+            "the graph said so",
+        ]);
+        let router = app_with_tools(engine.clone(), std::sync::Arc::new(GraphOnly));
+        let resp = router
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "why?"}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["choices"][0]["finish_reason"], "stop");
+        assert_eq!(
+            json["choices"][0]["message"]["content"],
+            "the graph said so"
+        );
+        // The tool ran and its result was fed back as a `<tool_response>` user turn.
+        let second_round = &engine.seen.lock().unwrap()[1];
+        assert!(
+            second_round
+                .iter()
+                .any(|m| m.role == "user" && m.content.contains("<tool_response>")),
+            "{second_round:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_role_turn_becomes_a_tool_response_user_turn() {
+        // Counter-intuitive and load-bearing: a `role: "tool"` message would emit
+        // a role token the served models were never trained on, while a
+        // `<tool_response>` user turn is what every Qwen template emits natively.
+        let engine = ScriptedServeEngine::new(&["Berlin is 21 degrees."]);
+        let resp = app(engine.clone())
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [
+                    {"role": "user", "content": "weather in Berlin?"},
+                    {"role": "assistant", "content": null, "tool_calls": [{
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Berlin\"}"},
+                    }]},
+                    {"role": "tool", "tool_call_id": "call_0", "name": "get_weather",
+                     "content": "{\"temp\":21}"},
+                ],
+                "tools": weather_tools(),
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let seen = engine.seen.lock().unwrap();
+        let turns = &seen[0];
+        assert!(
+            turns.iter().all(|m| m.role != "tool"),
+            "no `tool` role reaches the template: {turns:?}"
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|m| m.role == "user"
+                    && m.content == "<tool_response>{\"temp\":21}</tool_response>"),
+            "the result is a `<tool_response>` user turn: {turns:?}"
+        );
+        // And the assistant's own call is replayed in the in-band form, so the
+        // response has an antecedent instead of dangling.
+        assert!(
+            turns.iter().any(|m| m.role == "assistant"
+                && m.content.contains("<tool_call>")
+                && m.content.contains("get_weather")
+                && m.content.contains("Berlin")),
+            "the replayed call is rendered back: {turns:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_emits_one_complete_tool_calls_chunk() {
+        let engine = ScriptedServeEngine::new(&[WEATHER_CALL]);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "weather in Berlin?"}],
+                "tools": weather_tools(),
+                "stream": true,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            text.contains("\"role\":\"assistant\""),
+            "role chunk: {text}"
+        );
+        // Declared divergence: one complete chunk at `index: 0` carrying whole
+        // `arguments`, where OpenAI fragments `arguments` across chunks.
+        assert!(text.contains("\"index\":0"), "per-call index: {text}");
+        assert!(
+            text.contains("\"name\":\"get_weather\""),
+            "the call: {text}"
+        );
+        assert!(
+            text.contains(r#""arguments":"{\"city\":\"Berlin\"}""#),
+            "whole arguments in one chunk: {text}"
+        );
+        assert!(
+            text.contains("\"finish_reason\":\"tool_calls\""),
+            "terminating reason: {text}"
+        );
+        assert!(text.contains("data: [DONE]"), "terminator: {text}");
+    }
+
+    #[tokio::test]
+    async fn tool_choice_and_parallel_tool_calls_are_accepted_but_not_enforced() {
+        // Declared, not half-implemented: both fields are accepted (no 400), and
+        // neither changes behaviour. Forcing a named function is grammar work.
+        let engine = ScriptedServeEngine::new(&["I would rather just answer."]);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "weather in Berlin?"}],
+                "tools": weather_tools(),
+                "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+                "parallel_tool_calls": true,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "the fields are accepted");
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["choices"][0]["finish_reason"], "stop",
+            "`tool_choice` did not force a call — the divergence the README declares"
+        );
+        assert_eq!(
+            json["choices"][0]["message"]["content"],
+            "I would rather just answer."
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_answer_still_carries_a_string_content_and_no_tool_calls() {
+        // The other side of `content: Option<String>`: an ordinary turn is byte-
+        // identical to before, and `tool_calls` is omitted rather than `null`.
+        let engine = ScriptedServeEngine::new(&["a plain answer"]);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi"}],
+            })))
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("\"content\":\"a plain answer\""), "{text}");
+        assert!(!text.contains("tool_calls"), "omitted, not null: {text}");
     }
 }
