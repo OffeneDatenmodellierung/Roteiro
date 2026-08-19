@@ -467,14 +467,19 @@ impl ClearReport {
     /// one is what the store shrank by, and the two are checkable against each
     /// other by anyone holding a `du`.
     ///
-    /// They are not identical, and the gap is one thing. **`SQLite` does not shrink
-    /// a file when rows are deleted** — it frees pages inside it, and a `DELETE`
-    /// under a write transaction can add one. So the index is the only part of the
-    /// store that can move these two figures apart, it moves them by kilobytes
+    /// They are not identical, and the gap is one thing: the index moves under a
+    /// `clear` without being part of what was removed. **`SQLite` does not shrink
+    /// a file when rows are deleted** — it frees pages inside it — and a `DELETE`
+    /// under a write transaction can add a page, while a checkpoint can hand back
+    /// a write-ahead log. So the gap runs in **both** directions, it is kilobytes
     /// against a clear measured in gigabytes, and
     /// `the_accounted_bytes_and_the_measured_bytes_differ_only_by_the_index` is
     /// what keeps that claim true. Anything larger is a defect, which is why both
     /// numbers are reported rather than one.
+    ///
+    /// Measured on the real store: dropping an image that shared every layer with
+    /// a survivor accounted for 0 bytes and measured 32 KiB back, all of it the
+    /// index.
     #[must_use]
     pub fn measured_freed_bytes(&self) -> u64 {
         self.store_bytes_before
@@ -524,7 +529,19 @@ struct BaseRow {
 #[derive(Debug, Default)]
 struct Index {
     images: Vec<IndexRow>,
+    /// Base disks that live under the store root. **Only** these; a row naming a
+    /// path elsewhere is in `escaped` and no derivation here can reach it.
     bases: Vec<BaseRow>,
+    /// Base-disk rows pointing outside the store root.
+    ///
+    /// `base_path` is an absolute path recorded when the base was built, so it is
+    /// data rather than a derivation — and data can name anywhere, including the
+    /// repository store this verb must never reach. Split off at the point it is
+    /// read, so no later code has to remember to check: a relocated store makes
+    /// every row here stale at once, and the guarantee wanted is that nothing
+    /// outside the root is measured, listed **or** deleted, not only the last of
+    /// those.
+    escaped: Vec<PathBuf>,
     boxes: usize,
 }
 
@@ -592,6 +609,7 @@ fn read_index(store: &Path) -> Result<Index, StoreError> {
     }
 
     let mut bases = Vec::new();
+    let mut escaped = Vec::new();
     {
         let mut statement = db
             .prepare("SELECT name, kind, base_path FROM base_disk ORDER BY id")
@@ -607,11 +625,16 @@ fn read_index(store: &Path) -> Result<Index, StoreError> {
             .map_err(|error| fail(error.to_string()))?;
         for row in rows {
             let (name, kind, path) = row.map_err(|error| fail(error.to_string()))?;
-            bases.push(BaseRow {
-                name: name.unwrap_or_default(),
-                kind,
-                path: PathBuf::from(path),
-            });
+            let path = PathBuf::from(path);
+            if path.starts_with(store) {
+                bases.push(BaseRow {
+                    name: name.unwrap_or_default(),
+                    kind,
+                    path,
+                });
+            } else {
+                escaped.push(path);
+            }
         }
     }
 
@@ -624,6 +647,7 @@ fn read_index(store: &Path) -> Result<Index, StoreError> {
     Ok(Index {
         images,
         bases,
+        escaped,
         boxes: usize::try_from(boxes).unwrap_or(usize::MAX),
     })
 }
@@ -747,21 +771,43 @@ fn index_manifests_for(store: &Path, retained: &BTreeSet<String>) -> BTreeSet<Pa
 // Sizes
 // ---------------------------------------------------------------------------
 
-/// Apparent bytes at `path`: the file's length, or the sum of the lengths of
-/// every regular file beneath it.
+/// Bytes **allocated** to one file — what removing it gives back.
 ///
-/// Apparent rather than allocated. `du` and this agree on the store measured for
-/// issue #433 because nothing in it is sparse or hard-linked, and an apparent
-/// figure is the one that predicts what a re-pull will cost — which is what the
-/// number is for.
+/// Not its length. The ext4 disks in this store are sparse, and by a margin
+/// nobody would call rounding: `sha256-0a89fbeb….ext4` in the store measured for
+/// issue #433 is 1.23 GiB long and occupies 1.09 GiB, and the base rootfs beside
+/// it is 256 MiB long and occupies 110 MiB. Reporting the length would tell
+/// somebody a clear had freed 9.1 GiB where `du` says 8.7 GiB, and the number
+/// this verb exists to report would be the one number in it that could not be
+/// checked.
+///
+/// So it is `st_blocks`, which is what `du` counts and what the filesystem
+/// actually returns. Off Unix there is no such field and the length is the best
+/// available answer; nothing in the store is sparse on a filesystem without it.
+fn allocated(metadata: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        metadata.blocks() * 512
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.len()
+    }
+}
+
+/// Bytes at `path`: one file's allocation, or the sum of every regular file
+/// beneath it.
+///
+/// See [`allocated`] for why this is not the apparent size.
 fn size_of(path: &Path) -> u64 {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return 0;
     };
     if !metadata.is_dir() {
-        return metadata.len();
+        return allocated(&metadata);
     }
-    let mut total = 0;
+    let mut total = allocated(&metadata);
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -771,10 +817,9 @@ fn size_of(path: &Path) -> u64 {
             let Ok(metadata) = entry.metadata() else {
                 continue;
             };
+            total += allocated(&metadata);
             if metadata.is_dir() {
                 stack.push(entry.path());
-            } else {
-                total += metadata.len();
             }
         }
     }
@@ -994,6 +1039,11 @@ fn preserved(index: &Index) -> Vec<Preserved> {
                 base.kind
             ),
         })
+        .chain(index.escaped.iter().map(|path| Preserved {
+            path: path.display().to_string(),
+            reason: "the index names this base disk outside the store root, so nothing here                      measures, lists or removes it"
+                .to_owned(),
+        }))
         .collect()
 }
 
@@ -1335,14 +1385,18 @@ fn guard_entries(store: &Path) -> Result<(), StoreError> {
 }
 
 /// Refuse if any base-disk row points outside the store root.
+///
+/// [`read_index`] has already made those rows unreachable, so this cannot be what
+/// prevents a deletion outside the root — it is what makes the situation
+/// *visible* instead of quietly halving the store's inventory. The usual cause is
+/// a store that has been moved, where every row is stale at once and the honest
+/// answer is to say so rather than to clear what is left.
 fn guard_bases(store: &Path, index: &Index) -> Result<(), StoreError> {
-    for base in &index.bases {
-        if !base.path.starts_with(store) {
-            return Err(StoreError::BaseOutsideStore {
-                path: base.path.display().to_string(),
-                root: store.display().to_string(),
-            });
-        }
+    if let Some(path) = index.escaped.first() {
+        return Err(StoreError::BaseOutsideStore {
+            path: path.display().to_string(),
+            root: store.display().to_string(),
+        });
     }
     Ok(())
 }
@@ -1647,14 +1701,10 @@ mod tests {
         );
         let index = super::size_of(&fixture.store().join("db"));
         assert!(
-            report.freed_bytes >= report.measured_freed_bytes(),
-            "the store shrank by more than the objects that were removed"
-        );
-        assert!(
-            report.freed_bytes - report.measured_freed_bytes() <= index,
+            report.freed_bytes.abs_diff(report.measured_freed_bytes()) <= index,
             "the accounted bytes ({}) and the bytes the filesystem gave back ({}) differ by \
-             more than the index ({index}), which is the only thing in the store that can \
-             change size without having been removed",
+             more than the index ({index}) — in either direction, which is the only thing in \
+             the store that can change size without having been removed",
             report.freed_bytes,
             report.measured_freed_bytes()
         );
@@ -1753,6 +1803,57 @@ mod tests {
             "expected the escaping path to be named, got: {error}"
         );
         assert!(outside.exists(), "the clear reached outside the store root");
+
+        // And `status` does not reach it either. The containment is at the point
+        // the row is read, not at the point it is deleted, so a path outside the
+        // root is never measured or listed — only named as something left alone.
+        let report = status(&fixture.root).expect("status");
+        assert!(
+            report
+                .preserved
+                .iter()
+                .any(|entry| entry.path.contains("graph.db")),
+            "the escaping row was not named in the status document"
+        );
+        let image = &report.images[0];
+        assert_eq!(
+            image.bytes.base_disk, 0,
+            "a file outside the store root was measured into an image's size"
+        );
+        assert!(!image.base_disk_built);
+    }
+
+    /// The bytes reported are the bytes `du` reports, because the store is sparse.
+    ///
+    /// The ext4 disks are sparse by a margin nobody would call rounding: in the
+    /// store measured for issue #433, `sha256-0a89fbeb….ext4` is 1.23 GiB long and
+    /// occupies 1.09 GiB, and the base rootfs is 256 MiB long and occupies 110
+    /// MiB. A `clear` that reported lengths would claim 9.1 GiB freed where `du`
+    /// says 8.7 GiB — and the one number this verb exists to produce would be the
+    /// one number in it that could not be checked.
+    #[cfg(unix)]
+    #[test]
+    fn a_sparse_disk_image_is_counted_by_what_it_occupies() {
+        use std::io::{Seek as _, Write as _};
+
+        let fixture = Fixture::new("sparse");
+        let path = fixture.write("images/disk-images/sha256-sparse.ext4", 0);
+        let mut file = std::fs::File::create(&path).expect("create");
+        file.seek(std::io::SeekFrom::Start(64 << 20)).expect("seek");
+        file.write_all(b"end").expect("write");
+        drop(file);
+
+        let apparent = std::fs::metadata(&path).expect("metadata").len();
+        let occupied = super::size_of(&path);
+        assert!(
+            apparent > 64 << 20,
+            "the fixture file is not long enough to be worth measuring"
+        );
+        assert!(
+            occupied < apparent,
+            "a sparse file was counted by its length ({apparent}) rather than by what it \
+             occupies ({occupied}), so a clear would over-report what it freed"
+        );
     }
 
     /// A registered box blocks the clear.

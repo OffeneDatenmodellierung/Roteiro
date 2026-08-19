@@ -726,6 +726,25 @@ enum Command {
         #[command(subcommand)]
         action: SecurityAction,
     },
+    /// The **sandbox image store**: what it is holding, and dropping it (#433).
+    ///
+    /// Separate from `security` because its subject is different. `security`'s
+    /// verbs are about *analyzers* — their findings, their pinned assets, their
+    /// readiness — and this one is about the machine-global cache of OCI images
+    /// and the ext4 disks derived from them, which after ADR-0014 v1.6's builder
+    /// work is no longer one image per analyzer.
+    ///
+    /// Both verbs are safe by the same property, which is also their limit:
+    /// everything in this store is re-obtainable from a pinned digest, so
+    /// clearing costs time and never information — and `clear` may therefore
+    /// never reach anything that is not. It cannot see a findings layer, a memory
+    /// record or `graph.db`, and it refuses rather than guesses when it meets
+    /// something under the store root it does not recognise.
+    #[cfg(feature = "execution")]
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxAction,
+    },
     /// Start the network HTTP server: the OpenAI-compatible `/v1` model endpoint
     /// (+ graph tools + Ask) when built `--features serve` with a model installed,
     /// always alongside the read-only `/v1/graph/*` API and the `/` web UI (ADR-0006,
@@ -1443,6 +1462,66 @@ enum SecurityAction {
     },
 }
 
+/// The two verbs of the sandbox image store (#433, ADR-0014 v1.6).
+///
+/// `status` and `clear`, and deliberately no third: there is no config key that
+/// drops this cache. A setting that evicts is a *standing instruction to throw
+/// work away* which fires when nobody is looking, where ADR-0013 already holds
+/// eviction to be a maintenance act rather than a preference.
+#[cfg(feature = "execution")]
+#[derive(Subcommand)]
+enum SandboxAction {
+    /// Report what the sandbox image store is holding: one row per image, with
+    /// its sizes, and the store's total.
+    ///
+    /// Offered alongside `clear` rather than as a convenience. A destructive verb
+    /// with no way to see what it will destroy is invoked blind, which is
+    /// ADR-0014 v1.6's third rule. Each row's reference is what `clear --image`
+    /// takes, so what to type next is on the screen.
+    Status {
+        /// Emit the status as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drop cached images, and report what that freed.
+    ///
+    /// **What it may touch is bounded by why it is safe.** Everything in this
+    /// store is re-obtainable from a pinned digest, so clearing costs time and
+    /// never information — and the verb may therefore never reach anything that
+    /// is not. It refuses, naming what it found, rather than clearing anything it
+    /// cannot classify.
+    ///
+    /// Shared blobs are handled as a set difference over the whole index, not as
+    /// a walk of the named image: a layer some other cached image still uses
+    /// stays, and every surviving image is re-resolved blob by blob afterwards
+    /// and reported.
+    Clear {
+        /// Drop this image, by the reference `roteiro sandbox status` lists it
+        /// under.
+        #[arg(long, value_name = "REFERENCE")]
+        image: Option<String>,
+        /// Drop the pinned image this analyzer runs in — the same request as
+        /// `--image`, spelled the way the analyzer table spells it.
+        #[arg(long, value_name = "NAME")]
+        analyzer: Option<String>,
+        /// Drop **every** cached image, and the bytes under the store root that
+        /// no image claims.
+        ///
+        /// A separate argument from `--image` and `--analyzer` on purpose: "clear
+        /// this one" and "clear everything" are different requests, and a caller
+        /// asking for one must not be able to receive the other by supplying
+        /// nothing (ADR-0014 v1.6).
+        #[arg(long)]
+        everything: bool,
+        /// Report what would be removed, and remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Exit `1` because a **gate** failed (drift, unresolved link, no path) — the
 /// long-standing contract for `check`/`review`/`path`/`links`, which report the
 /// failure on stdout/stderr and then set a non-zero status without an `Err`.
@@ -1705,6 +1784,8 @@ fn main() -> anyhow::Result<()> {
         ),
         #[cfg(feature = "execution")]
         Command::Security { action } => run_security(action, cfg.effective.lint.image.as_deref()),
+        #[cfg(feature = "execution")]
+        Command::Sandbox { action } => run_sandbox(action),
         #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
         Command::Serve {
             models,
@@ -7887,6 +7968,291 @@ fn run_security(action: SecurityAction, lint_image: Option<&str>) -> anyhow::Res
         ),
         #[cfg(feature = "execution")]
         SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
+    }
+}
+
+/// Dispatch the sandbox store's two verbs.
+#[cfg(feature = "execution")]
+fn run_sandbox(action: SandboxAction) -> anyhow::Result<()> {
+    match action {
+        SandboxAction::Status { json } => run_sandbox_status(json),
+        SandboxAction::Clear {
+            image,
+            analyzer,
+            everything,
+            dry_run,
+            json,
+        } => run_sandbox_clear(image, analyzer.as_deref(), everything, dry_run, json),
+    }
+}
+
+/// The reference the pinned image table holds for `analyzer`.
+///
+/// Gated, because the table is: `SANDBOX_IMAGES` is compiled only under
+/// `exec-boxlite`. The *store* is not gated and neither is clearing it — a
+/// machine that filled this cache with one build must be able to empty it with
+/// another — so the absence of the table is a **named refusal that says what to
+/// type instead**, rather than an argument that silently is not there.
+#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
+fn sandbox_image_for(analyzer: &str) -> anyhow::Result<String> {
+    rto_exec::boxlite::image_for(analyzer).map_or_else(
+        || {
+            anyhow::bail!(
+                "no pinned sandbox image for analyzer `{analyzer}`.\n  \
+                 `roteiro sandbox status` lists what the store is holding, \
+                 and `--image` takes any of those references."
+            )
+        },
+        |image| Ok(image.reference.to_owned()),
+    )
+}
+
+/// The same, in a build with no pinned image table to consult.
+#[cfg(all(feature = "execution", not(feature = "exec-boxlite")))]
+fn sandbox_image_for(analyzer: &str) -> anyhow::Result<String> {
+    anyhow::bail!(
+        "this build cannot map analyzer `{analyzer}` to an image: the pinned image table is \
+         compiled only with `--features exec-boxlite`.\n  \
+         The store itself is readable and clearable without it — run \
+         `roteiro sandbox status` and pass one of the references it lists to `--image`."
+    )
+}
+
+/// Turn the three selectors into the one scope, or refuse naming all three.
+///
+/// The refusal is the point rather than a formality. ADR-0014 v1.6 requires that
+/// "clear this image" and "clear everything" be **different arguments**, so
+/// supplying neither must not fall through to either — least of all to the
+/// destructive one.
+#[cfg(feature = "execution")]
+fn sandbox_scope(
+    image: Option<String>,
+    analyzer: Option<&str>,
+    everything: bool,
+) -> anyhow::Result<rto_exec::Scope> {
+    let asked =
+        usize::from(image.is_some()) + usize::from(analyzer.is_some()) + usize::from(everything);
+    if asked > 1 {
+        anyhow::bail!(
+            "`--image`, `--analyzer` and `--everything` are different requests; pass exactly one."
+        );
+    }
+    if everything {
+        return Ok(rto_exec::Scope::Everything);
+    }
+    if let Some(reference) = image {
+        return Ok(rto_exec::Scope::Image(reference));
+    }
+    if let Some(analyzer) = analyzer {
+        return Ok(rto_exec::Scope::Image(sandbox_image_for(analyzer)?));
+    }
+    anyhow::bail!(
+        "`roteiro sandbox clear` needs to be told what to drop.\n  \
+         `--image REFERENCE` or `--analyzer NAME` drops one; `--everything` drops all of them.\n  \
+         Run `roteiro sandbox status` first — it lists each reference and what it is costing."
+    )
+}
+
+/// Report what the sandbox image store is holding.
+#[cfg(feature = "execution")]
+fn run_sandbox_status(json: bool) -> anyhow::Result<()> {
+    let report = rto_exec::sandbox_status(&rto_exec::asset_root())?;
+    if json {
+        return emit_json(&report);
+    }
+
+    // The scope is printed, not implied. There is one of these per asset root and
+    // every repository on the machine shares it, so a figure read next to a
+    // project name would otherwise be attributed to that project.
+    println!("sandbox image store: {}  (machine-wide)", report.store);
+    if !report.present {
+        println!("\nnothing is cached — the store does not exist yet");
+        return Ok(());
+    }
+    if report.images.is_empty() {
+        println!("\nno images cached");
+    } else {
+        println!("\nimages");
+    }
+    for image in &report.images {
+        println!("  {}", image.reference);
+        println!(
+            "      {}  ({} reclaimable on its own)",
+            human_bytes(image.bytes.total),
+            human_bytes(image.bytes.exclusive)
+        );
+        println!(
+            "      layers {} · extracted {} · disk image {} · base {}",
+            human_bytes(image.bytes.layers),
+            human_bytes(image.bytes.extracted),
+            human_bytes(image.bytes.disk_image),
+            human_bytes(image.bytes.base_disk)
+        );
+        // The object tally is the pulled content — manifest, config, one per
+        // distinct layer. Not the derived trees and disks, which are built on
+        // first run: an image that has only ever been pulled is complete without
+        // them, and counting them would report every fresh pull as damaged.
+        println!(
+            "      {} layer(s), {}/{} object(s) present, cached {}{}",
+            image.layers,
+            image.objects.present,
+            image.objects.expected,
+            image.cached_at,
+            if image.pull_complete {
+                ""
+            } else {
+                "  ** the index calls this pull incomplete — re-run `roteiro security prefetch` **"
+            }
+        );
+    }
+
+    sandbox_status_tail(&report);
+    Ok(())
+}
+
+/// The parts of a status screen that are about the store rather than an image.
+///
+/// Lifted out so [`run_sandbox_status`] is one loop over images: these four
+/// sections each answer a different question — what is not attributable, what
+/// will never be cleared, what is holding the store open, and what to type next.
+#[cfg(feature = "execution")]
+fn sandbox_status_tail(report: &rto_exec::SandboxStatus) {
+    if !report.unattributed.is_empty() {
+        println!("\nunattributed — no cached image claims these bytes");
+        for entry in &report.unattributed {
+            println!("  {}  {}", human_bytes(entry.bytes), entry.path);
+        }
+        println!("  `--everything` removes them; a per-image clear never does.");
+    }
+    if !report.preserved.is_empty() {
+        println!("\nnever cleared — no pinned digest re-obtains these");
+        for entry in &report.preserved {
+            println!("  {}\n      {}", entry.path, entry.reason);
+        }
+    }
+    if report.live_boxes > 0 {
+        println!(
+            "\n{} box(es) are registered in this store; `clear` will refuse until they are gone",
+            report.live_boxes
+        );
+    }
+
+    println!("\ntotal {}", human_bytes(report.total_bytes));
+    // Offered only when there is something to reclaim. A cleared store is a few
+    // kilobytes of empty index, and telling somebody they could reclaim that is
+    // how a useful line becomes one people stop reading.
+    if !report.images.is_empty() || !report.unattributed.is_empty() {
+        println!("  `roteiro sandbox clear --everything` reclaims it; every byte is re-obtainable");
+        println!("  by `roteiro security prefetch`, so it costs a re-pull and never information.");
+    }
+    // The boundary, said out loud. This verb owns the image store and not the
+    // rest of the asset cache, and a reader who has just been told a total wants
+    // to know whether it was the whole of what is on disk.
+    println!("  The pinned assets beside it — the sandbox runtime, analyzer rules — are");
+    println!("  reported by `roteiro security status` and are not in this total.");
+}
+
+/// Drop cached images and report what that freed.
+#[cfg(feature = "execution")]
+fn run_sandbox_clear(
+    image: Option<String>,
+    analyzer: Option<&str>,
+    everything: bool,
+    dry_run: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let scope = sandbox_scope(image, analyzer, everything)?;
+    let root = rto_exec::asset_root();
+    let report = if dry_run {
+        rto_exec::sandbox_plan(&root, &scope)?.0
+    } else {
+        rto_exec::sandbox_clear(&root, &scope)?
+    };
+    if json {
+        return emit_json(&report);
+    }
+
+    println!("sandbox image store: {}  (machine-wide)", report.store);
+    let verb = if report.applied {
+        "cleared"
+    } else {
+        "would clear"
+    };
+    println!("{verb}: {}", report.requested);
+
+    if report.removed.is_empty() && report.removed_unattributed.is_empty() {
+        println!("\nnothing to remove");
+        return Ok(());
+    }
+    println!("\nimages");
+    for removed in &report.removed {
+        println!(
+            "  {}\n      {}, {} object(s)",
+            removed.reference,
+            human_bytes(removed.freed_bytes),
+            removed.objects_removed
+        );
+    }
+    for entry in &report.removed_unattributed {
+        println!(
+            "  unattributed: {}\n      {}",
+            entry.path,
+            human_bytes(entry.bytes)
+        );
+    }
+
+    sandbox_clear_tail(&report);
+    Ok(())
+}
+
+/// The freed-bytes accounting and the survivors' verification.
+///
+/// Both are obligations rather than niceties. ADR-0014 v1.6 requires the verb to
+/// **report what it freed**, so an 8.5 GB re-pull appears in the transcript rather
+/// than turning up later as a mystery. And a `clear` that cannot demonstrate the
+/// surviving images are still complete is one nobody trusts twice (#433) — so the
+/// survivors are re-resolved against the filesystem after the deletion, and the
+/// tally is printed whether or not it is reassuring.
+#[cfg(feature = "execution")]
+fn sandbox_clear_tail(report: &rto_exec::ClearReport) {
+    println!("\nfreed {}", human_bytes(report.freed_bytes));
+    if report.applied {
+        println!(
+            "  store {} → {} (measured {})",
+            human_bytes(report.store_bytes_before),
+            human_bytes(report.store_bytes_after),
+            human_bytes(report.measured_freed_bytes())
+        );
+    }
+
+    if !report.preserved.is_empty() {
+        println!("\nleft alone — no pinned digest re-obtains these");
+        for entry in &report.preserved {
+            println!("  {}\n      {}", entry.path, entry.reason);
+        }
+    }
+
+    if !report.applied {
+        println!("\nnothing was removed — drop `--dry-run` to apply this");
+        return;
+    }
+    if report.retained.is_empty() {
+        println!("\nno images remain");
+        return;
+    }
+    println!("\nsurviving images, re-checked against the filesystem");
+    for image in &report.retained {
+        println!(
+            "  {}\n      {}/{} object(s) present{}",
+            image.reference,
+            image.objects.present,
+            image.objects.expected,
+            if image.complete {
+                ""
+            } else {
+                "  ** INCOMPLETE — this image can no longer run; re-run `roteiro security prefetch` **"
+            }
+        );
     }
 }
 
@@ -16100,5 +16466,135 @@ mod audio_stream_tests {
         let mut bare = explanation("audio_stream", "");
         bare.meta = serde_json::json!({});
         assert!(audio_stream_lines(&bare).is_empty());
+    }
+}
+
+// The `roteiro sandbox` surface: the argument shapes, and the one refusal that
+// carries an ADR obligation. The store behaviour these wrap — the set
+// difference, the byte accounting, the post-clear verification — is tested where
+// it lives, in `rto_exec::sandbox_store`.
+#[cfg(all(test, feature = "execution"))]
+mod sandbox_cli {
+    use super::{Cli, Command, SandboxAction, sandbox_scope};
+    use clap::Parser as _;
+
+    fn action<const N: usize>(args: [&str; N]) -> SandboxAction {
+        let Command::Sandbox { action } = Cli::try_parse_from(args).expect("parse").command else {
+            panic!("expected Sandbox");
+        };
+        action
+    }
+
+    /// `status` and `clear`, and `clear` takes three selectors plus a dry run.
+    #[test]
+    fn the_store_has_exactly_two_verbs() {
+        assert!(matches!(
+            action(["roteiro", "sandbox", "status"]),
+            SandboxAction::Status { json: false }
+        ));
+        let SandboxAction::Clear {
+            image,
+            analyzer,
+            everything,
+            dry_run,
+            json,
+        } = action([
+            "roteiro",
+            "sandbox",
+            "clear",
+            "--image",
+            "registry/a@sha256:abc",
+            "--dry-run",
+            "--json",
+        ])
+        else {
+            panic!("expected Clear");
+        };
+        assert_eq!(image.as_deref(), Some("registry/a@sha256:abc"));
+        assert_eq!(analyzer, None);
+        assert!(!everything);
+        assert!(dry_run);
+        assert!(json);
+    }
+
+    /// Being told nothing must not fall through to clearing everything.
+    ///
+    /// ADR-0014 v1.6's second obligation for this verb: "clear this image" and
+    /// "clear everything" are different requests and must be different arguments,
+    /// so a caller who supplied neither has to be sent back rather than served
+    /// the destructive reading of silence. The refusal names the way forward,
+    /// which for a destructive verb is the *non*-destructive one first.
+    #[test]
+    fn clearing_nothing_in_particular_is_a_refusal_and_never_everything() {
+        let refusal = sandbox_scope(None, None, false)
+            .expect_err("no selector must not resolve to a scope")
+            .to_string();
+        for named in ["--image", "--everything", "roteiro sandbox status"] {
+            assert!(
+                refusal.contains(named),
+                "the refusal does not name `{named}`: {refusal}"
+            );
+        }
+    }
+
+    /// Two selectors is also a refusal, in every pairing.
+    #[test]
+    fn two_selectors_are_a_refusal_whichever_two_they_are() {
+        let pairs = [
+            (Some("registry/a:1".to_owned()), None, true),
+            (None, Some("semgrep"), true),
+            (Some("registry/a:1".to_owned()), Some("semgrep"), false),
+        ];
+        for (image, analyzer, everything) in pairs {
+            assert!(
+                sandbox_scope(image.clone(), analyzer, everything).is_err(),
+                "accepted two selectors at once: {image:?} {analyzer:?} {everything}"
+            );
+        }
+    }
+
+    /// One selector each resolves to the scope it names.
+    #[test]
+    fn one_selector_resolves_to_the_scope_it_names() {
+        assert_eq!(
+            sandbox_scope(None, None, true).expect("everything"),
+            rto_exec::Scope::Everything
+        );
+        assert_eq!(
+            sandbox_scope(Some("registry/a:1".to_owned()), None, false).expect("image"),
+            rto_exec::Scope::Image("registry/a:1".to_owned())
+        );
+    }
+
+    /// `--analyzer` is the same request as `--image`, spelled the other way.
+    #[cfg(feature = "exec-boxlite")]
+    #[test]
+    fn an_analyzer_resolves_to_the_reference_the_index_holds_it_under() {
+        let image = rto_exec::boxlite::image_for("semgrep").expect("a pinned semgrep image");
+        assert_eq!(
+            sandbox_scope(None, Some("semgrep"), false).expect("analyzer"),
+            rto_exec::Scope::Image(image.reference.to_owned())
+        );
+        // A reference the table does not carry is a refusal that says what to run
+        // to find one that it does.
+        let refusal = sandbox_scope(None, Some("cargo-audit"), false)
+            .expect_err("no pinned image")
+            .to_string();
+        assert!(refusal.contains("roteiro sandbox status"), "{refusal}");
+    }
+
+    /// Without the pinned image table, `--analyzer` refuses **by name**.
+    ///
+    /// The store is readable and clearable in this build and the mapping is not,
+    /// so the honest answer is a refusal that says how to spell the same request
+    /// — not an argument that silently is not there, and not a clear that guessed.
+    #[cfg(not(feature = "exec-boxlite"))]
+    #[test]
+    fn without_the_pinned_image_table_the_analyzer_selector_says_so() {
+        let refusal = sandbox_scope(None, Some("semgrep"), false)
+            .expect_err("no image table in this build")
+            .to_string();
+        assert!(refusal.contains("exec-boxlite"), "{refusal}");
+        assert!(refusal.contains("--image"), "{refusal}");
     }
 }
