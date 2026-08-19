@@ -156,7 +156,7 @@ pub use sync::{
     DEFAULT_KEEP_GENERATIONS, ReclaimReport, SyncError, SyncReport, sweep_superseded, sync,
     sync_index, sync_tree, sync_worktree,
 };
-pub use text::{first_h1, heading_text, slugify};
+pub use text::{first_h1, heading_text, markdown_dialect, slugify};
 pub use trust::ProducerTrust;
 pub use workspace::{
     Follow, ResolvedWorkspace, Workspace, WorkspaceError, WorkspaceSet, discover_repos_under,

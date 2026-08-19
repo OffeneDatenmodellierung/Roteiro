@@ -35,15 +35,31 @@ pub fn slugify(s: &str) -> String {
     out.trim_matches('-').to_owned()
 }
 
-/// The Markdown dialect every heading rule in the project reads with.
+/// The Markdown dialect this project reads and renders with — the one answer to
+/// "what does this source mean", for every surface that asks.
 ///
-/// It must stay the set `rto_render` renders with, because the whole point of
-/// reading a heading through the parser is that the *dialect* decides where its
-/// text ends. `ENABLE_HEADING_ATTRIBUTES` is what makes `{#anchor}` an attribute
-/// block rather than four literal characters; the other two are here because a
-/// `~~strikethrough~~` inside a heading has to reduce to the same text on both
-/// surfaces, not because a heading contains a table.
-fn heading_options() -> Options {
+/// # Anyone parsing Markdown in this workspace must use this
+///
+/// Not as a convention: a *different* option set is a different language. With
+/// `ENABLE_HEADING_ATTRIBUTES` off, `{#modes}` is four literal characters of
+/// heading text rather than an attribute block, so a heading's text — and the
+/// slug, node title and `id` derived from it — changes meaning with the flag.
+/// Two parsers with two option sets do not fail; they quietly disagree about
+/// where a heading's text ends, which is the defect #469 was.
+///
+/// That makes this the foundation [`first_h1`] and [`heading_text`] stand on,
+/// and it is why it is `pub`: `rto_render` parses the same documents to render
+/// them (the document body, every heading's `id`, the page `<title>`), and those
+/// answers have to be the same answers. It cannot borrow the rule from
+/// `rto_spec` — it depends on that crate only under `mcp` — so, exactly like
+/// [`slugify`], this crate is the one place the dialect can sit and be the only
+/// copy of itself.
+///
+/// Strikethrough and tables are here for that reason and no other: a
+/// `~~retracted~~` heading has to reduce to the same text on every surface, not
+/// because a heading contains a table.
+#[must_use]
+pub fn markdown_dialect() -> Options {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -72,7 +88,7 @@ fn heading_options() -> Options {
 #[must_use]
 pub fn first_h1(md: &str) -> Option<String> {
     let mut text: Option<String> = None;
-    for event in Parser::new_ext(md, heading_options()) {
+    for event in Parser::new_ext(md, markdown_dialect()) {
         match event {
             Event::Start(Tag::Heading {
                 level: HeadingLevel::H1,
