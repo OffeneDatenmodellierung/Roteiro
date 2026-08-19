@@ -11452,6 +11452,172 @@ impl GraphToolRegistry {
             })
         })
     }
+
+    /// The `sandbox_status` call: the machine-global image store, no project.
+    ///
+    /// Not routed through [`Self::run`], and that is the point rather than an
+    /// omission: there is no project in this question. One sandbox store exists
+    /// per asset root and every hosted project shares it, so resolving a project
+    /// here would attach a selector to an answer it cannot change.
+    ///
+    /// # Errors
+    /// The store errors [`rto_exec::StoreError`] carries, or a serialisation
+    /// failure.
+    #[cfg(feature = "execution")]
+    fn sandbox_status() -> Result<String, String> {
+        let report =
+            rto_exec::sandbox_status(&rto_exec::asset_root()).map_err(|e| e.to_string())?;
+        serde_json::to_string(&report).map_err(|e| e.to_string())
+    }
+
+    /// The `sandbox_clear` call — the one tool on either surface that mutates.
+    ///
+    /// # Errors
+    /// A scope that names neither selector or both, the store errors
+    /// [`rto_exec::StoreError`] carries, or a serialisation failure.
+    #[cfg(feature = "execution")]
+    fn sandbox_clear(args: &serde_json::Value) -> Result<String, String> {
+        let image = args
+            .get("image")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let everything = args
+            .get("everything")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        // Neither argument defaults to the other, and the absence of both is not a
+        // request. ADR-0014 v1.6: "clear this image" and "clear everything" are
+        // different requests, so silence must not resolve to the destructive one.
+        // The MCP surface refuses the same two shapes in the same two ways —
+        // `sandbox_clear_refuses_a_scope_it_was_not_given` on each.
+        let scope = match (image, everything) {
+            (Some(_), true) => {
+                return Err(
+                    "`image` and `everything` are different requests; pass exactly one.".to_owned(),
+                );
+            }
+            (None, true) => rto_exec::Scope::Everything,
+            (Some(reference), false) => rto_exec::Scope::Image(reference),
+            (None, false) => {
+                return Err(
+                    "nothing was named to drop. Pass `image` with a reference from \
+                            `sandbox_status`, or `everything: true`. Supplying neither does \
+                            not mean everything."
+                        .to_owned(),
+                );
+            }
+        };
+        let root = rto_exec::asset_root();
+        let report = if args
+            .get("dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            rto_exec::sandbox_plan(&root, &scope).map(|(report, _doomed)| report)
+        } else {
+            rto_exec::sandbox_clear(&root, &scope)
+        }
+        .map_err(|e| e.to_string())?;
+        serde_json::to_string(&report).map_err(|e| e.to_string())
+    }
+}
+
+/// The served-chat `sandbox_status` tool definition — the mirror of the MCP one
+/// in `rto_render::mcp`, which declares its own schema.
+///
+/// **No `project`.** Every other tool here takes one; this store is machine-global
+/// and has no per-repository half for a selector to choose between, so offering
+/// the argument would imply an answer that changes with it.
+#[cfg(all(feature = "serve", feature = "execution"))]
+fn sandbox_status_tool_def() -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "sandbox_status".to_owned(),
+        description: "Report what the SANDBOX IMAGE STORE on THIS MACHINE is holding: one \
+                      row per cached container image, with its reference, its digests, how \
+                      many of its objects are on disk, and its size broken down into \
+                      layers, extracted trees, the derived ext4 disk image and the guest \
+                      base. \
+                      MACHINE-GLOBAL, and `scope` says so. There is one of these per asset \
+                      root and EVERY repository this server hosts shares it, so never \
+                      attribute a size here to the project you are discussing. It takes no \
+                      `project` argument because it has no per-repository half. \
+                      `bytes.total` is what an image references; `bytes.exclusive` is what \
+                      dropping THAT IMAGE ALONE would free — they differ when another \
+                      cached image shares a layer, so quote `exclusive` when you say what \
+                      clearing one image gives back. `objects` counts the PULLED content \
+                      (manifest, config, one per distinct layer); the extracted trees and \
+                      disk images are built on first run, so a pulled-but-never-run image \
+                      is complete without them. `unattributed` is bytes no image claims; \
+                      `preserved` is state no pinned digest re-obtains, which \
+                      `sandbox_clear` never removes. \
+                      Read this BEFORE `sandbox_clear` and show the user the numbers. \
+                      Every `reference` here is a value `sandbox_clear` takes as `image`. \
+                      Read-only."
+            .to_owned(),
+        parameters: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// The served-chat `sandbox_clear` tool definition — the mirror of the MCP one.
+///
+/// The **only** definition on either surface that describes a tool which changes
+/// something, so its description carries the three things a model has to do with
+/// it: look first, pass exactly one scope, and quote what came back.
+#[cfg(all(feature = "serve", feature = "execution"))]
+fn sandbox_clear_tool_def() -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "sandbox_clear".to_owned(),
+        description: "DELETE cached container images from the SANDBOX IMAGE STORE on THIS \
+                      MACHINE, and report what that freed. This is the ONE tool here that \
+                      changes anything, and what makes it admissible is also its limit: \
+                      everything it drops is re-obtainable from a pinned digest, so it \
+                      costs a re-download and NEVER information. It cannot reach a findings \
+                      layer, a memory record or the graph. \
+                      MACHINE-GLOBAL. One store per asset root, shared by EVERY repository \
+                      this server hosts, so clearing on behalf of one project slows the \
+                      next sandboxed run for all of them. No `project` argument; `scope` in \
+                      the result says `machine`. \
+                      TELL THE USER FIRST. Call `sandbox_status` and show them what is \
+                      cached and what it costs; a re-pull is minutes and gigabytes. \
+                      `image` and `everything` are DIFFERENT REQUESTS and neither has a \
+                      default: pass `image` with a reference from `sandbox_status`, or \
+                      `everything: true`. Supplying neither is an ERROR and does not mean \
+                      everything; supplying both is an error too. `dry_run: true` reports \
+                      what would go and removes nothing — `applied` says which happened. \
+                      REPORT WHAT IT FREED: `freed_bytes`, with `store_bytes_before` and \
+                      `store_bytes_after` measured either side. Quote a figure rather than \
+                      saying it worked. \
+                      `retained` is every surviving image re-checked against the disk AFTER \
+                      the deletion. If any `complete` is false, SAY SO PROMINENTLY — that \
+                      is a damaged store, not a successful clear, and `roteiro security \
+                      prefetch` is the repair. \
+                      It refuses rather than guessing: a registered box, an unrecognised \
+                      entry under the store root, or an index row pointing outside it all \
+                      stop it with nothing removed."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "image": {
+                    "type": "string",
+                    "description": "Drop this image, by the `reference` `sandbox_status` \
+                                    lists it under. Mutually exclusive with `everything`.",
+                },
+                "everything": {
+                    "type": "boolean",
+                    "description": "Drop every cached image, and the bytes under the store \
+                                    root no image claims. Mutually exclusive with `image`; \
+                                    supplying neither is an error.",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Report what would be removed and remove nothing.",
+                },
+            },
+        }),
+    }
 }
 
 /// The served-chat `debt_density` tool definition. Lifted out of
@@ -12001,6 +12167,14 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         {
             tools.push(security_list_tool_def(&with_project));
             tools.push(security_status_tool_def(&with_project));
+            // The sandbox store's pair (#433), on the same gate and for the same
+            // reason. `sandbox_clear` is the one tool on either surface that
+            // changes anything; ADR-0014 v1.6 admits it by a rule rather than as
+            // an exception, and `sandbox_status` is offered beside it because a
+            // destructive verb with no way to see what it will destroy is invoked
+            // blind. Neither takes `with_project`: the store is machine-global.
+            tools.push(sandbox_status_tool_def());
+            tools.push(sandbox_clear_tool_def());
         }
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
@@ -12143,6 +12317,12 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             "security_list" => self.security_list(project, args),
             #[cfg(feature = "execution")]
             "security_status" => self.security_status(project, args),
+            // Neither takes `project`: one sandbox store per asset root, shared by
+            // every hosted project, so there is nothing for a selector to select.
+            #[cfg(feature = "execution")]
+            "sandbox_status" => Self::sandbox_status(),
+            #[cfg(feature = "execution")]
+            "sandbox_clear" => Self::sandbox_clear(args),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -15467,7 +15647,12 @@ mod workspace_scoped_tools {
         // catch under others. This build has `execution` (it is in `default`, and
         // `--all-features` has it too), so they must be on both here.
         #[cfg(feature = "execution")]
-        for name in ["security_list", "security_status"] {
+        for name in [
+            "security_list",
+            "security_status",
+            "sandbox_status",
+            "sandbox_clear",
+        ] {
             assert!(
                 chat.contains(name) && mcp.contains(name),
                 "`{name}` must be on both surfaces: `execution` gates it here and \
@@ -15564,6 +15749,89 @@ mod workspace_scoped_tools {
             )
             .expect_err("unknown analyzer must be an error");
         assert!(err.contains("unknown analyzer `semgrepp`"), "{err}");
+    }
+
+    /// The served-chat half of the sandbox pair: offered together, no `project`,
+    /// and the destructive one refuses a scope it was not given.
+    ///
+    /// The MCP surface has the same three assertions
+    /// (`the_sandbox_pair_is_offered_together_and_takes_no_project`,
+    /// `sandbox_clear_refuses_a_scope_it_was_not_given`). They are separate
+    /// registries with separate schemas, so a guard on one proves nothing about
+    /// the other — which is the lesson of `[debt] ignore` across three surfaces
+    /// (#321) and `limit == 0` across five (#393).
+    #[cfg(feature = "execution")]
+    #[test]
+    fn the_served_sandbox_pair_takes_no_project_and_refuses_an_ungiven_scope() {
+        use rto_serve::ToolRegistry as _;
+
+        let registry = called_registry();
+        let tools = registry.tools();
+        for name in ["sandbox_status", "sandbox_clear"] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("`{name}` offered"));
+            assert!(
+                tool.parameters["properties"].get("project").is_none(),
+                "`{name}` must not offer a `project` selector: the sandbox store is \
+                 machine-global and the argument would imply an answer that changes with \
+                 it. Schema: {}",
+                tool.parameters
+            );
+        }
+
+        // Neither selector is not a request, and must not resolve to the
+        // destructive one. Both reach the refusal before the store is opened, so
+        // this touches no filesystem.
+        let refusal = registry
+            .call("sandbox_clear", &serde_json::json!({}))
+            .expect_err("silence must not be a scope");
+        assert!(
+            refusal.contains("does not") && refusal.contains("everything"),
+            "the refusal must say that supplying neither is not a request to clear \
+             everything: {refusal}"
+        );
+        assert!(
+            registry
+                .call(
+                    "sandbox_clear",
+                    &serde_json::json!({ "image": "registry/a:1", "everything": true })
+                )
+                .is_err(),
+            "`image` and `everything` are different requests and must not combine"
+        );
+    }
+
+    /// The served-chat `sandbox_clear` description carries what a model has to do
+    /// with the only tool on either surface that changes anything.
+    ///
+    /// The chat half of `the_mutating_tool_states_its_obligations_where_a_model_reads_them`.
+    /// A served model sees only this string.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn the_served_mutating_tool_states_its_obligations() {
+        use rto_serve::ToolRegistry as _;
+
+        let tools = called_registry().tools();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "sandbox_clear")
+            .expect("`sandbox_clear` offered");
+        for obligation in [
+            "sandbox_status",
+            "freed_bytes",
+            "DIFFERENT REQUESTS",
+            "MACHINE-GLOBAL",
+            "re-obtainable",
+            "retained",
+        ] {
+            assert!(
+                tool.description.contains(obligation),
+                "`sandbox_clear`'s description must carry `{obligation}`: {}",
+                tool.description
+            );
+        }
     }
 
     /// The served-chat `security_status` tool labels its two scopes, and names the

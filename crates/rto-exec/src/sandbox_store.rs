@@ -1039,10 +1039,13 @@ fn preserved(index: &Index) -> Vec<Preserved> {
                 base.kind
             ),
         })
-        .chain(index.escaped.iter().map(|path| Preserved {
-            path: path.display().to_string(),
-            reason: "the index names this base disk outside the store root, so nothing here                      measures, lists or removes it"
-                .to_owned(),
+        .chain(index.escaped.iter().map(|path| {
+            Preserved {
+                path: path.display().to_string(),
+                reason: "the index names this base disk outside the store root, so nothing \
+                     here measures, lists or removes it"
+                    .to_owned(),
+            }
         }))
         .collect()
 }
