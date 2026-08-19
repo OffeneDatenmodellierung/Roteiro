@@ -242,6 +242,35 @@ pub enum LintError {
         /// Why not.
         source: std::io::Error,
     },
+    /// A candidate scratch root is a relative path, and a relative path does
+    /// not name one directory here.
+    ///
+    /// Two processes would resolve it, against two different working
+    /// directories: this one creates the directory, and **cargo** — running with
+    /// its working directory set to the worktree — resolves `CARGO_TARGET_DIR`
+    /// to decide where to write. So a relative root means the directory is
+    /// created in one place and the build lands in another, and the other one is
+    /// inside the tree under review.
+    ///
+    /// Refused rather than resolved because there is no resolution that is
+    /// obviously right. Picking this process's working directory would silently
+    /// disagree with cargo; picking cargo's would put the scratch inside the
+    /// worktree by construction. When a value has two defensible readings and
+    /// one of them is the defect, the answer is to say so, not to choose.
+    #[error(
+        "{variable} is set to a relative path ({path}), and `roteiro lint` needs an absolute \
+         one. A relative build directory is resolved by cargo against the tree being linted, so \
+         it would put the build inside it. Set {variable} to an absolute path."
+    )]
+    ScratchRootNotAbsolute {
+        /// The variable that named it, so the reader knows what to change.
+        ///
+        /// Not called `source`: `thiserror` reads a field of that name as the
+        /// underlying error, and this one is a variable name.
+        variable: &'static str,
+        /// The relative path it was set to.
+        path: String,
+    },
     /// Every candidate scratch root turned out to be inside the tree being
     /// linted, so there is nowhere to build that does not defeat the point.
     ///
@@ -526,7 +555,8 @@ pub fn run(
 /// works on a directory that was never a repository at all.
 ///
 /// # Errors
-/// Returns [`LintError::ScratchUnavailable`] if the directory cannot be created.
+/// Returns [`LintError::ScratchUnavailable`] if the directory cannot be created,
+/// or whatever [`scratch_path`] refused with.
 fn scratch_dir(root: &Path) -> Result<PathBuf, LintError> {
     let dir = scratch_path(
         &scratch_roots_from(
@@ -554,26 +584,57 @@ fn scratch_dir(root: &Path) -> Result<PathBuf, LintError> {
 /// this function handed every repository in the world the same directory.
 ///
 /// # Errors
-/// Returns [`LintError::ScratchWouldBeInsideTheTree`] if every candidate in
-/// `roots` lies within `root`, and [`LintError::ScratchUnavailable`] if no id
+/// Returns [`LintError::ScratchRootNotAbsolute`] if a candidate it reaches is a
+/// relative path, [`LintError::ScratchWouldBeInsideTheTree`] if every candidate
+/// in `roots` lies within `root`, and [`LintError::ScratchUnavailable`] if no id
 /// can be derived for `root`.
-fn scratch_path(roots: &[PathBuf], root: &Path) -> Result<PathBuf, LintError> {
+fn scratch_path(roots: &[Candidate], root: &Path) -> Result<PathBuf, LintError> {
     let id = worktree_id(root).map_err(|source| LintError::ScratchUnavailable {
         path: root.display().to_string(),
         source: std::io::Error::other(source.to_string()),
     })?;
-    let chosen = roots
-        .iter()
-        .find(|candidate| !is_inside(candidate, root))
-        .ok_or_else(|| LintError::ScratchWouldBeInsideTheTree {
-            root: root.display().to_string(),
-            candidates: roots
-                .iter()
-                .map(|c| c.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-        })?;
-    Ok(chosen.join(id.as_str()))
+    for candidate in roots {
+        // **Before** the containment check, and the order is the whole of it.
+        // `is_inside` has to make its argument absolute to compare it with
+        // anything, and the only working directory it can use is *this*
+        // process's — while the path is destined for a cargo whose working
+        // directory is the worktree. Handed a relative candidate the check
+        // therefore answers a question about a directory that is not the one the
+        // build would use, and answers it confidently. Refusing here means it is
+        // never asked: every path reaching `is_inside` is already absolute, so
+        // its answer is about the same directory cargo would write to.
+        if !candidate.path.is_absolute() {
+            return Err(LintError::ScratchRootNotAbsolute {
+                variable: candidate.variable,
+                path: candidate.path.display().to_string(),
+            });
+        }
+        if !is_inside(&candidate.path, root) {
+            return Ok(candidate.path.join(id.as_str()));
+        }
+    }
+    Err(LintError::ScratchWouldBeInsideTheTree {
+        root: root.display().to_string(),
+        candidates: roots
+            .iter()
+            .map(|c| format!("{} ({})", c.path.display(), c.variable))
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
+}
+
+/// A candidate scratch root, and the input that produced it.
+///
+/// The variable travels with the path because both refusals are only useful
+/// if they name the variable the reader has to change — "every candidate is
+/// inside the tree" is a puzzle, and "`ROTEIRO_HOME` is inside the tree" is an
+/// instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    /// The environment variable that named it.
+    variable: &'static str,
+    /// Where it points, exactly as that variable spelled it.
+    path: PathBuf,
 }
 
 /// The scratch roots to try, best first, without touching the environment — so
@@ -595,20 +656,37 @@ fn scratch_path(roots: &[PathBuf], root: &Path) -> Result<PathBuf, LintError> {
 /// [`crate::asset_paths::asset_root`] ends and would be wrong here: cargo
 /// resolves a relative `CARGO_TARGET_DIR` against the *child's* working
 /// directory, and the child's working directory is the worktree.
+///
+/// Nothing here makes a candidate absolute, and that is deliberate — every
+/// input is a path a user chose, and silently rewriting one is how a variable
+/// comes to mean something other than what it says. [`scratch_path`] refuses a
+/// relative candidate instead, which is the same hazard handled where it can be
+/// reported rather than where it can only be papered over.
 fn scratch_roots_from(
     roteiro_home: Option<PathBuf>,
     home: Option<PathBuf>,
     temp: PathBuf,
-) -> Vec<PathBuf> {
+) -> Vec<Candidate> {
     roteiro_home
+        .map(|dir| ("ROTEIRO_HOME", dir))
         .into_iter()
-        .chain(home.map(|dir| dir.join(".roteiro")))
-        .chain(std::iter::once(temp))
-        .map(|dir| dir.join("lint").join("target"))
+        .chain(home.map(|dir| ("HOME", dir.join(".roteiro"))))
+        .chain(std::iter::once(("TMPDIR", temp)))
+        .map(|(variable, dir)| Candidate {
+            variable,
+            path: dir.join("lint").join("target"),
+        })
         .collect()
 }
 
 /// Whether `candidate` lies within `root`.
+///
+/// **`candidate` must be absolute**, and [`scratch_path`] refuses before calling
+/// this rather than leaving it to be remembered. The reason is that this
+/// function cannot honour a relative one even in principle: making it absolute
+/// takes a working directory, the only one available here belongs to *this*
+/// process, and the path is destined for a cargo whose working directory is the
+/// worktree. It would compare the wrong directory and say so with confidence.
 ///
 /// Both sides go through [`resolved`] first. Comparing the spellings as given
 /// is not enough on any machine where a symlink stands between the two — on
@@ -1085,8 +1163,15 @@ mod tests {
     /// directory, which is the worktree.
     #[test]
     fn the_scratch_root_never_falls_back_into_the_working_directory() {
+        let paths = |roots: Vec<super::Candidate>| -> Vec<PathBuf> {
+            roots.into_iter().map(|c| c.path).collect()
+        };
         assert_eq!(
-            scratch_roots_from(Some("/state".into()), Some("/home/u".into()), "/tmp".into()),
+            paths(scratch_roots_from(
+                Some("/state".into()),
+                Some("/home/u".into()),
+                "/tmp".into()
+            )),
             vec![
                 PathBuf::from("/state/lint/target"),
                 PathBuf::from("/home/u/.roteiro/lint/target"),
@@ -1095,7 +1180,11 @@ mod tests {
             "ROTEIRO_HOME first, as it is for the asset cache, then the home dir"
         );
         assert_eq!(
-            scratch_roots_from(None, Some("/home/u".into()), "/tmp".into()),
+            paths(scratch_roots_from(
+                None,
+                Some("/home/u".into()),
+                "/tmp".into()
+            )),
             vec![
                 PathBuf::from("/home/u/.roteiro/lint/target"),
                 PathBuf::from("/tmp/lint/target"),
@@ -1107,9 +1196,9 @@ mod tests {
         // the original defect rebuilt inside its own fix.
         for candidate in scratch_roots_from(None, None, std::env::temp_dir()) {
             assert!(
-                candidate.is_absolute(),
+                candidate.path.is_absolute(),
                 "{} is relative, so cargo would resolve it against the worktree",
-                candidate.display()
+                candidate.path.display()
             );
         }
     }
@@ -1153,6 +1242,118 @@ mod tests {
             "{err:?}"
         );
         assert!(err.to_string().contains("ROTEIRO_HOME"), "{err}");
+    }
+
+    /// The defect this PR exists to fix, arriving through the fix's own
+    /// arithmetic — reported on #443.
+    ///
+    /// `scratch_path` returned its candidate unchanged, so a relative
+    /// `ROTEIRO_HOME` produced a relative `CARGO_TARGET_DIR`. Cargo resolves
+    /// that against the **worktree**, so the build lands in the tree under
+    /// review: the exact hazard named as the reason for overriding a caller's
+    /// value rather than honouring it, then not guarded against on the path this
+    /// module computes itself.
+    ///
+    /// Two things are pinned here, and the second is the one that was subtle.
+    #[test]
+    fn a_relative_scratch_root_is_refused_rather_than_resolved() {
+        let root = Path::new("/repos/alpha");
+        for (source, roots) in [
+            (
+                "ROTEIRO_HOME",
+                scratch_roots_from(Some("relstate".into()), None, "/tmp".into()),
+            ),
+            (
+                "HOME",
+                scratch_roots_from(None, Some("relhome".into()), "/tmp".into()),
+            ),
+            ("TMPDIR", scratch_roots_from(None, None, "reltmp".into())),
+        ] {
+            let err = scratch_path(&roots, root).expect_err("a relative root must refuse");
+            assert!(
+                matches!(err, LintError::ScratchRootNotAbsolute { .. }),
+                "{source}: {err:?}"
+            );
+            // The message has to name the variable, or the reader is told a
+            // path is wrong and not which knob produced it.
+            assert!(err.to_string().contains(source), "{err}");
+        }
+
+        // And the ordering: the refusal comes **before** the containment check,
+        // which cannot answer for a relative path at all. `is_inside` resolves
+        // against this process's working directory while cargo resolves against
+        // the worktree, so on a relative candidate it compares a directory the
+        // build would never use — and, run from outside the tree, says "not
+        // inside" about a path that lands squarely within it.
+        let outside_cwd_verdict = is_inside(Path::new("relstate/lint/target"), root);
+        assert!(
+            !outside_cwd_verdict,
+            "this assertion documents the hazard: from a working directory \
+             outside {root:?}, the containment check passes a relative candidate \
+             that cargo would resolve into the tree. It is unreachable now only \
+             because `scratch_path` refuses first."
+        );
+    }
+
+    /// `scratch_path` never *returns* a relative path — it either produces an
+    /// absolute one or refuses.
+    ///
+    /// The invariant is stated over the return value rather than over the
+    /// inputs, because that is what the caller hands to a process with a
+    /// different working directory. Relative inputs are included on purpose: for
+    /// those the acceptable outcomes are an error or an absolute path, and
+    /// silently returning what it was given is neither.
+    #[test]
+    fn an_accepted_scratch_path_is_always_absolute() {
+        let root = Path::new("/repos/alpha");
+        for roots in [
+            scratch_roots_from(Some("/state".into()), None, "/tmp".into()),
+            scratch_roots_from(None, Some("/home/u".into()), "/tmp".into()),
+            scratch_roots_from(None, None, "/tmp".into()),
+            // The first candidate is inside the tree, so the chosen one is a
+            // later entry — the property has to hold for those too.
+            scratch_roots_from(Some("/repos/alpha/.state".into()), None, "/tmp".into()),
+            // And the relative ones, where returning the input is the defect.
+            scratch_roots_from(Some("relstate".into()), None, "/tmp".into()),
+            scratch_roots_from(None, Some("relhome".into()), "/tmp".into()),
+            scratch_roots_from(None, None, "reltmp".into()),
+        ] {
+            if let Ok(path) = scratch_path(&roots, root) {
+                assert!(
+                    path.is_absolute(),
+                    "{} is relative — cargo would resolve it against the worktree",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// The **order** of the two checks, which is the part that is easy to get
+    /// wrong and silent when it is.
+    ///
+    /// Containment is decided by making the candidate absolute against *this*
+    /// process's working directory. So when the tree under review happens to
+    /// contain that working directory, a relative candidate looks contained,
+    /// gets skipped as though it were the caller's own doing, and the next
+    /// candidate is used — an explicitly set `ROTEIRO_HOME` silently ignored,
+    /// with no error and no mention. Checking absoluteness first turns that into
+    /// the refusal it should be.
+    ///
+    /// The fixture uses the current directory as the tree precisely so that the
+    /// relative candidate falls inside it, which is the only arrangement in
+    /// which the two orderings disagree.
+    #[test]
+    fn absoluteness_is_checked_before_containment_not_after() {
+        let cwd = std::env::current_dir().expect("a working directory");
+        let roots = scratch_roots_from(Some("relstate".into()), None, std::env::temp_dir());
+        let err = scratch_path(&roots, &cwd).expect_err(
+            "a relative ROTEIRO_HOME must refuse, not be quietly skipped as \
+             'inside the tree' and replaced by the next candidate",
+        );
+        assert!(
+            matches!(err, LintError::ScratchRootNotAbsolute { .. }),
+            "{err:?}"
+        );
     }
 
     /// The same question asked of two spellings of one place.
@@ -1199,7 +1400,11 @@ mod tests {
     #[test]
     fn a_refused_lockfile_write_is_recognised_in_either_wording() {
         for stderr in [
+            // All three observed from cargo 1.97: a missing lockfile, a stale
+            // one, and the wording it uses when the manifest moved under it.
             "error: cannot create the lock file /r/Cargo.lock because --locked was passed to \
+             prevent this",
+            "error: cannot update the lock file /r/Cargo.lock because --locked was passed to \
              prevent this",
             "error: the lock file /r/Cargo.lock needs to be updated but --locked was passed to \
              prevent this",

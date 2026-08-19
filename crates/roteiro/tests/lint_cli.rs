@@ -156,15 +156,44 @@ impl Fixture {
         command.output().expect("run roteiro")
     }
 
-    /// Every path in the working tree, sorted — the evidence for "nothing was
-    /// written here".
+    /// Every path in the working tree with a digest of its contents, sorted —
+    /// the evidence for "nothing was written here".
     ///
     /// The whole tree rather than `target/` alone: a build writes more than one
-    /// thing (`Cargo.lock` is the other one this command had to stop), and a
-    /// test that named only the directory it knew about would keep passing while
-    /// the next write went somewhere else. `.git` is skipped because git's own
-    /// bookkeeping is not what is under test.
+    /// thing, and a test that named only the directory it knew about would keep
+    /// passing while the next write went somewhere else. `.git` is skipped
+    /// because git's own bookkeeping is not what is under test.
+    ///
+    /// **And contents rather than names alone.** An earlier version of this
+    /// recorded paths only, which made it blind to an in-place modification of a
+    /// file that already existed — and `Cargo.lock` is exactly that: cargo
+    /// rewrites it where it sits, so the listing is identical before and after.
+    /// Since stopping that rewrite is half of what this PR does (`--locked` is
+    /// the other half of the guarantee `CARGO_TARGET_DIR` gives), a snapshot
+    /// that could not see it was a test weaker than its own doc comment — which
+    /// is the shape of defect this suite exists to catch, not a nit. Reported on
+    /// #443.
+    ///
+    /// The digest is `DefaultHasher`, not a cryptographic one: it is compared
+    /// against another snapshot taken by the same process moments earlier, so
+    /// nothing here depends on the value being stable across runs or resistant
+    /// to anyone. It keeps the failure output to one short line per entry.
     fn tree_snapshot(&self) -> Vec<String> {
+        fn digest(path: &Path) -> String {
+            use std::hash::{Hash, Hasher};
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    bytes.hash(&mut hasher);
+                    format!("{:016x}", hasher.finish())
+                }
+                // A path that cannot be read still has to be *some* value, and
+                // one that differs from every readable file — an unreadable file
+                // silently comparing equal to a readable one is the failure this
+                // whole function is guarding against.
+                Err(err) => format!("unreadable: {}", err.kind()),
+            }
+        }
         fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
@@ -174,14 +203,16 @@ impl Fixture {
                 if path.file_name().is_some_and(|n| n == ".git") {
                     continue;
                 }
-                out.push(
-                    path.strip_prefix(base)
-                        .unwrap_or(&path)
-                        .display()
-                        .to_string(),
-                );
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
                 if path.is_dir() {
+                    out.push(format!("{rel}/"));
                     walk(&path, base, out);
+                } else {
+                    out.push(format!("{rel}  {}", digest(&path)));
                 }
             }
         }
@@ -268,9 +299,24 @@ fn a_lint_run_writes_nothing_into_the_tree_it_is_linting() {
     std::fs::create_dir_all(&state).expect("mkdir");
 
     let before = fixture.tree_snapshot();
+    let names = |snapshot: &[String]| -> Vec<String> {
+        snapshot
+            .iter()
+            .map(|e| e.split("  ").next().unwrap_or(e).to_owned())
+            .collect()
+    };
     assert!(
-        before.contains(&"Cargo.lock".to_owned()) && before.contains(&"src".to_owned()),
+        names(&before).contains(&"Cargo.lock".to_owned())
+            && names(&before).contains(&"src/".to_owned()),
         "the snapshot must actually see the tree: {before:?}"
+    );
+    // The snapshot has to carry contents, or it cannot see the `Cargo.lock`
+    // rewrite that `--locked` exists to stop — see `tree_snapshot`.
+    assert!(
+        before.iter().any(|e| e.starts_with("Cargo.lock  ")
+            && e.split("  ").nth(1).is_some_and(|d| d.len() == 16)),
+        "the snapshot records names without contents, so an in-place edit would \
+         leave it identical: {before:?}"
     );
 
     let lint = fixture.roteiro(
@@ -335,23 +381,29 @@ fn a_lint_run_writes_nothing_into_the_tree_it_is_linting() {
     std::fs::remove_dir_all(&state).ok();
 }
 
-/// The consequence of `--locked`, stated where a user meets it: a tree whose
-/// lockfile does not match its manifest is **refused**, not silently fixed.
+/// The half of the guarantee `CARGO_TARGET_DIR` does not cover: cargo rewrites
+/// `Cargo.lock` **in the tree**, and `--locked` is what stops it.
 ///
-/// Generating the lockfile would be a write into the tree under review, so the
-/// remedy stays with the person. The error has to say that, because the raw
-/// shape of this failure — cargo exiting 101 having printed no diagnostics — is
-/// indistinguishable from a build that fell over, and reporting it as a
-/// malformed report would send the reader looking in the wrong place.
+/// The stale state is produced by bumping the package's own version, so the
+/// lockfile disagrees with the manifest over a purely local fact. That needs no
+/// registry, no network and no cache — a fixture that added a dependency would
+/// be asserting something about this machine's `CARGO_HOME` as much as about
+/// roteiro.
+///
+/// **The tree assertion comes first, deliberately.** It is the one that has to
+/// fail if `--locked` is reverted, and putting the exit-status assertions ahead
+/// of it would let a weaker snapshot hide behind them: the test would go red for
+/// the status, and nobody would learn whether the snapshot could see the write.
+/// It also stands on its own — a refusal that rewrote the lockfile on its way to
+/// refusing would be worth nothing.
 #[test]
-fn a_tree_whose_lockfile_would_have_to_be_written_is_refused_and_told_why() {
+fn a_stale_lockfile_is_refused_and_the_tree_is_left_alone() {
     let fixture = Fixture::new("stale-lockfile");
-    // A dependency the committed lockfile knows nothing about, so cargo must
-    // update `Cargo.lock` to resolve the manifest at all.
+    // Same manifest, one version bump: `Cargo.lock` still records 0.0.0.
     std::fs::write(
         fixture.repo.join("Cargo.toml"),
-        "[package]\nname = \"lintfix\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
-         \n[features]\nextra = []\n\n[dependencies]\nserde = \"1\"\n",
+        "[package]\nname = \"lintfix\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
+         \n[features]\nextra = []\n",
     )
     .expect("write");
 
@@ -361,6 +413,16 @@ fn a_tree_whose_lockfile_would_have_to_be_written_is_refused_and_told_why() {
     if linter_is_absent(&stderr) {
         return;
     }
+
+    // First: nothing in the tree changed. Without `--locked` cargo rewrites
+    // `Cargo.lock` in place — same path, different bytes — which only a
+    // snapshot carrying contents can see.
+    assert_eq!(
+        before,
+        fixture.tree_snapshot(),
+        "`roteiro lint` wrote into the tree it was reporting on"
+    );
+
     assert!(
         !lint.status.success(),
         "a stale lockfile must refuse: {lint:?}"
@@ -368,13 +430,6 @@ fn a_tree_whose_lockfile_would_have_to_be_written_is_refused_and_told_why() {
     assert!(
         stderr.contains("--locked") && stderr.contains("generate-lockfile"),
         "the refusal must name the flag and the remedy: {stderr}"
-    );
-    // The refusal is worth nothing if the lockfile was rewritten on the way to
-    // it — which is precisely what the flag exists to prevent.
-    assert_eq!(
-        before,
-        fixture.tree_snapshot(),
-        "the tree was modified by a run that then refused"
     );
 }
 
