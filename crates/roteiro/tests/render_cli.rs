@@ -445,7 +445,7 @@ fn without_an_origin_remote_a_source_link_is_left_as_authored() {
 }
 
 #[test]
-fn the_landing_pages_bar_is_rendered_over_whatever_the_file_carried() {
+fn the_bar_on_the_landing_page_is_rendered_over_whatever_the_file_carried() {
     // Issue #508: `website/public/index.html` is copied verbatim, so its nav was
     // a hand-maintained copy of the list `site_nav` derives — and a page added to
     // one list and not the other is published, reachable, and linked from every
