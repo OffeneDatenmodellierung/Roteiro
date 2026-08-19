@@ -1894,6 +1894,21 @@ fn print_config_sections(loaded: &config::Loaded) {
         e.serve.tools,
         source(p.serve.tools.is_some(), u.serve.tools.is_some())
     );
+    // Reported because this is the key an operator comes to this command to
+    // check: "why did that request get the window it got?" (issue #486). Unset
+    // is not a number but a rule — each model's own trained window — so it is
+    // spelled out rather than printed as `None`, which would read as "no window".
+    println!(
+        "  max_context_tokens = {}  ({})",
+        e.serve.max_context_tokens.map_or_else(
+            || "each model's trained window".to_owned(),
+            |n| n.to_string()
+        ),
+        source(
+            p.serve.max_context_tokens.is_some(),
+            u.serve.max_context_tokens.is_some()
+        )
+    );
     print_remote_section(loaded);
     print_lint_section(loaded);
     print_debt_section(loaded);
@@ -10226,8 +10241,15 @@ fn serve_models_endpoint(
         .memory_budget_mb
         .unwrap_or(0)
         .saturating_mul(1024 * 1024);
-    let engine = rto_serve::llama::LlamaEngine::new_with_budget(served, 0, budget_bytes)
-        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    // The ceiling a request's context may grow to, not the window every request
+    // gets (issue #486). This argument was the literal `0` — which fell through
+    // to a hardcoded 4,096 that no configuration key could reach, on every model
+    // from one trained at 262,144 tokens to one trained at 512. Unset ⇒ 0 ⇒ each
+    // model's own trained window; a value bounds every served model at once.
+    let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
+    let engine =
+        rto_serve::llama::LlamaEngine::new_with_budget(served, max_context_tokens, budget_bytes)
+            .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
     let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
     // With the tier granted for this process, the hosted model joins the served
     // set as one more id — `rto-serve` is not modified, and the socket stays in
