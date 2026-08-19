@@ -511,7 +511,7 @@ mod tests {
     /// record standing in, the *pinned* configuration would be the one with no
     /// staleness evidence, which is exactly backwards.
     #[test]
-    fn falls_back_to_the_callers_pinned_database_when_the_report_names_none() {
+    fn falls_back_to_the_database_pinned_by_the_caller_when_the_report_names_none() {
         let native = r#"{"database":{"advisory-count":1216,"last-commit":null,
             "last-updated":null},"vulnerabilities":{"list":[]},"warnings":{}}"#;
         let mut ctx = ctx(&SOURCE_WITH_LOCK);
@@ -532,7 +532,7 @@ mod tests {
     /// It is a fallback, not an override: when the tool does report a database,
     /// the tool's own account is the evidence.
     #[test]
-    fn the_reports_own_database_wins_over_the_callers() {
+    fn the_database_in_the_report_wins_over_the_one_from_the_caller() {
         let mut ctx = ctx(&SOURCE_WITH_LOCK);
         ctx.advisory_db = Some(rto_graph::AdvisoryDb {
             digest: "from-the-cache".to_owned(),

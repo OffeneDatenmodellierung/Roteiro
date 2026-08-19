@@ -1483,7 +1483,7 @@ mod tests {
     /// 262,144-token context on `qwen3.8-27b` costs 16,466 MiB; paying that to
     /// answer a fifty-token question is what this prevents.
     #[test]
-    fn a_small_request_gets_the_floor_not_the_models_maximum() {
+    fn a_small_request_gets_the_floor_not_the_trained_maximum() {
         assert_eq!(
             window_for_request(50, 512, 0, QWEN_TRAINED),
             MIN_N_CTX,

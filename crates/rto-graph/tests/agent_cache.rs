@@ -276,7 +276,7 @@ fn the_most_recently_used_entry_survives_any_budget() {
 /// pin lasts one generation: the sweep advances the counter on its way out, so the
 /// next sweep can take it.
 #[test]
-fn this_generations_own_work_survives_one_sweep_and_not_two() {
+fn work_from_this_generation_survives_one_sweep_and_not_two() {
     let mut store = Store::open_in_memory().expect("store");
     seed_graph(&mut store);
     put(&store, "mine:1", Some("sym:rust:src/a.rs#alpha"), 1_000);
