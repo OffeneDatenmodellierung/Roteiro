@@ -1485,7 +1485,7 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
     /// have. The reviewer is also scored against a 190-path corpus and pointed at
     /// other repositories, where `src/**/mod.rs` is ordinary.
     #[test]
-    fn a_mod_rs_is_gated_by_its_directorys_declaration() {
+    fn a_mod_rs_is_gated_by_the_declaration_of_its_directory() {
         let parent = "#[cfg(feature = \"serve\")]\npub mod thing;\n";
         let site = claim_site(
             SHA,

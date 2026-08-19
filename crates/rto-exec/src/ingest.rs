@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_carries_the_callers_source_identity_over_the_reports() {
+    fn a_run_carries_the_source_identity_of_the_caller_not_the_report() {
         let mut req = request();
         req.source.commit = Some("c0ffee".to_owned());
         let mut rep = report();
