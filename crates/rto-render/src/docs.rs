@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
+use pulldown_cmark::{CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd, html};
 
 /// A rendered ADR: its title (for the index) and the full themed HTML page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,10 +522,48 @@ fn strip_frontmatter(text: &str) -> &str {
     }
 }
 
-/// The text of the first `# ` heading, if any.
+/// The visible text of the document's first level-1 heading — what the reader
+/// sees in the rendered `<h1>` — or `None` when the document has none.
+///
+/// Read from a **parse**, for the same reason [`heading_ids`] is: the heading's
+/// raw line is source, not text. A line scan cannot tell `{#modes}` (a heading
+/// attribute this renderer deliberately enables, see [`options`]) from the words
+/// of the heading, so it read `# The five ways to run it {#modes}` back as a
+/// title and put the markup in the `<title>` element of every page moved by the
+/// site split — issue #460, live on roteiro.dev. The `<h1>` on the same page was
+/// already right, because that side went through the parser.
+///
+/// The fix is *not* a second place that knows how to strip `{#…}`. A rule
+/// spelled out twice is a rule that can disagree with itself, and this one
+/// already disagrees once: the anchor is markup to the parser and text to the
+/// scanner. Asking the parser removes the second opinion rather than aligning
+/// it, and carries the rest of the dialect along for free — a fenced `# …` is
+/// not a title, a setext underline is one, and inline markup (`` `code` ``,
+/// emphasis, a link label) contributes its text and not its punctuation.
+///
+/// The parse stops at the first `</h1>`; nothing walks the rest of the document.
 fn first_heading(body: &str) -> Option<String> {
-    body.lines()
-        .find_map(|l| l.strip_prefix("# ").map(|h| h.trim().to_owned()))
+    let mut text: Option<String> = None;
+    for event in Parser::new_ext(body, options()) {
+        match event {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) => text = Some(String::new()),
+            // Only accumulates once an H1 has opened; a code span is part of the
+            // heading's text, exactly as it is for the heading's id.
+            Event::Text(t) | Event::Code(t) => {
+                if let Some(text) = text.as_mut() {
+                    text.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(HeadingLevel::H1)) => break,
+            _ => {}
+        }
+    }
+    // An empty `#` heading names nothing, so it defers to the caller's fallback
+    // rather than rendering `<title> — Roteiro</title>`.
+    text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
 }
 
 fn escape_html(s: &str) -> String {
@@ -541,8 +579,8 @@ fn escape_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexEntry, NavEntry, PublishedPages, markdown_to_html, render_adr, render_adr_index,
-        render_doc, render_markdown, render_nav, render_site_page,
+        IndexEntry, NavEntry, PublishedPages, escape_html, markdown_to_html, render_adr,
+        render_adr_index, render_doc, render_markdown, render_nav, render_site_page,
     };
 
     /// The site index most tests do not exercise: with it empty, a `.md` link
@@ -801,6 +839,191 @@ mod tests {
         // shift every subsequent heading's anchor by one.
         let html = markdown_to_html("```\n## Not a heading\n```\n\n## Real\n");
         assert!(html.contains("<h2 id=\"real\">Real</h2>"), "{html}");
+    }
+
+    #[test]
+    fn a_heading_s_anchor_never_reaches_the_title() {
+        // Issue #460, live on roteiro.dev: every page the site split moved
+        // carries `{#…}` on its H1, and the title was read off the raw line.
+        let r = render_site_page(
+            "---\nsite-page: modes\n---\n\n# The five ways to run it {#modes}\n\nBody.\n",
+            "fallback",
+            &nav(),
+            "modes.html",
+            &no_pages(),
+        );
+        // The heading was always right; the title is the side that was wrong.
+        assert!(
+            r.html
+                .contains("<h1 id=\"modes\">The five ways to run it</h1>"),
+            "{}",
+            r.html
+        );
+        assert_eq!(r.title, "The five ways to run it");
+        assert!(
+            r.html
+                .contains("<title>The five ways to run it — Roteiro</title>"),
+            "{}",
+            r.html
+        );
+        // The most-seen string a page has: the tab, the bookmark, the search
+        // result, the social preview. Nothing of the attribute survives anywhere.
+        assert!(
+            !r.html.contains("{#"),
+            "no literal attribute leaks: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn the_same_holds_for_an_adr_and_for_a_root_level_doc() {
+        // One extractor serves all three renderers, so all three are checked:
+        // a fix that reached only the page the issue named would leave the ADR
+        // index quoting `{#…}` back at the reader.
+        let adr = render_adr("# ADR-0001: Example {#adr1}\n", "slug", &no_pages());
+        assert_eq!(adr.title, "ADR-0001: Example");
+        assert!(
+            adr.html
+                .contains("<title>ADR-0001: Example — Roteiro</title>"),
+            "{}",
+            adr.html
+        );
+        let doc = render_doc(
+            "# Roteiro — Build Plan {#plan}\n",
+            "Build Plan",
+            &no_pages(),
+        );
+        assert_eq!(doc.title, "Roteiro — Build Plan");
+        assert!(!doc.html.contains("{#"), "{}", doc.html);
+    }
+
+    #[test]
+    fn a_title_that_legitimately_spells_the_anchor_syntax_keeps_it() {
+        // The other half of the rule, and the reason the fix is a parse and not
+        // a strip: `{#…}` is an attribute only where the dialect says it is, and
+        // a rule spelled out by hand does not know where that is. Inside a code
+        // span it is prose, and a stripper blind to code spans mangles a page
+        // whose subject *is* this syntax — which is most of the pages that
+        // document it.
+        let coded = render_doc(
+            "# Why `{#anchor}` outlives a restructure\n",
+            "fallback",
+            &no_pages(),
+        );
+        assert_eq!(coded.title, "Why {#anchor} outlives a restructure");
+        assert!(
+            coded
+                .html
+                .contains("<title>Why {#anchor} outlives a restructure — Roteiro</title>"),
+            "{}",
+            coded.html
+        );
+        // Mid-heading and uncoded, it is still prose: an attribute block is
+        // trailing or it is nothing.
+        let mid = render_doc(
+            "# Anchors are written {#id}, in prose\n",
+            "fallback",
+            &no_pages(),
+        );
+        assert_eq!(mid.title, "Anchors are written {#id}, in prose");
+    }
+
+    #[test]
+    fn the_title_and_the_heading_never_disagree() {
+        // The invariant underneath #460, stated directly. Where the attribute
+        // block ends is the dialect's call, not this module's — braces the
+        // parser eats are gone from *both* surfaces, braces it keeps are on
+        // both. Reading the title from the same parse is what makes that true by
+        // construction rather than by two rules that happen to match today.
+        for md in [
+            "# The five ways to run it {#modes}\n",
+            "# Why `{#anchor}` outlives a restructure\n",
+            "# Anchors are written {#id}, in prose\n",
+            "# Install & build {#build}\n",
+            "# What `init` sets up\n",
+            "# Sets like {#1, #2}\n",
+        ] {
+            let r = render_doc(md, "fallback", &no_pages());
+            let inner = r
+                .html
+                .split_once("<h1")
+                .and_then(|(_, rest)| rest.split_once('>'))
+                .and_then(|(_, rest)| rest.split_once("</h1>"))
+                .map(|(text, _)| text.to_owned())
+                .unwrap_or_default();
+            // The heading carries inline markup (`<code>`, emphasis); the title
+            // is the words inside it. Dropping the tags — and nothing else, so
+            // entities still have to match — is what makes them comparable.
+            let mut heading = String::new();
+            let mut depth = 0usize;
+            for c in inner.chars() {
+                match c {
+                    '<' => depth += 1,
+                    '>' => depth = depth.saturating_sub(1),
+                    _ if depth == 0 => heading.push(c),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                heading,
+                escape_html(&r.title),
+                "title and heading disagree for {md:?}: {}",
+                r.html
+            );
+        }
+    }
+
+    #[test]
+    fn the_title_is_the_heading_the_reader_sees() {
+        // Inline markup contributes its text, not its punctuation — the same
+        // rule the heading's own id already follows.
+        let code = render_doc("# What `init` sets up\n", "fallback", &no_pages());
+        assert_eq!(code.title, "What init sets up");
+        // A line scan called this document's title `Not a title`; the parser
+        // knows a fenced hash is not a heading at all.
+        let fenced = render_doc(
+            "```\n# Not a title\n```\n\n# The real one\n",
+            "fallback",
+            &no_pages(),
+        );
+        assert_eq!(fenced.title, "The real one");
+        // And a heading spelled the other way is still a heading: the page shows
+        // an `<h1>`, so the tab has to show its words rather than the file stem.
+        let setext = render_doc("Underlined\n==========\n", "fallback", &no_pages());
+        assert!(
+            setext.html.contains("<h1 id=\"underlined\">"),
+            "{}",
+            setext.html
+        );
+        assert_eq!(setext.title, "Underlined");
+    }
+
+    #[test]
+    fn a_document_with_no_h1_falls_back_and_the_fallback_is_used_verbatim() {
+        // The fallback is the caller's string, not markdown: it is never parsed,
+        // so it cannot be stripped and cannot leak markup it does not contain.
+        // Callers pass a file stem or a declared slug.
+        let none = render_site_page(
+            "---\nsite-page: modes\n---\n\nNo heading at all.\n",
+            "The five ways to run it",
+            &nav(),
+            "modes.html",
+            &no_pages(),
+        );
+        assert_eq!(none.title, "The five ways to run it");
+        assert!(
+            none.html
+                .contains("<title>The five ways to run it — Roteiro</title>"),
+            "{}",
+            none.html
+        );
+        // An H1 with nothing in it names nothing, so it defers to the fallback
+        // rather than emitting `<title> — Roteiro</title>`.
+        let empty = render_doc("#\n\nBody.\n", "build-plan", &no_pages());
+        assert_eq!(empty.title, "build-plan");
+        // A lower heading is not the document's title.
+        let sub = render_doc("## Only a section {#s}\n", "build-plan", &no_pages());
+        assert_eq!(sub.title, "build-plan");
     }
 
     #[test]
