@@ -8320,6 +8320,13 @@ struct LintReport {
     command: Vec<String>,
     /// The workspace root that was linted.
     worktree: String,
+    /// The `CARGO_TARGET_DIR` roteiro set for the run, outside the worktree.
+    ///
+    /// Present so `command` is genuinely reproducible by hand — the argv needs
+    /// this variable to reproduce where the build wrote — and so that roteiro
+    /// overriding a `CARGO_TARGET_DIR` the caller had set is something the run
+    /// *says*, rather than something the caller discovers.
+    scratch: String,
     started_at: String,
     ended_at: String,
     exit_status: i32,
@@ -8457,6 +8464,7 @@ fn run_lint(
             isolation: outcome.isolation,
             command: outcome.command.clone(),
             worktree: outcome.worktree.display().to_string(),
+            scratch: outcome.scratch.display().to_string(),
             started_at: outcome.report.started_at.clone(),
             ended_at: outcome.report.ended_at.clone(),
             exit_status: outcome.report.exit_status,
@@ -8490,6 +8498,15 @@ fn print_lint_report(
         outcome.toolchain.rustc, outcome.toolchain.host
     );
     println!("  features  {}", outcome.features.label());
+    // Stated, not hidden. Roteiro sets `CARGO_TARGET_DIR` for this run rather
+    // than inheriting whatever the shell had, because "the build writes nothing
+    // into the tree you are linting" has to be this command's property and not
+    // the caller's — but a variable overridden in silence is its own surprise,
+    // so the run names where it went.
+    println!(
+        "  build dir {} — set by roteiro, outside the worktree; the tree is not written to",
+        outcome.scratch.display()
+    );
     println!(
         "  isolation {} — the linter compiled this tree on this host, so its build scripts and \
          proc macros ran here too",

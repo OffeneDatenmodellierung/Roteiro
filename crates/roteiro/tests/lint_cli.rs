@@ -50,6 +50,17 @@ impl Fixture {
             "//! A crate with a lint in it.\npub fn count(v: &Vec<i32>) -> usize {\n    v.len()\n}\n",
         )
         .expect("write");
+        // A committed lockfile, because `roteiro lint` passes `--locked` — it
+        // must not write `Cargo.lock` into the tree it is reporting on. Cargo
+        // generates it here rather than this file spelling one out, so the
+        // fixture does not go stale against a lockfile format bump.
+        let lock = Command::new("cargo")
+            .args(["generate-lockfile"])
+            .current_dir(&repo)
+            .output()
+            .expect("run cargo");
+        assert!(lock.status.success(), "generate-lockfile failed: {lock:?}");
+
         std::fs::write(
             repo.join("audit.json"),
             std::fs::read(
@@ -132,10 +143,52 @@ impl Fixture {
                 command.env(key, value);
             }
         }
+        // **Unset, always.** `roteiro lint` must put the build somewhere outside
+        // the worktree by its own doing, and the defect that made this necessary
+        // was a build directory that landed outside the tree only when the
+        // developer's shell had already arranged it. Inheriting whatever this
+        // test process happens to have would make the suite pass or fail
+        // according to who ran it, and pass for the wrong reason on CI.
+        command.env_remove("CARGO_TARGET_DIR");
         for (key, value) in env {
             command.env(key, value);
         }
         command.output().expect("run roteiro")
+    }
+
+    /// Every path in the working tree, sorted — the evidence for "nothing was
+    /// written here".
+    ///
+    /// The whole tree rather than `target/` alone: a build writes more than one
+    /// thing (`Cargo.lock` is the other one this command had to stop), and a
+    /// test that named only the directory it knew about would keep passing while
+    /// the next write went somewhere else. `.git` is skipped because git's own
+    /// bookkeeping is not what is under test.
+    fn tree_snapshot(&self) -> Vec<String> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
+                out.push(
+                    path.strip_prefix(base)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string(),
+                );
+                if path.is_dir() {
+                    walk(&path, base, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.repo, &self.repo, &mut out);
+        out.sort();
+        out
     }
 
     /// Everything the store will say about its findings, as bytes.
@@ -184,6 +237,145 @@ fn git(repo: &Path, args: &[&str]) {
 /// wording itself is asserted in [`a_missing_toolchain_is_an_error_that_names_what_to_install`].
 fn linter_is_absent(stderr: &str) -> bool {
     stderr.contains("rustup component add clippy") || stderr.contains("not found on PATH")
+}
+
+/// The other headline invariant, and the one this module's documentation
+/// claimed for a release without providing: a lint run leaves the **tree** alone.
+///
+/// `roteiro lint clippy` is a build. A build writes, and cargo's defaults write
+/// `<worktree>/target` and `<worktree>/Cargo.lock` — into the tree under review,
+/// which for the case this command exists for is a branch somebody else wrote.
+/// The module said it did not do that. What actually stopped it was
+/// `CARGO_TARGET_DIR` being set *in the invoking shell*: the code listed the
+/// variable as one to inherit, and inheriting a name the parent does not have
+/// configures nothing at all.
+///
+/// So this runs the shipped path with `CARGO_TARGET_DIR` unset — see
+/// [`Fixture::roteiro`], which unsets it for every test here — and asserts the
+/// tree is untouched. It fails if the fix is reverted, which is the only reason
+/// it is worth having.
+#[test]
+fn a_lint_run_writes_nothing_into_the_tree_it_is_linting() {
+    let fixture = Fixture::new("read-only-source");
+
+    // Roteiro's state goes somewhere outside the fixture, so that "outside the
+    // worktree" is a claim this test can actually see. With the default
+    // `$repo/.home` the scratch directory would satisfy the assertions below
+    // while still sitting inside the tree, which would pass for a reason that is
+    // not the property being tested.
+    let state = std::env::temp_dir().join(format!("roteiro-lint-state-{}", std::process::id()));
+    std::fs::remove_dir_all(&state).ok();
+    std::fs::create_dir_all(&state).expect("mkdir");
+
+    let before = fixture.tree_snapshot();
+    assert!(
+        before.contains(&"Cargo.lock".to_owned()) && before.contains(&"src".to_owned()),
+        "the snapshot must actually see the tree: {before:?}"
+    );
+
+    let lint = fixture.roteiro(
+        &["lint", "clippy", "--allow-unsandboxed", "--json"],
+        &[("ROTEIRO_HOME", &state)],
+    );
+    let stderr = String::from_utf8_lossy(&lint.stderr).into_owned();
+    if !lint.status.success() {
+        assert!(
+            linter_is_absent(&stderr),
+            "lint failed unexpectedly: {stderr}"
+        );
+        std::fs::remove_dir_all(&state).ok();
+        return;
+    }
+    let report: serde_json::Value = serde_json::from_slice(&lint.stdout).expect("lint emits JSON");
+
+    // The assertion, named: cargo's default target directory is `target/` under
+    // the tree it builds, and it must not be there.
+    assert!(
+        !fixture.built_anything(),
+        "`target/` was written into the tree being linted"
+    );
+    // And the general form, which also covers `Cargo.lock` and anything a future
+    // cargo decides to drop next to it.
+    assert_eq!(
+        before,
+        fixture.tree_snapshot(),
+        "`roteiro lint` wrote into the tree it was reporting on"
+    );
+
+    // None of the above means anything if nothing was built. A clippy that never
+    // ran writes nothing either, and would satisfy every assertion so far — this
+    // is what separates the fix from a no-op.
+    assert_eq!(report["build_succeeded"], true, "{report}");
+    assert!(
+        report["counts"]["reported"].as_u64().expect("a count") > 0,
+        "the fixture crate has a lint in it; a run reporting none did not compile it: {report}"
+    );
+
+    // So the writes went somewhere, and the report says where — which is how
+    // roteiro choosing the directory over the caller stays a disclosure rather
+    // than a surprise.
+    let scratch = PathBuf::from(report["scratch"].as_str().expect("a scratch path"));
+    assert!(
+        scratch.starts_with(&state),
+        "the build directory {} is not under the state root {}",
+        scratch.display(),
+        state.display()
+    );
+    assert!(
+        !scratch.starts_with(&fixture.repo),
+        "the build directory is inside the worktree: {}",
+        scratch.display()
+    );
+    assert!(
+        scratch.join("debug").exists(),
+        "nothing was built into {} — the build went somewhere this test cannot see",
+        scratch.display()
+    );
+
+    std::fs::remove_dir_all(&state).ok();
+}
+
+/// The consequence of `--locked`, stated where a user meets it: a tree whose
+/// lockfile does not match its manifest is **refused**, not silently fixed.
+///
+/// Generating the lockfile would be a write into the tree under review, so the
+/// remedy stays with the person. The error has to say that, because the raw
+/// shape of this failure — cargo exiting 101 having printed no diagnostics — is
+/// indistinguishable from a build that fell over, and reporting it as a
+/// malformed report would send the reader looking in the wrong place.
+#[test]
+fn a_tree_whose_lockfile_would_have_to_be_written_is_refused_and_told_why() {
+    let fixture = Fixture::new("stale-lockfile");
+    // A dependency the committed lockfile knows nothing about, so cargo must
+    // update `Cargo.lock` to resolve the manifest at all.
+    std::fs::write(
+        fixture.repo.join("Cargo.toml"),
+        "[package]\nname = \"lintfix\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+         \n[features]\nextra = []\n\n[dependencies]\nserde = \"1\"\n",
+    )
+    .expect("write");
+
+    let before = fixture.tree_snapshot();
+    let lint = fixture.roteiro(&["lint", "clippy", "--allow-unsandboxed"], &[]);
+    let stderr = String::from_utf8_lossy(&lint.stderr).into_owned();
+    if linter_is_absent(&stderr) {
+        return;
+    }
+    assert!(
+        !lint.status.success(),
+        "a stale lockfile must refuse: {lint:?}"
+    );
+    assert!(
+        stderr.contains("--locked") && stderr.contains("generate-lockfile"),
+        "the refusal must name the flag and the remedy: {stderr}"
+    );
+    // The refusal is worth nothing if the lockfile was rewritten on the way to
+    // it — which is precisely what the flag exists to prevent.
+    assert_eq!(
+        before,
+        fixture.tree_snapshot(),
+        "the tree was modified by a run that then refused"
+    );
 }
 
 /// The headline invariant: a lint run leaves the findings tables byte-identical.

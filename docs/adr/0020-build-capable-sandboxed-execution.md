@@ -11,7 +11,7 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
+version: "1.4"
 last-modified: 2026-08-19
 confluence-url:
 ---
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 | **Status** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
@@ -142,6 +142,18 @@ The first draft of this condition hedged: the source tree stays read-only
 completes against a source tree on which every write is refused. So the writable
 surface a builder needs is a **scratch build directory**, not your code.
 
+**And a measurement is a property of the thing measured.** v1.3 recorded the
+result above and `roteiro lint` cited it, in a module doc comment, as a
+description of what that module did. It was not: the module *inherited*
+`CARGO_TARGET_DIR` by name from the invoking shell and never set it, so on the
+ordinary path — a shell with no such variable — the linter wrote `target/` and
+`Cargo.lock` into the tree it was reviewing, beneath a paragraph saying it did
+not. The probe was sound and the inference from it was not. Whoever establishes
+a precondition by hand owes the codebase the line that makes the code establish
+it too, and a citation is not that line. `roteiro lint` now sets
+`CARGO_TARGET_DIR` itself and passes `--locked`, and a test runs the shipped
+command with the variable unset and asserts the tree is unchanged.
+
 That is the difference between this decision and the one ADR-0014 warned about,
 and it is a large one: an *additional mount* rather than a *removed guarantee*.
 A malicious build script gets a directory that is discarded when the run ends.
@@ -149,9 +161,29 @@ It does not get your working tree. A blanket relaxation of the preflight remains
 the conversion ADR-0014 predicted, and this condition now forecloses it rather
 than rationing it.
 
-One thing is unestablished and belongs to condition 2 rather than here: the
-probe above had no dependencies, so it never read or wrote `CARGO_HOME`. Whether
-a package cache can be mounted read-only, or needs a writable copy, is open.
+One thing was unestablished and is no longer: the probe above had no
+dependencies, so it never read or wrote `CARGO_HOME`, and whether a package
+cache can be mounted read-only or needs a writable copy was open.
+
+**Measured: a read-only `CARGO_HOME` is sufficient.** With the package cache
+`chmod -R a-w`, the source tree `chmod -R a-w`, `CARGO_TARGET_DIR` outside both,
+and `--locked --offline`, `cargo clippy` exits **0** and reports
+`build-finished` with `success: true`. It emits 20 JSON messages — 13
+`compiler-artifact`, **4 `build-script-executed`**, 2 `compiler-message`, 1
+`build-finished` — and the scratch directory afterwards holds compiled build
+scripts for `serde`, `serde_core`, `proc-macro2` and `quote`. So build scripts
+were compiled *from* a read-only cache and *ran*, and neither the cache nor the
+source tree was written to. Condition 2's dependency mount can therefore be
+read-only like every other input mount, rather than needing a writable copy of a
+cache measured elsewhere in this document at 414 MB to 1.10 GB.
+
+**What that does not establish**, stated because the paragraph above is exactly
+the kind that gets cited later as more than it is: the cache was **warm**, and a
+cold one must still be populated by something that can write. The probe resolved
+4 crates with one proc-macro dependency, not this repository, and emphatically
+not an `--all-features` build of it — which, as the consequences below record,
+cannot be built under a denied network today at all. It says a read-only package
+cache is *workable*, not that this repository's full build is.
 
 ### 2. Egress stays denied; inputs are mounted, not fetched
 
@@ -310,8 +342,29 @@ An earlier revision was blocked on the findings store's inability to distinguish
 two builds of one commit. **Condition 4 dissolves that** — nothing is stored, so
 nothing collides. What remains before acceptance is engineering rather than an
 unanswered question: a writable build directory that does not relax the
-read-only preflight for readers, the argv and environment seam a builder needs,
-and a demonstrated refusal path that never falls back to the host.
+read-only preflight for readers, and a demonstrated refusal path that never
+falls back to the host.
+
+This list used to also name "the argv and environment seam a builder needs", and
+that was wrong in a way worth keeping rather than deleting, because the error is
+the same one that produced the defect in condition 1. The seam was already
+there. `Invocation` carries the argv, and `execute` took an environment list —
+but that list held **names to inherit**, and a builder needs **pairs to set**.
+The two read alike and do opposite things:
+
+- **Inheriting locates.** `CARGO_HOME`, `RUSTUP_HOME` — where the toolchain is
+  on this machine, which only the parent environment knows and which is the
+  user's to choose.
+- **Setting constrains.** `CARGO_TARGET_DIR` — where the build may write, which
+  is a property the runner guarantees and therefore must choose itself.
+
+Reading the one seam as though it were both is precisely how `CARGO_TARGET_DIR`
+came to be listed as a passthrough under a promise that it was configured:
+inheriting a name the parent has not set is a no-op that reads as a setting. The
+two halves are now separate fields on one type, so the confusion is not
+expressible rather than merely discouraged, and this blocker is correspondingly
+narrower and cheaper than it was written up as — the environment seam exists and
+needed splitting, not building.
 
 ### What has landed, and what it does not claim
 
@@ -327,6 +380,16 @@ resolves against, and no path from the linter to
 every report and carried in `--json`, so a scripted consumer is told what a
 person is told. The linter is also kept out of the cross-analyzer join, which is
 checked by a test rather than left to a reviewer.
+
+It also sets its own `CARGO_TARGET_DIR` — a per-checkout directory under
+`~/.roteiro/lint/target`, keyed the way the findings store keys a worktree, and
+never shared between two trees because ADR-0014 v1.6 holds a scratch directory
+full of compiled build scripts to be per-repository. Candidates are checked
+against the tree rather than trusted, so pointing `ROTEIRO_HOME` inside the
+worktree is refused rather than obeyed. The directory is printed with the report
+and carried in `--json`: roteiro overrides a `CARGO_TARGET_DIR` the caller set,
+because where a build writes is this command's guarantee and not the caller's to
+supply, and an override in silence would be its own surprise.
 
 Conditions 1 and 2 are **not** built, and nothing was borrowed from them. There
 is no writable build directory inside a guest and no host-produced dependency
@@ -353,3 +416,4 @@ what conditions 1 and 2 are for, and they remain the unbuilt work.
 | 1.1 | 2026-08-18 | Condition 4 reversed on the owner's ruling that builder output is local to the person running it rather than an artifact stored for later. Storing a lint was the source of every identity problem the draft catalogued — an advisory id is *assigned* and permanent, a lint name is a symbol in a compiler — so not storing is the fix rather than a workaround. This unblocks acceptance: what remains is engineering, not an open question. Condition 5 softened accordingly, since with no stored history a renamed lint is a surprise rather than a corruption. |
 | 1.2 | 2026-08-18 | Records what landed rather than changing any decision: `roteiro lint <analyzer>`, with a `clippy` adapter that reuses the shared normalisation shape and is deliberately absent from the registry `ingest` resolves against. Conditions 3–5 are built and tested — an unstored report, an `isolation: none` read out of the runner, and the renamed / removed / `[workspace.lints]` readings surfaced in both output shapes. Conditions 1–2 are untouched: the run has no boundary, and the read-only preflight was **not** relaxed to fit a builder through it. |
 | 1.3 | 2026-08-19 | Default posture set by the owner: a builder runs **sandboxed** unless host execution has been granted, and the grant is layered as ADR-0019 layers the remote tier — project `roteiro.toml` may deny it and may never grant it, because a merged line in a shared file is consent granted by someone else and noticed by nobody. Adds condition 6, including that the sandbox never silently falls back to the host. Condition 1 is strengthened rather than amended: measured, `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it, so the preflight is not relaxed at all and a builder's writable surface is an **added scratch mount** rather than a **removed guarantee**. Records the consequence that `roteiro lint` must refuse by default until conditions 1–2 exist. |
+| 1.4 | 2026-08-19 | **Corrects a claim this document's own measurement was used to justify.** v1.3 measured that `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it; `roteiro lint` then cited that result as a description of itself while *inheriting* the variable by name and never setting it — so on any shell that had not set one, the linter wrote `target/` and `Cargo.lock` into the tree it was reviewing, under a doc comment saying it did not. The module now sets `CARGO_TARGET_DIR` to a per-checkout directory outside the tree (ADR-0014 v1.6: a build scratch holds compiled build scripts and is never shared between trees) and passes `--locked` so the lockfile is not rewritten either, with a test that runs the shipped command with the variable unset and asserts the tree is unchanged. **Condition 1's open question is answered**: measured with `CARGO_HOME` and the source tree both `chmod -R a-w`, `CARGO_TARGET_DIR` outside and `--locked --offline`, `cargo clippy` exits 0, reports `build-finished` successfully, and executes 4 build scripts compiled from the read-only cache — so a package cache can be mounted read-only rather than copied, with the honest caveat that the cache was warm and the probe was 4 crates rather than an `--all-features` build of this repository. Finally, **withdraws "the argv and environment seam a builder needs" as a blocker**: the seam existed, and was the wrong kind — a list of names to *inherit* where a builder needs pairs to *set*. Conflating the two is what produced the defect above, so they are now separate fields on one type and the blocker is a split rather than a build. |
