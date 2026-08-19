@@ -1305,3 +1305,80 @@ fn a_repo_is_in_the_links_scope_exactly_once_however_it_is_spelled() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// #505: with no spoke pinning anything, `--pinned` fell back to the hub's `HEAD`
+/// for every one of them — the right behaviour — and said so **nowhere**. Its
+/// output was byte-identical to plain `--infer`, and contained no rev, no `HEAD`
+/// and no `@`, so there was nothing in it from which to tell an effective
+/// `--pinned` from an inert one.
+///
+/// That is the silent-wrong-answer class rather than a missing feature: the
+/// operator asked *"does this spoke match the hub version it actually deploys?"*
+/// and was shown the answer to *"does it match HEAD?"*. Those differ by exactly
+/// the drift the flag exists to exclude.
+///
+/// So the assertion is that the two runs **differ**, and that the difference is a
+/// report of the resolution — per spoke, and in a summary line that counts it.
+/// The fallback itself is unchanged; only its silence is.
+#[test]
+fn pinned_reports_the_head_fallback_when_no_spoke_pins_anything() {
+    let base = std::env::temp_dir().join(format!("roteiro-nopin-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let web = base.join("web");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&web).expect("mkdir web");
+
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "hub"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync");
+
+    // The shape the issue measured on a real 7-spoke workspace: no `.gitmodules`,
+    // no Dockerfile, so no `submodule` and no `image_ref` node — nothing to pin
+    // with. This is the ordinary infra-repo shape, not an edge case.
+    std::fs::write(web.join("prod.env"), "SERVE_FEATURES=true\n").expect("write");
+    git(&web, &["init", "-q"]);
+    git(&web, &["add", "."]);
+    git(&web, &["commit", "-q", "-m", "spoke"]);
+    assert!(roteiro(&web, &["sync"]).status.success(), "web sync");
+
+    let base_s = base.to_str().unwrap();
+    let run = |extra: &[&str]| -> String {
+        let mut args = vec!["links", "--infer", "--hub", "app", "--workspace", base_s];
+        args.extend_from_slice(extra);
+        let out = roteiro(&base, &args);
+        assert!(out.status.success(), "infer {extra:?} failed: {out:?}");
+        String::from_utf8(out.stdout).expect("utf8")
+    };
+
+    let plain = run(&[]);
+    let pinned = run(&["--pinned"]);
+
+    // The defect, stated as the thing that must not be true again.
+    assert_ne!(
+        plain, pinned,
+        "`--pinned` that resolved nothing must not be byte-identical to plain \
+         `--infer` (#505)"
+    );
+    // Per spoke: what it resolved against, and that the answer was not its own.
+    assert!(
+        pinned.contains("@ HEAD (no pin detected)"),
+        "each unpinned spoke must name what it fell back to: {pinned}"
+    );
+    // And once in summary, so an operator scanning the tail sees it without
+    // reading every row — which is where an inert `--pinned` is cheapest to catch.
+    assert!(
+        pinned.contains("0 of 1 spoke(s) pinned a hub version; 1 resolved against the hub's HEAD"),
+        "the summary must count the pins that were found: {pinned}"
+    );
+    // Plain `--infer` is unchanged: it never claimed to resolve per spoke, so it
+    // has nothing to report and must not grow a line saying so.
+    assert!(
+        !plain.contains("HEAD"),
+        "plain `--infer` must be untouched by this: {plain}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}

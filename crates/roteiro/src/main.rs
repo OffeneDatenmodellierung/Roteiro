@@ -496,7 +496,10 @@ enum Command {
         /// With `--infer`: resolve **each spoke against the hub version it itself
         /// pins** — read from the spoke's `submodule` / `image_ref` node — instead
         /// of one version for all (ADR-0009 step 8b). Spokes with no detectable pin
-        /// fall back to the hub's `HEAD`.
+        /// fall back to the hub's `HEAD`, and **the report says so** — per spoke,
+        /// and in a summary line counting how many pinned anything. Falling back
+        /// silently would make an inert `--pinned` byte-identical to plain
+        /// `--infer`, which is the answer to a different question (#505).
         #[arg(long, requires = "infer", conflicts_with_all = ["matrix", "hub_rev"])]
         pinned: bool,
         /// With `--infer`: persist the inferred correspondences into each spoke's
@@ -1241,7 +1244,12 @@ enum MemoryAction {
         /// chain, which supersession keeps rather than deletes.
         #[arg(long)]
         include_superseded: bool,
-        /// At most this many records (the newest ones).
+        /// At most this many records (the newest ones); `0` is unlimited.
+        ///
+        /// Unlimited means every record the filters admit, in the same order and
+        /// simply not cut. The same reading of `0` as `search --limit` and
+        /// `memory recall --limit`, which is the point: one parameter must not
+        /// mean different things on different surfaces (issues #375, #452).
         #[arg(long, value_name = "N", default_value_t = 50)]
         limit: usize,
         /// Emit the listing as JSON.
@@ -1291,7 +1299,13 @@ enum MemoryAction {
         /// hidden, and is often the one worth reading.
         #[arg(long)]
         applicable_only: bool,
-        /// At most this many records — the best-ranked, not the newest.
+        /// At most this many records — the best-ranked, not the newest; `0` is
+        /// unlimited.
+        ///
+        /// Unlimited means every live record, still ranked and simply not cut.
+        /// The same reading of `0` as `search --limit` and `memory list
+        /// --limit`, which is the point: one parameter must not mean different
+        /// things on different surfaces (issues #375, #452).
         #[arg(long, value_name = "N", default_value_t = 10)]
         limit: usize,
         /// Emit the ranking as JSON, every term included.
@@ -7652,9 +7666,16 @@ fn run_links_infer(
     };
 
     if json {
+        // `pinned` and `spokes_pinned` are what let a machine reader tell an
+        // effective `--pinned` from an inert one: a spoke that pinned nothing
+        // omits `hub_rev` entirely, so without the envelope saying the flag was in
+        // effect, the JSON has the same silence the text had (#505).
+        let spokes_pinned = ready.report.iter().filter(|r| r.hub_rev.is_some()).count();
         emit_json(&serde_json::json!({
             "hub": ready.hub_name,
             "hub_rev": ready.hub_rev,
+            "pinned": opts.pin.auto,
+            "spokes_pinned": spokes_pinned,
             "spokes": ready.report,
             "written": written,
         }))?;
@@ -7665,7 +7686,7 @@ fn run_links_infer(
                 ready.hub_name
             );
         }
-        print_infer_report(&ready.report, &ready.hub_name, hub_key_count);
+        print_infer_report(&ready.report, &ready.hub_name, hub_key_count, opts.pin.auto);
         if write {
             println!("\npersisted {written} inferred cross-repo edge(s) into spoke graphs");
         }
@@ -7818,14 +7839,25 @@ fn short_rev(rev: &str) -> &str {
     }
 }
 
-fn print_infer_report(report: &[InferredRepo], hub_name: &str, hub_keys: usize) {
+/// `pinned` is whether `--pinned` asked for per-spoke pin resolution, and it is a
+/// parameter rather than something inferred from the rows because **the rows a
+/// no-op produces are indistinguishable from the rows the flag was never passed
+/// for**. A spoke with no detectable pin falls back to the hub's `HEAD`, which is
+/// the right behaviour and was also, until #505, a silent one: with no spoke
+/// pinning anything the output was byte-identical to plain `--infer`, and nothing
+/// in it named a rev, so an operator who asked *"does this match the version it
+/// deploys?"* was shown the answer to *"does it match HEAD?"* with no way to tell.
+/// So the fallback is reported, not changed — per spoke, and once in summary.
+fn print_infer_report(report: &[InferredRepo], hub_name: &str, hub_keys: usize, pinned: bool) {
     println!("inferred config links (hub: {hub_name}, {hub_keys} keys)");
     let (mut nm, mut no) = (0usize, 0usize);
     for r in report {
-        // Under `--pinned`, say which hub version this spoke resolved against.
+        // Under `--pinned`, say which hub version this spoke resolved against —
+        // including when the answer is "none of its own, so the hub's HEAD".
         let pin = match (&r.hub_rev, &r.pin_via) {
             (Some(rev), Some(via)) => format!("  @ {} (via {via})", short_rev(rev)),
             (Some(rev), None) => format!("  @ {}", short_rev(rev)),
+            (None, _) if pinned => "  @ HEAD (no pin detected)".to_owned(),
             _ => String::new(),
         };
         println!(
@@ -7853,6 +7885,17 @@ fn print_infer_report(report: &[InferredRepo], hub_name: &str, hub_keys: usize) 
         "\n{nm} match(es), {no} orphan(s) across {} spoke(s)",
         report.len()
     );
+    // The line that makes an inert `--pinned` legible at a glance. Printed even
+    // when every spoke pinned something, because "7 of 7" is the confirmation the
+    // operator wanted and costs one line to give.
+    if pinned {
+        let pinned_count = report.iter().filter(|r| r.hub_rev.is_some()).count();
+        let fell_back = report.len() - pinned_count;
+        println!(
+            "{pinned_count} of {} spoke(s) pinned a hub version; {fell_back} resolved against the hub's HEAD",
+            report.len()
+        );
+    }
 }
 
 /// Assemble the full graph and write it as a portable JSON artifact.
@@ -8413,11 +8456,23 @@ fn report_analyzer(
     }
 
     let analyzer = requested.ok_or_else(|| {
-        anyhow::anyhow!(
-            "{source} is not a normalized `{}` report, so it must be an analyzer's own output —              say which analyzer with `--analyzer <name>` (known: {})",
-            rto_exec::REPORT_SCHEMA,
-            rto_exec::known_analyzers().join(", ")
-        )
+        // Fragments joined by exactly one space, never one `\`-wrapped literal.
+        // A continuation swallows the next line's indentation, so an edit that
+        // drops one turns source columns into user-visible text — which is how
+        // this refusal came to ship 14 of them (#522). The rule and the reason
+        // are `rto_exec::guidance`'s; wrapping is the list, not an escape, so
+        // there is no continuation here to lose.
+        let message = [
+            format!(
+                "{source} is not a normalized `{}` report,",
+                rto_exec::REPORT_SCHEMA
+            ),
+            "so it must be an analyzer's own output —".to_owned(),
+            "say which analyzer with `--analyzer <name>`".to_owned(),
+            format!("(known: {})", rto_exec::known_analyzers().join(", ")),
+        ]
+        .join(" ");
+        anyhow::anyhow!(message)
     })?;
     Ok((analyzer.to_owned(), true))
 }
@@ -16982,5 +17037,113 @@ mod sandbox_cli {
             .to_string();
         assert!(refusal.contains("exec-boxlite"), "{refusal}");
         assert!(refusal.contains("--image"), "{refusal}");
+    }
+}
+
+/// What a refusal **renders as**, which is the only thing a reader ever sees.
+///
+/// The bug class these guard (#455, #522) is invisible in source: the message
+/// reads correctly where it is written, compiles, and passes any test that greps
+/// it for a phrase — because the phrase was always right. Only the rendered shape
+/// is wrong. So these assert on the shape.
+#[cfg(all(test, feature = "execution"))]
+mod refusal_text_tests {
+    use super::report_analyzer;
+
+    /// The longest run of consecutive spaces in `text` (0 if it has none).
+    fn longest_space_run(text: &str) -> usize {
+        text.split(|c| c != ' ').map(str::len).max().unwrap_or(0)
+    }
+
+    /// The threshold is **two**, not four, and deliberately so. These refusals are
+    /// prose sentences, and prose never wants two adjacent spaces; the ~30
+    /// legitimate multi-space runs elsewhere in this file are column alignment in
+    /// status tables, which is content, on a different surface, and none of it is
+    /// here. A rule is only cheap to keep where it is true by construction.
+    fn assert_no_leaked_indentation(text: &str) {
+        assert!(
+            longest_space_run(text) <= 1,
+            "a prose refusal carries a run of spaces — leaked source indentation \
+             (#522), not content: {text:?}"
+        );
+    }
+
+    /// #522: this refusal shipped **14 columns of source indentation** into
+    /// user-visible text, from a `\` continuation lost in an edit. It is the third
+    /// instance of the class `rto_exec::guidance` documents, and it reached a
+    /// first-contact path — the message is the entire help available there.
+    #[test]
+    fn the_missing_analyzer_refusal_renders_no_leaked_indentation() {
+        let err = report_analyzer(b"{}", "report.json", None).expect_err("must refuse");
+        let text = err.to_string();
+        assert_no_leaked_indentation(&text);
+        // The way forward is still named — the half that was never broken, kept so
+        // a future rewrite cannot satisfy the shape rule by deleting the content.
+        assert!(
+            text.contains("--analyzer"),
+            "the refusal must still name the way forward: {text}"
+        );
+    }
+
+    /// The sibling refusal on the same path, held to the same rule — so the guard
+    /// is about how this function writes to a user, not about one literal.
+    #[test]
+    fn the_unnamed_analyzer_refusal_renders_no_leaked_indentation() {
+        let body = format!(r#"{{"schema":"{}"}}"#, rto_exec::REPORT_SCHEMA);
+        let err = report_analyzer(body.as_bytes(), "report.json", None).expect_err("must refuse");
+        assert_no_leaked_indentation(&err.to_string());
+    }
+}
+
+/// What `--limit` means, checked across every surface that offers it.
+#[cfg(test)]
+mod limit_contract_tests {
+    use clap::CommandFactory as _;
+
+    /// The rendered help of the `--limit` argument at a subcommand path.
+    fn limit_help(path: &[&str]) -> String {
+        let mut cmd = super::Cli::command();
+        for name in path {
+            let next = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no subcommand `{name}` under {path:?}"))
+                .clone();
+            cmd = next;
+        }
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "limit")
+            .unwrap_or_else(|| panic!("no `--limit` argument on `{}`", path.join(" ")));
+        arg.get_long_help()
+            .or_else(|| arg.get_help())
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
+
+    /// #453: `memory list` and `memory recall` have read `0` as unlimited since
+    /// #452 and said nothing about it, while `search` documented the same
+    /// contract. Behaving consistently while documenting inconsistently leaves a
+    /// user unable to tell, which was most of the original complaint in #375 — so
+    /// the surfaces are asserted **together, against one clause**, rather than
+    /// each being checked for a mention of its own.
+    #[test]
+    fn every_surface_reading_zero_as_unlimited_says_so_in_the_same_words() {
+        // The words `search --limit` has carried since #393. Not "some mention of
+        // unlimited": a third phrasing of one contract is the next form of the
+        // defect, and it would pass a looser assertion.
+        const CLAUSE: &str = "`0` is unlimited";
+        for path in [
+            &["search"][..],
+            &["memory", "list"][..],
+            &["memory", "recall"][..],
+        ] {
+            let help = limit_help(path);
+            assert!(
+                help.contains(CLAUSE),
+                "`{}` --limit reads `0` as unlimited, so its help must say \
+                 {CLAUSE:?} — in those words (#453): {help}",
+                path.join(" ")
+            );
+        }
     }
 }
