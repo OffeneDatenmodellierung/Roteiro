@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.26.0...rto-llama-v1.26.1) - 2026-08-19
+
+### Other
+
+- Merge pull request #510 from OffeneDatenmodellierung/fix/483-llama-dev-dep
+- stop building llama.cpp at every feature set
+
 ## [1.26.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.25.0...rto-llama-v1.26.0) - 2026-08-19
 
 ### Added
