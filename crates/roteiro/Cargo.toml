@@ -147,7 +147,17 @@ default = ["execution", "models", "exec-subprocess"]
 # `roteiro model pull`, so this costs nothing there; in a
 # `--no-default-features --features execution` build it is the one crate the
 # split adds.
-execution = ["dep:rto-exec", "dep:ureq"]
+# It also forwards `rto-render/execution`, which is what puts `security list` and
+# `security status` on the **MCP** tool surface (issue #435). Forwarded from here
+# rather than from `mcp` because this is the feature that decides whether this
+# binary has an analyzer surface at all: the served-chat registry's two
+# `security_*` tools are gated on `all(serve, execution)` and MCP's on
+# `all(mcp, execution)`, so both surfaces gain and lose the pair together and
+# `both_tool_surfaces_offer_the_same_tools` cannot be satisfied by only one of
+# them. Cargo cannot express "only when `mcp` is also on", so a non-`mcp` default
+# build carries the dependency edge and none of the code — and `rto-exec` is
+# already in that build, so the edge costs nothing.
+execution = ["dep:rto-exec", "dep:ureq", "rto-render/execution"]
 # The subprocess analyzer *backend*: `roteiro security run` (ADR-0014). **On by
 # default**, which is a change — it used to have to be asked for at build time as
 # well as consented to per run.

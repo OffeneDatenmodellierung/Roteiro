@@ -7549,27 +7549,29 @@ fn security_cross_reference(layers: &[rto_graph::FindingsLayer]) -> Vec<Security
     }
     correspondences
         .into_iter()
-        .map(|c| SecurityCrossReference {
-            advisory: c.advisory,
-            aliases: c.aliases,
-            package: c.package,
-            version: c.version,
-            confirmed_by: c
-                .reports
-                .iter()
-                .map(|r| &r.analyzer)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            reports: c
-                .reports
-                .into_iter()
-                .map(|r| SecurityCrossReferenceReport {
-                    analyzer: r.analyzer,
-                    key: r.key,
-                    rule: r.rule,
-                    severity: r.severity,
-                })
-                .collect(),
+        .map(|c| {
+            // From `Correspondence::confirmed_by`, not a second count written here:
+            // the same number now appears on the CLI and on both model-facing tool
+            // surfaces, and one concept reporting different figures on different
+            // surfaces is issue #321. Read before `c` is taken apart below.
+            let confirmed_by = c.confirmed_by();
+            SecurityCrossReference {
+                advisory: c.advisory,
+                aliases: c.aliases,
+                package: c.package,
+                version: c.version,
+                confirmed_by,
+                reports: c
+                    .reports
+                    .into_iter()
+                    .map(|r| SecurityCrossReferenceReport {
+                        analyzer: r.analyzer,
+                        key: r.key,
+                        rule: r.rule,
+                        severity: r.severity,
+                    })
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -9008,44 +9010,46 @@ fn run_security_prefetch(
 }
 
 /// The `--json` shape of `roteiro security status`.
+///
+/// The two row types come from [`rto_exec::tool_security`] rather than being
+/// declared here, and they used to be declared here. They moved when `security
+/// list`/`status` reached the model-facing tool surfaces (issue #435):
+/// `host_readiness` and `possibly_stale` are judgements about evidence — "this host
+/// could actually run it", "an advisory database is involved, so never call this
+/// current" — and three copies of a judgement is three chances for one of them to
+/// say something weaker. Issue #321 is what that costs.
+///
+/// `analyzers[].ready: bool` is **gone**, replaced by `host_readiness` plus the two
+/// facts it summarises (`assets_provisioned`, `missing_programs`). That is a
+/// breaking change to this command's `--json` and it is the point of issue #464: the
+/// boolean was named for running and computed from provisioning, so a consumer
+/// reading it could not have been right.
 #[cfg(feature = "execution")]
 #[derive(serde::Serialize)]
 struct SecurityStatusReport {
     root: String,
-    analyzers: Vec<AnalyzerCoverage>,
+    analyzers: Vec<rto_exec::AnalyzerCoverage>,
     assets: Vec<rto_exec::AssetStatus>,
-    layers: Vec<LayerStaleness>,
+    layers: Vec<rto_exec::LayerStaleness>,
 }
 
-/// What one shipped analyzer covers — the coverage matrix, read off the code
-/// rather than off a document, so the two cannot drift apart unnoticed.
+/// One analyzer's readiness as a display column.
+///
+/// `binary not found` carries the program name because that is the actionable part
+/// and Roteiro is not going to install it for you. The other two states are
+/// self-describing.
+///
+/// Lifted out of [`run_security_status`] so the arm that names a program and the
+/// arm that names a `prefetch` are read side by side, rather than one being a
+/// formatted string inside a `println!` argument list.
 #[cfg(feature = "execution")]
-#[derive(serde::Serialize)]
-struct AnalyzerCoverage {
-    analyzer: &'static str,
-    summary: &'static str,
-    languages: &'static [&'static str],
-    /// Whether every asset it needs is provisioned and still matches its digest.
-    ready: bool,
-}
-
-/// The staleness of the advisory data behind one live findings layer.
-#[cfg(feature = "execution")]
-#[derive(serde::Serialize)]
-struct LayerStaleness {
-    layer: String,
-    analyzer: String,
-    findings: usize,
-    runner: rto_graph::RunnerKind,
-    isolation: rto_graph::Isolation,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    advisory_db: Option<rto_graph::AdvisoryDb>,
-    /// Days between the advisory database's publication and now.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    advisory_db_age_days: Option<i64>,
-    /// `true` whenever an advisory database is involved at all. Never `false`
-    /// meaning "current" — only "this result has no advisory-data axis".
-    possibly_stale: bool,
+fn analyzer_state_line(coverage: &rto_exec::AnalyzerCoverage) -> String {
+    match coverage.host_readiness {
+        rto_exec::Readiness::BinaryNotFound => {
+            format!("binary not found: {}", coverage.missing_programs.join(", "))
+        }
+        state => state.as_str().to_owned(),
+    }
 }
 
 /// Report what is provisioned, what it covers, and how old the advisory data
@@ -9060,44 +9064,17 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
     let root = rto_exec::asset_root();
     let assets = rto_exec::status(&root, analyzer);
 
-    let analyzers: Vec<AnalyzerCoverage> = rto_exec::ADAPTERS
-        .iter()
-        .filter(|a| analyzer.is_none_or(|name| a.analyzer() == name))
-        .map(|adapter| AnalyzerCoverage {
-            analyzer: adapter.analyzer(),
-            summary: adapter.summary(),
-            languages: adapter.languages(),
-            ready: rto_exec::resolve(&root, adapter.analyzer()).is_ok(),
-        })
-        .collect();
+    let analyzers = rto_exec::coverage_matrix(&root, analyzer);
 
     // Staleness comes from the *runs*, because the advisory database's
     // publication date is something the analyzer reported, not something
-    // provisioning could know.
+    // provisioning could know. `layer_staleness` is that rule, shared with the two
+    // tool surfaces so `possibly_stale` has one definition.
     let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
-    let layers: Vec<LayerStaleness> = open_graph()
+    let stored = open_graph()
         .and_then(|(_repo, store, _cache)| Ok(store.findings_layers(analyzer)?))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|layer| {
-            let age = layer
-                .run
-                .advisory_db
-                .as_ref()
-                .and_then(|db| db.published_at.as_deref())
-                .and_then(|published| rto_exec::age_in_days(published, &now));
-            LayerStaleness {
-                layer: layer.run.layer,
-                analyzer: layer.run.analyzer,
-                findings: layer.findings.len(),
-                runner: layer.run.runner,
-                isolation: layer.run.isolation,
-                possibly_stale: layer.run.advisory_db.is_some(),
-                advisory_db: layer.run.advisory_db,
-                advisory_db_age_days: age,
-            }
-        })
-        .collect();
+        .unwrap_or_default();
+    let layers = rto_exec::layer_staleness(&stored, &now);
 
     if json {
         emit_json(&SecurityStatusReport {
@@ -9112,17 +9089,32 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
     println!("asset cache: {}", root.display());
     println!("\nanalyzers");
     for coverage in &analyzers {
+        // Three states, because the remedy differs (issue #464). `ready` used to be
+        // printed on the strength of the assets alone, which is true about
+        // provisioning and reads as a claim about running.
         println!(
-            "  {:<12} {}  [{}]",
+            "  {:<12} {:<31}  [{}]",
             coverage.analyzer,
-            if coverage.ready {
-                "ready"
-            } else {
-                "not provisioned"
-            },
+            analyzer_state_line(coverage),
             coverage.languages.join(", ")
         );
         println!("               {}", coverage.summary);
+        // The remedy, named where the state is, and named only for the one Roteiro
+        // performs. `binary not found` says which program is absent and stops
+        // there: Roteiro does not install analyzers (ADR-0014), and an install
+        // command it has not verified on this host would be a way forward that does
+        // not lead anywhere — see issue #430, which is the work of establishing
+        // those commands.
+        if !coverage.missing_programs.is_empty() {
+            println!(
+                "               not on PATH: {} — Roteiro does not install analyzers; \
+                 install it yourself, or produce the report elsewhere and use `roteiro \
+                 security ingest`",
+                coverage.missing_programs.join(", ")
+            );
+        } else if !coverage.assets_provisioned {
+            println!("               run `roteiro security prefetch` to provision its assets");
+        }
     }
 
     println!("\nassets");
@@ -10491,11 +10483,24 @@ fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
 /// `security prefetch` opens the network under an explicit consent and writes the
 /// asset cache. All three are permanent refusals, not gaps.
 ///
-/// `security list` and `security status` are read-only and *are* eligible; they
-/// are a follow-up rather than an oversight, for the reasons written out in
-/// `rto_render::mcp`'s module documentation (an empty listing that states neither
-/// "nothing found" nor "nothing ran", and `run_security_status` reading the store
-/// through `open_graph()` rather than a `project` selector).
+/// `security list` and `security status` are read-only and are here, as
+/// `security_list` and `security_status`, behind `all(serve, execution)` (issue
+/// #435). Neither is the CLI's `--json` served through: both go through
+/// [`rto_exec::tool_security`], which adds the two things a CLI does not need.
+/// First, a `coverage` discriminator, because `security list --json` is
+/// `{"layers": [], "findings": 0}` on a repository nobody has analyzed and
+/// `findings: 0` is also what a clean run reports — so the never-run case carries
+/// no `report` at all rather than an empty one. Second, `security_status` returns
+/// two labelled scopes, `machine` and `repository`: its asset half is
+/// machine-global (`rto_exec::asset_root`) and its layer half follows the selected
+/// project, and on a tool surface that asymmetry is invisible unless the document
+/// says it.
+///
+/// The gating is load-bearing rather than incidental. These two are on
+/// `execution`, and the MCP pair is on the same feature via
+/// `rto-render/execution`, so both surfaces gain and lose them together —
+/// `both_tool_surfaces_offer_the_same_tools` below cannot be satisfied by adding
+/// them to one.
 ///
 /// # Why there is no `review` tool, here or on MCP
 ///
@@ -10548,6 +10553,62 @@ impl GraphToolRegistry {
             .map_err(|e| e.to_string())?;
         let value = result.map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
+    /// The `security_list` call. Lifted out of [`GraphToolRegistry::call`] to keep
+    /// that dispatcher readable, as its `debt_density` argument parsing already is.
+    ///
+    /// # Errors
+    /// An unknown `analyzer`, or the store/serialise errors [`Self::run`] flattens.
+    #[cfg(feature = "execution")]
+    fn security_list(
+        &self,
+        project: Option<&str>,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        let analyzer = security_analyzer_arg(args)?;
+        // `limit` is model-controlled: clamped to the advertised bound by
+        // `model_limit`, floor included. It bounds findings PER LAYER, so a small
+        // page still reaches every analyzer's layer — a document-wide bound would
+        // spend itself on the first layer and report the rest as empty, which reads
+        // as "that analyzer found nothing".
+        let limit = model_limit(args, 20, 100);
+        self.run(project, move |store| {
+            store
+                .findings_layers(analyzer.as_deref())
+                .map(|layers| rto_exec::security_list(layers, limit))
+        })
+    }
+
+    /// The `security_status` call, in two labelled scopes. Lifted out of
+    /// [`GraphToolRegistry::call`] alongside [`Self::security_list`].
+    ///
+    /// # Errors
+    /// An unknown `analyzer`, an unknown or ambiguous `project`, or the
+    /// store/serialise errors [`Self::run`] flattens.
+    #[cfg(feature = "execution")]
+    fn security_status(
+        &self,
+        project: Option<&str>,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        let analyzer = security_analyzer_arg(args)?;
+        // The **resolved** project name, so the document's `repository` half names
+        // the graph it describes rather than echoing an argument a bare call
+        // omitted. Resolved before any machine-global work is reported, so the two
+        // halves never come from different questions.
+        let project_name = self.workspace.resolve(project).map_err(|e| e.to_string())?;
+        // Machine-global, and read outside `run` because it is not the project's to
+        // answer: `asset_root` resolves from this host's environment whichever
+        // project was selected. The document's two `scope` fields are what say so to
+        // the model.
+        let root = rto_exec::asset_root();
+        let now = rto_exec::rfc3339_utc(std::time::SystemTime::now());
+        self.run(project, move |store| {
+            store.findings_layers(analyzer.as_deref()).map(|layers| {
+                rto_exec::security_status(&root, analyzer.as_deref(), &project_name, &layers, &now)
+            })
+        })
     }
 }
 
@@ -10641,6 +10702,161 @@ fn config_secrets_tool_def(
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             })),
         }),
+    }
+}
+
+/// The served-chat `security_list` tool definition. Lifted out of
+/// [`GraphToolRegistry::tools`] for the same reason its neighbours are, and
+/// declared here rather than shared with MCP: the `rmcp` macro generates that
+/// surface's schema statically from an argument struct, so there is no one
+/// declaration for the two to share. `both_tool_surfaces_offer_the_same_tools` is
+/// what keeps them level instead.
+///
+/// The description carries the never-run-is-not-clean warning in full, and has to:
+/// a served model sees only this string, and reading `coverage: 0 findings` as a
+/// clean repository is the single most likely misuse of this tool.
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(all(feature = "serve", feature = "execution"))]
+fn security_list_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "security_list".to_owned(),
+        description: "List the SECURITY FINDINGS stored for this repository — every live \
+                      findings layer with the run evidence behind it (analyzer, version, \
+                      backend, isolation, advisory database, report digest) and a page of \
+                      its findings. \
+                      READ `coverage` FIRST. It is `analyzed` or \
+                      `no-analyzer-on-record`, and the second is a real outcome that is \
+                      NOT a clean repository: it means no analyzer result is on record \
+                      here. A `no-analyzer-on-record` result carries NO `report` at all — \
+                      so if you are looking for `findings` and there is no `report`, \
+                      nothing was checked and you must say so rather than report zero \
+                      findings. An analyzer that ran and found nothing is the OTHER case: \
+                      `coverage` is `analyzed` and `findings` is 0. \
+                      BOUNDED, and it tells you when it bound something. `limit` is \
+                      findings PER LAYER; each layer carries its true `findings` count, \
+                      the `page` actually returned, `truncated`, and how many were \
+                      `omitted`. A page keeps the most severe findings first, so what is \
+                      omitted is the least severe — never conclude a severity is absent \
+                      from a truncated page. \
+                      `cross_reference` is a VIEW over those findings, not a \
+                      replacement: it groups dependency advisories both analyzers \
+                      reported, `confirmed_by` says how many said so, `1` is a normal \
+                      state rather than a discrepancy, and the `findings` total above is \
+                      unchanged by it. \
+                      This is read-only: it cannot run an analyzer, and it cannot ingest \
+                      a report. Ask the user to run `roteiro security run` or `roteiro \
+                      security ingest` — a tool call is not a person consenting to \
+                      execution. \
+                      `limit` is 1-100 (default 20) — no unlimited setting."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({
+                "analyzer": {
+                    "type": "string",
+                    "enum": rto_exec::known_analyzers(),
+                },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+            })),
+        }),
+    }
+}
+
+/// The served-chat `security_status` tool definition. Lifted out of
+/// [`GraphToolRegistry::tools`] like its neighbours.
+///
+/// It advertises **no `limit`**, and that is a property of the answer: the document
+/// is one row per shipped analyzer, one per pinned asset and one per live findings
+/// layer — counts, never findings — so its size is fixed by what is installed
+/// rather than by how much was found. `security_status_advertises_no_bound_on_either_surface`
+/// is what stops a `limit` being added here "for consistency" with nothing
+/// honouring it, which is the schema/clamp drift issue #402 fixed once.
+///
+/// `with_project` adds the workspace `project` selector every tool carries.
+#[cfg(all(feature = "serve", feature = "execution"))]
+fn security_status_tool_def(
+    with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
+) -> rto_serve::ToolDef {
+    use serde_json::json;
+    rto_serve::ToolDef {
+        name: "security_status".to_owned(),
+        description: "Report SECURITY READINESS in TWO SEPARATELY SCOPED SECTIONS, and \
+                      the distinction is the whole point of the tool — do not merge them \
+                      when you report it. \
+                      `machine` (scope `machine`) describes THIS HOST: the pinned-asset \
+                      cache under `asset_root`, and each shipped analyzer's coverage \
+                      matrix with its `host_readiness`. It says nothing whatsoever about \
+                      whether anything has been run, and it is identical for every project \
+                      this server hosts. \
+                      `host_readiness` is THREE states, not a boolean, because the fix \
+                      differs and only one of them is Roteiro's to perform. `ready` = \
+                      assets provisioned AND the analyzer's program on PATH. \
+                      `assets-not-provisioned` = ask the user to run `roteiro security \
+                      prefetch`. `binary-not-found` = `missing_programs` names what is \
+                      absent, and ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to \
+                      install it, or to produce a report elsewhere and `roteiro security \
+                      ingest` it. Both underlying facts (`assets_provisioned`, \
+                      `missing_programs`) are ALWAYS present, so when the state is not \
+                      `ready` read both before telling the user what to do: a host can be \
+                      missing an asset AND a binary, and `host_readiness` names only the \
+                      first remedy. \
+                      Do not read `ready` as more than it says — it is readiness to run ON \
+                      THIS HOST. The sandboxed backend supplies the analyzer from a \
+                      digest-pinned image, so `binary-not-found` does not block it, and \
+                      this tool does not inspect the image store, so it reports no sandbox \
+                      verdict at all. \
+                      `repository` (scope `repository`) describes ONE PROJECT — the one \
+                      named in its own `project` field, which the `project` argument \
+                      selects: which findings layers are live, how many findings each \
+                      holds, and how old the advisory database behind each one is. \
+                      `possibly_stale` is `true` whenever an advisory database is \
+                      involved and NEVER means current; `false` means only that the \
+                      result has no advisory-data axis. \
+                      READ `repository.coverage` before concluding anything. It is \
+                      `analyzed` or `no-analyzer-on-record`; the second carries no \
+                      `layers` at all and means nothing has been analyzed in that \
+                      project, which is NOT a clean repository. \
+                      It needs no `limit`: this is one row per shipped analyzer, one per \
+                      pinned asset and one per live layer — COUNTS, NEVER FINDINGS. Use \
+                      `security_list` for the findings themselves. \
+                      This is read-only: it cannot provision an asset. `roteiro security \
+                      prefetch` opens the network under an explicit human consent and is \
+                      not available here — ask the user to run it."
+            .to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": with_project(json!({
+                "analyzer": {
+                    "type": "string",
+                    "enum": rto_exec::known_analyzers(),
+                },
+            })),
+        }),
+    }
+}
+
+/// A served-chat `analyzer` argument, validated against the shipped adapter set.
+///
+/// An unknown name is an **error**, not a document saying no result is on record.
+/// The `enum` in the schema above declares the legal values, and this is what
+/// happens to a model that sends something else anyway: on the CLI a mistyped
+/// `--analyzer` prints "no findings ingested for `<name>`" to the person who typed
+/// it and can see their own typo, whereas the same document handed to a model reads
+/// as "that analyzer has never been run here" — a security claim built on a
+/// spelling mistake. Same rule as an unrecognised `order`, and the same reason.
+#[cfg(all(feature = "serve", feature = "execution"))]
+fn security_analyzer_arg(args: &serde_json::Value) -> Result<Option<String>, String> {
+    match args.get("analyzer").and_then(serde_json::Value::as_str) {
+        None => Ok(None),
+        Some(name) if rto_exec::known_analyzers().contains(&name) => Ok(Some(name.to_owned())),
+        Some(name) => Err(format!(
+            "unknown analyzer `{name}` (expected {})",
+            rto_exec::known_analyzers().join("|")
+        )),
     }
 }
 
@@ -10928,6 +11144,22 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             config_secrets_tool_def(&with_project),
             coupling_tool_def(&with_project),
         ];
+        // The two read-only `security` subcommands (issue #435). Gated on
+        // `execution` because that is the feature carrying the analyzer surface at
+        // all, and the MCP pair is gated on the same one via
+        // `rto-render/execution` — so both surfaces offer them or neither does, and
+        // `both_tool_surfaces_offer_the_same_tools` cannot be satisfied by one.
+        //
+        // The other three are permanent refusals with their reasons in this
+        // registry's documentation: `ingest` and `run` write a findings layer
+        // (`run` through `execute_and_file`, which both its backends share, so
+        // ADR-0019's sandboxed default did not change this), and `prefetch` opens
+        // the network under an explicit human consent.
+        #[cfg(feature = "execution")]
+        {
+            tools.push(security_list_tool_def(&with_project));
+            tools.push(security_status_tool_def(&with_project));
+        }
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
             description: "List the projects this server hosts (often just one). Pass one as \
@@ -11062,6 +11294,13 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 let limit = model_limit(args, 20, 100);
                 self.run(project, |store| rto_graph::coupling(store, order, limit))
             }
+            // Both bodies live on the registry above: the read-only pair needs a
+            // resolved project name and a page bound, which is more than fits in a
+            // dispatch arm without pushing `call` past its line budget.
+            #[cfg(feature = "execution")]
+            "security_list" => self.security_list(project, args),
+            #[cfg(feature = "execution")]
+            "security_status" => self.security_status(project, args),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -12912,10 +13151,39 @@ mod lint_cli {
 #[cfg(all(test, feature = "execution"))]
 mod security_cli {
     use super::{
-        Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, report_analyzer,
-        security_cross_reference,
+        Cli, Command, SecurityAction, SecurityIngestReport, SecurityListing, analyzer_state_line,
+        report_analyzer, security_cross_reference,
     };
     use clap::Parser as _;
+
+    /// The `analyzers` column names the missing program, because Roteiro is not
+    /// going to install it and the reader has to know which one to go and get
+    /// (issue #464).
+    ///
+    /// Built from a `coverage_matrix_with` row rather than a hand-made struct, so
+    /// the display and the verdict cannot disagree about the same host.
+    #[test]
+    fn the_analyzer_column_names_the_missing_program() {
+        let root = std::path::Path::new("/nonexistent-asset-root");
+
+        // Assets missing: the remedy is `prefetch`, which Roteiro performs, and the
+        // column says so without naming a program.
+        let rows = rto_exec::coverage_matrix_with(root, Some("semgrep"), |_| true);
+        assert_eq!(analyzer_state_line(&rows[0]), "assets not provisioned");
+
+        // A binary missing is the state the old `ready: bool` could not express, and
+        // the only one whose column carries a name.
+        let coverage = rto_exec::AnalyzerCoverage {
+            host_readiness: rto_exec::Readiness::BinaryNotFound,
+            assets_provisioned: true,
+            missing_programs: vec!["cargo-audit"],
+            ..rows.into_iter().next().expect("one row")
+        };
+        assert_eq!(
+            analyzer_state_line(&coverage),
+            "binary not found: cargo-audit"
+        );
+    }
 
     fn parse<const N: usize>(args: [&str; N]) -> Command {
         Cli::try_parse_from(args).expect("parse").command
@@ -13742,15 +14010,27 @@ mod workspace_scoped_tools {
     /// from the library's without contradicting it.
     #[test]
     fn every_limit_tool_advertises_the_bound_it_enforces() {
+        /// The one bounded tool this build gains under `execution`. Empty otherwise,
+        /// so the table below needs no `mut` in a build with nothing to add — and
+        /// the rule is the same either way: a tool that pages must advertise the
+        /// page it enforces. `security_list` bounds findings per layer.
+        #[cfg(feature = "execution")]
+        const GATED: &[(&str, u64)] = &[("security_list", 100)];
+        #[cfg(not(feature = "execution"))]
+        const GATED: &[(&str, u64)] = &[];
         use rto_serve::ToolRegistry as _;
         let (set, _flat) = two_workspace_set();
         let tools = registry_for(&set, "api").tools();
-        for (name, max) in [
+        let bounded: Vec<(&str, u64)> = [
             ("search", 25u64),
             ("debt_density", 100),
             ("config_secrets", 200),
             ("coupling", 100),
-        ] {
+        ]
+        .into_iter()
+        .chain(GATED.iter().copied())
+        .collect();
+        for (name, max) in bounded {
             let tool = tools
                 .iter()
                 .find(|t| t.name == name)
@@ -14148,21 +14428,84 @@ mod workspace_scoped_tools {
 
     /// The chat side of the same refusal (see `rto_render::mcp`'s tests). The two
     /// registries are separate, so a guard on one proves nothing about the other.
+    ///
+    /// The `security*` set must be **exactly** the two read-only subcommands.
+    /// `ingest` and `run` write a findings layer — `run` through
+    /// `execute_and_file`, which both of its backends share, so ADR-0019's
+    /// sandboxed default did not make it read-only — and `run` additionally
+    /// executes an analyzer, which a tool call is never consent for. `prefetch`
+    /// opens the network under an explicit human consent. Issue #435 added `list`
+    /// and `status` and deliberately kept this test rather than deleting it: the set
+    /// equality catches any unexpected `security*` tool whatever it is called, and
+    /// the named loop then fails with the specific refusal that was broken even if
+    /// the equality is later loosened.
     #[test]
-    fn no_security_subcommand_is_advertised_to_the_served_model() {
+    fn the_three_mutating_security_subcommands_are_never_advertised() {
         use rto_serve::ToolRegistry as _;
-        let security: Vec<String> = called_registry()
+        use std::collections::BTreeSet;
+
+        let security: BTreeSet<String> = called_registry()
             .tools()
             .into_iter()
             .map(|t| t.name)
             .filter(|n| n.starts_with("security"))
             .collect();
-        assert!(
-            security.is_empty(),
-            "`security ingest`/`run`/`prefetch` are permanent refusals — mutating \
-             (`replace_findings_layer`), executing an analyzer, and network- \
-             consented respectively. Found: {security:?}",
+
+        // Feature-gated on `execution`, so the expected set is too: a build without
+        // it advertises no `security*` tool at all. That is the same property at a
+        // different feature set, not a weaker one.
+        #[cfg(feature = "execution")]
+        let allowed: BTreeSet<String> = ["security_list", "security_status"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        #[cfg(not(feature = "execution"))]
+        let allowed: BTreeSet<String> = BTreeSet::new();
+
+        assert_eq!(
+            security, allowed,
+            "the `security*` tools must be exactly the read-only pair: `ingest` and \
+             `run` mutate (both of `run`'s backends end in `replace_findings_layer`) \
+             and `run` executes; `prefetch` opens the network under a human consent. \
+             All three are permanent refusals, not gaps",
         );
+        for refused in ["ingest", "run", "prefetch"] {
+            assert!(
+                !security.iter().any(|n| n.contains(refused)),
+                "`security {refused}` is a permanent refusal and must never be a \
+                 served-chat tool. Found in: {security:?}",
+            );
+        }
+    }
+
+    /// The chat side of `security_status_description_says_what_ready_has_checked`
+    /// (issue #464). A served model sees only this string, and the two registries
+    /// declare their descriptions separately.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn served_security_status_description_says_what_ready_has_checked() {
+        use rto_serve::ToolRegistry as _;
+        let tools = called_registry().tools();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "security_status")
+            .expect("`security_status` advertised");
+        for claim in [
+            "THREE states",
+            "assets provisioned AND the analyzer's program on PATH",
+            "assets-not-provisioned",
+            "binary-not-found",
+            "ROTEIRO NEVER INSTALLS ANALYZERS",
+            "are ALWAYS present",
+            "ON THIS HOST",
+            "does not inspect the image store",
+        ] {
+            assert!(
+                tool.description.contains(claim),
+                "missing `{claim}` from: {}",
+                tool.description
+            );
+        }
     }
 
     /// The two tool surfaces must not drift apart in *which* tools they offer.
@@ -14223,6 +14566,147 @@ mod workspace_scoped_tools {
         for name in ["check", "context"] {
             assert!(chat.contains(name) && mcp.contains(name), "`{name}`");
         }
+        // Issue #435's pair, for the same reason and with one extra edge: they are
+        // feature-gated, and a *gate* that differs between the surfaces is a
+        // divergence the name check above would miss under some feature sets and
+        // catch under others. This build has `execution` (it is in `default`, and
+        // `--all-features` has it too), so they must be on both here.
+        #[cfg(feature = "execution")]
+        for name in ["security_list", "security_status"] {
+            assert!(
+                chat.contains(name) && mcp.contains(name),
+                "`{name}` must be on both surfaces: `execution` gates it here and \
+                 `rto-render/execution` gates it on MCP, forwarded from the same \
+                 feature so they cannot come apart",
+            );
+        }
+    }
+
+    /// Neither surface may advertise a `limit` on `security_status`, because
+    /// neither honours one.
+    ///
+    /// The document is one row per shipped analyzer, one per pinned asset and one
+    /// per live findings layer — counts, never findings — so its size is fixed by
+    /// what is installed rather than by how much was found. The obvious
+    /// "add a `limit` for consistency with the other tools" change would advertise a
+    /// bound nothing clamps to, and a schema that disagrees with the clamp is
+    /// exactly what issue #402 fixed. MCP's half of this is
+    /// `security_status_states_why_it_needs_no_bound`; this is the served-chat half,
+    /// plus the cross-check that `security_list` — which *does* page — declares the
+    /// same ceiling on both.
+    #[cfg(all(feature = "mcp", feature = "execution"))]
+    #[test]
+    fn security_status_advertises_no_bound_on_either_surface() {
+        use rto_serve::ToolRegistry as _;
+
+        let tools = called_registry().tools();
+        let status = tools
+            .iter()
+            .find(|t| t.name == "security_status")
+            .expect("`security_status` advertised on the chat surface");
+        let props = status.parameters["properties"]
+            .as_object()
+            .expect("object schema");
+        assert!(
+            !props.contains_key("limit"),
+            "`security_status` must not advertise a `limit` it does not honour: \
+             {props:?}",
+        );
+        for claim in ["needs no `limit`", "COUNTS, NEVER FINDINGS"] {
+            assert!(
+                status.description.contains(claim),
+                "missing `{claim}` from: {}",
+                status.description,
+            );
+        }
+
+        // `security_list` pages, so it declares the ceiling — and declares the same
+        // one MCP does, with `"minimum": 1` because `0` means unlimited on the
+        // `rto_graph` surfaces and neither model-facing surface offers that.
+        let list = tools
+            .iter()
+            .find(|t| t.name == "security_list")
+            .expect("`security_list` advertised on the chat surface");
+        let limit = &list.parameters["properties"]["limit"];
+        assert_eq!(limit["minimum"], 1, "{limit}");
+        assert_eq!(limit["maximum"], 100, "{limit}");
+        assert!(
+            list.description.contains("1-100 (default 20)")
+                && list.description.contains("no unlimited setting"),
+            "{}",
+            list.description,
+        );
+    }
+
+    /// The served-chat `security_list` tool distinguishes "nothing analyzed" from
+    /// "nothing found", and an unknown analyzer from either.
+    ///
+    /// `called_registry`'s store has a graph and no findings layers — the state a
+    /// first call against a fresh project actually meets, and the one whose CLI
+    /// `--json` is `{"layers": [], "findings": 0}`.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn served_security_list_never_reports_an_unanalyzed_repo_as_clean() {
+        use rto_serve::ToolRegistry as _;
+
+        let reg = called_registry();
+        let out = reg
+            .call("security_list", &serde_json::json!({}))
+            .expect("security_list");
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["coverage"], "no-analyzer-on-record", "{json}");
+        assert!(json.get("report").is_none(), "{json}");
+        // The field a model would reach for is absent, not zero — `0` is the good
+        // answer, which is why it may not appear in this document.
+        assert!(!out.contains("\"findings\""), "{out}");
+
+        // A misspelled analyzer is an error, not a document that reads as "semgrep
+        // has never run here".
+        let err = reg
+            .call(
+                "security_list",
+                &serde_json::json!({ "analyzer": "semgrepp" }),
+            )
+            .expect_err("unknown analyzer must be an error");
+        assert!(err.contains("unknown analyzer `semgrepp`"), "{err}");
+    }
+
+    /// The served-chat `security_status` tool labels its two scopes, and names the
+    /// resolved project inside the half that project governs.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn served_security_status_separates_machine_from_repository() {
+        use rto_serve::ToolRegistry as _;
+
+        let out = called_registry()
+            .call("security_status", &serde_json::json!({}))
+            .expect("security_status");
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["machine"]["scope"], "machine", "{json}");
+        assert_eq!(json["repository"]["scope"], "repository", "{json}");
+        assert!(json["machine"]["asset_root"].is_string(), "{json}");
+        // The RESOLVED name, not merely *a* string: this registry hosts `api` and
+        // the call omitted `project`, so an empty or echoed-argument value here
+        // would leave the half unlabelled — which is the whole defect.
+        assert_eq!(
+            json["repository"]["project"], "api",
+            "the resolved project belongs inside the half it governs: {json}"
+        );
+        assert!(json["machine"].get("project").is_none(), "{json}");
+        assert!(json["repository"].get("asset_root").is_none(), "{json}");
+        // The machine half's readiness names what it has actually checked (issue
+        // #464), on this surface too — the two registries are separate, so a guard
+        // on MCP proves nothing here.
+        let analyzer = &json["machine"]["analyzers"][0];
+        assert!(analyzer["host_readiness"].is_string(), "{json}");
+        assert!(analyzer["assets_provisioned"].is_boolean(), "{json}");
+        assert!(analyzer["missing_programs"].is_array(), "{json}");
+        assert!(analyzer.get("ready").is_none(), "{json}");
+
+        // No findings ingested into this fixture, so the repository half says so
+        // rather than showing an empty layer list a reader could call clean.
+        assert_eq!(json["repository"]["coverage"], "no-analyzer-on-record");
+        assert!(json["repository"].get("layers").is_none(), "{json}");
     }
 
     /// A one-project registry with two files carrying the **same** marker count

@@ -318,6 +318,17 @@ impl Adapter for Clippy {
         &[]
     }
 
+    fn host_programs(&self) -> &'static [&'static str] {
+        // The same two-part shape as `cargo-audit`, for the same reason: `cargo
+        // clippy` dispatches to a `cargo-clippy` binary on `PATH`. Unlike the
+        // others this is a toolchain component rather than a separate install —
+        // `rustup component add clippy` — but the *check* is identical, and this
+        // adapter is not in `ADAPTERS`, so `roteiro security status` never reports
+        // it. Declared because the trait requires an answer and a wrong one here
+        // would be waiting for whoever wires a lint status later.
+        &["cargo", "cargo-clippy"]
+    }
+
     fn command(&self, _assets: &AssetPaths<'_>) -> Invocation {
         Self::invocation(&FeatureSet::Defaults)
     }

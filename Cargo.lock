@@ -4331,6 +4331,7 @@ dependencies = [
  "axum 0.8.9",
  "pulldown-cmark",
  "rmcp",
+ "rto-exec",
  "rto-graph",
  "rto-spec",
  "schemars",

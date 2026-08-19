@@ -71,6 +71,10 @@ impl Adapter for Semgrep {
         &[RULES_ASSET]
     }
 
+    fn host_programs(&self) -> &'static [&'static str] {
+        &["semgrep"]
+    }
+
     fn command(&self, assets: &AssetPaths<'_>) -> Invocation {
         Invocation {
             program: "semgrep".to_owned(),
