@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
-last-modified: 2026-08-17
+version: "1.4"
+last-modified: 2026-08-19
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 
 ## Reference
 
@@ -35,7 +35,40 @@ Add an optional **`roteiro.toml`** at the repository root (committed — so a te
 
 > **CLI flag > project `roteiro.toml` > user `~/.roteiro/config.toml` > built-in default.**
 
-**One documented exception (v1.2).** For the remote-model-tier enable key this order is **inverted**: the project file may **deny but never grant**. See [[docs/adr/0019-remote-model-tier.md]]. The reason is in this ADR's own words — `roteiro.toml` is "committed — so a team shares the same, reproducible settings" — and a merged line authorising egress on every teammate's machine is not consent. Granting requires the **user** layer *and* the invocation, neither sufficient alone. Every other key follows the order above.
+**One rule inverts this order (v1.4).** For a **capability key** — one whose effect is to *turn something on* whose cost or risk falls on whoever runs the command — the project file may **deny but never grant**.
+
+This began as a single documented exception for the remote tier in v1.2. It is now the standard, because an exception list grows one entry at a time until it *is* the rule and nobody has noticed. A rule with a stated scope can be applied to a new key by whoever adds it; an exception list can only be extended by whoever remembers it exists.
+
+The reason is in this ADR's own words: `roteiro.toml` is "committed — so a team shares the same, reproducible settings". That is exactly right for a *setting* and exactly wrong for a *permission*. A merged line that starts sending source elsewhere, or running builds, on every teammate's machine is consent by pull request — granted by someone else, noticed by nobody. The project layer may switch such a capability **off** for everyone, and may never switch it **on** for anyone.
+
+### Which keys this covers
+
+A key is a capability key if setting it causes something to happen that otherwise would not, and that thing does at least one of:
+
+1. sends repository content **off the machine**;
+2. **executes code the repository supplies**, rather than code Roteiro ships;
+3. **writes outside** the repository and Roteiro's own caches;
+4. spends **materially more of the machine** than an ordinary command — loading a multi-gigabyte model, or running a build.
+
+Everything else is a **value**, and values follow the ordinary order above. Most keys are values, and for them the inversion is not merely unnecessary but *inexpressible*: there is no "deny" for `[models] generative = "qwen3-8b"`, only a different value.
+
+| Key | Class |
+|---|---|
+| `[remote] enabled` | **capability** — test 1; see [[docs/adr/0019-remote-model-tier.md]] §3 |
+| host execution for builders | **capability** — test 2; see [[docs/adr/0020-build-capable-sandboxed-execution.md]] §6 |
+| `[models]`, `[debt]`, `[serve]`, `[infer]`, `[duplicates]`, `[workspace]`, `[[links]]`, `[pins]`, `[telemetry] rotation`/`format`, `[media] silence_rms`/`image_variance` | value |
+
+Three groups are **deliberately unclassified**, and the inversion is not applied to them until they are classified, because each reads defensibly either way and misclassifying a key is worse than leaving it named:
+
+- **`[ingest] vision`/`audio`/`ocr`/`pdf`.** Setting one to `true` loads a model and generates content on every teammate's `sync` — test 4, and arguably test 2. Setting one to `false` is a *denial* and is permitted under either reading, which is how this repository already uses the key.
+- **`[media] gate`.** The safe value is `true`. `gate = false` admits the confabulation [[docs/adr/0015-generated-media-content-artifact-store.md]] exists to prevent — so disabling a guard may be a grant wearing a denial's grammar, which is a shape this rule does not currently name.
+- **`[paths] model_store`, `[telemetry] file`.** A path rather than a switch, but a project-set value redirects a teammate's writes outside their own repository, which is test 3.
+
+### The mechanism is structural, not remembered
+
+`RemoteConfig` implements the inversion with a bespoke `overlaid_with`. A second bespoke implementation is how a rule decays into a convention, and a third is how a convention decays into folklore. A capability key's layering must therefore be carried by its **type**, so that declaring a key a capability and getting its precedence right are *the same act* rather than two things a future author has to remember to do together — the same reasoning that put debt exclusions behind one function and truncation behind one `window`.
+
+`roteiro config` reports a key's class beside its layer, because a reader who sees one key inherit and its neighbour refuse to cannot otherwise tell whether that is the rule or a bug.
 
 **Format: TOML, and only TOML.** Not YAML.
 
@@ -144,3 +177,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.1 | 2026-08-16 | Amended (issue #321). Two refinements to layering, neither changing the CLI > project > user > default order: (a) **list-valued exclusion keys merge** — `[debt] ignore` unions the layers instead of the project layer discarding the user layer, with a new `ignore_reset` key as the explicit way to inherit nothing, and per-pattern provenance in `roteiro config`; discovery/selection lists deliberately still replace. (b) **Per-repo resolution**: in a multi-repo process each repository is scanned under its *own* config, extending ADR-0009's per-repo `[[links]]` rule. Motivation: the graph API applied no exclusions at all, so the explorer UI and the CLI reported different intent debt for the same repository. |
 | 1.2 | 2026-08-17 | Amended by [[docs/adr/0019-remote-model-tier.md]]. One key — the remote-model-tier enable — inverts the precedence: the committed project file may **deny but never grant** egress, and granting needs the user layer plus the invocation. Recorded here as well as in 0019 because a reader of this ADR would otherwise apply the general rule and be wrong. No other key is affected. Also corrects the header table, which read 1.0 while the frontmatter read 1.1. |
 | 1.3 | 2026-08-17 | Amended (Stage 33). **`[models]` grows from two keys to five**: `vision`, `audio` and `ocr` join `embedding` and `generative`, one key per model *kind* rather than per command (`generative` governs both `spec draft` and Ask). Until now those three models were compiled-in constants, so a project could **not pin its ASR model at all** — the setting did not exist. Two rules are recorded here because a reader would otherwise apply the general ones and be wrong: (a) a key whose *value* is wrong — unknown model, wrong modality — is a **named error quoting the key**, not the *warning* that a missing-feature key gets, and never a silent fall-back to the default; (b) `roteiro config` reports such a key instead of refusing, being the command an operator runs when a pin is misbehaving. `roteiro config` also gains a **per-surface resolution table** (model, rule, layer, installed), on the same reasoning as the per-pattern `[debt] ignore` provenance added in v1.1. Precedence is unchanged; unset resolves to exactly the models each surface used before. |
+| 1.4 | 2026-08-19 | Amended on the owner's ruling that v1.2's inversion should be the standard rather than an exception. The project file may **deny but never grant** any **capability key** — one that turns on something whose cost or risk falls on whoever runs the command — with a four-part test (sends content off the machine; executes repository-supplied code; writes outside the repository; spends materially more of the machine) so a new key can be classified by whoever adds it rather than by whoever remembers the exception list. Records that most keys are **values**, for which the inversion is not merely unneeded but inexpressible, and names three groups (`[ingest]` toggles, `[media] gate`, `[paths]`/`[telemetry]` paths) as deliberately unclassified pending a ruling, since misclassifying a key is worse than leaving it named. Also requires the mechanism be **structural** — carried by the key's type rather than by a bespoke `overlaid_with` per capability — because a second hand-written inversion is how a rule decays into a convention. |
