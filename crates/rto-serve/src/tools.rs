@@ -385,14 +385,81 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
     parse_tool_call(text).into_iter().collect()
 }
 
-/// Extract the first `<tool_call>…</tool_call>` from `text` and parse its JSON
-/// body into a [`ToolCall`]. Returns `None` if there is no well-formed call.
+/// A call syntax a model may emit inside `<tool_call>…</tool_call>`.
+///
+/// [`tool_system_prompt`] instructs the JSON form and most models comply, but a
+/// model's *training* can beat an instruction: the chat templates shipped in
+/// `qwen3-coder-30b-a3b` and `qwen3.8-27b` tell them that "an inner
+/// `<function=...></function>` block must be nested within `<tool_call>` XML
+/// tags", and they sometimes revert to it. A body the parser did not understand
+/// used to make the whole call invisible — [`chat_with_client_tools`] then read
+/// the generation as the model's final answer and handed the raw markup to the
+/// user as prose (#489).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dialect {
+    /// `{"name": "search", "arguments": {"query": "x"}}` — the instructed form,
+    /// and what three of the five registry models emit.
+    Json,
+    /// `<function=search><parameter=query>x</parameter></function>` — the form
+    /// the two Qwen XML templates train.
+    Xml,
+}
+
+impl Dialect {
+    /// Every dialect, in the order a body is tried against them.
+    ///
+    /// **This list is the only thing that makes a dialect reachable.** Nothing
+    /// else dispatches on [`Dialect`]: [`parse_tool_call`] drives from `ALL`, and
+    /// so does `every_dialect_parses_to_the_same_call`, which renders one call in
+    /// each dialect and asserts they arrive identical. So a third dialect either
+    /// lands here — parsed *and* held to the same output shape as the other two —
+    /// or it is inert. There is no arrangement in which one of them sees it and
+    /// the other does not.
+    const ALL: [Self; 2] = [Self::Json, Self::Xml];
+
+    /// Parse `body` as this dialect, or `None` when it is not this dialect (or is
+    /// malformed in it). Each dialect judges only its own syntax and neither
+    /// guesses: a body that is neither JSON nor XML stays `None` for both, which
+    /// is what keeps "understand a second dialect" from becoming "accept garbage".
+    fn parse(self, body: &str) -> Option<ToolCall> {
+        match self {
+            Self::Json => parse_json_body(body),
+            Self::Xml => parse_xml_body(body),
+        }
+    }
+}
+
+/// The XML dialect's tags. Named rather than inlined because the opening ones are
+/// matched by prefix and the closing ones by search, and a literal typed twice is
+/// a literal that can be corrected once.
+const FUNCTION_OPEN: &str = "<function=";
+const FUNCTION_CLOSE: &str = "</function>";
+const PARAMETER_OPEN: &str = "<parameter=";
+const PARAMETER_CLOSE: &str = "</parameter>";
+
+/// Extract the first `<tool_call>…</tool_call>` from `text` and parse its body
+/// into a [`ToolCall`], in whichever [`Dialect`] the model wrote it. Returns
+/// `None` if there is no well-formed call.
+///
+/// The `<tool_call>` wrapper is read here, once, for every dialect: both forms
+/// nest inside it, so the dialects differ only in the body and a change to the
+/// wrapper cannot reach one of them and miss the other.
 fn parse_tool_call(text: &str) -> Option<ToolCall> {
     let start = text.find("<tool_call>")? + "<tool_call>".len();
     let rest = &text[start..];
     let end = rest.find("</tool_call>")?;
     let body = rest[..end].trim();
 
+    Dialect::ALL.into_iter().find_map(|d| d.parse(body))
+}
+
+/// [`Dialect::Json`]: a JSON object carrying `name` and optional `arguments`.
+///
+/// Lifted out of [`parse_tool_call`] unchanged when the XML dialect landed. Three
+/// of the five registry models emit this form, so it is the one that must not
+/// move: same input, same `Option<ToolCall>`, including for the malformed bodies
+/// it already rejected.
+fn parse_json_body(body: &str) -> Option<ToolCall> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let name = value.get("name")?.as_str()?.to_owned();
     if name.is_empty() {
@@ -406,16 +473,98 @@ fn parse_tool_call(text: &str) -> Option<ToolCall> {
     Some(ToolCall { name, arguments })
 }
 
+/// [`Dialect::Xml`]: `<function=name>` wrapping `<parameter=key>value</parameter>`.
+///
+/// # What an argument value may contain
+///
+/// Everything after `<parameter=key>` is model text: it may hold `<`, `>`,
+/// newlines, or something that reads as another tag, and the wire form offers no
+/// escaping. So parameters are found by splitting on the *opening* tag, and a
+/// value ends at the **last** `</parameter>` before the next one — not the first,
+/// which would cut a value that quotes the closing tag, and not the first `<`,
+/// which would truncate any value mentioning a type or a generic.
+///
+/// Two limits this accepts, both unreachable without the model emitting the
+/// literal tag text inside a value: a value containing `<parameter=` splits into
+/// two arguments, and a value containing `</function>` ends the call early.
+/// Nothing on the wire distinguishes those from the real tags.
+///
+/// A missing `</function>` is not fatal — a generation cut short mid-call is
+/// still a call, and reading it as one is the whole point of #489 — but a missing
+/// or empty `<function=name>` is: without a name there is nothing to call.
+fn parse_xml_body(body: &str) -> Option<ToolCall> {
+    let after_open = body.find(FUNCTION_OPEN)? + FUNCTION_OPEN.len();
+    let rest = &body[after_open..];
+    let name_end = rest.find('>')?;
+    let name = rest[..name_end].trim().to_owned();
+    if name.is_empty() {
+        return None;
+    }
+    let inner = &rest[name_end + 1..];
+    let inner = inner.find(FUNCTION_CLOSE).map_or(inner, |i| &inner[..i]);
+
+    let mut arguments = serde_json::Map::new();
+    // `skip(1)`: the text before the first `<parameter=` is the template's own
+    // newline, never an argument.
+    for segment in inner.split(PARAMETER_OPEN).skip(1) {
+        let Some(key_end) = segment.find('>') else {
+            continue;
+        };
+        let key = segment[..key_end].trim();
+        if key.is_empty() {
+            continue;
+        }
+        let raw = &segment[key_end + 1..];
+        let raw = raw.rfind(PARAMETER_CLOSE).map_or(raw, |i| &raw[..i]);
+        // The wire form writes a newline either side of the value, so the value's
+        // own leading/trailing whitespace is not recoverable and is not preserved.
+        arguments.insert(key.to_owned(), xml_argument(raw.trim()));
+    }
+    Some(ToolCall {
+        name,
+        arguments: serde_json::Value::Object(arguments),
+    })
+}
+
+/// Give an XML-dialect argument value the type it had before the template
+/// flattened it, so `arguments` is shaped the same whichever dialect produced it.
+///
+/// The wire form is untyped — every value arrives as text — but
+/// [`ToolCall::arguments`] is a `serde_json::Value` that the registry reads with
+/// `as_u64`, `as_array` and `as_str`. Both XML templates write a string bare and
+/// run a non-string through `tojson` (`qwen3.8-27b`) or Python's `str`
+/// (`qwen3-coder-30b-a3b`), so a value that parses as JSON *and is not a string*
+/// is one that had a type: `10` is the integer `limit` the `search` schema
+/// declares, `["todo"]` is `debt`'s `categories` array. Both reach their tool
+/// correctly through this. A JSON *string* body is not unwrapped — the wire form
+/// writes strings unquoted, so quotes in the text are part of the value.
+///
+/// The limit, in the other direction: a value whose schema type is `string` but
+/// whose text is itself valid JSON — `search(query="42")` — is typed as a number,
+/// and `search` then answers "needs a string `query`". That is fed back to the
+/// model, which has a round to correct itself; it is a visible, self-correcting
+/// error rather than the silent wrong default an untyped `"10"` would give
+/// `limit`. `qwen3-coder`'s Python rendering of a bool or `None` (`True`, `None`)
+/// is not JSON and stays a string, which its schema-less `debt` filter tolerates.
+fn xml_argument(raw: &str) -> serde_json::Value {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::String(_)) | Err(_) => serde_json::Value::String(raw.to_owned()),
+        Ok(typed) => typed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Disposition, SuppressedTools, ToolCall, disposition, parse_tool_call, tool_system_prompt,
+        Dialect, Disposition, SuppressedTools, ToolCall, disposition, parse_tool_call,
+        tool_system_prompt,
     };
     use crate::engine::{
         ChatRequest, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
     };
     use crate::tools::{ToolDef, ToolRegistry, chat_with_client_tools, chat_with_tools};
     use std::collections::HashSet;
+    use std::fmt::Write as _;
     use std::sync::Mutex;
 
     #[test]
@@ -918,5 +1067,211 @@ mod tests {
         )
         .expect("outcome");
         assert!(engine.first_system_prompt().contains("get_weather"));
+    }
+
+    // ---------------------------------------------------------------- #489 ---
+    // The XML call dialect. `qwen3-coder-30b-a3b` and `qwen3.8-27b` ship chat
+    // templates that train a `<function=…>` block nested inside `<tool_call>`,
+    // and a body the parser did not understand did not *fail* — it made the call
+    // invisible, so the loop read the generation as the model's final answer and
+    // handed the raw markup to the user as prose.
+
+    /// The wire form both Qwen XML templates render: `<function=name>` on its own
+    /// line, then `<parameter=key>` / value / `</parameter>` per argument, each on
+    /// its own line, then `</function>`. Built from the templates' own string
+    /// concatenations so the tests below are exercising the real syntax.
+    fn xml_markup(name: &str, args: &[(&str, &str)]) -> String {
+        let mut out = format!("<tool_call>\n<function={name}>\n");
+        for (key, value) in args {
+            let _ = writeln!(out, "<parameter={key}>\n{value}\n</parameter>");
+        }
+        out.push_str("</function>\n</tool_call>");
+        out
+    }
+
+    #[test]
+    fn parses_the_xml_dialect_a_qwen_template_trains() {
+        let call = parse_tool_call(&xml_markup("explain", &[("key", "fn:foo")]))
+            .expect("an XML-dialect body is a tool call, not the model's answer");
+        assert_eq!(
+            call,
+            ToolCall {
+                name: "explain".to_owned(),
+                arguments: serde_json::json!({"key": "fn:foo"}),
+            },
+            "the same `ToolCall` the JSON dialect yields for the same call"
+        );
+    }
+
+    #[test]
+    fn xml_reasoning_before_the_call_is_not_part_of_it() {
+        // The templates explicitly permit "optional reasoning for your function
+        // call in natural language BEFORE the function call", so a leading
+        // sentence is normal output, not a malformed call.
+        let text = format!(
+            "I should look that up.\n{}",
+            xml_markup("search", &[("query", "window")])
+        );
+        let call = parse_tool_call(&text)
+            .expect("an XML-dialect body is a tool call, not the model's answer");
+        assert_eq!(call.name, "search");
+        assert_eq!(call.arguments, serde_json::json!({"query": "window"}));
+    }
+
+    #[test]
+    fn an_xml_argument_keeps_a_value_full_of_markup() {
+        // Argument values are arbitrary model text: angle brackets, newlines, and
+        // even the closing tag itself. Ending the value at the first `<`, or at
+        // the first `</parameter>`, would truncate this query silently — the
+        // model would get an answer to a question it did not ask.
+        let value = "impl<T> where T: Iterator<Item = u8>\nand a literal </parameter> in the text";
+        let call = parse_tool_call(&xml_markup("search", &[("query", value)]))
+            .expect("an XML-dialect body is a tool call, not the model's answer");
+        assert_eq!(call.arguments["query"], serde_json::json!(value));
+    }
+
+    #[test]
+    fn xml_arguments_arrive_typed_like_the_json_dialect() {
+        // The wire form is untyped, but the graph registry reads `limit` with
+        // `as_u64` and `categories` with `as_array`: handing those on as strings
+        // would not error, it would fall back to the default limit and to "all
+        // categories" — the model's request quietly ignored.
+        let call = parse_tool_call(&xml_markup(
+            "search",
+            &[
+                ("query", "window"),
+                ("limit", "25"),
+                ("categories", "[\"todo\", \"fixme\"]"),
+            ],
+        ))
+        .expect("an XML-dialect body is a tool call, not the model's answer");
+        assert_eq!(call.arguments["query"], serde_json::json!("window"));
+        assert_eq!(call.arguments["limit"], serde_json::json!(25));
+        assert_eq!(
+            call.arguments["categories"],
+            serde_json::json!(["todo", "fixme"])
+        );
+    }
+
+    #[test]
+    fn a_string_argument_whose_text_is_json_is_typed_as_json() {
+        // The declared limit of typing an untyped wire, pinned so it stays a
+        // decision rather than a surprise. `search(query="42")` reaches the tool
+        // as the number 42 and `search` answers "needs a string `query`", which
+        // is fed back and gives the model a round to correct itself — visible and
+        // self-correcting, unlike the silent default an untyped `limit` would get.
+        let call = parse_tool_call(&xml_markup("search", &[("query", "42")]))
+            .expect("an XML-dialect body is a tool call, not the model's answer");
+        assert_eq!(call.arguments["query"], serde_json::json!(42));
+        // Quotes in the value are the value's own: the wire form writes strings
+        // bare, so a quoted body is text that happened to contain quotes.
+        let call = parse_tool_call(&xml_markup("search", &[("query", "\"42\"")]))
+            .expect("an XML-dialect body is a tool call, not the model's answer");
+        assert_eq!(call.arguments["query"], serde_json::json!("\"42\""));
+    }
+
+    #[test]
+    fn a_body_in_neither_dialect_is_still_no_call() {
+        // Understanding a second dialect must not slide into accepting anything.
+        // This one passes before the fix as well as after, by construction: it
+        // exists to fail if a later widening makes the parser guess.
+        for body in [
+            "not json, and not xml either",
+            "<function>search</function>",
+            "<function=>\n<parameter=key>fn:foo</parameter>\n</function>",
+            "<parameter=key>fn:foo</parameter>",
+            "{\"arguments\": {\"key\": \"fn:foo\"}}",
+        ] {
+            assert!(
+                parse_tool_call(&format!("<tool_call>{body}</tool_call>")).is_none(),
+                "accepted a body in neither dialect: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_dialect_parses_to_the_same_call() {
+        // Driven from `Dialect::ALL`, which is the only thing that makes a
+        // dialect reachable: a third one has to render this call and arrive at
+        // the same `ToolCall`, arguments and their types included. Two parsers
+        // that agree today and drift tomorrow is the shape being avoided.
+        let expected = ToolCall {
+            name: "search".to_owned(),
+            arguments: serde_json::json!({"query": "window", "limit": 5}),
+        };
+        for dialect in Dialect::ALL {
+            let markup = match dialect {
+                Dialect::Json => call_markup("search", "{\"query\":\"window\",\"limit\":5}"),
+                Dialect::Xml => xml_markup("search", &[("query", "window"), ("limit", "5")]),
+            };
+            assert_eq!(
+                parse_tool_call(&markup),
+                Some(expected.clone()),
+                "{dialect:?} produced a different call"
+            );
+        }
+    }
+
+    #[test]
+    fn the_loop_runs_an_xml_dialect_call_instead_of_answering_with_it() {
+        // The defect is not in the parser alone. An unparsed call is not an error
+        // — it is *absence* — so the loop reads the generation as the model's
+        // final answer and returns the raw markup to the user. The parser unit
+        // tests above cannot see that; this one can.
+        let engine = ScriptedEngine::new(&[
+            xml_markup("echo", &[("key", "abc")]),
+            "the node abc is a function".to_owned(),
+        ]);
+        let req = ChatRequest {
+            model: "scripted".to_owned(),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: "explain abc".to_owned(),
+            }],
+            images: vec![],
+            audio: vec![],
+            temperature: 0.0,
+            max_tokens: 64,
+        };
+        let out = chat_with_tools(&engine, &EchoRegistry, &req, 4).expect("completion");
+        assert_eq!(
+            out.content, "the node abc is a function",
+            "the answer, not the tool call rendered as prose"
+        );
+        assert!(
+            engine.turns.lock().unwrap().is_empty(),
+            "both rounds ran: the call was executed and fed back"
+        );
+        let fed_back = engine
+            .round(1)
+            .into_iter()
+            .find(|m| m.role == "user" && m.content.starts_with("<tool_response>"))
+            .expect("a tool result was fed back");
+        assert!(
+            fed_back.content.contains("echoed:abc"),
+            "the XML argument reached the tool: {fed_back:?}"
+        );
+    }
+
+    #[test]
+    fn an_xml_dialect_client_tool_call_is_returned_structurally() {
+        // The same silent-wrong-answer shape on the #485 path: a client whose
+        // model wrote XML would receive `finish_reason: "stop"` and the markup as
+        // the assistant's message, instead of a tool call it could run.
+        let engine = ScriptedEngine::new(&[xml_markup("get_weather", &[("city", "Berlin")])]);
+        let out = chat_with_client_tools(
+            &engine,
+            &NeverCalled("graph_only_tool"),
+            &[client_tool("get_weather")],
+            &user_request(),
+            4,
+        )
+        .expect("outcome");
+        assert_eq!(out.client_tool_calls.len(), 1);
+        assert_eq!(out.client_tool_calls[0].name, "get_weather");
+        assert_eq!(
+            out.client_tool_calls[0].arguments,
+            serde_json::json!({"city": "Berlin"})
+        );
     }
 }
