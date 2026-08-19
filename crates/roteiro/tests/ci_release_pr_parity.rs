@@ -29,6 +29,7 @@
 //! moment the fix was cheap.
 
 use std::collections::BTreeSet;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use yaml_rust2::Yaml;
 
@@ -90,18 +91,80 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The parsed `jobs:` mapping of a workflow, or `None` when the file is absent —
-/// a packaged crate has no `.github/`, and this guard is about *this repository*.
-fn workflow_jobs(path: &Path) -> Option<Vec<(String, Yaml)>> {
-    let text = std::fs::read_to_string(path).ok()?;
+/// Whether this is a checkout of the Roteiro repository, rather than a packaged
+/// crate unpacked from the registry.
+///
+/// The marker is the **workspace** manifest two levels above `crates/roteiro`. A
+/// packaged crate has no such ancestor: `CARGO_MANIFEST_DIR` is then
+/// `…/registry/src/<index>/roteiro-<version>`, and two levels above that is the
+/// registry's source directory, which holds sibling crates and no workspace
+/// manifest.
+///
+/// This marker has to be as loud as the thing it guards, or it is the same
+/// defect one level up with more steps: a marker that read `false` on an IO
+/// error would turn "cannot read the repository" into "this is not a
+/// repository", and skip. So only `NotFound` means absent, and every other error
+/// panics.
+fn is_repository_checkout() -> bool {
+    let manifest = repo_root().join("Cargo.toml");
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). Without it this test cannot tell a \
+             packaged crate from a repository checkout, and guessing would make \
+             the guard skip in silence — which is the failure this whole file \
+             exists to rule out.",
+            manifest.display(),
+            e.kind(),
+        ),
+    }
+}
+
+/// A repository file's contents, or `None` when this is not a repository
+/// checkout at all.
+///
+/// The skip is legitimate: a packaged crate has no `.github/`, and this guard is
+/// about *this repository*. Collapsing every IO error into that one meaning is
+/// not. This guard exists to catch a defect that is **invisible by
+/// construction** — #482's gap was unreachable from any branch not named
+/// `release-plz-*`, which is why nothing else could find it — so a green that
+/// actually means "could not read the subject" is worse than no guard at all,
+/// because by then the green is load-bearing. #401's fragment guard set the
+/// standard by failing on an empty scan rather than skipping.
+///
+/// So the skip is made *verifiable* rather than merely narrower. Absent **and**
+/// not a checkout is the skip. Absent **in** a checkout is a failure — the file
+/// is committed, so it is supposed to be there. Anything else — permissions, a
+/// bad symlink, an IO error mid-read — panics naming the path and the kind.
+fn read_repo_file(rel: &str) -> Option<String> {
+    let path = repo_root().join(rel);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == ErrorKind::NotFound && !is_repository_checkout() => None,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). This guard asserts a property of that \
+             file, so skipping here would be a green that means \"could not \
+             look\". If the file moved or was deliberately deleted, this test \
+             moves or goes with it.",
+            path.display(),
+            e.kind(),
+        ),
+    }
+}
+
+/// The parsed `jobs:` mapping of the workflow at `rel`, or `None` outside a
+/// repository checkout.
+fn workflow_jobs(rel: &str) -> Option<Vec<(String, Yaml)>> {
+    let text = read_repo_file(rel)?;
     let docs = yaml_rust2::YamlLoader::load_from_str(&text)
-        .unwrap_or_else(|e| panic!("{} is not parseable YAML: {e}", path.display()));
+        .unwrap_or_else(|e| panic!("{rel} is not parseable YAML: {e}"));
     let doc = docs
         .first()
-        .unwrap_or_else(|| panic!("{} is an empty YAML document", path.display()));
+        .unwrap_or_else(|| panic!("{rel} is an empty YAML document"));
     let jobs = field(doc, "jobs")
         .and_then(Yaml::as_hash)
-        .unwrap_or_else(|| panic!("{} has no `jobs:` mapping", path.display()));
+        .unwrap_or_else(|| panic!("{rel} has no `jobs:` mapping"));
     Some(
         jobs.iter()
             .filter_map(|(name, job)| Some((name.as_str()?.to_owned(), job.clone())))
@@ -111,7 +174,7 @@ fn workflow_jobs(path: &Path) -> Option<Vec<(String, Yaml)>> {
 
 /// The jobs of this repository's `ci.yml`.
 fn ci_jobs() -> Option<Vec<(String, Yaml)>> {
-    workflow_jobs(&repo_root().join(".github/workflows/ci.yml"))
+    workflow_jobs(".github/workflows/ci.yml")
 }
 
 /// The value at `key` in a YAML mapping.

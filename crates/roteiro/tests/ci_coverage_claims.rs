@@ -18,6 +18,7 @@
 //! Making the coverage job blocking is a fine thing to do — but it has to happen
 //! in the same change that rewrites §11, and this test is what forces the pair.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// The repository root, from this crate's manifest directory (`crates/roteiro`).
@@ -29,10 +30,64 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Read a repo file, or `None` when it is absent — a packaged crate has no
-/// `.github/` or `docs/`, and this guard is about *this repository*.
+/// Whether this is a checkout of the Roteiro repository, rather than a packaged
+/// crate unpacked from the registry.
+///
+/// The marker is the **workspace** manifest two levels above `crates/roteiro`. A
+/// packaged crate has no such ancestor: `CARGO_MANIFEST_DIR` is then
+/// `…/registry/src/<index>/roteiro-<version>`, and two levels above that is the
+/// registry's source directory, which holds sibling crates and no workspace
+/// manifest.
+///
+/// This marker has to be as loud as the thing it guards, or it is the same
+/// defect one level up with more steps: a marker that read `false` on an IO
+/// error would turn "cannot read the repository" into "this is not a
+/// repository", and skip. So only `NotFound` means absent, and every other error
+/// panics.
+fn is_repository_checkout() -> bool {
+    let manifest = repo_root().join("Cargo.toml");
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). Without it this test cannot tell a \
+             packaged crate from a repository checkout, and guessing would make \
+             the guard skip in silence.",
+            manifest.display(),
+            e.kind(),
+        ),
+    }
+}
+
+/// Read a repo file, or `None` when this is not a repository checkout at all.
+///
+/// The skip is legitimate: a packaged crate has no `.github/` or `docs/`, and
+/// this guard is about *this repository*. Collapsing every IO error into that
+/// one meaning is not, and it used to — `.ok()` reported "absent" for a
+/// permission error, a bad symlink or any other IO fault, so the guard could
+/// report green having read nothing. For a test whose entire job is to notice a
+/// claim quietly going false, that is the failure it exists to prevent, wearing
+/// the guard's own clothes.
+///
+/// So the skip is verifiable rather than merely narrow. Absent **and** not a
+/// checkout is the skip. Absent **in** a checkout is a failure: every path this
+/// reads is committed, and a document deleted out from under the list here
+/// should take the list entry with it rather than silently stop being checked.
+/// Anything else panics naming the path and the error kind.
 fn repo_file(rel: &str) -> Option<String> {
-    std::fs::read_to_string(repo_root().join(rel)).ok()
+    let path = repo_root().join(rel);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == ErrorKind::NotFound && !is_repository_checkout() => None,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). This guard asserts a property of that \
+             file, so skipping here would be a green that means \"could not \
+             look\". If the file moved or was deliberately deleted, update the \
+             list in this test in the same change.",
+            path.display(),
+            e.kind(),
+        ),
+    }
 }
 
 /// `ci.yml` with every comment line dropped.
