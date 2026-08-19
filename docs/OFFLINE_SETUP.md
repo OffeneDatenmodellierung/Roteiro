@@ -267,26 +267,73 @@ None of those touched the code. Neither does a toolchain bump or a different
 `--all-features`, which is why the report names the linter's version, the rustc
 version and host, and the feature set it resolved with.
 
+#### It is sandboxed by default, so out of the box it refuses
+
+`roteiro lint` runs the linter in a sandbox unless you have said otherwise
+([ADR-0020](adr/0020-build-capable-sandboxed-execution.md) §6) — and **the
+sandboxed builder is not built yet**, so with no grant the command explains that
+and stops, having run nothing.
+
+That is on purpose, not a gap someone forgot to fill. `clippy` has `cargo check`
+semantics: linting compiles the tree, which executes its build scripts and loads
+its proc macros with your filesystem and your credentials — 54 build scripts and
+7 proc macros in this repository by default, 87 and 33 under `--all-features`. In
+your own repository that is the build you were going to run anyway. In a branch
+you are reviewing it is somebody else's code, and that the *toolchain* is yours
+does not make the *code* yours. Shipping host execution as the default *because*
+the sandbox is unfinished would let a missing capability decide a question that
+was supposed to be decided deliberately.
+
+So you opt in, and **either of these is enough — you do not need both**:
+
 ```sh
-roteiro lint clippy                    # default features
-roteiro lint clippy --all-features     # a different, also-true number
-roteiro lint clippy --json             # the same report, with `"stored": false`
+# for one run
+roteiro lint clippy --allow-unsandboxed
+
+# or standing, in your own ~/.roteiro/config.toml (never in roteiro.toml)
+[lint]
+allow_unsandboxed = true
 ```
 
-Two things it needs, and one it does not. It needs a Rust toolchain with the
-component installed: a missing `cargo` or a toolchain without clippy is an
-**error naming what to install**, never an empty report — "no diagnostics" and
-"nothing ran" must not look the same. It does **not** need a prefetch, because a
-linter has no pinned rule set to provision: its rules *are* the toolchain plus
-this repository's own `[workspace.lints]`.
+`--sandboxed` asks for the sandbox explicitly, which is how you opt one run back
+out of a standing grant. It refuses today, and **it never falls back**: asking
+for isolation and getting execution is the one outcome this command will not
+produce.
 
-It also runs **on this host with no isolation**, and unlike `security run` it
-does not ask for a flag first — the toolchain is yours and the tree is the one
-you are standing in, so `cargo clippy` here is the build you were going to run
-anyway. Reviewing somebody else's branch is the case where that is not true:
-`clippy` has `cargo check` semantics, so that branch's build scripts and proc
-macros execute on your machine. The argv and the isolation are printed before the
-run; the sandboxed builder that would answer it is ADR-0020's unbuilt work.
+The grant is layered the way [ADR-0019](adr/0019-remote-model-tier.md) layers the
+remote tier, and for the same reason — `roteiro.toml` is committed and shared:
+
+| Layer | May deny | May grant |
+|---|---|---|
+| Built-in default | sandboxed by default | — |
+| Project `roteiro.toml` | **yes** | **no** |
+| User `~/.roteiro/config.toml` | yes | **yes** |
+| `--allow-unsandboxed` / `--sandboxed` | yes | **yes** |
+
+A merged line that starts running builds on every teammate's machine is consent
+granted by someone else and noticed by nobody, so a committed file may switch the
+sandbox *on* for everyone and may never switch it *off* for anyone. It differs
+from `[remote] enabled` in one respect: there the user layer and the flag must
+**both** grant, here **either** suffices — otherwise you would still type the
+flag every run and the key would be pointless. `roteiro config` prints the key,
+both layers, and which one decided.
+
+```sh
+roteiro lint clippy --allow-unsandboxed                 # default features
+roteiro lint clippy --allow-unsandboxed --all-features  # a different, also-true number
+roteiro lint clippy --allow-unsandboxed --json          # with `"stored": false`
+```
+
+#### What it needs, and what it does not
+
+It needs a Rust toolchain with the component installed: a missing `cargo` or a
+toolchain without clippy is an **error naming what to install**, never an empty
+report — "no diagnostics" and "nothing ran" must not look the same. It does
+**not** need a prefetch, because a linter has no pinned rule set to provision:
+its rules *are* the toolchain plus this repository's own `[workspace.lints]`.
+
+A granted run still records and prints `isolation: none`, and still discloses its
+argv before starting. A grant changes who chose, not what happened.
 
 ### Or install none of them: `roteiro security ingest`
 

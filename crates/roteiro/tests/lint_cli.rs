@@ -80,7 +80,43 @@ impl Fixture {
         fixture
     }
 
+    /// Write (or remove) the **project** layer, `roteiro.toml`. Committed and
+    /// shared — the file ADR-0020 §6 says may deny host execution and never
+    /// grant it.
+    fn project_layer(&self, allow_unsandboxed: Option<bool>) {
+        write_layer(&self.repo.join("roteiro.toml"), allow_unsandboxed);
+    }
+
+    /// Write (or remove) the **user** layer — the one that may grant.
+    ///
+    /// `$ROTEIRO_HOME/config.toml`, which the fixture points at its own
+    /// directory, rather than the literal `~/.roteiro/config.toml` the messages
+    /// name: that is where the binary looks when `ROTEIRO_HOME` is set, and a
+    /// test that wrote to the other path would silently exercise an absent
+    /// layer — which is exactly how this test first passed for the wrong reason.
+    fn user_layer(&self, allow_unsandboxed: Option<bool>) {
+        let dir = self.repo.join(".home");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        write_layer(&dir.join("config.toml"), allow_unsandboxed);
+    }
+
+    /// Whether `cargo` ever ran in this fixture.
+    ///
+    /// The load-bearing assertion for "nothing fell back to the host": a refusal
+    /// that still compiled the tree would leave `target/` behind, and no amount
+    /// of reading the exit status would notice. Checking the *absence of a side
+    /// effect* is the only way to tell a refusal from a quiet run.
+    fn built_anything(&self) -> bool {
+        self.repo.join("target").exists()
+    }
+
     /// Run the CLI in the fixture, optionally overriding environment variables.
+    ///
+    /// `HOME` is the fixture's own, so the user config layer is the fixture's
+    /// too — but `CARGO_HOME`/`RUSTUP_HOME` are inherited from the real
+    /// environment, because rustup finds its toolchains through `HOME` and a
+    /// fixture home has none. Without them a granted run fails for a reason that
+    /// has nothing to do with what is being tested.
     fn roteiro(&self, args: &[&str], env: &[(&str, &Path)]) -> std::process::Output {
         let mut command = Command::new(BIN);
         command
@@ -91,6 +127,11 @@ impl Fixture {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for key in ["CARGO_HOME", "RUSTUP_HOME"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
         for (key, value) in env {
             command.env(key, value);
         }
@@ -108,6 +149,20 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.repo).ok();
+    }
+}
+
+/// Write a config layer holding just `[lint] allow_unsandboxed`, or remove the
+/// file when the key is absent — so "this layer says nothing" is a state a test
+/// can ask for rather than one it has to arrange by not calling anything.
+fn write_layer(path: &Path, allow_unsandboxed: Option<bool>) {
+    match allow_unsandboxed {
+        Some(value) => {
+            std::fs::write(path, format!("[lint]\nallow_unsandboxed = {value}\n")).expect("write");
+        }
+        None => {
+            std::fs::remove_file(path).ok();
+        }
     }
 }
 
@@ -141,7 +196,7 @@ fn a_lint_run_leaves_the_findings_tables_byte_identical() {
         "the control must be non-empty, or this test cannot fail"
     );
 
-    let lint = fixture.roteiro(&["lint", "clippy", "--json"], &[]);
+    let lint = fixture.roteiro(&["lint", "clippy", "--allow-unsandboxed", "--json"], &[]);
     let after = fixture.findings_listing();
     assert_eq!(
         String::from_utf8_lossy(&before),
@@ -179,7 +234,16 @@ fn a_lint_run_leaves_the_findings_tables_byte_identical() {
 #[test]
 fn the_report_says_what_produced_it() {
     let fixture = Fixture::new("evidence");
-    let lint = fixture.roteiro(&["lint", "clippy", "--all-features", "--json"], &[]);
+    let lint = fixture.roteiro(
+        &[
+            "lint",
+            "clippy",
+            "--allow-unsandboxed",
+            "--all-features",
+            "--json",
+        ],
+        &[],
+    );
     let stderr = String::from_utf8_lossy(&lint.stderr).into_owned();
     if !lint.status.success() {
         assert!(
@@ -248,7 +312,10 @@ fn a_missing_toolchain_is_an_error_that_names_what_to_install() {
     let empty = fixture.repo.join(".empty-path");
     std::fs::create_dir_all(&empty).expect("mkdir");
 
-    let lint = fixture.roteiro(&["lint", "clippy"], &[("PATH", empty.as_path())]);
+    let lint = fixture.roteiro(
+        &["lint", "clippy", "--allow-unsandboxed"],
+        &[("PATH", empty.as_path())],
+    );
     assert!(
         !lint.status.success(),
         "a missing toolchain must fail: {lint:?}"
@@ -277,7 +344,7 @@ fn a_missing_toolchain_is_an_error_that_names_what_to_install() {
 #[test]
 fn a_storing_analyzer_is_refused_and_the_disclosure_does_not_lie_about_it() {
     let fixture = Fixture::new("wrong-analyzer");
-    let out = fixture.roteiro(&["lint", "semgrep"], &[]);
+    let out = fixture.roteiro(&["lint", "semgrep", "--allow-unsandboxed"], &[]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("roteiro security run"), "{stderr}");
@@ -289,4 +356,220 @@ fn a_storing_analyzer_is_refused_and_the_disclosure_does_not_lie_about_it() {
         !stderr.contains("running semgrep"),
         "no run was disclosed for an analyzer that cannot run: {stderr}"
     );
+}
+
+/// **The inversion, end to end.** With nothing configured and no flag,
+/// `roteiro lint` runs nothing at all (ADR-0020 §6).
+///
+/// Before v1.3 this compiled the tree on the host. The assertion that carries
+/// the weight is [`Fixture::built_anything`]: an exit status alone cannot tell a
+/// refusal from a run that happened and then complained.
+#[test]
+fn by_default_it_refuses_and_runs_nothing() {
+    let fixture = Fixture::new("default-refuses");
+    let before = fixture.findings_listing();
+    assert!(!fixture.built_anything(), "the fixture starts unbuilt");
+
+    let out = fixture.roteiro(&["lint", "clippy"], &[]);
+    assert!(!out.status.success(), "the default must refuse: {out:?}");
+    assert!(
+        !fixture.built_anything(),
+        "a refusal compiled the tree — nothing may fall back to the host"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The refusal is the whole UX until the sandbox lands, so it is held to it:
+    // what happened, why, and both ways out.
+    assert!(stderr.contains("sandboxed by default"), "{stderr}");
+    assert!(stderr.contains("not built yet"), "{stderr}");
+    assert!(stderr.contains("--allow-unsandboxed"), "{stderr}");
+    assert!(stderr.contains("allow_unsandboxed = true"), "{stderr}");
+    assert!(stderr.contains("~/.roteiro/config.toml"), "{stderr}");
+    assert!(
+        stderr.contains("cannot grant"),
+        "and that the committed file is not the place: {stderr}"
+    );
+    assert!(
+        stderr.contains("do not need both"),
+        "and that either remedy suffices — otherwise the config key reads as a          second step and nobody stops typing the flag: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "a refusal reports nothing at all"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&before),
+        String::from_utf8_lossy(&fixture.findings_listing()),
+        "and it still writes nothing to the store"
+    );
+}
+
+/// A **project** grant must not enable host execution — the row that makes the
+/// layering real rather than documented. `roteiro.toml` is committed, so a
+/// merged line would otherwise start running builds on every teammate's machine.
+#[test]
+fn a_committed_project_grant_does_not_enable_host_execution() {
+    let fixture = Fixture::new("project-grant");
+    fixture.project_layer(Some(true));
+
+    let out = fixture.roteiro(&["lint", "clippy"], &[]);
+    assert!(
+        !out.status.success(),
+        "a committed file may never grant host execution: {out:?}"
+    );
+    assert!(!fixture.built_anything(), "and nothing may have been built");
+
+    // Ignored, but never silently: a team that wrote it needs telling.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("read and ignored"), "{stderr}");
+    assert!(stderr.contains("roteiro.toml"), "{stderr}");
+}
+
+/// A **project deny** overrides a user grant. A repository that wants the
+/// sandbox enforced gets it, and the person working in it is told to take it up
+/// with the repository rather than sent to edit their own config uselessly.
+#[test]
+fn a_project_deny_overrides_a_user_grant() {
+    let fixture = Fixture::new("project-deny");
+    fixture.user_layer(Some(true));
+    fixture.project_layer(Some(false));
+
+    for args in [
+        &["lint", "clippy"][..],
+        &["lint", "clippy", "--allow-unsandboxed"][..],
+    ] {
+        let out = fixture.roteiro(args, &[]);
+        assert!(
+            !out.status.success(),
+            "{args:?} must be refused by the project layer: {out:?}"
+        );
+        assert!(!fixture.built_anything(), "{args:?} built something");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("roteiro.toml"), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains("Pass `--allow-unsandboxed`"),
+            "{args:?}: a remedy that would not work must not be offered: {stderr}"
+        );
+    }
+}
+
+/// The user layer grants on its own — no flag — which is the asymmetry with
+/// ADR-0019 that makes the config key worth having.
+#[test]
+fn a_user_layer_grant_is_enough_on_its_own() {
+    let fixture = Fixture::new("user-grant");
+    fixture.user_layer(Some(true));
+
+    let out = fixture.roteiro(&["lint", "clippy", "--json"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        assert!(
+            linter_is_absent(&stderr),
+            "lint failed unexpectedly: {stderr}"
+        );
+        return;
+    }
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("lint emits JSON");
+    assert_eq!(
+        report["stored"], false,
+        "a grant changes who chose, not what is kept"
+    );
+    assert_eq!(
+        report["isolation"], "none",
+        "and it does not upgrade the isolation it reports"
+    );
+}
+
+/// `--sandboxed` refuses rather than falling back, even over a standing grant.
+/// Asking for isolation and getting execution is the one outcome ADR-0020 §6
+/// forbids outright.
+#[test]
+fn asking_for_the_sandbox_refuses_and_never_falls_back_to_the_host() {
+    let fixture = Fixture::new("sandboxed");
+    fixture.user_layer(Some(true));
+
+    let out = fixture.roteiro(&["lint", "clippy", "--sandboxed"], &[]);
+    assert!(
+        !out.status.success(),
+        "no sandbox exists to honour it: {out:?}"
+    );
+    assert!(
+        !fixture.built_anything(),
+        "asking for isolation must never produce execution"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--sandboxed"), "{stderr}");
+    assert!(
+        stderr.contains("fell back") || stderr.contains("not produce"),
+        "the refusal must say it did not downgrade: {stderr}"
+    );
+}
+
+/// The report and the behaviour must not disagree, in the arrangement where they
+/// most easily could: the project denies and the user grants.
+///
+/// Found by fault injection. Removing the project-deny short-circuit from
+/// `as_effective` leaves the *gate* correct — it consults `project_denied`
+/// first — while `roteiro config` starts echoing `Some(true)` over a run that
+/// refuses. Every other test here passed. A report that contradicts the
+/// behaviour is worse than no report, because ADR-0007's whole claim for this
+/// command is that it answers "why did it do that?".
+#[test]
+fn the_reported_value_agrees_with_the_refusal_when_a_project_denies() {
+    let fixture = Fixture::new("deny-echo");
+    fixture.project_layer(Some(false));
+    fixture.user_layer(Some(true));
+
+    let refused = fixture.roteiro(&["lint", "clippy"], &[]);
+    assert!(!refused.status.success(), "the project denied: {refused:?}");
+
+    let out = fixture.roteiro(&["config"], &[]);
+    assert!(out.status.success(), "config failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("allow_unsandboxed"))
+        .unwrap_or_else(|| panic!("no allow_unsandboxed line in:\n{stdout}"));
+    assert!(
+        line.contains("allow_unsandboxed = Some(false)"),
+        "the effective value must echo the denial that actually took effect, not \
+         the user grant it overruled: {line}"
+    );
+    assert!(line.contains("project: Some(false)"), "{line}");
+    assert!(line.contains("user: Some(true)"), "{line}");
+}
+
+/// ADR-0007's point: someone can ask "why did it do that?" and be answered.
+/// `roteiro config` shows the key, both layers, and which one won.
+#[test]
+fn roteiro_config_shows_the_key_and_the_layer_that_decided_it() {
+    let fixture = Fixture::new("config-report");
+    fixture.project_layer(Some(true));
+    fixture.user_layer(Some(false));
+
+    let out = fixture.roteiro(&["config"], &[]);
+    assert!(out.status.success(), "config failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let section: String = stdout
+        .lines()
+        .skip_while(|l| !l.starts_with("[lint]"))
+        .take_while(|l| !l.starts_with("[debt]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!section.is_empty(), "no [lint] section in:\n{stdout}");
+    assert!(section.contains("allow_unsandboxed"), "{section}");
+    // Per-layer, not just merged: the merged value alone cannot answer "why".
+    assert!(section.contains("project: Some(true)"), "{section}");
+    assert!(section.contains("user: Some(false)"), "{section}");
+    assert!(
+        section.contains("may deny, never grant"),
+        "each layer must be labelled with what it is allowed to do: {section}"
+    );
+    assert!(
+        section.contains("read and ignored"),
+        "and the discarded project grant must be called out: {section}"
+    );
+    // The default is the whole story for this key, so the header states it.
+    assert!(section.contains("sandboxed by default"), "{section}");
 }

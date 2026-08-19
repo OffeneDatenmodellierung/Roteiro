@@ -128,6 +128,13 @@ mod ingest;
 /// conversion ADR-0014 warns against rather than a refactor.
 #[cfg(feature = "exec-subprocess")]
 pub mod lint;
+/// ADR-0020 §6's grant: may a linter run on **this host**?
+///
+/// Ungated, unlike [`lint`] itself. A policy that existed only where the
+/// capability does would be the conversion ADR-0014 warns about, so the answer
+/// is the same in a build that cannot run a linter as in one that can — see the
+/// module's own documentation.
+pub mod lint_grant;
 mod runner;
 /// The per-file digests of the extracted sandbox runtime — **generated**.
 ///
@@ -174,6 +181,13 @@ pub use ingest::{
 pub use lint::{
     LINT_ANALYZERS, LintError, LintOutcome, Toolchain, invocation as lint_invocation,
     run as run_lint,
+};
+// ADR-0020 §6's grant. Re-exported under `lint_`-prefixed names because the
+// concepts have twins in `rto-remote` (ADR-0019 §3) and a reader who meets
+// `ConfigGrant` in the binary must be able to see which of the two it is.
+pub use lint_grant::{
+    ConfigGrant as LintConfigGrant, Decision as LintDecision, Reason as LintReason,
+    Requested as LintRequested, decide as decide_lint_host,
 };
 pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,

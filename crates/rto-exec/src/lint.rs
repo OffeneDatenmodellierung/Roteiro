@@ -29,33 +29,46 @@
 //! # It is not an [`AnalyzerRunner`], and that is not tidiness
 //!
 //! [`crate::check_request`] refuses any request whose worktree is not read-only,
-//! and every backend runs it. A linter cannot honour that: `cargo clippy` writes
-//! `target/`, which is inside the tree. The tempting move — relax the preflight
-//! so a builder fits through it — is exactly the silent conversion ADR-0014
-//! warns about, and ADR-0020's condition 1 forbids it (the relaxation belongs to
-//! a sandboxed build directory that does not exist yet). So this module takes a
-//! **different request shape** rather than a weakened one: no [`Consent`], no
-//! [`rto_graph::CommandPolicy`], no claim of a read-only tree, and no
-//! `AnalyzerRunner` impl to be handed to a caller that expects those promises.
-//! `check_request` is untouched and still refuses everything it refused before.
+//! and every backend runs it. This module does not go through it — not because a
+//! linter needs it relaxed, but because it has no [`crate::Worktree`] to present:
+//! it takes a directory and a grant, not an [`crate::AnalysisRequest`], and it
+//! produces no [`rto_graph::AnalysisRun`] for a policy to be recorded on. There
+//! is therefore no [`Consent`], no [`rto_graph::CommandPolicy`], and no
+//! `AnalyzerRunner` impl to be handed to a caller expecting those promises.
+//!
+//! ADR-0020 v1.1 hedged that a builder would need the preflight relaxed. v1.3
+//! withdraws the hedge on measurement: with `CARGO_TARGET_DIR` outside the tree
+//! and `--locked`, `cargo clippy` completes against a source tree on which every
+//! write is refused. So the writable surface a builder wants is an **added
+//! scratch directory**, not a **removed guarantee**, and `check_request` keeps
+//! refusing every writable worktree for readers and builders alike. Nothing here
+//! touches it. If a future change to this module seems to need it relaxed, that
+//! is the conversion ADR-0014 predicted, and the answer is the scratch mount.
 //!
 //! [`AnalyzerRunner`]: crate::AnalyzerRunner
 //! [`Consent`]: crate::Consent
 //!
-//! # What isolation it has: none, and it says so
+//! # Sandboxed is the default; the host is opt-in
 //!
-//! The linter runs as a child process on this host. `cargo clippy` has `cargo
-//! check` semantics, so it executes every build script in the resolved tree and
-//! loads every proc macro as a dylib into the compiler — measured on this
-//! repository at 54 build scripts and 7 proc macros by default, 87 and 33 under
-//! `--all-features` (ADR-0020). For **your own tree** that is the code you were
-//! going to build anyway, which is why this command does not gate on a consent
-//! flag the way `security run --allow-unsandboxed` does. For **someone else's**
-//! tree — reviewing an outside contributor's branch — it is that contributor's
-//! code executing on your machine, and the sandboxed builder that would answer
-//! it is unbuilt (ADR-0020 conditions 1–3). Every report says `isolation: none`
-//! and every non-JSON run prints the argv before running it, so neither reading
-//! depends on someone remembering this paragraph.
+//! `cargo clippy` has `cargo check` semantics, so it executes every build script
+//! in the resolved tree and loads every proc macro as a dylib into the compiler —
+//! measured on this repository at 54 build scripts and 7 proc macros by default,
+//! 87 and 33 under `--all-features` (ADR-0020). That is code executing on the
+//! host with the invoking user's filesystem and credentials, and **that the
+//! toolchain is yours does not make the code yours**: linting a branch you are
+//! reviewing runs its author's build scripts here.
+//!
+//! So ADR-0020 condition 6 puts the sandbox first and makes the host a thing a
+//! person opts into. Since conditions 1–2 are unbuilt there is no sandbox to
+//! select, which means the default **refuses** — see [`decide`] for the layering
+//! and [`Reason`] for what each refusal tells the reader to do about it. That
+//! refusal is deliberate rather than awkward: shipping host execution as the
+//! default *because* the sandbox is unfinished is exactly the conversion
+//! ADR-0014 warns about, a capability's availability quietly deciding a question
+//! that was supposed to be decided on purpose.
+//!
+//! A granted run still records `isolation: none` and still prints its argv
+//! first, because a grant changes who chose, not what happened.
 //!
 //! @rto:0014
 //! @rto:0020
@@ -70,6 +83,9 @@ use crate::adapter::{Invocation, NativeContext, UNKNOWN_VERSION};
 use crate::clock::rfc3339_utc;
 use crate::ingest::NormalizedReport;
 use crate::runner::ExecError;
+// The grant lives in its own ungated module (ADR-0020 §6 is policy, and policy
+// outlives the capability it governs); it is used here as if it were local.
+use crate::lint_grant::{Decision, Reason};
 use crate::snippet::WorktreeSnippets;
 use crate::subprocess::{SubprocessError, execute, scrub_environment, stderr_tail};
 
@@ -105,6 +121,17 @@ const TOOLCHAIN_ENV: &[&str] = &[
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LintError {
+    /// Host execution was not granted, so nothing ran (ADR-0020 §6).
+    ///
+    /// The **default** outcome, not an edge case: the sandbox is what a caller
+    /// gets for saying nothing, and it does not exist yet. The message is the
+    /// whole user interface for that state, so it is [`Reason::remedy`] verbatim
+    /// rather than a summary of it.
+    #[error("{}", .reason.remedy().unwrap_or("host execution was not granted"))]
+    HostExecutionNotGranted {
+        /// Which layer refused, and therefore which remedy was printed.
+        reason: Reason,
+    },
     /// `roteiro lint` was asked for an analyzer it does not drive.
     #[error(
         "`{requested}` is not a linter roteiro can run (known: {known}). \
@@ -262,12 +289,35 @@ pub fn invocation(analyzer: &str, features: &FeatureSet) -> Option<Invocation> {
 /// commit. No source identity is recorded, because recording one would imply a
 /// tie to a revision that a dirty tree does not have.
 ///
+/// `decision` is the outcome of [`decide`], and it is a **required argument
+/// rather than something read from a global** for the reason
+/// [`crate::SubprocessRunner::new`] takes its flag at construction: a caller must
+/// not be able to execute a build here by forgetting to check something. It is
+/// re-checked below even though every caller has already checked it, because a
+/// decision is a value that can be moved around and the check costs nothing.
+///
 /// # Errors
-/// Returns [`LintError`]: an unknown analyzer, a missing toolchain or linter
-/// (each naming what to install), no cargo project, a failed probe, a failed
-/// execution, output that is not a report, or a build that produced neither a
-/// completion nor a diagnostic.
-pub fn run(analyzer: &str, dir: &Path, features: &FeatureSet) -> Result<LintOutcome, LintError> {
+/// Returns [`LintError`]: **host execution not granted** (the default — see
+/// [`Reason`]), an unknown analyzer, a missing toolchain or linter (each naming
+/// what to install), no cargo project, a failed probe, a failed execution,
+/// output that is not a report, or a build that produced neither a completion
+/// nor a diagnostic.
+pub fn run(
+    analyzer: &str,
+    dir: &Path,
+    features: &FeatureSet,
+    decision: Decision,
+) -> Result<LintOutcome, LintError> {
+    // First, and before the analyzer name is even validated: a refusal must not
+    // depend on anything about the request. Checking the grant last would let a
+    // caller learn which analyzers this build drives by probing a gate that was
+    // supposed to be shut, and would put a `cargo locate-project` probe on the
+    // far side of it.
+    if !decision.granted() {
+        return Err(LintError::HostExecutionNotGranted {
+            reason: decision.reason,
+        });
+    }
     if analyzer != clippy::ANALYZER {
         return Err(LintError::UnknownAnalyzer {
             requested: analyzer.to_owned(),
@@ -496,6 +546,66 @@ mod tests {
         short_version,
     };
     use crate::adapter::clippy::FeatureSet;
+    use crate::lint_grant::{ConfigGrant, Reason, Requested, decide};
+
+    /// A decision that permits the host, for tests about everything *else*.
+    fn granted() -> crate::lint_grant::Decision {
+        let decision = decide(ConfigGrant::default(), Requested::Host);
+        assert!(decision.granted(), "the fixture must actually grant");
+        decision
+    }
+
+    /// ADR-0020 §6, at the seam that enforces it. Every caller checks the grant
+    /// first, and this is the check that makes forgetting to impossible rather
+    /// than merely unlikely — the reason
+    /// [`crate::SubprocessRunner::new`] takes its flag at construction too.
+    #[test]
+    fn refuses_to_run_at_all_without_a_grant() {
+        let ungranted = decide(ConfigGrant::default(), Requested::Unset);
+        let err = run(
+            "clippy",
+            std::path::Path::new("."),
+            &FeatureSet::Defaults,
+            ungranted,
+        )
+        .expect_err("must refuse");
+        assert!(
+            matches!(
+                err,
+                LintError::HostExecutionNotGranted {
+                    reason: Reason::Ungranted
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// The refusal comes before the analyzer name is even looked at, so a shut
+    /// gate cannot be used to enumerate what is behind it.
+    #[test]
+    fn an_ungranted_run_refuses_identically_whatever_it_was_asked_for() {
+        let ungranted = decide(ConfigGrant::default(), Requested::Unset);
+        let asked_for_a_real_one = run(
+            "clippy",
+            std::path::Path::new("."),
+            &FeatureSet::Defaults,
+            ungranted,
+        )
+        .expect_err("must refuse")
+        .to_string();
+        let asked_for_nonsense = run(
+            "no-such-linter",
+            std::path::Path::new("."),
+            &FeatureSet::Defaults,
+            ungranted,
+        )
+        .expect_err("must refuse")
+        .to_string();
+        assert_eq!(
+            asked_for_a_real_one, asked_for_nonsense,
+            "an ungranted refusal must not leak which analyzers exist"
+        );
+    }
 
     /// Asking a linter surface for a storing analyzer is a mistake worth a
     /// sentence: the two commands do different things to the store, so the
@@ -506,6 +616,7 @@ mod tests {
             "semgrep",
             std::path::Path::new("/nonexistent"),
             &FeatureSet::Defaults,
+            granted(),
         )
         .expect_err("must refuse");
         assert!(matches!(err, LintError::UnknownAnalyzer { .. }));

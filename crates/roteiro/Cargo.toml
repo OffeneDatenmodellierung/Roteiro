@@ -166,18 +166,24 @@ execution = ["dep:rto-exec", "dep:ureq"]
 # weaken it "for consistency" because the build-time gate is gone; it is carrying
 # the load the build-time gate used to share. ADR-0014 v1.1 records this.
 #
-# This feature also compiles **`roteiro lint`** (ADR-0020 v1.1), which executes on
-# this host with **no** equivalent flag — so read the sentence above precisely
-# rather than as a claim about every subprocess. What `--allow-unsandboxed` gates
-# is running a *third-party analyzer* here and filing its verdict as a stored fact
-# about the repository. `lint` runs the user's own toolchain over the tree they
-# are standing in — the build they were going to run anyway — and stores nothing
-# at all, so there is no verdict to file and no artifact to be wrong about later.
-# What it does expose is that tree's build scripts and proc macros, which is
-# disclosed per run (the argv and `isolation: none` print before it starts) and
-# spelled out in `roteiro lint --help`. Do not "restore consistency" in either
-# direction: not by putting a consent flag in front of `cargo clippy` in your own
-# checkout, and not by weakening `--allow-unsandboxed` because `lint` has none.
+# This feature also compiles **`roteiro lint`**, which under ADR-0020 v1.3 is
+# sandboxed by default and — since no sandboxed builder exists yet — **refuses**
+# unless host execution has been granted. An earlier revision of this note said
+# `lint` ran here with no equivalent gate, on the reasoning that it is your own
+# toolchain over the tree you are standing in. The owner overruled that, and
+# correctly: that the *toolchain* is yours does not make the *code* yours when
+# you are linting a branch you are reviewing, and `cargo clippy` has `cargo
+# check` semantics, so it runs that branch's build scripts here.
+#
+# So both commands now gate host execution, and they gate it differently on
+# purpose. `security run --allow-unsandboxed` is invocation-only: there is no
+# config key, and a run files its verdict into the store as a fact about the
+# repository. `roteiro lint` also accepts a standing grant — `[lint]
+# allow_unsandboxed` in the *user's own* config, never a committed `roteiro.toml`
+# — because it stores nothing and a person may reasonably say once that builds on
+# their own machine are fine. Do not collapse the two into one key without
+# deciding, in an ADR, whether a standing grant should also reach `security run`;
+# that would make an invocation-only gate reachable without the invocation.
 #
 # Keeping it a named feature is still worth it: `--no-default-features --features
 # execution` builds a Roteiro that provisions and ingests but **cannot execute**,
