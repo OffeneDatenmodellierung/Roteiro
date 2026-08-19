@@ -301,6 +301,55 @@ fn every_required_job_verifies_the_manifests_on_a_release_pr() {
     }
 }
 
+/// A required-check job is never skipped at the job level.
+///
+/// Every other assertion here reads a job's **steps** — and a job that does not
+/// run has no steps that run either, so all of them are vacuously satisfied by a
+/// job that GitHub skips. A skipped job reports `skipped`, which branch
+/// protection counts among the successful statuses, so the required context goes
+/// green having verified nothing. That is precisely the failure mode this file
+/// exists to prevent, reached by the one route the step-level checks are blind
+/// to: adding `if: !startsWith(github.head_ref, 'release-plz-')` to a required
+/// job would leave every assertion above passing.
+///
+/// Asserted as "no job-level `if:` at all" rather than "none that mentions
+/// `release-plz-`". The narrow form is evadable — the same exclusion can be
+/// spelled `github.event_name == 'push'`, or via an output of another job — and
+/// the invariant really is the broader one. The comment at the top of `ci.yml`
+/// argues at length that these jobs must RUN, so the required contexts are
+/// satisfied by a genuine `success` from a job that verified something rather
+/// than by `skipped`-counts-as-success. A condition that can skip one of them is
+/// against that whether or not it names a release branch.
+///
+/// The counterpart for non-required jobs is the opposite and sits below: those
+/// SHOULD be skipped outright, because nothing depends on them reporting.
+#[test]
+fn a_required_check_job_is_never_skipped_at_the_job_level() {
+    let Some(jobs) = ci_jobs() else {
+        return; // not a source checkout
+    };
+
+    for context in REQUIRED_CONTEXTS {
+        let Some((_, job)) = jobs.iter().find(|(name, _)| name == context) else {
+            continue; // reported by the classification test
+        };
+        let condition = condition(job);
+        assert!(
+            condition.is_none(),
+            "the required job `{context}` carries a job-level `if:` ({:?}). A \
+             skipped job reports `skipped`, which branch protection accepts as \
+             success — so the context would go green having verified nothing, \
+             and every step-level assertion in this file would pass vacuously \
+             because none of the steps ran. Move the condition onto the steps: \
+             `if: {EXPENSIVE_ARM}` on the expensive ones, `if: {CHEAP_ARM}` on \
+             the manifest check. If the job genuinely should not report at all, \
+             it is not a required check — take it out of branch protection and \
+             move it to NOT_REQUIRED_JOBS in the same change.",
+            condition.as_deref().unwrap_or("absent"),
+        );
+    }
+}
+
 /// No required-check job pays for expensive work on a release PR.
 ///
 /// The `!= 'true'` arm, asserted over *every* step rather than over a list of
