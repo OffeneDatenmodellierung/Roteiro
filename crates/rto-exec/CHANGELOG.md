@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.26.2...rto-exec-v1.26.3) - 2026-08-19
+
+### Fixed
+
+- one convention for a hint's upstream page, and a doc claim narrowed to what holds
+- a missing analyzer refusal says how to install it
+
 ## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.26.0...rto-exec-v1.26.1) - 2026-08-19
 
 ### Other
