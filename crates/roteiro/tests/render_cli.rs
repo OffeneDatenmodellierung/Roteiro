@@ -99,7 +99,7 @@ fn render_docs_builds_site_from_adrs_and_assets() {
     // ADR page rendered and themed; README skipped.
     let page = std::fs::read_to_string(site.join("adr/0001-example.html")).expect("adr page");
     assert!(page.starts_with("<!doctype html>"));
-    assert!(page.contains("<h1>ADR-0001: Example</h1>"));
+    assert!(page.contains("<h1 id=\"adr-0001-example\">ADR-0001: Example</h1>"));
     assert!(page.contains("<table>"), "GFM table should render");
     assert!(!page.contains("adr-id"), "frontmatter should be stripped");
     assert!(page.contains("← Back to roteiro.dev"));

@@ -18,6 +18,7 @@ use crate::adr::AdrDoc;
 use crate::annotate::Annotation;
 use crate::blueprint::BlueprintDoc;
 use crate::check::{Violation, ViolationKind};
+use crate::site::SitePage;
 
 /// Yields a blob's authored bytes, or `None` when the tree has no such file (a
 /// worktree deletion, which the caller drops).
@@ -37,10 +38,12 @@ pub struct AuthoredLayer {
     pub blueprints: Vec<BlueprintDoc>,
     /// `@rto:` annotations scanned from every other file.
     pub annotations: Vec<Annotation>,
-    /// ADRs under `docs/adr/` that did **not** parse. Carried as violations
-    /// rather than dropped: a malformed ADR is drift, not a skippable warning —
-    /// swallowing it lets the gate pass while silently discarding authored
-    /// intent.
+    /// ADRs under `docs/adr/` — and site pages anywhere — that did **not**
+    /// parse. Carried as violations rather than dropped: a malformed ADR is
+    /// drift, not a skippable warning — swallowing it lets the gate pass while
+    /// silently discarding authored intent. A site page that declared itself
+    /// published and then failed to parse is the same failure with a public
+    /// consequence: the page silently does not exist.
     pub malformed: Vec<Violation>,
 }
 
@@ -83,14 +86,75 @@ pub fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, 
     }
 }
 
+/// The authored layer **plus the site pages** — everything one tree's classify
+/// pass yields.
+///
+/// A wrapper rather than a fourth field on [`AuthoredLayer`], because that struct
+/// is destructured exhaustively by its callers and a new field is a breaking
+/// change for every one of them. Wrapping lets a caller adopt site pages when it
+/// is ready to render and gate them, and lets the rest keep compiling against
+/// exactly the layer they already handle — which matters here because the
+/// classification below must stay the *one* copy of the rule either way.
+#[derive(Debug, Default)]
+pub struct AuthoredDocs {
+    /// ADRs, blueprints, annotations, and anything malformed — including a site
+    /// page that declared itself published and then failed to parse.
+    pub layer: AuthoredLayer,
+    /// Documents that declared themselves published (`site-page:` frontmatter).
+    pub site: Vec<SitePage>,
+}
+
+/// Classify and parse the authored layer out of `blobs`, reading each blob's
+/// bytes with `read` — **discarding the site pages**.
+///
+/// Site pages are classified (they are not ADRs, blueprints or annotation
+/// carriers, and misfiling them would put website prose into the annotation
+/// scan) and then dropped, because this function's return type has nowhere to
+/// put them. A caller that publishes or gates the website wants
+/// [`authored_docs_from`], which is this function's whole body with the site
+/// pages kept.
+///
+/// # Errors
+/// Returns `E` if `read` fails.
+pub fn authored_layer_from<E>(
+    blobs: Vec<BlobRef>,
+    read: &BlobReader<'_, E>,
+) -> Result<AuthoredLayer, E> {
+    Ok(authored_docs_from(blobs, read)?.layer)
+}
+
+/// Read and parse the authored layer from `source`'s tree, **discarding the site
+/// pages** — see [`authored_layer_from`].
+///
+/// # Errors
+/// Returns [`GitError`] if the tree cannot be walked or a source file cannot be
+/// read.
+pub fn authored_layer(repo: &Repo, source: GraphSource) -> Result<AuthoredLayer, GitError> {
+    Ok(authored_docs(repo, source)?.layer)
+}
+
+/// Read and parse **everything** the authored classification yields from
+/// `source`'s tree: the file set from [`authored_blobs`], the bytes from
+/// [`Repo::read_source`], and the classification from [`authored_docs_from`].
+///
+/// # Errors
+/// Returns [`GitError`] if the tree cannot be walked or a source file cannot be
+/// read.
+pub fn authored_docs(repo: &Repo, source: GraphSource) -> Result<AuthoredDocs, GitError> {
+    authored_docs_from(authored_blobs(repo, source)?, &|blob| {
+        repo.read_source(blob, source)
+    })
+}
+
 /// Classify and parse the authored layer out of `blobs`, reading each blob's
 /// bytes with `read`.
 ///
 /// # This is the one copy of the classification rule
 ///
-/// Which path is an ADR, which markdown is a blueprint, which file merely carries
-/// `@rto:` annotations, and that a malformed ADR is drift rather than a skippable
-/// warning — that is a rule with one correct answer, and it now has three callers
+/// Which path is an ADR, which markdown is a blueprint, which markdown declares
+/// itself a published site page, which file merely carries `@rto:` annotations,
+/// and that a malformed ADR is drift rather than a skippable warning — that is a
+/// rule with one correct answer, and it now has three callers
 /// that reach it by different routes:
 ///
 /// - [`authored_layer`] below, from a [`GraphSource`] tree (`build_graph`);
@@ -114,11 +178,12 @@ pub fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, 
 /// # Errors
 /// Returns `E` if `read` fails. A file that reads but does not *parse* is not an
 /// error: a malformed ADR lands in [`AuthoredLayer::malformed`] as a violation.
-pub fn authored_layer_from<E>(
+pub fn authored_docs_from<E>(
     blobs: Vec<BlobRef>,
     read: &BlobReader<'_, E>,
-) -> Result<AuthoredLayer, E> {
-    let mut layer = AuthoredLayer::default();
+) -> Result<AuthoredDocs, E> {
+    let mut out = AuthoredDocs::default();
+    let layer = &mut out.layer;
     for blob in blobs {
         // Parse the authored source from the same tree the derived layer used.
         let Some(bytes) = read(&blob)? else {
@@ -143,6 +208,19 @@ pub fn authored_layer_from<E>(
                     message: format!("{}: cannot parse ADR: {e}", blob.path),
                 }),
             }
+        } else if is_md && crate::site::is_site_page(&text) {
+            // A document that declares itself published (`site-page:`) authors
+            // `[[…]]` links like an ADR, and is checked the same way — which is
+            // the entire reason the class exists. Classified before the blueprint
+            // rule so a published document is never demoted by a coincidence of
+            // its path or its H1.
+            match crate::site::parse_site_page(&blob.path, &text) {
+                Ok(page) => out.site.push(page),
+                Err(e) => layer.malformed.push(Violation {
+                    kind: ViolationKind::MalformedSitePage,
+                    message: format!("{}: cannot parse site page: {e}", blob.path),
+                }),
+            }
         } else if is_md && crate::blueprint::is_blueprint(&blob.path, &text) {
             // House-style blueprints (no frontmatter) author `[[…]]` links like
             // ADRs; their links are drift-checked against the derived graph too.
@@ -155,18 +233,138 @@ pub fn authored_layer_from<E>(
                 .extend(crate::annotate::scan_annotations(&blob.path, &text));
         }
     }
-    Ok(layer)
+    Ok(out)
 }
 
-/// Read and parse the authored layer from the tree named by `source`: the file
-/// set from [`authored_blobs`], the bytes from [`Repo::read_source`], and the
-/// classification from [`authored_layer_from`].
-///
-/// # Errors
-/// Returns [`GitError`] if the tree cannot be walked or a source file cannot be
-/// read.
-pub fn authored_layer(repo: &Repo, source: GraphSource) -> Result<AuthoredLayer, GitError> {
-    authored_layer_from(authored_blobs(repo, source)?, &|blob| {
-        repo.read_source(blob, source)
-    })
+#[cfg(test)]
+mod tests {
+    use super::authored_docs_from;
+    use rto_graph::BlobRef;
+
+    /// Classify a set of `(path, text)` pairs through the one classification
+    /// rule, reading bytes straight from the fixture.
+    fn classify(files: &[(&str, &str)]) -> super::AuthoredDocs {
+        let blobs: Vec<BlobRef> = files
+            .iter()
+            .map(|(path, _)| BlobRef {
+                path: (*path).to_owned(),
+                oid: String::new(),
+            })
+            .collect();
+        authored_docs_from(blobs, &|blob: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
+            Ok(files
+                .iter()
+                .find(|(p, _)| *p == blob.path)
+                .map(|(_, text)| text.as_bytes().to_vec()))
+        })
+        .expect("classify")
+    }
+
+    #[test]
+    fn publication_is_a_declaration_and_survives_living_outside_docs_site() {
+        // The rule that makes the class worth having: `docs/OFFLINE_SETUP.md`
+        // gains a public page *in place*, and the internal working documents
+        // beside it stay internal — neither outcome depends on a path.
+        let layer = classify(&[
+            (
+                "docs/OFFLINE_SETUP.md",
+                "---\nsite-page: offline-setup\n---\n\n# Offline setup\n",
+            ),
+            (
+                "docs/REVIEW_CHECKLIST.md",
+                "# Review checklist\n\nInternal.\n",
+            ),
+            ("docs/BUILD_PLAN_V2.md", "# Build Plan V2\n\nInternal.\n"),
+        ]);
+        let published: Vec<&str> = layer.site.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(published, ["docs/OFFLINE_SETUP.md"]);
+        assert_eq!(layer.site[0].slug, "offline-setup");
+        assert!(
+            layer.layer.malformed.is_empty(),
+            "{:?}",
+            layer.layer.malformed
+        );
+    }
+
+    #[test]
+    fn an_adr_is_still_an_adr_and_a_page_outranks_the_blueprint_rule() {
+        // ADRs are recognised first and are published by their own mechanism.
+        // A declared page under `docs/blueprint/` must not be demoted to a
+        // blueprint by the coincidence of its path.
+        let layer = classify(&[
+            (
+                "docs/adr/0001-x.md",
+                "---\nadr-id: \"0001\"\nstatus: Accepted\nsite-page: sneaky\n---\n\n# ADR-0001\n",
+            ),
+            (
+                "docs/blueprint/landing.md",
+                "---\nsite-page: index\n---\n\n# Roteiro\n",
+            ),
+            (
+                "docs/blueprint/roteiro.md",
+                "# Roteiro — Technical Implementation Plan\n",
+            ),
+        ]);
+        assert_eq!(layer.layer.docs.len(), 1, "the ADR is still an ADR");
+        let pages: Vec<&str> = layer.site.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(pages, ["index"]);
+        assert_eq!(layer.layer.blueprints.len(), 1);
+        assert_eq!(layer.layer.blueprints[0].path, "docs/blueprint/roteiro.md");
+    }
+
+    #[test]
+    fn a_page_that_declares_itself_and_fails_to_parse_is_drift_not_silence() {
+        // It asked to be published. Dropping it would leave the gate green and
+        // the page silently absent from the site.
+        let layer = classify(&[("docs/site/x.md", "---\nsite-page: Not A Slug\n---\n\n# X\n")]);
+        assert!(layer.site.is_empty());
+        assert_eq!(layer.layer.malformed.len(), 1);
+        assert_eq!(
+            layer.layer.malformed[0].kind,
+            crate::check::ViolationKind::MalformedSitePage
+        );
+        assert!(
+            layer.layer.malformed[0].message.contains("docs/site/x.md"),
+            "names the file: {}",
+            layer.layer.malformed[0].message
+        );
+    }
+
+    #[test]
+    fn the_three_field_entry_point_drops_pages_rather_than_misfiling_them() {
+        // `authored_layer_from` has nowhere to put a site page. Dropping it is
+        // deliberate and documented; the failure to avoid is the *other* one —
+        // a published page falling through to the annotation scan, which would
+        // put website prose into the `@rto:` surface.
+        let files = [(
+            "docs/OFFLINE_SETUP.md",
+            "---\nsite-page: offline-setup\n---\n\n# Offline setup\n\n// @rto:0001\n",
+        )];
+        let blobs = vec![BlobRef {
+            path: files[0].0.to_owned(),
+            oid: String::new(),
+        }];
+        let layer =
+            super::authored_layer_from(blobs, &|_: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
+                Ok(Some(files[0].1.as_bytes().to_vec()))
+            })
+            .expect("classify");
+        assert!(layer.docs.is_empty());
+        assert!(layer.blueprints.is_empty());
+        assert!(
+            layer.annotations.is_empty(),
+            "a published page is not an annotation carrier: {:?}",
+            layer.annotations
+        );
+        // The full form keeps it.
+        assert_eq!(classify(&files).site.len(), 1);
+    }
+
+    #[test]
+    fn a_non_page_still_contributes_its_annotations() {
+        // Adding a class must not steal files from the annotation scan.
+        let layer = classify(&[("src/store.rs", "//! @rto:0001\n")]);
+        assert!(layer.site.is_empty());
+        assert_eq!(layer.layer.annotations.len(), 1);
+    }
 }

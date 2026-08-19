@@ -387,8 +387,9 @@ fn inline_version_refs(line: &str) -> impl Iterator<Item = DocVersion> + '_ {
 }
 
 /// Split leading `---`-delimited frontmatter from the body. Returns
-/// `("", text)` when there is no frontmatter.
-fn split_frontmatter(text: &str) -> (&str, &str) {
+/// `("", text)` when there is no frontmatter. Shared with [`crate::site`],
+/// whose publication marker is a frontmatter field read the same way.
+pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let Some(rest) = text.strip_prefix("---\n") else {
         return ("", text);
     };
@@ -411,8 +412,10 @@ pub(crate) fn first_h1(body: &str) -> Option<String> {
 
 /// Clean a raw frontmatter value: trim, drop a trailing ` #…` inline comment
 /// (YAML-style) from unquoted values, then strip surrounding quotes. Quoted
-/// values are left intact so a `#` inside quotes survives.
-fn clean_value(raw: &str) -> &str {
+/// values are left intact so a `#` inside quotes survives. Shared with
+/// [`crate::site`] so a site page's frontmatter is read by the same rules as an
+/// ADR's — a quoted slug, or a trailing comment, must not mean two things.
+pub(crate) fn clean_value(raw: &str) -> &str {
     let raw = raw.trim();
     if raw.starts_with('"') || raw.starts_with('\'') {
         return strip_quotes(raw);

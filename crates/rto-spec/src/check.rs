@@ -19,6 +19,8 @@ use serde::Serialize;
 use crate::adr::{AdrDoc, AdrStatus};
 use crate::annotate::Annotation;
 use crate::blueprint::BlueprintDoc;
+use crate::layer::AuthoredDocs;
+use crate::site::SitePage;
 
 /// The category of an authored-layer drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -36,6 +38,11 @@ pub enum ViolationKind {
     DuplicateAdrId,
     /// An ADR's version metadata disagrees with itself.
     AdrVersionDrift,
+    /// A document declared itself a published site page but could not be parsed
+    /// as one.
+    MalformedSitePage,
+    /// Two or more documents declare the same `site-page` slug.
+    DuplicateSiteSlug,
 }
 
 impl ViolationKind {
@@ -49,6 +56,8 @@ impl ViolationKind {
             Self::InactiveAdr => "inactive-adr",
             Self::DuplicateAdrId => "duplicate-adr-id",
             Self::AdrVersionDrift => "adr-version-drift",
+            Self::MalformedSitePage => "malformed-site-page",
+            Self::DuplicateSiteSlug => "duplicate-site-slug",
         }
     }
 }
@@ -70,6 +79,8 @@ pub struct CheckReport {
     pub adrs: usize,
     /// Number of blueprints parsed and applied.
     pub blueprints: usize,
+    /// Number of published site pages parsed and applied.
+    pub site_pages: usize,
     /// Authored `[[…]]` links that resolved and became edges.
     pub links_ok: usize,
     /// `@rto:` annotations that resolved to an active ADR.
@@ -131,6 +142,49 @@ fn duplicate_adr_ids(docs: &[AdrDoc]) -> Vec<Violation> {
                     "adr-id {id} is declared by {} files: {} — all of them collapse \
                      into the single node `adr:{id}`, so only one decision survives \
                      and every @rto:{id} annotation binds to it",
+                    paths.len(),
+                    paths.join(", "),
+                ),
+            }
+        })
+        .collect()
+}
+
+/// Find `site-page` slugs claimed by more than one document.
+///
+/// Exactly [`duplicate_adr_ids`]'s failure, in the one other place this
+/// repository lets an author choose a key. A site page's node key is
+/// `site:<slug>` and its published filename is `<slug>.html`, so two documents
+/// claiming one slug collapse twice over: the later `apply_factset` overwrites
+/// the earlier node, and the later write to `<slug>.html` overwrites the earlier
+/// page. The site then serves one document at an address the other one also
+/// claims, and nothing else notices — the two files merge cleanly in git, and
+/// every other check passes. That is the ADR-0016 story with a public URL
+/// attached.
+///
+/// The message names **both** paths and the slug, for the reason
+/// [`duplicate_adr_ids`] does: a slug alone leaves the reader to hunt for the
+/// partner file, which is the work this check exists to save.
+fn duplicate_site_slugs(pages: &[SitePage]) -> Vec<Violation> {
+    let mut by_slug: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for page in pages {
+        by_slug
+            .entry(page.slug.as_str())
+            .or_default()
+            .push(page.path.as_str());
+    }
+    by_slug
+        .into_iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .map(|(slug, mut paths)| {
+            // Sort so the message is stable whatever order the tree walk yielded.
+            paths.sort_unstable();
+            Violation {
+                kind: ViolationKind::DuplicateSiteSlug,
+                message: format!(
+                    "site-page slug `{slug}` is declared by {} files: {} — all of \
+                     them collapse into the single node `site:{slug}` and the single \
+                     published page `{slug}.html`, so only one document survives",
                     paths.len(),
                     paths.join(", "),
                 ),
@@ -277,8 +331,9 @@ pub struct Validation {
 /// [`run`] applies these to the store before validating, so its `get_node`
 /// lookups see them. [`validate`] must reach the same verdict without writing,
 /// so it consults this overlay first and the store second — the keys come from
-/// the very same [`AdrDoc::facts`]/[`BlueprintDoc::facts`] sets `run` applies, so
-/// the two cannot disagree about what the authored layer contributes.
+/// the very same [`AdrDoc::facts`]/[`BlueprintDoc::facts`]/[`SitePage::facts`]
+/// sets `run` applies, so the two cannot disagree about what the authored layer
+/// contributes.
 ///
 /// Later docs overwrite earlier ones, matching `apply_factset`'s
 /// last-writer-wins — which is exactly the lossiness [`duplicate_adr_ids`]
@@ -286,13 +341,17 @@ pub struct Validation {
 #[derive(Debug, Default)]
 struct AuthoredOverlay {
     /// Every node key the authored layer contributes (ADRs, ADR sections,
-    /// blueprints and their sections).
+    /// blueprints, site pages, and all of their sections).
     keys: BTreeSet<String>,
     /// Parsed status per ADR node key.
     adr_status: BTreeMap<String, AdrStatus>,
 }
 
-fn authored_overlay(docs: &[AdrDoc], blueprints: &[BlueprintDoc]) -> AuthoredOverlay {
+fn authored_overlay(
+    docs: &[AdrDoc],
+    blueprints: &[BlueprintDoc],
+    site: &[SitePage],
+) -> AuthoredOverlay {
     let mut overlay = AuthoredOverlay::default();
     for doc in docs {
         overlay
@@ -304,6 +363,11 @@ fn authored_overlay(docs: &[AdrDoc], blueprints: &[BlueprintDoc]) -> AuthoredOve
         overlay
             .keys
             .extend(bp.facts().nodes.into_iter().map(|n| n.key));
+    }
+    for page in site {
+        overlay
+            .keys
+            .extend(page.facts().nodes.into_iter().map(|n| n.key));
     }
     overlay
 }
@@ -324,27 +388,70 @@ pub fn validate(
     blueprints: &[BlueprintDoc],
     annotations: &[Annotation],
 ) -> Result<Validation, StoreError> {
+    validate_all(store, docs, blueprints, &[], annotations)
+}
+
+/// [`validate`] over a whole [`AuthoredDocs`] — the same verdict, plus the
+/// **site pages** the three-slice form has no parameter for.
+///
+/// Two entry points rather than one, because the classification that produces
+/// site pages ([`crate::authored_layer_from`]) and the CLI gate that consumes
+/// them land in separate changes: a caller still passing three slices keeps
+/// compiling and keeps getting exactly today's verdict, and moves to this
+/// function when it is ready to check the website too. The shared body below is
+/// the only copy of the rule, so the two cannot drift into disagreeing about
+/// what a violation is.
+///
+/// # Errors
+/// Returns [`StoreError`] if querying the store fails.
+pub fn validate_layer(store: &Store, docs: &AuthoredDocs) -> Result<Validation, StoreError> {
+    validate_all(
+        store,
+        &docs.layer.docs,
+        &docs.layer.blueprints,
+        &docs.site,
+        &docs.layer.annotations,
+    )
+}
+
+/// The whole drift rule, over every authored document class. [`validate`] and
+/// [`validate_layer`] are this function with and without site pages.
+fn validate_all(
+    store: &Store,
+    docs: &[AdrDoc],
+    blueprints: &[BlueprintDoc],
+    site: &[SitePage],
+    annotations: &[Annotation],
+) -> Result<Validation, StoreError> {
     // 1. Detect colliding ADR ids *before* anything is applied, so the report
     //    describes the authored file set rather than what survived the merge.
     let mut report = CheckReport {
         adrs: docs.len(),
         blueprints: blueprints.len(),
+        site_pages: site.len(),
         violations: duplicate_adr_ids(docs),
         ..CheckReport::default()
     };
+    // The same collision in the one other place an author picks a key.
+    report.violations.extend(duplicate_site_slugs(site));
     // Self-contradiction inside one ADR, checked alongside the collision
     // *between* ADRs above: neither needs the graph, both are read off the
     // authored files exactly as they were parsed.
     report.violations.extend(adr_version_drift(docs));
-    let overlay = authored_overlay(docs, blueprints);
+    let overlay = authored_overlay(docs, blueprints, site);
     let mut edges = Vec::new();
 
-    // 2. Validate ADR and blueprint `[[…]]` links against the code graph. Both
-    //    author `references` edges into real symbols/files and drift the same way.
+    // 2. Validate ADR, blueprint and site-page `[[…]]` links against the code
+    //    graph. All three author `references` edges into real symbols/files and
+    //    drift the same way — which is the point of making the website a
+    //    document class rather than a pile of hand-written HTML: a page that
+    //    describes `security run`'s isolation posture can cite the code that
+    //    implements it, and the citation fails the gate when the code moves.
     let links = docs
         .iter()
         .flat_map(|d| &d.links)
-        .chain(blueprints.iter().flat_map(|b| &b.links));
+        .chain(blueprints.iter().flat_map(|b| &b.links))
+        .chain(site.iter().flat_map(|p| &p.links));
     for link in links {
         // A link resolves against the derived graph, or against an ADR the
         // authored layer is contributing in this same pass.
@@ -437,16 +544,46 @@ pub fn run(
     blueprints: &[BlueprintDoc],
     annotations: &[Annotation],
 ) -> Result<CheckReport, StoreError> {
-    // Materialise ADR/blueprint section nodes so links and annotations can
-    // reference them (and so `@rto:` targets can be looked up by key).
+    run_all(store, docs, blueprints, &[], annotations)
+}
+
+/// [`run`] over a whole [`AuthoredDocs`], including its **site pages**. See
+/// [`validate_layer`] for why both entry points exist.
+///
+/// # Errors
+/// Returns [`StoreError`] if applying authored facts or edges, or querying the
+/// store, fails.
+pub fn run_layer(store: &mut Store, docs: &AuthoredDocs) -> Result<CheckReport, StoreError> {
+    run_all(
+        store,
+        &docs.layer.docs,
+        &docs.layer.blueprints,
+        &docs.site,
+        &docs.layer.annotations,
+    )
+}
+
+/// The writing half, over every authored document class.
+fn run_all(
+    store: &mut Store,
+    docs: &[AdrDoc],
+    blueprints: &[BlueprintDoc],
+    site: &[SitePage],
+    annotations: &[Annotation],
+) -> Result<CheckReport, StoreError> {
+    // Materialise ADR/blueprint/site-page section nodes so links and annotations
+    // can reference them (and so `@rto:` targets can be looked up by key).
     for doc in docs {
         store.apply_factset(&doc.facts())?;
     }
     for bp in blueprints {
         store.apply_factset(&bp.facts())?;
     }
+    for page in site {
+        store.apply_factset(&page.facts())?;
+    }
 
-    let validation = validate(store, docs, blueprints, annotations)?;
+    let validation = validate_all(store, docs, blueprints, site, annotations)?;
     for edge in &validation.edges {
         store.insert_edge(edge)?;
     }
@@ -455,10 +592,21 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{ViolationKind, run};
+    use super::{ViolationKind, run, run_layer};
     use crate::adr::parse_adr;
     use crate::annotate::scan_annotations;
+    use crate::layer::{AuthoredDocs, AuthoredLayer};
+    use crate::site::parse_site_page;
     use rto_graph::{Node, NodeKind, Store};
+
+    /// An [`AuthoredDocs`] holding only site pages — the rest of the authored
+    /// layer is exercised by the tests above.
+    fn site_layer(pages: Vec<crate::site::SitePage>) -> AuthoredDocs {
+        AuthoredDocs {
+            site: pages,
+            ..AuthoredDocs::default()
+        }
+    }
 
     fn seed_graph(store: &Store) {
         // A tiny derived graph: one file and one symbol.
@@ -490,6 +638,106 @@ mod tests {
         // The authored edge is now in the graph.
         let edges = store.edges_from("adr:0001#design").expect("edges");
         assert!(edges.iter().any(|e| e.dst == "sym:rust:src/store.rs#Store"));
+    }
+
+    #[test]
+    fn a_site_page_s_links_are_drift_checked_like_an_adr_s() {
+        // The whole point of the document class: the public website's claims are
+        // held against the graph, so a page that cites the code it describes
+        // fails the gate when that code moves.
+        let mut store = Store::open_in_memory().expect("store");
+        seed_graph(&store);
+        let ok = parse_site_page(
+            "docs/site/modes.md",
+            "---\nsite-page: modes\n---\n\n# Modes\n\n## Offline\n\nSee [[src/store.rs#Store]].\n",
+        )
+        .expect("parse");
+        let report = run_layer(&mut store, &site_layer(vec![ok])).expect("run");
+        assert!(!report.has_violations(), "{:?}", report.violations);
+        assert_eq!(report.site_pages, 1);
+        assert_eq!(report.links_ok, 1);
+        // The authored edge is in the graph, attributed to the page's section.
+        let edges = store.edges_from("site:modes#offline").expect("edges");
+        assert!(edges.iter().any(|e| e.dst == "sym:rust:src/store.rs#Store"));
+
+        // The failing half — this is what would have caught the stale
+        // `--allow-unsandboxed` claim the hand-written page carried.
+        let mut store = Store::open_in_memory().expect("store");
+        seed_graph(&store);
+        let stale = parse_site_page(
+            "docs/site/modes.md",
+            "---\nsite-page: modes\n---\n\n# Modes\n\nSee [[src/store.rs#Ghost]].\n",
+        )
+        .expect("parse");
+        let report = run_layer(&mut store, &site_layer(vec![stale])).expect("run");
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].kind, ViolationKind::BrokenLink);
+    }
+
+    #[test]
+    fn two_pages_sharing_a_slug_are_a_violation_naming_both_files() {
+        // `duplicate_adr_ids` with a public URL attached: one node key and one
+        // published filename, so the later document silently replaces the first.
+        let mut store = Store::open_in_memory().expect("store");
+        seed_graph(&store);
+        let one = parse_site_page(
+            "docs/site/config.md",
+            "---\nsite-page: config\n---\n\n# Configuration\n",
+        )
+        .expect("one");
+        let two = parse_site_page(
+            "docs/OFFLINE_SETUP.md",
+            "---\nsite-page: config\n---\n\n# Offline setup\n",
+        )
+        .expect("two");
+        let report = run_layer(&mut store, &site_layer(vec![one, two])).expect("run");
+        let dupes: Vec<_> = report
+            .violations
+            .iter()
+            .filter(|v| v.kind == ViolationKind::DuplicateSiteSlug)
+            .collect();
+        assert_eq!(dupes.len(), 1, "one finding for the one colliding slug");
+        let msg = &dupes[0].message;
+        assert!(msg.contains("config"), "names the slug: {msg}");
+        assert!(
+            msg.contains("docs/site/config.md"),
+            "names the first: {msg}"
+        );
+        assert!(
+            msg.contains("docs/OFFLINE_SETUP.md"),
+            "names the second: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_three_slice_entry_point_still_reaches_todays_verdict() {
+        // `run` is `run_layer` with no site pages. A caller that has not moved
+        // over must see exactly the report it sees today — that is the whole
+        // reason both entry points exist.
+        let mut a = Store::open_in_memory().expect("store");
+        seed_graph(&a);
+        let mut b = Store::open_in_memory().expect("store");
+        seed_graph(&b);
+        let adr = "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001\n\n## Design\n\nUses [[src/store.rs#Store]].\n";
+        let doc = parse_adr("docs/adr/0001.md", adr).expect("parse");
+
+        let old = run(&mut a, std::slice::from_ref(&doc), &[], &[]).expect("run");
+        let new = run_layer(
+            &mut b,
+            &AuthoredDocs {
+                layer: AuthoredLayer {
+                    docs: vec![doc],
+                    ..AuthoredLayer::default()
+                },
+                ..AuthoredDocs::default()
+            },
+        )
+        .expect("run_layer");
+        assert_eq!(old.adrs, new.adrs);
+        assert_eq!(old.links_ok, new.links_ok);
+        assert_eq!(old.violations.len(), new.violations.len());
+        assert_eq!(old.site_pages, 0, "no site pages via the three-slice form");
+        assert_eq!(new.site_pages, 0);
     }
 
     #[test]
