@@ -196,6 +196,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use crate::query::window;
 use crate::store::StoreError;
 
 /// Stable schema tag on [`MemoryListing`], so a programmatic consumer can depend
@@ -604,7 +605,11 @@ pub struct MemoryFilter<'a> {
     /// kept for audit rather than for reading.
     pub include_superseded: bool,
     /// At most this many records (the newest generations). `None` for all of
-    /// them.
+    /// them — and so is `Some(0)`, which is [`window`]'s reading of `0` holding
+    /// on the one list surface in this module that cannot call it, because the
+    /// cut happens in SQL. Sharing the *rule* is the point; `LIMIT 0` returning
+    /// nothing would be the same divergence issue #447 was filed for, one
+    /// function away.
     pub limit: Option<usize>,
 }
 
@@ -862,6 +867,12 @@ pub struct RecallOptions<'a> {
     pub applicable_only: bool,
     /// At most this many records, applied **after** ranking so a limit returns the
     /// best matches rather than the newest ones.
+    ///
+    /// **`None` and `Some(0)` are the same request: every record.** `0` is
+    /// unlimited here because [`window`] is the one place that decides what
+    /// `limit` means in this crate, and that is what it decides (issue #375).
+    /// Recall used to read `Some(0)` as *no records* — the third implementation
+    /// of one parameter that `window`'s doc warned about, and issue #447.
     pub limit: Option<usize>,
 }
 
@@ -1198,9 +1209,12 @@ pub(crate) fn records(
     };
     // `id DESC` is newest-generation-first. It is an `AUTOINCREMENT` integer, not
     // a timestamp, so this ordering is total and skew-proof across worktrees.
+    // `Some(0)` is unlimited, exactly as `window` reads it — expressed as the
+    // absence of a clause because SQL's `LIMIT 0` means the opposite. This is
+    // the contract translated into SQL, not a second opinion about it.
     let limit = match filter.limit {
-        Some(n) => format!(" LIMIT {n}"),
-        None => String::new(),
+        Some(n) if n > 0 => format!(" LIMIT {n}"),
+        _ => String::new(),
     };
     let sql = format!("SELECT {RECORD_COLS}{RECORD_FROM}{clause} ORDER BY m.id DESC{limit}");
     let mut stmt = conn.prepare(&sql)?;
@@ -1294,9 +1308,12 @@ pub(crate) fn recall(
             .total_cmp(&a.score)
             .then_with(|| b.record.id.cmp(&a.record.id))
     });
-    if let Some(limit) = opts.limit {
-        out.truncate(limit);
-    }
+    // The one definition of `limit`, not a fourth reading of it: `0` is
+    // unlimited, so `None` and `Some(0)` both ask for every record (issues #375,
+    // #447). Offset `0` — recall has no paging parameter to offer, which is the
+    // same call `query::search_memory` already makes for the same reason. A
+    // `limit`-shaped offset is not worth inventing for a lens with no pages.
+    window(&mut out, 0, opts.limit.unwrap_or(0));
     Ok(out)
 }
 

@@ -751,6 +751,136 @@ fn a_limit_returns_the_best_matches_not_the_newest() {
     assert_eq!(top.live, 3, "the counts still describe the whole store");
 }
 
+/// The CLI's default `--limit` for `memory recall`, so the fixture below is
+/// unambiguously larger than a default page. Duplicated from `roteiro`'s clap
+/// declaration on purpose: this crate must not depend on the binary, and the
+/// number only has to be *a* default that the fixture exceeds for the assertion
+/// to mean what it says.
+const CLI_DEFAULT_RECALL_LIMIT: usize = 10;
+
+/// **`limit = 0` is every record, not none of them** (issue #447).
+///
+/// Measured on an 8,000-record store, `recall --limit 0` returned `[]` while
+/// `--limit 99999` returned all 8,000 and five other surfaces read `0` as
+/// unlimited — because recall called [`Vec::truncate`] instead of
+/// `rto_graph::window`, and `truncate(0)` empties a vector.
+///
+/// The fixture is deliberately larger than the CLI's default page, and the
+/// assertion is **all of them**, not "more than the default": a `0` that
+/// happened to fall through to some other cap would satisfy the weaker claim
+/// while still being a second reading of the parameter.
+#[test]
+fn a_zero_limit_recalls_every_record_not_none_of_them() {
+    let mut store = Store::open_in_memory().expect("store");
+    seed_graph(&mut store);
+    let population = CLI_DEFAULT_RECALL_LIMIT * 3;
+    for i in 0..population {
+        store
+            .record_memory(&MemoryWrite {
+                anchor: Some("sym:rust:src/lib.rs#main"),
+                confidence: Some(0.5),
+                ..lesson(&format!("record {i}"))
+            })
+            .expect("write");
+    }
+
+    let unlimited = store
+        .recall_memory(&RecallOptions {
+            limit: Some(0),
+            ..RecallOptions::default()
+        })
+        .expect("recall");
+    assert_eq!(
+        unlimited.results.len(),
+        population,
+        "`limit = 0` is unlimited, the reading `window` fixes for every lens",
+    );
+
+    // `None` is the same request spelled the other way, and an absurd limit is
+    // the same answer arrived at by a different route. All three must agree, or
+    // "unlimited" has more than one implementation again.
+    assert_eq!(
+        bodies(&unlimited),
+        bodies(&recall(&store)),
+        "`Some(0)` and `None` are one request, in the same order",
+    );
+    let huge = store
+        .recall_memory(&RecallOptions {
+            limit: Some(99_999),
+            ..RecallOptions::default()
+        })
+        .expect("recall");
+    assert_eq!(bodies(&huge), bodies(&unlimited));
+
+    // A limit that *is* a page still cuts, so `0` is unlimited rather than
+    // ignored — a `window` call that silently dropped the parameter would pass
+    // every assertion above.
+    let paged = store
+        .recall_memory(&RecallOptions {
+            limit: Some(CLI_DEFAULT_RECALL_LIMIT),
+            ..RecallOptions::default()
+        })
+        .expect("recall");
+    assert_eq!(paged.results.len(), CLI_DEFAULT_RECALL_LIMIT);
+
+    // The counts are taken before the window and describe the store, so the
+    // JSON document stays coherent at every limit: `live` is what `results` was
+    // cut from, and at `0` nothing was cut.
+    let live = u64::try_from(population).expect("population fits");
+    for report in [&unlimited, &paged] {
+        assert_eq!(report.live, live, "`live` is the pre-window population");
+        assert_eq!(report.superseded, 0);
+    }
+    assert_eq!(
+        u64::try_from(unlimited.results.len()).expect("fits"),
+        unlimited.live,
+        "at `limit = 0` the document reports every live record and returns them",
+    );
+}
+
+/// The same rule on the listing surface next door, where the cut happens in SQL
+/// and `LIMIT 0` means the **opposite** of what `window` means.
+///
+/// Not the reported defect, and reported alongside it: leaving `Some(0)` empty
+/// here would keep one parameter with two readings inside a single module — the
+/// shape issues #375, #393 and #447 are all instances of.
+#[test]
+fn a_zero_limit_lists_every_record_too() {
+    let mut store = Store::open_in_memory().expect("store");
+    for i in 0..5 {
+        store
+            .record_memory(&lesson(&format!("record {i}")))
+            .expect("write");
+    }
+
+    let unlimited = store
+        .memory_records(&rto_graph::MemoryFilter {
+            limit: Some(0),
+            ..rto_graph::MemoryFilter::default()
+        })
+        .expect("records");
+    assert_eq!(unlimited.len(), 5, "SQL `LIMIT 0` must not reach the query");
+    assert_eq!(
+        unlimited.len(),
+        store
+            .memory_records(&rto_graph::MemoryFilter::default())
+            .expect("records")
+            .len(),
+        "`Some(0)` and `None` are one request here as well",
+    );
+    assert_eq!(
+        store
+            .memory_records(&rto_graph::MemoryFilter {
+                limit: Some(2),
+                ..rto_graph::MemoryFilter::default()
+            })
+            .expect("records")
+            .len(),
+        2,
+        "and a limit that is a page still cuts",
+    );
+}
+
 /// Scope stays a **namespace with an exact-match filter** — it narrows, and it
 /// never decides applicability or ranking. Giving it a second, branch-shaped job
 /// is the thing ADR-0013 §Scope rules out.
