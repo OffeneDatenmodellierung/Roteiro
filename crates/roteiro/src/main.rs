@@ -12949,6 +12949,39 @@ mod lint_cli {
         Cli::try_parse_from(args).expect("parse").command
     }
 
+    /// Linting is the one thing a build without `exec-subprocess` must not be
+    /// able to do — and, like the host path of `security run`, it must say so by
+    /// name rather than as `unrecognized subcommand`.
+    ///
+    /// This is the coverage `tests/lint_cli.rs` cannot carry: that file drives a
+    /// linter that ran, so it is gated on the opposite arm. Exactly one of the
+    /// two is compiled in any build, and this is the arm a
+    /// `--no-default-features --features execution` build gets (issue #445).
+    #[cfg(not(feature = "exec-subprocess"))]
+    #[test]
+    fn the_lint_path_is_absent_but_names_the_feature() {
+        // Parsing is unconditional on purpose — the clap variant is never gated,
+        // for the reason `run_lint`'s refusal arm records — so the refusal has
+        // to come from the dispatch, not from the parser.
+        assert!(matches!(
+            parse(["roteiro", "lint", "clippy"]),
+            Command::Lint { .. }
+        ));
+        let message = super::run_lint(
+            "clippy",
+            &lint_features(false, None).expect("the default feature set resolves"),
+            lint_host_decision(&layers(None, None), false, false),
+            false,
+            None,
+        )
+        .expect_err("a build without exec-subprocess must refuse to lint")
+        .to_string();
+        assert!(message.contains("exec-subprocess"), "{message}");
+        // And it must not offer ingest as a way out: a lint is reported and
+        // never stored, so there is no artifact another machine could hand over.
+        assert!(message.contains("no ingest path"), "{message}");
+    }
+
     #[test]
     fn lint_takes_one_analyzer_and_reports_by_default() {
         let Command::Lint {

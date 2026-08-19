@@ -14,7 +14,17 @@
 //! the store is untouched, because "nothing was written" has to hold when the
 //! run fails as much as when it succeeds.
 
-#![cfg(feature = "execution")]
+// Gated on the backend, not on `execution`. Every test below runs `roteiro
+// lint` and asserts on what it did; in a build without `exec-subprocess` that
+// command is a refusal naming the feature, so all of them fail against a binary
+// behaving exactly as designed. That is the #455 shape — an ungated test
+// asserting on a gated path — and it stayed invisible because nothing compiled
+// `--no-default-features --features execution` until issue #445 added the job.
+//
+// The refusal itself is covered where it is reachable: `the_lint_path_is_absent_but_names_the_feature`
+// in `main.rs`'s `lint_cli` module, which is gated on the opposite arm so exactly
+// one of the two is compiled in any build.
+#![cfg(all(feature = "execution", feature = "exec-subprocess"))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
