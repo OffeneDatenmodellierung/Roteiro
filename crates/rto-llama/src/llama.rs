@@ -227,9 +227,9 @@ pub struct LlamaEngine {
     /// the window, never raise one past `n_ctx_train`.
     n_ctx_ceiling: u32,
     /// Trained windows already warned about, so the "ceiling above
-    /// `n_ctx_train`" message is logged once per model rather than once per
-    /// request. Not native state — bookkeeping, so its position among the fields
-    /// carries no teardown meaning.
+    /// `n_ctx_train`" message is logged once per distinct trained window (per
+    /// engine instance) rather than once per request. Not native state —
+    /// bookkeeping, so its position among the fields carries no teardown meaning.
     warned_windows: Mutex<std::collections::BTreeSet<u32>>,
     /// How many multimodal projectors this engine has loaded since it was built;
     /// see [`LlamaEngine::projector_inits`]. Not native state — a counter, so its
