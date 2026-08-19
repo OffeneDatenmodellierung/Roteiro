@@ -192,14 +192,23 @@ Maven 9.6, crates.io 3.2.
 ### The analyzers themselves are yours to install
 
 Roteiro provisions rules and databases; it never installs `semgrep`,
-`osv-scanner` or `cargo`. If a binary is missing, `security run` says so by name
-and points at `roteiro security ingest`:
+`osv-scanner` or `cargo`. If a binary is missing, `security run` names it, says
+how to obtain it, and names the path that needs no binary at all:
 
 ```
-analyzer binary `semgrep` not found on PATH (needed to run `semgrep`). Roteiro does
-not install analyzers; install it yourself, or produce the report elsewhere and
-use `roteiro security ingest`.
+Error: analyzer binary `semgrep` not found on PATH (needed to run `semgrep`), so nothing ran.
+  Roteiro does not install analyzers, and has not installed this one. Semgrep's own install page recommends:
+    pipx install semgrep
+  Upstream: https://docs.semgrep.dev/getting-started/quickstart
+  Or run the analyzer elsewhere — CI, a colleague's machine — and read its report in with `roteiro security ingest`, which needs nothing on PATH and produces the same findings as a local run.
 ```
+
+The install line comes from the adapter, so it is specific to the **program**
+that is missing rather than to the analyzer: a missing `cargo` gets rustup's
+page, a missing `cargo-audit` gets `cargo install cargo-audit`, and
+`osv-scanner` — which documents no single command — gets its install page
+instead of a guess. Saying how is not doing it: nothing on this path installs
+anything.
 
 **None of the three is mandatory.** Install only the ones whose axis you want —
 they overlap deliberately little:
@@ -214,18 +223,32 @@ they overlap deliberately little:
 [ADR-0018](adr/0018-analyzer-coverage-matrix.md) is the record of why, and
 `roteiro security list` cross-references them rather than double-counting.
 
+Every command below is the one that project's own install page documents. None
+of them is invented here — which is the thing worth knowing when you are reading
+this because the tool is not yet in front of you.
+
+This block is deliberately wider than any refusal: when a binary is missing,
+`security run` prints the single hint for the program it could not find, and
+none of the alternatives below. Treat the two as the same *source*, not as the
+same *text* — only the fenced error block above is quoted verbatim from the
+code, and only that one is held there by a test.
+
 ```sh
-# macOS
-brew install semgrep
-brew install osv-scanner
+# semgrep — https://docs.semgrep.dev/getting-started/quickstart
+pipx install semgrep               # what upstream lists first
+uv tool install semgrep            # upstream's alternative
+#   `brew install semgrep` also exists; upstream's own note is that it "often
+#   lags behind the latest release".
+
+# cargo-audit — https://github.com/rustsec/rustsec/tree/main/cargo-audit
 cargo install cargo-audit          # NOT a standalone binary — see below
 
-# Debian / Ubuntu
-python3 -m pip install semgrep     # no apt package; pipx works too
-#   osv-scanner: no apt package — take a release binary from
-#   https://github.com/google/osv-scanner/releases and put it on PATH,
-#   or `go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest`
-cargo install cargo-audit
+# osv-scanner — https://google.github.io/osv-scanner/installation/
+#   No single canonical command. Upstream lists one entry per platform (scoop,
+#   winget, brew, pacman, apk, pkg, pkg_add), a prebuilt SLSA3 binary, and
+#   `go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest` for
+#   anyone who already has Go. Pick from that page rather than from this one:
+#   it is the copy that gets updated.
 ```
 
 **`cargo-audit` is the odd one out.** It is a **cargo subcommand**, not a

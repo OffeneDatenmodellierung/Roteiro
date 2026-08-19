@@ -151,6 +151,18 @@ const NEVER_FELL_BACK: Guidance = Guidance::new(&[Line::Note(&[
     "getting execution is the one outcome this command will not produce.",
 ])]);
 
+/// What [`LintError::ToolchainMissing`] says about a program no adapter
+/// declares.
+///
+/// Unreachable while the only probes are `cargo` and `rustc`, both of which
+/// [`clippy::Clippy`] declares. Kept because the alternative to "this build does
+/// not know" is a guessed install line, and a guess that fails is worse than an
+/// admission that does not.
+const UNKNOWN_TOOL: Guidance = Guidance::new(&[Line::Note(&[
+    "Roteiro does not install toolchains, and this build knows no install",
+    "command for that program.",
+])]);
+
 /// Something went wrong running the linter, or working out whether it could be
 /// run at all.
 ///
@@ -213,16 +225,24 @@ pub enum LintError {
         known: String,
     },
     /// A toolchain program is not on `PATH`.
+    ///
+    /// The way forward comes from the adapter's own
+    /// [`crate::adapter::InstallHint`] rather than from a literal here. It used
+    /// to be a literal, and a correct one — but the same URL written in two
+    /// places is the drift #430 is about, one revision away from the two
+    /// disagreeing about which is current.
     #[error(
-        "`{program}` was not found on PATH, so `{analyzer}` could not be run. Roteiro does not \
-         install toolchains: install Rust (https://rustup.rs), or run the linter elsewhere. \
-         Nothing is reported, because a missing tool must never read as a clean tree."
+        "`{program}` was not found on PATH, so `{analyzer}` could not be run. Nothing is \
+         reported, because a missing tool must never read as a clean tree.{}",
+        .install.map_or(UNKNOWN_TOOL, |hint| hint)
     )]
     ToolchainMissing {
         /// The program that was looked for.
         program: String,
         /// The linter it was needed for.
         analyzer: String,
+        /// How to obtain `program`, as its adapter declares it.
+        install: Option<Guidance>,
     },
     /// The toolchain is present but the linter component is not installed.
     #[error(
@@ -1015,7 +1035,11 @@ fn probe_toolchain(
         return Err(LintError::AnalyzerNotInstalled {
             analyzer: analyzer.to_owned(),
             command: rendered("cargo", &clippy_args),
-            install: "rustup component add clippy".to_owned(),
+            // The adapter's constant, not a literal: the same instruction is
+            // printed by `clippy`'s install hint when the binary is absent
+            // rather than the component, and one of the two would eventually be
+            // updated alone.
+            install: crate::adapter::clippy::COMPONENT_ADD.to_owned(),
             stderr: stderr_tail(clippy.stderr.as_bytes()),
         });
     }
@@ -1071,6 +1095,7 @@ fn probe(
             LintError::ToolchainMissing {
                 program: program.to_owned(),
                 analyzer: analyzer.to_owned(),
+                install: crate::adapter::install_hint(program),
             }
         } else {
             LintError::ProbeFailed {
@@ -1286,16 +1311,25 @@ mod tests {
         let missing_toolchain = LintError::ToolchainMissing {
             program: "cargo".to_owned(),
             analyzer: "clippy".to_owned(),
+            install: crate::adapter::install_hint("cargo"),
         }
         .to_string();
         assert!(missing_toolchain.contains("not found on PATH"));
         assert!(missing_toolchain.contains("https://rustup.rs"));
         assert!(missing_toolchain.contains("must never read as a clean tree"));
+        // The toolchain, not the component: a reader with no `cargo` cannot run
+        // `rustup component add` against a toolchain they do not have, so the
+        // two absences must not print the same instruction. #430's "right *kind*
+        // of way forward".
+        assert!(
+            !missing_toolchain.contains(crate::adapter::clippy::COMPONENT_ADD),
+            "{missing_toolchain}"
+        );
 
         let missing_component = LintError::AnalyzerNotInstalled {
             analyzer: "clippy".to_owned(),
             command: "cargo clippy --version".to_owned(),
-            install: "rustup component add clippy".to_owned(),
+            install: crate::adapter::clippy::COMPONENT_ADD.to_owned(),
             stderr: String::new(),
         }
         .to_string();
