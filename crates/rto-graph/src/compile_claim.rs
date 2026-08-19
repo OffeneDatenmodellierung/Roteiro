@@ -504,7 +504,7 @@ mod tests {
     /// here is `ubuntu-latest`, so a wholly green CI must leave a claim about that
     /// code standing.
     #[test]
-    fn a_macos_only_site_is_never_refuted_by_this_repositorys_ci() {
+    fn a_macos_only_site_is_never_refuted_by_ci_here() {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         let site = ClaimSite {
             platform: Some(TargetOs::MacOs),
