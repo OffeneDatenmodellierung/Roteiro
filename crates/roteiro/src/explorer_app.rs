@@ -260,6 +260,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_js_ask_survives_a_null_content_tool_call_turn() {
+        // `ChatMessageDto.content` is now `Option<String>` (#485): a turn that
+        // carries `tool_calls` serialises `content: null`. Neither Ask panel sends
+        // `tools`, so neither can receive that turn today — but the field is
+        // nullable for every caller from now on, and a `null` must degrade to the
+        // empty-answer message rather than throw.
+        //
+        // Confirmed live against a real `finish_reason: "tool_calls"` body: both
+        // read sites evaluate to `"(the model returned an empty answer)"`. What is
+        // pinned here is the guard that makes that true — BOTH Ask panels reading
+        // `message.content` behind the `||` fallback rather than bare.
+        let (status, _ct, _cache, body) = get("/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        let guarded = "data.choices[0].message.content) ||";
+        assert_eq!(
+            body.matches(guarded).count(),
+            2,
+            "both Ask panels must read `message.content` behind the empty-answer \
+             fallback, so a `null` degrades instead of throwing"
+        );
+        assert!(
+            body.contains("\"(the model returned an empty answer)\""),
+            "the fallback the guard falls back TO"
+        );
+    }
+
+    #[tokio::test]
     async fn app_js_workspace_ask_linkifies_project_qualified_citations() {
         // A workspace Ask answer cites PROJECT-QUALIFIED node keys (`<project>::<key>`,
         // and a project/dir name may contain `-`/`.`, e.g. `stream-sync::sym:rust:…`).
