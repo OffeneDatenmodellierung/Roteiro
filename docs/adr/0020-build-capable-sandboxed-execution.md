@@ -11,7 +11,7 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.5"
+version: "1.6"
 last-modified: 2026-08-19
 confluence-url:
 ---
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.5 |
+| **Document version** | 1.6 |
 | **Status** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
@@ -356,6 +356,46 @@ correct way round: linting a tree you did not write executes that tree's build
 scripts and proc macros with your filesystem and your credentials. That the
 *toolchain* is yours does not make the *code* yours.
 
+**And the class this protects is wider than "builders".** That framing — a
+builder executes repository code, a reader does not — is what the default was
+argued on, and it is false. Measured, a `.pylintrc` containing nothing but
+
+```ini
+[MAIN]
+init-hook=import pathlib; pathlib.Path("…/EXECUTED").write_text("yes")
+```
+
+was executed by `pylint`, which wrote the marker, exited 16, and emitted **zero
+diagnostic about having done so**. The tool most people would name as the
+canonical read-only linter is an arbitrary-code-execution vector controlled by
+the tree under review, silently. The same shape was measured for `mypy`
+(`plugins=`), `sqlfluff` (`library_path` under the jinja templater) and `eslint`
+(the config is imported and run). Only `ruff` and `black` resisted, and only
+because neither has a plugin system.
+
+So **reader-versus-builder is a property of the repository, not of the tool**,
+and the two axes are orthogonal:
+
+| | is a property of | tabulable |
+|---|---|---|
+| **Writable surface** | `(tool, invocation)` | **yes** — in every case measured, a flag or a variable removed the requirement |
+| **Code execution** | `(tool, repository)` | **no** — the repository decides, not the tool |
+
+Three consequences follow, and the third is the one that would be got wrong:
+
+- *"May execute repository-authored code"* is a **ceiling, not a measurement**,
+  and it is true of nearly everything worth adapting.
+- Sandboxing cannot be gated on the writable-surface axis. `pylint` needs no
+  writable anything and still runs your `.pylintrc`.
+- **Do not add a per-tool exemption table.** It would be a table of wrong
+  answers — right for `ruff` and `black`, wrong for every tool with a plugin
+  system, and wrong in the direction that ships execution while reporting
+  isolation.
+
+This does not change the decision. It removes the argument the decision was made
+on and replaces it with a stronger one: the default is not for a class of
+*tool*, it is for a class of *input* — any tree you did not write.
+
 Host execution is therefore **permitted, not assumed**, and the permission is
 layered exactly as ADR-0019 layers the remote tier — for the same reason, which
 is that `roteiro.toml` is committed and shared:
@@ -386,14 +426,16 @@ while the command still reports success is the silent downgrade ADR-0019 §6
 exists to prevent, and it would be worse here than there: the person asked for
 isolation and would get execution.
 
-Until conditions 1 and 2 are built the default has nothing to select, so
-`roteiro lint` refuses unless host execution has been granted. That is the honest
-state rather than an awkward one — the command says the sandbox is the intended
-path and is not yet built, and anyone who wants it on their own machine says so
-once, in one place. Shipping the opposite default *because* the sandbox is
-unfinished would be precisely the conversion this document spends its length
-refusing: the availability of a capability quietly deciding a question that was
-supposed to be decided deliberately.
+Conditions 1 and 2 are built, so the default now has something to select. On a
+machine that has not been prepared `roteiro lint` still refuses — but for the
+reason condition 2a gives rather than for want of a sandbox: **Roteiro ships no
+default image**, because the image *is* the boundary and choosing whose it is
+would be a security decision made here and noticed by nobody. The refusal names
+the way forward, offers the unisolated alternative, and takes neither on the
+user's behalf. Shipping the opposite default *because* preparation is required
+would be precisely the conversion this document spends its length refusing: the
+availability of a capability quietly deciding a question that was supposed to be
+decided deliberately.
 
 ## Consequences
 
@@ -583,3 +625,4 @@ of scope for a sandboxed run of this repository, though not for others.
 | 1.3 | 2026-08-19 | Default posture set by the owner: a builder runs **sandboxed** unless host execution has been granted, and the grant is layered as ADR-0019 layers the remote tier — project `roteiro.toml` may deny it and may never grant it, because a merged line in a shared file is consent granted by someone else and noticed by nobody. Adds condition 6, including that the sandbox never silently falls back to the host. Condition 1 is strengthened rather than amended: measured, `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it, so the preflight is not relaxed at all and a builder's writable surface is an **added scratch mount** rather than a **removed guarantee**. Records the consequence that `roteiro lint` must refuse by default until conditions 1–2 exist. |
 | 1.4 | 2026-08-19 | **Corrects a claim this document's own measurement was used to justify.** v1.3 measured that `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it; `roteiro lint` then cited that result as a description of itself while *inheriting* the variable by name and never setting it — so on any shell that had not set one, the linter wrote `target/` and `Cargo.lock` into the tree it was reviewing, under a doc comment saying it did not. The module now sets `CARGO_TARGET_DIR` to a per-checkout directory outside the tree (ADR-0014 v1.6: a build scratch holds compiled build scripts and is never shared between trees) and passes `--locked` so the lockfile is not rewritten either, with a test that runs the shipped command with the variable unset and asserts the tree is unchanged — by content, not merely by filename, since `Cargo.lock` is rewritten in place and a listing of names cannot see that. A relative scratch root is refused rather than resolved, and the refusal is ordered before the containment check because that check resolves against roteiro's working directory while cargo resolves against the worktree, so on a relative path it decides a question about the wrong directory. **Condition 1's open question is answered**: measured with `CARGO_HOME` and the source tree both `chmod -R a-w`, `CARGO_TARGET_DIR` outside and `--locked --offline`, `cargo clippy` exits 0, reports `build-finished` successfully, and executes 4 build scripts compiled from the read-only cache — so a package cache can be mounted read-only rather than copied, with the honest caveat that the cache was warm and the probe was 4 crates rather than an `--all-features` build of this repository. Finally, **withdraws "the argv and environment seam a builder needs" as a blocker**: the seam existed, and was the wrong kind — a list of names to *inherit* where a builder needs pairs to *set*. Conflating the two is what produced the defect above, so they are now separate fields on one type and the blocker is a split rather than a build. |
 | 1.5 | 2026-08-19 | **Conditions 1 and 2 are built**, and one assumption in this document was false. Condition 1 needed no relaxation of `check_request` at all — a builder's writable surface is a third `VolumeSpec` with `read_only: false` beside two that stay `true`, an *added mount* rather than a *removed guarantee*, now asserted by a test rather than argued. Condition 2's `cargo vendor` is not needed either: the package cache is a read-only mount of the host's existing one, so none of the 414 MB / 556 MB / 1.10 GB is spent — but building it found what the probe could not, since the probe had no credentials in it, and **`$CARGO_HOME` itself is therefore not what is mounted**. Its root holds `credentials.toml`, and "egress is denied" does not answer that, because the run's output returns to the host and `cargo::warning=` is a channel a build script can write to; only `registry/` and `git/` are mounted, at the cost — stated here rather than discovered — that a `$CARGO_HOME/config.toml` source redirect is invisible to the guest. **The image is supplied by the user, not chosen by Roteiro**, because the assumption that an official Rust image would satisfy `SANDBOX_IMAGES`' rule is wrong: rust-lang builds every stable *and* nightly variant `--profile minimal`, so no first-party image carries `clippy`, confirmed from inside a running guest. Pointing at a third party's was declined on a sharper ground than the rule states — an image is not a dependency of the analysis, it **is the boundary**, and choosing whose container that is in a default is a security decision made here and noticed by nobody. A tag is refused for the same reason rather than for reproducibility, which this document retires for builders. Adds the fourth reading a lint count carries — a sandboxed run reports what the *image's* rustc said — to condition 5 and to both output shapes. Records that **parity did not weaken** as predicted, because a builder is not an `AnalyzerRunner` and the parity test is a reader-contract test; that the scratch is keyed per **backend** as well as per checkout, since the two put different operating systems' executables under one name; and that the environment seam is reconciled into one type whose `inherit` half is host-only by construction, a guest having no parent environment to inherit from. |
+| 1.6 | 2026-08-19 | **Removes the argument §6 was made on and replaces it with a stronger one.** The section framed the sandbox default as protecting against *builders* — tools that compile, and therefore execute what the repository declares. Measured, that framing is false: a `.pylintrc` containing nothing but an `init-hook=` was executed by `pylint`, which wrote its marker, exited 16, and emitted **no diagnostic about having done so**; the same shape was measured for `mypy` (`plugins=`), `sqlfluff` (`library_path`) and `eslint` (its config is imported and run). Only `ruff` and `black` resisted, and only for want of a plugin system. So reader-versus-builder is a property of **the repository**, not of the tool, and the two axes are orthogonal — writable surface is `(tool, invocation)` and genuinely tabulable, code execution is `(tool, repository)` and is not. Records the consequence that would otherwise be got wrong: **a per-tool exemption table must not be added**, because it would be right for `ruff` and `black`, wrong for everything with a plugin system, and wrong in the direction that ships execution while reporting isolation. The decision is unchanged; the default is not for a class of *tool* but for a class of *input* — any tree you did not write. Also corrects a paragraph this document's own v1.5 made stale: §6 still said `roteiro lint` refuses "until conditions 1 and 2 are built", when they are built and the refusal a stock machine actually meets is condition 2a's — no image is configured, because Roteiro deliberately ships no default. |
