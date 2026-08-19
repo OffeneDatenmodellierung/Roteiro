@@ -70,6 +70,7 @@ pub mod review_score;
 pub mod reviewer;
 mod store;
 mod sync;
+mod text;
 // Whether a producer's identity is measured or asserted (ADR-0019 §5). In *this*
 // crate rather than in `rto-remote` because `rto-remote` depends on this one, so
 // `ModelSource::Remote` cannot name a type that lives there — and because the
@@ -155,6 +156,7 @@ pub use sync::{
     DEFAULT_KEEP_GENERATIONS, ReclaimReport, SyncError, SyncReport, sweep_superseded, sync,
     sync_index, sync_tree, sync_worktree,
 };
+pub use text::slugify;
 pub use trust::ProducerTrust;
 pub use workspace::{
     Follow, ResolvedWorkspace, Workspace, WorkspaceError, WorkspaceSet, discover_repos_under,

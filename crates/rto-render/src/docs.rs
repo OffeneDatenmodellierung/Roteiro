@@ -8,9 +8,10 @@
 //! switch is drop-in. This module is pure string generation; the `roteiro`
 //! binary owns walking `docs/adr` and copying static assets.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
+use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
 
 /// A rendered ADR: its title (for the index) and the full themed HTML page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +21,21 @@ pub struct RenderedAdr {
     pub title: String,
     /// The complete HTML document.
     pub html: String,
+}
+
+/// One page in the site navigation bar: where it goes and what it is called.
+///
+/// Built by the caller from the authored site pages (`rto_spec::site_nav` puts
+/// them in order), and passed to [`render_site_page`] whole so every page emits
+/// the *same* bar. A per-page bar assembled independently is a bar that can
+/// disagree with itself, which is how a page ends up unreachable from its
+/// neighbours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavEntry {
+    /// Root-relative href (e.g. `modes.html`, or `./` for the landing page).
+    pub href: String,
+    /// Short label shown in the bar.
+    pub label: String,
 }
 
 /// An entry in the ADR/docs index page.
@@ -44,12 +60,12 @@ pub fn markdown_to_html(md: &str) -> String {
 /// `.html` targets, then run `CommonMark` with GitHub tables/strikethrough.
 fn render_markdown(md: &str, adr_prefix: &str) -> String {
     let pre = rewrite_wiki_links(md, adr_prefix);
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    let ids = heading_ids(&pre);
+    let mut next_id = 0usize;
     // Rewrite link destinations pointing at local Markdown files to the HTML the
-    // site actually serves (e.g. `adr/0001-….md` → `adr/0001-….html`).
-    let parser = Parser::new_ext(&pre, opts).map(|event| match event {
+    // site actually serves (e.g. `adr/0001-….md` → `adr/0001-….html`), and give
+    // every heading a stable `id` so it can be linked to.
+    let parser = Parser::new_ext(&pre, options()).map(|event| match event {
         Event::Start(Tag::Link {
             link_type,
             dest_url,
@@ -61,11 +77,92 @@ fn render_markdown(md: &str, adr_prefix: &str) -> String {
             title,
             id,
         }),
+        Event::Start(Tag::Heading {
+            level,
+            classes,
+            attrs,
+            ..
+        }) => {
+            let id = ids.get(next_id).cloned().map(CowStr::from);
+            next_id += 1;
+            Event::Start(Tag::Heading {
+                level,
+                id,
+                classes,
+                attrs,
+            })
+        }
         other => other,
     });
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
+}
+
+/// The `CommonMark` dialect the whole site is parsed with: GitHub tables and
+/// strikethrough, plus **heading attributes** (`## Heading {#anchor}`).
+///
+/// Heading attributes are how a URL outlives a restructure. A page split out of
+/// the old single-page site keeps the anchor the old page published — the
+/// heading declares `{#modes}` and lands at `#modes` — instead of silently
+/// becoming whatever the new heading text happens to slugify to. External links
+/// point at those anchors and cannot be updated, so the alternative is not a
+/// tidier URL; it is a dead one.
+fn options() -> Options {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
+    opts
+}
+
+/// The `id` for every heading in `md`, in document order.
+///
+/// An explicit `{#anchor}` wins; otherwise the id is [`rto_graph::slugify`] of
+/// the heading text — the same function that builds the section's node key, so
+/// an authored link to `site:modes#offline-mode` lands on the heading the graph
+/// says it does. A heading whose text slugifies to nothing (`## ###`) falls back
+/// to its position, and a repeat gets a `-2`, `-3`, … suffix, because two
+/// elements sharing an `id` means one of them is unreachable.
+///
+/// Computed from a *first parse* rather than a line scan: heading text can be
+/// spread over several inline events, and `#` inside a fenced block is not a
+/// heading at all. Parsing twice costs a document-sized pass and cannot be wrong
+/// about what the renderer will see, because it is the same parser.
+fn heading_ids(md: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut current: Option<(Option<String>, String)> = None;
+    for event in Parser::new_ext(md, options()) {
+        match event {
+            Event::Start(Tag::Heading { id, .. }) => {
+                current = Some((id.map(|i| i.to_string()), String::new()));
+            }
+            Event::Text(t) | Event::Code(t) => {
+                if let Some((_, text)) = current.as_mut() {
+                    text.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                let Some((explicit, text)) = current.take() else {
+                    continue;
+                };
+                let base = explicit
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or_else(|| rto_graph::slugify(&text));
+                let base = if base.is_empty() {
+                    format!("section-{}", ids.len() + 1)
+                } else {
+                    base
+                };
+                let n = seen.entry(base.clone()).or_insert(0);
+                *n += 1;
+                ids.push(if *n == 1 { base } else { format!("{base}-{n}") });
+            }
+            _ => {}
+        }
+    }
+    ids
 }
 
 /// Rewrite a relative link to a local Markdown file so it points at the rendered
@@ -116,6 +213,62 @@ pub fn render_doc(markdown: &str, fallback_title: &str) -> RenderedAdr {
                <a href=\"adr/\">ADRs</a></p>";
     let html = page(&format!("{title} — Roteiro"), "./", nav, &content);
     RenderedAdr { title, html }
+}
+
+/// Render one **site page** — a document that declared itself published — to a
+/// themed root-level page carrying the site navigation bar.
+///
+/// `nav` is the whole bar, in order; `current_href` is this page's own entry,
+/// which is marked `aria-current="page"` and rendered unlinked so the reader can
+/// see where they are. A `current_href` that matches nothing in `nav` simply
+/// yields a bar with nothing marked, which is what a preview of an unlisted page
+/// should look like rather than an error.
+///
+/// The title is the first `# ` heading, or `fallback_title`. `[[docs/adr/…]]`
+/// links resolve into the `adr/` subdirectory, exactly as they do for the Build
+/// Plan: a site page is a root-level document.
+#[must_use]
+pub fn render_site_page(
+    markdown: &str,
+    fallback_title: &str,
+    nav: &[NavEntry],
+    current_href: &str,
+) -> RenderedAdr {
+    let body = strip_frontmatter(markdown);
+    let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
+    let content = render_markdown(body, "adr/");
+    let bar = render_nav(nav, current_href);
+    let html = page(&format!("{title} — Roteiro"), "./", &bar, &content);
+    RenderedAdr { title, html }
+}
+
+/// The site navigation bar: one link per page, the current one marked.
+///
+/// Plain anchors in a `<nav>`, styled by `website/public/style.css`. No script:
+/// the explorer is deliberately vendored with no build step (ADR-0010), and a
+/// navigation bar that needs JavaScript to be a navigation bar would be the
+/// first thing on this site that does.
+#[must_use]
+pub fn render_nav(nav: &[NavEntry], current_href: &str) -> String {
+    let mut out = String::from("<nav class=\"sitenav\">");
+    for entry in nav {
+        if entry.href == current_href {
+            let _ = write!(
+                out,
+                "<span aria-current=\"page\">{}</span>",
+                escape_html(&entry.label)
+            );
+        } else {
+            let _ = write!(
+                out,
+                "<a href=\"{}\">{}</a>",
+                escape_attr(&entry.href),
+                escape_html(&entry.label)
+            );
+        }
+    }
+    out.push_str("</nav>");
+    out
 }
 
 /// Render the docs index: any `lifetime` docs (Build Plan, …) then the ADRs.
@@ -316,12 +469,28 @@ fn escape_attr(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{IndexEntry, markdown_to_html, render_adr, render_adr_index, render_doc};
+    use super::{
+        IndexEntry, NavEntry, markdown_to_html, render_adr, render_adr_index, render_doc,
+        render_nav, render_site_page,
+    };
+
+    fn nav() -> Vec<NavEntry> {
+        vec![
+            NavEntry {
+                href: "./".into(),
+                label: "Home".into(),
+            },
+            NavEntry {
+                href: "modes.html".into(),
+                label: "Modes & Co".into(),
+            },
+        ]
+    }
 
     #[test]
     fn markdown_renders_headings_and_tables() {
         let html = markdown_to_html("# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
-        assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("<h1 id=\"title\">Title</h1>"), "{html}");
         assert!(html.contains("<table>"));
         assert!(html.contains("<td>1</td>"));
     }
@@ -443,8 +612,13 @@ mod tests {
         assert_eq!(r.title, "ADR-0001: Example");
         // Frontmatter is gone; heading + section rendered.
         assert!(!r.html.contains("adr-id"));
-        assert!(r.html.contains("<h1>ADR-0001: Example</h1>"));
-        assert!(r.html.contains("<h2>Context</h2>"));
+        assert!(
+            r.html
+                .contains("<h1 id=\"adr-0001-example\">ADR-0001: Example</h1>")
+        );
+        // The section anchor matches the section's node key (`adr:0001#context`),
+        // so a link through the graph lands on the heading in the browser.
+        assert!(r.html.contains("<h2 id=\"context\">Context</h2>"));
         assert!(r.html.contains("<code>code</code>"));
         // Themed chrome present.
         assert!(
@@ -494,6 +668,111 @@ mod tests {
         assert!(html.find("0001-x").unwrap() < html.find("0002-y").unwrap());
         // Lifetime docs listed before the ADRs.
         assert!(html.find("build-plan").unwrap() < html.find("0001-x").unwrap());
+    }
+
+    #[test]
+    fn an_explicit_anchor_survives_the_split_that_moved_its_section() {
+        // The hazard this mechanism exists for. The old single-page site
+        // published `#modes`, `#crossrepo`, `#remote-tier` — short, hand-chosen
+        // ids that no heading text slugifies to. External links point at them and
+        // cannot be updated, so a page that inherits a section must be able to
+        // inherit its anchor verbatim.
+        let html = markdown_to_html(
+            "## The five ways to run it {#modes}\n\n## Cross-repo: a hub and its spokes {#crossrepo}\n",
+        );
+        assert!(
+            html.contains("<h2 id=\"modes\">The five ways to run it</h2>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"crossrepo\">Cross-repo: a hub and its spokes</h2>"),
+            "{html}"
+        );
+        // The attribute is markup, not part of the heading's text.
+        assert!(!html.contains("{#"), "no literal attribute leaks: {html}");
+    }
+
+    #[test]
+    fn generated_anchors_match_the_graph_s_section_keys_and_stay_unique() {
+        // `rto_spec` builds `<doc>#<slugify(heading)>` section keys from the same
+        // function, so a link that resolves in the graph lands on the heading.
+        let html = markdown_to_html("## Install & build\n\n## Install & build\n\n## ###\n");
+        assert!(html.contains("id=\"install-build\""), "{html}");
+        // A repeat is suffixed rather than duplicated: two elements sharing an
+        // `id` makes one of them unreachable.
+        assert!(html.contains("id=\"install-build-2\""), "{html}");
+        // A heading that slugifies to nothing still gets a usable anchor.
+        assert!(html.contains("id=\"section-3\""), "{html}");
+    }
+
+    #[test]
+    fn inline_code_counts_as_heading_text() {
+        // The old page's headings look like `What <code>init</code> sets up`.
+        // Dropping the code span would slugify only the prose around it and give
+        // the section an anchor nobody would guess.
+        let html = markdown_to_html("### What `init` sets up\n");
+        assert!(
+            html.contains("<h3 id=\"what-init-sets-up\">"),
+            "code span is part of the heading's text: {html}"
+        );
+    }
+
+    #[test]
+    fn a_hash_inside_a_fence_is_not_a_heading() {
+        // The id list is computed from a real parse, so fenced content cannot
+        // shift every subsequent heading's anchor by one.
+        let html = markdown_to_html("```\n## Not a heading\n```\n\n## Real\n");
+        assert!(html.contains("<h2 id=\"real\">Real</h2>"), "{html}");
+    }
+
+    #[test]
+    fn a_site_page_carries_the_bar_with_itself_marked() {
+        let r = render_site_page(
+            "---\nsite-page: modes\n---\n\n# The five ways to run it\n\nSee [[docs/adr/0019-remote.md]].\n",
+            "fallback",
+            &nav(),
+            "modes.html",
+        );
+        assert_eq!(r.title, "The five ways to run it");
+        // Frontmatter is chrome for the graph, not content for the reader.
+        assert!(!r.html.contains("site-page"), "{}", r.html);
+        // The current page is unlinked and marked; its neighbour is a link.
+        assert!(
+            r.html
+                .contains("<span aria-current=\"page\">Modes &amp; Co</span>"),
+            "{}",
+            r.html
+        );
+        assert!(r.html.contains("<a href=\"./\">Home</a>"), "{}", r.html);
+        // A root-level page: assets and ADR links resolve from the site root.
+        assert!(r.html.contains("href=\"./style.css\""), "{}", r.html);
+        assert!(
+            r.html
+                .contains("<a href=\"adr/0019-remote.html\">ADR-0019</a>"),
+            "{}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn the_bar_is_plain_anchors_and_escapes_its_labels() {
+        let bar = render_nav(&nav(), "nothing.html");
+        assert!(bar.starts_with("<nav class=\"sitenav\">"), "{bar}");
+        // Nothing marked when the current page is not in the bar — a preview of
+        // an unlisted page, not an error.
+        assert!(!bar.contains("aria-current"), "{bar}");
+        assert!(bar.contains("Modes &amp; Co"), "escaped label: {bar}");
+        // No script: the site has no build step and this must not introduce one.
+        assert!(!bar.contains("<script"), "{bar}");
+    }
+
+    #[test]
+    fn site_pages_render_deterministically() {
+        let md = "---\nsite-page: a\n---\n\n# A\n\n## S\n";
+        assert_eq!(
+            render_site_page(md, "f", &nav(), "a.html"),
+            render_site_page(md, "f", &nav(), "a.html")
+        );
     }
 
     #[test]

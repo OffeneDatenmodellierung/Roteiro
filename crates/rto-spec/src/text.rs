@@ -17,23 +17,14 @@ pub(crate) fn lang_for(path: &str) -> String {
     }
 }
 
-/// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`,
-/// trimmed of leading/trailing `-`. Shared by the ADR and lat.md section keys.
-#[must_use]
-pub(crate) fn slugify(s: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    out.trim_matches('-').to_owned()
-}
+/// A URL-safe slug for the ADR, site-page and lat.md section keys.
+///
+/// Re-exported from [`rto_graph::slugify`] rather than written here: the same
+/// rule decides the `id` attribute `rto_render` puts on the rendered heading, and
+/// a section key that disagrees with its own anchor is a link that resolves in
+/// the graph and scrolls nowhere in the browser. See that function for the full
+/// argument.
+pub(crate) use rto_graph::slugify;
 
 /// Extract the inner text of every `[[…]]` on `line`, ignoring any inside an
 /// inline code span (so `` `[[path#Symbol]]` `` written as a documentation
