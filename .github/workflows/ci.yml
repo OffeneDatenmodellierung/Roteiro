@@ -175,45 +175,59 @@ jobs:
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
+      # THERE IS DELIBERATELY NO apt INSTALL OF cmake/clang/libclang HERE, in
+      # this job or in `coverage` and `msrv` below. Do not add one back.
+      #
       # The opt-in `serve` feature builds vendored llama.cpp (ADR-0006), which
-      # `--all-features` below pulls in. cmake + libclang (bindgen) are required;
-      # the compiled artefacts are cached by rust-cache across runs.
-      # BOUNDING THE MIRROR, NOT JUST THE STEP. This step is where every one of
-      # the six-hour hangs happened. The obvious fix — a short `timeout-minutes`
-      # — is wrong on its own, and the measurement says why. Across the last ~40
-      # runs the *successful* durations of this step were, in seconds:
+      # `--all-features` pulls in, so this job does need cmake and a libclang
+      # that bindgen can load. It does not need to *install* them: `ubuntu-24.04`
+      # already ships both, and the step that used to do it was the single
+      # largest hang surface in this file — every one of the eleven six-hour
+      # cancellations sat on it.
       #
-      #   12 12 13 14 14 16 17 19 45 49 57 60 66 68 70 71 83 83 95 129 131 140
-      #   141 151 193 361 468 497 1141 1367 2201 2222
+      # Established on a real runner (image 20260810.271.1) rather than read off
+      # the image manifest, because the manifest does not answer the only
+      # question that matters — whether bindgen can LOAD libclang without
+      # `libclang-dev`:
       #
-      # Median 83s, but six succeeded after more than six minutes and four after
-      # 19-37 minutes. A bare five-minute step bound would therefore have turned
-      # roughly a fifth of currently-green runs red. The tail is not a different
-      # failure from the hang — it is the same degraded mirror, sometimes
-      # recovering and sometimes not.
+      #   cmake     /usr/local/bin/cmake, 3.31.6   (llama.cpp needs >= 3.14)
+      #   clang     /usr/bin/clang, 18.1.3         (clang-16/17/18 all present)
+      #   libclang  /usr/lib/llvm-18/lib/libclang.so.1 -> libclang-18.so.18
       #
-      # So the bound goes on the *fetch* rather than only on the step:
-      # `Acquire::http::Timeout` caps each stalled socket read at 30s and
-      # `Acquire::Retries` bounds the reattempts, which is what makes a tight
-      # step bound safe rather than merely aggressive. A wedged mirror now fails
-      # in minutes, naming itself, and a re-run fixes it; a slow-but-alive
-      # mirror still completes. `timeout-minutes` below is the backstop for what
-      # the transport options cannot see — a dpkg lock, say — not the first line
-      # of defence.
-      - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
-        if: env.RELEASE_PR != 'true'
-        timeout-minutes: 8
-        run: |
-          set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y cmake clang libclang-dev \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
+      # There is no bare unversioned `libclang.so` — that symlink is precisely
+      # what `libclang-dev` would add — and it turns out not to be needed, because
+      # clang-sys searches versioned SONAMEs too. Proven rather than argued, by
+      # running bindgen 0.72.1 (the exact version `Cargo.lock` pins for
+      # `llama-cpp-sys-2`) against a header on a clean runner with nothing
+      # installed: it generated bindings and exited 0.
+      #
+      # The step was also never the cheap no-op it looked like. `apt-cache policy`
+      # on a clean runner reports `cmake: Installed: (none)`, because the
+      # preinstalled cmake comes from Kitware into /usr/local/bin rather than from
+      # dpkg — so `apt-get install cmake` really did fetch Ubuntu's older 3.28.3
+      # into /usr/bin, where /usr/local/bin shadows it on PATH. Three packages
+      # downloaded, nothing changed, and six hours available to hang doing it.
+      #
+      # If a future dependency genuinely needs a package the image lacks, add a
+      # step for THAT package and bound it the way the protoc step below is —
+      # do not restore this one on the assumption the toolchain is missing.
       # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
       # brings two build requirements that are real and not optional.
       #
       # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
       # there is no stub path around it.
+      #
+      # This one IS a real install and stays: `protoc` is genuinely absent from
+      # `ubuntu-24.04` (`which protoc` finds nothing on a clean runner), unlike
+      # the cmake/clang/libclang step that used to sit above it.
+      #
+      # It runs WITHOUT a preceding `apt-get update`, which is not an oversight
+      # left behind when that step went: the runner image ships populated
+      # `/var/lib/apt/lists`, and `apt-get install -y protobuf-compiler` on a
+      # clean runner with no update at all resolved 3048 kB and finished in
+      # 5.07s. Measured, not assumed — an `update` is a full index refresh from
+      # the mirror and by far the more likely half to stall, so not needing it
+      # removes most of what remains of this hang surface.
       #
       # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
       # would otherwise fetch with an unverified `curl` and embed in the binary.
@@ -452,9 +466,11 @@ jobs:
   # of untruth this job exists to end.
   #
   # Scope: `--all-features`, matching the `checks` job, so the measured surface
-  # is the surface that is tested. That builds vendored llama.cpp (`serve`), so
-  # the same apt packages are needed; rust-cache carries the artefacts between
-  # runs. If this ever proves too slow to keep, narrow it to default features and
+  # is the surface that is tested. That builds vendored llama.cpp (`serve`),
+  # which needs cmake and a bindgen-loadable libclang — both already on the
+  # runner image, so this job installs neither; see the `checks` job for the
+  # evidence. `protoc` it does install, because that one really is absent.
+  # rust-cache carries the compiled artefacts between runs. If this ever proves too slow to keep, narrow it to default features and
   # SAY SO in the summary — a partial measurement reported as partial is honest,
   # a gate that times out is not.
   coverage:
@@ -505,19 +521,27 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-      - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
-        timeout-minutes: 8
-        run: |
-          set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y cmake clang libclang-dev \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
+      # No apt install of cmake/clang/libclang, deliberately — `ubuntu-24.04`
+      # ships all three and bindgen loads libclang without `libclang-dev`. The
+      # evidence, and the six-hour hang that made it worth establishing, are in
+      # the `checks` job above. Do not add one back here either.
       # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
       # brings two build requirements that are real and not optional.
       #
       # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
       # there is no stub path around it.
+      #
+      # This one IS a real install and stays: `protoc` is genuinely absent from
+      # `ubuntu-24.04` (`which protoc` finds nothing on a clean runner), unlike
+      # the cmake/clang/libclang step that used to sit above it.
+      #
+      # It runs WITHOUT a preceding `apt-get update`, which is not an oversight
+      # left behind when that step went: the runner image ships populated
+      # `/var/lib/apt/lists`, and `apt-get install -y protobuf-compiler` on a
+      # clean runner with no update at all resolved 3048 kB and finished in
+      # 5.07s. Measured, not assumed — an `update` is a full index refresh from
+      # the mirror and by far the more likely half to stall, so not needing it
+      # removes most of what remains of this hang surface.
       #
       # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
       # would otherwise fetch with an unverified `curl` and embed in the binary.
@@ -586,20 +610,27 @@ jobs:
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
-      - name: Install C/C++ toolchain (llama.cpp, `serve` feature)
-        if: env.RELEASE_PR != 'true'
-        timeout-minutes: 8
-        run: |
-          set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y cmake clang libclang-dev \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
+      # No apt install of cmake/clang/libclang, deliberately — `ubuntu-24.04`
+      # ships all three and bindgen loads libclang without `libclang-dev`. The
+      # evidence, and the six-hour hang that made it worth establishing, are in
+      # the `checks` job above. Do not add one back here either.
       # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
       # brings two build requirements that are real and not optional.
       #
       # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
       # there is no stub path around it.
+      #
+      # This one IS a real install and stays: `protoc` is genuinely absent from
+      # `ubuntu-24.04` (`which protoc` finds nothing on a clean runner), unlike
+      # the cmake/clang/libclang step that used to sit above it.
+      #
+      # It runs WITHOUT a preceding `apt-get update`, which is not an oversight
+      # left behind when that step went: the runner image ships populated
+      # `/var/lib/apt/lists`, and `apt-get install -y protobuf-compiler` on a
+      # clean runner with no update at all resolved 3048 kB and finished in
+      # 5.07s. Measured, not assumed — an `update` is a full index refresh from
+      # the mirror and by far the more likely half to stall, so not needing it
+      # removes most of what remains of this hang surface.
       #
       # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
       # would otherwise fetch with an unverified `curl` and embed in the binary.
