@@ -262,6 +262,15 @@ fn render_obsidian_gives_a_prose_note_its_whole_source() {
         "a symbol note does not gain its file's source: {sym}"
     );
 
+    // Nor does a *source* file node: only prose paths are selected, so a `.rs`
+    // file note is what it always was. Without this, dropping the prose filter
+    // would pour every source file into the vault and no test would notice.
+    let rs = std::fs::read_to_string(dir.join("vault/file-src-lib.rs.md")).expect("rs note");
+    assert!(
+        !rs.contains("pub fn f()"),
+        "a source file is not prose: {rs}"
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
