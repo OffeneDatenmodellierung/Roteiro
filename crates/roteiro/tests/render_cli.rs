@@ -274,6 +274,122 @@ fn render_obsidian_gives_a_prose_note_its_whole_source() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// An ADR whose two sections are each longer than extraction's `MAX_CONTENT`
+/// budget (1500 chars) and whose prose is unmistakably per-section, so a note
+/// holding the wrong span, or a truncated one, cannot pass by coincidence.
+fn adr_document() -> String {
+    use std::fmt::Write as _;
+    let mut s = String::from(
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n\
+         # ADR-0001: Example\n\n| | |\n|---|---|\n| **State** | Accepted |\n\n\
+         ## Context\n\n",
+    );
+    for i in 0..40 {
+        let _ = writeln!(s, "CONTEXTWORD paragraph {i} about the situation.\n");
+    }
+    let _ = write!(s, "## Decision\n\n");
+    for i in 0..40 {
+        let _ = writeln!(s, "DECISIONWORD paragraph {i} about the choice.\n");
+    }
+    s
+}
+
+/// The defect in #545, end to end: an ADR's notes were empty because `rto-spec`
+/// stored no content for them, and the renderer had nothing to show.
+///
+/// The three assertions that matter are *whole*, *own* and *not the document*.
+/// Byte counts alone would pass on a note that had merely grown, and a
+/// "contains its text" check alone would pass on the note that holds the entire
+/// ADR — which is the specific wrong answer a path-only rule produces.
+#[test]
+fn render_obsidian_gives_an_adr_section_note_its_own_section() {
+    let dir = fresh_dir("obsidian-adr");
+    git(&dir, &["init", "-q"]);
+    let doc = adr_document();
+    write(&dir, "docs/adr/0001-example.md", &doc);
+    write(&dir, "src/lib.rs", "/// Doc comment.\npub fn f() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "obsidian", "--out", "vault"])
+        .current_dir(&dir)
+        .env("ROTEIRO_HOME", &dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render obsidian failed: {out:?}");
+
+    let read = |name: &str| {
+        std::fs::read_to_string(dir.join("vault").join(name))
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+
+    // A section note is its own section, whole.
+    let context = read("adr-0001-context.md");
+    assert!(
+        context.contains("## Content"),
+        "the defect: the note had no content at all: {context}"
+    );
+    assert!(
+        context.contains("CONTEXTWORD paragraph 39 about the situation."),
+        "the last paragraph of the section is present, so it is not capped: {context}"
+    );
+    assert!(
+        !context.contains("DECISIONWORD"),
+        "and the next section's prose is not: {context}"
+    );
+    assert!(
+        !context.contains("| **State** | Accepted |"),
+        "nor the preamble: {context}"
+    );
+
+    let decision = read("adr-0001-decision.md");
+    assert!(
+        decision.contains("DECISIONWORD paragraph 39 about the choice."),
+        "{decision}"
+    );
+    assert!(!decision.contains("CONTEXTWORD"), "{decision}");
+
+    // Structure survives: the whole point of rendering the source rather than the
+    // whitespace-collapsed `meta.content`. One line would mean the note was built
+    // from the store after all.
+    assert!(
+        content_lines(&context) > 40,
+        "the section keeps its line structure, got {} line(s): {context}",
+        content_lines(&context)
+    );
+
+    // The `adr:` note gets the preamble — and not the body its sections carry, or
+    // the whole document would be stored and rendered twice over.
+    let adr = read("adr-0001.md");
+    assert!(
+        adr.contains("| **State** | Accepted |"),
+        "the ADR note carries the span that belongs to no section: {adr}"
+    );
+    assert!(
+        !adr.contains("CONTEXTWORD") && !adr.contains("DECISIONWORD"),
+        "the ADR note does not restate its sections: {adr}"
+    );
+
+    // The `file:` note is still the whole document, as #544 left it. This is what
+    // makes the split above a division of labour rather than a loss.
+    let file = read("file-docs-adr-0001-example.md.md");
+    assert!(
+        file.contains("CONTEXTWORD paragraph 39 about the situation.")
+            && file.contains("DECISIONWORD paragraph 39 about the choice."),
+        "the document note still holds all of it: {file}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Lines in a note's `## Content` section.
+fn content_lines(note: &str) -> usize {
+    let body = note.split_once("## Content\n\n").map_or("", |(_, r)| r);
+    let body = body.split_once("\n## ").map_or(body, |(head, _)| head);
+    body.trim_end().lines().count()
+}
+
 /// Stands in for the destination of the current page's entry, which is an
 /// unlinked `<span aria-current="page">` and so has none.
 ///

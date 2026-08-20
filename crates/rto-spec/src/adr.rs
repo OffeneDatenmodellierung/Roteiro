@@ -247,14 +247,13 @@ impl AdrDoc {
     #[must_use]
     pub fn text_for_key(&self, key: &str) -> Option<&str> {
         let rest = key.strip_prefix(&self.key())?;
-        let text = match rest {
-            "" => self.preamble.as_str(),
-            // `adr:00151` also strips the `adr:0015` prefix; requiring the `#`
-            // is what refuses it rather than reading `1` as a slug.
-            _ => {
-                let slug = rest.strip_prefix('#')?;
-                &self.sections.iter().find(|s| s.slug == slug)?.text
-            }
+        let text = if rest.is_empty() {
+            self.preamble.as_str()
+        } else {
+            // `adr:00151` also strips the `adr:0015` prefix; requiring the `#` is
+            // what refuses it rather than reading `1` as a slug.
+            let slug = rest.strip_prefix('#')?;
+            &self.sections.iter().find(|s| s.slug == slug)?.text
         };
         (!text.is_empty()).then_some(text)
     }
@@ -349,9 +348,50 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
         .or_else(|| crate::text::first_h1(body))
         .unwrap_or_else(|| format!("ADR-{id}"));
 
-    // Walk the body, tracking the current section so links are attributed to it.
-    // Fenced code blocks are skipped so documented examples of `[[…]]` syntax
-    // are not mistaken for real authored links.
+    let scan = scan_body(&id, body, body_line1);
+
+    Ok(AdrDoc {
+        meta: AdrMeta {
+            id,
+            title,
+            status,
+            version: fm_version,
+        },
+        path: rel_path.to_owned(),
+        sections: scan.sections,
+        preamble: scan.preamble,
+        links: scan.links,
+        versions: scan.versions,
+    })
+}
+
+/// Everything one pass over an ADR body yields.
+///
+/// Grouped into a struct rather than returned as a tuple of four because three of
+/// the four are only meaningful together: a `## ` heading simultaneously ends one
+/// span, opens the next, decides whether the rows that follow are version history,
+/// and re-attributes every `[[…]]` link after it.
+struct BodyScan {
+    /// Body text before the first `## `.
+    preamble: String,
+    /// `## ` sections in document order, each carrying its own span.
+    sections: Vec<Section>,
+    /// Authored `[[…]]` links, attributed to the section they appear in.
+    links: Vec<WikiLink>,
+    /// What the document says about its own version, in three places.
+    versions: VersionFacts,
+}
+
+/// Walk `body` once, tracking the current section so links are attributed to it
+/// and each `## ` span can be sliced back out.
+///
+/// Fenced code blocks are skipped so documented examples of `[[…]]` syntax are not
+/// mistaken for real authored links — and, for the same reason, a `## ` line inside
+/// a fence is body text rather than a section boundary.
+///
+/// `body_line1` is the 1-based line number `body` starts at in the file, so a
+/// violation can point at the file rather than at the post-frontmatter offset.
+fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
     let mut sections: Vec<Section> = Vec::new();
     let mut links = Vec::new();
     let mut versions = VersionFacts::default();
@@ -392,7 +432,11 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
             current = Some(slug.clone());
             // Close the span this heading ends — the preamble if it is the first.
             match sections.last_mut() {
-                Some(prev) => prev.text = body[span_start..line_start].trim().to_owned(),
+                Some(prev) => {
+                    body[span_start..line_start]
+                        .trim()
+                        .clone_into(&mut prev.text);
+                }
                 None => preamble_end = Some(line_start),
             }
             span_start = byte_offset;
@@ -432,23 +476,16 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
     // Close the last open span at end of document; with no `## ` at all the whole
     // body is preamble.
     if let Some(last) = sections.last_mut() {
-        last.text = body[span_start..].trim().to_owned();
+        body[span_start..].trim().clone_into(&mut last.text);
     }
     let preamble = body[..preamble_end.unwrap_or(body.len())].trim().to_owned();
 
-    Ok(AdrDoc {
-        meta: AdrMeta {
-            id,
-            title,
-            status,
-            version: fm_version,
-        },
-        path: rel_path.to_owned(),
-        sections,
+    BodyScan {
         preamble,
+        sections,
         links,
         versions,
-    })
+    }
 }
 
 /// Whether a `## ` heading opens the version-history table. Both spellings are
@@ -557,6 +594,218 @@ pub(crate) fn resolve_target(raw: &str) -> Option<String> {
 mod tests {
     use super::{AdrStatus, parse_adr};
     use crate::text::slugify;
+
+    /// An ADR with a preamble, two sections of clearly distinguishable prose, a
+    /// `## `-looking line inside a code fence, and an empty trailing section.
+    const SPANS: &str = "---\nadr-id: \"0015\"\nstatus: Accepted\n---\n\n# ADR-0015: Spans\n\n| | |\n|---|---|\n| **State** | Accepted |\n\n## Context\n\nALPHA the context prose.\n\n```md\n## Not A Heading\nALPHA fenced.\n```\n\n## Consequences\n\nBRAVO the consequences prose.\n\n### A subheading\n\nBRAVO more.\n\n## Empty\n";
+
+    /// The whole defect and the whole trap in one test: each section note gets
+    /// **its own** span and never the document. A path-only rule — the shape the
+    /// `prose_blob_oid` kind check in #544 exists to refuse — would put every one
+    /// of these strings in every one of these nodes.
+    #[test]
+    fn a_section_carries_its_own_body_and_not_the_document() {
+        let doc = parse_adr("docs/adr/0015-spans.md", SPANS).expect("parse");
+        let by = |slug: &str| {
+            doc.sections
+                .iter()
+                .find(|s| s.slug == slug)
+                .unwrap_or_else(|| panic!("no section {slug}"))
+        };
+
+        let context = &by("context").text;
+        assert!(
+            context.contains("ALPHA the context prose."),
+            "the section keeps its own prose: {context:?}"
+        );
+        assert!(
+            !context.contains("BRAVO"),
+            "and not the next section's: {context:?}"
+        );
+
+        let consequences = &by("consequences").text;
+        assert!(
+            consequences.contains("BRAVO the consequences prose."),
+            "{consequences:?}"
+        );
+        assert!(
+            consequences.contains("### A subheading"),
+            "a `###` inside the span is body text, not a boundary: {consequences:?}"
+        );
+        assert!(
+            !consequences.contains("ALPHA"),
+            "and not the previous section's: {consequences:?}"
+        );
+
+        // A heading line ends the span before it and does not open the next one.
+        assert!(
+            !context.contains("## Consequences"),
+            "the boundary heading is excluded: {context:?}"
+        );
+        assert!(
+            !consequences.starts_with("## "),
+            "a section note is already titled by its heading: {consequences:?}"
+        );
+
+        // A `## ` inside a fence is body text of the section that encloses it —
+        // the same rule the link scanner already applies to `[[…]]`.
+        assert_eq!(
+            doc.sections
+                .iter()
+                .map(|s| s.slug.as_str())
+                .collect::<Vec<_>>(),
+            ["context", "consequences", "empty"],
+            "a fenced `## ` line does not open a section"
+        );
+        assert!(
+            context.contains("## Not A Heading"),
+            "the fenced line stays inside the section that encloses it: {context:?}"
+        );
+
+        // A heading immediately followed by end-of-document has no text at all,
+        // and `stored` turns that into no `content` key rather than an empty one.
+        assert_eq!(by("empty").text, "");
+    }
+
+    /// The `adr:NNNN` node's share: the span belonging to no section. Storing the
+    /// whole document here instead would hold every section's text twice — once on
+    /// the ADR node and once on the section that owns it.
+    #[test]
+    fn the_preamble_is_the_span_that_belongs_to_no_section() {
+        let doc = parse_adr("docs/adr/0015-spans.md", SPANS).expect("parse");
+        assert!(
+            doc.preamble.contains("# ADR-0015: Spans"),
+            "{:?}",
+            doc.preamble
+        );
+        assert!(
+            doc.preamble.contains("| **State** | Accepted |"),
+            "the summary table is ADR-level, not section-level: {:?}",
+            doc.preamble
+        );
+        assert!(
+            !doc.preamble.contains("ALPHA") && !doc.preamble.contains("BRAVO"),
+            "no section body: {:?}",
+            doc.preamble
+        );
+        // Frontmatter is not body text and never reaches a note.
+        assert!(!doc.preamble.contains("adr-id"), "{:?}", doc.preamble);
+    }
+
+    /// A document with no `## ` at all is all preamble — the loop must close the
+    /// open span at end-of-document rather than dropping it.
+    #[test]
+    fn a_sectionless_adr_is_all_preamble() {
+        let doc = parse_adr(
+            "docs/adr/0099-x.md",
+            "---\nadr-id: \"0099\"\n---\n\n# ADR-0099\n\nJust prose.\n",
+        )
+        .expect("parse");
+        assert!(doc.sections.is_empty());
+        assert!(doc.preamble.contains("Just prose."), "{:?}", doc.preamble);
+    }
+
+    /// The store half. The text reaches `meta.content` **capped**, because the
+    /// store is exportable and ships with the graph; the vault reads the uncapped
+    /// text from the blob instead.
+    #[test]
+    fn facts_store_the_section_text_capped() {
+        let long = "x".repeat(4000);
+        let src = format!(
+            "---\nadr-id: \"0021\"\nstatus: Accepted\n---\n\n# ADR-0021\n\n## Context\n\n{long}\n"
+        );
+        let doc = parse_adr("docs/adr/0021-x.md", &src).expect("parse");
+        let facts = doc.facts();
+
+        let section = facts
+            .nodes
+            .iter()
+            .find(|n| n.key == "adr:0021#context")
+            .expect("section node");
+        let stored = section.meta["content"].as_str().expect("content");
+        assert_eq!(
+            stored.chars().count(),
+            1500,
+            "capped by the same budget the derived layer uses"
+        );
+        assert!(
+            doc.sections[0].text.chars().count() > stored.chars().count(),
+            "the parsed span itself stays whole — only the store is capped"
+        );
+
+        // The ADR node keeps its status and gains its preamble.
+        let adr = facts
+            .nodes
+            .iter()
+            .find(|n| n.key == "adr:0021")
+            .expect("adr node");
+        assert_eq!(adr.meta["status"], "Accepted");
+        assert!(
+            adr.meta["content"]
+                .as_str()
+                .expect("preamble")
+                .contains("ADR-0021"),
+            "{:?}",
+            adr.meta
+        );
+        assert!(
+            !adr.meta["content"]
+                .as_str()
+                .expect("preamble")
+                .contains("xxxx"),
+            "the ADR node does not restate its sections: {:?}",
+            adr.meta
+        );
+    }
+
+    /// An empty span stores no `content` key at all. `search` and
+    /// `infer::duplicates` both gate on content being non-empty, so an empty
+    /// string would be a key that says nothing while claiming to say something.
+    #[test]
+    fn an_empty_section_stores_no_content_key() {
+        let doc = parse_adr("docs/adr/0015-spans.md", SPANS).expect("parse");
+        let facts = doc.facts();
+        let empty = facts
+            .nodes
+            .iter()
+            .find(|n| n.key == "adr:0015#empty")
+            .expect("node");
+        assert!(empty.meta.get("content").is_none(), "{:?}", empty.meta);
+    }
+
+    /// The render half's seam: a node key maps back to exactly the span it names.
+    #[test]
+    fn text_for_key_maps_a_key_back_to_its_span() {
+        let doc = parse_adr("docs/adr/0015-spans.md", SPANS).expect("parse");
+
+        assert!(
+            doc.text_for_key("adr:0015")
+                .expect("preamble")
+                .contains("# ADR-0015: Spans")
+        );
+        assert!(
+            doc.text_for_key("adr:0015#consequences")
+                .expect("section")
+                .contains("BRAVO the consequences prose.")
+        );
+        assert!(
+            !doc.text_for_key("adr:0015#consequences")
+                .expect("section")
+                .contains("ALPHA"),
+            "a section key never resolves to the document"
+        );
+
+        // An empty span is `None`, so the note falls back rather than rendering a
+        // blank `## Content`.
+        assert_eq!(doc.text_for_key("adr:0015#empty"), None);
+        // Keys that are not this ADR's.
+        assert_eq!(doc.text_for_key("adr:0015#nosuch"), None);
+        assert_eq!(doc.text_for_key("adr:0016#context"), None);
+        assert_eq!(doc.text_for_key("file:docs/adr/0015-spans.md"), None);
+        // `adr:00151` shares the `adr:0015` prefix; requiring the `#` refuses it
+        // rather than reading `1` as a slug.
+        assert_eq!(doc.text_for_key("adr:00151"), None);
+    }
 
     #[test]
     fn parses_all_house_statuses() {

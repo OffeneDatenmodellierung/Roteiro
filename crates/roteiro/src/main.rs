@@ -13454,7 +13454,7 @@ mod config_secrets_summary_tests {
 
 #[cfg(test)]
 mod vault_body_tests {
-    use super::prose_blob_oid;
+    use super::{adr_blob_oid, prose_blob_oid};
 
     fn blobs() -> std::collections::HashMap<String, String> {
         // Only prose paths, exactly as `render_obsidian` builds it.
@@ -13505,6 +13505,53 @@ mod vault_body_tests {
                 "{kind} shares the path but is not the document"
             );
         }
+    }
+
+    /// The two rules are complements, not overlaps: exactly the kinds
+    /// `prose_blob_oid` refuses are the ones `adr_blob_oid` claims. Asserted
+    /// together because the bug they guard against is a node being served by
+    /// *both* — which is how an ADR note would end up holding the whole file the
+    /// `file:` note already holds.
+    #[test]
+    fn the_adr_rule_claims_exactly_what_the_prose_rule_refuses() {
+        let path = "docs/adr/0015-media.md";
+        for kind in ["adr", "adr_section"] {
+            let ex = node(kind, Some(path));
+            assert_eq!(
+                adr_blob_oid(&blobs(), &ex),
+                Some("oid-adr"),
+                "{kind} is entitled to a slice of its ADR"
+            );
+            assert_eq!(
+                prose_blob_oid(&blobs(), &ex),
+                None,
+                "{kind} is never given the whole document"
+            );
+        }
+
+        // A `file` node on the very same path is the document, and stays the
+        // prose rule's. No node is claimed by both rules.
+        let file = node("file", Some(path));
+        assert_eq!(prose_blob_oid(&blobs(), &file), Some("oid-adr"));
+        assert_eq!(adr_blob_oid(&blobs(), &file), None);
+    }
+
+    /// Everything else on an ADR's path — and every node without one — is refused.
+    #[test]
+    fn the_adr_rule_refuses_any_other_kind() {
+        for kind in ["site_page", "marker", "fn", "struct"] {
+            assert_eq!(
+                adr_blob_oid(&blobs(), &node(kind, Some("docs/adr/0015-media.md"))),
+                None,
+                "{kind} is not an ADR-layer node"
+            );
+        }
+        assert_eq!(adr_blob_oid(&blobs(), &node("adr", None)), None);
+        assert_eq!(
+            adr_blob_oid(&blobs(), &node("adr", Some("docs/adr/9999-absent.md"))),
+            None,
+            "a path with no blob in the rendered tree"
+        );
     }
 
     #[test]
