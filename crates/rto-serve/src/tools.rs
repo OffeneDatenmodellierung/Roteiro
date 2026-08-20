@@ -58,7 +58,12 @@ use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason, 
 /// Max **bytes** of a tool result fed back into the conversation, so a large
 /// query result cannot blow the context window. (`truncate` caps by UTF-8 bytes,
 /// backing up to a char boundary.)
-const MAX_TOOL_RESULT: usize = 4000;
+///
+/// One of the three constants [`crate::budget`] prices: this many bytes,
+/// `server::MAX_TOOL_ROUNDS` times, is the tool-result half of the prompt a
+/// request grows, and raising it past the budget there is a compile error
+/// (#556).
+pub(crate) const MAX_TOOL_RESULT: usize = 4000;
 
 /// A callable tool advertised to the model.
 #[derive(Debug, Clone)]
@@ -534,7 +539,7 @@ pub fn chat_with_client_tools(
                 .unwrap_or_else(|e| format!("tool `{}` error: {e}", call.name));
             messages.push(Message {
                 role: "user".to_owned(),
-                content: format!("<tool_response>{}</tool_response>", truncate(&result)),
+                content: tool_response_turn(&result),
             });
         }
     }
@@ -575,6 +580,17 @@ fn into_client_calls(calls: Vec<ToolCall>) -> Vec<ClientToolCall> {
             arguments: c.arguments,
         })
         .collect()
+}
+
+/// The turn a tool result is fed back as: the capped result inside the
+/// `<tool_response>` markers the system prompt told the model to expect.
+///
+/// A named function rather than a `format!` inline in the loop so that
+/// [`crate::budget`]'s allowance for everything the cap does *not* cover — those
+/// markers, and `truncate`'s own suffix — can be checked against the string this
+/// actually builds instead of against a comment counting characters.
+pub(crate) fn tool_response_turn(result: &str) -> String {
+    format!("<tool_response>{}</tool_response>", truncate(result))
 }
 
 /// Cap a tool result to [`MAX_TOOL_RESULT`] bytes (backing up to a char boundary).
