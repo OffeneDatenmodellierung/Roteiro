@@ -178,6 +178,93 @@ fn render_obsidian_home_scopes_debt_by_the_ignore_config() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A prose document longer than extraction's `MAX_CONTENT` budget (1500 chars),
+/// so the note it renders into is the *whole* file rather than a prefix, and
+/// structured enough that whitespace collapse is visible: headings, a table and a
+/// fenced code block all stop being themselves on one line.
+fn document() -> String {
+    use std::fmt::Write as _;
+    let mut s = String::from(
+        "# Working offline\n\nRoteiro is **offline-capable**.\n\n\
+         | Host | What |\n| --- | --- |\n| `example.com` | models |\n\n\
+         ```sh\nroteiro model pull\n```\n\n## Detail\n\n",
+    );
+    for i in 0..60 {
+        let _ = writeln!(s, "Paragraph {i} of the document body.\n");
+    }
+    s
+}
+
+#[test]
+fn render_obsidian_gives_a_prose_note_its_whole_source() {
+    let dir = fresh_dir("obsidian-prose");
+    git(&dir, &["init", "-q"]);
+    let doc = document();
+    write(&dir, "docs/OFFLINE.md", &doc);
+    // An ADR: it carries the same path as its `adr`/`adr_section` nodes, which is
+    // how a path-only rule would leak the document into all of them.
+    write(
+        &dir,
+        "docs/adr/0001-example.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n\n## Context\n\nBecause.\n",
+    );
+    write(&dir, "src/lib.rs", "/// Doc comment.\npub fn f() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "obsidian", "--out", "vault"])
+        .current_dir(&dir)
+        .env("ROTEIRO_HOME", &dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render obsidian failed: {out:?}");
+
+    let note = std::fs::read_to_string(dir.join("vault/file-docs-OFFLINE.md.md")).expect("note");
+    // The whole document, verbatim — not a 1500-char prefix of it.
+    assert!(
+        note.contains(doc.trim()),
+        "the note must reproduce its source: {note}"
+    );
+    assert!(
+        note.contains("Paragraph 59 of the document body."),
+        "the tail of the document past the extraction cap is present: {note}"
+    );
+    // ...and with its structure, which is the half a character count cannot show.
+    assert!(
+        note.contains("\n| Host | What |\n") && note.contains("\n```sh\n"),
+        "a table and a fence need their own lines: {note}"
+    );
+
+    // The ADR's own notes are untouched: the document belongs to the `file:` node
+    // that is the document, and duplicating it across 1 ADR + 4 section notes is
+    // the failure mode of matching on the path alone.
+    let adr = std::fs::read_to_string(dir.join("vault/adr-0001.md")).expect("adr note");
+    assert!(
+        !adr.contains("## Context\n\nBecause."),
+        "an adr note is its title, status and links — not the file: {adr}"
+    );
+    let section = std::fs::read_to_string(dir.join("vault/adr-0001-context.md")).expect("section");
+    assert!(
+        !section.contains("# ADR-0001: Example"),
+        "a section note must not carry the whole document: {section}"
+    );
+
+    // A symbol's doc comment is a summary of a definition, not a document, and is
+    // unchanged — nothing here widened beyond prose files.
+    let sym = std::fs::read_to_string(dir.join("vault/sym-rust-src-lib.rs-f.md")).expect("sym");
+    assert!(
+        sym.contains("## Content\n\nDoc comment."),
+        "doc comments render as before: {sym}"
+    );
+    assert!(
+        !sym.contains("pub fn f()"),
+        "a symbol note does not gain its file's source: {sym}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Stands in for the destination of the current page's entry, which is an
 /// unlinked `<span aria-current="page">` and so has none.
 ///

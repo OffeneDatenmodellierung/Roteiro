@@ -12960,6 +12960,30 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The blob holding a node's full prose text, or `None` if it has none.
+///
+/// The kind check is the whole of the rule and is load-bearing in both
+/// directions. A **file** node *is* the document, so it gets it. Every other node
+/// that shares the path does not: an `adr`/`adr_section` node's path is the ADR
+/// markdown file, and matching on the path alone would paste the entire document
+/// into all twenty ADR notes and all 179 of their section notes, next to the
+/// `file:` note that already carries it once. A symbol's `meta.content` is a doc
+/// comment — a summary of a definition, not a document — and is right as it is.
+///
+/// `blobs` is already filtered to prose paths, so a non-prose file node (source
+/// code, config, an image) simply misses the lookup and keeps whatever extraction
+/// captured for it. PDF and OCR text stay capped too: they are extraction
+/// *results*, not bytes this call site could re-read.
+fn prose_blob_oid<'a>(
+    blobs: &'a std::collections::HashMap<String, String>,
+    ex: &rto_graph::Explanation,
+) -> Option<&'a str> {
+    if ex.node.kind != rto_graph::NodeKind::File.as_str() {
+        return None;
+    }
+    blobs.get(ex.node.path.as_deref()?).map(String::as_str)
+}
+
 /// Render an Obsidian vault: one linked markdown note per graph node in `<out>`
 /// (default `vault`).
 fn render_obsidian(
@@ -12988,10 +13012,39 @@ fn render_obsidian(
         _ => None,
     };
 
+    // Where a prose file's full text lives in the rendered commit, keyed by path.
+    //
+    // A node's `meta.content` is an *embedding* budget (`MAX_CONTENT`, whitespace
+    // collapsed), so a note built from it alone is a few percent of its source on
+    // a single line — findable, and close to unreadable. `render_note` is a pure
+    // function of the `Explanation` and cannot reach the source; this call site
+    // has the repository, so it supplies the text.
+    //
+    // Only the *tree walk* is eager, and it reads no blob content: a body is read
+    // on demand, one prose node at a time, so this repository reads the 74 blobs
+    // that are prose rather than all 7,969 of its nodes. Empty when prose ingest
+    // is off, which is a project saying it does not want prose bodies — the same
+    // setting that leaves `meta.content` unset for these files.
+    let prose_blobs: std::collections::HashMap<String, String> = if ingest.prose {
+        repo.walk_blobs()?
+            .into_iter()
+            .filter(|b| rto_graph::is_prose(&b.path))
+            .map(|b| (b.path, b.oid))
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut count = 0usize;
     for key in store.all_keys()? {
         if let Some(ex) = rto_graph::explain(&store, &key)? {
-            let note = rto_render::render_note(&ex, source_base.as_deref());
+            // A non-UTF-8 blob falls back to `meta.content`: extraction papered
+            // over it with `from_utf8_lossy`, and a note of replacement
+            // characters is worse than the capped text.
+            let body = prose_blob_oid(&prose_blobs, &ex)
+                .and_then(|oid| repo.read_blob(oid).ok())
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            let note = rto_render::render_note(&ex, source_base.as_deref(), body.as_deref());
             std::fs::write(out.join(&note.filename), &note.content)?;
             count += 1;
         }
@@ -13335,6 +13388,73 @@ mod config_secrets_summary_tests {
             "{:?}",
             config_secrets_summary(&r)
         );
+    }
+}
+
+#[cfg(test)]
+mod vault_body_tests {
+    use super::prose_blob_oid;
+
+    fn blobs() -> std::collections::HashMap<String, String> {
+        // Only prose paths, exactly as `render_obsidian` builds it.
+        [
+            ("docs/adr/0015-media.md", "oid-adr"),
+            ("README.md", "oid-readme"),
+        ]
+        .into_iter()
+        .map(|(p, o)| (p.to_owned(), o.to_owned()))
+        .collect()
+    }
+
+    fn node(kind: &str, path: Option<&str>) -> rto_graph::Explanation {
+        rto_graph::Explanation {
+            schema: rto_graph::SCHEMA,
+            node: rto_graph::NodeSummary {
+                key: "k".into(),
+                kind: kind.into(),
+                name: "n".into(),
+                path: path.map(ToOwned::to_owned),
+                lang: None,
+            },
+            meta: serde_json::Value::Null,
+            outgoing: vec![],
+            incoming: vec![],
+        }
+    }
+
+    #[test]
+    fn a_prose_file_node_resolves_to_its_blob() {
+        assert_eq!(
+            prose_blob_oid(&blobs(), &node("file", Some("README.md"))),
+            Some("oid-readme")
+        );
+    }
+
+    /// The kind check, which is the whole of the rule. An ADR and each of its
+    /// sections carry the *ADR file's* path, so matching on the path alone would
+    /// paste the entire document into every one of them — beside the `file:` note
+    /// that already holds it once. Twenty ADRs and 179 section notes on this
+    /// repository, so the wrong answer here is not a small one.
+    #[test]
+    fn a_node_sharing_a_prose_path_does_not_get_the_document() {
+        for kind in ["adr", "adr_section", "site_page", "marker"] {
+            assert_eq!(
+                prose_blob_oid(&blobs(), &node(kind, Some("docs/adr/0015-media.md"))),
+                None,
+                "{kind} shares the path but is not the document"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_prose_file_node_and_a_pathless_node_are_left_alone() {
+        // Not in the map: `render_obsidian` filters it to prose paths, so source
+        // code, config and images keep whatever extraction captured.
+        assert_eq!(
+            prose_blob_oid(&blobs(), &node("file", Some("src/main.rs"))),
+            None
+        );
+        assert_eq!(prose_blob_oid(&blobs(), &node("file", None)), None);
     }
 }
 
