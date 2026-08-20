@@ -24,11 +24,14 @@ shape still right".
 
 WHAT THIS COVERS
   * Every declaration of every rule, with all var() chains expanded to literals.
-  * Three contexts, which are exhaustive: the only selectors defining custom
-    properties are `:root`, `#view-project` and `#ws-ask-panel` (asserted at
-    load), and the three views are mutually exclusive (`showSelectView` /
-    `showWorkspaceView` / `showProjectView` in app.js each `hidden` the other
-    two), so no element is ever inside both `#view-project` and `#ws-ask-panel`.
+  * Three contexts, which are exhaustive: no selector outside `:root`,
+    `#view-project` and `#ws-ask-panel` may declare custom properties, and that
+    is asserted at load rather than assumed. (Since #512 the sheet declares none
+    on `#ws-ask-panel`; it stays in the tolerated set so a pre-#512 revision can
+    still be read as the BEFORE side.) The three views are mutually exclusive —
+    `showSelectView` / `showWorkspaceView` / `showProjectView` in app.js each
+    `hidden` the other two — so no element is ever inside both `#view-project`
+    and `#ws-ask-panel`.
 
 WHAT THIS DOES NOT COVER
   * The cascade. It compares declarations, not winners. A rule that is added or
@@ -79,8 +82,9 @@ WS_ASK_P = {
 
 # The only NON-`.p-*` selectors that reach an element inside `#view-project`.
 # From the markup (`#view-project`'s subtree carries exactly one workspace class,
-# `class="ws-badge"` on `#p-linkage`) and from app.js:1899, the only project-side
-# writer of that class. `#view-workspace` and `#view-select` are `hidden` there.
+# `class="ws-badge"` on `#p-linkage`) and from `loadProject` in app.js, the only
+# project-side writer of that class. `#view-workspace` and `#view-select` are
+# `hidden` there.
 # `body`, `body.on-project` and `*` are ANCESTORS of `#view-project`, not
 # descendants, so they resolve in the `:root` scope and are compared under the
 # `workspace` context instead.
@@ -201,7 +205,15 @@ def project(rules, scope, reachable, ctx):
 
 def main():
     if len(sys.argv) not in (2, 3):
-        raise SystemExit("usage: resolve_theme.py BEFORE.html [AFTER.html]")
+        # Derived, because the literal that used to sit here still said
+        # `resolve_theme.py` after the file was renamed — and a usage line is
+        # read at exactly the moment you got the invocation wrong, so it is the
+        # one string that has to be pasteable. `sys.argv[0]` raw, not
+        # `os.path.basename` (which is what argparse's `prog` would print):
+        # the bare name is not runnable from the repo root, where everything
+        # else here is run from, while the path as typed is runnable from
+        # wherever the caller actually stands.
+        raise SystemExit(f"usage: {sys.argv[0]} BEFORE.html [AFTER.html]")
     outs = {}
     for path in sys.argv[1:]:
         rules = parse(style_block(path))
