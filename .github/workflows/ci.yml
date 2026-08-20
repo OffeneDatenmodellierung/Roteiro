@@ -171,8 +171,46 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      # Pinned to an exact toolchain, not the action's `stable` ref. rustc
+      # 1.98.0 shipped on 2026-08-18, `stable` resolved to it overnight, and
+      # three new clippy lints turned `main` red with no commit to blame (#563
+      # fixed the lints; this is the other half). SHA-pinning the *action* never
+      # covered that: `stable` is a branch of the action whose `toolchain` input
+      # defaults to `stable`, so the version was still chosen by the runner, on
+      # the day, from whatever had been released.
+      #
+      # This is the `master` ref instead — the same SHA the `msrv` job uses --
+      # where `toolchain` is a *required* input with no default. That is why one
+      # action ref now serves both purposes, with the version as data in each
+      # job rather than encoded in which SHA was used, and it is the reason not
+      # to tidy it back to the `# stable` SHA on the grounds that "we want
+      # stable": there, a dropped `with:` block silently floats again; here it
+      # fails the step.
+      #
+      # Two components, like `msrv` below, not three: a 1.98.x point release is
+      # a targeted fix, not a new lint set, and holding those out would forgo a
+      # compiler security fix to close a hole that has never been the failure
+      # mode here.
+      #
+      # ## Raising it is a standing responsibility, and nobody else holds it
+      #
+      # Dependabot covers `cargo` and `github-actions`, so it keeps the SHA
+      # above current — but a toolchain string inside a `with:` block is
+      # invisible to it, and nothing else bumps one. Left alone this holds 1.98
+      # forever: no new lints, no new fixes, and eventually a compiler that
+      # cannot build a dependency that has moved on. That is today's failure
+      # arriving quietly instead of loudly, and it is against ADR-0017's
+      # "current by default" — the pin buys a commit to blame, not a licence to
+      # freeze.
+      #
+      # To raise it: on the new toolchain run `cargo clippy --workspace
+      # --all-targets --all-features — -D warnings` and the default-features
+      # equivalent, fix what they find, and bump all four `toolchain:` values in
+      # this file in the same commit. Do that when a release has settled, not on
+      # the day it ships.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: "1.98"
           components: rustfmt, clippy
       # `cache-on-failure` defaults to false, so a job that fails saves no cache
       # at all — the post-run save step does not execute. The runs that most
@@ -363,8 +401,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      # Pinned toolchain, `master` ref of the action; see the `checks` job for
+      # why, and for what raising it involves. Bumped with the other three, in
+      # one commit, never alone.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: "1.98"
           components: rustfmt, clippy
       # A failed run must still save its cache, as above. Skipped on a release
       # PR for the reason given in the `checks` job.
@@ -436,8 +478,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      # Pinned toolchain, `master` ref of the action; see the `checks` job for
+      # why, and for what raising it involves. Bumped with the other three, in
+      # one commit, never alone.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: "1.98"
           components: clippy
       # A failed run must still save its cache, as above. Skipped on a release
       # PR for the reason given in the `checks` job.
@@ -535,8 +581,37 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      # Pinned toolchain, `master` ref of the action; see the `checks` job for
+      # why, and for what raising it involves.
+      #
+      # This is the site where pinning was arguable, so the reasoning is here
+      # rather than left to look like an oversight. This job runs no clippy, it
+      # is `continue-on-error`, it is not a required check, and it sailed
+      # through the 1.98 roll that failed all three jobs above. The rule that
+      # would leave it floating — a job whose pass condition is behaviour
+      # rather than a lint set is cheap to float, and floating buys a free look
+      # at the new compiler — is a good rule that does not fit this job:
+      #
+      #  * It is not a behaviour job. It is an instrumentation job, and
+      #    `llvm-tools-preview` is version-locked to rustc while
+      #    `cargo-llvm-cov` is pinned below. Floating one half of that pair is
+      #    how a profraw/LLVM version mismatch arrives with nothing in the diff
+      #    to explain it.
+      #  * Its output is a number compared across runs — the un-enforced 85%
+      #    per-file floor, #319. A denominator that moves with no commit behind
+      #    it devalues the delta, which is the only thing anyone reads here.
+      #  * As a canary it is a poor one. It runs on `pull_request` only, so a
+      #    toolchain break lands red on whoever happened to have a PR open that
+      #    morning; and `continue-on-error` makes that red quiet. Misattributed
+      #    and easy to miss is the worst shape for an early warning. The canary
+      #    worth having is a scheduled, non-blocking clippy on floating stable,
+      #    which is its own workflow and its own decision.
+      #
+      # So all four sites are pinned, and the toolchain does not move anywhere
+      # in this file without a commit.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: "1.98"
           components: llvm-tools-preview
       # A failed run must still save its cache, as above.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
