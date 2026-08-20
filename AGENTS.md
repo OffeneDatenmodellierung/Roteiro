@@ -270,6 +270,25 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   <the-crate>` before believing it, or prove it on a deliberately cold runner and
   assert the artefact was produced.
 
+- **Narrowing the gate to one crate narrows the feature set with it, silently.**
+  `cargo test -p <crate>` runs that crate's *own* defaults, not the
+  `--all-features` the workspace gate uses — and the code a change is about is
+  often exactly what the crate's defaults leave out. Measured on `roteiro`:
+
+  ```
+  cargo test -p roteiro                              163 tests
+  cargo test -p roteiro --features serve,explorer    293 tests
+  ```
+
+  The 130 in between are behind `#[cfg(feature = "serve")]` and
+  `#[cfg(feature = "explorer")]` — the serve wiring and every explorer test.
+  Two separate changes to those areas were gated this way on the same day and
+  neither ran a single test of the thing it changed.
+
+  The tell is in the output and reads like success: `ok. 0 passed; 163 filtered
+  out`. **Zero passed is not green.** Per-crate runs are fine for a fast loop;
+  name the features the change lives behind, and prove the count moved.
+
 ## Reviewing a change
 
 Use [`docs/REVIEW_CHECKLIST.md`](docs/REVIEW_CHECKLIST.md), and run `roteiro
