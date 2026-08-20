@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.26.5...rto-llama-v1.26.6) - 2026-08-20
+
+### Other
+
+- drop the apostropheless possessives from twelve test names
+
 ## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.26.0...rto-llama-v1.26.1) - 2026-08-19
 
 ### Other

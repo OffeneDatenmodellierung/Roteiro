@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.26.5...rto-render-v1.26.6) - 2026-08-20
+
+### Other
+
+- Merge pull request #531 from OffeneDatenmodellierung/chore/441-possessive-test-names
+- drop the apostropheless possessives from twelve test names
+
 ## [1.26.5](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.26.4...rto-render-v1.26.5) - 2026-08-19
 
 ### Other

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.26.5...rto-graph-v1.26.6) - 2026-08-20
+
+### Other
+
+- drop the apostropheless possessives from twelve test names
+
 ## [1.26.4](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.26.3...rto-graph-v1.26.4) - 2026-08-19
 
 ### Fixed
