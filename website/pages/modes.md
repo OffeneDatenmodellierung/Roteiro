@@ -31,7 +31,16 @@ roteiro debt
 
 <span class="c"># Render the graph to a docs site or an Obsidian vault</span>
 roteiro render docs
-roteiro render obsidian</code></pre>
+roteiro render obsidian
+
+<span class="c"># …or one vault spanning a whole workspace, members and all</span>
+roteiro render obsidian --workspace-name payments</code></pre>
+
+Without `--workspace-name`, `render obsidian` renders the current project, and
+its note names never change between releases — your own notes live *outside* the
+vault and link into it by name, so a rename would break them silently. With one,
+notes are named `<project>-<key>` so two repositories' `README.md` cannot claim
+the same note, and cross-repo links resolve inside the vault.
 
 ## 2 · Online mode — richer inference with local models {#online}
 

@@ -769,3 +769,306 @@ fn the_landing_page_carries_the_bar_the_renderer_emits() {
     );
     std::fs::remove_dir_all(&out_dir).ok();
 }
+
+/// A two-repo workspace: a hub `app` declaring config keys, and a spoke `deploy`
+/// overriding them under a different naming convention, with a **user** config
+/// (via `ROTEIRO_HOME`) naming a `prod` workspace over both. Returns
+/// `(base, home)`.
+///
+/// Deliberately gives both repos a `README.md`: that is the collision issue #442
+/// is about — node keys are repository-relative, so both are `file:README.md`.
+fn workspace_fixture(tag: &str) -> (PathBuf, PathBuf) {
+    let base = fresh_dir(tag);
+    let home = base.join("home");
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    for d in [&home, &app, &deploy] {
+        std::fs::create_dir_all(d).expect("mkdir");
+    }
+
+    write(&app, "README.md", "# App\n\nThe hub.\n");
+    write(
+        &app,
+        "config.toml",
+        "[serve]\naddr = \"127.0.0.1:8017\"\ntools = true\n",
+    );
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "init"]);
+
+    write(&deploy, "README.md", "# Deploy\n\nThe spoke.\n");
+    write(
+        &deploy,
+        "prod.env",
+        "SERVE_ADDR=0.0.0.0:8443\nSERVE_TOOLS=false\n",
+    );
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "[[workspaces]]\nname = \"prod\"\nrepos = [\"{}\", \"{}\"]\n",
+            app.display(),
+            deploy.display()
+        ),
+    )
+    .expect("write config");
+
+    (base, home)
+}
+
+/// Run the binary in `dir` with the fixture's isolated `ROTEIRO_HOME`.
+fn roteiro_in(dir: &Path, home: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(BIN)
+        .args(args)
+        .current_dir(dir)
+        .env("ROTEIRO_HOME", home)
+        .output()
+        .expect("run roteiro")
+}
+
+/// `render obsidian -w <name>` renders **one vault spanning the workspace**: both
+/// members' notes, project-qualified so they cannot overwrite each other, and one
+/// `_Home` carrying each member's own aggregates.
+///
+/// The collision this proves is solved is the concrete one from issue #442: two
+/// repositories each with a `README.md`, whose node key is `file:README.md` in
+/// both because node keys are repository-relative.
+#[test]
+fn render_obsidian_workspace_spans_members_without_collision() {
+    let (base, home) = workspace_fixture("ws-span");
+    let vault = base.join("vault");
+
+    let out = roteiro_in(
+        &base,
+        &home,
+        &[
+            "render",
+            "obsidian",
+            "-w",
+            "prod",
+            "--out",
+            vault.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "workspace render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // One note per member for the *same* key — the whole point.
+    for name in ["app-file-README.md.md", "deploy-file-README.md.md"] {
+        assert!(
+            vault.join(name).is_file(),
+            "missing {name}; vault holds: {:?}",
+            std::fs::read_dir(&vault)
+                .expect("read vault")
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        );
+    }
+    // And the unqualified name is *not* used, so neither member silently claimed it.
+    assert!(
+        !vault.join("file-README.md.md").is_file(),
+        "an unqualified note means one member overwrote the other"
+    );
+
+    let app_readme =
+        std::fs::read_to_string(vault.join("app-file-README.md.md")).expect("read note");
+    assert!(
+        app_readme.contains("project: \"app\""),
+        "a member note must say which member it is: {app_readme}"
+    );
+    assert!(app_readme.contains("- roteiro/project/app"), "{app_readme}");
+
+    let home_note = std::fs::read_to_string(vault.join("_Home.md")).expect("read _Home");
+    assert!(home_note.contains("# prod — workspace knowledge graph"));
+    assert!(home_note.contains("across **2** member repositories"));
+    // Per-member sections keep today's aggregates rather than being replaced by a
+    // workspace total (issue #442: a subset, not a casualty).
+    assert!(home_note.contains("\n## app\n"), "{home_note}");
+    assert!(home_note.contains("\n## deploy\n"), "{home_note}");
+    assert_eq!(
+        home_note.matches("### Structure").count(),
+        2,
+        "each member keeps its own structure table: {home_note}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A cross-repo link the graph already holds is rendered as a link to the other
+/// member's note — the one thing a per-project vault structurally cannot show.
+///
+/// ADR-0009 persists a spoke→hub match as an edge to a **local external-ref
+/// placeholder**, because store integrity needs both ends of an edge in one
+/// store. A workspace vault holds both repositories, so the placeholder is
+/// followed exactly as `Workspace::follow_external_ref` follows it at query time.
+/// No new edge is invented; the cross-repo graph has only ever been *rendered*
+/// one repo at a time.
+#[test]
+fn render_obsidian_workspace_follows_cross_repo_links_to_the_other_member() {
+    let (base, home) = workspace_fixture("ws-xrepo");
+    let vault = base.join("vault");
+
+    // `links --infer` matches config keys across *synced* repos, so both graphs
+    // have to exist before there is anything to infer over.
+    for member in ["app", "deploy"] {
+        let sync = roteiro_in(&base.join(member), &home, &["sync"]);
+        assert!(
+            sync.status.success(),
+            "{member} sync failed: {}",
+            String::from_utf8_lossy(&sync.stderr)
+        );
+    }
+
+    // Persist the inferred cross-repo links into the spoke's graph.
+    let infer = roteiro_in(
+        &base,
+        &home,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--write",
+            "--workspace-name",
+            "prod",
+            "--json",
+        ],
+    );
+    assert!(
+        infer.status.success(),
+        "links --infer --write failed: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&infer.stdout).expect("valid JSON");
+    assert_eq!(report["written"], 2, "two matches persisted: {report}");
+
+    let out = roteiro_in(
+        &base,
+        &home,
+        &[
+            "render",
+            "obsidian",
+            "-w",
+            "prod",
+            "--out",
+            vault.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "workspace render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The spoke's config key links straight at the hub's note.
+    let spoke = std::fs::read_to_string(vault.join("deploy-cfgkey-prod.env-SERVE_ADDR.md"))
+        .expect("read spoke config-key note");
+    assert!(
+        spoke.contains("[[app-cfgkey-config.toml-serve.addr]]"),
+        "the cross-repo edge must land on the hub's own note: {spoke}"
+    );
+    assert!(
+        !spoke.contains("extref"),
+        "and never on the local placeholder: {spoke}"
+    );
+
+    // The placeholder is therefore not written at all — nothing links to it, and a
+    // stand-in note for a node this vault already holds is just a dead end.
+    let stray: Vec<_> = std::fs::read_dir(&vault)
+        .expect("read vault")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("extref"))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "placeholder notes were written: {stray:?}"
+    );
+
+    // And `_Home` lists the crossing explicitly.
+    let home_note = std::fs::read_to_string(vault.join("_Home.md")).expect("read _Home");
+    assert!(home_note.contains("## Cross-repo links"), "{home_note}");
+    assert!(
+        home_note
+            .contains("[[app-cfgkey-config.toml-serve.addr\\|app::cfgkey:config.toml#serve.addr]]"),
+        "{home_note}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// **The compatibility promise of issue #442**, as a test: `render obsidian` with
+/// no `-w` renders the current project exactly as it always has — unqualified note
+/// names, no `project:` frontmatter — even when that repository *is* a member of a
+/// configured workspace.
+///
+/// This is the half that must not move. A user's own notes live outside the vault
+/// and link into it by name, so a rename breaks every one of them silently, with
+/// no error and nothing to grep for. Entering workspace mode by inference (as
+/// `links -w` defaults to the workspace containing the cwd) would do exactly that.
+#[test]
+fn render_obsidian_without_a_workspace_name_is_unchanged_inside_a_workspace() {
+    let (base, home) = workspace_fixture("ws-compat");
+    let app = base.join("app");
+    let vault = app.join("vault");
+
+    let out = roteiro_in(
+        &app,
+        &home,
+        &["render", "obsidian", "--out", vault.to_str().unwrap()],
+    );
+    assert!(
+        out.status.success(),
+        "project render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Unqualified, exactly as before.
+    assert!(
+        vault.join("file-README.md.md").is_file(),
+        "the bare note name must be what a project render writes"
+    );
+    assert!(
+        !vault.join("app-file-README.md.md").is_file(),
+        "a bare render must not qualify names: that renames every note and \
+         breaks every link a user wrote into the vault"
+    );
+
+    let note = std::fs::read_to_string(vault.join("file-README.md.md")).expect("read note");
+    assert!(!note.contains("project:"), "{note}");
+    assert!(!note.contains("roteiro/project/"), "{note}");
+
+    // And `_Home` is the project overview, not the workspace one.
+    let home_note = std::fs::read_to_string(vault.join("_Home.md")).expect("read _Home");
+    assert!(home_note.contains("# app — knowledge graph"), "{home_note}");
+    assert!(
+        !home_note.contains("workspace knowledge graph"),
+        "{home_note}"
+    );
+    assert!(!home_note.contains("## Members"), "{home_note}");
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A typo in `-w` fails fast and lists the workspaces that do exist, rather than
+/// rendering something else.
+#[test]
+fn render_obsidian_rejects_an_unknown_workspace_name() {
+    let (base, home) = workspace_fixture("ws-unknown");
+    let out = roteiro_in(
+        &base,
+        &home,
+        &["render", "obsidian", "-w", "prud", "--out", "vault"],
+    );
+    assert!(!out.status.success(), "an unknown name must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("prud") && err.contains("prod"), "{err}");
+    std::fs::remove_dir_all(&base).ok();
+}
