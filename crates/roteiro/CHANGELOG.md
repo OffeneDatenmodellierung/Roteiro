@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.27.1...roteiro-v1.27.2) - 2026-08-20
+
+### Fixed
+
+- *(explorer)* one palette under one set of names, values per view
+
 ## [1.27.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.27.0...roteiro-v1.27.1) - 2026-08-20
 
 ### Fixed
