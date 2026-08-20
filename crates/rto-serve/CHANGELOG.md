@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.28.0...rto-serve-v1.29.0) - 2026-08-20
+
+### Added
+
+- *(serve)* price the three request-context constants as one budget
+
+### Other
+
+- Merge branch 'main' into fix/556-request-budget
+
 ## [1.28.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.27.3...rto-serve-v1.28.0) - 2026-08-20
 
 ### Added
