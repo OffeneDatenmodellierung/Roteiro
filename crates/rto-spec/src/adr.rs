@@ -213,7 +213,8 @@ pub struct AdrDoc {
     /// `## ` sections in document order.
     pub sections: Vec<Section>,
     /// The body text *before* the first `## ` heading — in house style, the `# `
-    /// title and the summary table — verbatim and uncapped.
+    /// title and the summary table — verbatim and uncapped, with surrounding
+    /// blank lines trimmed (the same rule the sections use, see [`Section::text`]).
     ///
     /// This is the only part of an ADR that belongs to no section, which is
     /// exactly why the `adr` node carries it and not the whole document: the
@@ -433,8 +434,7 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
             // Close the span this heading ends — the preamble if it is the first.
             match sections.last_mut() {
                 Some(prev) => {
-                    body[span_start..line_start]
-                        .trim()
+                    crate::text::trim_blank_lines(&body[span_start..line_start])
                         .clone_into(&mut prev.text);
                 }
                 None => preamble_end = Some(line_start),
@@ -476,9 +476,10 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
     // Close the last open span at end of document; with no `## ` at all the whole
     // body is preamble.
     if let Some(last) = sections.last_mut() {
-        body[span_start..].trim().clone_into(&mut last.text);
+        crate::text::trim_blank_lines(&body[span_start..]).clone_into(&mut last.text);
     }
-    let preamble = body[..preamble_end.unwrap_or(body.len())].trim().to_owned();
+    let preamble =
+        crate::text::trim_blank_lines(&body[..preamble_end.unwrap_or(body.len())]).to_owned();
 
     BodyScan {
         preamble,
@@ -595,9 +596,10 @@ mod tests {
     use super::{AdrStatus, parse_adr};
     use crate::text::slugify;
 
-    /// An ADR with a preamble, two sections of clearly distinguishable prose, a
-    /// `## `-looking line inside a code fence, and an empty trailing section.
-    const SPANS: &str = "---\nadr-id: \"0015\"\nstatus: Accepted\n---\n\n# ADR-0015: Spans\n\n| | |\n|---|---|\n| **State** | Accepted |\n\n## Context\n\nALPHA the context prose.\n\n```md\n## Not A Heading\nALPHA fenced.\n```\n\n## Consequences\n\nBRAVO the consequences prose.\n\n### A subheading\n\nBRAVO more.\n\n## Empty\n";
+    /// An ADR with a preamble, sections of clearly distinguishable prose, a
+    /// `## `-looking line inside a code fence, a section whose span begins on an
+    /// indented code block, and an empty trailing section.
+    const SPANS: &str = "---\nadr-id: \"0015\"\nstatus: Accepted\n---\n\n# ADR-0015: Spans\n\n| | |\n|---|---|\n| **State** | Accepted |\n\n## Context\n\nALPHA the context prose.\n\n```md\n## Not A Heading\nALPHA fenced.\n```\n\n## Consequences\n\nBRAVO the consequences prose.\n\n### A subheading\n\nBRAVO more.\n\n## Example\n\n    CHARLIE indented code;\n\nCHARLIE prose.  \n\n## Empty\n";
 
     /// The whole defect and the whole trap in one test: each section note gets
     /// **its own** span and never the document. A path-only rule — the shape the
@@ -654,7 +656,7 @@ mod tests {
                 .iter()
                 .map(|s| s.slug.as_str())
                 .collect::<Vec<_>>(),
-            ["context", "consequences", "empty"],
+            ["context", "consequences", "example", "empty"],
             "a fenced `## ` line does not open a section"
         );
         assert!(
@@ -805,6 +807,46 @@ mod tests {
         // `adr:00151` shares the `adr:0015` prefix; requiring the `#` refuses it
         // rather than reading `1` as a slug.
         assert_eq!(doc.text_for_key("adr:00151"), None);
+    }
+
+    /// A span is trimmed of surrounding *blank lines* and nothing else. `str::trim`
+    /// also eats the first content line's indentation, which in Markdown is
+    /// meaning: a section opening on an indented code block was stored — and
+    /// rendered into the vault note — as ordinary prose. Latent in this repository
+    /// (no ADR currently opens a section indented), but on the exact surface #545
+    /// exists to fix, since `text_for_key` hands this same string to the renderer.
+    #[test]
+    fn a_span_keeps_the_indentation_of_its_first_content_line() {
+        let doc = parse_adr("docs/adr/0015-spans.md", SPANS).expect("parse");
+        let example = doc
+            .sections
+            .iter()
+            .find(|s| s.slug == "example")
+            .expect("no section example");
+
+        // Exact, not `contains`: the leading four spaces are the whole point, and
+        // the two trailing spaces are a hard break rather than padding.
+        assert_eq!(
+            example.text,
+            "    CHARLIE indented code;\n\nCHARLIE prose.  "
+        );
+        // The renderer reads the same string through the key seam.
+        assert_eq!(
+            doc.text_for_key("adr:0015#example"),
+            Some("    CHARLIE indented code;\n\nCHARLIE prose.  ")
+        );
+    }
+
+    /// The preamble is sliced by the same rule — the third span close, which the
+    /// two section closes are easy to fix without.
+    #[test]
+    fn the_preamble_keeps_the_indentation_of_its_first_content_line() {
+        let doc = parse_adr(
+            "docs/adr/0016-indented.md",
+            "---\nadr-id: \"0016\"\nstatus: Draft\n---\n\n    DELTA indented preamble;\n\n## Context\n\nprose.\n",
+        )
+        .expect("parse");
+        assert_eq!(doc.preamble, "    DELTA indented preamble;");
     }
 
     #[test]
