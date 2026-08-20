@@ -99,6 +99,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt as _;
+    use std::collections::{BTreeMap, BTreeSet};
     use tower::ServiceExt as _; // for `oneshot`
 
     /// Drive one GET against the app router, returning `(status, content-type,
@@ -582,5 +583,110 @@ mod tests {
             "the vendored UMD bundle is substantial"
         );
         assert!(body.contains("cytoscape"), "it is the cytoscape library");
+    }
+
+    /// The shell's `<style>` block, with its custom-property declarations grouped
+    /// by the selector that owns them (`:root`, `#view-project`, …).
+    fn palette_scopes(body: &str) -> BTreeMap<String, BTreeSet<String>> {
+        let style = body
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(css, _)| css)
+            .expect("the shell ships one inline <style> block");
+        let mut scopes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for block in style.split('}') {
+            let Some((selector, decls)) = block.rsplit_once('{') else {
+                continue;
+            };
+            // Take the selector's last non-blank line so a preceding comment
+            // block isn't swept up with it.
+            let selector = selector
+                .lines()
+                .rfind(|l| !l.trim().is_empty())
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            for name in decls
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("--"))
+                .filter_map(|l| l.split_once(':'))
+                .map(|(name, _)| format!("--{}", name.trim()))
+            {
+                scopes.entry(selector.clone()).or_default().insert(name);
+            }
+        }
+        scopes
+    }
+
+    /// #512: the explorer's two views must address ONE set of colour names whose
+    /// *values* change per view, never two parallel sets of names.
+    ///
+    /// The old shape kept a `--p*` set scoped to `#view-project` alongside the
+    /// `--*` set on `:root`, so any component reused across the views needed a
+    /// hand-written remap — and the one remap that existed was four variables
+    /// short. Nothing errored: an undefined custom property is invalid at
+    /// computed-value time, so the property silently falls back to inherited or
+    /// initial. `.p-toggle` did exactly that on the workspace view, inheriting the
+    /// panel's accent indigo instead of the muted grey its own rule asked for.
+    ///
+    /// Both halves are asserted, because either alone passes while still broken:
+    ///   1. every `var(--x)` resolves on `:root`, so no rule can depend on a name
+    ///      only one view declares;
+    ///   2. every name a view re-declares also exists on `:root`, so a dark-only
+    ///      role cannot be added without its light value.
+    ///
+    /// Deliberately structural: it pins no colour, so a palette re-tune stays free.
+    /// To show that a re-tune changed no rendered value, resolve both revisions
+    /// with `scripts/resolve-explorer-theme.py` and diff them.
+    #[tokio::test]
+    async fn shell_colour_vars_are_one_namespace_declared_by_both_views() {
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        let scopes = palette_scopes(&body);
+        let root = scopes
+            .get(":root")
+            .expect("the shell declares its palette on `:root`");
+
+        // (1) No rule may reference a name `:root` does not declare. A `var()`
+        // carrying a fallback is fine — there, the fallback IS the declared value.
+        let mut dangling: Vec<&str> = body
+            .match_indices("var(--")
+            .map(|(i, _)| &body[i + "var(".len()..])
+            .map(|rest| &rest[..rest.find(')').unwrap_or(rest.len())])
+            .filter(|inner| !inner.contains(','))
+            .map(str::trim)
+            .filter(|name| !root.contains(*name))
+            .collect();
+        dangling.sort_unstable();
+        dangling.dedup();
+        assert!(
+            dangling.is_empty(),
+            "used but not declared on `:root`, so they resolve only inside whichever \
+             view declares them and fall back to inherited/initial everywhere else: \
+             {dangling:?}"
+        );
+
+        // (2) A view that re-declares the palette must not introduce a name the
+        // light theme has no value for.
+        for (selector, names) in &scopes {
+            if selector == ":root" {
+                continue;
+            }
+            let missing: Vec<&String> = names.difference(root).collect();
+            assert!(
+                missing.is_empty(),
+                "`{selector}` declares {missing:?}, which `:root` does not — a \
+                 component reused outside `{selector}` would get no value at all"
+            );
+        }
+
+        // Name the old parallel namespace so a partial revert is caught outright.
+        for gone in ["--pbg", "--pfg", "--paccent", "--pmuted"] {
+            assert!(
+                !body.contains(gone),
+                "`{gone}` is back: re-declare the SHARED name under `#view-project` \
+                 rather than reintroducing a `--p*` palette"
+            );
+        }
     }
 }

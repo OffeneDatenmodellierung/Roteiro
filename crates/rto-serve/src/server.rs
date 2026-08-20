@@ -670,12 +670,22 @@ fn stream_chat(
             // The same two branches as `build_response`, and markup-free for the
             // same reason: content is emitted only when there are no client
             // calls, and an outcome with no client calls came through
-            // `tools::finish`. Resolving the loop first is also what makes that
-            // possible here at all — a token-incremental stream has already sent
-            // the first half of a call before anything can judge it. Which is
-            // why the else-branch below, where no tools are advertised and the
-            // loop is not used, streams raw: nothing there injected the tool
-            // prompt, so nothing there assigned `<tool_call>` a meaning.
+            // `tools::finish`.
+            //
+            // Here that is *unqualified*, where in `build_response` it is not.
+            // `use_tools` is true exactly when something was advertised — the
+            // `ScopedTools` wrapper delegates `tools()`, so `scope_has_tools`
+            // and the loop's own advertised list agree — so `Ending::Untooled`,
+            // the one ending that passes markup through, cannot arise inside
+            // this block at all.
+            //
+            // Resolving the loop first is also what makes any of it possible
+            // here — a token-incremental stream has already sent the first half
+            // of a call before anything can judge it. Which is why the
+            // else-branch below, where nothing is advertised and the loop is not
+            // used, streams raw: that is the untooled case, reached by a
+            // different route and with the same meaning. Nothing there injected
+            // the tool prompt, so nothing there assigned `<tool_call>` a meaning.
             match complete(&state, &req, &scope, &client_tools) {
                 Ok(outcome) if !outcome.client_tool_calls.is_empty() => {
                     let _ = tx.send(StreamMsg::ToolCalls(tool_call_dtos(
@@ -808,14 +818,22 @@ fn chunk_json(
 
 /// Assemble the OpenAI response body from a tool-loop [`ToolLoopOutcome`].
 ///
-/// Neither branch can publish tool-call markup as the assistant's answer (#489),
-/// and between them they cover the outcome:
+/// Neither branch publishes tool-call markup that Roteiro asked a model to write
+/// (#489), and between them they cover the outcome:
 ///
 /// * With client calls, this reports `finish_reason: "tool_calls"` and
 ///   `content: null`, so the raw markup in `completion.content` is not rendered.
 /// * Without them, `content` is whatever `tools::finish` passed — and that is
 ///   the one place a generation is declared to be the user's answer, so it
-///   carries no markup to publish.
+///   carries no markup to publish, **unless the request advertised no tools at
+///   all**. Such a request was never sent a tool system prompt, so its
+///   `<tool_call>` is ordinary model text and passing it through is the intended
+///   behaviour (`tools::Ending::Untooled`).
+///
+/// That exception really does reach here, unlike in [`stream_chat`]: this is the
+/// non-streaming path and it runs for every request, with no `use_tools` guard
+/// above it to exclude the untooled case. It is not a hole — an untooled request
+/// has no tool to call, so there is no call to mistake for an answer.
 ///
 /// The requirement on *this* function is therefore only the OpenAI one it
 /// already meets: do not render `content` beside `tool_calls`. It is not

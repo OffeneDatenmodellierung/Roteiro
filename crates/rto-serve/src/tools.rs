@@ -27,13 +27,22 @@
 //!
 //! The other property, in the other direction, and the one the loop kept losing:
 //!
-//! > **Content carrying tool-call markup is never returned as the user's answer.**
+//! > **Where Roteiro advertised tools, content carrying tool-call markup is
+//! > never returned as the user's answer.**
+//!
+//! The qualifier is load-bearing, and every statement of this property carries
+//! it. `<tool_call>` means "I am calling a tool" only because
+//! [`tool_system_prompt`] said so, and that prompt is sent only when something
+//! was advertised; a run that advertised nothing is a plain [`Engine::chat`]
+//! whose output passes through untouched ([`Ending::Untooled`]). Every other run
+//! is covered without qualification — every Ask, and every request carrying
+//! `tools`.
 //!
 //! Every way out of [`chat_with_client_tools`] goes through [`finish`], which is
 //! the only place a [`ToolLoopOutcome`] is built and the only place a generation
-//! is declared to be prose the user may read. It cannot return markup as an
-//! answer, so a new exit cannot leak one by forgetting a check — it can only
-//! fail to compile, because leaving means naming which [`Ending`] it is.
+//! is declared to be prose the user may read. So a new exit cannot leak markup by
+//! forgetting a check — it can only fail to compile, because leaving means naming
+//! which [`Ending`] it is.
 //!
 //! This replaces three separate return sites that each decided for themselves,
 //! and that is what let the same defect land three ways: an unreadable dialect
@@ -107,7 +116,16 @@ pub struct ClientToolCall {
 ///
 /// Built in exactly one place — [`finish`] — which is what holds #489's property:
 /// when `client_tool_calls` is empty, `completion.content` is prose the user may
-/// read as the answer, and it never carries tool-call markup.
+/// read as the answer, and it carries no tool-call markup.
+///
+/// **One exception, and it is the only one:** a run that advertised no tools at
+/// all — neither a registry's nor the client's — was never sent the tool system
+/// prompt, so `<tool_call>` in its output is text the model wrote rather than a
+/// call Roteiro asked for, and it passes through deliberately
+/// ([`Ending::Untooled`] carries the reasoning). Read the guarantee as
+/// conditional on the *call*, not on the outcome: advertise a tool and it holds
+/// without qualification, which covers every Ask and every request carrying
+/// `tools`.
 #[derive(Debug, Clone)]
 pub struct ToolLoopOutcome {
     /// The last generation. On a client-tool turn its `content` is the raw text
@@ -226,7 +244,8 @@ const REFUSAL: &str = "Roteiro: ";
 ///
 /// The property this exists to hold, and #489's whole subject:
 ///
-/// > **Content carrying tool-call markup is never returned as the user's answer.**
+/// > **Where Roteiro advertised tools, content carrying tool-call markup is
+/// > never returned as the user's answer.**
 ///
 /// Under [`tool_system_prompt`] the marker `<tool_call>` means the model was
 /// *calling a tool*: the prompt told it to "reply with ONLY a tool call ... in
@@ -242,7 +261,9 @@ const REFUSAL: &str = "Roteiro: ";
 /// it: a caller that mis-reads a call as an answer gets the refusal, not the
 /// markup. That is why the check lives here rather than at each return site — a
 /// check every site must remember to call is how #489's next leak arrives. The
-/// single exception is [`Ending::Untooled`], named rather than omitted.
+/// single exception is [`Ending::Untooled`], named rather than omitted — it is
+/// the "where Roteiro advertised tools" qualifier above, and the only thing that
+/// makes that statement a qualified one.
 ///
 /// Only `content` is replaced. The token counts stay as generated (the model
 /// really did spend them) and so does `finish_reason`, which for a truncation is
@@ -2007,9 +2028,21 @@ mod tests {
     fn every_ending_that_returns_prose_is_markup_free() {
         // Driven over the endings rather than over three hand-picked cases, so an
         // `Ending` added later has to decide what it does with markup — the same
-        // shape as `Dialect::ALL`. `ClientCalls` is absent by construction: it is
-        // the one ending whose outcome carries calls, and the wire layer renders
-        // `content: null` beside them.
+        // shape as `Dialect::ALL`.
+        //
+        // Two of the five are deliberately absent, and between this test and
+        // theirs all five are accounted for — an `Ending` nobody asserts is how
+        // the guarantee gets a hole:
+        //
+        // * `ClientCalls` is the one ending whose outcome carries calls, and the
+        //   wire layer renders `content: null` beside them.
+        // * `Untooled` is the exception itself: it passes markup through on
+        //   purpose, which is asserted the other way round in
+        //   `an_untooled_generation_is_the_one_named_exception`.
+        //
+        // So this loop is "every ending that returns prose Roteiro asked a tool
+        // for", which is exactly the qualified property the module documents —
+        // not "every ending".
         let markup = call_markup("echo", "{}");
         for ending in [
             Ending::Answer,
