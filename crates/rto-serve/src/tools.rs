@@ -22,12 +22,38 @@
 //! capability in this project. It is a stronger guarantee than a gate: there is
 //! no code path that reaches a client's tool, so there is nothing to gate.
 //! **Anyone changing [`chat_with_client_tools`] is changing that guarantee.**
+//!
+//! # A tool call is never the user's answer (#489)
+//!
+//! The other property, in the other direction, and the one the loop kept losing:
+//!
+//! > **Where Roteiro advertised tools, content carrying tool-call markup is
+//! > never returned as the user's answer.**
+//!
+//! The qualifier is load-bearing, and every statement of this property carries
+//! it. `<tool_call>` means "I am calling a tool" only because
+//! [`tool_system_prompt`] said so, and that prompt is sent only when something
+//! was advertised; a run that advertised nothing is a plain [`Engine::chat`]
+//! whose output passes through untouched ([`Ending::Untooled`]). Every other run
+//! is covered without qualification — every Ask, and every request carrying
+//! `tools`.
+//!
+//! Every way out of [`chat_with_client_tools`] goes through [`finish`], which is
+//! the only place a [`ToolLoopOutcome`] is built and the only place a generation
+//! is declared to be prose the user may read. So a new exit cannot leak markup by
+//! forgetting a check — it can only fail to compile, because leaving means naming
+//! which [`Ending`] it is.
+//!
+//! This replaces three separate return sites that each decided for themselves,
+//! and that is what let the same defect land three ways: an unreadable dialect
+//! (the issue as filed), a `<tool_call>` the model never closed, and a call in
+//! the generation *after* the round budget ran out.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::engine::{ChatRequest, Completion, Engine, EngineError, Message};
+use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason, Message};
 
 /// Max **bytes** of a tool result fed back into the conversation, so a large
 /// query result cannot blow the context window. (`truncate` caps by UTF-8 bytes,
@@ -87,6 +113,19 @@ pub struct ClientToolCall {
 
 /// The result of a tool-loop run: the model's completion, plus any calls against
 /// the client's tools that ended it.
+///
+/// Built in exactly one place — [`finish`] — which is what holds #489's property:
+/// when `client_tool_calls` is empty, `completion.content` is prose the user may
+/// read as the answer, and it carries no tool-call markup.
+///
+/// **One exception, and it is the only one:** a run that advertised no tools at
+/// all — neither a registry's nor the client's — was never sent the tool system
+/// prompt, so `<tool_call>` in its output is text the model wrote rather than a
+/// call Roteiro asked for, and it passes through deliberately
+/// ([`Ending::Untooled`] carries the reasoning). Read the guarantee as
+/// conditional on the *call*, not on the outcome: advertise a tool and it holds
+/// without qualification, which covers every Ask and every request carrying
+/// `tools`.
 #[derive(Debug, Clone)]
 pub struct ToolLoopOutcome {
     /// The last generation. On a client-tool turn its `content` is the raw text
@@ -128,6 +167,201 @@ fn disposition(calls: &[ToolCall], client_names: &HashSet<&str>) -> Disposition 
     } else {
         Disposition::Execute
     }
+}
+
+/// Why a run of the tool loop ended — the input to [`finish`].
+///
+/// The variants are exhaustive over the ways a generation leaves this module,
+/// and each names a *judgement* rather than a shape: this is the answer, the
+/// client runs these, the model was calling a tool and the call did not arrive,
+/// the budget ran out. Adding a fifth exit to [`chat_with_client_tools`] means
+/// naming which of these it is, which is the point: there is no way to leave
+/// without saying what the generation was.
+enum Ending {
+    /// The generation carried no tool call: it is the model's answer.
+    ///
+    /// A *claim*, which [`finish`] checks — see its documentation.
+    Answer,
+    /// The turn named a client tool. Every call is handed back, none is run.
+    ClientCalls(Vec<ToolCall>),
+    /// The model was calling a tool and the call did not arrive intact.
+    Unfinished(Unfinished),
+    /// The round budget ran out with the model still calling Roteiro's tools,
+    /// so it never reached an answer.
+    Exhausted,
+    /// Nothing was advertised, so [`tool_system_prompt`] was never injected and
+    /// this is a plain [`Engine::chat`] passed straight through.
+    ///
+    /// The one ending whose content is *not* read for markup, named here rather
+    /// than left as an omission at the return site. `<tool_call>` means "I am
+    /// calling a tool" only because the tool prompt said so; a request that
+    /// advertised no tools never sent that prompt, so the marker is ordinary
+    /// text — a general-backend client asking a model what a tool call looks
+    /// like must get its answer, not a refusal. Nothing is executable on this
+    /// path either, so there is no call to lose.
+    Untooled,
+}
+
+/// Tool-call markup that never became a runnable call, and why — the three want
+/// different sentences from the refusal, because they have different ways
+/// forward.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unfinished {
+    /// `</tool_call>` never arrived and generation stopped at the token cap.
+    ///
+    /// This is **evidence, not inference**: [`FinishReason::Length`] is set by
+    /// the decode loop only when `max_tokens` was reached before an end-of-
+    /// generation token, so the engine is reporting the truncation rather than
+    /// the parser guessing at it.
+    CutAtTokenCap,
+    /// `</tool_call>` never arrived, but the model chose to stop: it emitted
+    /// end-of-generation part-way through writing a call.
+    CutShort,
+    /// The call was closed and no [`Dialect`] understood its body — the shape
+    /// #489 opened on, still reachable by a dialect Roteiro has not learned.
+    Unreadable,
+}
+
+/// The two budgets a refusal has to be able to name, carried to [`finish`] so
+/// the message can quote the actual number rather than gesture at a limit.
+#[derive(Clone, Copy)]
+struct Limits {
+    /// The request's `max_tokens` — the cap a mid-call truncation hit.
+    max_tokens: u32,
+    /// The tool-round budget for this request (`server::MAX_TOOL_ROUNDS`).
+    rounds: usize,
+}
+
+/// Roteiro's own voice in the assistant's slot.
+///
+/// A refusal is rendered by the Ask panel exactly where the model's answer would
+/// go, so it says who is speaking: a reader who takes this for the model's words
+/// learns something false about their model.
+const REFUSAL: &str = "Roteiro: ";
+
+/// Build the run's [`ToolLoopOutcome`] — **the only place one is built**, and so
+/// the only place a generation becomes the user's answer.
+///
+/// The property this exists to hold, and #489's whole subject:
+///
+/// > **Where Roteiro advertised tools, content carrying tool-call markup is
+/// > never returned as the user's answer.**
+///
+/// Under [`tool_system_prompt`] the marker `<tool_call>` means the model was
+/// *calling a tool*: the prompt told it to "reply with ONLY a tool call ... in
+/// exactly this form". A generation carrying that marker is therefore not an
+/// answer, whatever prose it also contains — prose written on the way into a
+/// call the model never completed is an answer it had not finished forming. So
+/// this **refuses**, naming the budget that ran out, rather than stripping the
+/// markup and passing the remainder off as a reply. Stripping would be the
+/// silent downgrade `docs/REVIEW_CHECKLIST.md` §Refusals forbids: an incomplete
+/// thing presented as the whole one, with the evidence removed.
+///
+/// [`Ending::Answer`] is a claim by the caller and this function is what checks
+/// it: a caller that mis-reads a call as an answer gets the refusal, not the
+/// markup. That is why the check lives here rather than at each return site — a
+/// check every site must remember to call is how #489's next leak arrives. The
+/// single exception is [`Ending::Untooled`], named rather than omitted — it is
+/// the "where Roteiro advertised tools" qualifier above, and the only thing that
+/// makes that statement a qualified one.
+///
+/// Only `content` is replaced. The token counts stay as generated (the model
+/// really did spend them) and so does `finish_reason`, which for a truncation is
+/// already `length` and tells a machine client what happened.
+fn finish(completion: Completion, ending: Ending, limits: Limits) -> ToolLoopOutcome {
+    let refusal = match ending {
+        Ending::ClientCalls(calls) => {
+            // The wire layer renders `content: null` alongside these, so the raw
+            // markup in `completion.content` is not published. That holds by
+            // composition rather than by a rule each renderer remembers: content
+            // is only ever rendered when `client_tool_calls` is empty, and an
+            // outcome with no client calls came through one of the arms below.
+            return ToolLoopOutcome {
+                completion,
+                client_tool_calls: into_client_calls(calls),
+            };
+        }
+        Ending::Untooled => None,
+        Ending::Unfinished(why) => Some(unfinished_refusal(why, limits)),
+        Ending::Exhausted => Some(still_calling_refusal(limits)),
+        // The caller says this generation is the answer. It is one only if it
+        // carries no call — the same read the loop made, made again where it
+        // cannot be skipped.
+        Ending::Answer => match read_markup(&completion) {
+            Markup::None => None,
+            Markup::Unfinished(why) => Some(unfinished_refusal(why, limits)),
+            // Unreachable from today's callers, which route a parsed call to
+            // `Execute`, `ClientCalls` or `Exhausted`. Kept because "a complete
+            // call reached the answer exit" is precisely what a future fifth
+            // exit would do wrong, and refusing is right whichever side is: the
+            // markup is not an answer.
+            Markup::Call(_) => Some(still_calling_refusal(limits)),
+        },
+    };
+
+    ToolLoopOutcome {
+        completion: match refusal {
+            None => completion,
+            Some(content) => Completion {
+                content,
+                ..completion
+            },
+        },
+        client_tool_calls: Vec::new(),
+    }
+}
+
+/// The refusal for a call that did not arrive intact. Each arm names the *right
+/// kind* of way forward: a token cap wants a bigger cap, a model that stops
+/// mid-call wants a different model, an unread dialect wants a bug report.
+fn unfinished_refusal(why: Unfinished, limits: Limits) -> String {
+    match why {
+        Unfinished::CutAtTokenCap => format!(
+            "{REFUSAL}the model hit its token limit (`max_tokens` = {}) part-way through a \
+             tool call, so this reply is an unfinished call rather than an answer. Nothing \
+             was executed. Retry with a larger `max_tokens`, or ask a narrower question.",
+            limits.max_tokens
+        ),
+        // The marker itself is deliberately *not* quoted in any of these
+        // sentences. A refusal is assistant-slot text: it can be shown to the
+        // user and it can be carried back into a following turn, and a Roteiro
+        // message that contains the marker would be read as a call by the very
+        // function that wrote it. So the property holds over this module's own
+        // prose too — see `every_ending_that_returns_prose_is_markup_free`.
+        Unfinished::CutShort => format!(
+            "{REFUSAL}the model stopped part-way through a tool call — it opened a \
+             tool-call block and never closed it — so this reply is an unfinished call \
+             rather than an answer. Nothing was executed. Retry the question; if it keeps \
+             happening this model is not following the call protocol, and \
+             `roteiro model list` shows the others installed."
+        ),
+        // Two situations share this sentence because they share a way forward:
+        // a body in a dialect Roteiro has not learned, and a body in a dialect it
+        // has, written wrongly. Observed live on `qwen3-coder-30b-a3b`, the
+        // common one is the second — valid-looking JSON with a brace too many —
+        // so the message does not claim to know which.
+        Unfinished::Unreadable => format!(
+            "{REFUSAL}the model wrote a tool call Roteiro could not read: it parses as \
+             neither the JSON nor the XML dialect, so it is either malformed or a form \
+             Roteiro has not learned. Either way this reply is a call rather than an \
+             answer. Nothing was executed. Retry the question; if it keeps happening, \
+             report the model and the call it wrote at \
+             https://github.com/OffeneDatenmodellierung/Roteiro/issues."
+        ),
+    }
+}
+
+/// The refusal for a model that is still calling tools when it has run out of
+/// rounds to call them in.
+fn still_calling_refusal(limits: Limits) -> String {
+    format!(
+        "{REFUSAL}the model was still calling Roteiro's graph tools after {} tool round{} — \
+         the budget for one request — so it never reached an answer. Nothing further was \
+         executed. Ask a narrower question, or raise `MAX_TOOL_ROUNDS` in \
+         `crates/rto-serve/src/server.rs` and rebuild.",
+        limits.rounds,
+        if limits.rounds == 1 { "" } else { "s" }
+    )
 }
 
 /// A registry that advertises nothing and **can execute nothing**.
@@ -234,11 +468,12 @@ pub fn chat_with_client_tools(
     // The client's tools come first, so a graph tool sharing a name is shadowed
     // rather than executed in its place.
     let advertised: Vec<&ToolDef> = client_tools.iter().chain(graph_tools.iter()).collect();
+    let limits = Limits {
+        max_tokens: req.max_tokens,
+        rounds: max_rounds.max(1),
+    };
     if advertised.is_empty() {
-        return Ok(ToolLoopOutcome {
-            completion: engine.chat(req)?,
-            client_tool_calls: Vec::new(),
-        });
+        return Ok(finish(engine.chat(req)?, Ending::Untooled, limits));
     }
 
     // Prepend a system turn advertising the tools and the call protocol.
@@ -260,24 +495,27 @@ pub fn chat_with_client_tools(
         })
     };
 
-    for _ in 0..max_rounds.max(1) {
+    for _ in 0..limits.rounds {
         let completion = generate(&messages)?;
 
-        let calls = parse_tool_calls(&completion.content);
-        if calls.is_empty() {
+        let calls = match read_markup(&completion) {
             // No tool call: this is the model's final answer.
-            return Ok(ToolLoopOutcome {
-                completion,
-                client_tool_calls: Vec::new(),
-            });
-        }
+            Markup::None => return Ok(finish(completion, Ending::Answer, limits)),
+            // The model was calling a tool and the call did not arrive intact.
+            // That is not an absence of a call, and reading it as one is what
+            // handed the raw markup to the user as prose (#489). Nothing here is
+            // executable — the call is not there to run — so the loop ends and
+            // `finish` says why.
+            Markup::Unfinished(why) => {
+                return Ok(finish(completion, Ending::Unfinished(why), limits));
+            }
+            // One call per turn: the divergence declared on [`Markup::Call`].
+            Markup::Call(call) => vec![call],
+        };
 
         if disposition(&calls, &client_names) == Disposition::ReturnAll {
             // Rule 2. Return every call in the turn and execute none.
-            return Ok(ToolLoopOutcome {
-                completion,
-                client_tool_calls: into_client_calls(calls),
-            });
+            return Ok(finish(completion, Ending::ClientCalls(calls), limits));
         }
 
         // Execute the tools and feed the (bounded) results back. Each response is
@@ -304,19 +542,27 @@ pub fn chat_with_client_tools(
     // Round budget exhausted while still calling tools: run one final generation
     // over the accumulated context (including the last tool response) but do not
     // execute any further tools, so the last result actually informs the answer.
-    // A client-tool call in *this* generation is still returned structurally —
-    // leaking it to the user as prose is the silent-wrong-answer shape of #489.
+    //
+    // This generation is read exactly as one inside the loop is, and by the same
+    // function. A client-tool call is returned structurally; a *graph*-tool call
+    // is the model saying it still needs to look something up after the budget
+    // is gone, which is not an answer either — publishing it as prose was the
+    // second half of #489, and the half the Ask path actually took, because Ask
+    // supplies no client tools so `client_names` is always empty there.
     let completion = generate(&messages)?;
-    let calls = parse_tool_calls(&completion.content);
-    let client_tool_calls = if disposition(&calls, &client_names) == Disposition::ReturnAll {
-        into_client_calls(calls)
-    } else {
-        Vec::new()
+    let ending = match read_markup(&completion) {
+        Markup::None => Ending::Answer,
+        Markup::Unfinished(why) => Ending::Unfinished(why),
+        Markup::Call(call) => {
+            let calls = vec![call];
+            if disposition(&calls, &client_names) == Disposition::ReturnAll {
+                Ending::ClientCalls(calls)
+            } else {
+                Ending::Exhausted
+            }
+        }
     };
-    Ok(ToolLoopOutcome {
-        completion,
-        client_tool_calls,
-    })
+    Ok(finish(completion, ending, limits))
 }
 
 /// Stamp a correlation id onto each parsed call on its way back to the client.
@@ -371,18 +617,98 @@ fn tool_system_prompt(tools: &[&ToolDef]) -> String {
     out
 }
 
-/// Every tool call in `text`.
+/// What the tool-call markup in a generation turned out to be — the reading
+/// [`chat_with_client_tools`] acts on, and the reading [`finish`] re-checks.
 ///
-/// **Divergence, declared rather than half-implemented:** today this is
-/// [`parse_tool_call`]'s single *first* call wrapped in a vector, so a turn never
-/// carries more than one call and `parallel_tool_calls` is accepted-and-carried
-/// rather than enforced. N-call parsing lands with the grammar work (#485 PR 2).
+/// The variant that did not exist before #489 is [`Markup::Unfinished`]. The
+/// parser used to answer `Option<ToolCall>`, which collapses "the model was not
+/// calling a tool" and "the model was calling a tool and it did not arrive" into
+/// one `None` — and the loop read that `None` as *"this is the final answer"*.
+/// Three of them are three different situations and only one of them is an
+/// answer, so the type says three things.
+enum Markup {
+    /// No `<tool_call>` at all: whatever the model wrote is its own text.
+    None,
+    /// A complete call, in one of the [`Dialect`]s.
+    ///
+    /// **Divergence, declared rather than half-implemented:** a turn carries at
+    /// most one call, so `parallel_tool_calls` is accepted-and-carried rather
+    /// than enforced. N-call parsing lands with the grammar work (#485 PR 2);
+    /// the callers already wrap this in the `Vec` [`disposition`] takes, so the
+    /// mixed-turn rule is expressible and testable before the parser can produce
+    /// a mixed turn.
+    Call(ToolCall),
+    /// `<tool_call>` markup that is not a runnable call.
+    Unfinished(Unfinished),
+}
+
+/// The `<tool_call>` wrapper in `text` — read once here for every [`Dialect`],
+/// because both forms nest inside it and a change to the wrapper must not reach
+/// one dialect and miss the other.
+enum Wrapper<'a> {
+    /// No `<tool_call>` in the text.
+    Absent,
+    /// `<tool_call>…</tool_call>`, with this body between them.
+    Closed(&'a str),
+    /// `<tool_call>` was opened and never closed.
+    Open,
+}
+
+/// The wrapper tags, named because each is matched in two places.
+const TOOL_CALL_OPEN: &str = "<tool_call>";
+const TOOL_CALL_CLOSE: &str = "</tool_call>";
+
+/// Find the first `<tool_call>` wrapper in `text` and report what state it is in.
+fn wrapper(text: &str) -> Wrapper<'_> {
+    let Some(open) = text.find(TOOL_CALL_OPEN) else {
+        return Wrapper::Absent;
+    };
+    let rest = &text[open + TOOL_CALL_OPEN.len()..];
+    match rest.find(TOOL_CALL_CLOSE) {
+        Some(end) => Wrapper::Closed(rest[..end].trim()),
+        None => Wrapper::Open,
+    }
+}
+
+/// Read a generation as tool-call markup, using the engine's own account of why
+/// generation stopped to say what an unclosed wrapper means.
 ///
-/// The slice shape exists now because [`disposition`] needs it: the mixed-turn
-/// rule has to be expressible — and testable — before the parser can produce a
-/// mixed turn.
-fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
-    parse_tool_call(text).into_iter().collect()
+/// # An unclosed `<tool_call>` is not parsed leniently
+///
+/// The tempting reading is "the body is probably complete and only the tag is
+/// missing, so parse the remainder". It is not taken, and the reason is that it
+/// is only checkable in one of the two dialects. A JSON body proves its own
+/// completeness — `serde_json` rejects an unclosed object, so a body that parses
+/// is a body that arrived whole. An **XML** body proves nothing:
+/// [`parse_xml_body`] deliberately tolerates a missing `</function>` and a
+/// missing `</parameter>`, so `…<parameter=query>\nwin` parses happily into
+/// `search(query="win")` — a *different question, silently answered*, which is
+/// the exact failure class #489 is about. A rule that holds for one dialect and
+/// not the other is the drift [`Dialect::ALL`] exists to prevent, so the rule is
+/// the uniform one: **without `</tool_call>` the call did not arrive.**
+///
+/// The cost of that choice is a refusal where a complete-but-untagged JSON call
+/// could have been run — one retry. The cost of the other choice is a truncated
+/// query answered as if it were the real one, and nothing downstream can tell.
+///
+/// `finish_reason` then distinguishes *why* it did not arrive, which is what the
+/// refusal needs in order to name a way forward. It is engine evidence rather
+/// than parser inference: `rto_llama`'s decode loop starts at
+/// [`FinishReason::Length`] and reaches [`FinishReason::Stop`] only on an
+/// end-of-generation token, so `Length` means precisely "`max_tokens` was
+/// reached first".
+fn read_markup(completion: &Completion) -> Markup {
+    match wrapper(&completion.content) {
+        Wrapper::Absent => Markup::None,
+        Wrapper::Open => Markup::Unfinished(match completion.finish_reason {
+            FinishReason::Length => Unfinished::CutAtTokenCap,
+            FinishReason::Stop => Unfinished::CutShort,
+        }),
+        Wrapper::Closed(body) => Dialect::ALL
+            .into_iter()
+            .find_map(|d| d.parse(body))
+            .map_or(Markup::Unfinished(Unfinished::Unreadable), Markup::Call),
+    }
 }
 
 /// A call syntax a model may emit inside `<tool_call>…</tool_call>`.
@@ -436,22 +762,6 @@ const FUNCTION_OPEN: &str = "<function=";
 const FUNCTION_CLOSE: &str = "</function>";
 const PARAMETER_OPEN: &str = "<parameter=";
 const PARAMETER_CLOSE: &str = "</parameter>";
-
-/// Extract the first `<tool_call>…</tool_call>` from `text` and parse its body
-/// into a [`ToolCall`], in whichever [`Dialect`] the model wrote it. Returns
-/// `None` if there is no well-formed call.
-///
-/// The `<tool_call>` wrapper is read here, once, for every dialect: both forms
-/// nest inside it, so the dialects differ only in the body and a change to the
-/// wrapper cannot reach one of them and miss the other.
-fn parse_tool_call(text: &str) -> Option<ToolCall> {
-    let start = text.find("<tool_call>")? + "<tool_call>".len();
-    let rest = &text[start..];
-    let end = rest.find("</tool_call>")?;
-    let body = rest[..end].trim();
-
-    Dialect::ALL.into_iter().find_map(|d| d.parse(body))
-}
 
 /// [`Dialect::Json`]: a JSON object carrying `name` and optional `arguments`.
 ///
@@ -556,21 +866,63 @@ fn xml_argument(raw: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        Dialect, Disposition, SuppressedTools, ToolCall, disposition, parse_tool_call,
-        tool_system_prompt,
+        Dialect, Disposition, Ending, Limits, Markup, SuppressedTools, ToolCall, Unfinished,
+        disposition, finish, read_markup, tool_system_prompt,
     };
     use crate::engine::{
-        ChatRequest, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
+        ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message,
+        ModelInfo,
     };
     use crate::tools::{ToolDef, ToolRegistry, chat_with_client_tools, chat_with_tools};
     use std::collections::HashSet;
     use std::fmt::Write as _;
     use std::sync::Mutex;
 
+    /// A generation the engine says ended on an end-of-generation token — the
+    /// ordinary case, and the one the dialect tests are about.
+    fn stopped(content: &str) -> Completion {
+        Completion {
+            content: content.to_owned(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            finish_reason: FinishReason::Stop,
+        }
+    }
+
+    /// A generation the engine says was cut off at `max_tokens`.
+    fn truncated(content: &str) -> Completion {
+        Completion {
+            finish_reason: FinishReason::Length,
+            ..stopped(content)
+        }
+    }
+
+    /// The budgets a refusal names, with values a test can recognise in a message.
+    fn limits() -> Limits {
+        Limits {
+            max_tokens: 64,
+            rounds: 4,
+        }
+    }
+
+    /// The call in `text`, read as a cleanly-ended generation.
+    ///
+    /// The dialect tests drive [`read_markup`] — the function the loop itself
+    /// reads generations with — rather than a parser entry point sitting beside
+    /// it. A dialect that parses in isolation but never reaches the loop is
+    /// exactly the gap #489 opened in, so there is no isolated entry point left
+    /// to pass in.
+    fn call_in(text: &str) -> Option<ToolCall> {
+        match read_markup(&stopped(text)) {
+            Markup::Call(call) => Some(call),
+            Markup::None | Markup::Unfinished(_) => None,
+        }
+    }
+
     #[test]
     fn parses_a_well_formed_tool_call() {
         let text = "sure\n<tool_call>{\"name\": \"explain\", \"arguments\": {\"key\": \"fn:foo\"}}</tool_call>";
-        let call = parse_tool_call(text).expect("parsed");
+        let call = call_in(text).expect("parsed");
         assert_eq!(
             call,
             ToolCall {
@@ -582,9 +934,9 @@ mod tests {
 
     #[test]
     fn ignores_text_without_a_tool_call_or_malformed_json() {
-        assert!(parse_tool_call("just a normal answer").is_none());
-        assert!(parse_tool_call("<tool_call>not json</tool_call>").is_none());
-        assert!(parse_tool_call("<tool_call>{\"arguments\":{}}</tool_call>").is_none());
+        assert!(call_in("just a normal answer").is_none());
+        assert!(call_in("<tool_call>not json</tool_call>").is_none());
+        assert!(call_in("<tool_call>{\"arguments\":{}}</tool_call>").is_none());
     }
 
     #[test]
@@ -639,6 +991,11 @@ mod tests {
     struct ScriptedEngine {
         turns: Mutex<Vec<String>>,
         seen: Mutex<Vec<Vec<Message>>>,
+        /// What the engine reports about how each generation ended. `Length` is
+        /// the engine's own account of hitting `max_tokens`, which is what
+        /// separates "cut off mid-call" from "stopped mid-call" — see
+        /// [`read_markup`].
+        finish_reason: FinishReason,
     }
 
     impl ScriptedEngine {
@@ -646,6 +1003,15 @@ mod tests {
             Self {
                 turns: Mutex::new(turns.iter().map(|t| t.as_ref().to_owned()).collect()),
                 seen: Mutex::new(Vec::new()),
+                finish_reason: FinishReason::Stop,
+            }
+        }
+        /// As [`Self::new`], but every generation is reported as having hit the
+        /// token cap — a model cut off part-way through what it was writing.
+        fn truncating<S: AsRef<str>>(turns: &[S]) -> Self {
+            Self {
+                finish_reason: FinishReason::Length,
+                ..Self::new(turns)
             }
         }
         /// The messages handed to generation number `round` (0-based).
@@ -668,6 +1034,44 @@ mod tests {
             self.seen.lock().unwrap().push(req.messages.clone());
             let next = self.turns.lock().unwrap().remove(0);
             on_token(&next);
+            Ok(CompletionStats {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                finish_reason: self.finish_reason,
+            })
+        }
+    }
+
+    /// An engine that calls a tool on **every** generation and never answers —
+    /// including the one run after the round budget is spent. The model that has
+    /// decided it needs more lookups than it is allowed.
+    struct AlwaysCalling {
+        markup: String,
+        generations: Mutex<usize>,
+    }
+
+    impl AlwaysCalling {
+        fn new(markup: String) -> Self {
+            Self {
+                markup,
+                generations: Mutex::new(0),
+            }
+        }
+    }
+
+    impl Engine for AlwaysCalling {
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo {
+                id: "scripted".to_owned(),
+            }]
+        }
+        fn chat_stream(
+            &self,
+            _req: &ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            *self.generations.lock().unwrap() += 1;
+            on_token(&self.markup);
             Ok(CompletionStats {
                 prompt_tokens: 1,
                 completion_tokens: 1,
@@ -1091,7 +1495,7 @@ mod tests {
 
     #[test]
     fn parses_the_xml_dialect_a_qwen_template_trains() {
-        let call = parse_tool_call(&xml_markup("explain", &[("key", "fn:foo")]))
+        let call = call_in(&xml_markup("explain", &[("key", "fn:foo")]))
             .expect("an XML-dialect body is a tool call, not the model's answer");
         assert_eq!(
             call,
@@ -1112,8 +1516,8 @@ mod tests {
             "I should look that up.\n{}",
             xml_markup("search", &[("query", "window")])
         );
-        let call = parse_tool_call(&text)
-            .expect("an XML-dialect body is a tool call, not the model's answer");
+        let call =
+            call_in(&text).expect("an XML-dialect body is a tool call, not the model's answer");
         assert_eq!(call.name, "search");
         assert_eq!(call.arguments, serde_json::json!({"query": "window"}));
     }
@@ -1125,7 +1529,7 @@ mod tests {
         // the first `</parameter>`, would truncate this query silently — the
         // model would get an answer to a question it did not ask.
         let value = "impl<T> where T: Iterator<Item = u8>\nand a literal </parameter> in the text";
-        let call = parse_tool_call(&xml_markup("search", &[("query", value)]))
+        let call = call_in(&xml_markup("search", &[("query", value)]))
             .expect("an XML-dialect body is a tool call, not the model's answer");
         assert_eq!(call.arguments["query"], serde_json::json!(value));
     }
@@ -1136,7 +1540,7 @@ mod tests {
         // `as_u64` and `categories` with `as_array`: handing those on as strings
         // would not error, it would fall back to the default limit and to "all
         // categories" — the model's request quietly ignored.
-        let call = parse_tool_call(&xml_markup(
+        let call = call_in(&xml_markup(
             "search",
             &[
                 ("query", "window"),
@@ -1160,12 +1564,12 @@ mod tests {
         // as the number 42 and `search` answers "needs a string `query`", which
         // is fed back and gives the model a round to correct itself — visible and
         // self-correcting, unlike the silent default an untyped `limit` would get.
-        let call = parse_tool_call(&xml_markup("search", &[("query", "42")]))
+        let call = call_in(&xml_markup("search", &[("query", "42")]))
             .expect("an XML-dialect body is a tool call, not the model's answer");
         assert_eq!(call.arguments["query"], serde_json::json!(42));
         // Quotes in the value are the value's own: the wire form writes strings
         // bare, so a quoted body is text that happened to contain quotes.
-        let call = parse_tool_call(&xml_markup("search", &[("query", "\"42\"")]))
+        let call = call_in(&xml_markup("search", &[("query", "\"42\"")]))
             .expect("an XML-dialect body is a tool call, not the model's answer");
         assert_eq!(call.arguments["query"], serde_json::json!("\"42\""));
     }
@@ -1183,7 +1587,7 @@ mod tests {
             "{\"arguments\": {\"key\": \"fn:foo\"}}",
         ] {
             assert!(
-                parse_tool_call(&format!("<tool_call>{body}</tool_call>")).is_none(),
+                call_in(&format!("<tool_call>{body}</tool_call>")).is_none(),
                 "accepted a body in neither dialect: {body}"
             );
         }
@@ -1205,7 +1609,7 @@ mod tests {
                 Dialect::Xml => xml_markup("search", &[("query", "window"), ("limit", "5")]),
             };
             assert_eq!(
-                parse_tool_call(&markup),
+                call_in(&markup),
                 Some(expected.clone()),
                 "{dialect:?} produced a different call"
             );
@@ -1273,5 +1677,309 @@ mod tests {
             out.client_tool_calls[0].arguments,
             serde_json::json!({"city": "Berlin"})
         );
+    }
+
+    // ------------------------------------------------------- #489, the rest ---
+    // The XML dialect above was one cause of three. The other two do not involve
+    // a dialect at all — the model writes a call the parser *would* understand,
+    // and the loop still hands it to the user as prose:
+    //
+    //   1. the wrapper is never closed, so there is no body to parse;
+    //   2. the round budget runs out with the model still calling.
+    //
+    // Both are asserted through the loop, because both are properties of how the
+    // loop reads a generation rather than of the parser.
+
+    /// The Ask request shape: graph tools, no client tools. `client_names` is
+    /// empty here, which is why the budget-exhausted branch could not be saved by
+    /// the client-tool half of the old code.
+    fn ask_request() -> ChatRequest {
+        ChatRequest {
+            model: "scripted".to_owned(),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: "what does `window` do?".to_owned(),
+            }],
+            images: vec![],
+            audio: vec![],
+            temperature: 0.0,
+            max_tokens: 64,
+        }
+    }
+
+    /// Assert `content` is Roteiro speaking, not the model's markup passed off as
+    /// prose. The negative half is the defect; the positive half is the refusals
+    /// rule in `docs/REVIEW_CHECKLIST.md` — say who is speaking, and say what to
+    /// do next.
+    fn assert_refusal(content: &str) {
+        assert!(
+            !content.contains("<tool_call>"),
+            "tool-call markup reached the user as the answer: {content}"
+        );
+        assert!(
+            content.starts_with("Roteiro: "),
+            "a refusal says who is speaking: {content}"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_tool_call_is_a_call_that_did_not_arrive_not_an_answer() {
+        // Cause 1, measured at 4/12 rounds on `qwen3-coder-30b-a3b`. The model
+        // opens `<tool_call>` and stops before closing it, so the body never
+        // parses, so the old parser answered `None` — and `None` meant "no call,
+        // this is the final answer". The user got `<tool_call>{"name":"search"`
+        // as the assistant's reply.
+        let engine = ScriptedEngine::new(&["<tool_call>{\"name\":\"search\""]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+
+        assert_refusal(&out.content);
+        // The model stopped of its own accord rather than hitting the cap, so the
+        // way forward is the model, not a bigger budget.
+        assert!(out.content.contains("never closed it"), "{}", out.content);
+        assert!(
+            out.content.contains("roteiro model list"),
+            "{}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn a_call_cut_off_at_the_token_cap_names_the_cap() {
+        // The same unclosed wrapper, but the engine reports `length` — it hit
+        // `max_tokens` mid-call. That is evidence rather than inference
+        // (`rto_llama` only reports `stop` on an end-of-generation token), and it
+        // changes the way forward: the budget is the obstacle, so the refusal
+        // names the budget and its value.
+        let engine = ScriptedEngine::truncating(&["<tool_call>{\"name\":\"search\",\"argum"]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+
+        assert_refusal(&out.content);
+        assert!(out.content.contains("`max_tokens` = 64"), "{}", out.content);
+        // The truncation is still reported on the wire, so a machine client can
+        // see what happened without reading English.
+        assert_eq!(out.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn a_complete_json_call_missing_only_its_closing_tag_is_still_refused() {
+        // The decision, pinned so it stays one. This body *is* complete — lenient
+        // parsing would recover a runnable `search(query="window")` and save a
+        // round. It is refused anyway, because completeness is only checkable in
+        // the JSON dialect: `parse_xml_body` tolerates a missing `</function>`
+        // and a missing `</parameter>`, so the same leniency would run a
+        // *truncated* XML call as if it were whole — a different question,
+        // silently answered. One rule for both dialects, and it errs toward the
+        // retry rather than toward the wrong answer.
+        let engine = ScriptedEngine::new(&[
+            "<tool_call>{\"name\":\"echo\",\"arguments\":{\"key\":\"abc\"}}",
+        ]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+        assert_refusal(&out.content);
+    }
+
+    #[test]
+    fn a_graph_call_after_the_round_budget_is_not_the_models_answer() {
+        // Cause 2, measured at 2/12 rounds on `qwen3.8-27b`, and the branch the
+        // Ask path actually takes: no client tools, so `client_names` is empty,
+        // so `disposition` was always `Execute`, so the post-loop generation was
+        // returned verbatim — raw markup and all. The comment above that code
+        // claimed #489 was handled there. It was, for client tools only.
+        let engine = AlwaysCalling::new(call_markup("echo", r#"{"key":"abc"}"#));
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+
+        assert_refusal(&out.content);
+        assert!(
+            out.content.contains("4 tool rounds"),
+            "the refusal names the budget that ran out: {}",
+            out.content
+        );
+        assert!(out.content.contains("MAX_TOOL_ROUNDS"), "{}", out.content);
+        // Four looped generations plus the final one, and no more: the budget was
+        // spent, not silently extended.
+        assert_eq!(*engine.generations.lock().unwrap(), 5);
+    }
+
+    #[test]
+    fn prose_beside_an_abandoned_call_is_not_promoted_to_the_answer() {
+        // The rejected alternative, pinned. Stripping the markup would leave
+        // "Let me look that up." — fluent, plausible, and an answer the model had
+        // not finished forming. That is the silent downgrade
+        // `docs/REVIEW_CHECKLIST.md` §Refusals forbids: the incomplete thing
+        // presented as the whole one, with the evidence removed.
+        let engine = AlwaysCalling::new(format!(
+            "Let me look that up.\n{}",
+            call_markup("echo", r#"{"key":"abc"}"#)
+        ));
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 2).expect("completion");
+
+        assert_refusal(&out.content);
+        assert!(
+            !out.content.contains("Let me look that up"),
+            "the model's preamble is not the answer either: {}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn a_closed_call_in_no_dialect_is_not_the_models_answer() {
+        // #489 as filed, and the reason it stays fixed after the XML dialect
+        // landed: a *third* dialect is still a body neither parser reads. It is
+        // no longer an absence that reads as an answer — it is a call Roteiro
+        // could not understand, and the refusal says so and where to report it.
+        let engine = ScriptedEngine::new(&["<tool_call>search(query='window')</tool_call>"]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+
+        assert_refusal(&out.content);
+        assert!(out.content.contains("could not read"), "{}", out.content);
+        assert!(
+            out.content
+                .contains("github.com/OffeneDatenmodellierung/Roteiro/issues"),
+            "{}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn a_call_in_the_right_dialect_written_wrongly_is_not_the_models_answer() {
+        // Not a third dialect — the *instructed* one, with a brace too many. This
+        // exact string came off `qwen3-coder-30b-a3b` against this repo's graph,
+        // and it is what #489 looks like most often in practice: the XML dialect
+        // landed for models that revert to their training, but a model that
+        // complies with the instruction and then miscounts its own JSON fails the
+        // same way, because `serde_json` rejects it and a rejection was an
+        // absence. Neither dialect is missing here; the call is just wrong.
+        let observed = "<tool_call>{\"name\": \"search\", \"arguments\": {\"query\": \"window function\"}}}</tool_call>";
+        let engine = ScriptedEngine::new(&[observed]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+
+        assert_refusal(&out.content);
+        assert!(out.content.contains("malformed"), "{}", out.content);
+    }
+
+    // -- the chokepoint itself -------------------------------------------------
+
+    #[test]
+    fn the_answer_ending_cannot_publish_a_tool_call() {
+        // `finish` is the only place an outcome is built, and `Ending::Answer` is
+        // a *claim* it checks rather than trusts. This is the guard against the
+        // fourth cause: a future exit that reads a generation some other way — or
+        // does not read it at all — and reports it as the answer. There is no
+        // caller that can do this today; the point is that when one appears it
+        // refuses instead of leaking.
+        for content in [
+            "<tool_call>{\"name\":\"echo\",\"arguments\":{}}</tool_call>",
+            "<tool_call>{\"name\":\"echo\"",
+            "<tool_call>neither dialect</tool_call>",
+        ] {
+            let out = finish(stopped(content), Ending::Answer, limits());
+            assert_refusal(&out.completion.content);
+            assert!(out.client_tool_calls.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_answer_with_no_markup_passes_through_untouched() {
+        // The other half: the check must not eat ordinary answers. Accounting is
+        // preserved either way — the model really did spend those tokens.
+        let out = finish(
+            stopped("`window` caps a slice by bytes."),
+            Ending::Answer,
+            limits(),
+        );
+        assert_eq!(out.completion.content, "`window` caps a slice by bytes.");
+        assert_eq!(out.completion.completion_tokens, 1);
+        assert!(out.client_tool_calls.is_empty());
+    }
+
+    #[test]
+    fn an_untooled_generation_is_the_one_named_exception() {
+        // Advertising nothing means `tool_system_prompt` was never injected, so
+        // `<tool_call>` carries no meaning Roteiro assigned and censoring it would
+        // break a general-backend client that asked its model what a tool call
+        // looks like. The exception is a named `Ending`, not a missing check, so
+        // it is visible at every call site and pinned here.
+        let example = "It looks like <tool_call>{\"name\":\"search\"}</tool_call>.";
+        let out = finish(stopped(example), Ending::Untooled, limits());
+        assert_eq!(out.completion.content, example);
+    }
+
+    #[test]
+    fn a_refusal_keeps_the_generations_accounting() {
+        // Only `content` is replaced. The tokens were really spent, and
+        // `finish_reason` is the engine's account of how generation ended — for a
+        // truncation it already says `length`, which is the honest wire answer.
+        let out = finish(
+            truncated("<tool_call>{\"name\":\"echo\""),
+            Ending::Unfinished(Unfinished::CutAtTokenCap),
+            limits(),
+        );
+        assert_refusal(&out.completion.content);
+        assert_eq!(out.completion.prompt_tokens, 1);
+        assert_eq!(out.completion.completion_tokens, 1);
+        assert_eq!(out.completion.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn read_markup_separates_the_three_things_a_none_used_to_mean() {
+        // The type change that makes the rest possible. `Option<ToolCall>`
+        // collapsed "not calling a tool", "calling one that did not arrive" and
+        // "calling one in a form I cannot read" into a single `None`, and the loop
+        // read that `None` as "final answer". Only the first is an answer.
+        assert!(matches!(
+            read_markup(&stopped("just an answer")),
+            Markup::None
+        ));
+        assert!(matches!(
+            read_markup(&stopped(&call_markup("echo", "{}"))),
+            Markup::Call(_)
+        ));
+        assert!(matches!(
+            read_markup(&stopped("<tool_call>{\"name\":\"echo\"")),
+            Markup::Unfinished(Unfinished::CutShort)
+        ));
+        assert!(matches!(
+            read_markup(&truncated("<tool_call>{\"name\":\"echo\"")),
+            Markup::Unfinished(Unfinished::CutAtTokenCap)
+        ));
+        assert!(matches!(
+            read_markup(&stopped("<tool_call>nonsense</tool_call>")),
+            Markup::Unfinished(Unfinished::Unreadable)
+        ));
+    }
+
+    #[test]
+    fn every_ending_that_returns_prose_is_markup_free() {
+        // Driven over the endings rather than over three hand-picked cases, so an
+        // `Ending` added later has to decide what it does with markup — the same
+        // shape as `Dialect::ALL`.
+        //
+        // Two of the five are deliberately absent, and between this test and
+        // theirs all five are accounted for — an `Ending` nobody asserts is how
+        // the guarantee gets a hole:
+        //
+        // * `ClientCalls` is the one ending whose outcome carries calls, and the
+        //   wire layer renders `content: null` beside them.
+        // * `Untooled` is the exception itself: it passes markup through on
+        //   purpose, which is asserted the other way round in
+        //   `an_untooled_generation_is_the_one_named_exception`.
+        //
+        // So this loop is "every ending that returns prose Roteiro asked a tool
+        // for", which is exactly the qualified property the module documents —
+        // not "every ending".
+        let markup = call_markup("echo", "{}");
+        for ending in [
+            Ending::Answer,
+            Ending::Unfinished(Unfinished::CutAtTokenCap),
+            Ending::Unfinished(Unfinished::CutShort),
+            Ending::Unfinished(Unfinished::Unreadable),
+            Ending::Exhausted,
+        ] {
+            let out = finish(stopped(&markup), ending, limits());
+            assert!(
+                out.client_tool_calls.is_empty(),
+                "no client calls on a prose ending"
+            );
+            assert_refusal(&out.completion.content);
+        }
     }
 }
