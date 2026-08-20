@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.26.6...rto-exec-v1.27.0) - 2026-08-20
+
+### Added
+
+- *(sandbox)* user-supplied analyzer images, digest-pinned
+
+### Fixed
+
+- *(sandbox)* a pin refusal says what is wrong with the reference it got
+
 ## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.26.5...rto-exec-v1.26.6) - 2026-08-20
 
 ### Other
