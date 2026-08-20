@@ -12984,6 +12984,27 @@ fn prose_blob_oid<'a>(
     blobs.get(ex.node.path.as_deref()?).map(String::as_str)
 }
 
+/// The ADR file behind an `adr` or `adr_section` node, or `None` for anything
+/// else.
+///
+/// The mirror image of [`prose_blob_oid`]'s kind check, and load-bearing for the
+/// same reason read the other way round. These are precisely the nodes that carry
+/// an ADR's path *without being the document*, so each is entitled to a **slice**
+/// of that file and none of them to the whole of it — [`rto_spec::AdrDoc::text_for_key`]
+/// does the splitting. A path-only rule here would paste all 16 KB of ADR-0015
+/// into its twenty-odd notes at once.
+fn adr_blob_oid<'a>(
+    blobs: &'a std::collections::HashMap<String, String>,
+    ex: &rto_graph::Explanation,
+) -> Option<&'a str> {
+    if ex.node.kind != rto_graph::NodeKind::Adr.as_str()
+        && ex.node.kind != rto_graph::NodeKind::AdrSection.as_str()
+    {
+        return None;
+    }
+    blobs.get(ex.node.path.as_deref()?).map(String::as_str)
+}
+
 /// Render an Obsidian vault: one linked markdown note per graph node in `<out>`
 /// (default `vault`).
 fn render_obsidian(
@@ -13025,15 +13046,39 @@ fn render_obsidian(
     // that are prose rather than all 7,969 of its nodes. Empty when prose ingest
     // is off, which is a project saying it does not want prose bodies — the same
     // setting that leaves `meta.content` unset for these files.
-    let prose_blobs: std::collections::HashMap<String, String> = if ingest.prose {
-        repo.walk_blobs()?
-            .into_iter()
-            .filter(|b| rto_graph::is_prose(&b.path))
-            .map(|b| (b.path, b.oid))
-            .collect()
-    } else {
-        std::collections::HashMap::new()
-    };
+    //
+    // The ADR files are collected alongside and *not* gated on `ingest.prose`: an
+    // ADR's text is the authored layer, which `apply_authored_layer` re-parses from
+    // blobs on every sync whatever the derived layer chooses to ingest. Which paths
+    // are ADRs is read off the graph rather than re-decided here, so the
+    // classification in `rto_spec::authored_docs_from` stays the only one.
+    let adr_paths: std::collections::HashSet<String> = store
+        .all_nodes()?
+        .into_iter()
+        .filter(|n| n.kind == rto_graph::NodeKind::Adr)
+        .filter_map(|n| n.path)
+        .collect();
+    let mut prose_blobs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut adr_blobs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if ingest.prose || !adr_paths.is_empty() {
+        for blob in repo.walk_blobs()? {
+            if adr_paths.contains(&blob.path) {
+                adr_blobs.insert(blob.path.clone(), blob.oid.clone());
+            }
+            if ingest.prose && rto_graph::is_prose(&blob.path) {
+                prose_blobs.insert(blob.path, blob.oid);
+            }
+        }
+    }
+
+    // Each ADR parsed at most once, however many notes it feeds — this repository
+    // is 20 ADRs behind 199 notes. Keyed by blob oid, so the cache is
+    // content-addressed like everything else that reads a tree. `None` records a
+    // blob that could not be read or parsed, so a broken ADR is not re-read once
+    // per section.
+    let mut adr_docs: std::collections::HashMap<String, Option<rto_spec::AdrDoc>> =
+        std::collections::HashMap::new();
 
     let mut count = 0usize;
     for key in store.all_keys()? {
@@ -13041,9 +13086,25 @@ fn render_obsidian(
             // A non-UTF-8 blob falls back to `meta.content`: extraction papered
             // over it with `from_utf8_lossy`, and a note of replacement
             // characters is worse than the capped text.
-            let body = prose_blob_oid(&prose_blobs, &ex)
-                .and_then(|oid| repo.read_blob(oid).ok())
-                .and_then(|bytes| String::from_utf8(bytes).ok());
+            let body = if let Some(oid) = adr_blob_oid(&adr_blobs, &ex) {
+                let path = ex.node.path.clone().unwrap_or_default();
+                adr_docs
+                    .entry(oid.to_owned())
+                    .or_insert_with(|| {
+                        let text = repo
+                            .read_blob(oid)
+                            .ok()
+                            .and_then(|bytes| String::from_utf8(bytes).ok())?;
+                        rto_spec::parse_adr(&path, &text).ok()
+                    })
+                    .as_ref()
+                    .and_then(|doc| doc.text_for_key(&ex.node.key))
+                    .map(ToOwned::to_owned)
+            } else {
+                prose_blob_oid(&prose_blobs, &ex)
+                    .and_then(|oid| repo.read_blob(oid).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+            };
             let note = rto_render::render_note(&ex, source_base.as_deref(), body.as_deref());
             std::fs::write(out.join(&note.filename), &note.content)?;
             count += 1;
@@ -13393,7 +13454,7 @@ mod config_secrets_summary_tests {
 
 #[cfg(test)]
 mod vault_body_tests {
-    use super::prose_blob_oid;
+    use super::{adr_blob_oid, prose_blob_oid};
 
     fn blobs() -> std::collections::HashMap<String, String> {
         // Only prose paths, exactly as `render_obsidian` builds it.
@@ -13444,6 +13505,53 @@ mod vault_body_tests {
                 "{kind} shares the path but is not the document"
             );
         }
+    }
+
+    /// The two rules are complements, not overlaps: exactly the kinds
+    /// `prose_blob_oid` refuses are the ones `adr_blob_oid` claims. Asserted
+    /// together because the bug they guard against is a node being served by
+    /// *both* — which is how an ADR note would end up holding the whole file the
+    /// `file:` note already holds.
+    #[test]
+    fn the_adr_rule_claims_exactly_what_the_prose_rule_refuses() {
+        let path = "docs/adr/0015-media.md";
+        for kind in ["adr", "adr_section"] {
+            let ex = node(kind, Some(path));
+            assert_eq!(
+                adr_blob_oid(&blobs(), &ex),
+                Some("oid-adr"),
+                "{kind} is entitled to a slice of its ADR"
+            );
+            assert_eq!(
+                prose_blob_oid(&blobs(), &ex),
+                None,
+                "{kind} is never given the whole document"
+            );
+        }
+
+        // A `file` node on the very same path is the document, and stays the
+        // prose rule's. No node is claimed by both rules.
+        let file = node("file", Some(path));
+        assert_eq!(prose_blob_oid(&blobs(), &file), Some("oid-adr"));
+        assert_eq!(adr_blob_oid(&blobs(), &file), None);
+    }
+
+    /// Everything else on an ADR's path — and every node without one — is refused.
+    #[test]
+    fn the_adr_rule_refuses_any_other_kind() {
+        for kind in ["site_page", "marker", "fn", "struct"] {
+            assert_eq!(
+                adr_blob_oid(&blobs(), &node(kind, Some("docs/adr/0015-media.md"))),
+                None,
+                "{kind} is not an ADR-layer node"
+            );
+        }
+        assert_eq!(adr_blob_oid(&blobs(), &node("adr", None)), None);
+        assert_eq!(
+            adr_blob_oid(&blobs(), &node("adr", Some("docs/adr/9999-absent.md"))),
+            None,
+            "a path with no blob in the rendered tree"
+        );
     }
 
     #[test]

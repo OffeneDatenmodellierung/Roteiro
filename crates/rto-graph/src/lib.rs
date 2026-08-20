@@ -95,7 +95,7 @@ pub use context::{
 };
 pub use extract::{
     Extractor, FileNodeExtractor, IngestConfig, MediaEngineGuard, Registry, RustExtractor,
-    is_prose, release_media_engines,
+    cap_content, is_prose, release_media_engines,
 };
 pub use findings::{
     AdvisoryDb, AnalysisRun, CommandPolicy, EnvironmentPolicy, FINDING_KEY_PREFIX, Finding,

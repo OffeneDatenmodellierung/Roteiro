@@ -115,9 +115,46 @@ pub(crate) fn strip_code_spans(line: &str) -> String {
     out
 }
 
+/// Trim leading and trailing **blank lines** — lines that are empty or hold only
+/// whitespace — from a Markdown span, and nothing else.
+///
+/// Deliberately not `str::trim`: that also eats the *indentation* of the first
+/// content line, which in Markdown is meaning, not padding. A section opening on
+/// a four-space-indented code block would be stored, and rendered into the vault
+/// note, as ordinary prose. The one rule lives here rather than at each of the
+/// three span closes in [`crate::adr`] (two section closes and the preamble) so
+/// the next span to be sliced cannot get a fourth, slightly different one — and
+/// so `blueprint` and `site`, which have the same defect on their own section
+/// spans, have something to call when they are fixed.
+///
+/// The newline that *terminates* the last content line belongs to no blank line,
+/// but is dropped too, so a span never ends in a bare terminator. Trailing
+/// whitespace *on* a content line survives: two spaces before the terminator is
+/// a Markdown hard break.
+pub(crate) fn trim_blank_lines(span: &str) -> &str {
+    let blank = |line: &&str| line.trim().is_empty();
+    // `split_inclusive` keeps each terminator with its line, so summing the
+    // lengths of the blank ones gives a byte offset directly.
+    let leading: usize = span
+        .split_inclusive('\n')
+        .take_while(blank)
+        .map(str::len)
+        .sum();
+    let span = &span[leading..];
+    let trailing: usize = span
+        .split_inclusive('\n')
+        .rev()
+        .take_while(blank)
+        .map(str::len)
+        .sum();
+    let span = &span[..span.len() - trailing];
+    span.strip_suffix('\n')
+        .map_or(span, |s| s.strip_suffix('\r').unwrap_or(s))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{lang_for, strip_code_spans};
+    use super::{lang_for, strip_code_spans, trim_blank_lines};
 
     #[test]
     fn lang_for_lowercases_extension_to_match_the_extractor() {
@@ -146,5 +183,32 @@ mod tests {
     #[test]
     fn preserves_utf8_outside_spans() {
         assert_eq!(strip_code_spans("café `x` — ok"), "café  — ok");
+    }
+
+    #[test]
+    fn trims_surrounding_blank_lines_and_keeps_indentation() {
+        assert_eq!(
+            trim_blank_lines("\n\n    code;\n\nprose.\n\n"),
+            "    code;\n\nprose."
+        );
+        // Whitespace-only lines count as blank at either end...
+        assert_eq!(trim_blank_lines("  \n\t\n\tcode;\n   \n"), "\tcode;");
+        // ...but interior ones are body text and stay.
+        assert_eq!(trim_blank_lines("a\n\nb"), "a\n\nb");
+        // Trailing whitespace *on* a content line is a Markdown hard break.
+        assert_eq!(trim_blank_lines("a  \n"), "a  ");
+        // A `\r\n` terminator goes with its newline rather than leaving a stray CR.
+        assert_eq!(trim_blank_lines("\r\na\r\n\r\n"), "a");
+    }
+
+    /// An all-blank span must still come out empty: `AdrDoc::text_for_key` gates on
+    /// `is_empty` and `stored` on the capped string, so a span of two newlines has
+    /// to yield no `content` key exactly as `str::trim` made it.
+    #[test]
+    fn an_all_blank_span_is_empty() {
+        assert_eq!(trim_blank_lines(""), "");
+        assert_eq!(trim_blank_lines("\n"), "");
+        assert_eq!(trim_blank_lines("\n\n"), "");
+        assert_eq!(trim_blank_lines("   \n\t  \n"), "");
     }
 }

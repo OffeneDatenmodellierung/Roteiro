@@ -196,7 +196,16 @@ pub fn parse_site_page(rel_path: &str, text: &str) -> Result<SitePage, ParseErro
             let title = heading_text(heading);
             let slug = crate::text::slugify(&title);
             current = Some(slug.clone());
-            sections.push(Section { slug, title });
+            // No `text`: `Section` is shared with `parse_adr`, and only that
+            // parser populates it so far. A site page section note is empty in
+            // the vault for the same reason an ADR's was (#545) — the fix is the
+            // same shape and is deliberately not in that PR's scope, which is
+            // ADRs. 62 notes here against 199 there.
+            sections.push(Section {
+                slug,
+                title,
+                text: String::new(),
+            });
         }
         for raw in crate::text::scan_wiki_links(line) {
             let from = match &current {
