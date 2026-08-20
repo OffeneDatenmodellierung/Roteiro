@@ -1,0 +1,364 @@
+name: Toolchain canary
+
+# Answers one question, once a week: **does this codebase lint clean under the
+# newest stable Rust?**
+#
+# ## Why this workflow exists
+#
+# On 2026-08-18 Rust 1.98.0 shipped, CI's floating `stable` resolved to it
+# overnight, three new clippy lints fired, and `main` went red with no commit to
+# blame (#563 fixed the lints, #566 and the change that added this file pinned
+# every toolchain site). Pinning removed the *ambush*. It did not remove the
+# *work*: the pins now hold 1.98 until a human raises them, and a pin nobody
+# raises is the same failure arriving quietly instead of loudly — see the
+# `checks` job in `ci.yml`, which owns that argument and the bump procedure.
+#
+# This job is the other half. It takes the ambush and moves it somewhere it can
+# do no damage: a scheduled run, off the critical path, that finds out what the
+# next toolchain thinks of this code *before* anybody bumps a pin.
+#
+# ## The three rules this file must keep
+#
+# 1. **`schedule` and `workflow_dispatch` only. Never `push`, never
+#    `pull_request`.** A toolchain break has nothing to do with whoever happened
+#    to have a PR open that morning, and landing it on them is precisely the
+#    misattribution that disqualified `coverage` from being the canary (see the
+#    `coverage` job in `ci.yml`). The trigger list is the whole mechanism for
+#    that; do not extend it.
+#
+# 2. **This must never be able to block anything.** It is NOT a required status
+#    check and must never be added to branch protection. It is not in the
+#    required set (`checks`, `default-features`, `msrv`, `no-default-features`),
+#    it runs on triggers no pull request ever sees, and both facts have to stay
+#    true. Adding it to branch protection would wedge every PR on a job that
+#    reports on a compiler the PR does not use, which is the opposite of the
+#    point. If it is noisy, fix it or delete it — never gate on it.
+#
+# 3. **The toolchain here floats, on purpose.** This is the one place in the
+#    repository where floating is the *feature*: the job's entire question is
+#    "what does the newest stable think", so a pin would make it answer a
+#    question we already know. It therefore uses the `# stable` ref of
+#    `dtolnay/rust-toolchain`, whose `toolchain` input defaults to `stable`,
+#    while every other site in the repository uses the `# master` ref with an
+#    explicit version. That asymmetry is deliberate and documented at the step
+#    below. Do NOT "fix" it to match the pins.
+#
+# ## How a failure reaches a person
+#
+# A red X in the Actions tab on a Tuesday morning is an artifact, not a signal —
+# nobody is subscribed to this tab, and a non-blocking job that fails where no
+# one looks costs a workflow and buys nothing. So the result is written to the
+# **backlog**, which is the list that actually gets read here:
+#
+#   * clippy fails -> open an issue, or update the one already open;
+#   * clippy passes -> close the open issue, if there is one.
+#
+# The dedupe rule is the part that matters, and it is exact rather than
+# heuristic: the issue is found by the `toolchain-canary` label through the REST
+# list endpoint, never by title search (the search index lags, and a lagging
+# dedupe opens duplicates). One open issue at a time, always. A lint that goes
+# unfixed for three weeks running updates that one issue three times; it does
+# not open three issues.
+#
+# Notifications are rationed on top of that, because an issue that pings every
+# Monday trains people to mute it. A comment is posted only when the *toolchain
+# version changed* — that is new information. The same compiler failing the same
+# way next week refreshes the issue body and stays silent.
+#
+# And what closes it is written down, because an issue nobody closes is its own
+# noise: **this job closes it**, on the first run that lints clean. That happens
+# when someone fixes the lints, and also when upstream withdraws one — either
+# way the canary retracts its own alarm without anyone tidying up after it.
+#
+# ## Known limits, so nobody mistakes this for more than it is
+#
+#   * **It runs one feature set, not the matrix** — see the clippy step for
+#     which and why. A green canary is not a green bump; the bump procedure in
+#     `ci.yml` still runs both of its commands.
+#   * **A canary that stops running is silent.** GitHub disables `schedule` on
+#     repositories with 60 days of no activity, and a disabled schedule reports
+#     nothing at all. If this repository ever goes quiet, this file goes quiet
+#     with it, and that failure looks exactly like success.
+
+on:
+  # Weekly, Mondays. Rust ships every six weeks on a Thursday, so a weekly run
+  # catches a release within four days at worst — early enough to be useful,
+  # given that nothing depends on the answer any more (everything is pinned) and
+  # a caught break costs a bump commit rather than a red `main`.
+  #
+  # Not daily: a broken toolchain stays broken until someone fixes it, so daily
+  # would re-answer a known question five more times per incident and make a
+  # standing failure the normal state of this workflow. Not monthly: that can
+  # miss a whole release, which is the one thing it must not do.
+  #
+  # Monday rather than Friday, and this is deliberate: a Friday run would catch
+  # a Thursday release within a day, but files its issue into the weekend. The
+  # extra latency is free here and a workday landing is not.
+  #
+  # 06:17 rather than 06:00 — GitHub queues scheduled runs hardest on the hour,
+  # and a low-priority job has no reason to sit in that queue.
+  schedule:
+    - cron: "17 6 * * 1"
+  # So the answer can be *asked for* rather than waited for: before raising the
+  # pins, on the day a release ships, or to check the job itself still works.
+  workflow_dispatch:
+
+# Minimal and explicit. `issues: write` is the whole reason this workflow needs
+# any write scope at all — it opens, edits, comments on and closes the one
+# tracking issue, and creates the label that finds it. `contents: read` is for
+# the checkout. Nothing here writes to the repository, and nothing here needs a
+# token beyond the run-scoped `GITHUB_TOKEN`.
+permissions:
+  contents: read
+  issues: write
+
+# Never cancel a run in flight. This job's last steps mutate an issue, and a
+# cancellation between "clippy failed" and "the issue says so" loses the only
+# output the workflow has. Overlap is not a real risk at weekly cadence, so the
+# group exists to serialise a manual dispatch against a scheduled run rather
+# than to save runner time.
+concurrency:
+  group: toolchain-canary
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  clippy-on-floating-stable:
+    name: Clippy on floating stable
+    # Forks inherit this file but not the backlog it writes to, and a fork
+    # opening issues against its own copy is noise for its owner. Same guard as
+    # `graph-artifact.yml`.
+    if: github.repository == 'OffeneDatenmodellierung/Roteiro'
+    runs-on: ubuntu-24.04
+    # A backstop against a hung step, not a budget. Sized above `ci.yml`'s
+    # `default-features` job (30) because this one builds from a cold cache
+    # every time the toolchain moves, which is exactly the run that matters.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # THE ONE DELIBERATE FLOAT IN THIS REPOSITORY. See rule 3 in the header
+      # before changing this line.
+      #
+      # This is the `# stable` ref, where `toolchain` is an optional input
+      # defaulting to `stable`, so the runner resolves the newest stable on the
+      # day it runs. Everywhere else uses the `# master` ref with an explicit
+      # `toolchain:` precisely so that it *cannot* do this. Here it is the
+      # question being asked, so there is deliberately no `toolchain:` value to
+      # pin, and a reviewer who "corrects" this to the pinned form turns the
+      # canary into a fifth copy of `checks` that can never report anything new.
+      - name: Install the newest stable Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: clippy
+
+      # Which stable this actually was. Recorded in the run summary and in the
+      # issue body, because "clippy fails" is not actionable without it, and it
+      # is what the notification-rationing rule below compares against.
+      - name: Record which stable this is
+        id: toolchain
+        run: |
+          set -euo pipefail
+          full="$(rustc --version)"
+          semver="$(rustc --version | awk '{print $2}')"
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "semver=$semver" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Toolchain under test"
+            echo
+            echo '```'
+            echo "$full"
+            cargo clippy --version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Worth caching: five weeks in six the toolchain has not moved and this is
+      # a warm no-op. The sixth week the compiler version changes, rust-cache
+      # keys on it, and the run rebuilds from cold anyway — which is the run
+      # whose answer we want, so the cache costs nothing on the week it matters.
+      # `cache-on-failure` for the reason given in `ci.yml`: the failing run is
+      # the one somebody will re-run by hand.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+
+      # ## Which feature set, and why this one
+      #
+      # The default set, which is `execution,models,exec-subprocess` — the same
+      # command as `ci.yml`'s `default-features` job.
+      #
+      # Not `--all-features`, and the reason is false alarms rather than cost.
+      # `--all-features` turns on `exec-boxlite`, which needs `protoc` from apt
+      # and a provisioned sandbox runtime before it will build at all. `ci.yml`
+      # carries both steps and its own comment calls an apt failure "often a
+      # transient mirror/network issue; re-run the job". That is survivable for
+      # a job a human is watching. For an unattended weekly job whose entire
+      # value is that people believe its issue, a mirror hiccup filing "clippy
+      # fails on the newest stable" is the failure mode that kills it. So the
+      # canary depends on crates.io and nothing else.
+      #
+      # This set is enough to answer the question, and that is checked against
+      # the real incident rather than assumed: of the three lints that broke
+      # `main` on 1.98, `chunks_exact_to_as_chunks` fired in `rto-graph`'s media
+      # gate and `map_or_identity` in `rto-exec` — both inside the default set,
+      # and all three of `ci.yml`'s clippy jobs went red. This command would
+      # have gone red too, on the day, with nobody's PR involved.
+      #
+      # What it does not see: `mcp`, `serve`, `explorer`, `exec-boxlite`, and
+      # the model/media tiers. The third lint of that incident was in
+      # `rto-render/src/mcp.rs` and this command would have missed that *site*
+      # while still failing on the other two. That is the accepted trade: this
+      # job reports yes-or-no, not an exhaustive list. **A green canary is not a
+      # green bump** — the procedure in `ci.yml` still runs both its commands.
+      #
+      # `--keep-going` matters more than it looks. Cargo stops at the first
+      # crate that fails to compile, which is why the 1.98 report initially
+      # showed one lint when three had fired; a toolchain bump usually breaks
+      # more than the first thing you see. This makes the issue below list every
+      # failing crate in one pass, so the bump is scoped correctly from the
+      # start. It needs `-D warnings` alongside it to be worth anything.
+      - name: Clippy (default features, newest stable)
+        id: clippy
+        # Not `continue-on-error` on the job's behalf: the outcome is read by
+        # the reporting step below, and the job's own status is set at the end.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo clippy --keep-going --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
+
+      # Everything below is the surfacing. See "How a failure reaches a person"
+      # in the header for the rules these steps implement.
+      - name: Report to the backlog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          OUTCOME: ${{ steps.clippy.outcome }}
+          RUSTC_FULL: ${{ steps.toolchain.outputs.full }}
+          RUSTC_SEMVER: ${{ steps.toolchain.outputs.semver }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          LABEL="toolchain-canary"
+          TITLE="Canary: clippy fails on the newest stable Rust"
+          TODAY="$(date -u +%Y-%m-%d)"
+
+          # Idempotent: `--force` updates the label if it already exists, so the
+          # first run of this workflow creates it and every later run is a
+          # no-op. Without it the very first `gh issue create --label` would
+          # fail on an unknown label.
+          gh label create "$LABEL" \
+            --color "BFD4F2" \
+            --description "Opened and closed by the scheduled toolchain canary; never gate on it" \
+            --force
+
+          # The dedupe lookup. `gh issue list --label` is the REST list
+          # endpoint: exact and immediately consistent. Deliberately not
+          # `--search`, whose index lags by seconds to minutes and would let two
+          # runs each conclude "no open issue" and open one apiece.
+          existing="$(gh issue list --label "$LABEL" --state open --limit 1 \
+            --json number --jq '.[0].number // empty')"
+
+          if [ "$OUTCOME" != "failure" ]; then
+            if [ -n "$existing" ]; then
+              echo "clippy is clean; closing #$existing"
+              {
+                echo "Clippy is clean under \`${RUSTC_FULL}\`, so the canary is retracting this."
+                echo
+                echo "Closed automatically by the [toolchain canary](${RUN_URL}). It will reopen a fresh issue if a later stable breaks again."
+              } > close-comment.md
+              gh issue comment "$existing" --body-file close-comment.md
+              gh issue close "$existing" --reason completed
+            else
+              echo "clippy is clean under ${RUSTC_FULL}; nothing open, nothing to do"
+            fi
+            echo "Clippy is **clean** under \`${RUSTC_FULL}\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # --- failure path ---------------------------------------------------
+
+          # Cargo's own summary lines are the useful part; the full log is in
+          # the run. Bounded so the issue body stays readable.
+          tail -n 150 clippy.log > clippy-tail.log
+
+          first_seen="$TODAY"
+          prev_semver=""
+          if [ -n "$existing" ]; then
+            prev_body="$(gh issue view "$existing" --json body --jq .body)"
+            prev_semver="$(printf '%s\n' "$prev_body" \
+              | grep -o 'canary-semver=[^ ]*' | head -n 1 | cut -d= -f2 || true)"
+            found_first="$(printf '%s\n' "$prev_body" \
+              | grep -o 'canary-first-seen=[^ ]*' | head -n 1 | cut -d= -f2 || true)"
+            if [ -n "$found_first" ]; then
+              first_seen="$found_first"
+            fi
+          fi
+
+          {
+            echo "\`cargo clippy\` does not pass under the newest stable Rust."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Toolchain | \`${RUSTC_FULL}\` |"
+            echo "| Feature set | default (\`--workspace --all-targets\`) |"
+            echo "| First seen | ${first_seen} |"
+            echo "| Last checked | ${TODAY} |"
+            echo "| Run | ${RUN_URL} |"
+            echo
+            echo "## What this does and does not mean"
+            echo
+            echo "Nothing is broken right now. Every toolchain site in this repository is pinned, so CI, the published crate and this issue are all unaffected until somebody raises a pin. This is the warning that raising it will cost work."
+            echo
+            echo "## What to do"
+            echo
+            echo "Follow the bump procedure in the \`checks\` job of \`.github/workflows/ci.yml\` — it is the authority, and it runs a wider feature matrix than this canary does. In short: fix what the log below reports, confirm with the all-features command too, and bump every pinned \`toolchain:\` value in one commit."
+            echo
+            echo "## Clippy output (last 150 lines)"
+            echo
+            echo '```'
+            cat clippy-tail.log
+            echo '```'
+            echo
+            echo "<!-- Managed by .github/workflows/toolchain-canary.yml. The markers below are"
+            echo "     how the next run finds its own state; do not edit them by hand."
+            echo "     canary-semver=${RUSTC_SEMVER} canary-first-seen=${first_seen} -->"
+          } > issue-body.md
+
+          if [ -z "$existing" ]; then
+            echo "clippy failed and nothing is open; filing a new issue"
+            url="$(gh issue create --title "$TITLE" --label "$LABEL" --body-file issue-body.md)"
+            echo "filed $url"
+          else
+            echo "clippy failed and #$existing is already open; updating it in place"
+            gh issue edit "$existing" --body-file issue-body.md
+            # Notification rationing: the issue body is always refreshed, but a
+            # comment (which pings subscribers) is posted only when the compiler
+            # changed, because that is the only genuinely new fact. The same
+            # stable failing the same way next Monday must not ping anyone.
+            if [ "$prev_semver" != "$RUSTC_SEMVER" ]; then
+              {
+                echo "Still failing, and now on a newer toolchain: \`${RUSTC_FULL}\` (previously \`${prev_semver:-unrecorded}\`)."
+                echo
+                echo "Body updated with the current output. [Run](${RUN_URL})."
+              } > bump-comment.md
+              gh issue comment "$existing" --body-file bump-comment.md
+            else
+              echo "same toolchain ${RUSTC_SEMVER} as the last report; body refreshed, no comment posted"
+            fi
+          fi
+
+          echo "Clippy **fails** under \`${RUSTC_FULL}\`. See the tracking issue." >> "$GITHUB_STEP_SUMMARY"
+
+      # The run itself goes red too, so the Actions tab agrees with the backlog.
+      # This is corroboration, not the signal — see the header. It is safe
+      # precisely because of rule 2: no pull request can see this job, and it is
+      # not a required context, so a red run here blocks nothing.
+      - name: Fail the run if clippy failed
+        if: steps.clippy.outcome == 'failure'
+        run: |
+          echo "::error::clippy failed under ${{ steps.toolchain.outputs.full }}; see the toolchain-canary issue in the backlog"
+          exit 1
