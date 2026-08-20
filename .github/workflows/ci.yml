@@ -204,7 +204,7 @@ jobs:
       # freeze.
       #
       # To raise it: on the new toolchain run `cargo clippy --workspace
-      # --all-targets --all-features — -D warnings` and the default-features
+      # --all-targets --all-features -- -D warnings` and the default-features
       # equivalent, fix what they find, and bump all four `toolchain:` values in
       # this file in the same commit. Do that when a release has settled, not on
       # the day it ships.
