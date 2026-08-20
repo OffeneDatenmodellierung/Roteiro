@@ -8,7 +8,7 @@ use crate::engine::{ChatRequest, Message};
 use crate::tools::ToolDef;
 
 /// Default token budget when a request omits `max_tokens` — which the Ask panel
-/// does (`assets/app.js`'s `submitAsk` sends neither `max_tokens` nor
+/// does (`crates/roteiro/src/assets/app.js`'s `submitAsk` sends neither `max_tokens` nor
 /// `temperature`), so this is the budget every Ask question actually runs under.
 ///
 /// **512 was chosen when a context was a fixed 4,096, and it is small for the
