@@ -1779,6 +1779,83 @@ mod tests {
     }
 
     #[test]
+    fn an_unspent_round_is_never_a_generation() {
+        // The property that makes a generous `MAX_TOOL_ROUNDS` affordable, and
+        // the whole reason raising it was a defensible trade rather than a
+        // latency tax: the loop returns the moment a generation carries no tool
+        // call, so a budget a request does not spend costs that request nothing.
+        //
+        // Measured live before it was pinned — a question answering in two
+        // rounds produced byte-identical output at 4, 6, 8 and 10, same prompt
+        // *and* completion token counts. This is that observation as a test, so
+        // a later change that pays per round regardless (pre-allocating the
+        // messages, draining the budget, retrying a round) has to redden here
+        // rather than quietly making the constant expensive.
+        //
+        // It asserts a **relationship between two budgets**, never either
+        // number: pinning a constant's value is the guard #329 removed after it
+        // broke `main`.
+        let script = || {
+            ScriptedEngine::new(&[
+                call_markup("echo", r#"{"key":"abc"}"#),
+                "the node abc is a function".to_owned(),
+            ])
+        };
+        let frugal = script();
+        let generous = script();
+
+        let lean = chat_with_tools(&frugal, &EchoRegistry, &ask_request(), 2).expect("completion");
+        let fat =
+            chat_with_tools(&generous, &EchoRegistry, &ask_request(), 100).expect("completion");
+
+        assert_eq!(
+            lean.content, fat.content,
+            "an answer must not depend on budget the request never spent"
+        );
+        // One generation per scripted turn under both budgets — so the 98 extra
+        // rounds bought no extra inference, which is the claim.
+        let spent = |e: &ScriptedEngine| e.seen.lock().unwrap().len();
+        assert_eq!(spent(&frugal), 2);
+        assert_eq!(
+            spent(&frugal),
+            spent(&generous),
+            "a 50x budget ran the same number of generations"
+        );
+    }
+
+    #[test]
+    fn a_budget_that_covers_the_lookups_answers_where_a_smaller_one_refuses() {
+        // What raising the constant actually bought, stated as a relationship
+        // rather than a number: one question, one unchanged model behaviour,
+        // refused under a budget below the lookups it needs and answered under
+        // one that covers them. Live, two of six Ask questions crossed exactly
+        // this line — at 6 and at 8 rounds on `qwen3-coder-30b-a3b` — which is
+        // why 4 was too small and why the number chosen clears the harder of
+        // them with headroom.
+        const LOOKUPS: usize = 5;
+
+        let script = || {
+            let mut turns: Vec<String> = (0..LOOKUPS)
+                .map(|_| call_markup("echo", r#"{"key":"abc"}"#))
+                .collect();
+            turns.push("the node abc is a function".to_owned());
+            ScriptedEngine::new(&turns)
+        };
+
+        // One short: the post-budget generation is still a call, so it refuses.
+        let starved = script();
+        let out = chat_with_tools(&starved, &EchoRegistry, &ask_request(), LOOKUPS - 1)
+            .expect("completion");
+        assert_refusal(&out.content);
+
+        // Exactly enough: the same model reaches its answer.
+        let funded = script();
+        let out =
+            chat_with_tools(&funded, &EchoRegistry, &ask_request(), LOOKUPS).expect("completion");
+        assert_eq!(out.content, "the node abc is a function");
+    }
+
+    #[test]
     fn prose_beside_an_abandoned_call_is_not_promoted_to_the_answer() {
         // The rejected alternative, pinned. Stripping the markup would leave
         // "Let me look that up." — fluent, plausible, and an answer the model had

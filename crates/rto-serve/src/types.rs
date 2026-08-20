@@ -7,8 +7,35 @@ use serde::{Deserialize, Serialize};
 use crate::engine::{ChatRequest, Message};
 use crate::tools::ToolDef;
 
-/// Default token budget when a request omits `max_tokens`.
-const DEFAULT_MAX_TOKENS: u32 = 512;
+/// Default token budget when a request omits `max_tokens` — which the Ask panel
+/// does (`assets/app.js`'s `submitAsk` sends neither `max_tokens` nor
+/// `temperature`), so this is the budget every Ask question actually runs under.
+///
+/// **512 was chosen when a context was a fixed 4,096, and it is small for the
+/// models this registry now serves.** A reasoning model is charged for its
+/// `<think>` block out of this same budget before it writes a token of answer or
+/// of tool call — Stage 35b measured `qwen3.8-27b` spending an entire
+/// 1,200-token budget inside `<think>` and emitting no answer at all. 2,048
+/// clears that with room for an answer after it; the longest answer measured
+/// over the Ask questions was 359 tokens on that model.
+///
+/// **This is a raised ceiling, not a measured fix, and the difference matters.**
+/// #489's live refusals were attributed to generations truncated at this cap.
+/// Re-measured, they were not: across two models, two temperatures, two round
+/// budgets and 512/1,024/2,048, every response came back with
+/// `finish_reason: "stop"` and byte-identical content. The cap was never the
+/// binding constraint — `server::MAX_TOOL_ROUNDS` was, and it gates this one,
+/// because a loop that never reaches a final generation cannot truncate one.
+/// The refusal this constant governs (`tools::Unfinished::CutAtTokenCap`) stays
+/// reachable in principle and was not observed in practice.
+///
+/// **The cost is per request, and was measured rather than reasoned.**
+/// `max_tokens` is an input to `rto_llama::window_for_request` (#496), so this
+/// default sizes the context of every request that does not override it. On
+/// `qwen3.8-27b` at 64 KiB/token (`rto-llama/tests/context_window.rs`), at a
+/// realistic 8,775-token prompt the allocation moves from 742 MiB at 512 to
+/// 838 MiB at 2,048 — **+96 MiB** against ~18 GiB of weights.
+const DEFAULT_MAX_TOKENS: u32 = 2048;
 
 /// Max entries in a client's `tools` array. OpenAI's own documented ceiling, so
 /// a client written against their API cannot trip this without already having
