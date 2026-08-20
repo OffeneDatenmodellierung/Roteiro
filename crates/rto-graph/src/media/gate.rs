@@ -415,14 +415,21 @@ fn decode_samples(
         return None;
     }
     // A `data` chunk that is not a whole number of samples is a corrupt or
-    // truncated file. **Abstain rather than measure the aligned prefix**: the
-    // decoders below (for multi-byte sample widths) use `as_chunks`, which yields only the complete chunks
-    // and silently drops the remainder, so measuring anyway would report an
-    // RMS for part of a clip and could refuse a blob on the strength of it.
-    // That is a false skip — a silently missing description — and avoiding it
-    // is what the whole gate is calibrated around. Handing an unreadable clip
-    // to the model costs one model load; refusing a readable one costs the
-    // operator something they cannot see.
+    // truncated file. **Abstain rather than measure the aligned prefix**: five
+    // of the six decoder arms below use `as_chunks`, which yields only the
+    // complete chunks and silently drops the remainder, so measuring anyway
+    // would report an RMS for part of a clip and could refuse a blob on the
+    // strength of it. That is a false skip — a silently missing description —
+    // and avoiding it is what the whole gate is calibrated around. Handing an
+    // unreadable clip to the model costs one model load; refusing a readable
+    // one costs the operator something they cannot see.
+    //
+    // The sixth arm, 8-bit PCM, iterates bytes rather than chunking. It needs
+    // no protection here because it cannot receive any: at 8 bits `width == 1`,
+    // so the check below reads `!data.len().is_multiple_of(1)` and is always
+    // false. The guard is *vacuous* at that width, not quietly missing a case
+    // — every byte is a whole sample, so an 8-bit `data` chunk of any length is
+    // aligned by construction and there is nothing for it to catch.
     if !data.len().is_multiple_of(width) {
         return None;
     }
@@ -556,13 +563,17 @@ mod tests {
     /// **A `data` chunk that is not a whole number of samples must abstain, not
     /// be measured on its aligned prefix.**
     ///
-    /// The decoders use `as_chunks`, which yields only the complete chunks and
-    /// silently drops the remainder — so without the length check a truncated
-    /// file would be measured on whatever happened to align. Every case here
-    /// is all-zero bytes, which is the dangerous shape: the aligned prefix
-    /// measures `rms = 0`, so the gate would **refuse** a clip it could not
-    /// actually read. A false skip is a silently missing description, and
+    /// The multi-byte decoders use `as_chunks`, which yields only the complete
+    /// chunks and silently drops the remainder — so without the length check a
+    /// truncated file would be measured on whatever happened to align. Every
+    /// case here is all-zero bytes, which is the dangerous shape: the aligned
+    /// prefix measures `rms = 0`, so the gate would **refuse** a clip it could
+    /// not actually read. A false skip is a silently missing description, and
     /// avoiding it is the rule the whole gate is calibrated around.
+    ///
+    /// 8-bit PCM is absent from the cases below by construction, not by
+    /// omission: there `width == 1`, so no `data` chunk is ever unaligned and
+    /// the check cannot fire. There is no case to write.
     #[test]
     fn an_unaligned_data_chunk_abstains_rather_than_being_measured() {
         // `(bits, data length)`, each length short of a whole sample. Only the
