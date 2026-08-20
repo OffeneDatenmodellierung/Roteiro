@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.27.3...rto-serve-v1.28.0) - 2026-08-20
+
+### Added
+
+- *(serve)* honour `max_completion_tokens`, the current name of the budget
+- *(serve)* declare and enforce the OpenAI parameter boundary
+
+### Fixed
+
+- *(serve)* let the way-forward guard catch its own named case
+
 ## [1.27.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.27.2...rto-serve-v1.27.3) - 2026-08-20
 
 ### Fixed
