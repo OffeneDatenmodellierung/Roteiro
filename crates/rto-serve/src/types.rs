@@ -1,6 +1,10 @@
 //! OpenAI-compatible wire types for the `/v1` endpoints. Only the fields Roteiro
-//! reads or emits are modelled; unknown request fields are ignored so standard
-//! OpenAI clients work unchanged.
+//! reads or emits are modelled as named fields; everything else a client sends
+//! is captured by [`ChatCompletionRequest::extra`] and checked against the
+//! declared boundary in [`crate::openai_params`], so a parameter that would
+//! return a silently wrong answer is refused rather than dropped (#488).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +77,13 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub temperature: Option<f32>,
     /// Maximum tokens to generate.
+    ///
+    /// OpenAI spells this budget two ways and this is the deprecated one; the
+    /// current spelling `max_completion_tokens` names the *same* number and
+    /// lands in [`Self::extra`], from where
+    /// [`crate::openai_params::generation_budget`] resolves the two into this
+    /// one value. It is not a `#[serde(alias)]` on purpose — see that
+    /// function for the evidence that ruled the alias out.
     #[serde(default)]
     pub max_tokens: Option<u32>,
     /// Server-sent-events streaming: when `true`, the response is a stream of
@@ -91,16 +102,38 @@ pub struct ChatCompletionRequest {
     /// grammar work (#485 PR 2). It is carried as far as
     /// [`NormalisedChat::tool_choice`] so the "accepted, not forced" claim is
     /// checkable at the type boundary, and [`crate::server`] explicitly drops it
-    /// from there; nothing reports it back to the client. Declared as a
-    /// divergence in the crate README rather than half-implemented.
+    /// from there; nothing reports it back to the client. Declared
+    /// `accepted, not enforced` in [`crate::openai_params`] — which is published
+    /// as `docs/SERVING.md`'s parameter table — rather than half-implemented.
+    /// Declared is the whole difference between this and the silent drop #488
+    /// was filed over.
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
     /// OpenAI `parallel_tool_calls`. **Accepted and parsed, then discarded** —
     /// [`crate::tools`] parses at most one call per turn today, so a turn never
     /// carries more than one regardless of this field. Carried and dropped
-    /// exactly as [`Self::tool_choice`] is. Declared in the README.
+    /// exactly as [`Self::tool_choice`] is. Declared `accepted, not enforced`
+    /// in [`crate::openai_params`] alongside it.
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
+    /// **Every request key the fields above do not name.**
+    ///
+    /// Before #488 these were discarded by serde without ever reaching Roteiro,
+    /// which is how `seed`, `stop`, `response_format` and `n` came to be
+    /// accepted and silently ignored: a caller set one, believed it had taken
+    /// effect, and got a `200` that said so. Capturing them is what makes the
+    /// declaration in [`crate::openai_params`] enforceable at all —
+    /// [`Self::normalise`] hands this map to
+    /// [`crate::openai_params::check_declared`], which refuses the parameters
+    /// whose being ignored would contradict the response, and passes everything
+    /// else through untouched.
+    ///
+    /// A [`BTreeMap`] rather than a [`serde_json::Map`] so that when a request
+    /// carries several refused parameters the one named is the alphabetically
+    /// first, not whichever the client's serialiser happened to emit first — an
+    /// error message that varies by client is a bug report nobody can reproduce.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// One entry of the client's `tools` array. OpenAI wraps every tool in a
@@ -396,6 +429,18 @@ impl ChatCompletionRequest {
         if self.messages.is_empty() {
             return Err("`messages` must not be empty".to_owned());
         }
+        // Before the request is normalised into something the engine will
+        // cheerfully answer: a parameter whose being ignored would make that
+        // answer contradict the request is refused here rather than dropped.
+        // See `crate::openai_params` for the boundary, and for why a key the
+        // table has never heard of is still allowed through.
+        crate::openai_params::check_declared(&self.extra)?;
+        // The generation budget has two OpenAI spellings for one number:
+        // `max_tokens` is the field above, and `max_completion_tokens` — the
+        // spelling OpenAI now prefers — arrives in `extra`. Resolved after
+        // `check_declared` so the declared boundary keeps first refusal: a
+        // request that is refused outright has no budget worth resolving.
+        let max_tokens = crate::openai_params::generation_budget(self.max_tokens, &self.extra)?;
         let client_tools = client_tools_from(self.tools.unwrap_or_default())?;
         let (tool_choice, parallel_tool_calls) = (self.tool_choice, self.parallel_tool_calls);
         // Images are placed at the last `user` turn (where the vision path inserts
@@ -467,7 +512,7 @@ impl ChatCompletionRequest {
                 // internal ingestion path (`roteiro sync`), not a served endpoint.
                 audio: Vec::new(),
                 temperature: self.temperature.unwrap_or(0.0).max(0.0),
-                max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).max(1),
+                max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).max(1),
             },
             client_tools,
             tool_choice,
@@ -851,6 +896,75 @@ mod tests {
         assert_eq!(
             turns[2].content,
             r#"<tool_response>{"temp":21}</tool_response>"#
+        );
+    }
+
+    fn budget_of(body: &serde_json::Value) -> Result<u32, String> {
+        serde_json::from_value::<super::ChatCompletionRequest>(body.clone())
+            .expect("the body parses; the budget is resolved after deserialisation, not during it")
+            .normalise()
+            .map(|n| n.request.max_tokens)
+    }
+
+    fn with_budget(extra: &serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let map = body.as_object_mut().expect("object");
+        for (k, v) in extra.as_object().expect("object") {
+            map.insert(k.clone(), v.clone());
+        }
+        body
+    }
+
+    /// The end of the wire: OpenAI's current spelling arrives as the engine's
+    /// budget, which is the whole of what "supported" claims for it.
+    ///
+    /// Asserted on [`super::ChatRequest::max_tokens`] rather than on the
+    /// resolver in isolation, because the resolver returning the right number
+    /// and `normalise` then dropping it on the floor would be the same silent
+    /// wrong answer wearing a passing unit test.
+    #[test]
+    fn the_current_spelling_of_the_budget_reaches_the_engine() {
+        assert_eq!(
+            budget_of(&with_budget(
+                &serde_json::json!({"max_completion_tokens": 321})
+            )),
+            Ok(321)
+        );
+        assert_eq!(
+            budget_of(&with_budget(&serde_json::json!({"max_tokens": 321}))),
+            Ok(321)
+        );
+        assert_eq!(
+            budget_of(&with_budget(
+                &serde_json::json!({"max_tokens": 321, "max_completion_tokens": 321})
+            )),
+            Ok(321)
+        );
+    }
+
+    /// Two names, two numbers: a `400` from `normalise` — which the handler
+    /// renders as the same `{"error": …}` envelope as every other refusal —
+    /// rather than serde's `duplicate field` dying inside the extractor as a
+    /// `422` of plain text, which is what a `#[serde(alias)]` would have given.
+    #[test]
+    fn two_different_budgets_are_a_refusal_and_not_a_silent_pick() {
+        let err = budget_of(&with_budget(
+            &serde_json::json!({"max_tokens": 10, "max_completion_tokens": 20}),
+        ))
+        .expect_err("two budgets is ambiguous");
+        assert!(err.contains("`max_completion_tokens`"), "{err}");
+        assert!(err.contains("`max_tokens`"), "{err}");
+    }
+
+    /// Neither name is still the default budget the Ask panel runs under.
+    #[test]
+    fn neither_budget_name_leaves_the_default_in_place() {
+        assert_eq!(
+            budget_of(&with_budget(&serde_json::json!({}))),
+            Ok(super::DEFAULT_MAX_TOKENS)
         );
     }
 }

@@ -411,9 +411,10 @@ async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) 
     };
     // Destructured field-by-field on purpose: `tool_choice` and
     // `parallel_tool_calls` are parsed and carried but deliberately NOT enforced
-    // (see their field docs and the crate README's divergence table), and naming
-    // every field here means a future one cannot be added and silently dropped —
-    // which is the #488 defect this endpoint is trying to stop repeating.
+    // (see their field docs and `crate::openai_params`), and naming every field
+    // here means a future one cannot be added and silently dropped. #488 closed
+    // the same hole one layer up, where a parameter with no field at all now has
+    // to be declared before it can be served.
     let crate::types::NormalisedChat {
         request: req,
         client_tools,
@@ -1488,6 +1489,147 @@ mod tests {
             .status()
     }
 
+    /// Sends `body` and returns the whole response, so a test can read the
+    /// refusal a caller would actually be shown rather than only its status.
+    async fn post_chat_response(body: serde_json::Value) -> axum::response::Response {
+        test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn chat_plus(extra: &serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let map = body.as_object_mut().expect("an object");
+        for (k, v) in extra.as_object().expect("an object") {
+            map.insert(k.clone(), v.clone());
+        }
+        body
+    }
+
+    /// **Every** parameter declared `400` is refused over HTTP, by name.
+    ///
+    /// The unit tests in [`crate::openai_params`] prove the check refuses; this
+    /// proves the refusal survives the trip through axum's extractor, serde's
+    /// `flatten` and the error envelope, and reaches a client as a `400` naming
+    /// the parameter. Driven from the declaration itself, so a row added later
+    /// is covered the moment it is added rather than when someone remembers to
+    /// come back here.
+    #[tokio::test]
+    async fn every_declared_refusal_is_a_400_over_http() {
+        for p in crate::openai_params::OPENAI_CHAT_PARAMS {
+            let Some(refusal) = p.refusal() else { continue };
+            // A value no client library sends by accident — see
+            // `openai_params`' inert defaults for the ones that are.
+            let body = chat_plus(&serde_json::json!({ p.name: "roteiro-decided-this" }));
+            let resp = post_chat_response(body).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "`{}` is declared 400 but the endpoint served it",
+                p.name
+            );
+            let json = body_json(resp).await;
+            assert_eq!(json["error"]["type"], "invalid_request_error", "{}", p.name);
+            assert_eq!(
+                json["error"]["message"], refusal,
+                "the refusal on the wire is not the one that is declared and published"
+            );
+        }
+    }
+
+    /// The two the issue calls most likely to be load-bearing, end to end.
+    ///
+    /// Before this change both returned `200` and a wrong answer: `seed` a
+    /// non-reproducible completion, `response_format` prose that does not parse.
+    #[tokio::test]
+    async fn seed_and_response_format_are_refused_with_somewhere_to_go() {
+        let resp = post_chat_response(chat_plus(&serde_json::json!({"seed": 42}))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let message = body_json(resp).await["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(message.contains("`seed`"), "{message}");
+        assert!(message.contains("temperature: 0"), "{message}");
+
+        let resp = post_chat_response(chat_plus(
+            &serde_json::json!({"response_format": {"type": "json_object"}}),
+        ))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let message = body_json(resp).await["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(message.contains("`response_format`"), "{message}");
+        assert!(message.contains("Ask for JSON in the prompt"), "{message}");
+    }
+
+    /// The callers `deny_unknown_fields` would have broken still get a `200`.
+    ///
+    /// This is the other half of the decision and the reason for the narrower
+    /// instrument: a request carrying every habitual key **and** the defaults a
+    /// client library serialises without being asked is a request that decided
+    /// nothing Roteiro cannot do, and it must still be answered.
+    #[tokio::test]
+    async fn a_habitual_client_is_still_answered() {
+        let body = chat_plus(&serde_json::json!({
+            // Bookkeeping keys, declared `dropped`.
+            "user": "u-42",
+            "store": false,
+            "metadata": {"run": "nightly"},
+            "service_tier": "auto",
+            "prompt_cache_key": "bucket-1",
+            "safety_identifier": "s-9",
+            // Defaults of refused parameters: present, but no decision.
+            "n": 1,
+            "top_p": 1.0,
+            "frequency_penalty": 0,
+            "presence_penalty": 0.0,
+            "logit_bias": {},
+            "logprobs": false,
+            "seed": serde_json::Value::Null,
+            "stop": serde_json::Value::Null,
+            "response_format": {"type": "text"},
+            // A key this table has never heard of.
+            "x_some_client_extension": true,
+        }));
+        let resp = post_chat_response(body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a caller who decided nothing this endpoint cannot do was refused"
+        );
+    }
+
+    /// `n: 1` and `n: 3` are the same key and different requests.
+    ///
+    /// The single sharpest consequence of keying on the value rather than the
+    /// presence, and the one that would silently invert if someone later
+    /// "simplified" the check to `extra.contains_key(name)`.
+    #[tokio::test]
+    async fn the_same_key_is_answered_by_what_it_carries() {
+        assert_eq!(
+            post_chat(chat_plus(&serde_json::json!({"n": 1}))).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_chat(chat_plus(&serde_json::json!({"n": 3}))).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
     #[tokio::test]
     async fn image_in_a_non_user_message_is_400() {
         let img = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -2182,5 +2324,55 @@ mod tests {
             let json = body_json(resp).await;
             assert_eq!(json["error"]["type"], "invalid_request_error", "{what}");
         }
+    }
+
+    /// Two spellings of the budget carrying two numbers must reach the client
+    /// as this endpoint's own refusal, on the wire.
+    ///
+    /// The unit tests prove `generation_budget` returns the right `Err`; only
+    /// this one proves what the caller receives. It is here because the obvious
+    /// implementation — `#[serde(alias = "max_completion_tokens")]` on
+    /// `max_tokens` — was measured returning `422 Unprocessable Entity` with
+    /// the plain-text body ``Failed to deserialize the JSON body into the
+    /// target type: duplicate field `max_tokens` ``: not the `{"error": …}`
+    /// envelope, naming the field the caller did not send, and saying what
+    /// broke rather than what to do. Reading the alias out of the catch-all is
+    /// what buys the status and the envelope asserted below, so it is asserted
+    /// rather than assumed.
+    #[tokio::test]
+    async fn two_different_generation_budgets_are_a_400_in_the_error_envelope() {
+        let resp = test_app()
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 10,
+                "max_completion_tokens": 20,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["type"], "invalid_request_error");
+        let message = json["error"]["message"].as_str().expect("a message");
+        assert!(message.contains("`max_completion_tokens`"), "{message}");
+        assert!(message.contains("`max_tokens`"), "{message}");
+        assert!(message.contains("Send one of them"), "{message}");
+    }
+
+    /// The other half: OpenAI's current spelling alone is served, not refused
+    /// and not a `422`.
+    #[tokio::test]
+    async fn the_current_spelling_of_the_budget_is_served() {
+        let resp = test_app()
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi there"}],
+                "max_completion_tokens": 64,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["choices"][0]["message"]["content"], "HI THERE");
     }
 }
