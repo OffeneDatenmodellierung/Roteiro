@@ -36,7 +36,31 @@ use crate::types::{
 /// refusal names this constant by name and file — `tools::still_calling_refusal`
 /// — because raising it is the way forward for a reader who keeps meeting it, so
 /// a rename here must update that message.
-const MAX_TOOL_ROUNDS: usize = 4;
+///
+/// **Why 10 and not 4.** #489's refusals made the old budget visible rather than
+/// hiding it in a wrong answer: 2 of 6 Ask questions exhausted it. Measured live
+/// against this repo's graph on `qwen3-coder-30b-a3b` (greedy, and the model the
+/// Ask panel actually defaults to), those two clear at **6** and **8** rounds.
+/// So 4 was below what the questions people ask need, and 10 leaves two rounds
+/// of headroom over the hardest one that clears at all.
+///
+/// **Raising this is free for a request that does not need it — a property of
+/// the loop, not a hope.** [`chat_with_client_tools`] returns the moment a
+/// generation carries no tool call, so an unused round is never a generation.
+/// Measured: a question answering in two rounds produced byte-identical output
+/// at 4, 6, 8 and 10 — same prompt *and* completion token counts — and a
+/// question answering at 8 was identical again at 10.
+///
+/// **What it does cost is paid by the requests that spend it, and both halves
+/// were measured.** A question that exhausts the budget refuses about 3.5x
+/// slower, because it really does run every round before giving up: 22s at 4,
+/// 78s at 10. And each round feeds another tool result into the prompt, so the
+/// *context* a request allocates grows even though `MAX_TOOL_RESULT` did not
+/// change. Worst case — every result at its 4,000-byte cap — that moves a single
+/// request from a 9,518-token window costing 784 MiB to an 18,626-token window
+/// costing 1,318 MiB on `qwen3.8-27b`. That is the price of this constant, and
+/// it is why the number is not larger still.
+const MAX_TOOL_ROUNDS: usize = 10;
 
 /// Shared handler state: the inference engine, optionally the graph tools the
 /// served model may call, and — for a multi-workspace serve (ADR-0008) — a
