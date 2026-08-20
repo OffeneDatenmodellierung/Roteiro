@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.27.1...rto-serve-v1.27.2) - 2026-08-20
+
+### Fixed
+
+- *(serve)* a tool call is never the user's answer
+
+### Other
+
+- *(serve)* state the #489 guarantee with its condition, everywhere
+
 ## [1.26.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.26.1...rto-serve-v1.26.2) - 2026-08-19
 
 ### Other
