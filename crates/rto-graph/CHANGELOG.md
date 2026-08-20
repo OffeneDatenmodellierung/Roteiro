@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.29.0...rto-graph-v1.29.1) - 2026-08-20
+
+### Other
+
+- Merge pull request #566 from OffeneDatenmodellierung/ci/pin-stable-toolchain
+- *(media)* name which decoders use `as_chunks`, and why the guard is vacuous at 8-bit
+
 ## [1.29.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.28.0...rto-graph-v1.29.0) - 2026-08-20
 
 ### Fixed
