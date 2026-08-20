@@ -8,6 +8,9 @@
 //! real llama.cpp-backed [`llama::LlamaEngine`] lives behind the `llama` feature.
 //! Graph-tool auto-registration and `/v1/embeddings` land in later PRs.
 
+// The one number the three per-request context constants jointly determine, and
+// the compile-time assertion that keeps them honest about it (#556).
+pub mod budget;
 pub mod openai_params;
 pub mod server;
 pub mod tools;
@@ -25,6 +28,10 @@ pub use rto_llama::backend;
 #[cfg(feature = "llama")]
 pub use rto_llama::llama;
 
+pub use budget::{
+    REQUEST_CONTEXT_BUDGET_MIB, REQUEST_CONTEXT_BUDGET_TOKENS, WORST_CASE_REQUEST_TOKENS,
+    worst_case_tokens,
+};
 pub use openai_params::{Forward, Mention, OPENAI_CHAT_PARAMS, Param, Support, check_declared};
 pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,

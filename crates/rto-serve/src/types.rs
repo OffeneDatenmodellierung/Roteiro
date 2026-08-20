@@ -39,7 +39,16 @@ use crate::tools::ToolDef;
 /// `qwen3.8-27b` at 64 KiB/token (`rto-llama/tests/context_window.rs`), at a
 /// realistic 8,775-token prompt the allocation moves from 742 MiB at 512 to
 /// 838 MiB at 2,048 — **+96 MiB** against ~18 GiB of weights.
-const DEFAULT_MAX_TOKENS: u32 = 2048;
+///
+/// **And that cost is charged more than once.** Every tool round appends the
+/// call the model generated — a generation bounded by this budget — to the next
+/// prompt, so a request that spends its round budget pays this
+/// `MAX_TOOL_ROUNDS + 1` times, not once. [`crate::budget`] is where that sum
+/// lives and where the build fails if it outgrows what a request may allocate
+/// (#556). The paragraph above already asked a reader to remember the coupling
+/// while #555 raised two of the three, which is why the total is now a fact the
+/// compiler checks rather than a note.
+pub(crate) const DEFAULT_MAX_TOKENS: u32 = 2048;
 
 /// Max entries in a client's `tools` array. OpenAI's own documented ceiling, so
 /// a client written against their API cannot trip this without already having

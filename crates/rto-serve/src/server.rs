@@ -60,7 +60,13 @@ use crate::types::{
 /// request from a 9,518-token window costing 784 MiB to an 18,626-token window
 /// costing 1,318 MiB on `qwen3.8-27b`. That is the price of this constant, and
 /// it is why the number is not larger still.
-const MAX_TOOL_ROUNDS: usize = 10;
+///
+/// **That price is now asserted rather than remembered** (#556). This constant
+/// multiplies *both* of the other two — `tools::MAX_TOOL_RESULT` and, through
+/// the tool call each round appends to the next prompt,
+/// `types::DEFAULT_MAX_TOKENS` — so [`crate::budget`] computes the worst-case
+/// window from all three and fails the build if raising this one outgrows it.
+pub(crate) const MAX_TOOL_ROUNDS: usize = 10;
 
 /// Shared handler state: the inference engine, optionally the graph tools the
 /// served model may call, and — for a multi-workspace serve (ADR-0008) — a
