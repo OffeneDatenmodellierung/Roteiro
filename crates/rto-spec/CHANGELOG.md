@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.27.0...rto-spec-v1.27.1) - 2026-08-20
+
+### Fixed
+
+- *(spec)* a span keeps its indentation — trim blank lines, not whitespace
+- *(spec)* an ADR note in the vault carries the decision it names
+
+### Other
+
+- *(spec,render)* pin the split — a section note is its own section
+
 ## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.26.5...rto-spec-v1.26.6) - 2026-08-20
 
 ### Other

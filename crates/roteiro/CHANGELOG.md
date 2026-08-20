@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.27.0...roteiro-v1.27.1) - 2026-08-20
+
+### Fixed
+
+- *(spec)* an ADR note in the vault carries the decision it names
+- *(render)* a prose note in the vault is the document, not 6% of it
+
+### Other
+
+- *(spec,render)* pin the split — a section note is its own section
+- *(render)* pin that a source file node is not given its bytes
+
 ## [1.27.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.6...roteiro-v1.27.0) - 2026-08-20
 
 ### Added
