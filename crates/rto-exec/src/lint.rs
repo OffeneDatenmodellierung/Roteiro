@@ -234,7 +234,7 @@ pub enum LintError {
     #[error(
         "`{program}` was not found on PATH, so `{analyzer}` could not be run. Nothing is \
          reported, because a missing tool must never read as a clean tree.{}",
-        .install.map_or(UNKNOWN_TOOL, |hint| hint)
+        .install.unwrap_or(UNKNOWN_TOOL)
     )]
     ToolchainMissing {
         /// The program that was looked for.
