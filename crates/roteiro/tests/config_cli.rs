@@ -461,3 +461,103 @@ fn an_unresolvable_workspace_set_is_reported_not_thrown() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A composed workspace (ADR-0008 v1.3 `includes`) reports its **composed**
+/// membership — the repos it gets from the workspaces it includes are in the list,
+/// not silently absent.
+///
+/// This is the #499 question asked of a nested config: *which repos are in workspace
+/// `platform`, right now*. It is answered for free because the `[workspaces
+/// resolved]` section is built from `Config::resolved_workspaces()`, where the fold
+/// happens — the report renders resolved workspaces, not declared tables, so a
+/// composed one appears composed with no reporting change.
+///
+/// The *declared* half above it (`[[workspaces]]`, printed from the config tables)
+/// prints each entry's `name`/`roots`/`repos` and has no line for `includes`, so a
+/// composed entry's declaration is shown incompletely there. Not asserted here,
+/// because that is a defect to fix rather than a behaviour to pin.
+#[test]
+fn config_reports_composed_workspace_membership() {
+    let dir = std::env::temp_dir().join(format!("roteiro-config-wsnest-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
+    for repo in ["api", "worker", "shared-infra"] {
+        std::fs::create_dir_all(dir.join(repo).join(".git")).expect("mkdir repo");
+    }
+    let p = |rel: &str| at(&dir, rel);
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        format!(
+            "[[workspaces]]\nname = \"backend\"\nrepos = [\"{}\", \"{}\"]\n\n\
+             [[workspaces]]\nname = \"platform\"\nincludes = [\"backend\"]\n\
+             repos = [\"{}\"]\n",
+            p("api"),
+            p("worker"),
+            p("shared-infra"),
+        ),
+    )
+    .expect("write config");
+
+    let out = roteiro(&dir, &["config"]);
+    assert!(out.status.success(), "config failed: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        resolved_members(&text, "platform").as_deref(),
+        Some([p("shared-infra"), p("api"), p("worker")].as_slice()),
+        "a composed workspace must report the members it includes, not only its own \
+         (issue #499 applied to ADR-0008 v1.3). Output was:\n{text}"
+    );
+    assert_eq!(
+        resolved_members(&text, "backend").as_deref(),
+        Some([p("api"), p("worker")].as_slice()),
+        "and the included workspace is still reported in its own right: {text}"
+    );
+
+    let out = roteiro(&dir, &["config", "--json"]);
+    assert!(out.status.success(), "config --json failed: {out:?}");
+    let cfg: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let platform = cfg["workspace_resolution"]["workspaces"]
+        .as_array()
+        .expect("workspaces array")
+        .iter()
+        .find(|w| w["name"] == "platform")
+        .expect("`platform`")
+        .clone();
+    assert_eq!(
+        platform["resolved_repos"],
+        serde_json::json!([p("shared-infra"), p("api"), p("worker")]),
+        "JSON must carry the composed membership too: {platform}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An `includes` cycle is **reported** by `roteiro config`, not thrown — the same
+/// contract a duplicate workspace name has, for the same reason: this is the command
+/// you run because the config is broken, so it has to keep working when it is.
+#[test]
+fn an_include_cycle_is_reported_not_thrown() {
+    let dir = std::env::temp_dir().join(format!("roteiro-config-wscycle-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[[workspaces]]\nname = \"a\"\nincludes = [\"b\"]\nrepos = [\"/nowhere/a\"]\n\
+         [[workspaces]]\nname = \"b\"\nincludes = [\"a\"]\nrepos = [\"/nowhere/b\"]\n",
+    )
+    .expect("write config");
+
+    let out = roteiro(&dir, &["config"]);
+    assert!(
+        out.status.success(),
+        "`roteiro config` must keep working when the config it is explaining does \
+         not: {out:?}"
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        text.contains("UNRESOLVED") && text.contains("workspace include cycle: `a` → `b` → `a`"),
+        "the cycle must be reported, naming the path that closed it: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
