@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.5...roteiro-v1.26.6) - 2026-08-20
+
+### Fixed
+
+- *(links)* do not count a global --hub-rev as spokes that pinned
+- *(cli)* three refusals that did not say the thing the reader needed
+
+### Other
+
+- Merge pull request #536 from OffeneDatenmodellierung/test/441-landing-page-bar-names
+- Merge pull request #535 from OffeneDatenmodellierung/fix/522-453-505-small-refusals
+- *(cli)* drop the apostropheless possessives from two test names
+- Merge remote-tracking branch 'origin/main' into fix/522-453-505-small-refusals
+
 ## [1.26.4](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.3...roteiro-v1.26.4) - 2026-08-19
 
 ### Fixed
