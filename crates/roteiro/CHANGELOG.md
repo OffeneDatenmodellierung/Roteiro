@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.7](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.6...roteiro-v1.26.7) - 2026-08-20
+
+### Other
+
+- delete the apt step that hung, and guard the bounds that replace it
+
 ## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.5...roteiro-v1.26.6) - 2026-08-20
 
 ### Fixed
