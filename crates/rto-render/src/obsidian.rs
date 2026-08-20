@@ -2,10 +2,17 @@
 //! edges are `[[wikilinks]]`, so the provenance-tagged graph is browsable in
 //! Obsidian's graph view. Notes carry frontmatter `tags` (`roteiro/kind/*`,
 //! `roteiro/lang/*`, `roteiro/status/*`) so the graph is colourable/filterable —
-//! edge provenance is shown per-link in the body — surface the captured
-//! `meta.content` (doc comments, prose, PDF/image text) as the knowledge base,
-//! show an ADR's status, and (when the repository's web host is known) a
-//! clickable **Source** link to the file. A generated `_Home` note is the overview: what was
+//! edge provenance is shown per-link in the body — surface the node's text as the
+//! knowledge base, show an ADR's status, and (when the repository's web host is
+//! known) a clickable **Source** link to the file.
+//!
+//! That text is the node's captured `meta.content` (a doc comment, PDF or image
+//! text) *except* where the caller supplies a full `body` — which it does for
+//! prose documents, because `meta.content` is an embedding budget and a note
+//! rendered from it is the document capped at 1500 characters and collapsed onto
+//! one line. See [`note_body`].
+//!
+//! A generated `_Home` note is the overview: what was
 //! scanned, counts by kind, provenance breakdown, ADR statuses, intent-debt (with
 //! the files it is densest in), an inventory of secret-**named** config keys and
 //! their redaction state, and the most depended-on symbols by directed call
@@ -75,13 +82,19 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// `tags` for the graph view and an ADR's `status`), a clickable **Source** link
 /// (when `source_base` — a web "blob" base like
 /// `https://github.com/org/repo/blob/<sha>` — is known and the node has a path),
-/// the captured content as the knowledge base, and its edges as provenance-
-/// labelled wikilinks.
+/// the content as the knowledge base, and its edges as provenance-labelled
+/// wikilinks.
+///
+/// `body` is the node's **full source text**, which only the caller can fetch:
+/// this function is a pure function of the `Explanation`, and an `Explanation`
+/// carries no repository, store or blob. When it is `Some`, it replaces
+/// `meta.content` in the note's `## Content` section — see [`note_body`] for why
+/// replacing is the only correct combination of the two.
 #[must_use]
-pub fn render_note(ex: &Explanation, source_base: Option<&str>) -> VaultNote {
+pub fn render_note(ex: &Explanation, source_base: Option<&str>, body: Option<&str>) -> VaultNote {
     let meta = &ex.meta;
     let status = meta.get("status").and_then(|v| v.as_str());
-    let content = meta.get("content").and_then(|v| v.as_str());
+    let content = note_body(meta.get("content").and_then(|v| v.as_str()), body);
 
     let mut c = String::new();
     c.push_str("---\n");
@@ -122,7 +135,8 @@ pub fn render_note(ex: &Explanation, source_base: Option<&str>) -> VaultNote {
         );
     }
 
-    // The knowledge base: the captured doc comment / prose / PDF / image text.
+    // The knowledge base: the full source text, or the captured doc comment /
+    // prose / PDF / image text.
     if let Some(content) = content.map(str::trim).filter(|s| !s.is_empty()) {
         c.push_str("\n## Content\n\n");
         c.push_str(content);
@@ -160,6 +174,21 @@ pub fn render_note(ex: &Explanation, source_base: Option<&str>) -> VaultNote {
         filename: format!("{}.md", note_name(&ex.node.key)),
         content: c,
     }
+}
+
+/// Choose the text a note shows: the caller's full `body` when it has one, else
+/// the node's stored `content`.
+///
+/// The two are **not** complementary, they are the same text at two fidelities,
+/// so a note shows one of them and never both. `meta.content` is an embedding
+/// budget — extraction caps it (1500 chars) and collapses every whitespace run to
+/// a single space, which is right for a store that ships with the graph and wrong
+/// for a note: a 23 KB document arrives as one 1500-character line with every
+/// heading, table and code fence flattened into it. Where the caller can supply
+/// the source, that is what a reader wants; appending the capped rendering
+/// underneath it would only restate its first 6% badly.
+fn note_body<'a>(content: Option<&'a str>, body: Option<&'a str>) -> Option<&'a str> {
+    body.or(content)
 }
 
 /// `" (0.82)"` for an inferred edge's confidence, else empty.
@@ -494,7 +523,7 @@ mod tests {
                 node: "adr:0001".into(),
             }],
         };
-        let note = render_note(&ex, None);
+        let note = render_note(&ex, None, None);
         assert_eq!(note.filename, "sym-rust-a.rs-main.md");
         assert!(note.content.contains("kind: fn"));
         // No source base → no Source link.
@@ -546,7 +575,7 @@ mod tests {
             outgoing: vec![],
             incoming: vec![],
         };
-        let note = render_note(&ex, Some("https://github.com/org/repo/blob/abc123"));
+        let note = render_note(&ex, Some("https://github.com/org/repo/blob/abc123"), None);
         assert!(note.content.contains("status: Accepted"));
         assert!(note.content.contains("- roteiro/status/accepted"));
         assert!(note.content.contains("> **Status:** Accepted"));
@@ -559,6 +588,119 @@ mod tests {
             "{}",
             note.content
         );
+    }
+
+    /// The structured document a prose note is supposed to reproduce: headings, a
+    /// table and a fenced code block, none of which survive whitespace collapse.
+    const DOC: &str = "# Working offline\n\nRoteiro is **offline-capable**.\n\n| Host | What |\n| --- | --- |\n| `example.com` | models |\n\n```sh\nroteiro model pull\n```\n";
+
+    fn prose_note(content: Option<&str>) -> Explanation {
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: NodeSummary {
+                key: "file:docs/OFFLINE_SETUP.md".into(),
+                kind: "file".into(),
+                name: "OFFLINE_SETUP.md".into(),
+                path: Some("docs/OFFLINE_SETUP.md".into()),
+                lang: None,
+            },
+            meta: content.map_or(
+                serde_json::Value::Null,
+                |c| serde_json::json!({ "content": c }),
+            ),
+            outgoing: vec![],
+            incoming: vec![],
+        }
+    }
+
+    /// The whole readability defect, in one assertion pair: a note built from
+    /// `meta.content` alone is the document whitespace-collapsed onto one line,
+    /// and a note built from the source is the document.
+    ///
+    /// The newline count is the claim. A character count alone would pass on a
+    /// note that had merely grown longer while staying flat, which is exactly the
+    /// failure being fixed — `meta.content` is capped *and* collapsed, and only
+    /// the collapse is what makes it unreadable.
+    #[test]
+    fn a_supplied_body_supersedes_the_collapsed_stored_content() {
+        // What extraction stores: the same text, whitespace-collapsed.
+        let collapsed = DOC.split_whitespace().collect::<Vec<_>>().join(" ");
+        let ex = prose_note(Some(&collapsed));
+
+        let note = render_note(&ex, None, Some(DOC));
+        assert!(
+            note.content.contains(DOC.trim()),
+            "the source document is reproduced verbatim: {}",
+            note.content
+        );
+        assert!(
+            !note.content.contains(&collapsed),
+            "the collapsed rendering is replaced, not appended: {}",
+            note.content
+        );
+        assert!(
+            note.content.contains("\n| Host | What |\n"),
+            "a table needs its own lines to be a table: {}",
+            note.content
+        );
+        assert!(
+            note.content.contains("\n```sh\n"),
+            "a fenced block needs its own lines to be a fence: {}",
+            note.content
+        );
+
+        // The flat control: the same node with no body is the one-line note.
+        let flat = render_note(&ex, None, None);
+        assert!(
+            flat.content.contains(&collapsed),
+            "without a body the stored content is still shown: {}",
+            flat.content
+        );
+        assert!(
+            content_lines(&note.content) > content_lines(&flat.content),
+            "structure restored: {} line(s) with a body vs {} without",
+            content_lines(&note.content),
+            content_lines(&flat.content)
+        );
+        assert_eq!(
+            content_lines(&flat.content),
+            1,
+            "the defect: the stored content is a single line"
+        );
+    }
+
+    /// A doc comment is a summary of a definition, not a document, and its note is
+    /// correct as it stands. The caller supplies no body for these, so this pins
+    /// the unchanged path — the fix must not depend on every node gaining one.
+    #[test]
+    fn a_note_with_no_body_is_unchanged() {
+        let ex = Explanation {
+            schema: rto_graph::SCHEMA,
+            node: NodeSummary {
+                key: "sym:rust:a.rs#main".into(),
+                kind: "fn".into(),
+                name: "main".into(),
+                path: Some("a.rs".into()),
+                lang: Some("rust".into()),
+            },
+            meta: serde_json::json!({ "content": "Entry point." }),
+            outgoing: vec![],
+            incoming: vec![],
+        };
+        assert!(
+            render_note(&ex, None, None)
+                .content
+                .contains("## Content\n\nEntry point.")
+        );
+    }
+
+    /// Lines in the note's `## Content` section.
+    fn content_lines(note: &str) -> usize {
+        let body = note
+            .split_once("## Content\n\n")
+            .map_or("", |(_, rest)| rest);
+        let body = body.split_once("\n## ").map_or(body, |(head, _)| head);
+        body.trim_end().lines().count()
     }
 
     #[test]
@@ -581,7 +723,7 @@ mod tests {
             }],
             incoming: vec![],
         };
-        let note = render_note(&ex, None);
+        let note = render_note(&ex, None, None);
         assert!(
             note.content
                 .contains("related (inferred) (0.82) → [[file-b.md]]"),

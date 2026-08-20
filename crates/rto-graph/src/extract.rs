@@ -918,7 +918,14 @@ pub(crate) fn media_env_tag() -> u64 {
 }
 
 /// Whether `path` is a prose file whose body is worth embedding.
-fn is_prose(path: &str) -> bool {
+///
+/// Public because the *extension list is the definition* and a second copy of it
+/// would drift: the Obsidian renderer's call site (`roteiro render obsidian`)
+/// reads a prose file's full source at render time, and it has to select exactly
+/// the blobs this predicate admitted at extraction time. Nothing about the
+/// judgement itself is exported — only the answer.
+#[must_use]
+pub fn is_prose(path: &str) -> bool {
     matches!(
         extension(path).as_deref(),
         Some("md" | "markdown" | "txt" | "rst" | "adoc")
