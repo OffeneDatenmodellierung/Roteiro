@@ -8,6 +8,7 @@
 //! real llama.cpp-backed [`llama::LlamaEngine`] lives behind the `llama` feature.
 //! Graph-tool auto-registration and `/v1/embeddings` land in later PRs.
 
+pub mod openai_params;
 pub mod server;
 pub mod tools;
 pub mod types;
@@ -24,6 +25,7 @@ pub use rto_llama::backend;
 #[cfg(feature = "llama")]
 pub use rto_llama::llama;
 
+pub use openai_params::{Forward, OPENAI_CHAT_PARAMS, Param, Support, check_declared};
 pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };

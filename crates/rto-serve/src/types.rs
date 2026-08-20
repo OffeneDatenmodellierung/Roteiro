@@ -1,6 +1,10 @@
 //! OpenAI-compatible wire types for the `/v1` endpoints. Only the fields Roteiro
-//! reads or emits are modelled; unknown request fields are ignored so standard
-//! OpenAI clients work unchanged.
+//! reads or emits are modelled as named fields; everything else a client sends
+//! is captured by [`ChatCompletionRequest::extra`] and checked against the
+//! declared boundary in [`crate::openai_params`], so a parameter that would
+//! return a silently wrong answer is refused rather than dropped (#488).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -91,16 +95,38 @@ pub struct ChatCompletionRequest {
     /// grammar work (#485 PR 2). It is carried as far as
     /// [`NormalisedChat::tool_choice`] so the "accepted, not forced" claim is
     /// checkable at the type boundary, and [`crate::server`] explicitly drops it
-    /// from there; nothing reports it back to the client. Declared as a
-    /// divergence in the crate README rather than half-implemented.
+    /// from there; nothing reports it back to the client. Declared
+    /// `accepted, not enforced` in [`crate::openai_params`] — which is published
+    /// as `docs/SERVING.md`'s parameter table — rather than half-implemented.
+    /// Declared is the whole difference between this and the silent drop #488
+    /// was filed over.
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
     /// OpenAI `parallel_tool_calls`. **Accepted and parsed, then discarded** —
     /// [`crate::tools`] parses at most one call per turn today, so a turn never
     /// carries more than one regardless of this field. Carried and dropped
-    /// exactly as [`Self::tool_choice`] is. Declared in the README.
+    /// exactly as [`Self::tool_choice`] is. Declared `accepted, not enforced`
+    /// in [`crate::openai_params`] alongside it.
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
+    /// **Every request key the fields above do not name.**
+    ///
+    /// Before #488 these were discarded by serde without ever reaching Roteiro,
+    /// which is how `seed`, `stop`, `response_format` and `n` came to be
+    /// accepted and silently ignored: a caller set one, believed it had taken
+    /// effect, and got a `200` that said so. Capturing them is what makes the
+    /// declaration in [`crate::openai_params`] enforceable at all —
+    /// [`Self::normalise`] hands this map to
+    /// [`crate::openai_params::check_declared`], which refuses the parameters
+    /// whose being ignored would contradict the response, and passes everything
+    /// else through untouched.
+    ///
+    /// A [`BTreeMap`] rather than a [`serde_json::Map`] so that when a request
+    /// carries several refused parameters the one named is the alphabetically
+    /// first, not whichever the client's serialiser happened to emit first — an
+    /// error message that varies by client is a bug report nobody can reproduce.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// One entry of the client's `tools` array. OpenAI wraps every tool in a
@@ -396,6 +422,12 @@ impl ChatCompletionRequest {
         if self.messages.is_empty() {
             return Err("`messages` must not be empty".to_owned());
         }
+        // Before the request is normalised into something the engine will
+        // cheerfully answer: a parameter whose being ignored would make that
+        // answer contradict the request is refused here rather than dropped.
+        // See `crate::openai_params` for the boundary, and for why a key the
+        // table has never heard of is still allowed through.
+        crate::openai_params::check_declared(&self.extra)?;
         let client_tools = client_tools_from(self.tools.unwrap_or_default())?;
         let (tool_choice, parallel_tool_calls) = (self.tool_choice, self.parallel_tool_calls);
         // Images are placed at the last `user` turn (where the vision path inserts

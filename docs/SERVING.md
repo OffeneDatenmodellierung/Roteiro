@@ -90,26 +90,97 @@ role token in the prompt these models were never trained on. A `<tool_response>`
 user turn is what every Qwen template emits natively for a tool result, so this is
 the native form rather than a workaround.
 
-## A parameter this endpoint does not implement is dropped, not refused
+## Every request parameter, and what happens to it
 
-The request type carries `model`, `messages`, `temperature`, `max_tokens`,
-`stream`, `tools`, `tool_choice` and `parallel_tool_calls`. **Anything else you
-send is discarded silently at deserialisation.**
+This is the whole boundary. All 37 parameters of OpenAI's chat-completions
+request body are below, and there is nothing else to send — a key in no row here
+is either a typo or newer than this table, and is ignored.
 
-Most of OpenAI's remaining parameters are simply an absent feature, which is fine.
-Four are not, because a client can reasonably believe they took effect:
+Four statuses, the same four the divergence table above uses:
 
-| you send | you may believe | actually |
+- **supported** — read and acted on.
+- **accepted, not enforced** — parsed and carried, then deliberately not acted
+  on. Declared, which is the entire difference between this and the silent drop
+  the endpoint used to do.
+- **dropped** — ignored, and ignoring it leaves you believing nothing false
+  about the response. These are the parameters that drive OpenAI's own
+  bookkeeping — storage, billing, cache bucketing, abuse attribution — which a
+  loopback server has no analogue for and whose absence changes nothing you can
+  observe.
+- **400** — refused. Ignoring it would hand you a response that silently
+  contradicts your request, and a wrong answer is worse than a refusal. **The
+  cell quotes the message you will receive, verbatim.**
+
+| parameter | status | what happens |
 | --- | --- | --- |
-| `seed` | output is reproducible | it is not |
-| `stop` | generation halts at your marker | it runs to `max_tokens` |
-| `response_format: json_object` | the body parses as JSON | it is prose |
-| `n` | you receive *n* choices | you receive one |
+| `audio` | **400** | `audio` is not supported: no audio is generated, so a request asking for it would come back as text with nothing to say the voice was ignored. This endpoint has no audio output path at all; there is no setting that enables one. |
+| `frequency_penalty` | **400** | `frequency_penalty` is not supported: repetition penalties are not wired to the sampler, so the sampling you configured is not the sampling that ran. `temperature` is the one sampling control this endpoint honours. |
+| `function_call` | **400** | `function_call` is not supported: the deprecated `function_call` field is not read, so a forced call would simply not be forced. Send `tool_choice` instead — though note that it too is accepted and not enforced here, so neither field will force a named function today. |
+| `functions` | **400** | `functions` is not supported: the deprecated `functions` array is not read, so the model would be advertised no tools whatsoever and could never call one. Send the same functions as `tools`, which is supported. |
+| `logit_bias` | **400** | `logit_bias` is not supported: no per-token bias reaches the sampler, so tokens you banned can still be generated. Steer with a system message instead; there is no per-token control here. |
+| `logprobs` | **400** | `logprobs` is not supported: no log probabilities are computed, so the response carries none and a client reading them finds `null`. This endpoint returns no log probabilities, and there is no flag that turns them on. |
+| `max_completion_tokens` | **400** | `max_completion_tokens` is not supported: the generation budget is read from `max_tokens` and this field is not read at all, so your request would run at the default budget and truncate. Send `max_tokens` instead, which is supported. |
+| `max_tokens` | **supported** | the generation budget, and the input that sizes the context window for the request |
+| `messages` | **supported** | the conversation, including replayed `tool_calls` and `role: "tool"` results |
+| `metadata` | **dropped** | free-form labels for OpenAI's dashboard; never read, never echoed |
+| `modalities` | **400** | `modalities` is not supported: only text is generated, so asking for another modality returns text with no indication the request was not met. Text is the only output modality this endpoint has; there is no setting that adds another. |
+| `model` | **supported** | the model id to run; must be one of `/v1/models` |
+| `moderation` | **400** | `moderation` is not supported: no moderation pass runs over the input or the output, so a response you believe was screened was not. A loopback server has no moderation backend to call; screen on your side if you need it. |
+| `n` | **400** | `n` is not supported: exactly one choice is generated, so `choices` would come back shorter than you asked for. Send the request once per choice you need and collect the responses yourself; each one is a full generation and costs like one. |
+| `parallel_tool_calls` | **accepted, not enforced** | at most one call is parsed per turn today, so a turn never carries more than one regardless |
+| `prediction` | **dropped** | a speculative-decoding latency hint — the output is byte-identical with or without it, so ignoring it costs only the speed-up |
+| `presence_penalty` | **400** | `presence_penalty` is not supported: repetition penalties are not wired to the sampler, so the sampling you configured is not the sampling that ran. `temperature` is the one sampling control this endpoint honours. |
+| `prompt_cache_key` | **dropped** | a cache-bucketing hint for OpenAI's prompt cache; nothing about the response depends on it |
+| `prompt_cache_options` | **dropped** | as `prompt_cache_key` |
+| `prompt_cache_retention` | **dropped** | as `prompt_cache_key` |
+| `reasoning_effort` | **400** | `reasoning_effort` is not supported: the served model's reasoning is not budgeted by this field, so asking for more or less thinking changes nothing. Raise `max_tokens`: a reasoning model spends that budget inside its `<think>` block before it writes a token of answer, so the budget is what actually governs how much it may think. |
+| `response_format` | **400** | `response_format` is not supported: the body is prose whatever format you ask for — there is no grammar-constrained sampling on this endpoint, so `json_object` and `json_schema` would both return text that need not parse. Ask for JSON in the prompt and parse defensively. |
+| `safety_identifier` | **dropped** | as `user`, which it replaces |
+| `seed` | **400** | `seed` is not supported: sampling is not seeded, so repeated requests with the same seed need not agree and the output you believe is reproducible is not. `temperature: 0` selects greedy decoding, which is the nearest thing to reproducible output here — but it is not a seed, and no determinism is guaranteed. |
+| `service_tier` | **dropped** | selects OpenAI's processing tier for latency and billing; there is one tier here and the output is unaffected |
+| `stop` | **400** | `stop` is not supported: no stop sequence is applied, so generation runs to the `max_tokens` budget and your marker appears in the output rather than ending it. Truncate at your marker on the client side, and set `max_tokens` as the ceiling. |
+| `store` | **dropped** | asks OpenAI to retain the completion for its evals products; Roteiro stores nothing and sends nothing anywhere |
+| `stream` | **supported** | SSE chunks terminated by `data: [DONE]` |
+| `stream_options` | **400** | `stream_options` is not supported: the extra `usage` chunk `include_usage` promises is never streamed, so a client waiting for one before `[DONE]` waits for something that will not arrive. Read `usage` from the non-streaming response, which does carry it. |
+| `temperature` | **supported** | the one sampling control this endpoint honours; `0` (or omitted) is greedy |
+| `tool_choice` | **accepted, not enforced** | forcing a named function is grammar-constrained sampling, which lands with the grammar work; half-implementing it would tell a client it was honoured |
+| `tools` | **supported** | advertised to the model; calls are returned, never run — bounded at 128 entries / 32 KiB |
+| `top_logprobs` | **400** | `top_logprobs` is not supported: no log probabilities are computed, so no alternatives come back at any position. This endpoint returns no log probabilities, and there is no flag that turns them on. |
+| `top_p` | **400** | `top_p` is not supported: nucleus sampling is not wired to the sampler, so the sampling you configured is not the sampling that ran. `temperature` is the one sampling control this endpoint honours. |
+| `user` | **dropped** | an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way |
+| `verbosity` | **400** | `verbosity` is not supported: response length is not constrained by this field, so a `low` request can return the same wall of text as a `high` one. Ask for the length you want in the prompt, and set `max_tokens` as the hard ceiling. |
+| `web_search_options` | **400** | `web_search_options` is not supported: there is no web-search tool and the server never leaves the machine, so a response you believe was informed by a search was not. Omit `tools` to get Ask mode, whose tools search your own graph — that is the local search this endpoint does have. |
 
-This is a known gap rather than a decision — it is tracked as
-[issue #488](https://github.com/OffeneDatenmodellierung/Roteiro/issues/488), whose
-deliverable is the declaration rather than twenty implementations. Until it is
-closed, assume a parameter not listed above had no effect.
+### Sending a default is not making a decision
+
+A refusal that fires at a caller who chose nothing would be a worse defect than
+the silence it replaces, and client libraries serialise defaults constantly. So
+the check reads the **value**, never the presence of the key:
+
+- `null` is never a decision, for any parameter.
+- Neither is OpenAI's own documented default — `n: 1`, `top_p: 1`,
+  `frequency_penalty: 0`, `logit_bias: {}`, `response_format: {"type":"text"}`,
+  `modalities: ["text"]`, and the rest.
+
+`n: 1` and `n: 3` are therefore answered differently, and both correctly: the
+first asks for what this endpoint does, the second asks for something it cannot
+do. If your client sends `n: 1` and `top_p: 1` on every request — most do — none
+of this is aimed at you.
+
+### Why not `deny_unknown_fields`
+
+It was the obvious instrument and it is the wrong one. It would refuse `user`,
+`store`, `metadata`, `service_tier` and `prompt_cache_key` — keys clients send
+out of habit and whose absence harms nobody — so it would break working callers
+in order to fix a correctness problem those callers do not have. The list above
+is the narrower answer: refuse what would mislead you, ignore what would not,
+and publish both.
+
+The declaration is enforced from the same table that generates this page
+(`crates/rto-serve/src/openai_params.rs`), and the tests beside it assert the
+table against the request type and against this document in both directions —
+so a parameter added to the code without a row here, or a row here without the
+code behind it, fails the build rather than the reader.
 
 ## Why the `tools` array is bounded
 
