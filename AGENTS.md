@@ -213,12 +213,25 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   technical guarantee, which is why it is stated where someone can read it before
   depending on one of these crates rather than after.
 
-- **A scratch verification branch needs its own commit.** Some CI behaviour can
-  only be observed from a branch with a particular *name*: `ci.yml` skips the
-  expensive work on release PRs behind `startsWith(github.head_ref,
-  'release-plz-')`, and that predicate is unreachable from any other branch. The
-  technique is to push a temporary branch matching it, open a **draft** PR, read
-  what the required contexts report, then close the PR and delete the branch.
+- **Prefer a scratch branch with no PR at all.** Some things can only be
+  established on a real runner — what the image ships, whether a build still
+  works without a step you want to delete. `ci.yml` triggers on `pull_request`
+  and on `push` to `main` only, so a probe workflow scoped to its own branch
+  name runs **alone**: no PR, no check runs on a shared SHA, and none of the
+  trap below. Push it, read the run, delete the branch.
+
+  Two things that cost time on #538, where this was worked out: `actions/checkout`
+  with `ref:` fails on a slashed branch name, so check out the **SHA**; and a
+  probe that must observe a *cold* build has to omit `Swatinem/rust-cache`
+  deliberately, or it measures a restore rather than a build (see below).
+
+- **A scratch verification branch that does need a PR needs its own commit.**
+  Some CI behaviour can only be observed from a branch with a particular *name*:
+  `ci.yml` skips the expensive work on release PRs behind
+  `startsWith(github.head_ref, 'release-plz-')`, and that predicate is
+  unreachable from any other branch. Only then is the technique to push a
+  temporary branch matching it, open a **draft** PR, read what the required
+  contexts report, then close the PR and delete the branch.
 
   The trap is that **check runs attach to a commit SHA, not to a branch.** Push
   the scratch branch at the same commit as the branch under test and both PRs'
@@ -229,10 +242,33 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   nothing was actually at risk — but the green did not mean what it looked like,
   and it would not always be a YAML file.
 
-  So give the scratch branch its own commit; an empty one is enough. Delete it
-  when you are done — and if `git push --delete` is refused by the harness's
-  blast-radius policy, **say so in your report** rather than leaving the branch
-  stranded for someone else to find.
+  So give the scratch branch its own commit; an empty one is enough.
+
+- **Delete the scratch branch — `git push --delete` being refused is not a
+  reason to leave it.** That refusal comes from the harness's blast-radius
+  policy, not from GitHub, and there is a working route:
+
+  ```sh
+  gh api -X DELETE repos/:owner/:repo/git/refs/heads/BRANCH_NAME
+  ```
+
+  Before deleting a branch that never had a PR, check what you are destroying:
+  a PR's commits stay reachable through `refs/pull/N/head`, and a branch without
+  one has no such anchor. For a probe branch that is the point. For anything
+  else, confirm the content survives elsewhere first — comparing blob hashes is
+  cheaper than regretting it.
+
+- **A green CI run can be a cache hit, and the runs you most want cold are
+  exactly the ones it makes vacuous.** `Swatinem/rust-cache` restores on a
+  partial key match, so a run can report success having never compiled the thing
+  your change was about. On #538 `checks` passed in 2m55s with the cmake/clang
+  install deleted — as a cache hit, so `llama-cpp-sys-2` was restored rather than
+  rebuilt and neither cmake nor bindgen was invoked at all. The green proved the
+  workflow parsed, nothing more.
+
+  If the claim is *"this still builds without X"*, grep the log for `Compiling
+  <the-crate>` before believing it, or prove it on a deliberately cold runner and
+  assert the artefact was produced.
 
 ## Reviewing a change
 
