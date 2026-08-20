@@ -25,7 +25,7 @@ pub use rto_llama::backend;
 #[cfg(feature = "llama")]
 pub use rto_llama::llama;
 
-pub use openai_params::{Forward, OPENAI_CHAT_PARAMS, Param, Support, check_declared};
+pub use openai_params::{Forward, Mention, OPENAI_CHAT_PARAMS, Param, Support, check_declared};
 pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };

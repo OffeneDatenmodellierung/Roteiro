@@ -65,6 +65,37 @@
 //! where a wire name and a request-type field are spelled differently, so it is
 //! also the only row carrying [`Param::served_by`].
 //!
+//! ## Which prose is checked against this table, and which is not
+//!
+//! Four strings on a row can name a parameter in backticks, and only one of
+//! them is a *pointer* — a sentence that sends the reader somewhere:
+//!
+//! - **[`Forward::Do`]'s prose is checked**, in both directions, by
+//!   [`tests::a_way_forward_never_points_at_a_parameter_that_does_not_exist`].
+//!   It is the one that tells a caller what to send next, so a name it gets
+//!   wrong costs someone a request that cannot work.
+//! - **[`Forward::Nothing`]'s prose is checked** to name no parameter at all.
+//!   Saying there is no way forward and then backticking one is either wrong
+//!   about the first half or dangling on the second.
+//! - **`because` is not checked.** It says what is true instead, and what it
+//!   backticks is overwhelmingly *not* a parameter — `null`, `choices`,
+//!   `json_object`, `include_usage`, `low`, `high`. It does also name real
+//!   parameters, so a rename can rot it; that is a staleness risk in a
+//!   description, not a caller sent somewhere that does not exist, and
+//!   requiring a [`Mention`] for every value it quotes would be ceremony with
+//!   no defect behind it.
+//! - **`note` is not checked, and it is the closest thing to a sibling.** It is
+//!   published verbatim in `docs/SERVING.md`, and five of its cells
+//!   cross-reference another row (`safety_identifier` says "as `user`, which it
+//!   replaces"; `prompt_cache_options` and `prompt_cache_retention` both say "as
+//!   `prompt_cache_key`"; the two budget rows name each other). Rename one of
+//!   those and the published table points at nothing. It is left unchecked
+//!   deliberately and not by oversight: `note` also backticks `tool_calls`,
+//!   `role`, `data` and `/v1/models`, which are response fields and paths, so
+//!   the same declaration would have to be repeated across most of the
+//!   thirty-seven rows to guard five cross-references. Recorded here so the
+//!   next reader is choosing rather than discovering.
+//!
 //! ## An unknown key is still dropped, deliberately
 //!
 //! `#[serde(deny_unknown_fields)]` was the obvious instrument and is the wrong
@@ -122,14 +153,65 @@ pub enum Support {
 /// when it is the truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Forward {
-    /// An action the caller can take that works. Any parameter this names in
-    /// backticks must exist in [`OPENAI_CHAT_PARAMS`] — asserted by
-    /// [`tests::a_way_forward_never_points_at_a_parameter_that_does_not_exist`],
-    /// so a redirection cannot rot into pointing at a name nobody serves.
-    Do(&'static str),
+    /// An action the caller can take that works.
+    Do {
+        /// Every wire-shaped name the sentence backticks, said out loud.
+        ///
+        /// This exists because the guard that checks a redirection cannot do
+        /// its job from the prose alone. Reading a backticked span and looking
+        /// it up collapses **three** different things into one miss: a span
+        /// that is not a name at all (`<think>`), a span that is a name but
+        /// deliberately not a parameter (`usage` is a field of the *response*),
+        /// and a span that is meant as a parameter and is absent from this
+        /// table — which is the only one that is a defect, and the one the
+        /// guard is named for. Failing the lookup **is** the symptom, so the
+        /// lookup cannot be the test.
+        ///
+        /// So the relationship is declared rather than recovered from text, and
+        /// [`tests::a_way_forward_never_points_at_a_parameter_that_does_not_exist`]
+        /// checks it in both directions: every mention here is sound, and every
+        /// wire-shaped span in `prose` is mentioned here.
+        mentions: &'static [Mention],
+        /// The sentence the caller reads.
+        prose: &'static str,
+    },
     /// No action exists. The prose says why, rather than leaving the reader to
     /// go looking for a flag that is not there.
+    ///
+    /// It carries no [`Mention`]s on purpose: a sentence that says there is no
+    /// way forward and then backticks a parameter is either wrong about the
+    /// first half or dangling on the second, so the guard requires it to name
+    /// no wire-shaped parameter at all.
     Nothing(&'static str),
+}
+
+/// One backticked, wire-shaped name in a way forward, and what it actually is.
+///
+/// The two variants are the two legitimate cases the old lookup could not tell
+/// apart. Both are checked, in opposite directions, so neither can become the
+/// place the other hides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mention {
+    /// A parameter of [`OPENAI_CHAT_PARAMS`] — send it, raise it, omit it.
+    /// Checked to be a row of this table, to be one this endpoint actually
+    /// serves, and not to be the refused parameter redirecting to itself.
+    Parameter(&'static str),
+    /// A wire-shaped name that is deliberately **not** a parameter of this
+    /// table: `usage` is a field of the response, not something a caller sends.
+    /// Checked to be *absent* from the table — so declaring a name here cannot
+    /// quietly excuse a real parameter from the check above, and a name that
+    /// later becomes a parameter fails here rather than passing silently.
+    NotAParameter(&'static str),
+}
+
+impl Mention {
+    /// The name, whichever kind it is.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Parameter(n) | Self::NotAParameter(n) => n,
+        }
+    }
 }
 
 impl Forward {
@@ -137,9 +219,52 @@ impl Forward {
     #[must_use]
     pub const fn prose(&self) -> &'static str {
         match self {
-            Self::Do(s) | Self::Nothing(s) => s,
+            Self::Do { prose, .. } => prose,
+            Self::Nothing(s) => s,
         }
     }
+
+    /// The names this way forward says it mentions; empty for
+    /// [`Forward::Nothing`], which may mention none.
+    #[must_use]
+    pub const fn mentions(&self) -> &'static [Mention] {
+        match self {
+            Self::Do { mentions, .. } => mentions,
+            Self::Nothing(_) => &[],
+        }
+    }
+}
+
+/// Whether `span` is shaped like a parameter a caller could put on the wire.
+///
+/// OpenAI's request keys are all `snake_case` ASCII, so this admits every one
+/// of the thirty-seven and excludes what a way forward's prose otherwise
+/// backticks: markup (`<think>`), literals (`[DONE]`), paths (`/v1/models`) and
+/// commands (`roteiro model list`). It is the **backstop**, not the check: it
+/// decides which spans must be accounted for by a [`Mention`], and the
+/// [`Mention`] decides whether they are sound. On its own it would redden on
+/// `usage`, which is wire-shaped, legitimate, and not a parameter.
+#[must_use]
+pub fn looks_like_a_wire_parameter(span: &str) -> bool {
+    let mut chars = span.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The backticked spans of `prose`, with any trailing `: value` stripped so
+/// ``temperature: 0`` is recognised as a reference to `temperature`.
+///
+/// Lives beside [`Forward`] rather than in the tests because the guard and the
+/// declaration have to agree on what a "mention" is; two copies of this rule
+/// would be two answers to the same question.
+#[must_use]
+pub fn backticked(prose: &str) -> Vec<String> {
+    prose
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|span| span.split(':').next().unwrap_or(span).trim().to_owned())
+        .collect()
 }
 
 /// One row of the declared boundary.
@@ -242,9 +367,10 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "repetition penalties are not wired to the sampler, so the \
                       sampling you configured is not the sampling that ran",
-            forward: Forward::Do(
-                "`temperature` is the one sampling control this endpoint honours.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("temperature")],
+                prose: "`temperature` is the one sampling control this endpoint honours.",
+            },
         },
         inert: &["0"],
     },
@@ -255,10 +381,11 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "the deprecated `function_call` field is not read, so a forced \
                       call would simply not be forced",
-            forward: Forward::Do(
-                "Send `tool_choice` instead — though note that it too is accepted and \
-                 not enforced here, so neither field will force a named function today.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("tool_choice")],
+                prose: "Send `tool_choice` instead — though note that it too is accepted and \
+                        not enforced here, so neither field will force a named function today.",
+            },
         },
         inert: &["\"none\""],
     },
@@ -269,7 +396,10 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "the deprecated `functions` array is not read, so the model \
                       would be advertised no tools whatsoever and could never call one",
-            forward: Forward::Do("Send the same functions as `tools`, which is supported."),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("tools")],
+                prose: "Send the same functions as `tools`, which is supported.",
+            },
         },
         inert: &["[]"],
     },
@@ -280,9 +410,10 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "no per-token bias reaches the sampler, so tokens you banned \
                       can still be generated",
-            forward: Forward::Do(
-                "Steer with a system message instead; there is no per-token control here.",
-            ),
+            forward: Forward::Do {
+                mentions: &[],
+                prose: "Steer with a system message instead; there is no per-token control here.",
+            },
         },
         inert: &["{}"],
     },
@@ -381,10 +512,11 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "exactly one choice is generated, so `choices` would come back \
                       shorter than you asked for",
-            forward: Forward::Do(
-                "Send the request once per choice you need and collect the responses \
-                 yourself; each one is a full generation and costs like one.",
-            ),
+            forward: Forward::Do {
+                mentions: &[],
+                prose: "Send the request once per choice you need and collect the responses \
+                        yourself; each one is a full generation and costs like one.",
+            },
         },
         inert: &["1"],
     },
@@ -409,9 +541,10 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "repetition penalties are not wired to the sampler, so the \
                       sampling you configured is not the sampling that ran",
-            forward: Forward::Do(
-                "`temperature` is the one sampling control this endpoint honours.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("temperature")],
+                prose: "`temperature` is the one sampling control this endpoint honours.",
+            },
         },
         inert: &["0"],
     },
@@ -443,11 +576,12 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "the served model's reasoning is not budgeted by this field, so \
                       asking for more or less thinking changes nothing",
-            forward: Forward::Do(
-                "Raise `max_tokens`: a reasoning model spends that budget inside its \
-                 `<think>` block before it writes a token of answer, so the budget is \
-                 what actually governs how much it may think.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("max_tokens")],
+                prose: "Raise `max_tokens`: a reasoning model spends that budget inside its \
+                        `<think>` block before it writes a token of answer, so the budget is \
+                        what actually governs how much it may think.",
+            },
         },
         inert: &["\"medium\""],
     },
@@ -459,7 +593,10 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
             because: "the body is prose whatever format you ask for — there is no \
                       grammar-constrained sampling on this endpoint, so `json_object` \
                       and `json_schema` would both return text that need not parse",
-            forward: Forward::Do("Ask for JSON in the prompt and parse defensively."),
+            forward: Forward::Do {
+                mentions: &[],
+                prose: "Ask for JSON in the prompt and parse defensively.",
+            },
         },
         inert: &["{\"type\":\"text\"}"],
     },
@@ -477,11 +614,12 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "sampling is not seeded, so repeated requests with the same seed \
                       need not agree and the output you believe is reproducible is not",
-            forward: Forward::Do(
-                "`temperature: 0` selects greedy decoding, which is the nearest thing to \
-                 reproducible output here — but it is not a seed, and no determinism is \
-                 guaranteed.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("temperature")],
+                prose: "`temperature: 0` selects greedy decoding, which is the nearest thing to \
+                        reproducible output here — but it is not a seed, and no determinism is \
+                        guaranteed.",
+            },
         },
         inert: &[],
     },
@@ -500,10 +638,11 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
             because: "no stop sequence is applied, so generation runs to the \
                       `max_tokens` budget and your marker appears in the output rather \
                       than ending it",
-            forward: Forward::Do(
-                "Truncate at your marker on the client side, and set `max_tokens` as the \
-                 ceiling.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("max_tokens")],
+                prose: "Truncate at your marker on the client side, and set `max_tokens` as the \
+                        ceiling.",
+            },
         },
         inert: &["[]", "\"\""],
     },
@@ -529,9 +668,10 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
             because: "the extra `usage` chunk `include_usage` promises is never \
                       streamed, so a client waiting for one before `[DONE]` waits for \
                       something that will not arrive",
-            forward: Forward::Do(
-                "Read `usage` from the non-streaming response, which does carry it.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::NotAParameter("usage")],
+                prose: "Read `usage` from the non-streaming response, which does carry it.",
+            },
         },
         inert: &["{}", "{\"include_usage\":false}"],
     },
@@ -577,9 +717,10 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "nucleus sampling is not wired to the sampler, so the sampling \
                       you configured is not the sampling that ran",
-            forward: Forward::Do(
-                "`temperature` is the one sampling control this endpoint honours.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("temperature")],
+                prose: "`temperature` is the one sampling control this endpoint honours.",
+            },
         },
         inert: &["1"],
     },
@@ -597,10 +738,11 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "response length is not constrained by this field, so a `low` \
                       request can return the same wall of text as a `high` one",
-            forward: Forward::Do(
-                "Ask for the length you want in the prompt, and set `max_tokens` as the \
-                 hard ceiling.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("max_tokens")],
+                prose: "Ask for the length you want in the prompt, and set `max_tokens` as the \
+                        hard ceiling.",
+            },
         },
         inert: &["\"medium\""],
     },
@@ -611,10 +753,11 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         support: Support::Rejected {
             because: "there is no web-search tool and the server never leaves the \
                       machine, so a response you believe was informed by a search was not",
-            forward: Forward::Do(
-                "Omit `tools` to get Ask mode, whose tools search your own graph — that is \
-                 the local search this endpoint does have.",
-            ),
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("tools")],
+                prose: "Omit `tools` to get Ask mode, whose tools search your own graph — that is \
+                        the local search this endpoint does have.",
+            },
         },
         inert: &[],
     },
@@ -787,7 +930,10 @@ pub fn generation_budget(
 
 #[cfg(test)]
 mod tests {
-    use super::{Forward, OPENAI_CHAT_PARAMS, Param, Support, check_declared, param};
+    use super::{
+        Forward, Mention, OPENAI_CHAT_PARAMS, Param, Support, backticked, check_declared,
+        looks_like_a_wire_parameter, param,
+    };
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
 
@@ -1141,53 +1287,133 @@ mod tests {
         }
     }
 
-    /// A `Forward::Do` that redirects to another parameter must redirect to one
-    /// that exists.
+    /// A way forward must not point at a parameter that does not exist.
     ///
     /// "Send `max_tokens` instead" is only useful while `max_tokens` is a thing
     /// this endpoint serves. Renaming or dropping a supported parameter without
     /// this would leave refusals confidently pointing at nothing — the wrong
     /// answer that reads like a right one.
+    ///
+    /// **The version this replaces could not catch its own named case.** It
+    /// read the backticked spans of the prose, looked each one up, and
+    /// `continue`d when the lookup failed. Failing the lookup *is* the symptom,
+    /// so the skip swallowed the defect along with the noise it was there to
+    /// filter — and the noise was two different things, not one:
+    ///
+    /// 1. a span that is not a name at all (`<think>`, `temperature: 0`);
+    /// 2. a span that is a wire-shaped name but deliberately not a parameter —
+    ///    `stream_options` says to read `usage` from the response, and `usage`
+    ///    is a field of the response, not something a caller sends;
+    /// 3. a span meant as a parameter and absent from the table — the defect.
+    ///
+    /// Shape alone separates (1), which is what
+    /// [`looks_like_a_wire_parameter`] does. It cannot separate (2) from (3):
+    /// `usage` and a mistyped parameter are the same string to a regex, so a
+    /// shape-only rule would redden on a row that is correct today. Only the
+    /// author knows which, so the author says: every wire-shaped span is
+    /// declared as a [`Mention`], and the two kinds are checked in opposite
+    /// directions — `Parameter` must be in the table, `NotAParameter` must not.
+    ///
+    /// Both directions of the declaration are asserted, so it cannot be evaded
+    /// by simply not declaring: an undeclared wire-shaped span fails here just
+    /// as an absent parameter does.
     #[test]
     fn a_way_forward_never_points_at_a_parameter_that_does_not_exist() {
         for p in OPENAI_CHAT_PARAMS {
-            let Support::Rejected {
-                forward: Forward::Do(prose),
-                ..
-            } = p.support
-            else {
+            let Support::Rejected { forward, .. } = p.support else {
                 continue;
             };
-            for quoted in backticked(prose) {
-                // Only names that look like wire parameters are checked; prose
-                // also quotes values (`temperature: 0`) and markup (`<think>`).
-                let Some(referenced) = param(&quoted) else {
-                    continue;
-                };
-                assert_ne!(
-                    referenced.name, p.name,
-                    "`{}`'s way forward is to send `{}`",
-                    p.name, quoted
-                );
+            let prose = forward.prose();
+            let spans = backticked(prose);
+
+            // Every mention the row declares is sound.
+            for mention in forward.mentions() {
+                match *mention {
+                    Mention::Parameter(target) => {
+                        let referenced = param(target).unwrap_or_else(|| {
+                            panic!(
+                                "`{}`'s way forward points at `{target}`, which is in \
+                                 no row of this table",
+                                p.name
+                            )
+                        });
+                        assert_ne!(
+                            referenced.name, p.name,
+                            "`{}`'s way forward is to send `{target}`",
+                            p.name
+                        );
+                        assert!(
+                            !matches!(referenced.support, Support::Dropped),
+                            "`{}` redirects to `{target}`, which is itself dropped",
+                            p.name
+                        );
+                        assert!(
+                            referenced.refusal().is_none(),
+                            "`{}` redirects to `{target}`, which is itself refused — \
+                             a way forward that walks into another 400",
+                            p.name
+                        );
+                    }
+                    Mention::NotAParameter(name) => {
+                        assert!(
+                            param(name).is_none(),
+                            "`{}`'s way forward declares `{name}` not to be a \
+                             parameter, but it is a row of this table; declare it \
+                             `Mention::Parameter` so it is checked like one",
+                            p.name
+                        );
+                    }
+                }
+                // A pointer nothing in the sentence carries is a pointer that
+                // has already drifted from it.
                 assert!(
-                    !matches!(referenced.support, Support::Dropped),
-                    "`{}` redirects to `{}`, which is itself dropped",
+                    spans.iter().any(|s| s == mention.name()),
+                    "`{}` declares it mentions `{}`, but its sentence never \
+                     backticks it: {prose}",
                     p.name,
-                    quoted
+                    mention.name()
                 );
             }
-        }
-    }
 
-    /// Backticked spans of `prose`, with any trailing `: value` stripped so
-    /// ``temperature: 0`` is recognised as a reference to `temperature`.
-    fn backticked(prose: &str) -> Vec<String> {
-        prose
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .map(|span| span.split(':').next().unwrap_or(span).trim().to_owned())
-            .collect()
+            // …and every wire-shaped span of the sentence is declared. This is
+            // the direction that makes the declaration mandatory rather than
+            // optional: a name added to the prose and not to `mentions` fails
+            // here, so a future editor cannot reintroduce the silent skip by
+            // simply saying nothing.
+            for span in &spans {
+                if !looks_like_a_wire_parameter(span) {
+                    // (1): markup, a literal, a path, a command. Skipped on
+                    // shape, which is a property of the string rather than of
+                    // this table, so this skip cannot hide a missing row.
+                    continue;
+                }
+                assert!(
+                    forward.mentions().iter().any(|m| m.name() == span),
+                    "`{}`'s way forward backticks `{span}`, which is shaped like a \
+                     parameter a caller would send but is declared nowhere. If it \
+                     is a parameter of this table, say `Mention::Parameter(\"{span}\")` \
+                     and it will be checked to exist; if it deliberately is not one \
+                     — a field of the response, a value — say \
+                     `Mention::NotAParameter(\"{span}\")` and it will be checked to \
+                     stay that way. Prose: {prose}",
+                    p.name
+                );
+            }
+
+            // `Forward::Nothing` says no action exists; a sentence that then
+            // names a parameter is either wrong about the first half or
+            // dangling on the second.
+            if matches!(forward, Forward::Nothing(_)) {
+                for span in &spans {
+                    assert!(
+                        !looks_like_a_wire_parameter(span),
+                        "`{}` says there is no way forward, then backticks the \
+                         parameter-shaped `{span}`: {prose}",
+                        p.name
+                    );
+                }
+            }
+        }
     }
 
     /// Only a refused parameter needs inert values, and every inert value must
@@ -1469,5 +1695,58 @@ mod tests {
             assert!(err.contains("`max_completion_tokens`"), "{err}");
             assert!(err.ends_with('.'), "{err}");
         }
+    }
+
+    /// The legitimate skips stay skipped, by name.
+    ///
+    /// A guard that reddens on `<think>` gets switched off, and the two spans
+    /// below are exactly the ones that would make it do so. They are asserted
+    /// individually rather than left to the green of the test above, because
+    /// the green there proves only that *today's* table passes: it would still
+    /// be green if the shape rule were tightened until `usage` were the sole
+    /// survivor, which is the change that breaks the next author's row.
+    #[test]
+    fn the_spans_that_are_not_parameters_are_still_skipped() {
+        // (1) Skipped on shape: markup, literals, paths and commands are not
+        // things a caller puts in a request body.
+        for span in ["<think>", "[DONE]", "/v1/models", "roteiro model list", ""] {
+            assert!(
+                !looks_like_a_wire_parameter(span),
+                "`{span}` is not shaped like a wire parameter and must not be \
+                 treated as one"
+            );
+        }
+        // …and the thirty-seven real ones all are, so the shape rule is not
+        // quietly excusing the table it exists to check.
+        for p in OPENAI_CHAT_PARAMS {
+            assert!(
+                looks_like_a_wire_parameter(p.name),
+                "`{}` is a parameter of this table, so the shape rule must admit it",
+                p.name
+            );
+        }
+
+        // (2) Skipped by declaration, not by shape: `usage` is wire-shaped and
+        // is not a parameter, and `stream_options` says so out loud.
+        assert!(looks_like_a_wire_parameter("usage"));
+        assert!(param("usage").is_none());
+        let Support::Rejected { forward, .. } = param("stream_options").expect("declared").support
+        else {
+            panic!("`stream_options` is refused, and its way forward points at the response")
+        };
+        assert!(
+            forward
+                .mentions()
+                .contains(&Mention::NotAParameter("usage")),
+            "`stream_options` reads `usage` from the *response*; the guard must \
+             skip it because the row says so, never because a lookup failed"
+        );
+
+        // `temperature: 0` is a value of a real parameter, and the extraction
+        // resolves it to that parameter rather than to a name nobody has.
+        assert_eq!(
+            backticked("`temperature: 0` selects greedy decoding"),
+            vec!["temperature".to_owned()]
+        );
     }
 }
