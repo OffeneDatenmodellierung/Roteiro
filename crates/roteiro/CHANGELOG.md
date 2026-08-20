@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.4](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.27.3...roteiro-v1.27.4) - 2026-08-20
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [1.27.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.27.1...roteiro-v1.27.2) - 2026-08-20
 
 ### Fixed

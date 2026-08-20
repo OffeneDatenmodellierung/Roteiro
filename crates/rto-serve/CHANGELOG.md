@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.4](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.27.2...rto-serve-v1.27.4) - 2026-08-20
+
+### Fixed
+
+- *(serve)* raise the two budgets #550's refusals made visible
+
+### Other
+
+- release v1.27.3
+- Potential fix for pull request finding
+- Merge remote-tracking branch 'origin/main' into fix/serve-tool-budgets
+
 ## [1.27.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v1.27.2...rto-serve-v1.27.3) - 2026-08-20
 
 ### Fixed
