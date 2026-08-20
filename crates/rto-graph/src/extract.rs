@@ -934,7 +934,17 @@ pub fn is_prose(path: &str) -> bool {
 
 /// Trim and cap `text` to [`MAX_CONTENT`] characters (whitespace-collapsed), so
 /// stored content stays small and deterministic.
-fn cap_content(text: &str) -> String {
+///
+/// Public because the *budget is the definition*, and a second copy of it would
+/// drift. The authored layer (`rto-spec`) stores an ADR's section text on its
+/// `adr`/`adr_section` nodes so `search` and `explain` can reach it, and that text
+/// has to be bounded by the same rule the derived layer uses — otherwise the
+/// exportable store grows by whichever cap was written down last. This is not an
+/// extraction path and needs no [`EXTRACT_VERSION`] bump: the authored layer is
+/// re-parsed from blobs on every sync rather than served from the
+/// content-addressed extraction cache.
+#[must_use]
+pub fn cap_content(text: &str) -> String {
     let mut out = String::with_capacity(text.len().min(MAX_CONTENT));
     // Track the character count incrementally — `out.chars().count()` per
     // iteration would make this O(n²) on long inputs.

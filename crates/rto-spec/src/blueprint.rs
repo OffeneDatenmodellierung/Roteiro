@@ -113,7 +113,16 @@ pub fn parse_blueprint(rel_path: &str, text: &str) -> BlueprintDoc {
             let title = heading.trim().to_owned();
             let slug = crate::text::slugify(&title);
             current = Some(slug.clone());
-            sections.push(Section { slug, title });
+            // No `text`: `Section` is shared with `parse_adr`, and only that
+            // parser populates it so far. A blueprint section note is empty in
+            // the vault for the same reason an ADR's was (#545) — the fix is the
+            // same shape and is deliberately not in that PR's scope, which is
+            // ADRs. 11 notes here against 199 there.
+            sections.push(Section {
+                slug,
+                title,
+                text: String::new(),
+            });
         }
         for raw in crate::text::scan_wiki_links(line) {
             let from = match &current {

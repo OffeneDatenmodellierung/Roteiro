@@ -176,6 +176,19 @@ pub struct Section {
     pub slug: String,
     /// Heading text.
     pub title: String,
+    /// The section's body: everything between this `## ` heading and the next
+    /// one, verbatim and **uncapped**, with surrounding blank lines trimmed.
+    ///
+    /// The heading line itself is excluded — a section's note is already titled
+    /// by it, and a `### ` subheading inside the span is body text and stays.
+    /// [`AdrDoc::facts`] caps this before it reaches the store; the vault renders
+    /// it whole. Empty when a heading is immediately followed by another.
+    ///
+    /// Populated by [`parse_adr`] only. [`crate::blueprint`] and [`crate::site`]
+    /// share this struct and leave it empty — their section notes have the same
+    /// defect #545 fixes here, and fixing them is the same shape of change on a
+    /// different document class.
+    pub text: String,
 }
 
 /// A `[[path#Symbol]]` (or `[[path]]`) authored link found in an ADR, resolved
@@ -199,6 +212,14 @@ pub struct AdrDoc {
     pub path: String,
     /// `## ` sections in document order.
     pub sections: Vec<Section>,
+    /// The body text *before* the first `## ` heading — in house style, the `# `
+    /// title and the summary table — verbatim and uncapped.
+    ///
+    /// This is the only part of an ADR that belongs to no section, which is
+    /// exactly why the `adr` node carries it and not the whole document: the
+    /// sections already hold the body between them, so nothing is stored twice.
+    /// The whole document, for a reader who wants it, is on the `file:` node.
+    pub preamble: String,
     /// Authored `[[…]]` links in document order.
     pub links: Vec<WikiLink>,
     /// What the document says about its own version, in three places.
@@ -212,6 +233,32 @@ impl AdrDoc {
         format!("adr:{}", self.meta.id)
     }
 
+    /// The **full, uncapped** text the node `key` should show, or `None` if `key`
+    /// names no part of this ADR (or names an empty one).
+    ///
+    /// The inverse of the key grammar [`Self::key`] and [`Self::facts`] build, and
+    /// deliberately their neighbour: a renderer that re-split `adr:0015#consequences`
+    /// with its own rule would be reimplementing the thing it is trying to read.
+    ///
+    /// The split is the point. `adr:0015` gets its preamble and a section gets its
+    /// own span — never the whole document, which is what a path-only rule would
+    /// hand to all twenty ADR notes and all 179 section notes alike, beside the
+    /// `file:` note that already carries it once.
+    #[must_use]
+    pub fn text_for_key(&self, key: &str) -> Option<&str> {
+        let rest = key.strip_prefix(&self.key())?;
+        let text = match rest {
+            "" => self.preamble.as_str(),
+            // `adr:00151` also strips the `adr:0015` prefix; requiring the `#`
+            // is what refuses it rather than reading `1` as a slug.
+            _ => {
+                let slug = rest.strip_prefix('#')?;
+                &self.sections.iter().find(|s| s.slug == slug)?.text
+            }
+        };
+        (!text.is_empty()).then_some(text)
+    }
+
     /// The authored nodes and structural edges for this ADR: an `adr` node, one
     /// `adr_section` node per section, and `contains` edges between them. Wiki
     /// links are *not* included — they are validated against the code graph by
@@ -223,6 +270,9 @@ impl AdrDoc {
             .with_provenance(Provenance::Authored);
         adr.path = Some(self.path.clone());
         adr.meta = serde_json::json!({ "status": self.meta.status.as_str() });
+        if let Some(content) = stored(&self.preamble) {
+            adr.meta["content"] = content;
+        }
         let mut fs = FactSet::new().with_node(adr);
 
         for section in &self.sections {
@@ -230,6 +280,9 @@ impl AdrDoc {
             let mut node = Node::new(key.clone(), NodeKind::AdrSection, section.title.clone())
                 .with_provenance(Provenance::Authored);
             node.path = Some(self.path.clone());
+            if let Some(content) = stored(&section.text) {
+                node.meta = serde_json::json!({ "content": content });
+            }
             fs = fs.with_node(node).with_edge(Edge::authored(
                 adr_key.clone(),
                 key,
@@ -238,6 +291,20 @@ impl AdrDoc {
         }
         fs
     }
+}
+
+/// The `meta.content` value for one span of an ADR, or `None` when the span is
+/// empty (a heading immediately followed by another) — an empty string would be a
+/// key that says nothing, and `search`/`duplicates` both gate on content being
+/// non-empty.
+///
+/// Capped by [`rto_graph::cap_content`] rather than by a bound of this module's
+/// own: the store is exportable and ships with the graph, so authored text lands
+/// in it under the same budget the derived layer uses. The vault does not read
+/// this — it renders the uncapped text from the blob (see [`AdrDoc::text_for_key`]).
+fn stored(text: &str) -> Option<serde_json::Value> {
+    let capped = rto_graph::cap_content(text);
+    (!capped.is_empty()).then(|| serde_json::Value::from(capped))
 }
 
 /// Parse an ADR markdown document at `rel_path`.
@@ -285,13 +352,32 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
     // Walk the body, tracking the current section so links are attributed to it.
     // Fenced code blocks are skipped so documented examples of `[[…]]` syntax
     // are not mistaken for real authored links.
-    let mut sections = Vec::new();
+    let mut sections: Vec<Section> = Vec::new();
     let mut links = Vec::new();
     let mut versions = VersionFacts::default();
     let mut current: Option<String> = None;
     let mut in_fence = false;
     let mut in_history = false;
-    for (offset, line) in body.lines().enumerate() {
+    // Byte offsets into `body`, so each `## ` span can be sliced back out of it:
+    // `span_start` is where the open span's text begins (just past its heading
+    // line), and `preamble_end` is fixed by the first heading. Tracked here rather
+    // than re-derived by a second pass, because this loop already knows where
+    // every heading is and which of them are inside a code fence.
+    let mut byte_offset = 0usize;
+    let mut span_start = 0usize;
+    let mut preamble_end: Option<usize> = None;
+    for (line_idx, line) in body.lines().enumerate() {
+        // Advance the cursor first: every `continue` below still consumes a line,
+        // and a fenced line's bytes belong to whichever section encloses it.
+        // `str::lines` strips a `\r\n` terminator as well as a `\n`.
+        let line_start = byte_offset;
+        byte_offset += line.len();
+        if body[byte_offset..].starts_with("\r\n") {
+            byte_offset += 2;
+        } else if body[byte_offset..].starts_with('\n') {
+            byte_offset += 1;
+        }
+
         if line.trim_start().starts_with("```") {
             in_fence = !in_fence;
             continue;
@@ -304,13 +390,23 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
             in_history = is_version_history(&title);
             let slug = crate::text::slugify(&title);
             current = Some(slug.clone());
-            sections.push(Section { slug, title });
+            // Close the span this heading ends — the preamble if it is the first.
+            match sections.last_mut() {
+                Some(prev) => prev.text = body[span_start..line_start].trim().to_owned(),
+                None => preamble_end = Some(line_start),
+            }
+            span_start = byte_offset;
+            sections.push(Section {
+                slug,
+                title,
+                text: String::new(),
+            });
         }
         if in_history {
             versions.history.extend(history_row_version(line));
         } else {
             versions.summary_row = versions.summary_row.or_else(|| summary_row_version(line));
-            let file_line = body_line1 + offset;
+            let file_line = body_line1 + line_idx;
             versions
                 .inline_refs
                 .extend(inline_version_refs(line).map(|version| InlineVersionRef {
@@ -333,6 +429,13 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
         }
     }
 
+    // Close the last open span at end of document; with no `## ` at all the whole
+    // body is preamble.
+    if let Some(last) = sections.last_mut() {
+        last.text = body[span_start..].trim().to_owned();
+    }
+    let preamble = body[..preamble_end.unwrap_or(body.len())].trim().to_owned();
+
     Ok(AdrDoc {
         meta: AdrMeta {
             id,
@@ -342,6 +445,7 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
         },
         path: rel_path.to_owned(),
         sections,
+        preamble,
         links,
         versions,
     })
