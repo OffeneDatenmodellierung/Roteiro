@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.6...roteiro-v1.27.0) - 2026-08-20
+
+### Added
+
+- *(sandbox)* user-supplied analyzer images, digest-pinned
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/user-sandbox-images
+
 ## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.26.5...roteiro-v1.26.6) - 2026-08-20
 
 ### Fixed
