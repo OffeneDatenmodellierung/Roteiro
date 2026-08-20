@@ -249,7 +249,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   policy, not from GitHub, and there is a working route:
 
   ```sh
-  gh api -X DELETE repos/:owner/:repo/git/refs/heads/<branch>
+  gh api -X DELETE repos/:owner/:repo/git/refs/heads/BRANCH_NAME
   ```
 
   Before deleting a branch that never had a PR, check what you are destroying:
