@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.28.0...rto-render-v1.29.0) - 2026-08-20
+
+### Fixed
+
+- *(lint)* unbreak `main` under the clippy that ships with Rust 1.98
+
 ## [1.27.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.27.0...rto-render-v1.27.1) - 2026-08-20
 
 ### Fixed
