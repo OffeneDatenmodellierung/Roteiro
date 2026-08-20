@@ -122,7 +122,7 @@ pub enum SubprocessError {
     #[error(
         "analyzer binary `{program}` not found on PATH (needed to run `{analyzer}`), so nothing \
          ran.{}{}",
-        .install.map_or(NO_HINT, |hint| hint),
+        .install.unwrap_or(NO_HINT),
         INGEST_INSTEAD
     )]
     BinaryNotFound {

@@ -416,12 +416,13 @@ fn decode_samples(
     }
     // A `data` chunk that is not a whole number of samples is a corrupt or
     // truncated file. **Abstain rather than measure the aligned prefix**: the
-    // decoders below use `chunks_exact`, which silently drops the remainder, so
-    // measuring anyway would report an RMS for part of a clip and could refuse
-    // a blob on the strength of it. That is a false skip — a silently missing
-    // description — and avoiding it is what the whole gate is calibrated
-    // around. Handing an unreadable clip to the model costs one model load;
-    // refusing a readable one costs the operator something they cannot see.
+    // decoders below (for multi-byte sample widths) use `as_chunks`, which yields only the complete chunks
+    // and silently drops the remainder, so measuring anyway would report an
+    // RMS for part of a clip and could refuse a blob on the strength of it.
+    // That is a false skip — a silently missing description — and avoiding it
+    // is what the whole gate is calibrated around. Handing an unreadable clip
+    // to the model costs one model load; refusing a readable one costs the
+    // operator something they cannot see.
     if !data.len().is_multiple_of(width) {
         return None;
     }
@@ -433,32 +434,38 @@ fn decode_samples(
         }
         (f, 16) if f == format_pcm => {
             out.extend(
-                data.chunks_exact(2)
+                data.as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / f64::from(1_i32 << 15)),
             );
         }
         // 24-bit is stored packed, three bytes little-endian, so sign-extend it
         // into an i32 by placing it in the top three bytes and shifting back.
         (f, 24) if f == format_pcm => {
-            out.extend(data.chunks_exact(3).map(|c| {
+            out.extend(data.as_chunks::<3>().0.iter().map(|c| {
                 let v = i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8;
                 f64::from(v) / f64::from(1_i32 << 23)
             }));
         }
         (f, 32) if f == format_pcm => {
-            out.extend(data.chunks_exact(4).map(|c| {
+            out.extend(data.as_chunks::<4>().0.iter().map(|c| {
                 f64::from(i32::from_le_bytes([c[0], c[1], c[2], c[3]])) / 2_147_483_648.0
             }));
         }
         (f, 32) if f == format_float => {
             out.extend(
-                data.chunks_exact(4)
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
             );
         }
         (f, 64) if f == format_float => {
             out.extend(
-                data.chunks_exact(8)
+                data.as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])),
             );
         }
@@ -549,13 +556,13 @@ mod tests {
     /// **A `data` chunk that is not a whole number of samples must abstain, not
     /// be measured on its aligned prefix.**
     ///
-    /// The decoders use `chunks_exact`, which silently drops the remainder — so
-    /// without the length check a truncated file would be measured on whatever
-    /// happened to align. Every case here is all-zero bytes, which is the
-    /// dangerous shape: the aligned prefix measures `rms = 0`, so the gate would
-    /// **refuse** a clip it could not actually read. A false skip is a silently
-    /// missing description, and avoiding it is the rule the whole gate is
-    /// calibrated around.
+    /// The decoders use `as_chunks`, which yields only the complete chunks and
+    /// silently drops the remainder — so without the length check a truncated
+    /// file would be measured on whatever happened to align. Every case here
+    /// is all-zero bytes, which is the dangerous shape: the aligned prefix
+    /// measures `rms = 0`, so the gate would **refuse** a clip it could not
+    /// actually read. A false skip is a silently missing description, and
+    /// avoiding it is the rule the whole gate is calibrated around.
     #[test]
     fn an_unaligned_data_chunk_abstains_rather_than_being_measured() {
         // `(bits, data length)`, each length short of a whole sample. Only the

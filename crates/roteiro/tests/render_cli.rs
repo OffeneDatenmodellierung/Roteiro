@@ -411,7 +411,7 @@ fn bar_entries(html: &str) -> Vec<(String, String)> {
         return Vec::new();
     };
     let bar = &html[start..];
-    let bar = &bar[..bar.find("</nav>").map_or(bar.len(), |i| i)];
+    let bar = &bar[..bar.find("</nav>").unwrap_or(bar.len())];
 
     let mut entries = Vec::new();
     let mut rest = bar;
