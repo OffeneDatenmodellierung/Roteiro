@@ -67,7 +67,6 @@ use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
 use crate::assets;
 use crate::child_env::ChildEnv;
 use crate::clock::rfc3339_utc;
-use crate::guidance::{Guidance, Line};
 use crate::ingest::assemble;
 use crate::runner::{AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_request};
 use crate::snippet::WorktreeSnippets;
@@ -148,13 +147,21 @@ pub struct SandboxImage {
     pub analyzer_version: &'static str,
 }
 
-/// Every analyzer this build can run sandboxed.
+/// Every analyzer this build ships an image for.
 ///
-/// Short by design. An analyzer earns an entry here when there is a published
-/// image whose contents can be pinned by digest *and* whose analyzer version is
-/// knowable — `cargo-audit` has no official image, and inventing one would make
-/// Roteiro the publisher of a security tool's container, which is not a job it
-/// is taking on.
+/// **No longer "every analyzer this build can run sandboxed"** — that is now the
+/// union of this table and `[security.images]`, computed by [`image_inventory`].
+/// The rename of the sentence is the substance of issue #434.
+///
+/// Short by design, and it stays short. An analyzer earns an entry here when
+/// there is a published image whose contents can be pinned by digest *and* whose
+/// analyzer version is knowable — `cargo-audit` has no official image, and
+/// inventing one would make Roteiro the publisher of a security tool's
+/// container, which is not a job it is taking on. What has changed is where that
+/// sentence *ends*: it used to end in "so there is no entry, and that analyzer is
+/// host-only", and it now ends in "so the operator supplies one", which is the
+/// same answer `[lint] image` already gave for builders (ADR-0020 conditions
+/// 1-2).
 pub static SANDBOX_IMAGES: &[SandboxImage] = &[SandboxImage {
     analyzer: crate::adapter::semgrep::ANALYZER,
     // Multi-arch index digest: the same reference resolves on linux/amd64 and
@@ -169,6 +176,217 @@ pub static SANDBOX_IMAGES: &[SandboxImage] = &[SandboxImage {
 #[must_use]
 pub fn image_for(analyzer: &str) -> Option<&'static SandboxImage> {
     SANDBOX_IMAGES.iter().find(|i| i.analyzer == analyzer)
+}
+
+/// Who chose the image an analyzer runs in.
+///
+/// Recorded and printed rather than inferred, because the two answers carry
+/// different warranties and a reader who cannot tell them apart has lost the
+/// thing the pin was for. Roteiro vouches for a [`SANDBOX_IMAGES`] entry: it
+/// checked that the image is published, that its contents are addressable by
+/// digest, and *which analyzer version it carries*. It vouches for none of that
+/// about a reference it was handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImageSource {
+    /// A [`SANDBOX_IMAGES`] entry — Roteiro chose it.
+    BuiltIn,
+    /// A `[security.images]` entry for an analyzer that has no built-in pin.
+    /// Without it this analyzer has no sandboxed path at all.
+    UserDeclared,
+    /// A `[security.images]` entry standing in front of a built-in pin.
+    ///
+    /// Its own variant rather than folded into [`Self::UserDeclared`] precisely
+    /// because it is the case somebody might not have meant: the analyzer would
+    /// run sandboxed either way, and what the key changed is *whose* image. That
+    /// is worth a word of its own in `security status`.
+    Overrides,
+}
+
+impl ImageSource {
+    /// A short label for a status column.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built-in",
+            Self::UserDeclared => "user-declared",
+            Self::Overrides => "user-declared (replaces the built-in pin)",
+        }
+    }
+
+    /// Whether Roteiro chose this image.
+    #[must_use]
+    pub fn is_built_in(self) -> bool {
+        matches!(self, Self::BuiltIn)
+    }
+}
+
+/// The image an analyzer will actually run in, whoever chose it.
+///
+/// Owned rather than `&'static SandboxImage`, which is the whole shape of this
+/// change: the table can no longer be the only source, so a runner cannot hold a
+/// borrow into it.
+///
+/// # `analyzer_version` is `Option`, and that is the honest part
+///
+/// A [`SANDBOX_IMAGES`] entry states the version its image carries, and the
+/// backend records it without a second VM boot to ask — the image is immutable
+/// and Roteiro checked. **For a user-declared image there is nothing to read it
+/// from**, and repeating the table's answer would stamp evidence describing an
+/// image that was not run. So this is `None`, the backend passes `None` to
+/// [`crate::NativeContext`], and what gets recorded is whatever the analyzer said
+/// about *itself* in its own output (`semgrep` reports its version there), or
+/// [`crate::UNKNOWN_VERSION`] for an adapter whose output carries none.
+///
+/// That is a real cost of choosing your own image, and it is the right way round:
+/// a version Roteiro cannot vouch for is reported as the analyzer's claim rather
+/// than as Roteiro's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResolvedImage {
+    /// The analyzer it provides.
+    pub analyzer: String,
+    /// The fully-qualified, digest-pinned reference.
+    pub reference: String,
+    /// The manifest digest, recorded on every run this image produces.
+    pub digest: String,
+    /// The analyzer version the image is *known* to carry, or `None` when only
+    /// the analyzer itself can say. See the type's documentation.
+    pub analyzer_version: Option<String>,
+    /// Who chose it.
+    pub source: ImageSource,
+}
+
+impl ResolvedImage {
+    /// How a refusal about this image should name the setting that produced it.
+    ///
+    /// A built-in pin is not something the reader can edit, so it is described
+    /// rather than quoted as a key; a declared one names the exact table entry to
+    /// go and change.
+    #[must_use]
+    pub fn what(&self) -> String {
+        if self.source.is_built_in() {
+            format!("the pinned image for {}", self.analyzer)
+        } else {
+            format!("`[security.images] {}`", self.analyzer)
+        }
+    }
+}
+
+/// The image `analyzer` runs in, given whatever `[security.images]` declared.
+///
+/// **A declared entry wins over a built-in pin, and that is a decision.** The
+/// alternative — refusing to let anyone stand in front of the one entry whose
+/// provenance Roteiro vouches for — was rejected on two grounds. It would make
+/// Roteiro the sole timekeeper of that pin, so an advisory against the pinned
+/// `semgrep` would be un-routable-around until a Roteiro release: exactly the
+/// curation burden this mechanism exists to put down. And it would draw the line
+/// in a place whose shape is Roteiro's release history rather than the operator's
+/// risk — "you may declare an image for any analyzer except the ones we happened
+/// to have got round to pinning" is not a rule anybody can hold in their head.
+///
+/// What the override costs is paid where it can be seen rather than waived:
+/// [`ResolvedImage::analyzer_version`] stops being asserted, `security status`
+/// prints [`ImageSource::Overrides`] against the row, and the digest recorded on
+/// the run is the one that actually ran.
+///
+/// # Errors
+/// [`SandboxError::NoAdapter`] if `declared` is given for an analyzer this build
+/// cannot normalise, [`SandboxError::ImageNotPinned`] if it names a tag, or
+/// [`SandboxError::NoImage`] if there is neither a declared entry nor a pin.
+pub fn resolve_image(
+    analyzer: &str,
+    declared: Option<&str>,
+) -> Result<ResolvedImage, SandboxError> {
+    let built_in = image_for(analyzer);
+    let Some(reference) = declared else {
+        let image = built_in.ok_or_else(|| SandboxError::NoImage {
+            requested: analyzer.to_owned(),
+            known: known_images(),
+        })?;
+        return Ok(ResolvedImage {
+            analyzer: image.analyzer.to_owned(),
+            reference: image.reference.to_owned(),
+            digest: image.digest.to_owned(),
+            analyzer_version: Some(image.analyzer_version.to_owned()),
+            source: ImageSource::BuiltIn,
+        });
+    };
+
+    // Ordered cheapest-and-most-fundamental first, as `lint_sandbox::run`
+    // orders its own preflight. "This build cannot read that analyzer's output"
+    // is true of every machine, so it is answered before anything about *this*
+    // one — including the pin, since a digest-pinned image for a tool Roteiro
+    // has no parser for is still useless.
+    if crate::adapter::adapter_for(analyzer).is_none() {
+        return Err(SandboxError::NoAdapter {
+            requested: analyzer.to_owned(),
+            known: crate::adapter::known_analyzers().join(", "),
+        });
+    }
+    let digest = pinned_digest(&format!("`[security.images] {analyzer}`"), reference)?;
+
+    Ok(ResolvedImage {
+        analyzer: analyzer.to_owned(),
+        reference: reference.to_owned(),
+        digest: digest.to_owned(),
+        // Not `built_in.map(…)`, even when the analyzer has a pin. See
+        // `ResolvedImage`: repeating the table's version for somebody else's
+        // image is the one way this feature could make evidence say something
+        // untrue.
+        analyzer_version: None,
+        source: if built_in.is_some() {
+            ImageSource::Overrides
+        } else {
+            ImageSource::UserDeclared
+        },
+    })
+}
+
+/// Every image this configuration would run, the built-in table composed with
+/// `declared`.
+///
+/// One row per analyzer that has an image at all, ordered by analyzer name so two
+/// runs of `security status` print the same thing. **Every** declared entry is
+/// validated, including one for an analyzer with no adapter — which is the whole
+/// reason this is a fallible sweep rather than a per-analyzer lookup: a typo in a
+/// committed `roteiro.toml` must be a refusal at `status` and `prefetch`, not a
+/// key that silently does nothing until somebody runs that analyzer.
+///
+/// # Errors
+/// The first [`resolve_image`] refusal, in analyzer order.
+pub fn image_inventory(declared: &[(String, String)]) -> Result<Vec<ResolvedImage>, SandboxError> {
+    let mut names: Vec<&str> = SANDBOX_IMAGES.iter().map(|i| i.analyzer).collect();
+    for (analyzer, _) in declared {
+        if !names.contains(&analyzer.as_str()) {
+            names.push(analyzer);
+        }
+    }
+    names.sort_unstable();
+
+    names
+        .into_iter()
+        .map(|analyzer| {
+            let declared = declared
+                .iter()
+                .find(|(name, _)| name == analyzer)
+                .map(|(_, reference)| reference.as_str());
+            resolve_image(analyzer, declared)
+        })
+        .collect()
+}
+
+/// The analyzers [`SANDBOX_IMAGES`] can answer for, for a refusal to list.
+fn known_images() -> String {
+    let known = SANDBOX_IMAGES
+        .iter()
+        .map(|i| i.analyzer)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if known.is_empty() {
+        "none".to_owned()
+    } else {
+        known
+    }
 }
 
 /// Whether this host can start a microVM at all.
@@ -239,26 +457,6 @@ fn probe_reason(raw: &str) -> String {
     raw.trim().to_owned()
 }
 
-/// Why a tag will not do, and how to get the digest instead.
-///
-/// A [`Guidance`] rather than a wrapped literal: this text is multi-line and
-/// ends in something to paste, and written the other way it leaked its own
-/// source indentation into the middle of a sentence (see [`crate::guidance`]).
-const PIN_IT: Guidance = Guidance::new(&[
-    Line::Note(&[
-        "An image is where somebody else's build scripts execute, and a tag is a",
-        "mutable pointer to it — whoever controls the tag can replace what runs, with",
-        "no version change and no notice.",
-    ]),
-    Line::Note(&["Pin it by digest instead:"]),
-    Line::Command("image = \"docker.io/you/image@sha256:<64 hex>\""),
-    Line::Note(&[
-        "`docker buildx imagetools inspect <reference>` prints it. Use the **index**",
-        "digest — the one printed for the tag itself — so one reference resolves on",
-        "both amd64 and arm64 rather than two that can drift apart.",
-    ]),
-]);
-
 /// Something went wrong running the analyzer in a sandbox, as opposed to
 /// something being wrong with what it produced.
 #[derive(Debug, thiserror::Error)]
@@ -274,50 +472,90 @@ pub enum SandboxError {
         /// What the capability probe reported.
         reason: String,
     },
-    /// This build has no pinned image for the analyzer.
+    /// Neither a built-in pin nor a `[security.images]` entry names an image
+    /// for the analyzer.
+    ///
+    /// This used to be the end of the road — the table was the only source, so
+    /// an analyzer absent from it was host-only forever on a command whose
+    /// default is sandboxed. It is now a refusal with a way forward, which is
+    /// the whole of issue #434.
     #[error(
-        "no pinned sandbox image for analyzer {requested:?} in this build (available: {known})"
+        "no sandbox image for analyzer {requested} — this build pins one for: {known}.\n  \
+         Roteiro pins an image only where one is published, addressable by digest and of a \
+         knowable version; inventing one would make it the publisher of a security tool's \
+         container.\n  \
+         Declare your own, pinned by digest, and it will be used:\n    \
+         [security.images]\n    \
+         {requested} = \"registry.example/you/{requested}@sha256:<64 hex>\"\n  \
+         Then `roteiro security prefetch --analyzer {requested} --allow-download` to obtain it. \
+         See docs/SANDBOXED_LINTING.md. The alternatives are unchanged: run it elsewhere and \
+         `roteiro security ingest` the report, or accept an unisolated run with \
+         `--allow-unsandboxed`, whose evidence records isolation=none."
     )]
     NoImage {
         /// The analyzer that was asked for.
         requested: String,
-        /// The analyzers that do have an image.
+        /// The analyzers that do have a built-in pin.
         known: String,
     },
     /// The pinned image is not in the local store, and this backend does not
     /// pull implicitly.
     #[error(
-        "assets-unavailable-offline: the pinned image for {analyzer} is not in the local store\n  \
+        "assets-unavailable-offline: the image for {analyzer} is not in the local store\n  \
          image: {reference}\n  \
-         fetch it with: roteiro security prefetch --allow-download\n  \
+         fetch it with: roteiro security prefetch --analyzer {analyzer} --allow-download\n  \
          (roteiro never pulls an image during a run, so a scan can never depend on \
-         a registry being reachable)"
+         a registry being reachable — and that is as true of an image you declared \
+         in `[security.images]` as of one Roteiro pinned)"
     )]
     ImageNotProvisioned {
         /// The analyzer whose run was refused.
         analyzer: String,
         /// The digest-pinned reference that is missing.
-        reference: &'static str,
+        ///
+        /// Owned rather than `&'static str`: since a `[security.images]` entry
+        /// can name it, the reference this refusal has to print is not
+        /// necessarily one compiled into the binary.
+        reference: String,
     },
     /// An image reference names a tag rather than a digest.
     ///
     /// Refused for user-supplied images as well as pinned ones, and the reason
     /// is **not** the reproducibility argument ADR-0020 retires for builders. It
-    /// is that the image *is* the boundary. A builder's guest is where somebody
-    /// else's build scripts execute, and a tag is a mutable pointer to it: the
-    /// contents can be replaced by whoever controls the tag, with no version
-    /// change and no notice, and the run would go on reporting success. You may
-    /// choose your own boundary; you may not choose one that can be swapped
-    /// under you.
+    /// is that the image *is* the boundary. A guest is where somebody else's
+    /// code executes, and a tag is a mutable pointer to it: the contents can be
+    /// replaced by whoever controls the tag, with no version change and no
+    /// notice, and the run would go on reporting success. You may choose your
+    /// own boundary; you may not choose one that can be swapped under you.
+    ///
+    /// Transparent over [`crate::image_ref::NotPinned`] rather than a second
+    /// declaration of the same fields: the message a reader sees must not depend
+    /// on whether the check was reached through a backend or through
+    /// `roteiro config`.
+    #[error(transparent)]
+    ImageNotPinned(#[from] crate::image_ref::NotPinned),
+    /// A `[security.images]` entry names something this build cannot normalise.
+    ///
+    /// **The constraint that surprises people, so it is stated rather than
+    /// implied.** An image can only serve an analyzer Roteiro already has an
+    /// adapter for: `normalize()` is Rust in [`crate::ADAPTERS`] and a user
+    /// cannot supply a parser. An image carrying your favourite linter will boot
+    /// perfectly and produce output nothing here can read, so the refusal comes
+    /// at the key rather than as an empty report after a VM has run.
     #[error(
-        "the image for {what} is {reference:?}, which is a tag rather than a digest.{}",
-        PIN_IT
+        "`[security.images] {requested}` names an analyzer this build cannot read the output of \
+         (it can read: {known}).\n  \
+         An image can only serve an analyzer Roteiro already has an adapter for — the parser is \
+         Rust in `ADAPTERS` and cannot be supplied alongside the image. An image carrying some \
+         other tool boots perfectly and produces nothing Roteiro can normalise.\n  \
+         To have findings from a tool that is not on that list, run it yourself and \
+         `roteiro security ingest` its report."
     )]
-    ImageNotPinned {
-        /// What wanted the image, so the reader knows which setting to change.
-        what: String,
-        /// The reference as it was written.
-        reference: String,
+    NoAdapter {
+        /// The analyzer named by the config key.
+        requested: String,
+        /// The analyzers this build can normalise.
+        known: String,
     },
     /// The sandbox itself failed at some stage.
     #[error("sandbox {stage}: {message}")]
@@ -380,7 +618,7 @@ pub enum SandboxError {
 /// Executes an analyzer inside a digest-pinned OCI image in a microVM.
 pub struct BoxliteRunner {
     adapter: &'static dyn Adapter,
-    image: &'static SandboxImage,
+    image: ResolvedImage,
     /// Host paths of the resolved assets — what `rules_digest` is read from.
     assets: Vec<(&'static str, PathBuf)>,
     /// The same assets as the guest sees them, which is what the argv names.
@@ -402,16 +640,32 @@ impl std::fmt::Debug for BoxliteRunner {
 impl BoxliteRunner {
     /// Build a runner for `analyzer`, resolving its pinned assets under `root`.
     ///
+    /// `declared` is the `[security.images]` entry for this analyzer, if the
+    /// config layers settled on one. It is passed in as a resolved
+    /// `Option<&str>` rather than as a config type for the reason
+    /// `lint_sandbox::run` takes its image the same way: this crate owns what an
+    /// image reference *means* and owns none of the layering that produced it.
+    ///
     /// Everything that can be refused is refused here, before a VM is started:
-    /// the capability probe, the pinned image, and the asset cache. A cold cache
-    /// or an absent hypervisor therefore costs nothing and says so precisely.
+    /// the capability probe, the image, and the asset cache. A cold cache or an
+    /// absent hypervisor therefore costs nothing and says so precisely.
+    ///
+    /// The tag check inside [`resolve_image`] is deliberately reached **after**
+    /// the hypervisor probe here and **before** it in `lint_sandbox::run`, and
+    /// the difference is not an inconsistency: there, the reference is the whole
+    /// input and a tag is the likeliest thing wrong with it; here, `declared` is
+    /// usually absent and the common refusal is about this machine.
     ///
     /// # Errors
     /// Returns [`ExecError::UnknownAnalyzer`] if this build cannot normalise the
-    /// analyzer, [`ExecError::Sandbox`] if there is no sandbox or no pinned image
-    /// for it, or [`ExecError::AssetsUnavailableOffline`] if its pinned inputs
-    /// are not provisioned.
-    pub fn new(analyzer: &str, assets_root: &Path) -> Result<Self, ExecError> {
+    /// analyzer, [`ExecError::Sandbox`] if there is no sandbox or no image for
+    /// it, or [`ExecError::AssetsUnavailableOffline`] if its pinned inputs are
+    /// not provisioned.
+    pub fn new(
+        analyzer: &str,
+        assets_root: &Path,
+        declared: Option<&str>,
+    ) -> Result<Self, ExecError> {
         let adapter =
             crate::adapter::adapter_for(analyzer).ok_or_else(|| ExecError::UnknownAnalyzer {
                 requested: analyzer.to_owned(),
@@ -422,14 +676,7 @@ impl BoxliteRunner {
             return Err(SandboxError::Unavailable { reason }.into());
         }
 
-        let image = image_for(analyzer).ok_or_else(|| SandboxError::NoImage {
-            requested: analyzer.to_owned(),
-            known: SANDBOX_IMAGES
-                .iter()
-                .map(|i| i.analyzer)
-                .collect::<Vec<_>>()
-                .join(", "),
-        })?;
+        let image = resolve_image(analyzer, declared)?;
 
         let assets = assets::resolve(assets_root, analyzer)?;
         let guest_assets = assets
@@ -468,8 +715,8 @@ impl BoxliteRunner {
 
     /// The image this runner executes in.
     #[must_use]
-    pub fn image(&self) -> &'static SandboxImage {
-        self.image
+    pub fn image(&self) -> &ResolvedImage {
+        &self.image
     }
 
     /// The invocation this runner will execute, with guest-side asset paths.
@@ -536,9 +783,15 @@ impl AnalyzerRunner for BoxliteRunner {
             started_at,
             ended_at,
             // The image's analyzer version rather than one asked for at run
-            // time: the image is immutable, so what it carries is known without
-            // spending a second VM boot to ask it.
-            analyzer_version: Some(self.image.analyzer_version.to_owned()),
+            // time: a *pinned* image is immutable and Roteiro checked what it
+            // carries, so it is known without spending a second VM boot to ask.
+            //
+            // `None` for a user-declared image, and that is the honest answer
+            // rather than a gap — see `ResolvedImage`. The adapter then falls
+            // back to whatever the analyzer said about itself in its own output,
+            // which is a claim by the thing that actually ran instead of a claim
+            // by a table describing a different image.
+            analyzer_version: self.image.analyzer_version.clone(),
             exit_status: output.status,
             source: &request.source,
             rules_digest: self.rules_digest(),
@@ -554,7 +807,7 @@ impl AnalyzerRunner for BoxliteRunner {
         // The one field only this backend can supply. Adapters hardcode `None`
         // because they parse analyzer output, and no analyzer knows what image
         // it was put inside.
-        report.image_digest = Some(self.image.digest.to_owned());
+        report.image_digest = Some(self.image.digest.clone());
 
         assemble(
             report,
@@ -585,7 +838,7 @@ impl BoxliteRunner {
         let options = BoxOptions {
             cpus: Some(GUEST_CPUS),
             memory_mib: Some(GUEST_MEMORY_MIB),
-            rootfs: RootfsSpec::Image(self.image.reference.to_owned()),
+            rootfs: RootfsSpec::Image(self.image.reference.clone()),
             // The boundary, not a configuration flag: no interface is created.
             network: NetworkSpec::Disabled,
             volumes: vec![
@@ -646,12 +899,12 @@ impl BoxliteRunner {
     /// never does. A scan must not be able to fail because a registry was
     /// unreachable, nor to succeed by silently fetching something new.
     async fn require_image(&self, runtime: &BoxliteRuntime) -> Result<(), SandboxError> {
-        if image_present(runtime, self.image).await? {
+        if image_present(runtime, &self.image).await? {
             Ok(())
         } else {
             Err(SandboxError::ImageNotProvisioned {
                 analyzer: self.adapter.analyzer().to_owned(),
-                reference: self.image.reference,
+                reference: self.image.reference.clone(),
             })
         }
     }
@@ -797,61 +1050,49 @@ fn stderr_tail(stderr: &str) -> String {
     format!("\n  its stderr ended:\n  {joined}")
 }
 
-/// Pull the pinned image for `analyzer` into the local store.
+/// Pull the image for `analyzer` into the local store.
 ///
-/// The **only** function in this module that can reach a network, and it is
-/// never called by a run — `roteiro security prefetch --allow-download` calls
-/// it, which is the same split the asset cache uses: provisioning fetches,
-/// running reads.
+/// One of the two functions in this module that can reach a network (the other
+/// is [`pull_reference`], the builder's), and neither is ever called by a run —
+/// `roteiro security prefetch --allow-download` calls it, which is the same split
+/// the asset cache uses: **provisioning fetches, running reads.**
+///
+/// `declared` is the `[security.images]` entry, if any. That it is pulled here
+/// rather than by a run is the point of the rule and not an implementation
+/// detail: a reference from a committed `roteiro.toml` is the one image a
+/// teammate may have chosen for you, and `prefetch` names it before opening a
+/// socket to anything.
 ///
 /// # Errors
-/// Returns [`SandboxError::NoImage`] if this build has no image for the
-/// analyzer, [`SandboxError::Unavailable`] if no sandbox exists here, or
+/// Returns [`SandboxError::NoImage`] if neither a pin nor a declared entry names
+/// an image for the analyzer, [`SandboxError::NoAdapter`] or
+/// [`SandboxError::ImageNotPinned`] if a declared entry is unusable, or
 /// [`SandboxError::Runtime`] if the pull fails.
-pub fn provision_image(analyzer: &str, assets_root: &Path) -> Result<String, SandboxError> {
-    let image = image_for(analyzer).ok_or_else(|| SandboxError::NoImage {
-        requested: analyzer.to_owned(),
-        known: SANDBOX_IMAGES
-            .iter()
-            .map(|i| i.analyzer)
-            .collect::<Vec<_>>()
-            .join(", "),
-    })?;
+pub fn provision_image(
+    analyzer: &str,
+    assets_root: &Path,
+    declared: Option<&str>,
+) -> Result<String, SandboxError> {
+    let image = resolve_image(analyzer, declared)?;
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| SandboxError::Runtime {
-            stage: "runtime",
-            message: e.to_string(),
-        })?;
-
-    runtime.block_on(async {
-        let boxlite = BoxliteRuntime::new(BoxliteOptions {
-            home_dir: assets_root.join("boxlite-home"),
-            image_registries: Vec::new(),
-        })
-        .map_err(|e| SandboxError::Runtime {
-            stage: "open",
-            message: e.to_string(),
-        })?;
-        boxlite
+    blocking(async {
+        open_store(assets_root)?
             .images()
             .map_err(|e| SandboxError::Runtime {
                 stage: "images",
                 message: e.to_string(),
             })?
-            .pull(image.reference)
+            .pull(&image.reference)
             .await
             .map_err(|e| SandboxError::Runtime {
                 stage: "pull",
                 message: e.to_string(),
             })?;
-        Ok(image.digest.to_owned())
+        Ok(image.digest.clone())
     })
 }
 
-/// Whether the pinned image for `analyzer` is already in the local store.
+/// Whether the image `analyzer` would run in is already in the local store.
 ///
 /// The question that has to be asked *before* a run rather than discovered
 /// during one. `provision_image` downloads and a run refuses — but a caller that
@@ -863,40 +1104,19 @@ pub fn provision_image(analyzer: &str, assets_root: &Path) -> Result<String, San
 /// Reads the local store and nothing else. Asking never pulls.
 ///
 /// # Errors
-/// [`SandboxError::NoImage`] if this build has no image for the analyzer, or
+/// [`SandboxError::NoImage`] if neither a pin nor `declared` names an image for
+/// the analyzer, the [`resolve_image`] refusals if `declared` is unusable, or
 /// [`SandboxError::Runtime`] if the local image store cannot be opened or
 /// listed. A store that cannot be read is deliberately an error rather than
 /// `Ok(false)`: "definitely absent" and "could not tell" are different answers,
 /// and only the first one is safe for a caller to treat as a skip.
-pub fn image_is_provisioned(analyzer: &str, assets_root: &Path) -> Result<bool, SandboxError> {
-    let image = image_for(analyzer).ok_or_else(|| SandboxError::NoImage {
-        requested: analyzer.to_owned(),
-        known: SANDBOX_IMAGES
-            .iter()
-            .map(|i| i.analyzer)
-            .collect::<Vec<_>>()
-            .join(", "),
-    })?;
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| SandboxError::Runtime {
-            stage: "runtime",
-            message: e.to_string(),
-        })?;
-
-    runtime.block_on(async {
-        let boxlite = BoxliteRuntime::new(BoxliteOptions {
-            home_dir: assets_root.join("boxlite-home"),
-            image_registries: Vec::new(),
-        })
-        .map_err(|e| SandboxError::Runtime {
-            stage: "open",
-            message: e.to_string(),
-        })?;
-        image_present(&boxlite, image).await
-    })
+pub fn image_is_provisioned(
+    analyzer: &str,
+    assets_root: &Path,
+    declared: Option<&str>,
+) -> Result<bool, SandboxError> {
+    let image = resolve_image(analyzer, declared)?;
+    blocking(async move { image_present(&open_store(assets_root)?, &image).await })
 }
 
 /// Whether `image` is in `runtime`'s local store.
@@ -905,7 +1125,7 @@ pub fn image_is_provisioned(analyzer: &str, assets_root: &Path) -> Result<bool, 
 /// run's own refusal cannot come to different conclusions about the same store.
 async fn image_present(
     runtime: &BoxliteRuntime,
-    image: &SandboxImage,
+    image: &ResolvedImage,
 ) -> Result<bool, SandboxError> {
     let images = runtime
         .images()
@@ -927,31 +1147,18 @@ async fn image_present(
 
 /// The digest an image reference is pinned to, or a refusal naming what to fix.
 ///
-/// The one place the rule is applied, so a user-supplied builder image and a
-/// [`SANDBOX_IMAGES`] entry are held to the same standard — the difference
-/// between them is *who chose*, never *how strong the pin is*.
-///
-/// Checked structurally rather than by looking for an `@`: a reference may carry
-/// a registry port (`host:5000/repo`) and a tag, so "contains a colon" and
-/// "names a digest" are different questions and only one of them is this one.
+/// The rule itself lives in [`crate::image_ref`], ungated, because
+/// `roteiro config` has to report an unpinned reference in a build with no
+/// sandbox in it. This wraps it into the backend's error type and adds nothing —
+/// a `SANDBOX_IMAGES` entry, a user-supplied builder image and a
+/// `[security.images]` entry are one standard, and the difference between them
+/// is *who chose*, never *how strong the pin is*.
 ///
 /// # Errors
 /// Returns [`SandboxError::ImageNotPinned`] if `reference` carries no
 /// `@sha256:<64 hex>` suffix.
 pub fn pinned_digest<'a>(what: &str, reference: &'a str) -> Result<&'a str, SandboxError> {
-    let unpinned = || SandboxError::ImageNotPinned {
-        what: what.to_owned(),
-        reference: reference.to_owned(),
-    };
-    let (_, digest) = reference.rsplit_once('@').ok_or_else(unpinned)?;
-    let hex = digest.strip_prefix("sha256:").ok_or_else(unpinned)?;
-    // Length *and* alphabet: `@sha256:` followed by anything at all would
-    // otherwise satisfy a prefix check while naming nothing.
-    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(digest)
-    } else {
-        Err(unpinned())
-    }
+    crate::image_ref::pinned_digest(what, reference).map_err(SandboxError::from)
 }
 
 /// Open the local image store under `assets_root`, pulling nothing.
@@ -1059,9 +1266,21 @@ pub fn reference_is_present(
 #[cfg(test)]
 mod tests {
     use super::{
-        GUEST_ASSETS, GUEST_WORKTREE, MAX_OUTPUT_BYTES, SANDBOX_IMAGES, guest_environment,
-        image_for, sandbox_probe, stderr_tail,
+        GUEST_ASSETS, GUEST_WORKTREE, ImageSource, MAX_OUTPUT_BYTES, SANDBOX_IMAGES,
+        guest_environment, image_for, image_inventory, resolve_image, sandbox_probe, stderr_tail,
     };
+
+    /// A digest-shaped reference nobody has to read twice.
+    fn reference(name: &str) -> String {
+        format!("registry.example/you/{name}@sha256:{}", "b".repeat(64))
+    }
+
+    /// The analyzer that has a built-in pin, taken from the table rather than
+    /// spelled out — a test naming `semgrep` would start lying the day the pin
+    /// moves, and this file's subject is the *composition*, not that entry.
+    fn pinned_analyzer() -> &'static str {
+        SANDBOX_IMAGES.first().expect("a pinned image").analyzer
+    }
 
     /// Every pinned image must name a digest, and the reference must *be* that
     /// digest — a tag would make the "reproducible" claim false, and a
@@ -1098,54 +1317,153 @@ mod tests {
         }
     }
 
-    /// An image reference is pinned by digest or it is refused, and this is the
-    /// one place that decides it — for a [`SANDBOX_IMAGES`] entry and for a
-    /// user-supplied builder image alike. The difference between them is *who
-    /// chose*, never *how strong the pin is*.
-    ///
-    /// The rejections matter more than the acceptance. A prefix check would let
-    /// `@sha256:` followed by anything through, and a "contains a colon" check
-    /// would reject a registry port — so both the alphabet and the length are
-    /// checked, and a port is not confused for a tag.
+    /// With nothing declared, resolution is exactly the table it always was —
+    /// including the version it vouches for.
     #[test]
-    fn an_image_is_pinned_by_digest_or_it_is_refused() {
-        let hex = "a".repeat(64);
-        for pinned in [
-            format!("docker.io/library/rust@sha256:{hex}"),
-            // A registry with a port, which contains a colon and is not a tag.
-            format!("registry.internal:5000/team/rust-clippy@sha256:{hex}"),
-            // A tag *and* a digest: the digest is what resolves, so this is
-            // pinned. Refusing it would reject what `docker pull` prints.
-            format!("docker.io/library/rust:1.97.1@sha256:{hex}"),
-        ] {
+    fn an_undeclared_analyzer_resolves_to_its_built_in_pin() {
+        for image in SANDBOX_IMAGES {
+            let resolved = resolve_image(image.analyzer, None).expect("a pinned analyzer");
+            assert_eq!(resolved.reference, image.reference);
+            assert_eq!(resolved.digest, image.digest);
+            assert_eq!(resolved.source, ImageSource::BuiltIn);
             assert_eq!(
-                super::pinned_digest("test", &pinned).expect("pinned"),
-                format!("sha256:{hex}"),
-                "{pinned}"
+                resolved.analyzer_version.as_deref(),
+                Some(image.analyzer_version),
+                "a pinned image states what it carries, and that is why it is pinned"
             );
         }
+    }
 
-        for unpinned in [
-            "docker.io/library/rust".to_owned(),
-            "docker.io/library/rust:1.97.1".to_owned(),
-            "registry.internal:5000/team/rust-clippy:latest".to_owned(),
-            // Digest-shaped and not a digest: a prefix check would pass these.
-            "x@sha256:".to_owned(),
-            "x@sha256:deadbeef".to_owned(),
-            format!("x@sha256:{}", "a".repeat(63)),
-            format!("x@sha256:{}", "a".repeat(65)),
-            format!("x@sha256:{}z", "a".repeat(63)),
-            format!("x@sha512:{hex}"),
-        ] {
-            let err = super::pinned_digest("`[lint] image`", &unpinned)
-                .expect_err(&format!("{unpinned} must be refused"));
-            let message = err.to_string();
-            // A refusal names what to change and shows the shape it wants —
-            // this one is met by people who have only ever typed a tag.
-            assert!(message.contains("`[lint] image`"), "{message}");
-            assert!(message.contains("@sha256:"), "{message}");
-            assert!(message.contains("imagetools inspect"), "{message}");
-        }
+    /// The gap issue #434 is about: an analyzer with no pin is host-only until
+    /// somebody declares an image, and then it is not.
+    #[test]
+    fn a_declared_image_gives_an_unpinned_analyzer_a_sandbox() {
+        let unpinned = crate::adapter::known_analyzers()
+            .into_iter()
+            .find(|a| image_for(a).is_none())
+            .expect("an analyzer with no built-in image — the whole premise of #434");
+
+        let refusal = resolve_image(unpinned, None).expect_err("no image, no sandbox");
+        let message = refusal.to_string();
+        // A refusal names the way forward, and the way forward is now this key.
+        assert!(message.contains("[security.images]"), "{message}");
+        assert!(message.contains(unpinned), "{message}");
+        assert!(message.contains("security ingest"), "{message}");
+
+        let declared = reference(unpinned);
+        let resolved = resolve_image(unpinned, Some(&declared)).expect("declared");
+        assert_eq!(resolved.reference, declared);
+        assert_eq!(resolved.digest, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(resolved.source, ImageSource::UserDeclared);
+    }
+
+    /// **The override decision, executed rather than argued.** A declared entry
+    /// wins over a built-in pin — and the version Roteiro would have asserted
+    /// about the pinned image is dropped rather than carried over, because
+    /// repeating it would be evidence describing an image that was not run.
+    #[test]
+    fn a_declared_image_replaces_a_built_in_pin_and_stops_asserting_its_version() {
+        let analyzer = pinned_analyzer();
+        let pinned = resolve_image(analyzer, None).expect("pinned");
+        assert!(pinned.analyzer_version.is_some());
+
+        let declared = reference(analyzer);
+        let resolved = resolve_image(analyzer, Some(&declared)).expect("declared");
+        assert_eq!(resolved.reference, declared);
+        assert_ne!(resolved.reference, pinned.reference);
+        assert_eq!(
+            resolved.source,
+            ImageSource::Overrides,
+            "replacing a pin is its own state, because it is the case somebody might not have meant"
+        );
+        assert_eq!(
+            resolved.analyzer_version, None,
+            "Roteiro must not restate a table's version for an image it did not choose"
+        );
+        // And the difference is legible without reading this test.
+        assert!(resolved.source.as_str().contains("replaces"));
+        assert!(!resolved.source.is_built_in());
+    }
+
+    /// A tag is refused wherever it is written, and the refusal names the entry
+    /// rather than leaving the reader to find which of several it meant.
+    #[test]
+    fn a_declared_tag_is_refused_and_names_its_own_key() {
+        let analyzer = pinned_analyzer();
+        let err = resolve_image(analyzer, Some("registry.example/you/thing:latest"))
+            .expect_err("a tag must not be accepted from config either");
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("`[security.images] {analyzer}`")),
+            "{message}"
+        );
+        assert!(
+            message.contains("registry.example/you/thing:latest"),
+            "{message}"
+        );
+        assert!(message.contains("@sha256:"), "{message}");
+    }
+
+    /// **The constraint that must not be discovered after a VM has booted.** An
+    /// image can only serve an analyzer Roteiro already has a parser for, and a
+    /// key naming anything else is refused at the key.
+    #[test]
+    fn a_declared_image_for_an_analyzer_with_no_adapter_is_refused() {
+        let declared = reference("my-favourite-linter");
+        let err = resolve_image("my-favourite-linter", Some(&declared))
+            .expect_err("no adapter, no findings");
+        let message = err.to_string();
+        assert!(message.contains("my-favourite-linter"), "{message}");
+        assert!(message.contains("adapter"), "{message}");
+        // Named before the pin is even looked at, so a perfectly pinned image
+        // for the wrong tool still fails on the reason that matters.
+        assert!(!message.contains("tag rather than a digest"), "{message}");
+        // And it names what a reader can do instead.
+        assert!(message.contains("security ingest"), "{message}");
+
+        // The same key with a *tag* still reports the adapter first: the
+        // ordering is deliberate, so fixing the pin would not have helped.
+        let tagged =
+            resolve_image("my-favourite-linter", Some("x:latest")).expect_err("still no adapter");
+        assert!(tagged.to_string().contains("adapter"), "{tagged}");
+    }
+
+    /// The inventory is the union, in a stable order, and it validates every
+    /// declared entry rather than only the ones somebody happens to run.
+    #[test]
+    fn the_inventory_is_the_union_of_the_table_and_the_declarations() {
+        let analyzer = pinned_analyzer();
+        let unpinned = crate::adapter::known_analyzers()
+            .into_iter()
+            .find(|a| image_for(a).is_none())
+            .expect("an analyzer with no built-in image");
+
+        let declared = vec![(unpinned.to_owned(), reference(unpinned))];
+        let inventory = image_inventory(&declared).expect("valid");
+        let names: Vec<&str> = inventory.iter().map(|i| i.analyzer.as_str()).collect();
+        assert!(names.contains(&analyzer), "the pin survives: {names:?}");
+        assert!(
+            names.contains(&unpinned),
+            "the declaration joins: {names:?}"
+        );
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            names, sorted,
+            "a status listing must not reorder run to run"
+        );
+
+        // An entry nobody would run is still checked, which is the point: a typo
+        // in a committed file must fail at `status`, not lie dormant.
+        let bad = vec![("nonesuch".to_owned(), reference("nonesuch"))];
+        let err = image_inventory(&bad).expect_err("an unknown analyzer is a refusal");
+        assert!(err.to_string().contains("nonesuch"), "{err}");
+
+        assert_eq!(
+            image_inventory(&[]).expect("no declarations").len(),
+            SANDBOX_IMAGES.len(),
+            "with nothing declared the inventory is exactly the table"
+        );
     }
 
     /// The registry is what `image_for` answers from, so an entry nobody can

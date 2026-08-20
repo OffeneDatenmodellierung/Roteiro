@@ -135,6 +135,14 @@ pub mod file_url;
 /// refusals leaked source indentation into shipped output at once, which says
 /// the way they were written invited it.
 pub mod guidance;
+/// Whether an image reference is pinned by a digest — the one place that decides.
+///
+/// Ungated, like [`guidance`], and for a reason of the same shape: the rule is
+/// about a string somebody wrote in a config file, not about which backends were
+/// compiled in. `roteiro config` reports an unpinned reference in a build with no
+/// sandbox at all, and a second copy of the check written for that purpose is how
+/// one of the two ends up laxer than the other.
+pub mod image_ref;
 mod ingest;
 /// Running a linter and **reporting** it, with no store anywhere in the path.
 ///
@@ -229,6 +237,7 @@ pub use crossref::{
     Correspondence, Report, across_analyzers as cross_reference_across_analyzers, cross_reference,
 };
 pub use guidance::{Guidance, Line as GuidanceLine};
+pub use image_ref::{NotPinned, pinned_digest as image_pinned_digest};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
     normalize_native,

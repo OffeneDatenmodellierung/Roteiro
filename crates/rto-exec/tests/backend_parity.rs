@@ -1,13 +1,42 @@
-//! Stage 24's definition of done, executed rather than argued.
+//! Stage 24's definition of done, **re-scoped by issue #434**, executed rather
+//! than argued.
 //!
 //! > The same analyzer produces the same findings via subprocess and via
-//! > boxlite, differing only in the isolation label and image digest.
+//! > boxlite **when the sandboxed run uses the image Roteiro pinned**,
+//! > differing only in the isolation label and image digest.
 //!
 //! This runs a **real `semgrep`** twice over the same tree — once as a host
 //! child process, once inside a digest-pinned microVM — and compares what comes
 //! back. It is not a mock: if the two disagree, something in the normalized
 //! schema is leaking the environment it ran in, and that matters more than the
 //! backend does.
+//!
+//! # The clause in bold is new, and leaving it out would have made this test a lie
+//!
+//! Until #434 there was one image per analyzer, compiled in, so "the sandboxed
+//! run" and "the pinned image" were the same thing and the definition of done did not have to
+//! say which it meant. `[security.images]` separates them, and the original
+//! sentence does not survive the separation: **the parity claim is false by
+//! construction once the image is user-chosen.** A different image carries a
+//! different `semgrep`, and a different `semgrep` legitimately finds different
+//! things — so `analyzer_version` and the finding set may both differ with no
+//! defect anywhere.
+//!
+//! The dangerous part is that this file would have gone on passing. It builds
+//! its own runner and would have kept selecting the built-in pin, staying green
+//! while defending a claim the feature no longer makes — a green test whose
+//! subject has moved, which is worse than no test because it is read as
+//! coverage. So the subject is now **asserted** rather than assumed: both tests
+//! check that what they ran was the built-in pin, and
+//! [`a_user_declared_image_makes_no_parity_claim`] states the boundary of the
+//! claim in the same file, so the narrowing is legible to whoever reads this
+//! next rather than living only in ADR-0014 v1.8.
+//!
+//! What is **not** narrowed: the digest recorded on a run is the digest of the
+//! image that actually ran, whoever chose it. Provenance did not weaken — if
+//! anything it strengthened, since Roteiro now declines to assert an analyzer
+//! version for an image it did not choose (`ResolvedImage::analyzer_version`),
+//! where before it restated a table's answer.
 //!
 //! # Why the comparison is meaningful rather than circular
 //!
@@ -26,6 +55,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rto_exec::boxlite::{ImageSource, resolve_image};
 use rto_exec::{
     AnalysisRequest, AnalyzerRunner, BoxliteRunner, Consent, SubprocessRunner, Worktree,
 };
@@ -80,7 +110,18 @@ fn the_same_analyzer_gives_the_same_findings_in_both_backends() {
     };
 
     let host = SubprocessRunner::new("semgrep", &root, true).expect("subprocess runner");
-    let sandbox = BoxliteRunner::new("semgrep", &root).expect("boxlite runner");
+    // `None`: the built-in pin, explicitly, never whatever `[security.images]`
+    // happens to hold. This test's whole subject is the pinned image, and a
+    // runner that read ambient configuration could silently change what it was
+    // comparing — which is the failure #434 flagged.
+    let sandbox = BoxliteRunner::new("semgrep", &root, None).expect("boxlite runner");
+    assert_eq!(
+        sandbox.image().source,
+        ImageSource::BuiltIn,
+        "this test's claim is about the image Roteiro pinned; if it ever runs another one \
+         the definition of done above is false by construction and the failure must be here rather than \
+         silently absent"
+    );
 
     let host_run = host.run(&request).expect("the host scan must succeed");
     let sandbox_run = sandbox
@@ -117,7 +158,7 @@ fn the_same_analyzer_gives_the_same_findings_in_both_backends() {
     assert_eq!(a.image_digest, None, "a host run ran in no image");
     assert_eq!(
         b.image_digest.as_deref(),
-        Some(sandbox.image().digest),
+        Some(sandbox.image().digest.as_str()),
         "a sandboxed run must stamp the image it ran in"
     );
 
@@ -127,7 +168,9 @@ fn the_same_analyzer_gives_the_same_findings_in_both_backends() {
         a.analyzer_version, b.analyzer_version,
         "the pinned image must carry the same semgrep as the host, or the two runs \
          are not comparable — repin SANDBOX_IMAGES to match, or install the matching host \
-         version"
+         version.\n         This is the assertion #434 narrows: it holds because Roteiro \
+         chose the image and knows what it carries. Under `[security.images]` it could not, \
+         which is why that case is not a parity case"
     );
     assert_eq!(
         a.rules_digest, b.rules_digest,
@@ -174,7 +217,11 @@ fn a_provisioned_sandbox_scans_with_no_network() {
     };
     let tree = fixture_tree();
 
-    let sandbox = BoxliteRunner::new("semgrep", &root).expect("boxlite runner");
+    // The built-in pin, for `the_same_analyzer_gives_the_same_findings_in_both_backends`'s
+    // reason: "offline once provisioned" is a claim about an image whose
+    // provisioning Roteiro can describe.
+    let sandbox = BoxliteRunner::new("semgrep", &root, None).expect("boxlite runner");
+    assert_eq!(sandbox.image().source, ImageSource::BuiltIn);
     let response = sandbox
         .run(&AnalysisRequest {
             analyzer: "semgrep".to_owned(),
@@ -189,11 +236,57 @@ fn a_provisioned_sandbox_scans_with_no_network() {
     assert_eq!(response.run.isolation, Isolation::MicroVm);
     assert_eq!(
         response.run.image_digest.as_deref(),
-        Some(sandbox.image().digest)
+        Some(sandbox.image().digest.as_str())
     );
     eprintln!(
         "OFFLINE OK: {} findings from a guest with no network interface",
         response.findings.len()
+    );
+}
+
+/// The boundary of the claim above, stated in the file that makes it.
+///
+/// **The narrowing is not a caveat in an ADR; it is a property of the code, and
+/// this is where it is checked.** Resolve the same analyzer against a declared
+/// image and two things change at once, both of which break parity by
+/// construction rather than by defect:
+///
+/// - a **different digest**, so the two runs are not running the same `semgrep`;
+/// - **no asserted version**, because Roteiro will not restate a table's answer
+///   about an image it did not choose — so the `analyzer_version` equality that
+///   is the heart of "the same analyzer" has nothing on one side to compare.
+///
+/// Needs no hypervisor and no image, which is the point: it is the half of the
+/// re-scoping that runs everywhere, including on the CI runner where the parity
+/// tests above skip. A narrowing that were only checked on a machine with
+/// virtualisation would be a narrowing nobody's CI ever reads.
+#[test]
+fn a_user_declared_image_makes_no_parity_claim() {
+    let pinned = resolve_image("semgrep", None).expect("semgrep is the pinned analyzer");
+    assert_eq!(pinned.source, ImageSource::BuiltIn);
+    assert!(
+        pinned.analyzer_version.is_some(),
+        "the parity assertion rests on this: Roteiro knows what its own pin carries"
+    );
+
+    let declared = format!("registry.example/you/semgrep@sha256:{}", "c".repeat(64));
+    let chosen = resolve_image("semgrep", Some(&declared)).expect("a pinned reference");
+
+    assert_eq!(chosen.source, ImageSource::Overrides);
+    assert_ne!(
+        chosen.digest, pinned.digest,
+        "a declared image is a different image, so 'the same analyzer' is not what ran"
+    );
+    assert_eq!(
+        chosen.analyzer_version, None,
+        "and Roteiro stops asserting a version it cannot vouch for, which is exactly the \
+         field the parity comparison turns on"
+    );
+
+    eprintln!(
+        "SCOPE: parity is asserted for {} only; a declared image records its own digest \
+         and no asserted version",
+        pinned.reference
     );
 }
 
@@ -232,7 +325,7 @@ fn preconditions() -> Option<PathBuf> {
     }
 
     // The image is never pulled by a run, and this test is a run.
-    if let Err(e) = BoxliteRunner::new("semgrep", &root) {
+    if let Err(e) = BoxliteRunner::new("semgrep", &root, None) {
         eprintln!(
             "SKIPPED: the sandboxed backend is not ready on this host: {e}\n         \
              provision it with `roteiro security prefetch --analyzer sandbox --allow-download`"
@@ -246,7 +339,7 @@ fn preconditions() -> Option<PathBuf> {
     // surfaced as `ImageNotProvisioned` from the assertion itself. A skipped
     // step reading as a broken backend is the failure this check exists to
     // prevent, and it is why the recipe below is spelled out rather than named.
-    match rto_exec::boxlite::image_is_provisioned("semgrep", &root) {
+    match rto_exec::boxlite::image_is_provisioned("semgrep", &root, None) {
         Ok(true) => Some(root),
         Ok(false) => {
             eprintln!(
