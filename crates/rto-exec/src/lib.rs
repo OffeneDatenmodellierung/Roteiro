@@ -237,7 +237,7 @@ pub use crossref::{
     Correspondence, Report, across_analyzers as cross_reference_across_analyzers, cross_reference,
 };
 pub use guidance::{Guidance, Line as GuidanceLine};
-pub use image_ref::{NotPinned, pinned_digest as image_pinned_digest};
+pub use image_ref::{NotPinned, PinDefect, pinned_digest as image_pinned_digest};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
     normalize_native,

@@ -291,8 +291,9 @@ impl ResolvedImage {
 ///
 /// # Errors
 /// [`SandboxError::NoAdapter`] if `declared` is given for an analyzer this build
-/// cannot normalise, [`SandboxError::ImageNotPinned`] if it names a tag, or
-/// [`SandboxError::NoImage`] if there is neither a declared entry nor a pin.
+/// cannot normalise, [`SandboxError::ImageNotPinned`] if it is not pinned by a
+/// sha256 digest, or [`SandboxError::NoImage`] if there is neither a declared
+/// entry nor a pin.
 pub fn resolve_image(
     analyzer: &str,
     declared: Option<&str>,
@@ -518,15 +519,20 @@ pub enum SandboxError {
         /// necessarily one compiled into the binary.
         reference: String,
     },
-    /// An image reference names a tag rather than a digest.
+    /// An image reference is not pinned by a sha256 digest.
     ///
-    /// Refused for user-supplied images as well as pinned ones, and the reason
-    /// is **not** the reproducibility argument ADR-0020 retires for builders. It
-    /// is that the image *is* the boundary. A guest is where somebody else's
-    /// code executes, and a tag is a mutable pointer to it: the contents can be
+    /// Refused for user-supplied images as well as pinned ones. Where the
+    /// reference is a **tag**, the reason is **not** the reproducibility
+    /// argument ADR-0020 retires for builders: it is that the image *is* the
+    /// boundary, and a tag is a mutable pointer to it — the contents can be
     /// replaced by whoever controls the tag, with no version change and no
     /// notice, and the run would go on reporting success. You may choose your
     /// own boundary; you may not choose one that can be swapped under you.
+    ///
+    /// A tag is only one of the four ways to fail the check, and the other three
+    /// belong to people who have already pinned; which one applies is carried by
+    /// [`crate::image_ref::PinDefect`] and decides both the sentence and the
+    /// guidance.
     ///
     /// Transparent over [`crate::image_ref::NotPinned`] rather than a second
     /// declaration of the same fields: the message a reader sees must not depend
