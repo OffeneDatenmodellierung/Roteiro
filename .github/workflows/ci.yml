@@ -205,9 +205,32 @@ jobs:
       #
       # To raise it: on the new toolchain run `cargo clippy --workspace
       # --all-targets --all-features -- -D warnings` and the default-features
-      # equivalent, fix what they find, and bump all four `toolchain:` values in
-      # this file in the same commit. Do that when a release has settled, not on
-      # the day it ships.
+      # equivalent, fix what they find, and bump every pinned `toolchain:` value
+      # in the same commit. Do that when a release has settled, not on the day
+      # it ships.
+      #
+      # There are seven, and they are no longer all in this file — the last
+      # three floats have since been pinned too, so grep rather than trusting
+      # this list:
+      #
+      #   * `ci.yml` — `checks`, `default-features`, `no-default-features`,
+      #     `coverage` (four).
+      #   * `graph-artifact.yml` — `publish` (one).
+      #   * `release-plz.yml` — `release-plz-pr` and `release-plz-release`
+      #     (two). The second one publishes to crates.io; see the comment there
+      #     for why it must not lag behind `checks`.
+      #
+      # `msrv` here and both jobs in `website.yml` are pinned to the MSRV
+      # instead, and do NOT move with this bump. The one-line check that the
+      # split is still what you expect:
+      #
+      #   grep -rn 'toolchain: "' .github/workflows/
+      #
+      # It matches this comment line too, unavoidably. Expect ten real
+      # values: seven at the pinned version, three at the MSRV.
+      #
+      # A toolchain the canary has already flagged is a toolchain this bump is
+      # overdue for; see `toolchain-canary.yml`.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.98"
@@ -402,8 +425,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned toolchain, `master` ref of the action; see the `checks` job for
-      # why, and for what raising it involves. Bumped with the other three, in
-      # one commit, never alone.
+      # why, and for what raising it involves. Bumped with the other six, in one
+      # commit, never alone — three of them now live in `graph-artifact.yml` and
+      # `release-plz.yml`, so the bump is not confined to this file.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.98"
@@ -479,8 +503,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned toolchain, `master` ref of the action; see the `checks` job for
-      # why, and for what raising it involves. Bumped with the other three, in
-      # one commit, never alone.
+      # why, and for what raising it involves. Bumped with the other six, in one
+      # commit, never alone — three of them now live in `graph-artifact.yml` and
+      # `release-plz.yml`, so the bump is not confined to this file.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.98"
