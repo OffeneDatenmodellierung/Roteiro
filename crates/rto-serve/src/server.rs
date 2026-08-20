@@ -27,8 +27,15 @@ use crate::types::{
     FunctionCallDto, ModelList, ModelObject, ToolCallDelta, ToolCallDto, Usage,
 };
 
-/// How many tool round-trips a single request may take before the model's last
-/// output is returned regardless (ADR-0006 server-side execute-and-loop).
+/// How many tool round-trips a single request may take (ADR-0006 server-side
+/// execute-and-loop). One further generation runs after the budget is spent, so
+/// the last tool result informs the answer.
+///
+/// A model still calling tools in *that* generation has run out of rounds
+/// without reaching an answer, and is refused rather than published (#489). The
+/// refusal names this constant by name and file — `tools::still_calling_refusal`
+/// — because raising it is the way forward for a reader who keeps meeting it, so
+/// a rename here must update that message.
 const MAX_TOOL_ROUNDS: usize = 4;
 
 /// Shared handler state: the inference engine, optionally the graph tools the
@@ -635,6 +642,16 @@ fn stream_chat(
             // The tool loop runs multiple generations, so it is resolved fully
             // and then the final answer is emitted as one delta (tool-mode
             // streaming is not token-incremental).
+            //
+            // The same two branches as `build_response`, and markup-free for the
+            // same reason: content is emitted only when there are no client
+            // calls, and an outcome with no client calls came through
+            // `tools::finish`. Resolving the loop first is also what makes that
+            // possible here at all — a token-incremental stream has already sent
+            // the first half of a call before anything can judge it. Which is
+            // why the else-branch below, where no tools are advertised and the
+            // loop is not used, streams raw: nothing there injected the tool
+            // prompt, so nothing there assigned `<tool_call>` a meaning.
             match complete(&state, &req, &scope, &client_tools) {
                 Ok(outcome) if !outcome.client_tool_calls.is_empty() => {
                     let _ = tx.send(StreamMsg::ToolCalls(tool_call_dtos(
@@ -767,10 +784,19 @@ fn chunk_json(
 
 /// Assemble the OpenAI response body from a tool-loop [`ToolLoopOutcome`].
 ///
-/// A turn that called the client's tools reports `finish_reason: "tool_calls"`
-/// with `content: null` and the structured calls — the model's raw `<tool_call>`
-/// markup is *not* passed through as the assistant's answer, which is exactly the
-/// silent-wrong-answer shape #489 describes.
+/// Neither branch can publish tool-call markup as the assistant's answer (#489),
+/// and between them they cover the outcome:
+///
+/// * With client calls, this reports `finish_reason: "tool_calls"` and
+///   `content: null`, so the raw markup in `completion.content` is not rendered.
+/// * Without them, `content` is whatever `tools::finish` passed — and that is
+///   the one place a generation is declared to be the user's answer, so it
+///   carries no markup to publish.
+///
+/// The requirement on *this* function is therefore only the OpenAI one it
+/// already meets: do not render `content` beside `tool_calls`. It is not
+/// separately responsible for inspecting the text, and it must not become so —
+/// a check at each render site is what let the defect survive in three places.
 fn build_response(model: &str, outcome: &ToolLoopOutcome) -> ChatCompletionResponse {
     let completion = &outcome.completion;
     let (content, tool_calls, finish_reason) = if outcome.client_tool_calls.is_empty() {
