@@ -416,7 +416,7 @@ fn decode_samples(
     }
     // A `data` chunk that is not a whole number of samples is a corrupt or
     // truncated file. **Abstain rather than measure the aligned prefix**: the
-    // decoders below use `as_chunks`, which yields only the complete chunks
+    // decoders below (for multi-byte sample widths) use `as_chunks`, which yields only the complete chunks
     // and silently drops the remainder, so measuring anyway would report an
     // RMS for part of a clip and could refuse a blob on the strength of it.
     // That is a false skip — a silently missing description — and avoiding it
