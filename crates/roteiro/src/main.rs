@@ -1797,7 +1797,11 @@ fn main() -> anyhow::Result<()> {
             image.as_deref().or(cfg.effective.lint.image.as_deref()),
         ),
         #[cfg(feature = "execution")]
-        Command::Security { action } => run_security(action, cfg.effective.lint.image.as_deref()),
+        Command::Security { action } => run_security(
+            action,
+            cfg.effective.lint.image.as_deref(),
+            &cfg.effective.security,
+        ),
         #[cfg(feature = "execution")]
         Command::Sandbox { action } => run_sandbox(action),
         #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
@@ -2106,6 +2110,7 @@ fn print_config_sections(loaded: &config::Loaded) {
     );
     print_remote_section(loaded);
     print_lint_section(loaded);
+    print_security_section(loaded);
     print_debt_section(loaded);
     print_telemetry_section(e, p, u);
     print_workspace_section(loaded);
@@ -2233,6 +2238,52 @@ fn print_lint_section(_loaded: &config::Loaded) {
         "\n[lint]  (ADR-0020 §6 — not built: this binary has no `roteiro lint`, so nothing here \
          permits anything, whatever the keys say)"
     );
+}
+
+/// Print `[security]` — the images analyzers are sandboxed in, per layer.
+///
+/// Its own function beside [`print_lint_section`], and the header names the
+/// precedence *because* it sits next to a table that does not follow it. `[lint]`
+/// holds one key that inverts and one that does not; this table holds only
+/// locators, so a reader coming from the section above has to be told that the
+/// ordinary rule is back, rather than left to infer which of the two neighbours
+/// they are looking at.
+///
+/// It **reports** a bad entry rather than refusing over one. That is ADR-0007
+/// v1.3's rule and it is not a softening: the refusal fires at every consuming
+/// site, and this is the command an operator runs precisely because a key is not
+/// doing what they expected — the one command it must not stop.
+fn print_security_section(loaded: &config::Loaded) {
+    println!("\n[security]  (ADR-0014 — locators, so ordinary precedence: project over user)");
+    let effective = &loaded.effective.security.images;
+    if effective.is_empty() {
+        println!(
+            "  images = {{}}  — nothing declared, so `security run` uses only the images this \
+             build pins. An analyzer with no pin has no sandboxed path; declare one under \
+             `[security.images]` to give it one. See docs/SANDBOXED_LINTING.md."
+        );
+    } else {
+        for (analyzer, reference) in effective {
+            // Per entry rather than per table, for the reason `[debt] ignore`
+            // reports per pattern: the effective map can hold entries from both
+            // layers at once, so one label for the table would be a lie.
+            let layer = match (
+                loaded.project.security.images.get(analyzer),
+                loaded.user.security.images.get(analyzer),
+            ) {
+                (Some(_), Some(_)) => "project (over user)",
+                (Some(_), None) => "project",
+                (None, Some(_)) => "user",
+                (None, None) => "unknown",
+            };
+            println!("  images.{analyzer} = {reference:?}  ({layer})");
+        }
+    }
+    for problem in loaded.effective.security.problems() {
+        // Named as read-and-refused rather than printed bare, so nobody reads
+        // this section as a list of settings that are in force.
+        println!("  ** this entry is refused wherever it is used: {problem}");
+    }
 }
 
 /// Print `[models]`: the five keys as set, each with the layer that set it, then
@@ -8000,8 +8051,18 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
 /// `prefetch` because a builder's image is **supplied rather than pinned by
 /// Roteiro** (ADR-0020 conditions 1-2): there is no entry in `SANDBOX_IMAGES` to
 /// iterate for it, so the only place that knows what to pull is the config.
+///
+/// `security` is `[security.images]`, and it reaches three actions rather than
+/// one. `run` needs the image it is about to boot; `prefetch` needs it for the
+/// same reason `lint_image` does, since a declared image is not in any table to
+/// iterate; and `status` needs it because a reader who cannot tell a built-in
+/// image from a declared one has lost the thing the pin was for (issue #434).
 #[cfg(feature = "execution")]
-fn run_security(action: SecurityAction, lint_image: Option<&str>) -> anyhow::Result<()> {
+fn run_security(
+    action: SecurityAction,
+    lint_image: Option<&str>,
+    security: &config::SecurityConfig,
+) -> anyhow::Result<()> {
     match action {
         SecurityAction::Ingest {
             file,
@@ -8018,6 +8079,7 @@ fn run_security(action: SecurityAction, lint_image: Option<&str>) -> anyhow::Res
             &analyzer,
             select_backend(sandboxed, allow_unsandboxed),
             json,
+            security.image_for(&analyzer),
         ),
         #[cfg(feature = "execution")]
         SecurityAction::Prefetch {
@@ -8030,9 +8092,12 @@ fn run_security(action: SecurityAction, lint_image: Option<&str>) -> anyhow::Res
             allow_download,
             json,
             image.as_deref().or(lint_image),
+            security,
         ),
         #[cfg(feature = "execution")]
-        SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
+        SecurityAction::Status { analyzer, json } => {
+            run_security_status(analyzer.as_deref(), json, security)
+        }
     }
 }
 
@@ -8875,9 +8940,17 @@ fn select_backend(sandboxed: bool, allow_unsandboxed: bool) -> RunBackend {
 /// substitutes the other backend**, so the `runner` and `isolation` recorded on
 /// the stored layer are always the ones the user asked for.
 #[cfg(feature = "execution")]
-fn run_security_run(analyzer: &str, backend: RunBackend, json: bool) -> anyhow::Result<()> {
+fn run_security_run(
+    analyzer: &str,
+    backend: RunBackend,
+    json: bool,
+    declared_image: Option<&str>,
+) -> anyhow::Result<()> {
     match backend {
-        RunBackend::Sandboxed => run_security_run_sandboxed(analyzer, json),
+        RunBackend::Sandboxed => run_security_run_sandboxed(analyzer, json, declared_image),
+        // A host run has no image, so `[security.images]` is not consulted and
+        // not silently ignored either: there is nothing for it to name. The
+        // recorded `isolation=none` is the whole of what that run is.
         RunBackend::Subprocess => run_security_run_on_this_host(analyzer, json),
     }
 }
@@ -8890,29 +8963,34 @@ fn run_security_run(analyzer: &str, backend: RunBackend, json: bool) -> anyhow::
 /// this adds no wording of its own — a second, paraphrased copy of a message
 /// that lives in `rto-exec` is a copy that goes stale.
 #[cfg(all(feature = "execution", feature = "exec-boxlite"))]
-fn run_security_run_sandboxed(analyzer: &str, json: bool) -> anyhow::Result<()> {
+fn run_security_run_sandboxed(
+    analyzer: &str,
+    json: bool,
+    declared_image: Option<&str>,
+) -> anyhow::Result<()> {
     use rto_exec::BoxliteRunner;
 
     let root = rto_exec::asset_root();
-    let runner = BoxliteRunner::new(analyzer, &root)?;
-    let image = runner.image();
+    let runner = BoxliteRunner::new(analyzer, &root, declared_image)?;
+    let reference = runner.image().reference.clone();
 
     // Preflight the local image store. The backend checks this too, but only
     // after it has opened a runtime and started building a box — so without
     // this, the commonest first-run failure on a provisioned host arrives after
     // a visible pause, looking like something broke rather than something was
     // never fetched. `roteiro` never pulls during a run, so the answer cannot be
-    // to fetch it here.
-    if !rto_exec::boxlite::image_is_provisioned(analyzer, &root)? {
+    // to fetch it here — and that is as true of an image the operator declared
+    // as of one Roteiro pinned.
+    if !rto_exec::boxlite::image_is_provisioned(analyzer, &root, declared_image)? {
         return Err(rto_exec::boxlite::SandboxError::ImageNotProvisioned {
             analyzer: analyzer.to_owned(),
-            reference: image.reference,
+            reference,
         }
         .into());
     }
 
     let invocation = runner.invocation();
-    execute_and_file(&runner, analyzer, invocation, Some(image.reference), json)
+    execute_and_file(&runner, analyzer, invocation, Some(&reference), json)
 }
 
 /// The same command in a build without `exec-boxlite`, which is every stock
@@ -8929,7 +9007,11 @@ fn run_security_run_sandboxed(analyzer: &str, json: bool) -> anyhow::Result<()> 
 /// thing the user may choose — but it is stated as a downgrade with its
 /// consequence attached, not as a fallback this command would take on its own.
 #[cfg(all(feature = "execution", not(feature = "exec-boxlite")))]
-fn run_security_run_sandboxed(analyzer: &str, _json: bool) -> anyhow::Result<()> {
+fn run_security_run_sandboxed(
+    analyzer: &str,
+    _json: bool,
+    _declared_image: Option<&str>,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "sandbox-unavailable: `roteiro security run {analyzer}` runs sandboxed by default, and \
          this build has no sandbox backend — `exec-boxlite` was not compiled in. It is not in the \
@@ -9778,6 +9860,61 @@ fn assets_to_prefetch(analyzer: Option<&str>) -> anyhow::Result<Vec<&'static rto
     Ok(specs)
 }
 
+/// Pull every sandbox image this configuration would run, reporting failures.
+///
+/// Lifted out of [`run_security_prefetch`] because it grew a second source and
+/// with it a fallible resolution step — but the split earns its place beyond the
+/// line count: this is the **only** function in the CLI that can pull an image,
+/// so what it discloses before opening a socket is worth reading on its own.
+///
+/// Returns what went wrong rather than short-circuiting, for the reason the asset
+/// loop above does the same: one unobtainable image must not hide the others, and
+/// a `prefetch` that stopped at the first failure would have to be run once per
+/// problem to find out how many there were.
+#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
+fn pull_sandbox_images(
+    root: &std::path::Path,
+    analyzer: Option<&str>,
+    json: bool,
+    security: &config::SecurityConfig,
+) -> Vec<String> {
+    // The **inventory**, not the table: since issue #434 the set of images an
+    // analyzer run can use is the built-in pins composed with
+    // `[security.images]`, and iterating the table alone would leave a declared
+    // image obtainable by no command at all. Resolution refuses a tag, an
+    // analyzer with no adapter, or an entry naming nothing — here rather than at
+    // a run, which is the point of validating the whole map instead of only the
+    // entries somebody happens to provision.
+    let inventory = match rto_exec::boxlite::image_inventory(&security.declared()) {
+        Ok(inventory) => inventory,
+        Err(e) => return vec![format!("{e}")],
+    };
+
+    let mut failures = Vec::new();
+    for image in inventory {
+        if analyzer.is_some_and(|name| name != image.analyzer) {
+            continue;
+        }
+        if !json {
+            // Named before a socket is opened, and labelled with who chose it. A
+            // declared reference can come from a committed `roteiro.toml`, so it
+            // is the one image a teammate may have picked for you; printing
+            // whose choice it was is what turns that into a thing you saw.
+            eprintln!(
+                "pulling sandbox image for {} [{}] ({})",
+                image.analyzer,
+                image.source.as_str(),
+                image.reference
+            );
+        }
+        let declared = security.image_for(&image.analyzer);
+        if let Err(e) = rto_exec::boxlite::provision_image(&image.analyzer, root, declared) {
+            failures.push(format!("{e}"));
+        }
+    }
+    failures
+}
+
 /// Install and verify every pinned asset, recording each digest.
 ///
 /// This is the only command that writes to the asset cache, and the only one
@@ -9792,6 +9929,7 @@ fn run_security_prefetch(
     allow_download: bool,
     json: bool,
     lint_image: Option<&str>,
+    security: &config::SecurityConfig,
 ) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let specs = assets_to_prefetch(analyzer)?;
@@ -9848,20 +9986,7 @@ fn run_security_prefetch(
     // never does it.
     #[cfg(feature = "exec-boxlite")]
     if allow_download {
-        for image in rto_exec::boxlite::SANDBOX_IMAGES {
-            if analyzer.is_some_and(|name| name != image.analyzer) {
-                continue;
-            }
-            if !json {
-                eprintln!(
-                    "pulling sandbox image for {} ({})",
-                    image.analyzer, image.reference
-                );
-            }
-            if let Err(e) = rto_exec::boxlite::provision_image(image.analyzer, &root) {
-                failures.push(format!("{e}"));
-            }
-        }
+        failures.extend(pull_sandbox_images(&root, analyzer, json, security));
     }
 
     // The sandboxed linter's image, which is **supplied rather than pinned**
@@ -9885,7 +10010,7 @@ fn run_security_prefetch(
         }
     }
     #[cfg(not(feature = "exec-boxlite"))]
-    let _ = lint_image;
+    let _ = (lint_image, security);
 
     if json {
         emit_json(&SecurityPrefetchReport {
@@ -9939,8 +10064,71 @@ fn run_security_prefetch(
 struct SecurityStatusReport {
     root: String,
     analyzers: Vec<rto_exec::AnalyzerCoverage>,
+    /// The sandbox images this configuration would run, each labelled with who
+    /// chose it and whether it is in the local store.
+    ///
+    /// Added alongside `analyzers` rather than inside it, and that is not
+    /// squeamishness about a breaking change. `AnalyzerCoverage` is shared with
+    /// both model-facing tool surfaces and answers *"could this host run it"*
+    /// from the asset cache and `PATH`; which container it would run in is a
+    /// different question with a different remedy, and issue #464 is what it
+    /// costs to answer two questions in one field.
+    ///
+    /// Absent in a build with no sandbox backend, where there is no such thing
+    /// as an image to report.
+    #[cfg(feature = "exec-boxlite")]
+    images: Vec<SandboxImageStatus>,
     assets: Vec<rto_exec::AssetStatus>,
     layers: Vec<rto_exec::LayerStaleness>,
+}
+
+/// One sandbox image as `security status` reports it.
+///
+/// `source` is the field issue #434 turns on. A user who cannot tell a built-in
+/// pin from an image named in a committed `roteiro.toml` has lost exactly what
+/// the pin was for — Roteiro checked that a built-in image is published,
+/// digest-addressable and of a knowable version, and it checked none of that
+/// about a reference it was handed.
+#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
+#[derive(serde::Serialize)]
+struct SandboxImageStatus {
+    #[serde(flatten)]
+    image: rto_exec::boxlite::ResolvedImage,
+    /// Whether it is already in the local store. `false` means a run refuses —
+    /// nothing pulls implicitly.
+    provisioned: bool,
+}
+
+/// Resolve every sandbox image and ask the local store about each one.
+///
+/// Its own function so the `--json` and human arms report from one computation:
+/// a status blob and a status listing disagreeing about which images are present
+/// is the shape of defect `tool_security` exists to prevent.
+///
+/// # Errors
+/// The first [`rto_exec::boxlite::resolve_image`] refusal — a tag, an analyzer
+/// with no adapter, an entry naming nothing. A status that skipped a broken key
+/// and printed the rest would be the quiet answer this command exists to
+/// replace.
+#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
+fn sandbox_image_status(
+    root: &std::path::Path,
+    analyzer: Option<&str>,
+    security: &config::SecurityConfig,
+) -> anyhow::Result<Vec<SandboxImageStatus>> {
+    rto_exec::boxlite::image_inventory(&security.declared())?
+        .into_iter()
+        .filter(|image| analyzer.is_none_or(|name| name == image.analyzer))
+        .map(|image| {
+            let declared = security.image_for(&image.analyzer);
+            // "Could not tell" is not "absent" — `image_is_provisioned` errors
+            // rather than answering `false` on a store it cannot read, and that
+            // distinction is preserved here rather than flattened into a column.
+            let provisioned =
+                rto_exec::boxlite::image_is_provisioned(&image.analyzer, root, declared)?;
+            Ok(SandboxImageStatus { image, provisioned })
+        })
+        .collect()
 }
 
 /// One analyzer's readiness as a display column.
@@ -9970,11 +10158,19 @@ fn analyzer_state_line(coverage: &rto_exec::AnalyzerCoverage) -> String {
 // functions that only ever run together.
 #[allow(clippy::too_many_lines)]
 #[cfg(feature = "execution")]
-fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
+fn run_security_status(
+    analyzer: Option<&str>,
+    json: bool,
+    security: &config::SecurityConfig,
+) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let assets = rto_exec::status(&root, analyzer);
 
     let analyzers = rto_exec::coverage_matrix(&root, analyzer);
+    #[cfg(feature = "exec-boxlite")]
+    let images = sandbox_image_status(&root, analyzer, security)?;
+    #[cfg(not(feature = "exec-boxlite"))]
+    let _ = security;
 
     // Staleness comes from the *runs*, because the advisory database's
     // publication date is something the analyzer reported, not something
@@ -9990,6 +10186,8 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
         emit_json(&SecurityStatusReport {
             root: root.display().to_string(),
             analyzers,
+            #[cfg(feature = "exec-boxlite")]
+            images,
             assets,
             layers,
         })?;
@@ -10026,6 +10224,9 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
             println!("               run `roteiro security prefetch` to provision its assets");
         }
     }
+
+    #[cfg(feature = "exec-boxlite")]
+    print_sandbox_images(&images);
 
     println!("\nassets");
     for asset in &assets {
@@ -10078,6 +10279,64 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
         }
     }
     Ok(())
+}
+
+/// Print the sandbox images, saying of each one **who chose it**.
+///
+/// Its own section rather than a column on the analyzer rows, because it answers
+/// a different question with a different remedy: an analyzer row says whether
+/// this host could run the tool, and this says which container it would run it
+/// in and whether that container is here yet.
+///
+/// The `source` column is the whole reason issue #434 asked for this. Roteiro
+/// vouches for a built-in pin — published, digest-addressable, of a knowable
+/// version — and vouches for none of that about a reference it was handed, so a
+/// reader who cannot tell them apart has lost the thing the pin was for. The
+/// version line says so out loud rather than leaving a blank column to be read
+/// as an omission.
+#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
+fn print_sandbox_images(images: &[SandboxImageStatus]) {
+    println!("\nsandbox images  (ADR-0014 — a run never pulls; `prefetch` obtains)");
+    if images.is_empty() {
+        println!(
+            "  none — this build pins no image and `[security.images]` declares none, so \
+             `security run` has no sandboxed path. See docs/SANDBOXED_LINTING.md."
+        );
+        return;
+    }
+    for row in images {
+        println!(
+            "  {:<12} {:<41}  {}",
+            row.image.analyzer,
+            row.image.source.as_str(),
+            if row.provisioned {
+                "in the local store"
+            } else {
+                "NOT PROVISIONED — a run refuses"
+            }
+        );
+        println!("               {}", row.image.reference);
+        match &row.image.analyzer_version {
+            Some(version) => println!(
+                "               analyzer version {version}, which Roteiro checked this image \
+                 carries"
+            ),
+            // Stated rather than left blank. A missing column reads as an
+            // omission; this is a consequence of choosing your own image and the
+            // reader should meet it here rather than in a findings record.
+            None => println!(
+                "               analyzer version is not asserted for an image Roteiro did not \
+                 choose — the run records what the analyzer says about itself"
+            ),
+        }
+        if !row.provisioned {
+            println!(
+                "               obtain it: roteiro security prefetch --analyzer {} \
+                 --allow-download",
+                row.image.analyzer
+            );
+        }
+    }
 }
 
 /// Serve the read-only graph explorer JSON API over HTTP, **llama-free**
@@ -14782,6 +15041,11 @@ mod security_cli {
             // is the honest value rather than a placeholder: a reader-class
             // analyzer's image is pinned in `SANDBOX_IMAGES` and never supplied.
             None,
+            // And nothing declared, which is the state this refusal must hold
+            // in: a build with no sandbox backend cannot honour
+            // `[security.images]` either, so the message names the feature
+            // rather than the key.
+            &crate::config::SecurityConfig::default(),
         )
         .expect_err("a build with no sandbox must refuse the sandboxed path")
         .to_string();
@@ -14827,6 +15091,7 @@ mod security_cli {
                     json: false,
                 },
                 None,
+                &crate::config::SecurityConfig::default(),
             )
             .expect_err("no sandbox in this build")
             .to_string()
@@ -14883,7 +15148,10 @@ mod security_cli {
         // host path never reads it. `run_security` grew that second argument
         // without this call site following, and nothing caught it: the test is
         // gated on `not(exec-subprocess)`, which is precisely the configuration
-        // no job compiled (issue #445).
+        // no job compiled (issue #445). It grew a **third** for
+        // `[security.images]` and this call site again did not follow — the
+        // `no-default-features` job ADR-0014 v1.7 added is what caught it that
+        // time, which is the job doing exactly what it was added for.
         let message = crate::run_security(
             SecurityAction::Run {
                 analyzer: "cargo-audit".to_owned(),
@@ -14892,6 +15160,9 @@ mod security_cli {
                 json: false,
             },
             None,
+            // Nothing declared: the host path has no image, so this argument is
+            // not consulted on the way to the refusal below.
+            &crate::config::SecurityConfig::default(),
         )
         .expect_err("a build without exec-subprocess must refuse the host path")
         .to_string();

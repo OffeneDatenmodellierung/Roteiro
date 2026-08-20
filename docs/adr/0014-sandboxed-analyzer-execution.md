@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Security Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.7"
-last-modified: 2026-08-19
+version: "1.8"
+last-modified: 2026-08-20
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Security Tooling |
-| **Document version** | 1.7 |
+| **Document version** | 1.8 |
 
 ## Reference
 
@@ -186,6 +186,128 @@ and size, requires consent, and verifies hashes atomically:
 An optional feature that pulls images or refreshes advisory databases must not be
 described as "offline"; it is **offline-capable once provisioned**, and the docs
 must say so in those words.
+
+### The image is Roteiro's where it can vouch for one, and yours otherwise
+
+`SANDBOX_IMAGES` was a `&'static` table with one entry, and its own doc comment
+stated the gap it left: an analyzer earns an entry only where there is a
+published image, addressable by digest, of a knowable version — *"`cargo-audit`
+has no official image, and inventing one would make Roteiro the publisher of a
+security tool's container, which is not a job it is taking on."*
+
+That sentence is right and its ending was wrong. It ended in **"so there is no
+entry"**, which made `cargo-audit` and `osv-scanner` host-only *forever* on a
+command whose default is sandboxed — an operator who already had an image for one
+of them could not tell Roteiro about it. The same reasoning had already produced
+the opposite ending one surface over: `[lint] image` in
+[[docs/adr/0020-build-capable-sandboxed-execution.md]] conditions 1-2, where
+Roteiro ships **no** image and the user supplies one. So the sentence now ends in
+**"so the operator supplies one"**, and this is an extension of an accepted
+mechanism to the surface that lacked it rather than a new one.
+
+`[security.images]` is a map keyed by analyzer, because this surface has N images
+where a builder has one, and it **composes with** the built-in table rather than
+replacing it. With the table absent nothing changes: `semgrep` runs in the pinned
+image and an analyzer with no pin refuses, exactly as before.
+
+**A declared entry wins over a pinned one.** Both directions had a real argument —
+overriding lets someone track a newer `semgrep`; refusing keeps the one entry
+whose provenance Roteiro vouches for — and the override was chosen on two grounds.
+Refusing would make Roteiro the sole timekeeper of that pin, so an advisory
+against the pinned `semgrep` would be un-routable-around until a Roteiro release:
+precisely the curation burden this mechanism exists to put down. And it would draw
+the line in a place whose shape is Roteiro's release history rather than the
+operator's risk — *"you may declare an image for any analyzer except the ones we
+happened to have got round to pinning"* is not a rule anyone can hold in their
+head.
+
+The cost of that choice is **paid rather than waived**, in three places:
+
+- **Roteiro stops asserting the analyzer version.** A pinned entry states what its
+  image carries and the backend records it without a second VM boot, because
+  Roteiro checked. For a declared image there is nothing to read it from, and
+  restating the table's answer would stamp evidence describing an image that was
+  not run. So the version recorded is whatever the analyzer said about **itself**
+  in its own output, or `unknown` where an adapter's output carries none. Measured
+  on the machine this was written on: the pinned image records `1.173.0`; the same
+  analyzer in a declared `semgrep` image records `1.172.0`, read from semgrep
+  rather than from the table that would have said `1.173.0`.
+- **`security status` says who chose each image** — `built-in`, `user-declared`,
+  or `user-declared (replaces the built-in pin)`. A reader who cannot tell them
+  apart has lost the thing the pin was for.
+- **`prefetch` names the reference before opening a socket**, labelled with its
+  source, because a reference from a committed `roteiro.toml` is the one image a
+  teammate may have chosen for you.
+
+Four obligations are unchanged and are not negotiable by this key:
+
+1. **A tag is refused**, at one function shared with `[lint] image`
+   (`rto_exec::image_ref::pinned_digest`) — the difference between a pinned entry
+   and a declared one is *who chose*, never *how strong the pin is*. The reason is
+   not reproducibility, which ADR-0020 retires for builders; it is that the image
+   **is** the boundary, and a tag is a mutable pointer to it.
+2. **A run never pulls.** A declared image absent from the local store is the same
+   `assets-unavailable-offline` refusal a pinned one gets, naming the `prefetch`
+   that obtains it.
+3. **Public registries only, for now**, and the reason is a conflict rather than
+   an unimplemented nicety: a private registry needs credentials at pull time, and
+   they would have to come from the ambient environment — inside a feature whose
+   `EnvironmentPolicy::Scrubbed` posture exists to keep ambient credentials *out*,
+   and whose guest never receives an environment at all. That needs a credential
+   story, not a code path.
+4. **An image can only serve an analyzer Roteiro already has an adapter for.**
+   `normalize()` is Rust in `ADAPTERS` and a user cannot supply a parser, so an
+   image carrying some other tool boots perfectly and produces nothing Roteiro can
+   read. This is a refusal *at the key*, checked before the pin and before the
+   hypervisor probe, rather than an empty report after a guest has run.
+
+The config key is a **value** under [[docs/adr/0007-configuration-file.md]] v1.4,
+not a capability, and it was classified by applying the five tests rather than by
+assuming. It sends nothing off the machine (the guest has no network device, and
+the pull is an invocation with `--allow-download`); the analyzers reachable here
+parse rather than build, and an image is registry content named by a locator, not
+code the repository supplies; it changes *what* is in `~/.roteiro` rather than
+*whether* Roteiro writes there, which is test 3 as v1.4 sharpened it; the spend
+belongs to `prefetch` rather than to the key; and test 5 runs the other way — the
+key's direction of effect is to put an analyzer that had **no** sandboxed path
+*inside* one, so its default grants nothing and setting it adds a boundary rather
+than removing a guard. Ordinary precedence therefore applies, project over user,
+exactly as for `[lint] image` and `[remote] endpoint`: a project may choose
+*where* its team's boundary comes from without deciding *whether* there is one,
+and for a locator the inversion is not merely unnecessary but inexpressible, since
+there is no "deny" for a locator, only a different one. The residual — that a
+committed file does choose the container somebody else's analyzer runs in — is
+answered by the three disclosures above rather than by inverting a key that cannot
+express a denial.
+
+### `backend_parity` is re-scoped, because its claim did not survive this
+
+Stage 24's definition of done read:
+
+> The same analyzer produces the same findings via subprocess and via boxlite,
+> differing only in the isolation label and image digest.
+
+**That is false by construction once the image is user-chosen**, and the danger is
+not that it becomes false — it is that the test would have gone on passing.
+`crates/rto-exec/tests/backend_parity.rs` builds its own runner and would have
+kept selecting the built-in pin, staying green while defending a claim the feature
+no longer makes. A green test whose subject has moved is worse than no test,
+because it is read as coverage.
+
+The definition of done now carries the clause it always needed: *"…when the
+sandboxed run uses the image Roteiro pinned."* Under a declared image a different
+`semgrep` legitimately finds different things, and the `analyzer_version` equality
+that is the heart of *"the same analyzer"* has nothing on one side to compare —
+Roteiro no longer asserts one. So the test's subject is **asserted rather than
+assumed**: both parity tests now check that what they ran was
+`ImageSource::BuiltIn` and fail loudly if it ever is not, and a third test in the
+same file states the boundary of the claim without needing a hypervisor, so the
+narrowing is legible to whoever reads that file rather than living only here.
+
+What is **not** narrowed: the digest recorded on a run is the digest of the image
+that actually ran, whoever chose it. Provenance did not weaken. It arguably
+strengthened, since Roteiro now declines to assert an analyzer version for an
+image it did not choose, where before it restated a table's answer.
 
 ### The cache is reused, and dropped on demand — never on a schedule
 
@@ -369,3 +491,4 @@ be.
 | 1.5 | 2026-08-18 | **The sandboxed backend becomes reachable, and becomes the default path of `security run`.** Since Stage 24 `BoxliteRunner` was built, tested (`crates/rto-exec/tests/backend_parity.rs`) and specified here, but `run_security_run` hard-coded `SubprocessRunner` — the isolation boundary this ADR exists to provide could not be asked for from the CLI at all. `security run` now selects the sandbox when **no** flag is given; `--allow-unsandboxed` is what selects the host, and it selects it outright. Three obligations follow and are tested: (a) **no fallback, in either direction.** There is deliberately no input meaning "sandbox, or the host if that fails" — a missing feature, an unpulled image, an unprovisioned asset or an absent hypervisor is a named refusal naming the fix, never a quiet host run, because `RunnerKind`/`isolation` on the stored layer would then be a false statement about how those findings were produced (ADR-0019 §6). (b) **`--allow-unsandboxed` is untouched.** v1.2's warning holds without amendment: it is still required per invocation for the host path, still records `isolation=none`, and the sandbox existing is not a reason to imply or retire it. (c) **`exec-boxlite` stays off by default and the CLI surface does not move with it.** `run` and both flags parse in every build; only the capability is conditional, and it refuses in a sentence that names the feature and the four-step bootstrap. Gating the clap variant instead is how `roteiro model rm` shipped invisible to crates.io users, and is not repeated here. The human line describing isolation is now read back out of the stored `AnalysisRun` rather than from the calling function, so the sentence a user reads and the row `security list` returns cannot disagree. |
 | 1.6 | 2026-08-19 | **Provisioning gains its third verb.** `prefetch` obtains and `status` reports; nothing removed, so a user wanting a clean build or the disk back had `rm -rf` and a guess — against 2.9 GB of cached image and runtime. Records that the cache exists to be **reused**, because a boundary costing minutes per run is one people switch off, and that `clear` is a **command and never a config key**: a setting that drops a cache is a standing instruction to throw work away that fires when nobody is looking, where ADR-0013 already holds eviction to be a maintenance act rather than a preference. Its safety and its limit are the same property — everything under the asset cache is re-obtainable from a pinned digest, so `clear` costs time and never information, and may therefore never reach the store. Distinguishes **content-addressed, verified** artifacts (shareable across repositories) from a **build scratch holding compiled build scripts** (per repository, because sharing one would defeat this ADR's execution boundary through a cache rather than through a mount); which package caches qualify is per-ecosystem and deliberately unsettled. Finally, admits `clear` to the MCP surface as its **first mutating tool**, with the permission stated positively so it does not become a precedent by extension: a tool may drop state re-obtainable from a pinned digest and nothing else, must report what it freed, and must not be given a scope wider than the request. |
 | 1.7 | 2026-08-19 | **v1.2's `--no-default-features --features execution` claim becomes a checked one.** It was written in v1.2 and never compiled: by issue #445 that configuration had two compile errors and five `-D warnings` rejections, every one an artefact of *exclusion* — items whose only callers are cfg'd out, and a call site that never saw its callee's signature change. `--all-features` cannot find that class by construction, which is #360's lesson one configuration over. No decision here changes; what changes is that the sentence is now enforced by the `no-default-features` CI job rather than asserted. **If that job is ever removed, remove the claim in the same change** — a documented posture nobody compiles is how the last one rotted. |
+| 1.8 | 2026-08-20 | **User-supplied analyzer images (#434), and `backend_parity` re-scoped in the same change.** `SANDBOX_IMAGES` was a `&'static` table with one entry, so `cargo-audit` and `osv-scanner` were host-only forever on a command whose default is sandboxed. The table's own doc comment already carried the reasoning that fixes it — Roteiro will not publish a security tool's container — and that reasoning had already produced the opposite ending for builders in [[docs/adr/0020-build-capable-sandboxed-execution.md]] conditions 1-2, so this **extends `[lint] image`'s mechanism to the surface that lacked it** rather than inventing a second shape. `[security.images]` is a map keyed by analyzer (N images here where a builder has one) that **composes with** the table; with it absent, nothing changes. **A declared entry overrides a pinned one** — refusing would make Roteiro the sole timekeeper of the `semgrep` pin and would draw the line at the shape of Roteiro's release history rather than the operator's risk — and the cost is paid rather than waived: Roteiro **stops asserting the analyzer version** for an image it did not choose (recorded live: the pin reports `1.173.0`, a declared image reports `1.172.0` read from semgrep itself), `security status` labels every image built-in or user-declared, and `prefetch` names the reference before opening a socket. Four obligations are unchanged: a tag is refused at one function shared with `[lint] image`; a run never pulls; public registries only, because credentials at pull time conflict with the `EnvironmentPolicy::Scrubbed` posture rather than merely being unimplemented; and **an image can only serve an analyzer Roteiro already has an adapter for**, refused at the key rather than discovered as an empty report. Classified against [[docs/adr/0007-configuration-file.md]] v1.4's five tests as a **value** — test 5 runs backwards here, since the key's effect is to put an analyzer that had no sandboxed path *inside* one — so ordinary precedence, project over user. And **`backend_parity`'s definition of done gains the clause it always needed**: parity holds *when the sandboxed run uses the image Roteiro pinned*. It is false by construction otherwise, and the test would have stayed green while defending it, so both parity tests now assert `ImageSource::BuiltIn` and a third states the boundary of the claim without needing a hypervisor. Provenance is unweakened: the recorded digest is the image that ran, whoever chose it. |
