@@ -494,10 +494,15 @@ fn scan_root() -> PathBuf {
 }
 
 /// Every `.rs` file under `dir`, recursively.
+///
+/// An unreadable directory is a **failure**, not an empty one. `scan_root`
+/// already refuses to skip a missing tree on the grounds that an empty scan is a
+/// green test that checked nothing; returning quietly here would reintroduce the
+/// same thing one level down and at partial scope — a subtree silently dropped
+/// leaves `files` non-empty and `links > 0`, so neither assertion below notices.
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("cannot list {} ({:?}: {e})", dir.display(), e.kind()));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -528,9 +533,14 @@ fn doc_anchor_fragments_resolve_to_real_headings() {
     let mut problems = Vec::new();
     let mut links = 0;
     for path in &files {
-        let Ok(src) = std::fs::read_to_string(path) else {
-            continue;
-        };
+        // Not `else { continue }`. These paths were just enumerated from the
+        // filesystem, so a read failure is anomalous rather than expected, and
+        // skipping one would drop its anchors from the scan without moving
+        // either assertion around this loop — `links > 0` catches total silence,
+        // never partial. Every `.rs` file in the workspace is valid UTF-8; if one
+        // deliberately is not, that is a decision worth making in the open.
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {} ({:?}: {e})", path.display(), e.kind()));
         let rel = path
             .strip_prefix(&root)
             .unwrap_or(path)

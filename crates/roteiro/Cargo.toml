@@ -75,6 +75,15 @@ rusqlite = { workspace = true }
 tokio = { version = "1", features = ["rt", "macros"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# `tests/ci_release_pr_parity.rs` reads `.github/workflows/ci.yml` structurally —
+# job by job, step by step — rather than grepping it, because the thing it
+# asserts is the *shape* of a job and a `contains` over the text would be
+# satisfied by the comments that discuss that shape at length. Adds no crate to
+# the tree: `rto-graph` already depends on `yaml-rust2` non-optionally (for
+# `config_keys`), so it is in the lockfile and in every build of this binary
+# already, and neither `cargo deny` nor `cargo audit` gains a new surface. Keep
+# the version in step with `crates/rto-graph/Cargo.toml`.
+yaml-rust2 = "0.11.0"
 
 [features]
 # Ingest is available in a stock install — ADR-0014 lists it as "always, no
