@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Roteiro — workspace explorer</title>
     <style>
-      /* Light theme, matching the maintainer-signed-off screenshots. */
+      /* The palette. ONE set of semantic names; `#view-project` below re-declares
+         the same names with its own values, so a component reused across the two
+         views themes itself and needs no per-view remap (issue #512).
+
+         Light theme, matching the maintainer-signed-off screenshots. */
       :root {
         --bg: #f6f7f9;
         --panel: #ffffff;
@@ -24,6 +28,19 @@
         --hub-line: #c7d2fe;
         --accent: #4f46e5;
         --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
+        /* Roles that differ between the two views. Each light value is the one
+           the old `#ws-ask-panel` remap already resolved to, or the light-view
+           colour the workspace legend already uses for the same meaning — so
+           nothing here is a new colour, only a name for one we had. */
+        --field: var(--panel); /* input/chip fill, one step off the surrounding panel */
+        --code-bg: var(--slate-soft); /* inset code + captured-content backdrop */
+        --err: var(--drift); /* error TEXT (`#status.err` already used this) */
+        --derived: var(--accent);
+        --authored: var(--gold); /* the workspace legend's "gold = authored" */
+        --inferred: var(--slate); /* the workspace legend's "slate = inferred" */
+        --derived-line: var(--line-strong);
+        --authored-line: var(--line-strong);
+        --inferred-line: var(--line-strong);
       }
       * {
         box-sizing: border-box;
@@ -411,7 +428,7 @@
       }
       #status.err,
       #select-status.err {
-        color: var(--drift);
+        color: var(--err);
       }
 
       /* Project drill-in chips (workspace view) --------------------------- */
@@ -444,23 +461,35 @@
         background: var(--hub);
       }
 
-      /* Project graph view (dark, per the signed-off screenshots) --------- */
+      /* Project graph view (dark, per the signed-off screenshots). Whether the
+         two views SHOULD differ is a product question and is left alone here;
+         all that changes is that the dark values now live under the same names
+         as the light ones instead of a parallel `--p*` set. --------------- */
       #view-project {
-        --pbg: #0d1117;
-        --ppanel: #161b22;
-        --pline: #30363d;
-        --pline-strong: #3d444d;
-        --pfg: #e6edf3;
-        --pmuted: #8b949e;
-        --pderived: #6ea8fe;
-        --pauthored: #e0b64d;
-        --pinferred: #3fb6a8;
-        --paccent: #7c8cff;
-        background: var(--pbg);
-        color: var(--pfg);
+        --bg: #0d1117;
+        --panel: #161b22;
+        --line: #30363d;
+        --line-strong: #3d444d;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #7c8cff;
+        --field: #0d1117;
+        --code-bg: #0d1117;
+        --err: #ff7b72;
+        --derived: #6ea8fe;
+        --authored: #e0b64d;
+        --inferred: #3fb6a8;
+        --derived-line: #274b7a;
+        --authored-line: #5c4a13;
+        --inferred-line: #1f5750;
+        background: var(--bg);
+        color: var(--fg);
         min-height: 100vh;
       }
       body.on-project {
+        /* `body` is OUTSIDE `#view-project`, so `var(--bg)` here would resolve to
+           the LIGHT value. This literal backs the overscroll area and has to stay
+           in step with `#view-project`'s `--bg` by hand. */
         background: #0d1117;
       }
       .pbar {
@@ -468,8 +497,8 @@
         align-items: center;
         gap: 0.75rem;
         padding: 0.6rem 1rem;
-        border-bottom: 1px solid var(--pline);
-        background: var(--ppanel);
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
         position: sticky;
         top: 0;
         z-index: 5;
@@ -479,13 +508,13 @@
         font-size: 0.82rem;
         cursor: pointer;
         background: transparent;
-        color: var(--pfg);
-        border: 1px solid var(--pline-strong);
+        color: var(--fg);
+        border: 1px solid var(--line-strong);
         border-radius: 7px;
         padding: 0.3rem 0.6rem;
       }
       .p-back:hover {
-        border-color: var(--paccent);
+        border-color: var(--accent);
         color: #fff;
       }
       .p-crumbs {
@@ -493,17 +522,17 @@
         align-items: center;
         gap: 0.4rem;
         font-size: 0.85rem;
-        color: var(--pmuted);
+        color: var(--muted);
       }
       .p-crumb-root {
         font-weight: 650;
-        color: var(--pfg);
+        color: var(--fg);
       }
       .p-crumb-link {
         font: inherit;
         background: transparent;
         border: 0;
-        color: var(--paccent);
+        color: var(--accent);
         cursor: pointer;
         padding: 0;
       }
@@ -511,16 +540,16 @@
         text-decoration: underline;
       }
       .p-crumb-current {
-        color: var(--pfg);
+        color: var(--fg);
         font-weight: 600;
       }
       .p-sep {
-        color: var(--pmuted);
+        color: var(--muted);
       }
       .pbar .ws-badge {
         background: #21262d;
-        color: var(--pmuted);
-        border-color: var(--pline);
+        color: var(--muted);
+        border-color: var(--line);
       }
       .pbar .ws-badge.standalone {
         background: #2a2010;
@@ -529,14 +558,14 @@
       }
       .p-status {
         padding: 0.4rem 1rem;
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.82rem;
       }
       .p-status:empty {
         display: none;
       }
       .p-status.err {
-        color: #ff7b72;
+        color: var(--err);
       }
       .p-layout {
         display: flex;
@@ -560,8 +589,8 @@
         align-items: center;
         gap: 0.6rem;
         padding: 0.55rem 0.8rem;
-        border-bottom: 1px solid var(--pline);
-        background: var(--ppanel);
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
         flex-wrap: wrap;
       }
       .p-zoom {
@@ -575,8 +604,8 @@
         line-height: 1;
         cursor: pointer;
         background: #21262d;
-        color: var(--pfg);
-        border: 1px solid var(--pline-strong);
+        color: var(--fg);
+        border: 1px solid var(--line-strong);
         border-radius: 6px;
       }
       .p-zoom button#p-fit {
@@ -585,7 +614,7 @@
         font-size: 0.78rem;
       }
       .p-zoom button:hover {
-        border-color: var(--paccent);
+        border-color: var(--accent);
       }
       .p-search {
         font: inherit;
@@ -594,20 +623,20 @@
         min-width: 160px;
         flex: 1 1 160px;
         max-width: 280px;
-        background: #0d1117;
-        color: var(--pfg);
-        border: 1px solid var(--pline-strong);
+        background: var(--field);
+        color: var(--fg);
+        border: 1px solid var(--line-strong);
         border-radius: 7px;
       }
       .p-search::placeholder {
-        color: var(--pmuted);
+        color: var(--muted);
       }
       .p-toggle {
         display: inline-flex;
         align-items: center;
         gap: 0.35rem;
         font-size: 0.8rem;
-        color: var(--pmuted);
+        color: var(--muted);
         white-space: nowrap;
         cursor: pointer;
         user-select: none;
@@ -618,7 +647,7 @@
       }
       .p-counter {
         margin-left: auto;
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.8rem;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
@@ -629,9 +658,9 @@
         flex-wrap: wrap;
         align-items: center;
         padding: 0.4rem 0.8rem;
-        border-bottom: 1px solid var(--pline);
-        background: var(--ppanel);
-        color: var(--pmuted);
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--muted);
         font-size: 0.78rem;
       }
       .p-legend-label {
@@ -651,13 +680,13 @@
         display: inline-block;
       }
       .p-dot.derived {
-        background: var(--pderived);
+        background: var(--derived);
       }
       .p-dot.authored {
-        background: var(--pauthored);
+        background: var(--authored);
       }
       .p-dot.inferred {
-        background: var(--pinferred);
+        background: var(--inferred);
       }
       /* Cross-repo link legend (PR 6): dashed gold/slate swatches + a red `?`. */
       .p-legend-xrepo {
@@ -666,16 +695,16 @@
         align-items: center;
         padding-left: 1rem;
         margin-left: 0.25rem;
-        border-left: 1px solid var(--pline);
+        border-left: 1px solid var(--line);
       }
       .p-dash {
         width: 1.4rem;
         height: 0;
-        border-top: 2px dashed var(--pmuted);
+        border-top: 2px dashed var(--muted);
         display: inline-block;
       }
       .p-dash.authored {
-        border-top-color: #e0b64d;
+        border-top-color: var(--authored);
       }
       .p-dash.inferred {
         border-top-color: #8b95a3;
@@ -700,9 +729,9 @@
         position: absolute;
         z-index: 40;
         pointer-events: none;
-        background: #161b22;
-        color: var(--pfg);
-        border: 1px solid var(--pline-strong);
+        background: var(--panel);
+        color: var(--fg);
+        border: 1px solid var(--line-strong);
         border-radius: 6px;
         padding: 0.2rem 0.45rem;
         font-size: 0.72rem;
@@ -713,8 +742,8 @@
         border-style: dashed;
       }
       .p-chip.xrepo.authored {
-        border-color: #e0b64d;
-        color: #e0b64d;
+        border-color: var(--authored);
+        color: var(--authored);
       }
       .p-chip.xrepo.inferred {
         border-color: #8b95a3;
@@ -725,7 +754,7 @@
         color: #f85149;
       }
       .p-follow-hint {
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.72rem;
         font-style: italic;
         margin: 0.15rem 0 0.2rem;
@@ -735,8 +764,8 @@
         max-width: 360px;
         display: flex;
         flex-direction: column;
-        border-left: 1px solid var(--pline);
-        background: var(--ppanel);
+        border-left: 1px solid var(--line);
+        background: var(--panel);
       }
       @media (max-width: 820px) {
         .p-layout {
@@ -747,7 +776,7 @@
           flex-basis: auto;
           max-width: none;
           border-left: 0;
-          border-top: 1px solid var(--pline);
+          border-top: 1px solid var(--line);
         }
         #p-graph {
           height: 60vh;
@@ -755,7 +784,7 @@
       }
       .p-tabs {
         display: flex;
-        border-bottom: 1px solid var(--pline);
+        border-bottom: 1px solid var(--line);
       }
       .p-tab {
         flex: 1 1 auto;
@@ -764,16 +793,16 @@
         padding: 0.6rem 0.5rem;
         cursor: pointer;
         background: transparent;
-        color: var(--pmuted);
+        color: var(--muted);
         border: 0;
         border-bottom: 2px solid transparent;
       }
       .p-tab:hover {
-        color: var(--pfg);
+        color: var(--fg);
       }
       .p-tab.active {
-        color: var(--pfg);
-        border-bottom-color: var(--paccent);
+        color: var(--fg);
+        border-bottom-color: var(--accent);
         font-weight: 600;
       }
       .p-tab[aria-disabled="true"] {
@@ -795,10 +824,10 @@
         display: block;
       }
       .p-muted {
-        color: var(--pmuted);
+        color: var(--muted);
       }
       .p-empty {
-        color: var(--pmuted);
+        color: var(--muted);
         font-style: italic;
         padding: 0.4rem 0;
       }
@@ -806,7 +835,7 @@
         font-size: 0.72rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: var(--pmuted);
+        color: var(--muted);
         margin: 1.1rem 0 0.5rem;
       }
       .p-sec-title:first-child {
@@ -816,7 +845,7 @@
         text-transform: none;
         letter-spacing: 0;
         font-size: 0.72rem;
-        color: var(--pmuted);
+        color: var(--muted);
         opacity: 0.8;
         margin-left: 0.4rem;
       }
@@ -831,14 +860,14 @@
         gap: 0.5rem;
         padding: 0.32rem 0;
         cursor: pointer;
-        border-bottom: 1px solid var(--pline);
+        border-bottom: 1px solid var(--line);
       }
       .p-hot li:hover .p-hot-name {
         color: #fff;
         text-decoration: underline;
       }
       .p-hot-rank {
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.72rem;
         width: 1.4rem;
         text-align: right;
@@ -855,7 +884,7 @@
         text-overflow: ellipsis;
       }
       .p-hot-kind {
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.7rem;
       }
       .p-hot-bar {
@@ -868,20 +897,20 @@
       .p-hot-bar i {
         display: block;
         height: 100%;
-        background: var(--paccent);
+        background: var(--accent);
       }
       .p-hot-deg {
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.72rem;
         width: 1.8rem;
         text-align: right;
         font-variant-numeric: tabular-nums;
       }
       .p-debt details {
-        border: 1px solid var(--pline);
+        border: 1px solid var(--line);
         border-radius: 7px;
         margin-bottom: 0.4rem;
-        background: #0d1117;
+        background: var(--code-bg);
       }
       .p-debt summary {
         cursor: pointer;
@@ -902,10 +931,10 @@
         padding: 0.05rem 0.35rem;
         border-radius: 4px;
         background: #3b2f10;
-        color: var(--pauthored);
+        color: var(--authored);
       }
       .p-debt-loc {
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.72rem;
         margin-left: auto;
         white-space: nowrap;
@@ -916,7 +945,7 @@
         padding: 0.1rem 0.6rem 0.55rem;
       }
       .p-debt-body code {
-        color: var(--pfg);
+        color: var(--fg);
         white-space: pre-wrap;
         word-break: break-word;
       }
@@ -937,24 +966,24 @@
         letter-spacing: 0.03em;
         padding: 0.1rem 0.4rem;
         border-radius: 5px;
-        border: 1px solid var(--pline-strong);
-        color: var(--pmuted);
+        border: 1px solid var(--line-strong);
+        color: var(--muted);
       }
       .p-badge.prov-derived {
-        color: var(--pderived);
-        border-color: #274b7a;
+        color: var(--derived);
+        border-color: var(--derived-line);
       }
       .p-badge.prov-authored {
-        color: var(--pauthored);
-        border-color: #5c4a13;
+        color: var(--authored);
+        border-color: var(--authored-line);
       }
       .p-badge.prov-inferred {
-        color: var(--pinferred);
-        border-color: #1f5750;
+        color: var(--inferred);
+        border-color: var(--inferred-line);
       }
       .p-node-path {
         font-size: 0.75rem;
-        color: var(--pmuted);
+        color: var(--muted);
         word-break: break-all;
         margin: 0.35rem 0 0.2rem;
       }
@@ -963,8 +992,8 @@
         overflow: auto;
         margin: 0.35rem 0 0.5rem;
         padding: 0.5rem 0.6rem;
-        background: #0d1117;
-        border: 1px solid var(--pline);
+        background: var(--code-bg);
+        border: 1px solid var(--line);
         border-radius: 6px;
         font-size: 0.75rem;
         line-height: 1.45;
@@ -972,7 +1001,7 @@
         word-break: break-word;
       }
       .p-node-content code {
-        color: var(--pfg);
+        color: var(--fg);
         background: none;
         border: none;
         padding: 0;
@@ -984,8 +1013,8 @@
       .p-generated {
         margin: 0.35rem 0 0.6rem;
         padding: 0.5rem 0.6rem;
-        border: 1px solid #5c4a13;
-        border-left: 3px solid var(--pauthored);
+        border: 1px solid var(--authored-line);
+        border-left: 3px solid var(--authored);
         border-radius: 6px;
         background: #14100a;
       }
@@ -994,16 +1023,16 @@
       }
       .p-generated-warning {
         font-size: 0.7rem;
-        color: var(--pauthored);
+        color: var(--authored);
         margin: 0 0 0.35rem;
       }
       .p-badge.p-generated-badge {
-        color: var(--pauthored);
-        border-color: #5c4a13;
+        color: var(--authored);
+        border-color: var(--authored-line);
       }
       .p-generated-producer {
         font-size: 0.68rem;
-        color: var(--pmuted);
+        color: var(--muted);
         word-break: break-all;
         margin: 0.3rem 0;
       }
@@ -1015,23 +1044,23 @@
         line-height: 1.45;
         white-space: pre-wrap;
         word-break: break-word;
-        color: var(--pfg);
+        color: var(--fg);
       }
       .p-generated-skip {
         font-size: 0.72rem;
-        color: var(--pmuted);
+        color: var(--muted);
         margin: 0.35rem 0 0.4rem;
       }
       .p-generated-rebuild {
         display: block;
         margin-top: 0.35rem;
         padding: 0.3rem 0.4rem;
-        border: 1px solid var(--pline);
+        border: 1px solid var(--line);
         border-radius: 5px;
-        background: #0d1117;
-        font-family: var(--pmono, ui-monospace, SFMono-Regular, Menlo, monospace);
+        background: var(--code-bg);
+        font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
         font-size: 0.7rem;
-        color: var(--pmuted);
+        color: var(--muted);
         word-break: break-all;
         user-select: all;
       }
@@ -1046,9 +1075,9 @@
         font-size: 0.75rem;
         padding: 0.2rem 0.5rem;
         border-radius: 999px;
-        border: 1px solid var(--pline-strong);
-        background: #0d1117;
-        color: var(--paccent);
+        border: 1px solid var(--line-strong);
+        background: var(--field);
+        color: var(--accent);
         cursor: pointer;
         max-width: 100%;
         overflow: hidden;
@@ -1056,31 +1085,38 @@
         white-space: nowrap;
       }
       .p-chip:hover {
-        border-color: var(--paccent);
+        border-color: var(--accent);
         color: #fff;
       }
       .p-chip .p-chip-kind {
-        color: var(--pmuted);
+        color: var(--muted);
       }
       .p-loading {
-        color: var(--pmuted);
+        color: var(--muted);
         padding: 0.5rem 0;
       }
       .p-err {
-        color: #ff7b72;
+        color: var(--err);
         padding: 0.5rem 0;
       }
       .p-ask-disabled strong {
-        color: var(--pfg);
+        color: var(--fg);
       }
       .p-ask-disabled code {
-        color: var(--pfg);
-        background: #0d1117;
+        color: var(--fg);
+        background: var(--code-bg);
         padding: 0.05rem 0.3rem;
         border-radius: 4px;
-        border: 1px solid var(--pline);
+        border: 1px solid var(--line);
       }
-      /* The enabled Ask tab (serve build): a question form over the model. */
+      /* The enabled Ask tab (serve build): a question form over the model. These
+         `.p-ask*` classes are the one component the product already reuses across
+         both views — the project inspector's Ask tab and `#ws-ask-panel` on the
+         light workspace view. That reuse used to cost a hand-written remap of six
+         `--p*` vars on `#ws-ask-panel` plus a rescue rule for the dark code
+         backdrop, and the remap was four vars short, silently (issue #512). Every
+         colour below now names a role both views declare, so the panel needs no
+         remap and a future reuse cannot be half-done. */
       .p-ask {
         display: flex;
         flex-direction: column;
@@ -1098,14 +1134,14 @@
         box-sizing: border-box;
         padding: 0.5rem 0.6rem;
         font: inherit;
-        color: var(--pfg);
-        background: var(--pbg);
-        border: 1px solid var(--pline-strong);
+        color: var(--fg);
+        background: var(--field);
+        border: 1px solid var(--line-strong);
         border-radius: 6px;
       }
       .p-ask textarea:focus {
         outline: none;
-        border-color: var(--paccent);
+        border-color: var(--accent);
       }
       .p-ask-row {
         display: flex;
@@ -1115,8 +1151,8 @@
       }
       .p-ask button.p-ask-send {
         color: #fff;
-        background: var(--paccent);
-        border: 1px solid var(--paccent);
+        background: var(--accent);
+        border: 1px solid var(--accent);
         border-radius: 6px;
         padding: 0.35rem 0.9rem;
         font: inherit;
@@ -1127,18 +1163,18 @@
         cursor: default;
       }
       .p-ask-model {
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.8rem;
       }
       select.p-ask-model-select {
         font: inherit;
         font-size: 0.8rem;
-        color: var(--pfg);
-        /* Theme-aware like the Ask textarea (`--pbg`): dark on the project view,
-           the light panel colour on the workspace view — never a hardcoded dark
+        color: var(--fg);
+        /* Theme-aware like the Ask textarea: `--field` is dark on the project view
+           and the light panel colour on the workspace view — never a hardcoded dark
            swatch that would read as dark-on-dark under the light workspace theme. */
-        background: var(--pbg);
-        border: 1px solid var(--pline-strong);
+        background: var(--field);
+        border: 1px solid var(--line-strong);
         border-radius: 6px;
         padding: 0.25rem 0.4rem;
         cursor: pointer;
@@ -1146,53 +1182,36 @@
       }
       select.p-ask-model-select:focus {
         outline: none;
-        border-color: var(--paccent);
+        border-color: var(--accent);
       }
       .p-ask-answer {
         white-space: pre-wrap;
         line-height: 1.45;
-        color: var(--pfg);
-        border-top: 1px solid var(--pline);
+        color: var(--fg);
+        border-top: 1px solid var(--line);
         padding-top: 0.6rem;
       }
       .p-ask-answer a {
-        color: var(--paccent);
+        color: var(--accent);
         cursor: pointer;
         text-decoration: none;
-        border-bottom: 1px dotted var(--paccent);
+        border-bottom: 1px dotted var(--accent);
       }
       .p-ask-refs {
-        color: var(--pmuted);
+        color: var(--muted);
         font-size: 0.8rem;
         margin-top: 0.5rem;
       }
       .p-ask-refs a {
-        color: var(--paccent);
+        color: var(--accent);
         cursor: pointer;
       }
       .p-ask code {
-        color: var(--pfg);
-        background: #0d1117;
+        color: var(--fg);
+        background: var(--code-bg);
         padding: 0.05rem 0.3rem;
         border-radius: 4px;
-        border: 1px solid var(--pline);
-      }
-      /* The workspace-level Ask panel reuses the project Ask's `.p-ask*` markup and
-         classes, but lives on the light workspace view — so it remaps the project
-         `--p*` colour vars (defined on `#view-project`) to the workspace theme, and
-         softens the two dark code backdrops those classes bake in. Same form, same
-         behaviour; only the palette differs. */
-      #ws-ask-panel {
-        --pbg: var(--panel);
-        --pfg: var(--fg);
-        --pmuted: var(--muted);
-        --pline: var(--line);
-        --pline-strong: var(--line-strong);
-        --paccent: var(--accent);
-      }
-      #ws-ask-panel .p-ask-answer code,
-      #ws-ask-panel .p-ask code {
-        background: var(--slate-soft);
+        border: 1px solid var(--line);
       }
     </style>
   </head>
