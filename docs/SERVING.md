@@ -119,8 +119,8 @@ Four statuses, the same four the divergence table above uses:
 | `functions` | **400** | `functions` is not supported: the deprecated `functions` array is not read, so the model would be advertised no tools whatsoever and could never call one. Send the same functions as `tools`, which is supported. |
 | `logit_bias` | **400** | `logit_bias` is not supported: no per-token bias reaches the sampler, so tokens you banned can still be generated. Steer with a system message instead; there is no per-token control here. |
 | `logprobs` | **400** | `logprobs` is not supported: no log probabilities are computed, so the response carries none and a client reading them finds `null`. This endpoint returns no log probabilities, and there is no flag that turns them on. |
-| `max_completion_tokens` | **400** | `max_completion_tokens` is not supported: the generation budget is read from `max_tokens` and this field is not read at all, so your request would run at the default budget and truncate. Send `max_tokens` instead, which is supported. |
-| `max_tokens` | **supported** | the generation budget, and the input that sizes the context window for the request |
+| `max_completion_tokens` | **supported** | OpenAI's current name for the generation budget; the same budget as `max_tokens`, read from the same field — send either, but sending both with different values is a `400` |
+| `max_tokens` | **supported** | the generation budget, and the input that sizes the context window for the request; OpenAI deprecated this spelling in favour of `max_completion_tokens`, and both are read |
 | `messages` | **supported** | the conversation, including replayed `tool_calls` and `role: "tool"` results |
 | `metadata` | **dropped** | free-form labels for OpenAI's dashboard; never read, never echoed |
 | `modalities` | **400** | `modalities` is not supported: only text is generated, so asking for another modality returns text with no indication the request was not met. Text is the only output modality this endpoint has; there is no setting that adds another. |

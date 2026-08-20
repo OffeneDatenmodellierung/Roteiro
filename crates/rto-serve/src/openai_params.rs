@@ -56,6 +56,15 @@
 //! same rule: the first asks for what Roteiro does, the second asks for
 //! something it cannot do.
 //!
+//! ## One budget, two spellings
+//!
+//! `max_completion_tokens` and `max_tokens` are OpenAI's current and deprecated
+//! names for the *same* number, and both are read — see
+//! [`generation_budget`], and the comment on the `max_completion_tokens` row for
+//! why refusing the current spelling was the wrong boundary. It is the only row
+//! where a wire name and a request-type field are spelled differently, so it is
+//! also the only row carrying [`Param::served_by`].
+//!
 //! ## An unknown key is still dropped, deliberately
 //!
 //! `#[serde(deny_unknown_fields)]` was the obvious instrument and is the wrong
@@ -138,6 +147,22 @@ impl Forward {
 pub struct Param {
     /// The parameter name exactly as OpenAI spells it on the wire.
     pub name: &'static str,
+    /// The [`crate::types::ChatCompletionRequest`] field that carries this wire
+    /// name, when it is **not** a field of the same name.
+    ///
+    /// `None` — every row but one — means the obvious thing: a served parameter
+    /// has a field spelled as it is spelled on the wire, and a parameter that is
+    /// not served has no field at all.
+    ///
+    /// `Some(other)` is the one case where a wire name and a field name come
+    /// apart: OpenAI spells the *same* generation budget two ways, so
+    /// `max_completion_tokens` is served by the `max_tokens` field. The
+    /// relationship is declared here rather than left as an exception inside
+    /// [`tests::the_struct_and_the_table_declare_the_same_fields`], because a
+    /// guard with an exception carved into it for one row is how the next row
+    /// gets one too. Checked by
+    /// [`tests::a_served_by_pointer_names_a_parameter_that_serves_itself`].
+    pub served_by: Option<&'static str>,
     /// What Roteiro does with it.
     pub support: Support,
     /// The published table's "why" cell for a parameter that is **not**
@@ -160,6 +185,18 @@ pub struct Param {
 }
 
 impl Param {
+    /// The request-type field that carries this wire name.
+    ///
+    /// The same as [`Param::name`] for every row but `max_completion_tokens`;
+    /// see [`Param::served_by`].
+    #[must_use]
+    pub const fn field(&self) -> &'static str {
+        match self.served_by {
+            Some(field) => field,
+            None => self.name,
+        }
+    }
+
     /// The `400` message, or `None` for a parameter that is not refused.
     ///
     /// Three parts, in the order `docs/REVIEW_CHECKLIST.md` asks for them: what
@@ -186,6 +223,7 @@ impl Param {
 pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     Param {
         name: "audio",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "no audio is generated, so a request asking for it would come \
@@ -199,6 +237,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "frequency_penalty",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "repetition penalties are not wired to the sampler, so the \
@@ -211,6 +250,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "function_call",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "the deprecated `function_call` field is not read, so a forced \
@@ -224,6 +264,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "functions",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "the deprecated `functions` array is not read, so the model \
@@ -234,6 +275,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "logit_bias",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "no per-token bias reaches the sampler, so tokens you banned \
@@ -246,6 +288,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "logprobs",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "no log probabilities are computed, so the response carries none \
@@ -257,37 +300,48 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
         },
         inert: &["false"],
     },
+    // OpenAI spells one generation budget two ways, and this is the newer
+    // spelling: `max_completion_tokens` supersedes `max_tokens`, which its own
+    // schema marks deprecated. Until 2026-08-20 this row was a `400` whose way
+    // forward was "Send `max_tokens` instead" — so a client on OpenAI's current
+    // name was refused and told to fall back to the name OpenAI is retiring.
+    // That is the one row of the thirty-seven where the wire says a thing,
+    // Roteiro can do exactly that thing, and Roteiro declines: honouring it is
+    // not a new capability but the same budget answered under its current name,
+    // and `served_by` below is that sameness written down rather than implied.
+    // Resolved by `generation_budget`, which refuses only the genuinely
+    // ambiguous request — both names, two different numbers.
     Param {
         name: "max_completion_tokens",
-        note: "",
-        support: Support::Rejected {
-            because: "the generation budget is read from `max_tokens` and this field \
-                      is not read at all, so your request would run at the default \
-                      budget and truncate",
-            forward: Forward::Do("Send `max_tokens` instead, which is supported."),
-        },
+        served_by: Some("max_tokens"),
+        note: "OpenAI's current name for the generation budget; the same budget as `max_tokens`, read from the same field — send either, but sending both with different values is a `400`",
+        support: Support::Supported,
         inert: &[],
     },
     Param {
         name: "max_tokens",
-        note: "the generation budget, and the input that sizes the context window for the request",
+        served_by: None,
+        note: "the generation budget, and the input that sizes the context window for the request; OpenAI deprecated this spelling in favour of `max_completion_tokens`, and both are read",
         support: Support::Supported,
         inert: &[],
     },
     Param {
         name: "messages",
+        served_by: None,
         note: "the conversation, including replayed `tool_calls` and `role: \"tool\"` results",
         support: Support::Supported,
         inert: &[],
     },
     Param {
         name: "metadata",
+        served_by: None,
         note: "free-form labels for OpenAI's dashboard; never read, never echoed",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "modalities",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "only text is generated, so asking for another modality returns \
@@ -301,12 +355,14 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "model",
+        served_by: None,
         note: "the model id to run; must be one of `/v1/models`",
         support: Support::Supported,
         inert: &[],
     },
     Param {
         name: "moderation",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "no moderation pass runs over the input or the output, so a \
@@ -320,6 +376,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "n",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "exactly one choice is generated, so `choices` would come back \
@@ -333,18 +390,21 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "parallel_tool_calls",
+        served_by: None,
         note: "at most one call is parsed per turn today, so a turn never carries more than one regardless",
         support: Support::AcceptedNotEnforced,
         inert: &[],
     },
     Param {
         name: "prediction",
+        served_by: None,
         note: "a speculative-decoding latency hint — the output is byte-identical with or without it, so ignoring it costs only the speed-up",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "presence_penalty",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "repetition penalties are not wired to the sampler, so the \
@@ -357,24 +417,28 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "prompt_cache_key",
+        served_by: None,
         note: "a cache-bucketing hint for OpenAI's prompt cache; nothing about the response depends on it",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "prompt_cache_options",
+        served_by: None,
         note: "as `prompt_cache_key`",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "prompt_cache_retention",
+        served_by: None,
         note: "as `prompt_cache_key`",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "reasoning_effort",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "the served model's reasoning is not budgeted by this field, so \
@@ -389,6 +453,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "response_format",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "the body is prose whatever format you ask for — there is no \
@@ -400,12 +465,14 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "safety_identifier",
+        served_by: None,
         note: "as `user`, which it replaces",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "seed",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "sampling is not seeded, so repeated requests with the same seed \
@@ -420,12 +487,14 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "service_tier",
+        served_by: None,
         note: "selects OpenAI's processing tier for latency and billing; there is one tier here and the output is unaffected",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "stop",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "no stop sequence is applied, so generation runs to the \
@@ -440,18 +509,21 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "store",
+        served_by: None,
         note: "asks OpenAI to retain the completion for its evals products; Roteiro stores nothing and sends nothing anywhere",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "stream",
+        served_by: None,
         note: "SSE chunks terminated by `data: [DONE]`",
         support: Support::Supported,
         inert: &[],
     },
     Param {
         name: "stream_options",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "the extra `usage` chunk `include_usage` promises is never \
@@ -465,24 +537,28 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "temperature",
+        served_by: None,
         note: "the one sampling control this endpoint honours; `0` (or omitted) is greedy",
         support: Support::Supported,
         inert: &[],
     },
     Param {
         name: "tool_choice",
+        served_by: None,
         note: "forcing a named function is grammar-constrained sampling, which lands with the grammar work; half-implementing it would tell a client it was honoured",
         support: Support::AcceptedNotEnforced,
         inert: &[],
     },
     Param {
         name: "tools",
+        served_by: None,
         note: "advertised to the model; calls are returned, never run — bounded at 128 entries / 32 KiB",
         support: Support::Supported,
         inert: &[],
     },
     Param {
         name: "top_logprobs",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "no log probabilities are computed, so no alternatives come back \
@@ -496,6 +572,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "top_p",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "nucleus sampling is not wired to the sampler, so the sampling \
@@ -508,12 +585,14 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "user",
+        served_by: None,
         note: "an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way",
         support: Support::Dropped,
         inert: &[],
     },
     Param {
         name: "verbosity",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "response length is not constrained by this field, so a `low` \
@@ -527,6 +606,7 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     },
     Param {
         name: "web_search_options",
+        served_by: None,
         note: "",
         support: Support::Rejected {
             because: "there is no web-search tool and the server never leaves the \
@@ -649,6 +729,62 @@ pub fn check_declared(extra: &BTreeMap<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the generation budget from the two names OpenAI spells it with.
+///
+/// `named` is the `max_tokens` field; `extra` is the catch-all, where the
+/// current spelling `max_completion_tokens` lands. Both name the same number,
+/// so the answer is that number however the caller asked for it.
+///
+/// **Why this and not `#[serde(alias)]`.** The one-line alias was tried first
+/// and rejected on evidence: a body carrying both names dies inside serde with
+/// ``duplicate field `max_tokens` ``, which axum returns as a `422` of plain
+/// text. Three things are wrong with that as a refusal — it is not the
+/// `{"error": …}` envelope every other refusal on this endpoint returns, it
+/// names `max_tokens` to a caller who sent `max_completion_tokens`, and it says
+/// what broke rather than what to do, which `docs/REVIEW_CHECKLIST.md` does not
+/// accept as a refusal. Reading the alias out of the catch-all costs this
+/// function and buys a `400` that names both spellings and the way forward.
+///
+/// **Both names is not automatically a conflict.** The module header's rule
+/// applies here too: the check keys on the *value*. `null` is no decision, and
+/// two spellings carrying the same number are one decision expressed twice —
+/// refusing either would be a refusal fired at a caller who was unambiguous.
+/// Only two different numbers are ambiguous, and only those are refused;
+/// silently picking one of them is the defect class this module exists to
+/// remove.
+///
+/// # Errors
+/// A `400` message when the two names disagree, or when the alias carries
+/// something that is not a token count.
+pub fn generation_budget(
+    named: Option<u32>,
+    extra: &BTreeMap<String, Value>,
+) -> Result<Option<u32>, String> {
+    let Some(value) = extra.get("max_completion_tokens").filter(|v| !v.is_null()) else {
+        return Ok(named);
+    };
+    let alias = value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| {
+            format!(
+                "`max_completion_tokens` is a generation budget and must be a whole \
+                 number of tokens: `{value}` is not one. Send a non-negative integer, \
+                 exactly as `max_tokens` takes one."
+            )
+        })?;
+    match named {
+        Some(named) if named != alias => Err(format!(
+            "`max_completion_tokens` and `max_tokens` are the same generation budget \
+             under two names, and this request sets them to {alias} and {named}, so \
+             there is no way to tell which budget you meant. Send one of them — \
+             `max_completion_tokens` is OpenAI's current spelling and `max_tokens` \
+             the one it deprecated, so prefer the first."
+        )),
+        _ => Ok(Some(alias)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Forward, OPENAI_CHAT_PARAMS, Param, Support, check_declared, param};
@@ -765,18 +901,92 @@ mod tests {
             source.display()
         );
 
+        // `Param::field`, not `Param::name`: one wire name is served by a
+        // field spelled differently (`max_completion_tokens` by `max_tokens`),
+        // and the table says so on the row itself. Reading the mapping is what
+        // keeps this an assertion about *every* row rather than an assertion
+        // with one row excused from it — the excused row is how the next one
+        // gets excused too. Two rows may name one field, hence the `dedup`.
         let mut declared: Vec<&str> = OPENAI_CHAT_PARAMS
             .iter()
             .filter(|p| matches!(p.support, Support::Supported | Support::AcceptedNotEnforced))
-            .map(|p| p.name)
+            .map(Param::field)
             .collect();
         declared.sort_unstable();
+        declared.dedup();
 
         assert_eq!(
             fields, declared,
             "the request type and the declared table disagree. A field with no \
              row is a parameter served but undeclared — which is #488 — and a \
              row with no field claims a capability that is not there"
+        );
+    }
+
+    /// A `served_by` pointer is the same kind of claim as a way forward, and
+    /// gets the same treatment: it must name a row that exists and that is
+    /// actually served.
+    ///
+    /// Without this the mapping the guard above now reads could itself be the
+    /// hiding place — a row could declare itself served by a field nobody has,
+    /// and `the_struct_and_the_table_declare_the_same_fields` would fail with a
+    /// message about the struct rather than about the lie on the row.
+    #[test]
+    fn a_served_by_pointer_names_a_parameter_that_serves_itself() {
+        for p in OPENAI_CHAT_PARAMS {
+            let Some(target) = p.served_by else { continue };
+            assert!(
+                matches!(p.support, Support::Supported | Support::AcceptedNotEnforced),
+                "`{}` is {:?} yet names a field that serves it; only a served \
+                 parameter has a field at all",
+                p.name,
+                p.support
+            );
+            assert_ne!(target, p.name, "`{}` is served by itself", p.name);
+            let referenced = param(target).unwrap_or_else(|| {
+                panic!(
+                    "`{}` is served by `{target}`, which is in no row of this table",
+                    p.name
+                )
+            });
+            assert!(
+                matches!(
+                    referenced.support,
+                    Support::Supported | Support::AcceptedNotEnforced
+                ),
+                "`{}` is served by `{target}`, which is itself {:?} — a field \
+                 that is not served cannot serve a second name",
+                p.name,
+                referenced.support
+            );
+            assert!(
+                referenced.served_by.is_none(),
+                "`{}` is served by `{target}`, which is served by something else \
+                 again; this is a chain, and only a direct pointer is checked",
+                p.name
+            );
+        }
+    }
+
+    /// The alias `generation_budget` honours and the alias the table declares
+    /// must be the same one.
+    ///
+    /// The resolver names `max_completion_tokens` in code, which is the one
+    /// place in this module a wire name is written outside the table. This is
+    /// the thread between them: declare a second budget alias in the table and
+    /// this reddens, because the resolver would not read it.
+    #[test]
+    fn the_budget_alias_the_resolver_honours_is_the_one_the_table_declares() {
+        let aliases: Vec<&str> = OPENAI_CHAT_PARAMS
+            .iter()
+            .filter(|p| p.served_by == Some("max_tokens"))
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(
+            aliases,
+            ["max_completion_tokens"],
+            "`generation_budget` resolves exactly this one alias of the budget; \
+             a row declaring another would be published as served and never read"
         );
     }
 
@@ -1177,5 +1387,87 @@ mod tests {
             .expect("refused");
         assert!(fmt.contains("prose"), "{fmt}");
         assert!(fmt.contains("Ask for JSON in the prompt"), "{fmt}");
+    }
+
+    // --- the generation budget under its two names -------------------------
+
+    fn budget(named: Option<u32>, alias: Option<Value>) -> Result<Option<u32>, String> {
+        let mut extra = BTreeMap::new();
+        if let Some(v) = alias {
+            extra.insert("max_completion_tokens".to_owned(), v);
+        }
+        super::generation_budget(named, &extra)
+    }
+
+    /// The change this row records: a client on OpenAI's current spelling gets
+    /// the budget it asked for, rather than a refusal pointing it at the
+    /// spelling OpenAI deprecated.
+    #[test]
+    fn the_current_spelling_of_the_budget_is_honoured() {
+        assert_eq!(budget(None, Some(json!(256))), Ok(Some(256)));
+        assert!(
+            param("max_completion_tokens")
+                .expect("declared")
+                .refusal()
+                .is_none(),
+            "the current name of a budget this endpoint honours must not be a 400"
+        );
+    }
+
+    /// Neither name set is still no budget: the caller gets the default, and
+    /// nothing here invents one.
+    #[test]
+    fn neither_name_leaves_the_budget_unset() {
+        assert_eq!(budget(None, None), Ok(None));
+        assert_eq!(budget(Some(64), None), Ok(Some(64)));
+    }
+
+    /// `null` is no decision here either, exactly as it is nowhere else in this
+    /// module.
+    #[test]
+    fn a_null_alias_is_not_a_budget() {
+        assert_eq!(budget(Some(64), Some(Value::Null)), Ok(Some(64)));
+        assert_eq!(budget(None, Some(Value::Null)), Ok(None));
+    }
+
+    /// Both names, one number: unambiguous, so it is answered rather than
+    /// refused. A refusal here would fire at a caller who decided exactly once.
+    #[test]
+    fn both_names_agreeing_is_one_decision_expressed_twice() {
+        assert_eq!(budget(Some(128), Some(json!(128))), Ok(Some(128)));
+    }
+
+    /// Both names, two numbers: nothing can tell which was meant, and picking
+    /// one silently is the defect class this module exists to remove.
+    #[test]
+    fn both_names_disagreeing_is_refused_and_names_both() {
+        let err = budget(Some(10), Some(json!(20))).expect_err("two budgets is ambiguous");
+        assert!(err.contains("`max_completion_tokens`"), "{err}");
+        assert!(err.contains("`max_tokens`"), "{err}");
+        assert!(err.contains("10") && err.contains("20"), "{err}");
+        assert!(err.contains("Send one of them"), "the way forward: {err}");
+        assert!(
+            err.ends_with('.'),
+            "a refusal is prose a person reads: {err}"
+        );
+    }
+
+    /// A budget that is not a token count is refused by name rather than
+    /// silently becoming the default — which is the same silent-wrong-answer
+    /// shape, one layer down.
+    #[test]
+    fn a_budget_that_is_not_a_token_count_is_refused() {
+        for value in [
+            json!("512"),
+            json!(-1),
+            json!(1.5),
+            json!([512]),
+            json!(u64::from(u32::MAX) + 1),
+        ] {
+            let err = budget(None, Some(value.clone()))
+                .expect_err(&format!("`max_completion_tokens: {value}` is not a budget"));
+            assert!(err.contains("`max_completion_tokens`"), "{err}");
+            assert!(err.ends_with('.'), "{err}");
+        }
     }
 }

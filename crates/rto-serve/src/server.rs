@@ -2325,4 +2325,54 @@ mod tests {
             assert_eq!(json["error"]["type"], "invalid_request_error", "{what}");
         }
     }
+
+    /// Two spellings of the budget carrying two numbers must reach the client
+    /// as this endpoint's own refusal, on the wire.
+    ///
+    /// The unit tests prove `generation_budget` returns the right `Err`; only
+    /// this one proves what the caller receives. It is here because the obvious
+    /// implementation — `#[serde(alias = "max_completion_tokens")]` on
+    /// `max_tokens` — was measured returning `422 Unprocessable Entity` with
+    /// the plain-text body ``Failed to deserialize the JSON body into the
+    /// target type: duplicate field `max_tokens` ``: not the `{"error": …}`
+    /// envelope, naming the field the caller did not send, and saying what
+    /// broke rather than what to do. Reading the alias out of the catch-all is
+    /// what buys the status and the envelope asserted below, so it is asserted
+    /// rather than assumed.
+    #[tokio::test]
+    async fn two_different_generation_budgets_are_a_400_in_the_error_envelope() {
+        let resp = test_app()
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 10,
+                "max_completion_tokens": 20,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["type"], "invalid_request_error");
+        let message = json["error"]["message"].as_str().expect("a message");
+        assert!(message.contains("`max_completion_tokens`"), "{message}");
+        assert!(message.contains("`max_tokens`"), "{message}");
+        assert!(message.contains("Send one of them"), "{message}");
+    }
+
+    /// The other half: OpenAI's current spelling alone is served, not refused
+    /// and not a `422`.
+    #[tokio::test]
+    async fn the_current_spelling_of_the_budget_is_served() {
+        let resp = test_app()
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi there"}],
+                "max_completion_tokens": 64,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["choices"][0]["message"]["content"], "HI THERE");
+    }
 }
