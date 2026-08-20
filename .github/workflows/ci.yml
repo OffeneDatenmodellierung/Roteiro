@@ -266,7 +266,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y protobuf-compiler \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
+            || { echo "::error::apt-get failed while installing protobuf-compiler. This is often a transient mirror/network issue; re-run the job. See the apt output above for the exact failure."; exit 1; }
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
         if: env.RELEASE_PR != 'true'
         run: python3 scripts/provision-sandbox-runtime.py --github-env
