@@ -124,8 +124,26 @@ env:
   RELEASE_PR: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-') }}
 
 jobs:
+  # Pinned to `ubuntu-24.04` rather than `ubuntu-latest`, which resolves to the
+  # same image TODAY — so this is not a version change, it is a change in what
+  # can move without a diff.
+  #
+  # It became load-bearing when the cmake/clang/libclang apt install came out of
+  # the jobs below. That step was pointless, but it did mean the build stated its
+  # own C/C++ requirements; without it, "the image already ships a
+  # bindgen-loadable libclang" is an assumption held by the runner label alone.
+  # `ubuntu-latest` advances to the next LTS on GitHub's schedule, and it would
+  # take the `serve` build with it on a commit that changed nothing.
+  #
+  # Consistent with how everything else here is fixed: every action is pinned to
+  # a SHA, and ADR-0017 asks for deliberate, monitored currency rather than
+  # whatever arrives. The obligation this creates is a real one — `ubuntu-24.04`
+  # will eventually be retired, with warnings in the run log well ahead of time —
+  # and taking that bump deliberately is the point, since it is when the probe
+  # behind the deleted step (`cmake --version`, `clang --version`, and bindgen
+  # actually loading libclang) has to be run again on the new image.
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # BOUNDING A RUNAWAY JOB. Until this existed there was no `timeout-minutes`
     # anywhere in this file, so every job inherited GitHub's 6-hour default. That
     # is not a theoretical exposure: eleven jobs across six of the last ~40 CI
@@ -337,8 +355,9 @@ jobs:
   # protoc and the sandbox runtime are NOT needed and deliberately absent:
   # `exec-boxlite` is off in `rto-exec`'s default set, so nothing here trips
   # `rto-exec/build.rs`'s BOXLITE_RUNTIME_URL requirement.
+  # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   default-features:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A backstop against a hung step, not a budget. See `checks` for the
     # measured durations these bounds are sized against.
     timeout-minutes: 30
@@ -409,8 +428,9 @@ jobs:
   # protoc and the sandbox runtime are NOT needed and are deliberately absent:
   # `--no-default-features` leaves `exec-boxlite` off in every workspace member,
   # so nothing trips `rto-exec/build.rs`'s BOXLITE_RUNTIME_URL requirement.
+  # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   no-default-features:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A backstop against a hung step, not a budget. See `checks` for the
     # measured durations these bounds are sized against.
     timeout-minutes: 60
@@ -473,8 +493,9 @@ jobs:
   # rust-cache carries the compiled artefacts between runs. If this ever proves too slow to keep, narrow it to default features and
   # SAY SO in the summary — a partial measurement reported as partial is honest,
   # a gate that times out is not.
+  # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A backstop against a hung step, not a budget. See `checks` for the
     # measured durations these bounds are sized against.
     timeout-minutes: 90
@@ -594,8 +615,9 @@ jobs:
           path: coverage-summary.txt
           if-no-files-found: warn
 
+  # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A backstop against a hung step, not a budget. See `checks` for the
     # measured durations these bounds are sized against.
     timeout-minutes: 60
