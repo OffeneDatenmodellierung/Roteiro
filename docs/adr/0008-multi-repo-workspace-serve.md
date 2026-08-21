@@ -252,8 +252,19 @@ is the commitment; the rendering is not.
   that they have none.
 
 Diamonds need no special handling: `a` including `b` and `c` which both include
-`d` yields `d` once, because member paths are already de-duplicated within a
-workspace.
+`d` yields `d` once. Not because workspaces de-duplicate their members — they do
+not, and a repo a user lists twice in one entry still resolves twice — but
+because the fold carries a dedupe of its own, in two parts: a workspace is
+expanded at most once by name, and every root and repo an include contributes is
+checked against a seen-set spanning the whole expansion. That set matches on the
+*expanded* path, so `~/git/api` and the spelling it expands to are one member
+rather than two, and it is **seeded from what the including workspace already
+declares** — so an included member duplicating a declared one is dropped, while a
+duplicate the user wrote by hand is left exactly as it was.
+
+The distinction matters because the fold's dedupe is the only thing holding this
+property. Read as a pre-existing invariant it looks redundant, and the next
+person to tidy it away would reintroduce diamonds silently.
 
 ## Build-plan outline (grounded)
 
