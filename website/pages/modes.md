@@ -115,7 +115,19 @@ Requires `--features mcp`.
 roteiro mcp
 
 <span class="c"># Or networked over streamable HTTP (terminate TLS at a reverse proxy)</span>
-roteiro mcp --http 127.0.0.1:8080</code></pre>
+roteiro mcp --http 127.0.0.1:8080
+
+<span class="c"># Restrict what this server exposes — to a list, or to everything read-only</span>
+roteiro mcp --tools search,explain,context,path
+roteiro mcp --tools read-only            <span class="c"># drops sandbox_clear, the one mutating tool</span></code></pre>
+
+<div class="note"><strong>The server decides what it exposes.</strong> <code>--tools</code>
+(and <code>[mcp] tools</code> in config) bounds <em>both</em> <code>tools/list</code> and
+<code>tools/call</code> — a tool that is not advertised is not callable either, because a client
+that already knows the name is exactly the case a restriction is for. An unknown name, or a
+restriction leaving nothing to serve, is a startup error rather than a server that quietly
+advertises everything. It is a size lever as well as a permission one: on this repository the full
+surface is 20,045 advertised bytes and a graph-only ten-tool list is 9,056.</div>
 
 <div class="note"><strong>Renamed in v1.5.</strong> The MCP graph server moved from
 <code>roteiro serve</code> to <code>roteiro mcp</code>; bare <code>roteiro serve</code> is now

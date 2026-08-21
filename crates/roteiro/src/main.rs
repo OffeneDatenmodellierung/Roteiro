@@ -12015,6 +12015,10 @@ fn serve_v1_tail(
     if opts.mcp {
         #[cfg(feature = "mcp")]
         {
+            // Said here as well as in `serve_mcp`, because a restricted `/mcp`
+            // mounted beside `/v1` is the same claim and a reader of the startup
+            // line should not have to know which command mounted it.
+            announce_mcp_surface(&opts.mcp_surface);
             let combined = router.merge(rto_render::mcp::mcp_router(flat, &opts.mcp_surface));
             eprintln!(
                 "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note} + /mcp — serving: {names}"
