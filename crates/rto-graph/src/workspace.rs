@@ -852,10 +852,78 @@ fn dedupe_name(projects: &BTreeMap<String, Source>, base: String) -> String {
 /// clone, a file in worktrees and submodules), so existence — not `is_dir` — is
 /// tested.
 ///
+/// The rule is invisible to whoever passes the root, which is a separate defect
+/// from the rule being wrong: see [`RootScan`], and the `--workspace` help text
+/// that now says "immediate subdirectories" rather than "under" (issue #580).
+///
 /// # Errors
 /// [`WorkspaceError::Discover`] if `root` cannot be read.
 pub fn discover_repos_under(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
-    let is_repo = |dir: &Path| dir.join(".git").exists();
+    Ok(scan_root(root)?.repos)
+}
+
+/// Whether `dir` is a git repository: it holds a `.git` **entry**. A directory in
+/// a normal clone, a file in worktrees and submodules — so existence is the test,
+/// not `is_dir`.
+fn is_repo(dir: &Path) -> bool {
+    dir.join(".git").exists()
+}
+
+/// What a shallow scan of one root found, **including what it walked past**.
+///
+/// [`discover_repos_under`] answers the membership question and is what building
+/// a workspace uses. This answers the diagnostic one, because the shallow rule is
+/// invisible at exactly the moment it matters: a root whose repos all live one
+/// level deeper (`~/GIT/<org>/<repo>`, a common layout) yields a near-empty
+/// workspace and no error, so the failure presents later as "the graph tools
+/// return nothing useful" rather than as a configuration mistake (issue #580).
+///
+/// The rule itself is deliberate and is not what this changes — see
+/// [`discover_repos_under`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootScan {
+    /// The root scanned.
+    pub root: PathBuf,
+    /// Repos found: the root itself if it is one, plus each immediate
+    /// subdirectory that is one, sorted.
+    pub repos: Vec<PathBuf>,
+    /// Immediate subdirectories that are **not** repos, sorted. A repo nested
+    /// inside one of these is not hosted; counting them is free here because the
+    /// scan already read the directory, which is why the successful-start note
+    /// can report it without a second pass.
+    pub skipped: Vec<PathBuf>,
+}
+
+impl RootScan {
+    /// Which skipped subdirectories hold a repo **directly** beneath them — the
+    /// ones a user almost certainly meant to reach.
+    ///
+    /// Costs one `read_dir` per skipped directory, so it is **bounded** by `limit`
+    /// and is for the path where the user is already stuck: a root that yielded
+    /// nothing to serve. A successful start reports [`RootScan::skipped`] instead,
+    /// which the scan already knows.
+    #[must_use]
+    pub fn nested_repo_parents(&self, limit: usize) -> Vec<&Path> {
+        self.skipped
+            .iter()
+            .take(limit)
+            .filter(|dir| {
+                std::fs::read_dir(dir).is_ok_and(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .any(|e| e.path().is_dir() && is_repo(&e.path()))
+                })
+            })
+            .map(PathBuf::as_path)
+            .collect()
+    }
+}
+
+/// The shallow scan behind [`discover_repos_under`], keeping what it skipped.
+///
+/// # Errors
+/// [`WorkspaceError::Discover`] if `root` cannot be read.
+pub fn scan_root(root: &Path) -> Result<RootScan, WorkspaceError> {
     let mut repos = Vec::new();
     if is_repo(root) {
         repos.push(root.to_path_buf());
@@ -864,14 +932,19 @@ pub fn discover_repos_under(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError>
         root: root.to_path_buf(),
         msg: e.to_string(),
     })?;
-    let mut children: Vec<PathBuf> = entries
+    let (mut children, mut skipped): (Vec<PathBuf>, Vec<PathBuf>) = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && is_repo(p))
-        .collect();
+        .filter(|p| p.is_dir())
+        .partition(|p| is_repo(p));
     children.sort();
+    skipped.sort();
     repos.extend(children);
-    Ok(repos)
+    Ok(RootScan {
+        root: root.to_path_buf(),
+        repos,
+        skipped,
+    })
 }
 
 /// A workspace group after config normalisation ([`crate::WorkspaceSet`] input): a
@@ -1510,5 +1583,49 @@ mod tests {
             set.containing(Path::new("/elsewhere/.git/roteiro/graph.db")),
             None
         );
+    }
+
+    /// The shallow rule is deliberate; being **invisible** is the defect
+    /// (issue #580). A scan therefore reports what it walked past, so a caller
+    /// can say so at the moment the project count surprises somebody.
+    ///
+    /// The layout is the one the issue reports: one repo at depth 1 beside
+    /// organisation directories whose repos are one level further down.
+    #[test]
+    fn a_shallow_scan_reports_the_directories_it_walked_past() {
+        let base = std::env::temp_dir().join(format!("rto-scan-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for dir in ["direct/.git", "orgA/repo1/.git", "orgB/repo2/.git", "empty"] {
+            std::fs::create_dir_all(base.join(dir)).expect("mkdir");
+        }
+        let scan = scan_root(&base).expect("scan");
+
+        // Membership is unchanged — this is not a change to the rule.
+        assert_eq!(scan.repos, vec![base.join("direct")]);
+        assert_eq!(discover_repos_under(&base).expect("discover"), scan.repos);
+
+        // And the three directories it did not descend into are recorded.
+        assert_eq!(
+            scan.skipped,
+            vec![base.join("empty"), base.join("orgA"), base.join("orgB")],
+        );
+
+        // The deeper probe names only the ones that would have yielded a repo,
+        // so a message built from it is actionable rather than a directory dump.
+        assert_eq!(
+            scan.nested_repo_parents(64),
+            vec![base.join("orgA").as_path(), base.join("orgB").as_path()],
+        );
+
+        // Bounded: the probe costs a `read_dir` per candidate, so a caller can
+        // cap it. `skipped` is sorted, so `limit` takes a defined prefix.
+        assert_eq!(
+            scan.nested_repo_parents(2),
+            vec![base.join("orgA").as_path()],
+            "`limit` bounds the directories examined, not the ones reported",
+        );
+        assert!(scan.nested_repo_parents(0).is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

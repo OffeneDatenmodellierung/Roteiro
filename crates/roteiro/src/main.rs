@@ -806,9 +806,12 @@ enum Command {
         /// The PEM private-key file for `--tls-cert`.
         #[arg(long, value_name = "FILE")]
         tls_key: Option<String>,
-        /// Workspace mode (ADR-0008): host every git repo under ROOT
-        /// (repeatable), so one server — holding the model once — answers
-        /// questions about many projects, selected per call by `project`.
+        /// Workspace mode (ADR-0008): host each git repo that is an **immediate
+        /// child** of ROOT, plus ROOT itself if it is one — one level, **not
+        /// recursive** (repeatable). So one server, holding the model once,
+        /// answers questions about many projects, selected per call by `project`.
+        /// A repo two levels down (`ROOT/<org>/<repo>`) is **not** found; pass
+        /// each `<org>` directory instead, or list them under `[[workspaces]]`.
         /// Combined with `[workspace]` config. Omit for single-repo serving
         /// (the current directory's repo).
         #[arg(long, value_name = "ROOT")]
@@ -882,9 +885,12 @@ enum Command {
         /// instead of STDIO. Terminate TLS at a reverse proxy.
         #[arg(long, value_name = "ADDR")]
         http: Option<String>,
-        /// Workspace mode (ADR-0008): host every git repo under ROOT (repeatable),
-        /// selected per call by `project`. Combined with `[workspace]` config.
-        /// Omit for single-repo serving (the current directory's repo).
+        /// Workspace mode (ADR-0008): host each git repo that is an **immediate
+        /// child** of ROOT, plus ROOT itself if it is one — one level, **not
+        /// recursive** (repeatable), selected per call by `project`. A repo two
+        /// levels down (`ROOT/<org>/<repo>`) is **not** found; pass each `<org>`
+        /// directory instead, or list them under `[[workspaces]]`. Combined with
+        /// `[workspace]` config. Omit for single-repo serving (the cwd's repo).
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
         /// Select a **named** workspace from config as the default the flat tools
@@ -1637,6 +1643,13 @@ fn main() -> anyhow::Result<()> {
     // config.toml`); a malformed file is a hard error for any command (ADR-0007).
     let cwd = std::env::current_dir()?;
     let cfg = config::load(&cwd)?;
+    // A config file sitting where no layer reads it (issue #581). Warned about
+    // for every command rather than only for `config`, because the whole defect
+    // is that the file is invisible: a person who knew to run `roteiro config`
+    // would already suspect their settings were not taking effect.
+    if let Some(warning) = cfg.near_miss_warning() {
+        eprintln!("{warning}");
+    }
     // Initialise logging once, here — the single subscriber-build seam (ADR-0011).
     // Stdout logging is unchanged; a rotating OTEL-JSON file sink is added only when
     // `[telemetry] file` / `--log-file` / `--log` enables it. The returned guard
@@ -2089,6 +2102,15 @@ fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
             .as_deref()
             .map_or_else(|| "(none)".to_owned(), |p| p.display().to_string())
     );
+    // The line issue #581 is about: `project config: (none)` with no hint that a
+    // plausible-looking sibling was passed over reads as "there is nothing to
+    // find", which is the opposite of what happened.
+    if let Some(near) = loaded.near_miss.as_ref() {
+        println!(
+            "not read:       {} (no layer reads that path — see the warning above)",
+            near.stray.display()
+        );
+    }
     print_config_sections(loaded);
     println!("\n(unset values fall back to built-in defaults; a CLI flag overrides config)");
     Ok(())
@@ -7390,6 +7412,21 @@ where
         .collect()
 }
 
+/// Where a workspace declaration belongs, for the three "nothing in scope"
+/// errors that offer to tell you.
+///
+/// One sentence in one place. Issue #581 is what it costs when a message sends a
+/// user to the wrong file — the error said `roteiro.toml` while
+/// [`config::WorkspaceConfig`] calls workspaces "naturally a user-layer setting",
+/// so following the advice literally, in the most obvious directory, produced a
+/// silently ignored file. Three copies of the sentence is how one fix misses two.
+///
+/// It says "prefer", not "must": the project layer really does read
+/// `[[workspaces]]`, and a message that denied it would be a second wrong answer.
+const WORKSPACE_CONFIG_ADVICE: &str = "workspaces are machine-specific, so prefer the USER config \
+     (`~/.roteiro/config.toml`, or `$ROTEIRO_HOME/config.toml`) over a committed \
+     `roteiro.toml` — both layers are read";
+
 /// Verify a workspace's authored cross-repo links (ADR-0009). For every repo in
 /// the workspace (the cwd repo plus any `--workspace`/`[workspace]` roots), read
 /// its `[[links]]` and resolve each project-qualified `to` against the other
@@ -7399,8 +7436,8 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
     let paths = links_scope_paths(cfg, scope)?;
     if paths.is_empty() {
         anyhow::bail!(
-            "no repos in scope — run inside a repo, pass `--workspace <root>`, or set \
-             `[workspace]` in roteiro.toml"
+            "no repos in scope — run inside a repo, pass `--workspace <root>`, or \
+             set `[workspace]` in config ({WORKSPACE_CONFIG_ADVICE})"
         );
     }
     let workspace = rto_graph::Workspace::from_repo_paths(&paths)?;
@@ -10509,12 +10546,16 @@ fn run_explorer(
     let set = if resolved.is_empty() {
         explorer_cwd_set()?
     } else {
-        rto_graph::WorkspaceSet::from_resolved(resolved)?
+        rto_graph::WorkspaceSet::from_resolved(resolved.clone())?
     };
     if set.names().is_empty() {
+        // Same depth diagnostic `serve`/`mcp` give (issue #580): a root scanned
+        // one level deep that held no repo at that depth is a dead end, and
+        // naming the subdirectories that do hold repos turns it into a fix.
         anyhow::bail!(
             "no workspaces to serve — run inside a repo, or configure \
-             `[[workspaces]]` / `[standalone]` in roteiro.toml"
+             `[[workspaces]]` / `[standalone]` in config ({WORKSPACE_CONFIG_ADVICE}){}",
+            nested_repo_hint(&resolved)
         );
     }
     let set = Arc::new(set);
@@ -11040,9 +11081,16 @@ fn build_serve_workspaces(
     // `-w` naming nothing to serve — BEFORE `from_repo_paths` would surface a raw
     // `WorkspaceError::Empty`. Mirrors `run_explorer`'s message.
     if set.names().is_empty() {
+        // The depth rule belongs *here*, because this is the moment a user who
+        // passed a parent directory needs it and the only moment they are
+        // looking. Naming the subdirectories that do hold repos turns a dead end
+        // into a fix, so the probe — one `read_dir` per skipped directory,
+        // bounded — is worth its cost on this path and on no other (issue #580).
         anyhow::bail!(
             "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, \
-             or configure `[[workspaces]]` / `[standalone]` in roteiro.toml"
+             or configure `[[workspaces]]` / `[standalone]` in config \
+             ({WORKSPACE_CONFIG_ADVICE}).{}",
+            nested_repo_hint(&effective)
         );
     }
     // Validate `--workspace-name` once, up front: an unknown name fails fast (listing
@@ -11070,8 +11118,114 @@ fn build_serve_workspaces(
         },
         flat.names().join(", ")
     );
+    // Beside the project count, because that is where a user notices: a root
+    // whose repos all live one level deeper yields "1 project(s)" and no error
+    // (issue #580). Free — the scan already read each root's directory — so it
+    // costs nothing to say what was walked past.
+    for note in scanned_roots_note(&effective) {
+        eprintln!("{note}");
+    }
     install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
     Ok(ServeWorkspaces { set, flat })
+}
+
+/// What each scanned root actually offered, one line per root that skipped
+/// something — printed beside the project count on a successful start.
+///
+/// `--workspace <ROOT>` scans **one level**. That rule is deliberate and well
+/// argued (see [`rto_graph::discover_repos_under`]); the defect issue #580
+/// reports is that it lives in a Rust doc comment nobody reads while the user
+/// sees a near-empty workspace and no error at all. So the count of directories
+/// walked past is reported where the project count is, which is the line a user
+/// is looking at when the number surprises them.
+///
+/// Silent when a root skipped nothing, so an ordinary sibling-checkouts layout —
+/// the case the shallow rule is for — says nothing extra.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn scanned_roots_note(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<String> {
+    scanned_roots(effective)
+        .into_iter()
+        .filter(|scan| !scan.skipped.is_empty())
+        .map(|scan| {
+            format!(
+                "  note: {} scanned one level deep (not recursive) — {} {} hosted, \
+                 {} {} skipped for holding no `.git`; any repo nested inside those \
+                 is NOT hosted",
+                scan.root.display(),
+                scan.repos.len(),
+                plural(scan.repos.len(), "repo", "repos"),
+                scan.skipped.len(),
+                plural(scan.skipped.len(), "subdirectory", "subdirectories"),
+            )
+        })
+        .collect()
+}
+
+/// `one`/`many` chosen by `n`. A local helper so the depth notes read as English
+/// rather than as `subdirector(y/ies)`.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
+    if n == 1 { one } else { many }
+}
+
+/// The directories a failed scan walked past that **do** hold repos one level
+/// further down, as a sentence to append to the "no workspaces to serve" error.
+///
+/// Empty when there is nothing useful to say, so the error keeps its old wording
+/// in the ordinary case. Bounded at eight named directories and at
+/// [`PROBE_LIMIT`] directories examined: this runs only where the user is already
+/// stuck, and a dead end is worth one `read_dir` per candidate, but a root with
+/// ten thousand children is not worth ten thousand of them.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn nested_repo_hint(effective: &[rto_graph::ResolvedWorkspace]) -> String {
+    /// How many skipped subdirectories the probe will examine, per root.
+    const PROBE_LIMIT: usize = 256;
+    /// How many it will name in the message.
+    const NAME_LIMIT: usize = 8;
+
+    let mut named: Vec<String> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    for scan in scanned_roots(effective) {
+        let nested = scan.nested_repo_parents(PROBE_LIMIT);
+        if nested.is_empty() {
+            continue;
+        }
+        roots.push(scan.root.display().to_string());
+        named.extend(nested.iter().map(|p| p.display().to_string()));
+    }
+    if named.is_empty() {
+        return String::new();
+    }
+    let shown = named.len().min(NAME_LIMIT);
+    format!(
+        "\n\nA root is scanned ONE LEVEL DEEP — each immediate child that is a git \
+         repo, and the root itself if it is one — never recursively. {} held no repo \
+         at that depth, but {} of its subdirectories do hold repos one level \
+         further: {}{}. Pass those as `--workspace <ROOT>` instead, or list them \
+         under `[[workspaces]]`.",
+        roots.join(", "),
+        named.len(),
+        named[..shown].join(", "),
+        if named.len() > shown { ", …" } else { "" },
+    )
+}
+
+/// Scan every root named by `effective`, skipping any that cannot be read — a
+/// stale root is what the caller is already reporting, not a second error to
+/// raise from a diagnostic.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn scanned_roots(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<rto_graph::RootScan> {
+    let mut seen = std::collections::BTreeSet::new();
+    effective
+        .iter()
+        .flat_map(|ws| ws.roots.iter())
+        .filter_map(|root| {
+            let path = config::expand_tilde(root);
+            seen.insert(path.clone())
+                .then(|| rto_graph::scan_root(&path).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// The two workspace views a `serve` process holds. `set` is the full

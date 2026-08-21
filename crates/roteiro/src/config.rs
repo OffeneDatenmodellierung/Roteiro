@@ -31,6 +31,9 @@ pub struct Loaded {
     pub user_path: Option<PathBuf>,
     /// Path the project config was read from, if present.
     pub project_path: Option<PathBuf>,
+    /// A config file sitting where no layer reads it. `None` in the ordinary
+    /// case; see [`NearMiss`].
+    pub near_miss: Option<NearMiss>,
 }
 
 impl Loaded {
@@ -1824,7 +1827,11 @@ fn dedupe_workspace_name(used: &mut std::collections::HashSet<String>, base: Str
 pub fn load(cwd: &Path) -> anyhow::Result<Loaded> {
     let user_path = user_config_path().filter(|p| p.is_file());
     let project_path = find_project_config(cwd);
-    load_from(user_path, project_path)
+    let mut loaded = load_from(user_path, project_path)?;
+    // Filled here rather than in `load_from`, which is deliberately env-free so
+    // layering tests need not touch global state (issue #581).
+    loaded.near_miss = user_layer_near_miss();
+    Ok(loaded)
 }
 
 /// Read and merge explicit user/project config paths — the env-free core of
@@ -1839,6 +1846,7 @@ fn load_from(user_path: Option<PathBuf>, project_path: Option<PathBuf>) -> anyho
         project,
         user_path,
         project_path,
+        near_miss: None,
     })
 }
 
@@ -1881,6 +1889,93 @@ pub(crate) fn default_log_path() -> Option<PathBuf> {
 /// (mirrors the model store's home resolution).
 fn user_config_path() -> Option<PathBuf> {
     Some(roteiro_home()?.join("config.toml"))
+}
+
+/// A `roteiro.toml` in `$ROTEIRO_HOME` (else `~/.roteiro`), which **no layer can
+/// ever load** — the user layer is `config.toml` and the project layer needs a
+/// git ancestor, which that directory has not got (issue #581).
+///
+/// # Why this is worth a check rather than a shrug
+///
+/// The two layers use two different filenames for what a person reasonably reads
+/// as "the Roteiro config file", and the project-layer name is the more guessable
+/// of the two — it is the tool's own name. Putting it in the tool's own home
+/// directory is a natural mistake, and the reported case had been silently inert
+/// for six days. This repository has ruled before that a silently-ignored config
+/// key is the worst available outcome (ADR-0007 v1.1's `ignore_reset`, issue
+/// #513); a silently-ignored config *file* is that with a larger blast radius.
+///
+/// # Why it warns rather than refusing, and rather than loading the file
+///
+/// **Not a hard error**, because ADR-0007 v1.3 makes `roteiro config` the one
+/// command a bad configuration must not stop — it is what an operator runs
+/// *because* something is not taking effect — and a stray file must not be the
+/// thing that stops it.
+///
+/// **Not a second accepted filename**, either. ADR-0007 chose one format and one
+/// location per layer on the reasoning that a second way to spell a thing is
+/// surface that invites drift; accepting `roteiro.toml` here would create a
+/// precedence question ("both files exist — which wins?") whose every answer is
+/// a new thing to document, in order to reward a guess. Naming the real path is
+/// a one-line fix for the user and no new surface at all.
+///
+/// # Why the mirror image is *not* checked
+///
+/// A `config.toml` at a repository root would be the same mistake in the other
+/// direction, and it is deliberately ignored: a repository root is not Roteiro's
+/// directory, and `config.toml` there very plausibly belongs to something else
+/// entirely. Warning about it would fire on repositories that never mentioned
+/// Roteiro. `$ROTEIRO_HOME` **is** Roteiro's directory, so a `roteiro.toml` in it
+/// was written for Roteiro and for nothing else — which is exactly what makes it
+/// safe to be sure about.
+fn user_layer_near_miss() -> Option<NearMiss> {
+    let home = roteiro_home()?;
+    let stray = home.join("roteiro.toml");
+    stray.is_file().then(|| NearMiss {
+        stray,
+        user_layer: home.join("config.toml"),
+    })
+}
+
+/// A config file found somewhere no layer will read it, and the path that would
+/// have been read instead. See [`user_layer_near_miss`].
+///
+/// Carries both paths rather than deriving the second on demand, so
+/// [`Loaded::near_miss_warning`] is a pure function of this value and can be
+/// tested without an environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearMiss {
+    /// The file that was not read.
+    pub stray: PathBuf,
+    /// The user-layer path that would have been.
+    pub user_layer: PathBuf,
+}
+
+impl Loaded {
+    /// The warning to print when a config file sits somewhere no layer reads.
+    ///
+    /// Names both paths, because "this file was not read" without "the one that
+    /// would be" leaves the reader exactly as stuck.
+    #[must_use]
+    pub fn near_miss_warning(&self) -> Option<String> {
+        let near = self.near_miss.as_ref()?;
+        // Not a near miss if it *is* the project layer this run loaded, which
+        // happens when Roteiro's home is itself a repository root the working
+        // directory sits under. Rare, and warning that a file was not read while
+        // reading it would be worse than saying nothing.
+        if self.project_path.as_deref() == Some(near.stray.as_path()) {
+            return None;
+        }
+        Some(format!(
+            "warning: {} was NOT read. Roteiro's USER layer is {}; a `roteiro.toml` \
+             is the PROJECT layer and is only read from the repository root above \
+             your working directory, which this file has none of. Move these \
+             settings into {} for them to take effect.",
+            near.stray.display(),
+            near.user_layer.display(),
+            near.user_layer.display(),
+        ))
+    }
 }
 
 /// Find the project `roteiro.toml` at the **repository root** — the nearest
@@ -2035,6 +2130,39 @@ mod tests {
         assert_eq!(find_project_config(&root), None);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `roteiro.toml` in Roteiro's own home is never read by either layer, and
+    /// the whole defect is that nothing said so (issue #581). The warning has to
+    /// name **both** paths: "this was not read" without "this would have been"
+    /// leaves the reader exactly as stuck.
+    #[test]
+    fn a_config_file_no_layer_reads_is_named_together_with_the_one_that_is() {
+        let home = PathBuf::from("/home/u/.roteiro");
+        let mut loaded = load_from(None, None).expect("load");
+        assert!(
+            loaded.near_miss_warning().is_none(),
+            "the ordinary case must stay silent",
+        );
+
+        loaded.near_miss = Some(super::NearMiss {
+            stray: home.join("roteiro.toml"),
+            user_layer: home.join("config.toml"),
+        });
+        let warning = loaded.near_miss_warning().expect("warns");
+        assert!(
+            warning.contains("/home/u/.roteiro/roteiro.toml")
+                && warning.contains("/home/u/.roteiro/config.toml"),
+            "both paths, or the reader is no better off: {warning}",
+        );
+        assert!(warning.contains("NOT read"), "{warning}");
+
+        // And it stays quiet when that same file *is* the project layer — which
+        // happens if Roteiro's home is itself a repository root above the working
+        // directory. Saying a file was not read while reading it is worse than
+        // saying nothing.
+        loaded.project_path = Some(home.join("roteiro.toml"));
+        assert!(loaded.near_miss_warning().is_none());
     }
 
     /// `[mcp] tools` layers by **intersection**, and the direction is the point:
