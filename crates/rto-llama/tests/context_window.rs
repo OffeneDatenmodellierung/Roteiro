@@ -18,6 +18,24 @@
 //! That is the whole argument for sizing a context to the request rather than to
 //! a fixed maximum, so it is measured here rather than asserted.
 //!
+//! **What this instrument does not see** (issue #578). The cost reported here is
+//! a `ps` RSS delta, and RSS accounts for the KV and recurrent buffers but *not*
+//! for ggml's compute buffers. On `qwen3.8-27b` at `n_ctx = 4096` llama.cpp
+//! reports allocating 256 MiB KV + 149.62 MiB recurrent + **509.02 MiB Metal
+//! compute + 24.02 MiB CPU compute**, against the 429 MiB this file prints —
+//! and a real 2,001-token decode adds only 35 MiB more, so the compute buffers
+//! are not merely waiting to be faulted in. "Metal is invisible to `ps`" is not
+//! the explanation either: the KV and recurrent buffers are `MTL0` allocations
+//! too, and they are counted. Why the compute buffers differ is unresolved, and
+//! `ps` cannot answer it — `phys_footprint` or `vmmap` would be the instrument.
+//!
+//! Read these numbers, then, as **KV + recurrent**, which is what the
+//! per-request-sizing argument turns on and which they measure faithfully. The
+//! trap is tuning `n_ubatch` from them: `n_ubatch` scales precisely the buffer
+//! this cannot see, so a sweep to 2048 moves RSS by 44 MiB while moving the real
+//! allocation by 1,527 MiB, and reads as nearly free when it is not. See
+//! `speculative::base_params` for that measurement.
+//!
 //! These need the `llama` feature **and** a GGUF on disk, so they are
 //! `#[ignore]`d and self-skip with a printed reason when the model is absent —
 //! CI compiles them under `--all-features` without running them, exactly as

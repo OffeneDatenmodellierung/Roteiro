@@ -116,9 +116,12 @@ const WINDOW_HEADROOM: u32 = 64;
 /// buffer"), and [`LlamaEngine::new_context`] builds a context **per
 /// generation**. A fixed window is therefore paid in full on every request,
 /// whatever that request asked for. Measured on `qwen3.8-27b`
-/// (`tests/context_window.rs`), a context costs 429 MiB at 4,096 and **16,466
-/// MiB at its trained 262,144** — so a fixed maximum would spend 16 GiB to
-/// answer "hello". Sizing to the request gives the *whole* trained window to a
+/// (`tests/context_window.rs`), a context's KV and recurrent state cost 429 MiB
+/// at 4,096 and **16,466 MiB at its trained 262,144** — so a fixed maximum would
+/// spend 16 GiB to answer "hello". (KV and recurrent state is what that
+/// instrument measures; it does not see ggml's compute buffers, which is
+/// immaterial to this argument but not to every argument — see the note on
+/// `tests/context_window.rs`.) Sizing to the request gives the *whole* trained window to a
 /// request that needs it, and the floor to one that does not.
 ///
 /// `ceiling` is the operator's cap ([`LlamaEngine::new`]'s `n_ctx`), where `0`

@@ -173,6 +173,28 @@ fn draft_max_u32() -> u32 {
 /// compute graph, llama.cpp splits a logical batch into `n_ubatch`-sized pieces
 /// for causal models by itself, and leaving it at llama.cpp's 512 is what keeps
 /// this change close to free (see `tests/batch_capacity.rs` for the measurement).
+///
+/// **512 is also the fastest, which is not the usual prior** (issue #578). The
+/// argument above is about buffer size, and read alone it looks like an
+/// unmeasured trade — raise the buffer, buy prefill throughput — so it kept
+/// getting re-opened on the general expectation that a wider physical batch buys
+/// 5-15% on Metal. It does not, here. Swept on `qwen3.8-27b` at `n_ctx = 4096`
+/// over a 2,001-token prefill, all three arms returning an identical logit
+/// checksum:
+///
+/// | `n_ubatch` | Metal compute buffer | prefill | tok/s |
+/// |------------|----------------------|---------|-------|
+/// | 512        | 509.02 MiB           | 5.390 s | 371.3 |
+/// | 1024       | 1018.04 MiB          | 5.736 s | 348.8 |
+/// | 2048       | 2036.07 MiB          | 6.218 s | 321.8 |
+///
+/// Worse on both axes: the buffer scales exactly linearly (2.000x, 4.000x —
+/// **+1,527 MiB** at 2048, per context, and a context is built per generation),
+/// and prefill slows monotonically, **-13% at 2048**. The likely cause is that
+/// this model is a hybrid — `full_attention_interval = 4` over 64 blocks, so 48
+/// layers are Gated Delta Net — and the chunked recurrent scan has its own
+/// preferred granularity that a wider ubatch works against. That last part is a
+/// hypothesis; the table is the result, and the result is: leave it at 512.
 pub(crate) fn base_params(n_ctx: u32) -> llama_cpp_2::context::params::LlamaContextParams {
     let n_ctx = std::num::NonZeroU32::new(n_ctx).unwrap_or(std::num::NonZeroU32::MIN);
     llama_cpp_2::context::params::LlamaContextParams::default()
