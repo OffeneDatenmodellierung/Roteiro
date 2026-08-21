@@ -39,10 +39,19 @@ pub struct VaultNote {
 /// Map a node key to a filesystem- and wikilink-safe note stem that is **unique
 /// per key even after case folding**.
 ///
-/// The name is always `<hint>-<16 hex digits>`: a lowercased, readable *hint*
-/// slugged from the key, then an unconditional 64-bit FNV-1a hash of the whole,
-/// exact key. Characters outside `[a-z0-9._-]` collapse to a single `-` in the
-/// hint; the hash carries everything the hint threw away.
+/// A name is a lowercased, readable *hint* slugged from the key, followed by an
+/// unconditional 64-bit FNV-1a hash of the whole, exact key written as 16 hex
+/// digits — `<hint>-<16 hex digits>`. Characters outside `[a-z0-9._-]` collapse
+/// to a single `-` in the hint; the hash carries everything the hint threw away.
+///
+/// **The hash is the unconditional part, not the hint.** A key of nothing but
+/// separators slugs to an empty hint, and the name is then the bare 16 hex
+/// digits — no hint, and no `-` to join it to. The two forms cannot be confused
+/// for one another, which is what makes the exception safe rather than a second
+/// naming rule: a hinted name is at least 18 characters and contains a `-`,
+/// and a bare one is exactly 16 and contains none. That is argued again at the
+/// branch itself, and asserted by
+/// `every_name_carries_the_hash_however_short_the_key`.
 ///
 /// # Why the hash is unconditional (issue #574)
 ///
@@ -929,11 +938,24 @@ pub fn render_workspace_home(ws: &WorkspaceSummary) -> VaultNote {
          things it relates to — including across repositories.*\n",
     );
     c.push_str(HOW_TO_READ);
-    c.push_str(
-        "\n**Notes are named `<project>-<key>`**, because a node key is \
+    // The example is *rendered* by `note_name` rather than spelled out. A
+    // hand-written spelling of this sentence survived #574 unchanged, so every
+    // vault v2.0.0 built stated the pre-#574 naming rule — on the first page a
+    // reader opens — while `note_name` was writing something else. This is the
+    // one copy that lives in the crate defining the rule, so it can simply ask:
+    // a derived example cannot drift, and a spelled one already has.
+    let example = members.iter().next().map_or_else(String::new, |p| {
+        let key = format!("{p}::file:README.md");
+        format!(" Here, `{key}` is the note `{}.md`.", note_name(&key))
+    });
+    let _ = writeln!(
+        c,
+        "\n**Every note is keyed `<project>::<key>`**, because a node key is \
          repository-relative: every member has a `README.md`, and without the \
-         project each would overwrite the last. Filter the graph view by a \
-         member's `roteiro/project/*` tag to see one repository at a time.\n",
+         project each would overwrite the last. A note's *filename* is derived \
+         from that key — a readable lowercase hint, then a hash of the whole \
+         key — so no filename contains `::`.{example} Filter the graph view by \
+         a member's `roteiro/project/*` tag to see one repository at a time."
     );
 
     let total_nodes: usize = ws.members.iter().map(|m| m.total_nodes).sum();
@@ -1800,6 +1822,49 @@ mod tests {
             &scope,
         );
         assert_eq!(note.filename, "app-file-readme.md-a114bde6dcaba1c1.md");
+    }
+
+    /// `_Home` must *show* a name, not spell the form out.
+    ///
+    /// The test above pins the distinction in the code. It did not stop the
+    /// distinction being described wrongly in the same file, because it guards
+    /// the function and not the sentences: `render_workspace_home` went on
+    /// writing the pre-#574 form into the `_Home` of every workspace vault
+    /// v2.0.0 built, and nothing here disagreed with it.
+    ///
+    /// So this asserts the property that made that possible is gone — the
+    /// paragraph now contains a string `note_name` actually produced for a real
+    /// member, which a hand-written spelling cannot satisfy. It is not a
+    /// tautology despite both sides calling `note_name`: what it rejects is the
+    /// *shape* of the old copy, a form written out by hand next to the function
+    /// that could have rendered it.
+    #[test]
+    fn the_workspace_home_names_an_example_note_name_actually_produces() {
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            cross_links: vec![],
+            cross_links_total: 0,
+        };
+        let note = render_workspace_home(&ws);
+
+        // The first member in name order, rendered through the real function.
+        let expected = format!("{}.md", note_name("api::file:README.md"));
+        assert!(
+            note.content.contains(&expected),
+            "the naming paragraph must show a real name ({expected}), not a \
+             hand-written form:\n{}",
+            note.content
+        );
+        // And the key form it is derived *from* is still stated, because that is
+        // the half a reader needs to look a note up by its frontmatter.
+        assert!(
+            note.content.contains("`<project>::<key>`"),
+            "{}",
+            note.content
+        );
+        // No filename anywhere in the vault carries `::`.
+        assert!(!expected.contains("::"), "{expected}");
     }
 
     #[test]
