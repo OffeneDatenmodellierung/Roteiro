@@ -1489,6 +1489,48 @@ mod tests {
         assert_ne!(names[0], names[1], "two members must not share one note");
     }
 
+    /// The two names this feature has, pinned together in one place.
+    ///
+    /// They are easy to conflate and were, in this PR, described inconsistently
+    /// in two doc comments — the **key** is `<project>::<key>` (ADR-0009's
+    /// cross-repo form, which is why cross-repo links resolve), and the **note
+    /// name** is [`note_name`] of that key, in which `::` has become `-`. A
+    /// reader told the wrong one goes looking for a file with `::` in it.
+    ///
+    /// Asserting both here means the next description that drifts has something
+    /// to disagree with, rather than waiting for a reviewer to read two comments
+    /// side by side.
+    #[test]
+    fn the_qualified_key_and_the_note_name_are_different_strings() {
+        let ms = members(&["app"]);
+        let scope = VaultScope {
+            project: Some("app"),
+            members: &ms,
+        };
+        // The key: project-qualified, `::` intact — this is what the graph and
+        // ADR-0009's external refs use.
+        let qualified = "app::file:README.md";
+        // The note name: `note_name` of exactly that key, `::` slugged to `-`.
+        assert_eq!(
+            scoped_note_name(&scope, "file:README.md"),
+            "app-file-README.md"
+        );
+        assert_eq!(note_name(qualified), "app-file-README.md");
+        assert!(
+            !scoped_note_name(&scope, "file:README.md").contains("::"),
+            "no note name ever contains `::`"
+        );
+        // And on disk the stem gains the extension, which is the string a reader
+        // actually looks for.
+        let note = render_note_scoped(
+            &node_with("file:README.md", Some("README.md"), None),
+            None,
+            None,
+            &scope,
+        );
+        assert_eq!(note.filename, "app-file-README.md.md");
+    }
+
     #[test]
     fn a_member_note_declares_which_member_it_came_from() {
         let ms = members(&["api"]);

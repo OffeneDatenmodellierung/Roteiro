@@ -13105,10 +13105,22 @@ fn render_obsidian(
 ///
 /// Nothing here is a new export surface: every note is one a per-project vault
 /// would already have rendered for that member, and the only edges shown are the
-/// ones the graph already holds. What changes is the *span* — notes are named
-/// `<project>::<key>` so members cannot overwrite each other, `_Home` is the
-/// workspace overview, and the cross-repo links ADR-0009 persists finally have
-/// both of their endpoints in one vault.
+/// ones the graph already holds. What changes is the *span* — members can no
+/// longer overwrite each other's notes, `_Home` is the workspace overview, and
+/// the cross-repo links ADR-0009 persists finally have both of their endpoints in
+/// one vault.
+///
+/// Two related names, because conflating them sends a reader looking for a file
+/// that does not exist:
+///
+/// - the **key** a note is rendered from is project-qualified,
+///   `<project>::<key>` — ADR-0009's cross-repo form, reused rather than
+///   reinvented, which is why a cross-repo link resolves to a note in this vault;
+/// - the **note name** is [`rto_render::note_name`] of that key, which slugs `:`
+///   to `-`. There is no `::` in a filename.
+///
+/// So `app`'s `file:README.md` is keyed `app::file:README.md` and written to
+/// `app-file-README.md.md`.
 ///
 /// Each member is read with **its own** configuration — `[ingest]` toggles and
 /// `[debt] ignore` come from that repository's `roteiro.toml`, not the one the
