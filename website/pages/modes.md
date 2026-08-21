@@ -38,9 +38,10 @@ roteiro render obsidian --workspace-name payments</code></pre>
 
 Without `--workspace-name`, `render obsidian` renders the current project, with
 unqualified note names, even when that repository is a member of a configured
-workspace. With one, notes are named `<project>-<key>` so two repositories'
+workspace. With one, every note is keyed `<project>::<key>` so two repositories'
 `README.md` cannot claim the same note, and cross-repo links resolve inside the
-vault.
+vault. The filename is derived from that key — a readable lowercase hint, then a
+hash of the whole key — so no filename contains `::`.
 
 Two things to know before you rely on a vault: **the output directory is deleted
 and rebuilt on every render**, so your own notes belong *outside* it and link
