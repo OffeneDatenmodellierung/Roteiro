@@ -579,9 +579,12 @@ enum Command {
         /// `obsidian` only: render a **named** workspace from config
         /// (`[[workspaces]]`/`[standalone]`) as **one vault spanning its member
         /// repositories**, instead of the current project alone (issue #442).
-        /// Member notes are named `<project>-<key>`, because node keys are
+        /// Member notes are keyed `<project>::<key>`, because node keys are
         /// repository-relative and every member's `README.md` would otherwise
-        /// claim the same note. An unknown name fails fast, listing the known ones.
+        /// claim the same note; the filename is derived from that key — a
+        /// readable lowercase hint, then a hash of the whole key — so no
+        /// filename contains `::`. An unknown name fails fast, listing the
+        /// known ones.
         ///
         /// **Omitted, the current project alone is rendered, with unqualified
         /// names.** Deliberately *not* "the workspace containing the current repo"

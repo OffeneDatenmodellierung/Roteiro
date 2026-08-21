@@ -39,10 +39,19 @@ pub struct VaultNote {
 /// Map a node key to a filesystem- and wikilink-safe note stem that is **unique
 /// per key even after case folding**.
 ///
-/// The name is always `<hint>-<16 hex digits>`: a lowercased, readable *hint*
-/// slugged from the key, then an unconditional 64-bit FNV-1a hash of the whole,
-/// exact key. Characters outside `[a-z0-9._-]` collapse to a single `-` in the
-/// hint; the hash carries everything the hint threw away.
+/// A name is a lowercased, readable *hint* slugged from the key, followed by an
+/// unconditional 64-bit FNV-1a hash of the whole, exact key written as 16 hex
+/// digits — `<hint>-<16 hex digits>`. Characters outside `[a-z0-9._-]` collapse
+/// to a single `-` in the hint; the hash carries everything the hint threw away.
+///
+/// **The hash is the unconditional part, not the hint.** A key of nothing but
+/// separators slugs to an empty hint, and the name is then the bare 16 hex
+/// digits — no hint, and no `-` to join it to. The two forms cannot be confused
+/// for one another, which is what makes the exception safe rather than a second
+/// naming rule: a hinted name is at least 18 characters and contains a `-`,
+/// and a bare one is exactly 16 and contains none. That is argued again at the
+/// branch itself, and asserted by
+/// `every_name_carries_the_hash_however_short_the_key`.
 ///
 /// # Why the hash is unconditional (issue #574)
 ///
@@ -929,11 +938,39 @@ pub fn render_workspace_home(ws: &WorkspaceSummary) -> VaultNote {
          things it relates to — including across repositories.*\n",
     );
     c.push_str(HOW_TO_READ);
-    c.push_str(
-        "\n**Notes are named `<project>-<key>`**, because a node key is \
-         repository-relative: every member has a `README.md`, and without the \
-         project each would overwrite the last. Filter the graph view by a \
-         member's `roteiro/project/*` tag to see one repository at a time.\n",
+    // The example is *rendered* by `note_name` rather than spelled out. A
+    // hand-written spelling of this sentence survived #574 unchanged, so every
+    // vault v2.0.0 built stated the pre-#574 naming rule — on the first page a
+    // reader opens — while `note_name` was writing something else. This is the
+    // one copy that lives in the crate defining the rule, so it can simply ask:
+    // a derived example cannot drift, and a spelled one already has.
+    //
+    // The *key* it names has to be real too, or the fix trades one false
+    // sentence in `_Home` for another: `<member>::file:README.md` was fabricated
+    // from the member list, and workspace membership does not require a README.
+    // A cross-repo link's **source** end is the strongest key available here —
+    // `from_project` is a member by definition and `from_key` is a node in that
+    // member's own store, which the Cross-repo links table below already links
+    // to by name. The *target* end will not do: `resolves == false` means the
+    // target repository is outside this vault, so `to_qualified` names no note
+    // here — the same false claim one remove away.
+    //
+    // With no cross-repo links there is no key this function can prove is a
+    // node, so the sentence says nothing rather than inventing one. The rule it
+    // states is complete without an example; only the illustration is lost.
+    let example = ws.cross_links.first().map_or_else(String::new, |l| {
+        let key = format!("{}::{}", l.from_project, l.from_key);
+        format!(" Here, `{key}` is the note `{}.md`.", note_name(&key))
+    });
+    let _ = writeln!(
+        c,
+        "\n**Every note is keyed `<project>::<key>`**, because a node key is \
+         repository-relative: the same path or symbol can occur in more than one \
+         member, and without the project the second note would overwrite the \
+         first. A note's *filename* is derived from that key — a readable \
+         lowercase hint, then a hash of the whole key — so no filename contains \
+         `::`.{example} Filter the graph view by a member's `roteiro/project/*` \
+         tag to see one repository at a time."
     );
 
     let total_nodes: usize = ws.members.iter().map(|m| m.total_nodes).sum();
@@ -1800,6 +1837,105 @@ mod tests {
             &scope,
         );
         assert_eq!(note.filename, "app-file-readme.md-a114bde6dcaba1c1.md");
+    }
+
+    /// `_Home` must *show* a name, not spell the form out.
+    ///
+    /// The test above pins the distinction in the code. It did not stop the
+    /// distinction being described wrongly in the same file, because it guards
+    /// the function and not the sentences: `render_workspace_home` went on
+    /// writing the pre-#574 form into the `_Home` of every workspace vault
+    /// v2.0.0 built, and nothing here disagreed with it.
+    ///
+    /// So this asserts the property that made that possible is gone — the
+    /// paragraph now contains a string `note_name` actually produced for a key
+    /// the workspace really holds, which a hand-written spelling cannot
+    /// satisfy. It is not a tautology despite both sides calling `note_name`:
+    /// what it rejects is the *shape* of the old copy, a form written out by
+    /// hand next to the function that could have rendered it.
+    ///
+    /// That the *key* is real is the other half, and the reason the example is
+    /// drawn from `cross_links` rather than invented from the member list —
+    /// a name rendered for a node the vault does not hold is a true sentence
+    /// about a note nobody can open. The empty case is
+    /// `the_workspace_home_claims_no_example_note_when_it_has_no_real_key`.
+    #[test]
+    fn the_workspace_home_names_an_example_note_name_actually_produces() {
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            cross_links: vec![CrossLink {
+                from_project: "sdk".into(),
+                from_key: "cfgkey:config.toml#addr".into(),
+                from_name: "addr".into(),
+                kind: "links".into(),
+                confidence: Some(0.91),
+                to_qualified: "api::cfgkey:config.toml#addr".into(),
+                resolves: true,
+            }],
+            cross_links_total: 1,
+        };
+        let note = render_workspace_home(&ws);
+
+        // The source end of the first cross-repo link, rendered through the real
+        // function. `from_project` is a member and `from_key` is one of its own
+        // nodes, so this is a note the render writes rather than one the
+        // sentence assumes.
+        let expected = format!("{}.md", note_name("sdk::cfgkey:config.toml#addr"));
+        assert!(
+            note.content.contains(&expected),
+            "the naming paragraph must show a real name ({expected}), not a \
+             hand-written form:\n{}",
+            note.content
+        );
+        // And the key form it is derived *from* is still stated, because that is
+        // the half a reader needs to look a note up by its frontmatter.
+        assert!(
+            note.content.contains("`<project>::<key>`"),
+            "{}",
+            note.content
+        );
+        // No filename anywhere in the vault carries `::`.
+        assert!(!expected.contains("::"), "{expected}");
+    }
+
+    /// With no cross-repo links there is no key the renderer can prove is a
+    /// node, so it must say nothing rather than fabricate one.
+    ///
+    /// The example this replaced was `<first member>::file:README.md`, invented
+    /// from the member list — and membership does not require a README, so
+    /// `_Home` could assert a note that was never written. That is the very
+    /// defect this PR exists to fix, one remove away, so the empty case gets an
+    /// assertion of its own rather than an assumption.
+    #[test]
+    fn the_workspace_home_claims_no_example_note_when_it_has_no_real_key() {
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            cross_links: vec![],
+            cross_links_total: 0,
+        };
+        let note = render_workspace_home(&ws);
+
+        assert!(
+            !note.content.contains("is the note "),
+            "no cross-repo link means no provable key, so no `Here, X is the \
+             note Y` claim:\n{}",
+            note.content
+        );
+        // The fabricated form specifically: never emitted, with or without links.
+        assert!(
+            !note.content.contains("::file:README.md"),
+            "{}",
+            note.content
+        );
+        // The rule itself is still stated — only the illustration is absent.
+        assert!(
+            note.content.contains("`<project>::<key>`")
+                && note.content.contains("no filename contains `::`"),
+            "{}",
+            note.content
+        );
     }
 
     #[test]
