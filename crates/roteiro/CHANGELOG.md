@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.0.1...roteiro-v2.0.2) - 2026-08-21
+
+### Fixed
+
+- *(serve,spec)* strip `<think>` on `/v1`, and refuse an unterminated block
+
+### Other
+
+- Merge pull request #589 from OffeneDatenmodellierung/fix/thinking-582-583
+
 ## [2.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.0.0...roteiro-v2.0.1) - 2026-08-21
 
 ### Fixed
