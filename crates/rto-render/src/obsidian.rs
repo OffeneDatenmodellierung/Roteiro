@@ -78,6 +78,220 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Emit `value` as a YAML **double-quoted** scalar, `"`-delimited and escaped so
+/// it parses back to exactly `value`.
+///
+/// The one escaping rule for this module's frontmatter. It exists because the
+/// three hand-rolled variants it replaced disagreed with each other — `key:` and
+/// `project:` turned a `"` into an apostrophe, and `path:` escaped nothing — and
+/// two of the three could emit YAML that does not mean what it says:
+///
+/// | value | was emitted | parsed back as |
+/// | --- | --- | --- |
+/// | `foo\bar` | `"foo\bar"` | `foo<BS>ar` — `\b` is YAML's **backspace** escape |
+/// | `foo\dir` | `"foo\dir"` | *parse error* — `\d` is not a YAML escape |
+/// | `say"hi".rs` | `"say"hi".rs"` | *parse error* — the scalar ends at the `"` |
+///
+/// The first is the dangerous one: seven characters silently become six, and
+/// nothing anywhere reports it. The other two cost the reader every property on
+/// the note, because Obsidian parses this block as the note's properties and a
+/// block that does not parse yields no properties at all rather than an error.
+///
+/// All three inputs are legal path components on Linux and macOS. None occurs in
+/// this repository today, so this is a latent defect rather than an observed one.
+///
+/// Escapes, per YAML 1.2 §7.3.1: the two structural characters `\` and `"`, then
+/// anything a parser is not obliged to accept literally — C0 controls, `DEL`, the
+/// C1 range, and the three separators (`U+2028`, `U+2029`, `U+FEFF`) that some
+/// parsers treat as line breaks. Short escapes where YAML defines one, so the
+/// common cases stay readable, and `\uXXXX` otherwise.
+fn yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            '\u{0}' => out.push_str(r"\0"),
+            '\u{7}' => out.push_str(r"\a"),
+            '\u{8}' => out.push_str(r"\b"),
+            '\u{b}' => out.push_str(r"\v"),
+            '\u{c}' => out.push_str(r"\f"),
+            '\u{1b}' => out.push_str(r"\e"),
+            // Everything else a YAML parser may reject or fold: the rest of C0,
+            // DEL, the C1 range, and the separators that can read as line breaks.
+            c if (c < ' ')
+                || c == '\u{7f}'
+                || ('\u{80}'..='\u{9f}').contains(&c)
+                || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}') =>
+            {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Emit `value` in YAML **plain** (unquoted) style when that round-trips, and as
+/// [`yaml_double_quoted`] when it would not.
+///
+/// For the frontmatter fields that are written bare today — `kind`, `lang`,
+/// `status`. Those are constrained by *today's* producers (an ADR's status is
+/// validated against the house states; kinds and languages come from extraction),
+/// but `roteiro load` installs a caller-supplied graph artifact whose nodes carry
+/// whatever JSON they carry, so "the producer is careful" is not a property this
+/// renderer can rely on. A `status:` of `Accepted: superseded by 0012` emitted
+/// bare is a parse error, and `Accepted # pending` silently truncates to
+/// `Accepted`.
+///
+/// Escalating only when needed is what keeps the bytes of an existing vault
+/// unchanged — every `kind`, `lang` and `status` in this repository is plain-safe
+/// and stays bare. [`is_plain_safe`] is deliberately stricter than YAML's plain
+/// grammar for the same reason it is safe: a value it rejects is merely quoted.
+fn yaml_scalar(value: &str) -> String {
+    if is_plain_safe(value) {
+        value.to_owned()
+    } else {
+        yaml_double_quoted(value)
+    }
+}
+
+/// Whether `value` can be written as a bare YAML scalar and read back unchanged.
+///
+/// A conservative allowlist rather than YAML's actual plain-scalar grammar, which
+/// is subtle enough (indicator characters, `: ` and ` #` only in some positions,
+/// leading and trailing space, implicit typing) that implementing it is how the
+/// bug this replaces gets written a second time. Getting this wrong in the
+/// strict direction costs a pair of quotation marks; getting it wrong in the
+/// permissive direction costs the note's properties.
+///
+/// So: a leading ASCII letter, then letters, digits, `_`, `-`, `.` and `/` — which
+/// covers every kind, language and status this renderer emits — and never a word
+/// YAML resolves to a boolean or null. That last exclusion is not hypothetical:
+/// `no` is the ISO 639-1 code for Norwegian, and YAML 1.1 parsers read a bare `no`
+/// as `false`.
+fn is_plain_safe(value: &str) -> bool {
+    const NOT_STRINGS: [&str; 11] = [
+        "true", "false", "yes", "no", "on", "off", "null", "nil", "none", "y", "n",
+    ];
+    !value.is_empty()
+        && value.starts_with(|c: char| c.is_ascii_alphabetic())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        && !NOT_STRINGS.contains(&value.to_ascii_lowercase().as_str())
+}
+
+/// Which vault a note is being rendered into: a single project's, or one member
+/// of a **workspace** vault spanning several repositories.
+///
+/// This is the whole of the workspace-vault naming rule, in one place, because
+/// the rule has a hard compatibility half. Node keys are **repository-relative**
+/// (`file:README.md` names no repo), so every member of a workspace produces the
+/// same note name for its `README.md` and one would silently overwrite the rest.
+/// Qualifying the key with its project fixes that — but a single-project vault's
+/// note names **must not move**: Obsidian resolves `[[links]]` by name, and a
+/// user's own notes live outside the vault and link *into* it (issue #442), so a
+/// rename breaks every such link silently, with no error and nothing to grep for.
+///
+/// Hence [`VaultScope::PROJECT`] (`project: None`) is not a degenerate case but
+/// the contract: it makes every name in this module reduce to exactly
+/// [`note_name`] of the bare key, byte for byte.
+#[derive(Debug, Clone, Copy)]
+pub struct VaultScope<'a> {
+    /// The member project this note belongs to, qualifying its name as
+    /// `<project>::<key>` — the same form ADR-0009's cross-repo links already use.
+    /// `None` ⇒ a single-project vault, and names are unqualified exactly as
+    /// before.
+    pub project: Option<&'a str>,
+    /// The workspace's member project names. An external-ref placeholder whose
+    /// target names one of these is a cross-repo edge the vault can actually
+    /// follow, so it is rendered as a link straight to that member's note. Empty
+    /// for a single-project vault.
+    pub members: &'a std::collections::BTreeSet<String>,
+}
+
+/// The empty member set backing [`VaultScope::PROJECT`] — a single-project vault
+/// has no other members to resolve a cross-repo reference against.
+static NO_MEMBERS: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+impl VaultScope<'_> {
+    /// A single-project vault: names are unqualified, and no cross-repo reference
+    /// resolves. Every name this produces is byte-identical to [`note_name`] of
+    /// the bare key — see the type's documentation for why that is load-bearing.
+    pub const PROJECT: Self = Self {
+        project: None,
+        members: &NO_MEMBERS,
+    };
+}
+
+impl Default for VaultScope<'_> {
+    fn default() -> Self {
+        Self::PROJECT
+    }
+}
+
+impl VaultScope<'_> {
+    /// Whether an external-ref placeholder `key` is one this vault resolves for
+    /// itself — its target names a member, so every edge to it points at the real
+    /// note and the placeholder need not be rendered at all.
+    ///
+    /// The single rule behind both halves of that: [`link_target`] redirects
+    /// exactly the keys this accepts, and the caller skips writing exactly the
+    /// notes this accepts. They cannot disagree.
+    #[must_use]
+    pub fn redirects_external_ref(&self, key: &str) -> bool {
+        key.strip_prefix("extref:")
+            .and_then(rto_graph::parse_qualified)
+            .is_some_and(|(project, _)| self.members.contains(project))
+    }
+}
+
+/// The note name for a node `key` owned by `scope`'s project.
+///
+/// In a single-project vault (`scope.project == None`) this *is* [`note_name`].
+/// In a workspace vault it is [`note_name`] of the project-qualified key
+/// `<project>::<key>` — reusing ADR-0009's qualified form rather than inventing a
+/// second one, which is what lets a cross-repo external-ref target (already
+/// stored qualified) map to its note by the very same call.
+#[must_use]
+pub fn scoped_note_name(scope: &VaultScope<'_>, key: &str) -> String {
+    match scope.project {
+        None => note_name(key),
+        Some(project) => note_name(&format!("{project}::{key}")),
+    }
+}
+
+/// The note an edge pointing at `key` should link to.
+///
+/// Almost always [`scoped_note_name`]. The exception is the one cross-repo edge
+/// the graph already models: a spoke's inferred link to a hub is stored as an
+/// edge to a **local external-ref placeholder** (`extref:<project>::<key>`,
+/// [`rto_graph::external_ref_key`]) because store integrity requires both ends of
+/// an edge in one store. A workspace vault holds both repos' notes, so when the
+/// placeholder's target names a member the link is pointed at the **real** note
+/// instead of the stand-in.
+///
+/// This invents no edge. It renders the edge that is there, following the
+/// placeholder exactly as [`rto_graph::Workspace::follow_external_ref`] does at
+/// query time — the cross-repo graph has only ever been *rendered* one repo at a
+/// time.
+fn link_target(scope: &VaultScope<'_>, key: &str) -> String {
+    if scope.redirects_external_ref(key) {
+        // `note_name(qualified)` is by construction the same string
+        // `scoped_note_name` produces for that member's own copy of the node.
+        // `strip_prefix`, not `trim_start_matches`: the latter strips the prefix
+        // repeatedly, which would mangle a target that legitimately starts with it.
+        return note_name(key.strip_prefix("extref:").unwrap_or(key));
+    }
+    scoped_note_name(scope, key)
+}
+
 /// Render a node's [`Explanation`] into an Obsidian note: YAML frontmatter (with
 /// `tags` for the graph view and an ADR's `status`), a clickable **Source** link
 /// (when `source_base` — a web "blob" base like
@@ -92,26 +306,54 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// replacing is the only correct combination of the two.
 #[must_use]
 pub fn render_note(ex: &Explanation, source_base: Option<&str>, body: Option<&str>) -> VaultNote {
+    render_note_scoped(ex, source_base, body, &VaultScope::PROJECT)
+}
+
+/// [`render_note`], for one member of a **workspace** vault: identical except
+/// that the note's own name and every link it emits are resolved through `scope`
+/// (see [`VaultScope`]).
+///
+/// With [`VaultScope::PROJECT`] this is [`render_note`] byte for byte, which is
+/// how the single-project vault's compatibility promise is kept by construction
+/// rather than by a parallel code path that has to be kept in step.
+#[must_use]
+pub fn render_note_scoped(
+    ex: &Explanation,
+    source_base: Option<&str>,
+    body: Option<&str>,
+    scope: &VaultScope<'_>,
+) -> VaultNote {
     let meta = &ex.meta;
     let status = meta.get("status").and_then(|v| v.as_str());
     let content = note_body(meta.get("content").and_then(|v| v.as_str()), body);
 
     let mut c = String::new();
     c.push_str("---\n");
-    let _ = writeln!(c, "key: \"{}\"", ex.node.key.replace('"', "'"));
-    let _ = writeln!(c, "kind: {}", ex.node.kind);
+    let _ = writeln!(c, "key: {}", yaml_double_quoted(&ex.node.key));
+    let _ = writeln!(c, "kind: {}", yaml_scalar(ex.node.kind.as_str()));
+    // Which member this note came from. Absent in a single-project vault, where
+    // it would be one constant repeated on every note — and where adding it would
+    // change every note's bytes.
+    if let Some(project) = scope.project {
+        let _ = writeln!(c, "project: {}", yaml_double_quoted(project));
+    }
     if let Some(path) = &ex.node.path {
-        let _ = writeln!(c, "path: \"{path}\"");
+        let _ = writeln!(c, "path: {}", yaml_double_quoted(path));
     }
     if let Some(lang) = &ex.node.lang {
-        let _ = writeln!(c, "lang: {lang}");
+        let _ = writeln!(c, "lang: {}", yaml_scalar(lang));
     }
     if let Some(status) = status {
-        let _ = writeln!(c, "status: {status}");
+        let _ = writeln!(c, "status: {}", yaml_scalar(status));
     }
     // Nested tags group in Obsidian's tag pane and colour the graph view.
     c.push_str("tags:\n");
     let _ = writeln!(c, "  - roteiro/kind/{}", tag_slug(&ex.node.kind));
+    // Colours the graph view by member, which is the one thing a workspace vault
+    // is for and a per-project vault has no use for.
+    if let Some(project) = scope.project {
+        let _ = writeln!(c, "  - roteiro/project/{}", tag_slug(project));
+    }
     if let Some(lang) = &ex.node.lang {
         let _ = writeln!(c, "  - roteiro/lang/{}", tag_slug(lang));
     }
@@ -152,7 +394,7 @@ pub fn render_note(ex: &Explanation, source_base: Option<&str>, body: Option<&st
                 e.kind,
                 e.provenance,
                 confidence(e.confidence),
-                note_name(&e.node)
+                link_target(scope, &e.node)
             );
         }
     }
@@ -162,7 +404,7 @@ pub fn render_note(ex: &Explanation, source_base: Option<&str>, body: Option<&st
             let _ = writeln!(
                 c,
                 "- [[{}]] {} ({}){} →",
-                note_name(&e.node),
+                link_target(scope, &e.node),
                 e.kind,
                 e.provenance,
                 confidence(e.confidence)
@@ -171,7 +413,7 @@ pub fn render_note(ex: &Explanation, source_base: Option<&str>, body: Option<&st
     }
 
     VaultNote {
-        filename: format!("{}.md", note_name(&ex.node.key)),
+        filename: format!("{}.md", scoped_note_name(scope, &ex.node.key)),
         content: c,
     }
 }
@@ -320,20 +562,44 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
          generated by [Roteiro](https://roteiro.dev). Every symbol, document and \
          decision is a note, linked to the things it relates to.*\n",
     );
-    c.push_str(
-        "\n**How to read it.** Open any note to see what a thing is, the intent or \
-         docs behind it (its **Content**), where it lives (its **Source** link), \
-         and how it connects (**Outgoing**/**Incoming** links). Each link is \
-         labelled with how the fact was established — `derived` (extracted from \
-         code), `authored` (human intent: ADRs, blueprints, annotations), or \
-         `inferred` (a scored suggestion). Open Obsidian's **graph view** to see \
-         the whole thing at once.\n",
-    );
+    c.push_str(HOW_TO_READ);
     let _ = writeln!(
         c,
         "\n**{} nodes**, **{} edges** across the project.",
         s.total_nodes, s.total_edges
     );
+    write_repo_line(&mut c, s);
+    write_summary_sections(&mut c, s, &VaultScope::PROJECT, 2);
+    c.push_str(NAVIGATING);
+
+    VaultNote {
+        filename: HOME_NOTE.to_owned(),
+        content: c,
+    }
+}
+
+/// The "how to read a note" paragraph. Shared verbatim by the single-project and
+/// workspace overviews — the notes themselves are identical in both, so a reader
+/// who learns the format once has learned it for either.
+const HOW_TO_READ: &str = "\n**How to read it.** Open any note to see what a thing is, the intent or \
+     docs behind it (its **Content**), where it lives (its **Source** link), \
+     and how it connects (**Outgoing**/**Incoming** links). Each link is \
+     labelled with how the fact was established — `derived` (extracted from \
+     code), `authored` (human intent: ADRs, blueprints, annotations), or \
+     `inferred` (a scored suggestion). Open Obsidian's **graph view** to see \
+     the whole thing at once.\n";
+
+/// The closing navigation section.
+const NAVIGATING: &str = "\n## Navigating this vault\n\n\
+     - Open the **graph view** to see the whole codebase; notes are coloured/\
+     filterable by their `roteiro/kind/*`, `roteiro/lang/*` and \
+     `roteiro/status/*` tags.\n\
+     - Each note carries its captured **content** (doc comments, prose, PDF/\
+     image text) and its provenance-labelled incoming/outgoing links.\n\
+     - Start from an ADR above, or search the tag pane for a kind.\n";
+
+/// `**Repository:** …` — the web root and the commit the graph was rendered from.
+fn write_repo_line(c: &mut String, s: &VaultSummary) {
     if let Some(repo) = &s.repo_url {
         let _ = write!(c, "\n**Repository:** [{repo}]({repo})");
         if let Some(commit) = &s.commit {
@@ -342,20 +608,49 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
         }
         c.push('\n');
     }
+}
 
-    c.push_str("\n## Structure\n\n| Kind | Count |\n| --- | --- |\n");
+/// Every aggregate the overview carries for **one project**: structure by kind,
+/// provenance, ADRs, intent debt (and where it is densest), the config-secret
+/// inventory and directed call coupling.
+///
+/// Factored out of [`render_home`] so a workspace vault's per-member section is
+/// *the same code*, not a reimplementation that can drift: the promise in issue
+/// #442 is that today's per-project view stays a **subset** of the workspace one
+/// rather than a casualty of it. `level` is the markdown heading depth — 2 for a
+/// single-project `_Home`, 3 inside a member's section — and `scope` decides
+/// whether the wikilinks point at bare or project-qualified notes.
+fn write_summary_sections(c: &mut String, s: &VaultSummary, scope: &VaultScope<'_>, level: usize) {
+    let hd = &"#".repeat(level);
+    let sub = &"#".repeat(level + 1);
+    write_structure(c, s, hd);
+    write_decisions(c, s, scope, hd);
+    write_debt(c, s, scope, hd, sub);
+    write_config_secrets(c, s, scope, hd);
+    write_coupling(c, s, scope, hd);
+}
+
+/// `Structure` (nodes by kind) and `Provenance` (edges by how they were established).
+fn write_structure(c: &mut String, s: &VaultSummary, hd: &str) {
+    let _ = write!(c, "\n{hd} Structure\n\n| Kind | Count |\n| --- | --- |\n");
     for (kind, n) in &s.node_counts {
         let _ = writeln!(c, "| {kind} | {n} |");
     }
 
     if !s.edge_provenance.is_empty() {
-        c.push_str("\n## Provenance\n\n| Provenance | Edges |\n| --- | --- |\n");
+        let _ = write!(
+            c,
+            "\n{hd} Provenance\n\n| Provenance | Edges |\n| --- | --- |\n"
+        );
         for (prov, n) in &s.edge_provenance {
             let _ = writeln!(c, "| {prov} | {n} |");
         }
     }
+}
 
-    c.push_str("\n## Decisions (ADRs)\n\n");
+/// `Decisions (ADRs)` — the recorded decisions and their lifecycle status.
+fn write_decisions(c: &mut String, s: &VaultSummary, scope: &VaultScope<'_>, hd: &str) {
+    let _ = write!(c, "\n{hd} Decisions (ADRs)\n\n");
     if s.adrs.is_empty() {
         c.push_str("*No ADRs found.*\n");
     } else {
@@ -364,13 +659,16 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
             let _ = writeln!(
                 c,
                 "- **{status}** — [[{}|{}]]",
-                note_name(&adr.key),
+                scoped_note_name(scope, &adr.key),
                 adr.name
             );
         }
     }
+}
 
-    c.push_str("\n## Intent debt\n\n");
+/// `Intent debt` — the marker categories, and the files the debt is densest in.
+fn write_debt(c: &mut String, s: &VaultSummary, scope: &VaultScope<'_>, hd: &str, sub: &str) {
+    let _ = write!(c, "\n{hd} Intent debt\n\n");
     if s.debt.is_empty() {
         c.push_str("*None recorded.*\n");
     } else {
@@ -381,20 +679,21 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
     }
 
     if !s.densest_files.is_empty() {
-        c.push_str(
-            "\n### Densest files (markers per 1,000 lines)\n\n\
+        let _ = write!(
+            c,
+            "\n{sub} Densest files (markers per 1,000 lines)\n\n\
              *Where the debt above is concentrated, rather than where there is \
              most of it — a raw count ranks the biggest file first by \
              construction. The denominator is file length: every line, blanks and \
              comments included, not source lines of code. Prose matches (`for \
-             now`, `tbd`) count too, so a design document can rank high.*\n\n",
+             now`, `tbd`) count too, so a design document can rank high.*\n\n"
         );
         c.push_str("| File | Markers | Lines | Per 1k |\n| --- | --- | --- | --- |\n");
         for e in &s.densest_files {
             let _ = writeln!(
                 c,
                 "| [[{}\\|{}]] | {} | {} | {:.2} |",
-                note_name(&format!("file:{}", e.path)),
+                scoped_note_name(scope, &format!("file:{}", e.path)),
                 e.path,
                 e.markers,
                 e.lines,
@@ -402,9 +701,12 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
             );
         }
     }
+}
 
+/// `Config keys named like secrets` — an inventory and its unconditional caveat.
+fn write_config_secrets(c: &mut String, s: &VaultSummary, scope: &VaultScope<'_>, hd: &str) {
     if let Some(cs) = &s.config_secrets {
-        c.push_str("\n## Config keys named like secrets\n\n");
+        let _ = write!(c, "\n{hd} Config keys named like secrets\n\n");
         let _ = writeln!(
             c,
             "**{}** secret-named config key(s): {} redacted before storage, {} \
@@ -423,7 +725,11 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
         if !cs.files.is_empty() {
             c.push_str("\nIn:\n");
             for path in &cs.files {
-                let _ = writeln!(c, "- [[{}\\|{path}]]", note_name(&format!("file:{path}")));
+                let _ = writeln!(
+                    c,
+                    "- [[{}\\|{path}]]",
+                    scoped_note_name(scope, &format!("file:{path}"))
+                );
             }
         }
         // The caveat is unconditional and comes last, so it is the final thing read
@@ -441,38 +747,159 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
              repository leaks secrets.*\n",
         );
     }
+}
 
+/// `Most depended-on (call fan-in)` — directed call coupling, capped.
+fn write_coupling(c: &mut String, s: &VaultSummary, scope: &VaultScope<'_>, hd: &str) {
     if !s.most_called.is_empty() {
-        c.push_str(
-            "\n## Most depended-on (call fan-in)\n\n\
+        let _ = write!(
+            c,
+            "\n{hd} Most depended-on (call fan-in)\n\n\
              *Distinct callers and callees over `calls` edges — direction kept, so \
              \"everything calls this\" and \"this calls everything\" are not the same \
              row. Call targets are resolved by simple name, so a short, generically-\
              named function can absorb every call to that name: read a large fan-in on \
-             one as a question, not a finding.*\n\n",
+             one as a question, not a finding.*\n\n"
         );
         c.push_str("| Symbol | Called by | Calls |\n| --- | --- | --- |\n");
         for e in &s.most_called {
             let _ = writeln!(
                 c,
                 "| [[{}\\|{}]] | {} | {} |",
-                note_name(&e.key),
+                scoped_note_name(scope, &e.key),
                 e.name,
                 e.fan_in,
                 e.fan_out
             );
         }
     }
+}
 
+/// One cross-repo edge the workspace vault can actually follow: a spoke's node
+/// linking to a hub's, through the external-ref placeholder ADR-0009 persists.
+///
+/// Collected by the caller, which has every member's store open; the renderer
+/// only lays them out. Nothing here is a new edge — these are the `inferred`
+/// links `roteiro links` already reports, rendered for the first time.
+#[derive(Debug, Clone)]
+pub struct CrossLink {
+    /// The member the edge starts in.
+    pub from_project: String,
+    /// The source node's key, within `from_project`.
+    pub from_key: String,
+    /// The source node's display name.
+    pub from_name: String,
+    /// The edge kind (`links`, …).
+    pub kind: String,
+    /// Confidence, for an `inferred` edge.
+    pub confidence: Option<f64>,
+    /// The project-qualified target, `<project>::<key>` (ADR-0009).
+    pub to_qualified: String,
+    /// Whether `to_qualified`'s project is a member of this workspace — and so
+    /// whether the link resolves to a note in this vault, or dangles because the
+    /// target repository is outside it.
+    pub resolves: bool,
+}
+
+/// Aggregate figures for a **workspace** vault's `_Home` overview: the members,
+/// each with exactly the aggregates a single-project `_Home` carries, plus the
+/// cross-repo links between them.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceSummary {
+    /// The workspace name (`--workspace-name`).
+    pub name: String,
+    /// One entry per member repository, in stable name order. Each is the very
+    /// same [`VaultSummary`] a per-project vault would render.
+    pub members: Vec<VaultSummary>,
+    /// Cross-repo links between members, already ordered and capped by the caller.
+    pub cross_links: Vec<CrossLink>,
+    /// Cross-repo links found in total, which `cross_links` may be a capped view
+    /// of — so the section can say what it is not showing.
+    pub cross_links_total: usize,
+}
+
+/// Render a **workspace** vault's overview: the members and their scale, the
+/// cross-repo links between them, and then each member's own aggregates —
+/// structure, provenance, ADRs, intent debt, config-secret inventory and call
+/// coupling — under its own heading.
+///
+/// The per-member sections are rendered by the same [`write_summary_sections`]
+/// the single-project `_Home` uses, so the existing view is a **subset** of this
+/// one: someone who came for their repository's coupling and debt tables finds
+/// them, rather than a workspace total that averages them away.
+#[must_use]
+pub fn render_workspace_home(ws: &WorkspaceSummary) -> VaultNote {
+    let members: std::collections::BTreeSet<String> =
+        ws.members.iter().map(|m| m.project.clone()).collect();
+
+    let mut c = String::new();
+    c.push_str("---\ntags:\n  - roteiro/home\n  - roteiro/workspace\n---\n\n");
+    let _ = writeln!(c, "# {} — workspace knowledge graph", ws.name);
     c.push_str(
-        "\n## Navigating this vault\n\n\
-         - Open the **graph view** to see the whole codebase; notes are coloured/\
-         filterable by their `roteiro/kind/*`, `roteiro/lang/*` and \
-         `roteiro/status/*` tags.\n\
-         - Each note carries its captured **content** (doc comments, prose, PDF/\
-         image text) and its provenance-labelled incoming/outgoing links.\n\
-         - Start from an ADR above, or search the tag pane for a kind.\n",
+        "\n*A browsable snapshot of a whole **workspace** as one **knowledge \
+         graph**, generated by [Roteiro](https://roteiro.dev). Every symbol, \
+         document and decision in every member repository is a note, linked to the \
+         things it relates to — including across repositories.*\n",
     );
+    c.push_str(HOW_TO_READ);
+    c.push_str(
+        "\n**Notes are named `<project>-<key>`**, because a node key is \
+         repository-relative: every member has a `README.md`, and without the \
+         project each would overwrite the last. Filter the graph view by a \
+         member's `roteiro/project/*` tag to see one repository at a time.\n",
+    );
+
+    let total_nodes: usize = ws.members.iter().map(|m| m.total_nodes).sum();
+    let total_edges: usize = ws.members.iter().map(|m| m.total_edges).sum();
+    let _ = writeln!(
+        c,
+        "\n**{total_nodes} nodes**, **{total_edges} edges** across **{}** member \
+         repositor{}.",
+        ws.members.len(),
+        if ws.members.len() == 1 { "y" } else { "ies" }
+    );
+
+    c.push_str("\n## Members\n\n| Project | Nodes | Edges | Repository | Commit |\n| --- | --- | --- | --- | --- |\n");
+    for m in &ws.members {
+        let repo = m
+            .repo_url
+            .as_ref()
+            .map_or_else(|| "—".to_owned(), |u| format!("[{u}]({u})"));
+        let commit = m.commit.as_ref().map_or_else(
+            || "—".to_owned(),
+            |c| format!("`{}`", &c[..c.len().min(12)]),
+        );
+        let _ = writeln!(
+            c,
+            "| [[#{}\\|{}]] | {} | {} | {repo} | {commit} |",
+            m.project, m.project, m.total_nodes, m.total_edges
+        );
+    }
+    c.push_str(
+        "\n*The `Repository` and `Commit` columns say where each member came from \
+         and what was read. They are **not** a replication manifest — reconstructing \
+         a workspace from a vault is issue #442 part 2, and nothing here is designed \
+         to be handed to someone else.*\n",
+    );
+
+    write_cross_links(&mut c, ws);
+
+    for m in &ws.members {
+        let _ = writeln!(c, "\n## {}", m.project);
+        let _ = writeln!(
+            c,
+            "\n**{} nodes**, **{} edges** in this member.",
+            m.total_nodes, m.total_edges
+        );
+        write_repo_line(&mut c, m);
+        let scope = VaultScope {
+            project: Some(&m.project),
+            members: &members,
+        };
+        write_summary_sections(&mut c, m, &scope, 3);
+    }
+
+    c.push_str(NAVIGATING);
 
     VaultNote {
         filename: HOME_NOTE.to_owned(),
@@ -480,11 +907,70 @@ pub fn render_home(s: &VaultSummary) -> VaultNote {
     }
 }
 
+/// The `## Cross-repo links` section: the edges that only a workspace vault can
+/// show, and the honest statement of what is missing from them.
+fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
+    c.push_str("\n## Cross-repo links\n\n");
+    if ws.cross_links.is_empty() {
+        c.push_str(
+            "*None. These are the `inferred` cross-repo links `roteiro links \
+             --infer --write` persists (ADR-0009); a workspace whose members have \
+             never been inferred over has none recorded yet.*\n",
+        );
+        return;
+    }
+    c.push_str(
+        "*A spoke's config key and the hub key it corresponds to, across \
+         repositories — the one thing a per-project vault structurally cannot show. \
+         These are `inferred` matches persisted by `roteiro links --infer --write` \
+         (ADR-0009), not authored facts: read a row as a candidate correspondence.*\n\n",
+    );
+    c.push_str("| From | | To | Kind |\n| --- | --- | --- | --- |\n");
+    for l in &ws.cross_links {
+        let from_scope = VaultScope {
+            project: Some(&l.from_project),
+            members: &NO_MEMBERS,
+        };
+        let to = if l.resolves {
+            format!("[[{}\\|{}]]", note_name(&l.to_qualified), l.to_qualified)
+        } else {
+            // Outside this workspace: there is no note to link to, and a wikilink
+            // to a note that does not exist reads in Obsidian as one that is
+            // merely unwritten.
+            format!("`{}` *(outside this workspace)*", l.to_qualified)
+        };
+        let _ = writeln!(
+            c,
+            "| [[{}\\|{}]] | {} | {to} | {}{} |",
+            scoped_note_name(&from_scope, &l.from_key),
+            l.from_name,
+            l.from_project,
+            l.kind,
+            confidence(l.confidence)
+        );
+    }
+    if ws.cross_links_total > ws.cross_links.len() {
+        let _ = writeln!(
+            c,
+            "\n*Showing {} of {} — the full report is `roteiro links --matrix`.*",
+            ws.cross_links.len(),
+            ws.cross_links_total
+        );
+    }
+    c.push_str(
+        "\n*Shown in one direction only. The edge lives in the spoke's store, \
+         pointing at a local placeholder for the hub's node, so the hub's own note \
+         carries no matching **Incoming** entry — Obsidian's **Backlinks** pane \
+         still shows it, because the link is in the vault.*\n",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AdrEntry, ConfigSecretSummary, CouplingEntry, DensityEntry, HOME_NOTE, VaultSummary,
-        note_name, render_home, render_note,
+        AdrEntry, ConfigSecretSummary, CouplingEntry, CrossLink, DensityEntry, HOME_NOTE,
+        VaultScope, VaultSummary, WorkspaceSummary, note_name, render_home, render_note,
+        render_note_scoped, render_workspace_home, scoped_note_name,
     };
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
 
@@ -920,5 +1406,717 @@ mod tests {
         );
         // The rest of the overview is unaffected.
         assert!(note.content.contains("# docs — knowledge graph"));
+    }
+
+    // ---- Workspace vaults (issue #442 part 1) --------------------------------
+
+    /// A `Explanation` for `key`, with one outgoing edge to `to`.
+    fn node_linking_to(key: &str, name: &str, to: &str) -> Explanation {
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: NodeSummary {
+                key: key.into(),
+                kind: "config_key".into(),
+                name: name.into(),
+                path: Some("config.toml".into()),
+                lang: None,
+            },
+            meta: serde_json::Value::Null,
+            outgoing: vec![EdgeRef {
+                kind: "links".into(),
+                provenance: "inferred",
+                confidence: Some(0.91),
+                node: to.into(),
+            }],
+            incoming: vec![],
+        }
+    }
+
+    fn members(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_project_scope_leaves_every_note_name_exactly_as_it_was() {
+        // The compatibility promise of issue #442, as a test rather than a claim:
+        // a user's own notes live outside the vault and link into it *by name*, so
+        // a name that moves breaks those links silently. Whatever workspace mode
+        // does, `VaultScope::PROJECT` must reduce to `note_name` of the bare key.
+        for key in [
+            "file:README.md",
+            "adr:0001",
+            "sym:rust:src/a.rs#Store",
+            "extref:other::file:README.md",
+            "cfgkey:config.toml#serve.addr",
+        ] {
+            assert_eq!(
+                scoped_note_name(&VaultScope::PROJECT, key),
+                note_name(key),
+                "single-project name moved for `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn render_note_is_the_project_scoped_render_byte_for_byte() {
+        let ex = node_linking_to("cfgkey:config.toml#addr", "addr", "sym:rust:a.rs#A");
+        assert_eq!(
+            render_note(&ex, Some("https://h/b"), Some("body")),
+            render_note_scoped(&ex, Some("https://h/b"), Some("body"), &VaultScope::PROJECT),
+            "the unscoped entry point must stay the scoped one at PROJECT, so the \
+             two cannot drift apart"
+        );
+    }
+
+    #[test]
+    fn each_member_gets_its_own_note_for_the_same_key() {
+        // The collision the whole feature exists for: node keys are
+        // repository-relative, so every member's `README.md` is `file:README.md`.
+        let ms = members(&["api", "sdk"]);
+        let names: Vec<String> = ["api", "sdk"]
+            .iter()
+            .map(|p| {
+                scoped_note_name(
+                    &VaultScope {
+                        project: Some(p),
+                        members: &ms,
+                    },
+                    "file:README.md",
+                )
+            })
+            .collect();
+        assert_eq!(names, ["api-file-README.md", "sdk-file-README.md"]);
+        assert_ne!(names[0], names[1], "two members must not share one note");
+    }
+
+    /// The two names this feature has, pinned together in one place.
+    ///
+    /// They are easy to conflate and were, in this PR, described inconsistently
+    /// in two doc comments — the **key** is `<project>::<key>` (ADR-0009's
+    /// cross-repo form, which is why cross-repo links resolve), and the **note
+    /// name** is [`note_name`] of that key, in which `::` has become `-`. A
+    /// reader told the wrong one goes looking for a file with `::` in it.
+    ///
+    /// Asserting both here means the next description that drifts has something
+    /// to disagree with, rather than waiting for a reviewer to read two comments
+    /// side by side.
+    #[test]
+    fn the_qualified_key_and_the_note_name_are_different_strings() {
+        let ms = members(&["app"]);
+        let scope = VaultScope {
+            project: Some("app"),
+            members: &ms,
+        };
+        // The key: project-qualified, `::` intact — this is what the graph and
+        // ADR-0009's external refs use.
+        let qualified = "app::file:README.md";
+        // The note name: `note_name` of exactly that key, `::` slugged to `-`.
+        assert_eq!(
+            scoped_note_name(&scope, "file:README.md"),
+            "app-file-README.md"
+        );
+        assert_eq!(note_name(qualified), "app-file-README.md");
+        assert!(
+            !scoped_note_name(&scope, "file:README.md").contains("::"),
+            "no note name ever contains `::`"
+        );
+        // And on disk the stem gains the extension, which is the string a reader
+        // actually looks for.
+        let note = render_note_scoped(
+            &node_with("file:README.md", Some("README.md"), None),
+            None,
+            None,
+            &scope,
+        );
+        assert_eq!(note.filename, "app-file-README.md.md");
+    }
+
+    #[test]
+    fn a_member_note_declares_which_member_it_came_from() {
+        let ms = members(&["api"]);
+        let ex = node_linking_to("cfgkey:config.toml#addr", "addr", "sym:rust:a.rs#A");
+        let note = render_note_scoped(
+            &ex,
+            None,
+            None,
+            &VaultScope {
+                project: Some("api"),
+                members: &ms,
+            },
+        );
+        assert_eq!(note.filename, "api-cfgkey-config.toml-addr.md");
+        assert!(
+            note.content.contains("project: \"api\""),
+            "{}",
+            note.content
+        );
+        assert!(
+            note.content.contains("- roteiro/project/api"),
+            "the tag is what filters the graph view to one repository: {}",
+            note.content
+        );
+        // A within-member edge is qualified to the same member, not left bare.
+        assert!(
+            note.content.contains("→ [[api-sym-rust-a.rs-A]]"),
+            "{}",
+            note.content
+        );
+    }
+
+    #[test]
+    fn a_project_note_declares_no_project() {
+        let ex = node_linking_to("cfgkey:config.toml#addr", "addr", "sym:rust:a.rs#A");
+        let note = render_note(&ex, None, None);
+        assert!(!note.content.contains("project:"), "{}", note.content);
+        assert!(
+            !note.content.contains("roteiro/project/"),
+            "a per-project vault would carry one constant on every note — and \
+             adding it would change every note's bytes: {}",
+            note.content
+        );
+    }
+
+    #[test]
+    fn a_cross_repo_edge_links_straight_to_the_other_members_note() {
+        // ADR-0009: the spoke's edge points at a *local placeholder* for the hub's
+        // node, because store integrity needs both ends in one store. A workspace
+        // vault holds both, so the link goes to the real note. No new edge — the
+        // resolver already follows this placeholder at query time.
+        let ms = members(&["spoke", "hub"]);
+        let scope = VaultScope {
+            project: Some("spoke"),
+            members: &ms,
+        };
+        let ex = node_linking_to(
+            "cfgkey:config.toml#addr",
+            "addr",
+            &rto_graph::external_ref_key("hub::cfgkey:config.toml#addr"),
+        );
+        let note = render_note_scoped(&ex, None, None, &scope);
+        assert!(
+            note.content.contains("→ [[hub-cfgkey-config.toml-addr]]"),
+            "the edge must land on the hub's own note: {}",
+            note.content
+        );
+        assert!(
+            !note.content.contains("extref"),
+            "and never on the placeholder: {}",
+            note.content
+        );
+        // The same rule decides that the placeholder is not written as a note, so
+        // the two halves cannot disagree.
+        assert!(
+            scope.redirects_external_ref(&rto_graph::external_ref_key(
+                "hub::cfgkey:config.toml#addr"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_cross_repo_edge_out_of_the_workspace_keeps_its_placeholder() {
+        // The target repo is not in this vault, so there is no note to point at.
+        // Redirecting anyway would produce a link that resolves to nothing —
+        // Obsidian shows that as merely unwritten, which is a worse lie than a
+        // placeholder that honestly says "elsewhere".
+        let ms = members(&["spoke"]);
+        let scope = VaultScope {
+            project: Some("spoke"),
+            members: &ms,
+        };
+        let key = rto_graph::external_ref_key("elsewhere::cfgkey:config.toml#addr");
+        assert!(!scope.redirects_external_ref(&key));
+        let ex = node_linking_to("cfgkey:config.toml#addr", "addr", &key);
+        let note = render_note_scoped(&ex, None, None, &scope);
+        assert!(
+            note.content
+                .contains("→ [[spoke-extref-elsewhere-cfgkey-config.toml-addr]]"),
+            "{}",
+            note.content
+        );
+    }
+
+    #[test]
+    fn a_single_project_vault_never_redirects_an_external_ref() {
+        // No members ⇒ nothing to resolve against, so today's vault keeps rendering
+        // the placeholder exactly as it does now.
+        let key = rto_graph::external_ref_key("hub::cfgkey:config.toml#addr");
+        assert!(!VaultScope::PROJECT.redirects_external_ref(&key));
+        assert_eq!(
+            scoped_note_name(&VaultScope::PROJECT, &key),
+            note_name(&key)
+        );
+    }
+
+    fn member_summary(project: &str, fan_in: u32) -> VaultSummary {
+        VaultSummary {
+            project: project.to_owned(),
+            total_nodes: 3,
+            total_edges: 2,
+            node_counts: vec![("fn".into(), 2)],
+            edge_provenance: vec![("derived".into(), 2)],
+            adrs: vec![AdrEntry {
+                key: "adr:0001".into(),
+                name: "First".into(),
+                status: Some("Accepted".into()),
+            }],
+            debt: vec![("todo".into(), 4)], // roteiro:ignore
+            densest_files: vec![DensityEntry {
+                path: "src/small.rs".into(),
+                markers: 3,
+                lines: 120,
+                per_kloc: 25.0,
+            }],
+            config_secrets: None,
+            most_called: vec![CouplingEntry {
+                key: "sym:rust:a.rs#helper".into(),
+                name: "helper".into(),
+                fan_in,
+                fan_out: 1,
+            }],
+            repo_url: Some(format!("https://github.com/org/{project}")),
+            commit: Some("abcdef0123456789".into()),
+        }
+    }
+
+    #[test]
+    fn the_workspace_home_keeps_every_members_own_aggregates() {
+        // The promise in issue #442: the existing per-project `_Home` view is a
+        // *subset* of the workspace one, not a casualty of it. Someone who came for
+        // their repository's coupling and debt tables must still find them —
+        // not a workspace total that averages them away.
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            cross_links: vec![],
+            cross_links_total: 0,
+        };
+        let note = render_workspace_home(&ws);
+        assert_eq!(note.filename, HOME_NOTE);
+        assert!(
+            note.content
+                .contains("# platform — workspace knowledge graph")
+        );
+        // Summed, and the members listed.
+        assert!(
+            note.content
+                .contains("**6 nodes**, **4 edges** across **2** member")
+        );
+        assert!(note.content.contains("| [[#api\\|api]] | 3 | 2 |"));
+
+        for project in ["api", "sdk"] {
+            assert!(
+                note.content.contains(&format!("\n## {project}\n")),
+                "each member gets its own section"
+            );
+        }
+        // Today's sections, one level deeper, once per member.
+        for section in [
+            "### Structure",
+            "### Provenance",
+            "### Decisions (ADRs)",
+            "### Intent debt",
+            "#### Densest files",
+            "### Most depended-on",
+        ] {
+            assert_eq!(
+                note.content.matches(section).count(),
+                2,
+                "`{section}` must appear once per member: {}",
+                note.content
+            );
+        }
+        // And every link inside a member's section resolves within that member.
+        assert!(
+            note.content
+                .contains("**Accepted** — [[api-adr-0001|First]]")
+        );
+        assert!(
+            note.content
+                .contains("**Accepted** — [[sdk-adr-0001|First]]")
+        );
+        assert!(
+            note.content
+                .contains("[[api-sym-rust-a.rs-helper\\|helper]] | 7 |")
+        );
+        assert!(
+            note.content
+                .contains("[[sdk-file-src-small.rs\\|src/small.rs]]")
+        );
+    }
+
+    #[test]
+    fn the_workspace_home_renders_cross_repo_links_and_marks_the_ones_it_cannot_follow() {
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            cross_links: vec![
+                CrossLink {
+                    from_project: "sdk".into(),
+                    from_key: "cfgkey:config.toml#addr".into(),
+                    from_name: "addr".into(),
+                    kind: "links".into(),
+                    confidence: Some(0.91),
+                    to_qualified: "api::cfgkey:config.toml#addr".into(),
+                    resolves: true,
+                },
+                CrossLink {
+                    from_project: "sdk".into(),
+                    from_key: "cfgkey:config.toml#other".into(),
+                    from_name: "other".into(),
+                    kind: "links".into(),
+                    confidence: None,
+                    to_qualified: "absent::cfgkey:config.toml#other".into(),
+                    resolves: false,
+                },
+            ],
+            cross_links_total: 2,
+        };
+        let note = render_workspace_home(&ws);
+        // Resolvable: a link to the other member's note, with its confidence.
+        assert!(
+            note.content.contains(
+                "| [[sdk-cfgkey-config.toml-addr\\|addr]] | sdk | \
+                 [[api-cfgkey-config.toml-addr\\|api::cfgkey:config.toml#addr]] | links (0.91) |"
+            ),
+            "{}",
+            note.content
+        );
+        // Outside the workspace: stated as such, never as a wikilink — Obsidian
+        // renders a link to a missing note as one that is merely unwritten.
+        assert!(
+            note.content
+                .contains("`absent::cfgkey:config.toml#other` *(outside this workspace)*"),
+            "{}",
+            note.content
+        );
+        assert!(
+            !note.content.contains("[[absent-"),
+            "a dangling wikilink would read as a note someone forgot to write: {}",
+            note.content
+        );
+    }
+
+    #[test]
+    fn the_workspace_home_says_when_it_has_truncated_the_cross_links() {
+        // A capped table that does not say it is capped reads as the whole set.
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7)],
+            cross_links: vec![CrossLink {
+                from_project: "api".into(),
+                from_key: "cfgkey:config.toml#addr".into(),
+                from_name: "addr".into(),
+                kind: "links".into(),
+                confidence: None,
+                to_qualified: "api::cfgkey:config.toml#addr".into(),
+                resolves: true,
+            }],
+            cross_links_total: 40,
+        };
+        let note = render_workspace_home(&ws);
+        assert!(note.content.contains("Showing 1 of 40"), "{}", note.content);
+        assert!(note.content.contains("roteiro links --matrix"));
+    }
+
+    #[test]
+    fn a_workspace_with_no_cross_repo_links_says_why_rather_than_showing_nothing() {
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7)],
+            cross_links: vec![],
+            cross_links_total: 0,
+        };
+        let note = render_workspace_home(&ws);
+        assert!(note.content.contains("## Cross-repo links"));
+        assert!(
+            note.content.contains("links --infer --write"),
+            "an empty section must name what would fill it, or it reads as \
+             \"these repos are unrelated\": {}",
+            note.content
+        );
+        // Singular, because getting this wrong on a one-member workspace is the
+        // kind of thing nobody notices until it ships.
+        assert!(note.content.contains("**1** member repository."));
+    }
+
+    // ---- YAML frontmatter escaping -------------------------------------------
+
+    /// Parse a note's frontmatter block with a **real** YAML parser and return
+    /// `field`'s value, or the parse error.
+    ///
+    /// Every assertion below goes through this rather than checking the emitted
+    /// bytes. An escaper that is wrong in a self-consistent way passes a
+    /// byte-comparison — that is precisely how `"foo\bar"` survived: it looks
+    /// exactly like what was asked for, and means something else.
+    fn frontmatter_field(note: &str, field: &str) -> Result<Option<String>, String> {
+        let block = note
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .map(|(block, _)| block)
+            .expect("note must open with a frontmatter block");
+        let docs = yaml_rust2::YamlLoader::load_from_str(block).map_err(|e| e.to_string())?;
+        Ok(docs[0][field].as_str().map(ToOwned::to_owned))
+    }
+
+    /// A node whose key, path and language are whatever the test needs.
+    fn node_with(key: &str, path: Option<&str>, lang: Option<&str>) -> Explanation {
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: NodeSummary {
+                key: key.into(),
+                kind: "fn".into(),
+                name: "n".into(),
+                path: path.map(ToOwned::to_owned),
+                lang: lang.map(ToOwned::to_owned),
+            },
+            meta: serde_json::Value::Null,
+            outgoing: vec![],
+            incoming: vec![],
+        }
+    }
+
+    /// The three measured failure modes of the escaping this replaced, each
+    /// asserted on the **parsed** value.
+    ///
+    /// Before the fix: `foo\bar` parsed back as `foo<BS>ar` (silently six
+    /// characters, not seven), and the other two made the whole block
+    /// unparseable — which in Obsidian costs the note *every* property, with no
+    /// error shown.
+    #[test]
+    fn a_backslash_or_quote_in_a_path_still_parses_back_to_itself() {
+        for path in [
+            r"foo\bar",     // `\b` was YAML's backspace escape: silent corruption
+            r"foo\dir",     // `\d` is not a YAML escape at all: parse error
+            "say\"hi\".rs", // an unescaped `"` ended the scalar early: parse error
+            r"a\\b",
+            "trailing-backslash\\",
+        ] {
+            let note = render_note(&node_with("file:x", Some(path), None), None, None);
+            assert_eq!(
+                frontmatter_field(&note.content, "path"),
+                Ok(Some(path.to_owned())),
+                "path {path:?} must round-trip"
+            );
+        }
+    }
+
+    /// `key:` is not hypothetical for this: node keys already carry `:` and `#`,
+    /// and a symbol name can contain a quotation mark.
+    #[test]
+    fn a_node_key_round_trips_whatever_punctuation_it_carries() {
+        for key in [
+            "sym:rust:src/a.rs#Store",
+            r"sym:rust:src\weird.rs#Thing",
+            "sym:rust:a.rs#say\"hi\"",
+            "cfgkey:config.toml#serve.addr",
+        ] {
+            let note = render_note(&node_with(key, None, None), None, None);
+            assert_eq!(
+                frontmatter_field(&note.content, "key"),
+                Ok(Some(key.to_owned())),
+                "key {key:?} must round-trip"
+            );
+        }
+        // The old rule turned a `"` into an apostrophe, so the note reported a key
+        // that was not the node's key — parseable, and wrong.
+        let note = render_note(
+            &node_with("sym:rust:a.rs#say\"hi\"", None, None),
+            None,
+            None,
+        );
+        assert!(
+            !note.content.contains("say'hi'"),
+            "a quotation mark must be escaped, not rewritten: {}",
+            note.content
+        );
+    }
+
+    /// A member directory name is a path component, so it reaches the same rule.
+    #[test]
+    fn a_member_project_name_round_trips() {
+        let ms: std::collections::BTreeSet<String> =
+            std::iter::once(r"odd\name".to_owned()).collect();
+        let note = render_note_scoped(
+            &node_with("file:x", None, None),
+            None,
+            None,
+            &VaultScope {
+                project: Some(r"odd\name"),
+                members: &ms,
+            },
+        );
+        assert_eq!(
+            frontmatter_field(&note.content, "project"),
+            Ok(Some(r"odd\name".to_owned()))
+        );
+    }
+
+    /// The **bare** fields are the other half of the same class, and were missed
+    /// by the review that found the quoted ones: `status` is written unquoted, and
+    /// `roteiro load` installs a caller-supplied artifact whose nodes carry
+    /// whatever they carry.
+    #[test]
+    fn a_bare_field_is_quoted_only_when_being_bare_would_change_it() {
+        let with_status = |status: &str| {
+            let mut ex = node_with("adr:0001", None, None);
+            ex.meta = serde_json::json!({ "status": status });
+            render_note(&ex, None, None)
+        };
+
+        // Would be a parse error bare; would silently truncate bare.
+        for status in [
+            "Accepted: superseded by 0012",
+            "Accepted # pending",
+            "{draft}",
+            "",
+        ] {
+            let note = with_status(status);
+            assert_eq!(
+                frontmatter_field(&note.content, "status"),
+                Ok(Some(status.to_owned())),
+                "status {status:?} must round-trip"
+            );
+        }
+
+        // …and a safe one stays bare, which is what keeps an existing vault's
+        // bytes unchanged.
+        let note = with_status("Accepted");
+        assert!(
+            note.content.contains("\nstatus: Accepted\n"),
+            "a plain-safe status must not gain quotes: {}",
+            note.content
+        );
+    }
+
+    /// `no` is Norwegian, and a bare `no` reads as `false` to a YAML **1.1**
+    /// parser.
+    ///
+    /// The only assertion here that pins emitted bytes, and deliberately so:
+    /// `yaml-rust2` implements YAML 1.2, whose core schema resolves a bare `no`
+    /// to the *string* `no`, so a round-trip through this test's own oracle
+    /// cannot see the problem — it passes either way. The exposure is to the
+    /// parser on the other side, and Obsidian's is not this one. Quoting costs
+    /// two characters on a value that never occurs here; guessing which YAML
+    /// version every downstream reader implements does not seem like the better
+    /// bet.
+    #[test]
+    fn a_language_that_spells_a_yaml_boolean_is_quoted() {
+        let note = render_note(&node_with("file:x", None, Some("no")), None, None);
+        assert!(
+            note.content.contains("\nlang: \"no\"\n"),
+            "a bare `no` is `false` to a 1.1 parser and must be quoted: {}",
+            note.content
+        );
+        assert_eq!(
+            frontmatter_field(&note.content, "lang"),
+            Ok(Some("no".to_owned())),
+            "and it must still read back as the string: {}",
+            note.content
+        );
+        // And an ordinary language is untouched.
+        let rust = render_note(&node_with("file:x", None, Some("rust")), None, None);
+        assert!(rust.content.contains("\nlang: rust\n"), "{}", rust.content);
+    }
+
+    /// Control characters and the separators some parsers fold as line breaks.
+    #[test]
+    fn control_characters_cannot_break_out_of_the_block() {
+        for path in [
+            "a\nb",
+            "a\tb",
+            "a\u{0}b",
+            "a\u{2028}b",
+            "a\u{7f}b",
+            "a\u{85}b",
+        ] {
+            let note = render_note(&node_with("file:x", Some(path), None), None, None);
+            assert_eq!(
+                frontmatter_field(&note.content, "path"),
+                Ok(Some(path.to_owned())),
+                "path {path:?} must round-trip"
+            );
+            // A raw newline would end the scalar and inject a sibling key.
+            assert_eq!(
+                note.content.matches("\npath: ").count(),
+                1,
+                "the value must stay on one line: {}",
+                note.content
+            );
+        }
+    }
+
+    /// The escaping is *only* an escaping: for a value with nothing to escape it
+    /// must emit the same bytes it always did, or #442's promise that a
+    /// single-project vault is byte-identical does not hold.
+    #[test]
+    fn an_ordinary_value_is_emitted_exactly_as_before() {
+        let note = render_note(
+            &node_with("sym:rust:src/a.rs#Store", Some("src/a.rs"), Some("rust")),
+            None,
+            None,
+        );
+        assert!(
+            note.content
+                .contains("\nkey: \"sym:rust:src/a.rs#Store\"\n")
+        );
+        assert!(note.content.contains("\nkind: fn\n"));
+        assert!(note.content.contains("\npath: \"src/a.rs\"\n"));
+        assert!(note.content.contains("\nlang: rust\n"));
+    }
+
+    /// The plain-style decision is checked against a real parser rather than
+    /// against itself: whatever `is_plain_safe` accepts must actually round-trip
+    /// bare, and whatever it rejects must round-trip quoted.
+    #[test]
+    fn the_plain_style_decision_agrees_with_a_real_yaml_parser() {
+        for value in [
+            "fn",
+            "config_key",
+            "rust",
+            "Accepted",
+            "a.b",
+            "a/b",
+            "a-b_c",
+            "no",
+            "yes",
+            "true",
+            "null",
+            "y",
+            "N",
+            "",
+            " lead",
+            "trail ",
+            "a: b",
+            "a #c",
+            "{x}",
+            "[x]",
+            "*x",
+            "&x",
+            "!x",
+            "#x",
+            ">x",
+            "|x",
+            "%x",
+            "@x",
+            "`x",
+            "\"x",
+            "'x",
+            ",x",
+            "123",
+            "1.5",
+            "-x",
+            ".x",
+            "a\\b",
+        ] {
+            let emitted = super::yaml_scalar(value);
+            let doc = format!("v: {emitted}");
+            let parsed = yaml_rust2::YamlLoader::load_from_str(&doc)
+                .unwrap_or_else(|e| panic!("{value:?} emitted {emitted:?}: {e}"));
+            assert_eq!(
+                parsed[0]["v"].as_str(),
+                Some(value),
+                "{value:?} emitted as {emitted:?} did not round-trip"
+            );
+        }
     }
 }

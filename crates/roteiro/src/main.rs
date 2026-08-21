@@ -560,6 +560,22 @@ enum Command {
         /// Output directory (default: `website/dist` for docs, `vault` for obsidian).
         #[arg(long)]
         out: Option<String>,
+        /// `obsidian` only: render a **named** workspace from config
+        /// (`[[workspaces]]`/`[standalone]`) as **one vault spanning its member
+        /// repositories**, instead of the current project alone (issue #442).
+        /// Member notes are named `<project>-<key>`, because node keys are
+        /// repository-relative and every member's `README.md` would otherwise
+        /// claim the same note. An unknown name fails fast, listing the known ones.
+        ///
+        /// **Omitted, the current project is rendered exactly as before** — same
+        /// notes, same names, byte for byte. Deliberately *not* "the workspace
+        /// containing the current repo" (which is how `links -w` defaults): a
+        /// user's own notes live outside the vault and link into it by name, so a
+        /// bare `render obsidian` silently becoming a multi-repo render would
+        /// rename every note and break every one of those links with no error.
+        /// Workspace mode is opt-in, by name, always.
+        #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
+        workspace_name: Option<String>,
     },
     /// Graph-grounded spec/blueprint authoring (ADR-0004). Tier 0: offline,
     /// deterministic — no model required.
@@ -1755,7 +1771,18 @@ fn main() -> anyhow::Result<()> {
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
         Command::Init { fetch, vault } => run_init(ingest, fetch, vault, debt_ignore),
-        Command::Render { target, out } => run_render(ingest, &target, out, debt_ignore),
+        Command::Render {
+            target,
+            out,
+            workspace_name,
+        } => run_render(
+            &cfg.effective,
+            ingest,
+            &target,
+            out,
+            debt_ignore,
+            workspace_name.as_deref(),
+        ),
         Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
         // The whole `Loaded` config, not only the effective merge: `spec draft`
         // can reach the remote tier, and ADR-0019 §3's consent gate has to read
@@ -3537,9 +3564,18 @@ fn run_sync(
 
 /// Open the repository and its per-worktree store and shared object cache.
 fn open_graph() -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph::ObjectCache)> {
-    use rto_graph::{ObjectCache, Repo, Store};
     let cwd = std::env::current_dir()?;
-    let repo = Repo::discover(&cwd)?;
+    open_graph_at(&cwd)
+}
+
+/// [`open_graph`], for a repository found from `dir` rather than the current
+/// directory — a workspace vault renders each member in turn, from wherever the
+/// command was run.
+fn open_graph_at(
+    dir: &std::path::Path,
+) -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph::ObjectCache)> {
+    use rto_graph::{ObjectCache, Repo, Store};
+    let repo = Repo::discover(dir)?;
     let store_dir = repo.git_dir().join("roteiro");
     std::fs::create_dir_all(&store_dir)?;
     let store = Store::open(&store_dir.join("graph.db"))?;
@@ -7158,14 +7194,7 @@ fn links_scope_paths(
     let chosen: Option<&rto_graph::ResolvedWorkspace> = if let Some(name) = scope.workspace_name {
         // Explicit selection: it must name a configured workspace, else a clear
         // error listing the known ones.
-        Some(resolved.iter().find(|r| r.name == name).ok_or_else(|| {
-            let known = resolved
-                .iter()
-                .map(|r| r.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::anyhow!("no workspace named `{name}` (known: {known})")
-        })?)
+        Some(select_resolved_workspace(&resolved, name)?)
     } else if resolved.is_empty() {
         None
     } else {
@@ -12688,14 +12717,26 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
 
 /// Render a build-output of the graph: the docs site or an Obsidian vault.
 fn run_render(
+    cfg: &config::Config,
     ingest: rto_graph::IngestConfig,
     target: &str,
     out: Option<String>,
     debt_ignore: &[String],
+    workspace_name: Option<&str>,
 ) -> anyhow::Result<()> {
     match rto_render::Target::parse(target) {
+        // `--workspace-name` scopes a *vault*; the docs site is this repository's
+        // published website and has no workspace form. Rejected rather than
+        // ignored, so the flag never looks like it took effect.
+        Some(rto_render::Target::DocsSite) if workspace_name.is_some() => anyhow::bail!(
+            "`--workspace-name` applies only to `roteiro render obsidian` \
+             (it renders a workspace as one vault); the docs site is per-repository"
+        ),
         Some(rto_render::Target::DocsSite) => render_docs(out),
-        Some(rto_render::Target::ObsidianVault) => render_obsidian(ingest, out, debt_ignore),
+        Some(rto_render::Target::ObsidianVault) => match workspace_name {
+            Some(name) => render_obsidian_workspace(cfg, name, out),
+            None => render_obsidian(ingest, out, debt_ignore),
+        },
         None => anyhow::bail!("unknown render target `{target}` (expected: docs | obsidian)"),
     }
 }
@@ -13005,8 +13046,12 @@ fn adr_blob_oid<'a>(
     blobs.get(ex.node.path.as_deref()?).map(String::as_str)
 }
 
-/// Render an Obsidian vault: one linked markdown note per graph node in `<out>`
-/// (default `vault`).
+/// Render an Obsidian vault for **the current project**: one linked markdown note
+/// per graph node in `<out>` (default `vault`).
+///
+/// This is the whole of `roteiro render obsidian` with no `--workspace-name`, and
+/// it is unchanged: same notes, same names, byte for byte. See the flag's own
+/// documentation for why that is a promise rather than an accident.
 fn render_obsidian(
     ingest: rto_graph::IngestConfig,
     out: Option<String>,
@@ -13018,21 +13063,315 @@ fn render_obsidian(
         || std::path::PathBuf::from("vault"),
         std::path::PathBuf::from,
     );
-    if out.exists() {
-        std::fs::remove_dir_all(&out)?;
-    }
-    std::fs::create_dir_all(&out)?;
+    reset_vault_dir(&out)?;
 
-    // A web "blob" base for clickable Source links, from the origin remote + the
-    // rendered commit (an absolute URL, so it works in the downloaded vault too).
-    // `None` when there is no mappable remote — notes then omit the link.
     let commit = repo.head_commit_id().ok();
     let remote = repo.origin_url();
-    let source_base = match (remote.as_deref(), commit.as_deref()) {
+    let source_base = member_source_base(remote.as_deref(), commit.as_deref());
+
+    let mut names = NoteNames::default();
+    let count = write_member_notes(
+        &repo,
+        &store,
+        ingest,
+        &out,
+        &rto_render::VaultScope::PROJECT,
+        source_base.as_deref(),
+        &mut names,
+    )?;
+
+    // The overview note: what was scanned, structure, provenance, ADRs, debt.
+    let repo_url = remote.as_deref().and_then(repo_web_root);
+    let home = rto_render::render_home(&vault_summary(
+        &repo,
+        &store,
+        repo_url,
+        commit,
+        debt_ignore,
+    )?);
+    std::fs::write(out.join(&home.filename), &home.content)?;
+
+    println!(
+        "rendered obsidian vault → {} ({count} note(s) + {})",
+        out.display(),
+        rto_render::HOME_NOTE
+    );
+    names.report();
+    Ok(())
+}
+
+/// Render **one vault spanning a named workspace's member repositories** (issue
+/// #442 part 1).
+///
+/// Nothing here is a new export surface: every note is one a per-project vault
+/// would already have rendered for that member, and the only edges shown are the
+/// ones the graph already holds. What changes is the *span* — members can no
+/// longer overwrite each other's notes, `_Home` is the workspace overview, and
+/// the cross-repo links ADR-0009 persists finally have both of their endpoints in
+/// one vault.
+///
+/// Two related names, because conflating them sends a reader looking for a file
+/// that does not exist:
+///
+/// - the **key** a note is rendered from is project-qualified,
+///   `<project>::<key>` — ADR-0009's cross-repo form, reused rather than
+///   reinvented, which is why a cross-repo link resolves to a note in this vault;
+/// - the **note name** is [`rto_render::note_name`] of that key, which slugs `:`
+///   to `-`. There is no `::` in a filename.
+///
+/// So `app`'s `file:README.md` is keyed `app::file:README.md` and written to
+/// `app-file-README.md.md`.
+///
+/// Each member is read with **its own** configuration — `[ingest]` toggles and
+/// `[debt] ignore` come from that repository's `roteiro.toml`, not the one the
+/// command happened to be run in — so a member's section reports exactly the
+/// figures its own `roteiro debt` would (ADR-0007 v1.1). Rendering the same
+/// repository from two directories must not produce two different numbers.
+fn render_obsidian_workspace(
+    cfg: &config::Config,
+    workspace_name: &str,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let paths = workspace_member_paths(cfg, workspace_name)?;
+    // Names come from `Workspace::from_repo_paths` rather than being re-derived
+    // here, because that is the rule that produced the `<project>::<key>` targets
+    // already recorded in the members' external-ref nodes. Two naming rules would
+    // mean cross-repo links that resolve at query time and dangle in the vault.
+    let ws = rto_graph::Workspace::from_repo_paths(&paths)?;
+    let member_names = ws.names();
+    let members: std::collections::BTreeSet<String> = member_names.iter().cloned().collect();
+
+    let out = out.map_or_else(
+        || std::path::PathBuf::from("vault"),
+        std::path::PathBuf::from,
+    );
+    reset_vault_dir(&out)?;
+
+    let mut names = NoteNames::default();
+    let mut summaries = Vec::with_capacity(member_names.len());
+    let mut cross_links = Vec::new();
+    let mut count = 0usize;
+
+    for project in &member_names {
+        let root = ws.project_root(Some(project))?.ok_or_else(|| {
+            anyhow::anyhow!("workspace member `{project}` has no repository root")
+        })?;
+
+        // That member's own configuration, not the invoking directory's.
+        let member_cfg = config::load(&root).map_err(|e| {
+            anyhow::anyhow!(
+                "reading the configuration of workspace member `{project}` at {}: {e}",
+                root.display()
+            )
+        })?;
+        let ingest = member_cfg.effective.ingest.resolve();
+        let debt_ignore = member_cfg.effective.debt.ignore.clone().unwrap_or_default();
+
+        let (repo, mut store, cache) = open_graph_at(&root)?;
+        build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+
+        let commit = repo.head_commit_id().ok();
+        let remote = repo.origin_url();
+        let source_base = member_source_base(remote.as_deref(), commit.as_deref());
+        let scope = rto_render::VaultScope {
+            project: Some(project),
+            members: &members,
+        };
+
+        count += write_member_notes(
+            &repo,
+            &store,
+            ingest,
+            &out,
+            &scope,
+            source_base.as_deref(),
+            &mut names,
+        )?;
+        collect_cross_links(&store, project, &members, &mut cross_links)?;
+
+        let repo_url = remote.as_deref().and_then(repo_web_root);
+        summaries.push(vault_summary(
+            &repo,
+            &store,
+            repo_url,
+            commit,
+            &debt_ignore,
+        )?);
+    }
+
+    // Stable, and stable for a reason: the vault is regenerated over itself, so a
+    // `_Home` whose member order moved would show a diff on every render.
+    cross_links.sort_by(|a: &rto_render::CrossLink, b: &rto_render::CrossLink| {
+        (&a.from_project, &a.from_key, &a.to_qualified).cmp(&(
+            &b.from_project,
+            &b.from_key,
+            &b.to_qualified,
+        ))
+    });
+    let cross_links_total = cross_links.len();
+    cross_links.truncate(WORKSPACE_CROSS_LINK_ROWS);
+
+    let home = rto_render::render_workspace_home(&rto_render::WorkspaceSummary {
+        name: workspace_name.to_owned(),
+        members: summaries,
+        cross_links,
+        cross_links_total,
+    });
+    std::fs::write(out.join(&home.filename), &home.content)?;
+
+    println!(
+        "rendered obsidian vault for workspace `{workspace_name}` → {} \
+         ({count} note(s) across {} member(s) + {})",
+        out.display(),
+        member_names.len(),
+        rto_render::HOME_NOTE
+    );
+    names.report();
+    Ok(())
+}
+
+/// Cross-repo links shown in the workspace `_Home`. An overview, not the report:
+/// the full one is `roteiro links --matrix`, and `_Home` says so when it truncates.
+const WORKSPACE_CROSS_LINK_ROWS: usize = 25;
+
+/// The member repository paths of the workspace named `workspace_name`.
+///
+/// Deliberately **not** [`links_scope_paths`]: that unions in the current repo (so
+/// a link check run inside a spoke resolves against its siblings) and falls back
+/// to the workspace containing the cwd. Both are right for `links` and wrong for a
+/// vault, where the members are the artifact's contents — rendering `-w Thalweg`
+/// from an unrelated directory must produce Thalweg's three members and nothing
+/// else.
+fn workspace_member_paths(
+    cfg: &config::Config,
+    workspace_name: &str,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    use std::collections::BTreeSet;
+    let resolved = cfg.resolved_workspaces()?;
+    let chosen = select_resolved_workspace(&resolved, workspace_name)?;
+    let mut paths: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    for root in &chosen.roots {
+        paths.extend(rto_graph::discover_repos_under(std::path::Path::new(root))?);
+    }
+    for repo in &chosen.repos {
+        paths.insert(std::path::PathBuf::from(repo));
+    }
+    if paths.is_empty() {
+        anyhow::bail!("workspace `{workspace_name}` resolves to no repositories");
+    }
+    Ok(paths.into_iter().collect())
+}
+
+/// The configured workspace named `name`, or a clear error listing the known ones.
+/// Shared by `links -w` and `render obsidian -w` so one name fails the same way in
+/// both.
+fn select_resolved_workspace<'a>(
+    resolved: &'a [rto_graph::ResolvedWorkspace],
+    name: &str,
+) -> anyhow::Result<&'a rto_graph::ResolvedWorkspace> {
+    resolved.iter().find(|r| r.name == name).ok_or_else(|| {
+        let known = resolved
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::anyhow!("no workspace named `{name}` (known: {known})")
+    })
+}
+
+/// Empty `out`, then create it. A vault is a build output that is regenerated over
+/// itself; the alternative is stale notes for symbols that have since been renamed
+/// accumulating for ever. The contract this rests on is stated in the issue: the
+/// vault directory is Roteiro's, and a user's own notes belong outside it.
+fn reset_vault_dir(out: &std::path::Path) -> anyhow::Result<()> {
+    if out.exists() {
+        std::fs::remove_dir_all(out)?;
+    }
+    std::fs::create_dir_all(out)?;
+    Ok(())
+}
+
+/// A web "blob" base for clickable Source links, from the origin remote and the
+/// rendered commit (an absolute URL, so it works in a downloaded vault too).
+/// `None` when there is no mappable remote — notes then omit the link.
+fn member_source_base(remote: Option<&str>, commit: Option<&str>) -> Option<String> {
+    match (remote, commit) {
         (Some(r), Some(c)) => source_blob_base(r, c),
         _ => None,
-    };
+    }
+}
 
+/// The note names a vault has already claimed, so a name written twice is
+/// **reported** instead of one note silently overwriting the other.
+///
+/// Keyed case-insensitively, because that is what a reader gets either way:
+/// Obsidian resolves `[[links]]` without regard to case, and macOS and Windows
+/// fold it in the filesystem too, so two notes whose names differ only in case are
+/// one note however they were written.
+///
+/// This is instrumentation for the question workspace mode had to answer — do
+/// members collide? — and answering it turned up that they already did *within* a
+/// single project: measured on this repository before any workspace support
+/// existed, 8,144 nodes rendered to 8,040 distinct notes. Nine were lost to the
+/// slug ([`rto_render::note_name`] maps `#` and `:` alike to `-`, so
+/// `…cytoscape.min.js#$a` and `…#a` are one name) and 95 to case. The count
+/// printed said 8,144. Naming is deliberately left alone — every fix renames
+/// notes, which is the one thing this feature may not do — so what is added here
+/// is the report.
+#[derive(Default)]
+struct NoteNames {
+    /// Lowercased note filename → the node key that claimed it first.
+    claimed: std::collections::HashMap<String, String>,
+    /// `(filename, first key, overwriting key)` for each collision.
+    collisions: Vec<(String, String, String)>,
+}
+
+impl NoteNames {
+    /// Record that `key` wrote `filename`, noting a collision if it was taken.
+    fn claim(&mut self, filename: &str, key: &str) {
+        match self.claimed.entry(filename.to_lowercase()) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                self.collisions
+                    .push((filename.to_owned(), e.get().clone(), key.to_owned()));
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(key.to_owned());
+            }
+        }
+    }
+
+    /// Warn about collisions, naming a few. Silent when there are none.
+    fn report(&self) {
+        if self.collisions.is_empty() {
+            return;
+        }
+        eprintln!(
+            "warning: {} note(s) share a name with another and are one note in the \
+             vault (Obsidian resolves links case-insensitively). The graph is \
+             complete; the vault is not:",
+            self.collisions.len()
+        );
+        for (name, first, second) in self.collisions.iter().take(5) {
+            eprintln!("  {name}: `{first}` and `{second}`");
+        }
+        if self.collisions.len() > 5 {
+            eprintln!("  … and {} more", self.collisions.len() - 5);
+        }
+    }
+}
+
+/// Write one member's notes into `out` under `scope`, returning how many were
+/// rendered. Shared by the single-project and workspace paths, so both read prose
+/// and ADR bodies by exactly the same rules.
+fn write_member_notes(
+    repo: &rto_graph::Repo,
+    store: &rto_graph::Store,
+    ingest: rto_graph::IngestConfig,
+    out: &std::path::Path,
+    scope: &rto_render::VaultScope<'_>,
+    source_base: Option<&str>,
+    names: &mut NoteNames,
+) -> anyhow::Result<usize> {
     // Where a prose file's full text lives in the rendered commit, keyed by path.
     //
     // A node's `meta.content` is an *embedding* budget (`MAX_CONTENT`, whitespace
@@ -13082,7 +13421,13 @@ fn render_obsidian(
 
     let mut count = 0usize;
     for key in store.all_keys()? {
-        if let Some(ex) = rto_graph::explain(&store, &key)? {
+        // A cross-repo placeholder whose target is a member of this vault is not
+        // rendered: every edge to it was pointed at the real note instead, so a
+        // note here would be an unreachable stand-in for a node this vault holds.
+        if scope.redirects_external_ref(&key) {
+            continue;
+        }
+        if let Some(ex) = rto_graph::explain(store, &key)? {
             // A non-UTF-8 blob falls back to `meta.content`: extraction papered
             // over it with `from_utf8_lossy`, and a note of replacement
             // characters is worse than the capped text.
@@ -13105,28 +13450,54 @@ fn render_obsidian(
                     .and_then(|oid| repo.read_blob(oid).ok())
                     .and_then(|bytes| String::from_utf8(bytes).ok())
             };
-            let note = rto_render::render_note(&ex, source_base.as_deref(), body.as_deref());
+            let note = rto_render::render_note_scoped(&ex, source_base, body.as_deref(), scope);
+            names.claim(&note.filename, &ex.node.key);
             std::fs::write(out.join(&note.filename), &note.content)?;
             count += 1;
         }
     }
+    Ok(count)
+}
 
-    // The overview note: what was scanned, structure, provenance, ADRs, debt.
-    let repo_url = remote.as_deref().and_then(repo_web_root);
-    let home = rto_render::render_home(&vault_summary(
-        &repo,
-        &store,
-        repo_url,
-        commit,
-        debt_ignore,
-    )?);
-    std::fs::write(out.join(&home.filename), &home.content)?;
-
-    println!(
-        "rendered obsidian vault → {} ({count} note(s) + {})",
-        out.display(),
-        rto_render::HOME_NOTE
-    );
+/// Collect one member's cross-repo links: the edges pointing at its external-ref
+/// placeholders (ADR-0009), which is where a spoke records that one of its config
+/// keys corresponds to a hub's.
+///
+/// These are read off the store, never inferred here. `roteiro links --infer
+/// --write` is what puts them there; a workspace whose members have never been
+/// inferred over simply has none.
+fn collect_cross_links(
+    store: &rto_graph::Store,
+    project: &str,
+    members: &std::collections::BTreeSet<String>,
+    out: &mut Vec<rto_render::CrossLink>,
+) -> anyhow::Result<()> {
+    let kind = rto_graph::NodeKind::Other(rto_graph::EXTERNAL_REF_KIND.to_owned());
+    for placeholder in store.nodes_by_kind(&kind)? {
+        let Some(qualified) = rto_graph::external_ref_target(&placeholder) else {
+            continue;
+        };
+        let resolves = rto_graph::parse_qualified(&qualified)
+            .is_some_and(|(target, _)| members.contains(target));
+        let Some(ex) = rto_graph::explain(store, &placeholder.key)? else {
+            continue;
+        };
+        for edge in ex.incoming {
+            // The source node's display name, for a row that reads as something
+            // other than a key. Its absence is not worth failing a render over.
+            let name = rto_graph::explain(store, &edge.node)?
+                .map_or_else(|| edge.node.clone(), |src| src.node.name);
+            out.push(rto_render::CrossLink {
+                from_project: project.to_owned(),
+                from_key: edge.node,
+                from_name: name,
+                kind: edge.kind,
+                confidence: edge.confidence,
+                to_qualified: qualified.clone(),
+                resolves,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -15643,6 +16014,78 @@ mod cli_routing {
         assert_eq!(workspace, vec!["/repos".to_owned()]);
         assert_eq!(workspace_name.as_deref(), Some("api"));
         assert!(sync_on_access);
+    }
+
+    /// `render obsidian -w <name>` selects a workspace; **bare `render obsidian`
+    /// carries none**, which is the compatibility promise of issue #442 stated at
+    /// the parse layer. Workspace mode renames every note, and a user's own notes
+    /// link into the vault by name, so it must never be entered by inference.
+    #[test]
+    fn render_takes_a_workspace_name_and_defaults_to_none() {
+        let Command::Render {
+            target,
+            workspace_name,
+            ..
+        } = parse(["roteiro", "render", "obsidian", "-w", "platform"])
+        else {
+            panic!("expected Render");
+        };
+        assert_eq!(target, "obsidian");
+        assert_eq!(workspace_name.as_deref(), Some("platform"));
+
+        let Command::Render { workspace_name, .. } = parse(["roteiro", "render", "obsidian"])
+        else {
+            panic!("expected Render");
+        };
+        assert_eq!(
+            workspace_name, None,
+            "no `-w` must mean today's per-project render, never the workspace \
+             containing the cwd"
+        );
+    }
+
+    /// A vault spans a workspace; the docs site is one repository's published
+    /// website. Refused rather than ignored, so the flag never looks like it took
+    /// effect.
+    #[test]
+    fn render_docs_refuses_a_workspace_name_instead_of_ignoring_it() {
+        let err = crate::run_render(
+            &crate::config::Config::default(),
+            rto_graph::IngestConfig::default(),
+            "docs",
+            None,
+            &[],
+            Some("platform"),
+        )
+        .expect_err("`render docs -w` must not silently render the plain site")
+        .to_string();
+        assert!(err.contains("--workspace-name"), "{err}");
+        assert!(err.contains("render obsidian"), "{err}");
+    }
+
+    /// An unknown workspace name fails fast and lists the known ones — the same
+    /// message `links -w` gives, because it is now literally the same code.
+    #[test]
+    fn an_unknown_workspace_name_for_render_lists_the_known_ones() {
+        let resolved = vec![
+            rto_graph::ResolvedWorkspace {
+                name: "platform".to_owned(),
+                roots: vec![],
+                repos: vec!["/repos/api".to_owned()],
+                linked: true,
+            },
+            rto_graph::ResolvedWorkspace {
+                name: "tools".to_owned(),
+                roots: vec![],
+                repos: vec!["/repos/cli".to_owned()],
+                linked: true,
+            },
+        ];
+        let err = crate::select_resolved_workspace(&resolved, "platfrom")
+            .expect_err("a typo must not silently render something else")
+            .to_string();
+        assert!(err.contains("no workspace named `platfrom`"), "{err}");
+        assert!(err.contains("platform, tools"), "{err}");
     }
 
     // Deprecated `serve --models`: still parses, still routes to the network server
