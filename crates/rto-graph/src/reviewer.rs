@@ -663,6 +663,14 @@ pub fn parse_findings(reviewed_sha: &str, path: &str, reply: &str) -> Parsed {
         // Checked on the text as handed over, which a caller has already run its
         // `</think>` strip across: an *opening* tag still present means the
         // closing one never arrived, so generation stopped mid-deliberation.
+        //
+        // **Now a second line of defence rather than the first.** Since #583 the
+        // strip itself refuses a block it never saw closed, and `review_llm`
+        // reports that as `reasoning_truncated` without reaching this function at
+        // all. What survives to here is the case that rule deliberately does not
+        // claim — a block opened part-way through a reply rather than at its
+        // start. Kept because the cost is one `contains` and the failure it
+        // prevents is a truncated review counted as a clean file.
         reasoning_truncated: reply.contains("<think>"),
         ..Parsed::default()
     };

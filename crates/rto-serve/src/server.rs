@@ -710,13 +710,48 @@ fn stream_chat(
                 }
             }
         } else {
+            // The untooled, token-incremental path — the one branch of `/v1` that
+            // never reaches `tools::finish`, and so the one place the `<think>`
+            // rule has to be applied by hand rather than inherited.
+            //
+            // It is applied, and that is the decision #582 asked for: the
+            // endpoint answers the same question the same way whether or not the
+            // client asked for a stream. Leaving this raw while the non-streaming
+            // path stripped would have replaced the CLI/HTTP split the issue was
+            // filed on with a streaming/non-streaming one inside the same
+            // endpoint, which is the same defect with a smaller blast radius.
+            //
+            // `StreamFilter` withholds the block instead of forwarding it, so a
+            // reasoning model costs this path its time-to-first-token and no
+            // correctness. See `rto_llama::thinking::StreamFilter`.
+            let mut filter = crate::thinking::StreamFilter::new();
             let mut on_token = |piece: &str| {
-                let _ = tx.send(StreamMsg::Delta(piece.to_owned()));
+                if let Some(text) = filter.push(piece) {
+                    let _ = tx.send(StreamMsg::Delta(text));
+                }
             };
             match state.engine.chat_stream(&req, &mut on_token) {
-                Ok(usage) => {
-                    let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
-                }
+                Ok(usage) => match filter.end(usage.finish_reason) {
+                    Ok(tail) => {
+                        if let Some(text) = tail {
+                            let _ = tx.send(StreamMsg::Delta(text));
+                        }
+                        let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
+                    }
+                    // Nothing has been sent — the filter held every token — so
+                    // the refusal is the whole of the assistant's turn rather
+                    // than a correction appended to half a reply. Same sentence
+                    // the non-streaming path would have produced, from the same
+                    // function, because a caller must not have to know which
+                    // transport it used to know what happened (#583).
+                    Err(why) => {
+                        let _ = tx.send(StreamMsg::Delta(crate::tools::unanswered_refusal(
+                            why,
+                            req.max_tokens,
+                        )));
+                        let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
+                    }
+                },
                 Err(e) => {
                     let _ = tx.send(StreamMsg::Failed(e.to_string()));
                 }
@@ -2263,6 +2298,304 @@ mod tests {
         assert_eq!(
             json["choices"][0]["message"]["content"],
             "I would rather just answer."
+        );
+    }
+
+    /// A reasoning model: emits `text` in `pieces` tokens and stops for
+    /// `finish_reason`. Records what it was prompted with, so a test can assert
+    /// on the history the tool loop fed back.
+    struct ReasoningEngine {
+        text: String,
+        pieces: usize,
+        finish_reason: FinishReason,
+        seen: std::sync::Mutex<Vec<Vec<crate::engine::Message>>>,
+    }
+
+    impl ReasoningEngine {
+        fn new(text: &str, finish_reason: FinishReason) -> std::sync::Arc<Self> {
+            Self::in_pieces(text, 1, finish_reason)
+        }
+
+        /// The same generation split across `pieces` tokens — the streaming
+        /// tests care that a tag straddling a token boundary is still a tag.
+        fn in_pieces(
+            text: &str,
+            pieces: usize,
+            finish_reason: FinishReason,
+        ) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                text: text.to_owned(),
+                pieces,
+                finish_reason,
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl Engine for ReasoningEngine {
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo {
+                id: "echo".to_owned(),
+            }]
+        }
+        fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            self.seen.lock().unwrap().push(req.messages.clone());
+            let chars: Vec<char> = self.text.chars().collect();
+            let per = chars.len().div_ceil(self.pieces.max(1)).max(1);
+            for chunk in chars.chunks(per) {
+                on_token(&chunk.iter().collect::<String>());
+            }
+            Ok(CompletionStats {
+                prompt_tokens: 3,
+                completion_tokens: 105,
+                finish_reason: self.finish_reason,
+            })
+        }
+    }
+
+    /// Reassemble an SSE body into the text a client would have displayed.
+    ///
+    /// Concatenated rather than substring-matched, because the point of the
+    /// streaming path is that the answer arrives in pieces: `"four"` may well
+    /// cross a chunk boundary as `"fou"` + `"r"`, and a test that grepped the
+    /// raw body for it would be asserting on the tokenisation instead of the
+    /// content.
+    fn stream_content(sse: &str) -> String {
+        sse.lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter(|l| *l != "[DONE]")
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| {
+                v["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// The generation #582 was filed on, near enough verbatim.
+    const THINKS_THEN_ANSWERS: &str = "<think>\nOkay, the user is asking \"What is 2+2?\". Just a direct answer.\n</think>\n\nfour";
+
+    /// **The defect #582 is: this is stripped for every CLI consumer and was
+    /// not stripped here.** Same model, same block, two answers depending on
+    /// which consumer asked. Measured live, ~95 of 105 completion tokens were
+    /// reasoning for a one-word answer, and all of them reached the caller.
+    #[tokio::test]
+    async fn a_reasoning_block_does_not_reach_an_http_caller() {
+        let engine = ReasoningEngine::new(THINKS_THEN_ANSWERS, FinishReason::Stop);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "What is 2+2?"}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["choices"][0]["message"]["content"], "four");
+
+        // The counts are the model's, not the answer's: it really did spend them,
+        // and a client budgeting against a number Roteiro shrank would be told a
+        // comfortable lie.
+        assert_eq!(json["usage"]["completion_tokens"], 105);
+    }
+
+    /// The same, with tools advertised — the Ask path, which goes through the
+    /// tool loop rather than the untooled shortcut. Both routes reach the
+    /// caller, so a fix on one of them is half a fix.
+    #[tokio::test]
+    async fn the_tool_loop_path_strips_it_too() {
+        let engine = ReasoningEngine::new(THINKS_THEN_ANSWERS, FinishReason::Stop);
+        let resp = app_with_tools(engine, std::sync::Arc::new(PanicRegistry))
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "What is 2+2?"}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            body_json(resp).await["choices"][0]["message"]["content"],
+            "four"
+        );
+    }
+
+    /// **#583 over HTTP.** The block never closes, so there is no answer in this
+    /// generation at all — and the old rule returned the text unchanged, which
+    /// would publish a model's scratch deliberation as its reply.
+    #[tokio::test]
+    async fn an_unterminated_block_is_refused_rather_than_published() {
+        let cut = "<think>\nOkay, I need to compare B-trees and LSM trees";
+        let engine = ReasoningEngine::new(cut, FinishReason::Length);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "B-trees vs LSM?"}],
+                "max_tokens": 512,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let content = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            !content.contains("B-trees"),
+            "the deliberation was published as the answer: {content}"
+        );
+        assert!(
+            content.starts_with("Roteiro: "),
+            "a refusal says who is speaking: {content}"
+        );
+        assert!(
+            content.contains("512"),
+            "it names the budget the caller can raise: {content}"
+        );
+        // The stop reason is the model's and is left alone, so a machine client
+        // still learns that generation was cut short.
+        assert_eq!(json["choices"][0]["finish_reason"], "length");
+    }
+
+    /// A model that stops on its own inside the block gets a different sentence,
+    /// because it has a different way forward: no budget will fix it.
+    #[tokio::test]
+    async fn a_model_that_stops_mid_reasoning_is_told_apart_from_one_that_ran_out() {
+        let engine = ReasoningEngine::new("<think>\nhmm", FinishReason::Stop);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi"}],
+            })))
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let content = json["choices"][0]["message"]["content"].as_str().unwrap();
+        assert!(content.starts_with("Roteiro: "), "{content}");
+        assert!(
+            content.contains("roteiro model list"),
+            "points at the other installed models: {content}"
+        );
+        assert!(
+            !content.contains("max_tokens"),
+            "raising a budget that was not the constraint is the wrong advice: {content}"
+        );
+    }
+
+    /// **The streaming surface answers the same question the same way.** Left
+    /// raw, this would have replaced #582's CLI/HTTP split with a
+    /// streaming/non-streaming one inside the same endpoint.
+    ///
+    /// Split across many tokens so the tags straddle boundaries, which is what a
+    /// real tokeniser does.
+    #[tokio::test]
+    async fn a_reasoning_block_does_not_reach_a_streaming_caller() {
+        let engine = ReasoningEngine::in_pieces(THINKS_THEN_ANSWERS, 40, FinishReason::Stop);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "What is 2+2?"}],
+                "stream": true,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains("Okay") && !text.contains("think"),
+            "no delta may carry any part of the block: {text}"
+        );
+        assert_eq!(
+            stream_content(&text),
+            "four",
+            "the answer still arrives, and only the answer: {text}"
+        );
+        assert!(text.contains("data: [DONE]"), "terminator: {text}");
+    }
+
+    /// And a stream that never leaves the block refuses, rather than ending with
+    /// the caller having received nothing at all.
+    #[tokio::test]
+    async fn a_stream_cut_off_inside_the_block_refuses() {
+        let engine = ReasoningEngine::in_pieces("<think>\nstill thinking", 8, FinishReason::Length);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 512,
+                "stream": true,
+            })))
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains("still thinking"),
+            "the deliberation was streamed: {text}"
+        );
+        let content = stream_content(&text);
+        assert!(
+            content.starts_with("Roteiro: ") && content.contains("512"),
+            "the refusal is the whole turn, and the same sentence the \
+             non-streaming path gives: {content}"
+        );
+        assert!(text.contains("data: [DONE]"), "terminator: {text}");
+    }
+
+    /// **The loop stops re-sending the block to itself.** The assistant turn fed
+    /// back into round two used to carry the whole of round one's reasoning, so
+    /// it was re-prefilled once per round against a prompt budget with no prefix
+    /// cache (#578). This is the internal half of the multi-turn argument #582
+    /// makes about clients echoing history.
+    #[tokio::test]
+    async fn reasoning_is_not_fed_back_into_the_next_round() {
+        struct GraphTool;
+        impl crate::tools::ToolRegistry for GraphTool {
+            fn tools(&self) -> Vec<crate::tools::ToolDef> {
+                vec![crate::tools::ToolDef {
+                    name: "lookup".to_owned(),
+                    description: "look something up".to_owned(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }]
+            }
+            fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+                Ok("the graph said so".to_owned())
+            }
+        }
+
+        // Round one deliberates and calls a tool; round two answers.
+        let engine = ScriptedServeEngine::new(&[
+            "<think>\nI should look this up first.\n</think>\n\n\
+             <tool_call>{\"name\": \"lookup\", \"arguments\": {}}</tool_call>",
+            "<think>\nNow I can answer.\n</think>\n\nthe graph said so",
+        ]);
+        let resp = app_with_tools(engine.clone(), std::sync::Arc::new(GraphTool))
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "look it up"}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            body_json(resp).await["choices"][0]["message"]["content"],
+            "the graph said so"
+        );
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the loop ran two rounds");
+        let round_two: String = seen[1].iter().map(|m| m.content.clone()).collect();
+        assert!(
+            !round_two.contains("I should look this up first"),
+            "round one's deliberation was re-sent in round two's prompt: {round_two}"
+        );
+        assert!(
+            round_two.contains("lookup"),
+            "the call it actually made is still there: {round_two}"
         );
     }
 

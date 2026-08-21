@@ -33,8 +33,15 @@ pub mod speculative;
 // and `rto-graph`'s per-modality media engines live in. Compiled unconditionally
 // — it needs no C/C++ toolchain — so its unit tests run in the default CI build.
 pub mod slot;
+// Reading a reasoning model's `<think>` block: which part of a completion is the
+// answer, and when there isn't one (#582/#583). Compiled unconditionally — it
+// needs no C/C++ toolchain, and both consumers of the rule (`rto-serve`'s `/v1`
+// endpoint and the `roteiro` CLI) have to be able to see it from crates that do
+// not agree on which llama.cpp features are on.
+pub mod thinking;
 
 pub use engine::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
 pub use slot::{EngineSlot, KeyedSlot};
+pub use thinking::Unterminated;

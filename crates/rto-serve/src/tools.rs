@@ -54,6 +54,7 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::{ChatRequest, Completion, Engine, EngineError, FinishReason, Message};
+use crate::thinking::{self, Unterminated};
 
 /// Max **bytes** of a tool result fed back into the conversation, so a large
 /// query result cannot blow the context window. (`truncate` caps by UTF-8 bytes,
@@ -191,6 +192,15 @@ enum Ending {
     ClientCalls(Vec<ToolCall>),
     /// The model was calling a tool and the call did not arrive intact.
     Unfinished(Unfinished),
+    /// The generation opened a `<think>` block and never closed it, so it never
+    /// started an answer at all (#583).
+    ///
+    /// A sibling of [`Ending::Unfinished`] and named to rhyme with it: both are
+    /// a marker that was opened and never closed, and both mean the generation
+    /// stopped before it became a reply. Established by [`read_reasoning`] the
+    /// moment the generation arrives, which is why no arm of [`finish`] has to
+    /// look for it.
+    Unanswered(Unterminated),
     /// The round budget ran out with the model still calling Roteiro's tools,
     /// so it never reached an answer.
     Exhausted,
@@ -288,6 +298,7 @@ fn finish(completion: Completion, ending: Ending, limits: Limits) -> ToolLoopOut
         }
         Ending::Untooled => None,
         Ending::Unfinished(why) => Some(unfinished_refusal(why, limits)),
+        Ending::Unanswered(why) => Some(unanswered_refusal(why, limits.max_tokens)),
         Ending::Exhausted => Some(still_calling_refusal(limits)),
         // The caller says this generation is the answer. It is one only if it
         // carries no call — the same read the loop made, made again where it
@@ -313,6 +324,78 @@ fn finish(completion: Completion, ending: Ending, limits: Limits) -> ToolLoopOut
             },
         },
         client_tool_calls: Vec::new(),
+    }
+}
+
+/// Replace a generation's `content` with the answer inside it, dropping any
+/// `<think>…</think>` block — or hand it back with the verdict that it never
+/// reached an answer.
+///
+/// **Called the moment a generation arrives, and that placement is the point.**
+/// A reasoning block is not an answer, not a tool call, and not something to
+/// feed back into the next round, so nothing downstream should ever see one:
+/// past this function `content` is the model's reply and only its reply.
+/// Three things follow, and each was a live defect before it:
+///
+/// 1. **The `/v1` response carries the answer, not the deliberation** (#582).
+///    Roteiro strips this block for every CLI consumer and did not strip it
+///    here, so the same model producing the same block was cleaned for one
+///    consumer and passed through raw for the other. Measured live: ~95 of 105
+///    completion tokens were reasoning for a one-word answer.
+/// 2. **The loop stops re-sending it.** The assistant turn appended below is fed
+///    back into the next round's prompt, so a block left in was re-prefilled
+///    once per round against the budget [`crate::budget`] accounts for — and
+///    there is no prefix cache today (#578), so it is paid in full each time.
+///    The same compounding happens on the client's side of the wire, because a
+///    multi-turn caller echoes assistant turns back as history.
+/// 3. **[`read_markup`] judges the reply rather than the deliberation.** A model
+///    that writes "I could call `<tool_call>`…" *while thinking* and then answers
+///    plainly used to be refused for markup it never emitted as a call. The
+///    marker means "I am calling a tool" because [`tool_system_prompt`] said so,
+///    and the prompt is talking about the reply.
+///
+/// Only `content` changes. The token counts stay as generated — the model really
+/// did spend them on reasoning, and a client billing or budgeting against them
+/// would be told a comfortable lie by any other choice — and so does
+/// `finish_reason`, which is what [`Unterminated`] was read from.
+fn read_reasoning(completion: Completion) -> Result<Completion, (Completion, Unterminated)> {
+    match thinking::answer(&completion.content, completion.finish_reason) {
+        Ok(answer) => {
+            let content = answer.to_owned();
+            Ok(Completion {
+                content,
+                ..completion
+            })
+        }
+        // Handed back whole. The refusal replaces the content anyway, and the
+        // counts and stop reason travel with it.
+        Err(why) => Err((completion, why)),
+    }
+}
+
+/// The refusal for a generation that never left its reasoning block.
+///
+/// Written to the same rule as [`unfinished_refusal`] below, because it is the
+/// same situation one marker over: an opened block that never closed is not a
+/// short answer, and presenting one as an answer would be the silent downgrade
+/// `docs/REVIEW_CHECKLIST.md` §Refusals forbids. It names the budget for the
+/// cap case because that is the number a caller can change — and `max_tokens`
+/// really is the binding constraint here, unlike in the tool-call case #489
+/// re-measured: `types::DEFAULT_MAX_TOKENS` records `qwen3.8-27b` spending an
+/// entire 1,200-token budget inside `<think>` and emitting no answer at all.
+pub(crate) fn unanswered_refusal(why: Unterminated, max_tokens: u32) -> String {
+    match why {
+        Unterminated::CutAtTokenCap => format!(
+            "{REFUSAL}the model spent its whole token budget (`max_tokens` = {max_tokens}) \
+             inside its reasoning block and never started an answer, so there is nothing here \
+             to read as one. Retry with a larger `max_tokens`, or ask a narrower question."
+        ),
+        Unterminated::CutShort => format!(
+            "{REFUSAL}the model stopped part-way through its reasoning and never started an \
+             answer, so there is nothing here to read as one. Retry the question; if it keeps \
+             happening this model is not finishing its reasoning, and `roteiro model list` \
+             shows the others installed."
+        ),
     }
 }
 
@@ -478,7 +561,15 @@ pub fn chat_with_client_tools(
         rounds: max_rounds.max(1),
     };
     if advertised.is_empty() {
-        return Ok(finish(engine.chat(req)?, Ending::Untooled, limits));
+        // Untooled passes *tool* markup through, never reasoning: `<tool_call>`
+        // is ordinary text here because nothing injected the prompt that gives it
+        // meaning, whereas `<think>` was assigned its meaning by the model and
+        // means the same thing on every path. So this reads reasoning exactly as
+        // the tooled path below does.
+        return Ok(match read_reasoning(engine.chat(req)?) {
+            Ok(completion) => finish(completion, Ending::Untooled, limits),
+            Err((completion, why)) => finish(completion, Ending::Unanswered(why), limits),
+        });
     }
 
     // Prepend a system turn advertising the tools and the call protocol.
@@ -501,7 +592,14 @@ pub fn chat_with_client_tools(
     };
 
     for _ in 0..limits.rounds {
-        let completion = generate(&messages)?;
+        // Before anything reads this generation as a call, an answer, or a turn
+        // to feed back — see [`read_reasoning`] for why all three want it gone.
+        let completion = match read_reasoning(generate(&messages)?) {
+            Ok(completion) => completion,
+            Err((completion, why)) => {
+                return Ok(finish(completion, Ending::Unanswered(why), limits));
+            }
+        };
 
         let calls = match read_markup(&completion) {
             // No tool call: this is the model's final answer.
@@ -554,7 +652,15 @@ pub fn chat_with_client_tools(
     // is gone, which is not an answer either — publishing it as prose was the
     // second half of #489, and the half the Ask path actually took, because Ask
     // supplies no client tools so `client_names` is always empty there.
-    let completion = generate(&messages)?;
+    // Read exactly as one inside the loop is, reasoning included: this is the
+    // generation the Ask path most often publishes, and the round budget running
+    // out is not a reason to hand back a block the loop would have dropped.
+    let completion = match read_reasoning(generate(&messages)?) {
+        Ok(completion) => completion,
+        Err((completion, why)) => {
+            return Ok(finish(completion, Ending::Unanswered(why), limits));
+        }
+    };
     let ending = match read_markup(&completion) {
         Markup::None => Ending::Answer,
         Markup::Unfinished(why) => Ending::Unfinished(why),

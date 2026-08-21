@@ -195,17 +195,45 @@ pub fn review_file(
             max_tokens: REVIEW_MAX_TOKENS,
         })
         .map_err(|e| anyhow::anyhow!("reviewing {}: {e}", file.path))?;
-    let reply = crate::strip_thinking_public(&completion.content);
+    let read = rto_llama::thinking::answer(&completion.content, completion.finish_reason);
     // The one way to tell a reviewer that found nothing from a reviewer that was
     // asked the wrong question. Prompt work is otherwise done by staring at a
-    // score, which moves for both reasons at once.
+    // score, which moves for both reasons at once. Shows the raw generation when
+    // there was no answer in it, because the deliberation is the only evidence
+    // there is about why.
     if std::env::var_os("ROTEIRO_REVIEW_DEBUG").is_some() {
         eprintln!(
-            "--- {} ({} prompt tokens est.)\n{reply}\n---",
-            file.path, prompt.tokens
+            "--- {} ({} prompt tokens est.)\n{}\n---",
+            file.path,
+            prompt.tokens,
+            read.unwrap_or(&completion.content)
         );
     }
-    let parsed = parse_findings(&file.reviewed_sha, &file.path, &reply);
+    // **A file this model never got to is reported, never counted.** An
+    // unterminated `<think>` block means the generation stopped mid-deliberation,
+    // so this file was not reviewed — and the old stripper handed the raw block
+    // to `parse_findings`, which is the one thing `strip_thinking`'s own doc
+    // comment said must not happen: *"a reviewer that parsed a model's `<think>`
+    // block would read its scratch reasoning as findings"* (#583).
+    //
+    // It returns `Ok` rather than an error because a truncated review is an
+    // outcome about one file, not a failed run: `reasoning_truncated` exists so a
+    // run that cannot tell "found nothing" from "never answered" stops reporting
+    // a recall figure it did not measure. `parse_findings` keeps its own
+    // `contains("<think>")` check, which now only fires on a block opened
+    // mid-reply — belt and braces over the same fact, arriving by a route this
+    // one deliberately does not claim.
+    let Ok(reply) = read else {
+        return Ok(FileOutcome {
+            findings: Vec::new(),
+            suppressed: Vec::new(),
+            unparsed: 0,
+            declared_clean: false,
+            reasoning_truncated: true,
+            dropped_tokens: prompt.dropped_tokens,
+        });
+    };
+    let parsed = parse_findings(&file.reviewed_sha, &file.path, reply);
 
     let mut findings = Vec::new();
     let mut withheld = Vec::new();
