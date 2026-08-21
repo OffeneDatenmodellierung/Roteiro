@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.0.0...roteiro-v2.0.1) - 2026-08-21
+
+### Fixed
+
+- *(render)* name a key the vault holds, and fail the guard on what it cannot read
+
+### Other
+
+- *(render)* describe the note-name rule, not the pre-#574 spelling
+
 ## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.30.0...roteiro-v2.0.0) - 2026-08-21
 
 ### Fixed
