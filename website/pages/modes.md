@@ -36,11 +36,17 @@ roteiro render obsidian
 <span class="c"># …or one vault spanning a whole workspace, members and all</span>
 roteiro render obsidian --workspace-name payments</code></pre>
 
-Without `--workspace-name`, `render obsidian` renders the current project, and
-its note names never change between releases — your own notes live *outside* the
-vault and link into it by name, so a rename would break them silently. With one,
-notes are named `<project>-<key>` so two repositories' `README.md` cannot claim
-the same note, and cross-repo links resolve inside the vault.
+Without `--workspace-name`, `render obsidian` renders the current project, with
+unqualified note names, even when that repository is a member of a configured
+workspace. With one, notes are named `<project>-<key>` so two repositories'
+`README.md` cannot claim the same note, and cross-repo links resolve inside the
+vault.
+
+Two things to know before you rely on a vault: **the output directory is deleted
+and rebuilt on every render**, so your own notes belong *outside* it and link
+into it by name — and **note names changed in issue #574, with no migration**, to
+stop two nodes silently landing on one file. Both are explained on the
+[Obsidian vault](obsidian-vault.html) page.
 
 ## 2 · Online mode — richer inference with local models {#online}
 

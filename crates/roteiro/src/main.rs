@@ -554,10 +554,26 @@ enum Command {
         json: bool,
     },
     /// Render the graph: docs site or Obsidian vault.
+    ///
+    /// **The output directory is deleted and rebuilt on every render.** A vault is
+    /// a build-output of the graph, regenerated over itself so that a note for a
+    /// symbol you have since renamed does not linger for ever. Nothing you put
+    /// inside it survives: keep your own notes *outside* the vault and link into
+    /// it (issue #442).
+    ///
+    /// **Note names changed in issue #574 and there is no migration.** They used
+    /// to collide — two keys could produce one file, and on macOS and Windows two
+    /// names differing only in case are the same file, so this repository's vault
+    /// was 104 notes short of the count it printed. Every name now carries a hash
+    /// of its key, so every node gets its own note; the cost is that every note
+    /// was renamed, and a hand-written link into a vault rendered by an earlier
+    /// version now resolves to nothing. Re-point those links (Obsidian's
+    /// autocomplete will find the new names) or re-create them from the new vault.
     Render {
         /// Target: docs | obsidian
         target: String,
-        /// Output directory (default: `website/dist` for docs, `vault` for obsidian).
+        /// Output directory (default: `website/dist` for docs, `vault` for
+        /// obsidian). **Emptied first** — see the command's help.
         #[arg(long)]
         out: Option<String>,
         /// `obsidian` only: render a **named** workspace from config
@@ -567,13 +583,14 @@ enum Command {
         /// repository-relative and every member's `README.md` would otherwise
         /// claim the same note. An unknown name fails fast, listing the known ones.
         ///
-        /// **Omitted, the current project is rendered exactly as before** — same
-        /// notes, same names, byte for byte. Deliberately *not* "the workspace
-        /// containing the current repo" (which is how `links -w` defaults): a
-        /// user's own notes live outside the vault and link into it by name, so a
-        /// bare `render obsidian` silently becoming a multi-repo render would
-        /// rename every note and break every one of those links with no error.
-        /// Workspace mode is opt-in, by name, always.
+        /// **Omitted, the current project alone is rendered, with unqualified
+        /// names.** Deliberately *not* "the workspace containing the current repo"
+        /// (which is how `links -w` defaults): a user's own notes live outside the
+        /// vault and link into it by name, so a bare `render obsidian` silently
+        /// becoming a multi-repo render would rename every note and break every
+        /// one of those links with no error. Workspace mode is opt-in, by name,
+        /// always — a name may move because a release says so, never because of
+        /// where the command was run.
         #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
         workspace_name: Option<String>,
     },
@@ -13049,9 +13066,17 @@ fn adr_blob_oid<'a>(
 /// Render an Obsidian vault for **the current project**: one linked markdown note
 /// per graph node in `<out>` (default `vault`).
 ///
-/// This is the whole of `roteiro render obsidian` with no `--workspace-name`, and
-/// it is unchanged: same notes, same names, byte for byte. See the flag's own
-/// documentation for why that is a promise rather than an accident.
+/// This is the whole of `roteiro render obsidian` with no `--workspace-name`. It
+/// renders exactly the nodes it always did, with exactly the same bodies — but as
+/// of issue #574 **not under the same names**: [`rto_render::note_name`] was not
+/// injective under filename case folding, and this repository's vault was
+/// silently one file short for each of 104 keys. The count printed below is now
+/// the number of notes on disk, which before that fix it was not.
+///
+/// There is no migration. A hand-written note *outside* the vault that linked in
+/// by name now points at nothing — the name is derived from the key, and the old
+/// one is not recoverable from the new. See [`rto_render::note_name`] for why the
+/// break was taken now rather than deferred.
 fn render_obsidian(
     ingest: rto_graph::IngestConfig,
     out: Option<String>,
@@ -13116,11 +13141,18 @@ fn render_obsidian(
 /// - the **key** a note is rendered from is project-qualified,
 ///   `<project>::<key>` — ADR-0009's cross-repo form, reused rather than
 ///   reinvented, which is why a cross-repo link resolves to a note in this vault;
-/// - the **note name** is [`rto_render::note_name`] of that key, which slugs `:`
-///   to `-`. There is no `::` in a filename.
+/// - the **note name** is [`rto_render::note_name`] of that key: `:` slugs to
+///   `-`, the whole hint lowercases, and a hash of the key is appended. There is
+///   no `::` in a filename.
 ///
 /// So `app`'s `file:README.md` is keyed `app::file:README.md` and written to
-/// `app-file-README.md.md`.
+/// `app-file-readme.md-a114bde6dcaba1c1.md`.
+///
+/// Qualification is what stops *members* colliding; it does nothing about the two
+/// mechanisms that were losing notes *within* a member, so before issue #574 a
+/// workspace vault lost those once per member and the total scaled with the
+/// member count. It is the hash, not the prefix, that makes the count printed
+/// below equal the number of files written.
 ///
 /// Each member is read with **its own** configuration — `[ingest]` toggles and
 /// `[debt] ignore` come from that repository's `roteiro.toml`, not the one the
@@ -13283,6 +13315,14 @@ fn select_resolved_workspace<'a>(
 /// itself; the alternative is stale notes for symbols that have since been renamed
 /// accumulating for ever. The contract this rests on is stated in the issue: the
 /// vault directory is Roteiro's, and a user's own notes belong outside it.
+///
+/// **This is a data-loss surface, so it is stated where a user meets it** — in
+/// `render`'s `--help`, in `docs/OBSIDIAN_VAULT.md`, and in the README — not only
+/// here. Nothing placed inside the vault survives a render, which is exactly what
+/// makes the note *names* the only stable interface it has: the sole thing that
+/// persists is a note outside the vault linking in by name. That is why issue
+/// #574's renaming was worth a deliberate break rather than a compatibility
+/// shim, and why it does not get a second one.
 fn reset_vault_dir(out: &std::path::Path) -> anyhow::Result<()> {
     if out.exists() {
         std::fs::remove_dir_all(out)?;
@@ -13309,15 +13349,19 @@ fn member_source_base(remote: Option<&str>, commit: Option<&str>) -> Option<Stri
 /// fold it in the filesystem too, so two notes whose names differ only in case are
 /// one note however they were written.
 ///
-/// This is instrumentation for the question workspace mode had to answer — do
-/// members collide? — and answering it turned up that they already did *within* a
-/// single project: measured on this repository before any workspace support
+/// This began as instrumentation for the question workspace mode had to answer —
+/// do members collide? — and answering it turned up that they already did *within*
+/// a single project: measured on this repository before any workspace support
 /// existed, 8,144 nodes rendered to 8,040 distinct notes. Nine were lost to the
-/// slug ([`rto_render::note_name`] maps `#` and `:` alike to `-`, so
-/// `…cytoscape.min.js#$a` and `…#a` are one name) and 95 to case. The count
-/// printed said 8,144. Naming is deliberately left alone — every fix renames
-/// notes, which is the one thing this feature may not do — so what is added here
-/// is the report.
+/// slug and 95 to filename case folding. The count printed said 8,144.
+///
+/// Issue #574 fixed the naming rather than only reporting it, so this is now a
+/// **guard rather than a census**: [`rto_render::note_name`] appends a 64-bit
+/// hash of the whole key to every name, which makes a collision a hash collision.
+/// One is not expected — the birthday bound over this repository's keys is about
+/// 2e-12 — but "not expected" is exactly the claim that loses a note quietly, so
+/// the check stays and the report says which two keys did it. Silence here is now
+/// the assertion that the count printed is the number of files written.
 #[derive(Default)]
 struct NoteNames {
     /// Lowercased note filename → the node key that claimed it first.
@@ -13347,8 +13391,10 @@ impl NoteNames {
         }
         eprintln!(
             "warning: {} note(s) share a name with another and are one note in the \
-             vault (Obsidian resolves links case-insensitively). The graph is \
-             complete; the vault is not:",
+             vault, so the count above is larger than the number of files written. \
+             Since issue #574 every name carries a hash of its whole key, so this \
+             is a hash collision and a bug worth reporting — not the old lossy \
+             slug. The graph is complete; the vault is not:",
             self.collisions.len()
         );
         for (name, first, second) in self.collisions.iter().take(5) {

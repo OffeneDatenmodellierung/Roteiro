@@ -39,6 +39,22 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// The vault path of the note for `key`.
+///
+/// Names are `rto_render::note_name` of the node key, and are deliberately not
+/// typed out in this file. Hardcoding them re-pins the encoding at a second site,
+/// so issue #574's rename would surface here as a dozen unrelated expected-value
+/// edits rather than as one decision taken at the function. What these tests are
+/// about is *which key* a note stands for, which is what this says.
+fn note_path(vault: &Path, key: &str) -> PathBuf {
+    vault.join(format!("{}.md", rto_render::note_name(key)))
+}
+
+/// The wikilink an edge to `key` renders as, for the same reason.
+fn link(key: &str) -> String {
+    format!("[[{}]]", rto_render::note_name(key))
+}
+
 fn write(dir: &Path, rel: &str, content: &str) {
     let path = dir.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
@@ -220,7 +236,8 @@ fn render_obsidian_gives_a_prose_note_its_whole_source() {
         .expect("run render");
     assert!(out.status.success(), "render obsidian failed: {out:?}");
 
-    let note = std::fs::read_to_string(dir.join("vault/file-docs-OFFLINE.md.md")).expect("note");
+    let note = std::fs::read_to_string(note_path(&dir.join("vault"), "file:docs/OFFLINE.md"))
+        .expect("note");
     // The whole document, verbatim — not a 1500-char prefix of it.
     assert!(
         note.contains(doc.trim()),
@@ -239,12 +256,13 @@ fn render_obsidian_gives_a_prose_note_its_whole_source() {
     // The ADR's own notes are untouched: the document belongs to the `file:` node
     // that is the document, and duplicating it across 1 ADR + 4 section notes is
     // the failure mode of matching on the path alone.
-    let adr = std::fs::read_to_string(dir.join("vault/adr-0001.md")).expect("adr note");
+    let adr = std::fs::read_to_string(note_path(&dir.join("vault"), "adr:0001")).expect("adr note");
     assert!(
         !adr.contains("## Context\n\nBecause."),
         "an adr note is its title, status and links — not the file: {adr}"
     );
-    let section = std::fs::read_to_string(dir.join("vault/adr-0001-context.md")).expect("section");
+    let section = std::fs::read_to_string(note_path(&dir.join("vault"), "adr:0001#context"))
+        .expect("section");
     assert!(
         !section.contains("# ADR-0001: Example"),
         "a section note must not carry the whole document: {section}"
@@ -252,7 +270,8 @@ fn render_obsidian_gives_a_prose_note_its_whole_source() {
 
     // A symbol's doc comment is a summary of a definition, not a document, and is
     // unchanged — nothing here widened beyond prose files.
-    let sym = std::fs::read_to_string(dir.join("vault/sym-rust-src-lib.rs-f.md")).expect("sym");
+    let sym = std::fs::read_to_string(note_path(&dir.join("vault"), "sym:rust:src/lib.rs#f"))
+        .expect("sym");
     assert!(
         sym.contains("## Content\n\nDoc comment."),
         "doc comments render as before: {sym}"
@@ -265,7 +284,8 @@ fn render_obsidian_gives_a_prose_note_its_whole_source() {
     // Nor does a *source* file node: only prose paths are selected, so a `.rs`
     // file note is what it always was. Without this, dropping the prose filter
     // would pour every source file into the vault and no test would notice.
-    let rs = std::fs::read_to_string(dir.join("vault/file-src-lib.rs.md")).expect("rs note");
+    let rs =
+        std::fs::read_to_string(note_path(&dir.join("vault"), "file:src/lib.rs")).expect("rs note");
     assert!(
         !rs.contains("pub fn f()"),
         "a source file is not prose: {rs}"
@@ -319,13 +339,13 @@ fn render_obsidian_gives_an_adr_section_note_its_own_section() {
         .expect("run render");
     assert!(out.status.success(), "render obsidian failed: {out:?}");
 
-    let read = |name: &str| {
-        std::fs::read_to_string(dir.join("vault").join(name))
-            .unwrap_or_else(|e| panic!("{name}: {e}"))
+    let read = |key: &str| {
+        std::fs::read_to_string(note_path(&dir.join("vault"), key))
+            .unwrap_or_else(|e| panic!("{key}: {e}"))
     };
 
     // A section note is its own section, whole.
-    let context = read("adr-0001-context.md");
+    let context = read("adr:0001#context");
     assert!(
         context.contains("## Content"),
         "the defect: the note had no content at all: {context}"
@@ -343,7 +363,7 @@ fn render_obsidian_gives_an_adr_section_note_its_own_section() {
         "nor the preamble: {context}"
     );
 
-    let decision = read("adr-0001-decision.md");
+    let decision = read("adr:0001#decision");
     assert!(
         decision.contains("DECISIONWORD paragraph 39 about the choice."),
         "{decision}"
@@ -361,7 +381,7 @@ fn render_obsidian_gives_an_adr_section_note_its_own_section() {
 
     // The `adr:` note gets the preamble — and not the body its sections carry, or
     // the whole document would be stored and rendered twice over.
-    let adr = read("adr-0001.md");
+    let adr = read("adr:0001");
     assert!(
         adr.contains("| **State** | Accepted |"),
         "the ADR note carries the span that belongs to no section: {adr}"
@@ -373,7 +393,7 @@ fn render_obsidian_gives_an_adr_section_note_its_own_section() {
 
     // The `file:` note is still the whole document, as #544 left it. This is what
     // makes the split above a division of labour rather than a loss.
-    let file = read("file-docs-adr-0001-example.md.md");
+    let file = read("file:docs/adr/0001-example.md");
     assert!(
         file.contains("CONTEXTWORD paragraph 39 about the situation.")
             && file.contains("DECISIONWORD paragraph 39 about the choice."),
@@ -860,10 +880,11 @@ fn render_obsidian_workspace_spans_members_without_collision() {
     );
 
     // One note per member for the *same* key — the whole point.
-    for name in ["app-file-README.md.md", "deploy-file-README.md.md"] {
+    for key in ["app::file:README.md", "deploy::file:README.md"] {
+        let name = note_path(&vault, key);
         assert!(
-            vault.join(name).is_file(),
-            "missing {name}; vault holds: {:?}",
+            name.is_file(),
+            "missing the note for `{key}` ({name:?}); vault holds: {:?}",
             std::fs::read_dir(&vault)
                 .expect("read vault")
                 .filter_map(Result::ok)
@@ -873,12 +894,12 @@ fn render_obsidian_workspace_spans_members_without_collision() {
     }
     // And the unqualified name is *not* used, so neither member silently claimed it.
     assert!(
-        !vault.join("file-README.md.md").is_file(),
+        !note_path(&vault, "file:README.md").is_file(),
         "an unqualified note means one member overwrote the other"
     );
 
     let app_readme =
-        std::fs::read_to_string(vault.join("app-file-README.md.md")).expect("read note");
+        std::fs::read_to_string(note_path(&vault, "app::file:README.md")).expect("read note");
     assert!(
         app_readme.contains("project: \"app\""),
         "a member note must say which member it is: {app_readme}"
@@ -968,10 +989,10 @@ fn render_obsidian_workspace_follows_cross_repo_links_to_the_other_member() {
     );
 
     // The spoke's config key links straight at the hub's note.
-    let spoke = std::fs::read_to_string(vault.join("deploy-cfgkey-prod.env-SERVE_ADDR.md"))
+    let spoke = std::fs::read_to_string(note_path(&vault, "deploy::cfgkey:prod.env#SERVE_ADDR"))
         .expect("read spoke config-key note");
     assert!(
-        spoke.contains("[[app-cfgkey-config.toml-serve.addr]]"),
+        spoke.contains(&link("app::cfgkey:config.toml#serve.addr")),
         "the cross-repo edge must land on the hub's own note: {spoke}"
     );
     assert!(
@@ -996,8 +1017,10 @@ fn render_obsidian_workspace_follows_cross_repo_links_to_the_other_member() {
     let home_note = std::fs::read_to_string(vault.join("_Home.md")).expect("read _Home");
     assert!(home_note.contains("## Cross-repo links"), "{home_note}");
     assert!(
-        home_note
-            .contains("[[app-cfgkey-config.toml-serve.addr\\|app::cfgkey:config.toml#serve.addr]]"),
+        home_note.contains(&format!(
+            "[[{}\\|app::cfgkey:config.toml#serve.addr]]",
+            rto_render::note_name("app::cfgkey:config.toml#serve.addr")
+        )),
         "{home_note}"
     );
 
@@ -1005,16 +1028,29 @@ fn render_obsidian_workspace_follows_cross_repo_links_to_the_other_member() {
 }
 
 /// **The compatibility promise of issue #442**, as a test: `render obsidian` with
-/// no `-w` renders the current project exactly as it always has — unqualified note
-/// names, no `project:` frontmatter — even when that repository *is* a member of a
+/// no `-w` renders the current project alone — unqualified note names, no
+/// `project:` frontmatter — even when that repository *is* a member of a
 /// configured workspace.
 ///
-/// This is the half that must not move. A user's own notes live outside the vault
-/// and link into it by name, so a rename breaks every one of them silently, with
-/// no error and nothing to grep for. Entering workspace mode by inference (as
-/// `links -w` defaults to the workspace containing the cwd) would do exactly that.
+/// **Narrowed deliberately under issue #574.** As #570 landed it, this test read
+/// "is unchanged inside a workspace" and checked that against filenames typed out
+/// in full, which made it two promises at once: workspace mode must not qualify a
+/// bare render's names, *and* the names themselves must never move. #574 breaks
+/// the second on purpose — the old names were not injective under filename case
+/// folding, and this repository's vault silently held one file for each of 104
+/// pairs of keys. Rather than update the expected strings under the old title,
+/// the names are now looked up through `note_name` and the surviving promise is
+/// named exactly: **a bare render must not enter workspace mode.**
+///
+/// That promise is the one worth keeping, because the failure it guards is
+/// *inference*: `links -w` defaults to the workspace containing the cwd, and a
+/// `render obsidian` that did the same would rename every note as a side effect
+/// of where it was run, with no error and nothing to grep for. A rename that
+/// arrives in a release is a changelog entry; a rename that arrives because you
+/// changed directory is a bug. The first now applies (see `note_name`); the
+/// second still must not.
 #[test]
-fn render_obsidian_without_a_workspace_name_is_unchanged_inside_a_workspace() {
+fn render_obsidian_without_a_workspace_name_never_enters_workspace_mode() {
     let (base, home) = workspace_fixture("ws-compat");
     let app = base.join("app");
     let vault = app.join("vault");
@@ -1032,16 +1068,16 @@ fn render_obsidian_without_a_workspace_name_is_unchanged_inside_a_workspace() {
 
     // Unqualified, exactly as before.
     assert!(
-        vault.join("file-README.md.md").is_file(),
+        note_path(&vault, "file:README.md").is_file(),
         "the bare note name must be what a project render writes"
     );
     assert!(
-        !vault.join("app-file-README.md.md").is_file(),
+        !note_path(&vault, "app::file:README.md").is_file(),
         "a bare render must not qualify names: that renames every note and \
          breaks every link a user wrote into the vault"
     );
 
-    let note = std::fs::read_to_string(vault.join("file-README.md.md")).expect("read note");
+    let note = std::fs::read_to_string(note_path(&vault, "file:README.md")).expect("read note");
     assert!(!note.contains("project:"), "{note}");
     assert!(!note.contains("roteiro/project/"), "{note}");
 
@@ -1070,5 +1106,233 @@ fn render_obsidian_rejects_an_unknown_workspace_name() {
     assert!(!out.status.success(), "an unknown name must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("prud") && err.contains("prod"), "{err}");
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// **Issue #574's verification: the vault holds one note per node, and says so.**
+///
+/// `render obsidian` prints `(N note(s))`. Before this fix that N was the number
+/// of nodes *rendered*, not the number of files that survived — two keys could
+/// slug to one name, and on macOS and Windows two names differing only in case
+/// are one file. Measured on this repository: 8,239 claimed, 8,135 written, 104
+/// notes silently gone.
+///
+/// Three assertions, because two of them are platform-blind on their own:
+///
+/// 1. **distinct case-folded names == N.** The load-bearing one. Asserted over
+///    *lowercased* names rather than names, so it fails on Linux CI too — where
+///    the larger mechanism structurally cannot manifest, and where every previous
+///    look at this came back clean.
+/// 2. **files on disk == N.** The symptom as a user meets it, and the only one of
+///    the three that a case-folding filesystem shows.
+/// 3. **no collision warning on stderr.** The render's own guard agrees.
+///
+/// The fixture is a real repository, and the file that matters in it is this
+/// crate's **vendored `cytoscape.min.js`**, copied in from the source tree. Its
+/// minified single-letter symbols are where 89 of the 104 losses came from —
+/// `#$a` against `#a`, `#A` against `#a` — and they are not the sort of key
+/// anyone would think to invent. It is not optional: if the asset is missing the
+/// test fails rather than quietly checking a repository with nothing to collide.
+#[test]
+fn every_node_gets_its_own_note_and_the_count_printed_is_the_count_written() {
+    let dir = fresh_dir("lossless-names");
+    git(&dir, &["init", "-q"]);
+
+    // The real vendored bundle, not a stand-in for it.
+    let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/cytoscape.min.js");
+    assert!(
+        vendored.is_file(),
+        "the vendored bundle this test measures against is missing at {vendored:?} — \
+         it moved or was removed, and the test must be re-pointed rather than \
+         allowed to pass over a repository with no colliding keys"
+    );
+    std::fs::create_dir_all(dir.join("assets")).expect("mkdir");
+    std::fs::copy(&vendored, dir.join("assets/cytoscape.min.js")).expect("copy bundle");
+
+    // Plus a handful of keys that collide by the other mechanism, so the slug
+    // half is exercised even if the bundle is ever slimmed.
+    write(
+        &dir,
+        "src/lib.rs",
+        "pub struct Store;\npub fn store() {}\npub mod r#mod {\n    pub struct STORE;\n}\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "obsidian", "--out", "vault"])
+        .current_dir(&dir)
+        .env("ROTEIRO_HOME", &dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render obsidian failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // `rendered obsidian vault → <path> (N note(s) + _Home.md)`
+    let claimed: usize = stdout
+        .split_once(" (")
+        .and_then(|(_, rest)| rest.split_once(" note(s)"))
+        .and_then(|(n, _)| n.parse().ok())
+        .unwrap_or_else(|| panic!("no note count in `{stdout}`"));
+    assert!(
+        claimed > 1_000,
+        "the fixture must be big enough to contain the collisions this is about, \
+         and it rendered only {claimed} notes — did the bundle stop being ingested?"
+    );
+
+    let vault = dir.join("vault");
+    let written: Vec<String> = std::fs::read_dir(&vault)
+        .expect("read vault")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        // `Path::extension` rather than `ends_with(".md")`: clippy rejects the
+        // latter as a case-sensitive extension comparison, which — in this file
+        // of all files — is a fair objection.
+        .filter(|n| Path::new(n).extension().is_some_and(|e| e == "md"))
+        .filter(|n| n != "_Home.md")
+        .collect();
+
+    // (1) The platform-independent statement. Two names that differ only in case
+    // are one file on macOS and Windows, so counting them as two is exactly the
+    // reading that made this defect invisible to CI for as long as it existed.
+    let folded: std::collections::BTreeSet<String> =
+        written.iter().map(|n| n.to_lowercase()).collect();
+    assert_eq!(
+        folded.len(),
+        claimed,
+        "{} of {claimed} notes share a name with another after case folding — on a \
+         case-folding filesystem the vault is that many notes short, whatever this \
+         machine's filesystem does",
+        claimed - folded.len()
+    );
+
+    // (2) The symptom, on whichever filesystem this is running.
+    assert_eq!(
+        written.len(),
+        claimed,
+        "the render claimed {claimed} notes and wrote {}",
+        written.len()
+    );
+
+    // (3) And the render's own guard agrees rather than having been quietly
+    // satisfied by the same blind spot.
+    assert!(
+        !stderr.contains("share a name"),
+        "the collision guard fired: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The same guarantee in **workspace mode**, where the defect scaled with the
+/// member count.
+///
+/// Project qualification (#570) stops *members* overwriting each other; it does
+/// nothing about the two mechanisms that lost notes *within* a member, because
+/// prefixing a key changes neither its slug's lossiness nor its case. So a
+/// workspace vault lost its per-member quota once per member: modelling this
+/// repository's keys as members gave 104 lost at one member, 416 at four, 832 at
+/// the eight the reporting machine has configured. This asserts the fix holds
+/// across the qualified names too, by rendering rather than by modelling — the
+/// same bundle in two members, so both the within-member collisions and the
+/// cross-member ones are live at once.
+#[test]
+fn a_workspace_vault_also_writes_every_note_it_counts() {
+    let base = fresh_dir("ws-lossless");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).expect("mkdir");
+
+    let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/cytoscape.min.js");
+    assert!(
+        vendored.is_file(),
+        "vendored bundle missing at {vendored:?}"
+    );
+
+    for member in ["api", "sdk"] {
+        let repo = base.join(member);
+        std::fs::create_dir_all(repo.join("assets")).expect("mkdir");
+        // The same file in both members: every one of its node keys is
+        // repository-relative and therefore identical across the two.
+        std::fs::copy(&vendored, repo.join("assets/cytoscape.min.js")).expect("copy");
+        write(&repo, "README.md", &format!("# {member}\n"));
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+    }
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "[[workspaces]]\nname = \"both\"\nrepos = [\"{}\", \"{}\"]\n",
+            base.join("api").display(),
+            base.join("sdk").display()
+        ),
+    )
+    .expect("write config");
+
+    let vault = base.join("vault");
+    let out = roteiro_in(
+        &base,
+        &home,
+        &[
+            "render",
+            "obsidian",
+            "-w",
+            "both",
+            "--out",
+            vault.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "workspace render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // `rendered obsidian vault → <path> (N note(s) across M member(s) + _Home.md)`
+    let claimed: usize = stdout
+        .split_once(" (")
+        .and_then(|(_, rest)| rest.split_once(" note(s)"))
+        .and_then(|(n, _)| n.parse().ok())
+        .unwrap_or_else(|| panic!("no note count in `{stdout}`"));
+
+    let written: Vec<String> = std::fs::read_dir(&vault)
+        .expect("read vault")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        // `Path::extension` rather than `ends_with(".md")`: clippy rejects the
+        // latter as a case-sensitive extension comparison, which — in this file
+        // of all files — is a fair objection.
+        .filter(|n| Path::new(n).extension().is_some_and(|e| e == "md"))
+        .filter(|n| n != "_Home.md")
+        .collect();
+    let folded: std::collections::BTreeSet<String> =
+        written.iter().map(|n| n.to_lowercase()).collect();
+
+    assert_eq!(
+        folded.len(),
+        claimed,
+        "{} of {claimed} workspace notes share a name after case folding",
+        claimed - folded.len()
+    );
+    assert_eq!(
+        written.len(),
+        claimed,
+        "claimed {claimed}, wrote {}",
+        written.len()
+    );
+    assert!(!stderr.contains("share a name"), "{stderr}");
+
+    // And the qualification is still doing its own job: the shared `README.md` is
+    // two notes, not one that a member won.
+    for member in ["api", "sdk"] {
+        assert!(
+            note_path(&vault, &format!("{member}::file:README.md")).is_file(),
+            "`{member}` lost its README note"
+        );
+    }
+
     std::fs::remove_dir_all(&base).ok();
 }

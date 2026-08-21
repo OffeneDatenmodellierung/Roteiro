@@ -36,39 +36,120 @@ pub struct VaultNote {
     pub content: String,
 }
 
-/// Map a node key to a filesystem- and wikilink-safe note stem. Characters that
-/// are awkward in filenames or Obsidian links (`:` `/` `#` whitespace) collapse
-/// to `-`; alphanumerics, `.`, `_` and `-` are kept. The result is **bounded**
-/// in length (a grouped Rust `use` can key a 300+ char import node) by truncating
-/// and appending a short hash of the full key, so notes stay under filesystem
-/// limits while remaining unique and deterministic.
+/// Map a node key to a filesystem- and wikilink-safe note stem that is **unique
+/// per key even after case folding**.
+///
+/// The name is always `<hint>-<16 hex digits>`: a lowercased, readable *hint*
+/// slugged from the key, then an unconditional 64-bit FNV-1a hash of the whole,
+/// exact key. Characters outside `[a-z0-9._-]` collapse to a single `-` in the
+/// hint; the hash carries everything the hint threw away.
+///
+/// # Why the hash is unconditional (issue #574)
+///
+/// It used to be applied only when the slug overran the filename limit, and the
+/// slug alone was lossy twice over. Measured on this repository — 8,239 nodes
+/// rendering to 8,135 notes, 104 of them silently overwritten:
+///
+/// | mechanism | lost | where |
+/// | --- | --- | --- |
+/// | every character outside the safe set becomes `-` and runs collapse, so `…cytoscape.min.js#$a` and `…cytoscape.min.js#a` are one name | 9 | everywhere |
+/// | macOS and Windows fold filename case, so `…#A` and `…#a` are two *names* but one *file* | 95 | macOS, Windows |
+///
+/// The second mechanism is the trap. A lossless-but-case-sensitive encoding
+/// fixes the 9, verifies clean on Linux CI, and still loses 95 notes on a Mac.
+/// So the requirement is stated after folding:
+///
+/// ```text
+/// lower(note_name(k1)) == lower(note_name(k2))  implies  k1 == k2
+/// ```
+///
+/// This matters more than lossiness in a cache would, because the note names are
+/// the vault's **only** stable interface: `reset_vault_dir` deletes and rebuilds
+/// the whole directory on every render, so the one thing that survives a render
+/// is a user's own note *outside* the vault linking in by name (issue #442).
+///
+/// # The trade taken
+///
+/// Two decisions, and what each bought:
+///
+/// **The hint is lowercased rather than case-preserved.** Case-preserving would
+/// also satisfy the requirement — the hash differs for `#A` and `#a`, so the two
+/// names differ in their suffix and stay distinct under folding. It was rejected
+/// because lowercasing makes `note_name(k) == note_name(k).to_lowercase()` an
+/// invariant of the function, and *that* collapses the folded property into the
+/// literal one: there is then no way to write a version of this that is green on
+/// Linux and lossy on macOS, which is the defect shape this repository keeps
+/// finding. The cost is that `parseHTTPHeader` reads as `parsehttpheader`. That
+/// is affordable precisely because the hint is a hint — once a 17-character
+/// suffix is mandatory the name is not something anyone types from memory, so
+/// its job is to be recognisable in a file list, not to be transcribed.
+///
+/// **Readability was spent, deliberately.** Every name grows by 17 characters and
+/// hand-writing a link now needs Obsidian's autocomplete. The alternatives that
+/// keep names short — hashing only the keys observed to collide — make the *set*
+/// of collisions platform-dependent, so one key would get one filename on macOS
+/// and another on Linux and a synced vault would churn. A name that is uglier
+/// everywhere beats a name that is different per platform.
+///
+/// The mapping is not reversible (the hint is lossy and the hash is one-way), but
+/// it does not need to be: every note's frontmatter carries `key:` verbatim, so
+/// name → key is recoverable from the vault itself, which is the direction a
+/// reader actually needs.
+///
+/// # What "unique" rests on
+///
+/// Equal names imply equal hashes, not equal keys — this is a 64-bit hash, not a
+/// proof. Over this repository's 8,239 keys there is no collision, and the
+/// birthday bound at that size is about 2e-12. Should one ever occur it is
+/// *reported*, not silent: `NoteNames` in the render path claims every filename
+/// case-insensitively and warns on a repeat. What is proved outright is the
+/// folding half — the output is lowercase by construction, so case folding is the
+/// identity on it.
 #[must_use]
 pub fn note_name(key: &str) -> String {
-    // Keep the stem well under the 255-byte filename limit (leaving room for
-    // ".md"). The slug is ASCII, so byte length equals char count and slicing is
-    // safe. A hash of the full key preserves uniqueness after truncation.
+    // Keep the whole stem well under the 255-byte filename limit (leaving room
+    // for ".md"). The hint is ASCII, so byte length equals char count and slicing
+    // is safe.
     const MAX: usize = 200;
-    let mut out = String::with_capacity(key.len());
+    // '-' plus the 16 hex digits of the hash.
+    const SUFFIX: usize = 17;
+    const HINT: usize = MAX - SUFFIX;
+
+    let mut hint = String::with_capacity(key.len());
     let mut prev_dash = false;
     for c in key.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-            out.push(c);
+            hint.push(c.to_ascii_lowercase());
             prev_dash = false;
         } else if !prev_dash {
-            out.push('-');
+            hint.push('-');
             prev_dash = true;
         }
     }
-    let out = out.trim_matches('-');
-    if out.len() <= MAX {
-        out.to_owned()
+    let hint = hint.trim_matches('-');
+    // Truncation is only ever cosmetic now: the hash, not the hint, is what keeps
+    // a 300-character grouped `use` distinct from its neighbour.
+    let hint = hint[..hint.len().min(HINT)].trim_end_matches('-');
+    let hash = fnv1a64(key.as_bytes());
+    if hint.is_empty() {
+        // A key of nothing but separators. Bare hex, and it cannot be confused
+        // with a hinted name: those are `<hint>-<16 hex>`, so at least 18
+        // characters, and this is exactly 16 with no `-` in it.
+        format!("{hash:016x}")
     } else {
-        format!("{}-{:016x}", &out[..MAX - 17], fnv1a64(key.as_bytes()))
+        format!("{hint}-{hash:016x}")
     }
 }
 
-/// FNV-1a (64-bit) — a dependency-free, deterministic hash to disambiguate a
-/// truncated note stem. No cryptographic properties needed.
+/// FNV-1a (64-bit) — a dependency-free, deterministic hash carrying everything
+/// [`note_name`]'s hint discards. No cryptographic properties needed: nothing
+/// here defends against a chosen collision, only against an accidental one.
+///
+/// 64 bits rather than fewer because the cost of a collision is exactly the
+/// defect this suffix exists to fix — a note silently overwritten. At 8k keys a
+/// 32-bit hash collides about 0.8% of the time and a 48-bit one about 1e-5;
+/// 64 bits is 2e-12, and stays under 1e-10 for a workspace vault an order of
+/// magnitude larger.
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -190,18 +271,23 @@ fn is_plain_safe(value: &str) -> bool {
 /// Which vault a note is being rendered into: a single project's, or one member
 /// of a **workspace** vault spanning several repositories.
 ///
-/// This is the whole of the workspace-vault naming rule, in one place, because
-/// the rule has a hard compatibility half. Node keys are **repository-relative**
-/// (`file:README.md` names no repo), so every member of a workspace produces the
-/// same note name for its `README.md` and one would silently overwrite the rest.
-/// Qualifying the key with its project fixes that — but a single-project vault's
-/// note names **must not move**: Obsidian resolves `[[links]]` by name, and a
-/// user's own notes live outside the vault and link *into* it (issue #442), so a
-/// rename breaks every such link silently, with no error and nothing to grep for.
+/// This is the whole of the workspace-vault naming rule, in one place. Node keys
+/// are **repository-relative** (`file:README.md` names no repo), so every member
+/// of a workspace produces the same note name for its `README.md` and one would
+/// silently overwrite the rest. Qualifying the key with its project fixes that.
 ///
-/// Hence [`VaultScope::PROJECT`] (`project: None`) is not a degenerate case but
-/// the contract: it makes every name in this module reduce to exactly
-/// [`note_name`] of the bare key, byte for byte.
+/// [`VaultScope::PROJECT`] (`project: None`) is not a degenerate case but the
+/// contract: it makes every name in this module reduce to exactly [`note_name`]
+/// of the bare key, with nothing qualified and no `project:` frontmatter.
+///
+/// That reduction is *still* the promise; what it no longer implies is stability
+/// against `main`. #570 could say "a single-project vault's names do not move",
+/// because the only thing moving them would have been workspace qualification.
+/// #574 moves them all, on purpose: the old names were not injective under
+/// filename case folding and the vault lost 104 notes to that. The promise here
+/// was always about **this axis** — turning workspace mode on must not rename a
+/// project's notes — and it holds unchanged. See [`note_name`] for the rename and
+/// what it bought.
 #[derive(Debug, Clone, Copy)]
 pub struct VaultScope<'a> {
     /// The member project this note belongs to, qualifying its name as
@@ -223,7 +309,8 @@ static NO_MEMBERS: std::collections::BTreeSet<String> = std::collections::BTreeS
 impl VaultScope<'_> {
     /// A single-project vault: names are unqualified, and no cross-repo reference
     /// resolves. Every name this produces is byte-identical to [`note_name`] of
-    /// the bare key — see the type's documentation for why that is load-bearing.
+    /// the bare key — see the type's documentation for why that reduction is
+    /// load-bearing, and for what it does *not* promise.
     pub const PROJECT: Self = Self {
         project: None,
         members: &NO_MEMBERS,
@@ -974,14 +1061,120 @@ mod tests {
     };
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
 
+    /// The shape of a name, pinned once so a change to it is a deliberate edit
+    /// here rather than a diff spread over twenty other assertions.
+    ///
+    /// Everything else in this module composes `note_name` instead of repeating
+    /// its output, because those tests are about *which key a link points at* and
+    /// were never about the spelling.
     #[test]
-    fn note_name_is_safe_and_stable() {
+    fn note_name_is_a_lowercase_hint_and_a_hash_of_the_whole_key() {
         assert_eq!(
             note_name("sym:rust:src/a.rs#Store"),
-            "sym-rust-src-a.rs-Store"
+            "sym-rust-src-a.rs-store-b4cbf6633003361f"
         );
-        assert_eq!(note_name("adr:0001"), "adr-0001");
-        assert_eq!(note_name("file:src/main.rs"), "file-src-main.rs");
+        assert_eq!(note_name("adr:0001"), "adr-0001-559a2e837953b2ff");
+        assert_eq!(
+            note_name("file:src/main.rs"),
+            "file-src-main.rs-4a72627453f6780e"
+        );
+        // Deterministic: the suffix is a pure function of the key, so a vault
+        // renders the same names on every machine and every run.
+        assert_eq!(note_name("adr:0001"), note_name("adr:0001"));
+    }
+
+    /// **The property `note_name` exists to have** (issue #574): distinct keys
+    /// give distinct notes *on a case-folding filesystem*, which is where the
+    /// vault was losing them.
+    ///
+    /// Asserted over lowercased names, not names. On macOS and Windows two names
+    /// differing only in case are one file, so a name set that is distinct as
+    /// strings can still be a vault with notes missing — and Linux CI cannot see
+    /// it. Folding here makes the assertion say what the filesystem says, on
+    /// every platform.
+    ///
+    /// The keys are the two mechanisms that were actually losing notes, taken
+    /// from this repository's own render rather than invented: the vendored
+    /// `cytoscape.min.js` bundle whose minified single-letter symbols differ only
+    /// by a sigil or by case, and a pair of grouped Rust `use` keys differing
+    /// only by a trailing comma. `render_cli` runs the same assertion end to end
+    /// over a rendered vault; this is the unit-level statement of it.
+    #[test]
+    fn distinct_keys_give_distinct_notes_even_after_case_folding() {
+        const JS: &str = "sym:javascript:crates/roteiro/src/assets/cytoscape.min.js";
+        let keys: Vec<String> = [
+            // Slug lossiness: the sigil and the letter both slugged to the same
+            // thing (9 notes lost this way, on every platform).
+            format!("{JS}#$a"),
+            format!("{JS}#a"),
+            format!("{JS}#$o"),
+            format!("{JS}#o"),
+            // Case folding: distinct names, one file (95 notes lost this way, and
+            // only on macOS and Windows).
+            format!("{JS}#A"),
+            format!("{JS}#O"),
+            format!("{JS}#S"),
+            format!("{JS}#s"),
+            // Real source symbols, same shape.
+            "sym:rust:crates/rto-exec/src/sandbox_store.rs#Store".into(),
+            "sym:rust:crates/rto-exec/src/sandbox_store.rs#store".into(),
+            // A trailing comma is the whole difference between these two.
+            "import:rust:crate::engine::{ChatRequest,Engine,ModelInfo,}".into(),
+            "import:rust:crate::engine::{ChatRequest,Engine,ModelInfo}".into(),
+            // Nothing but separators: no hint at all, so the name is bare hash.
+            "::".into(),
+            "##".into(),
+            // Over the length bound, differing only past the truncation point —
+            // the case truncation alone used to merge.
+            format!("import:rust:{}A", "a::b::c,".repeat(60)),
+            format!("import:rust:{}a", "a::b::c,".repeat(60)),
+        ]
+        .into();
+
+        let folded: std::collections::BTreeSet<String> =
+            keys.iter().map(|k| note_name(k).to_lowercase()).collect();
+        assert_eq!(
+            folded.len(),
+            keys.len(),
+            "two keys share a note after case folding; the vault would hold one \
+             file for both and report two"
+        );
+    }
+
+    /// Case folding is the identity on a note name, so the assertion above is not
+    /// weaker than the filesystem it stands in for.
+    ///
+    /// This is the reason the hint is lowercased rather than case-preserved: it
+    /// makes "distinct names" and "distinct files on macOS" the same statement,
+    /// so there is no version of this module that passes on Linux and loses notes
+    /// on a Mac. Without it, the two assertions could drift apart and only the
+    /// weaker one would ever run in CI.
+    #[test]
+    fn a_note_name_is_already_lowercase() {
+        for key in [
+            "sym:rust:src/a.rs#Store",
+            "file:README.md",
+            "app::file:CHANGELOG.md",
+            "sym:javascript:a.js#ABC",
+        ] {
+            let name = note_name(key);
+            assert_eq!(name, name.to_lowercase(), "`{key}` kept case in its name");
+        }
+    }
+
+    /// `_Home` is a name in the same namespace as every note, and it is not
+    /// derived from a key — so nothing must be able to collide with it. The
+    /// mandatory suffix gives that for free: every generated name either ends in
+    /// `-<16 hex>` or *is* 16 hex digits, and `_home` is neither.
+    #[test]
+    fn no_key_can_claim_the_home_note() {
+        for key in ["_Home", "file:_Home", "_home", "::_Home::"] {
+            assert_ne!(
+                format!("{}.md", note_name(key)).to_lowercase(),
+                HOME_NOTE.to_lowercase(),
+                "`{key}` would overwrite the overview note"
+            );
+        }
     }
 
     #[test]
@@ -1010,19 +1203,22 @@ mod tests {
             }],
         };
         let note = render_note(&ex, None, None);
-        assert_eq!(note.filename, "sym-rust-a.rs-main.md");
+        assert_eq!(
+            note.filename,
+            format!("{}.md", note_name("sym:rust:a.rs#main"))
+        );
         assert!(note.content.contains("kind: fn"));
         // No source base → no Source link.
         assert!(!note.content.contains("**Source:**"));
         assert!(note.content.contains("# main"));
-        assert!(
-            note.content
-                .contains("- calls (derived) → [[sym-rust-a.rs-helper]]")
-        );
-        assert!(
-            note.content
-                .contains("- [[adr-0001]] references (authored) →")
-        );
+        assert!(note.content.contains(&format!(
+            "- calls (derived) → [[{}]]",
+            note_name("sym:rust:a.rs#helper")
+        )));
+        assert!(note.content.contains(&format!(
+            "- [[{}]] references (authored) →",
+            note_name("adr:0001")
+        )));
         // Tags for the graph view.
         assert!(note.content.contains("- roteiro/kind/fn"));
         assert!(note.content.contains("- roteiro/lang/rust"));
@@ -1044,6 +1240,33 @@ mod tests {
             a,
             "different keys stay distinct after truncation"
         );
+        // Truncation must not leave a doubled separator before the suffix — the
+        // hint is trimmed after cutting, not before.
+        assert!(!a.contains("--"), "{a}");
+    }
+
+    /// A short key is bounded too, and every name carries the suffix — the hash
+    /// is no longer reached for only when the hint overruns.
+    ///
+    /// That gating was the defect (#574): two keys short enough to skip the hash
+    /// had nothing left to tell them apart once the slug had flattened them.
+    #[test]
+    fn every_name_carries_the_hash_however_short_the_key() {
+        for key in ["a", "adr:0001", "file:README.md"] {
+            let name = note_name(key);
+            let (hint, hash) = name.rsplit_once('-').expect("a suffixed name");
+            assert!(!hint.is_empty(), "{name}");
+            assert_eq!(hash.len(), 16, "{name}");
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "the suffix is the key's hash, not part of the hint: {name}"
+            );
+        }
+        // A key with no hint at all is the bare hash, which cannot be mistaken
+        // for a hinted name (those are at least 18 characters).
+        let bare = note_name("::");
+        assert_eq!(bare.len(), 16, "{bare}");
+        assert!(!bare.contains('-'), "{bare}");
     }
 
     #[test]
@@ -1211,8 +1434,10 @@ mod tests {
         };
         let note = render_note(&ex, None, None);
         assert!(
-            note.content
-                .contains("related (inferred) (0.82) → [[file-b.md]]"),
+            note.content.contains(&format!(
+                "related (inferred) (0.82) → [[{}]]",
+                note_name("file:b.md")
+            )),
             "{}",
             note.content
         );
@@ -1260,13 +1485,18 @@ mod tests {
         assert!(note.content.contains("**3 nodes**, **2 edges**"));
         assert!(note.content.contains("| fn | 2 |"));
         assert!(note.content.contains("| derived | 1 |"));
-        assert!(note.content.contains("**Accepted** — [[adr-0001|First]]"));
+        assert!(note.content.contains(&format!(
+            "**Accepted** — [[{}|First]]",
+            note_name("adr:0001")
+        )));
         assert!(note.content.contains("| todo | 4 |")); // roteiro:ignore
         // Directed coupling: the two fans are separate columns, and the wikilink's
         // own `|` is escaped so it cannot break the table it sits in.
         assert!(
-            note.content
-                .contains("| [[sym-rust-a.rs-helper\\|helper]] | 7 | 1 |"),
+            note.content.contains(&format!(
+                "| [[{}\\|helper]] | 7 | 1 |",
+                note_name("sym:rust:a.rs#helper")
+            )),
             "{}",
             note.content
         );
@@ -1278,8 +1508,10 @@ mod tests {
         // be checked rather than taken on trust, and the wikilink's own `|` is
         // escaped so it cannot break the table it sits in.
         assert!(
-            note.content
-                .contains("| [[file-src-small.rs\\|src/small.rs]] | 3 | 120 | 25.00 |"),
+            note.content.contains(&format!(
+                "| [[{}\\|src/small.rs]] | 3 | 120 | 25.00 |",
+                note_name("file:src/small.rs")
+            )),
             "{}",
             note.content
         );
@@ -1299,7 +1531,8 @@ mod tests {
             note.content
         );
         assert!(
-            note.content.contains("- [[file-.env\\|.env]]"),
+            note.content
+                .contains(&format!("- [[{}\\|.env]]", note_name("file:.env"))),
             "{}",
             note.content
         );
@@ -1436,12 +1669,29 @@ mod tests {
         names.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    /// **Rewritten deliberately under #574.** #570 landed this as "a project
+    /// scope leaves every note name exactly as it was", and read that two ways at
+    /// once: `PROJECT` reduces to `note_name`, *and* `note_name` itself does not
+    /// move. #574 breaks the second half on purpose — the old names were not
+    /// injective under filename case folding and this repository's vault lost 104
+    /// notes to it — so the two halves are separated here rather than having
+    /// expected values quietly updated underneath the old title.
+    ///
+    /// What survives is the half #570 was actually about, and it is unweakened:
+    /// **turning workspace mode on must not rename a project's notes.** Names may
+    /// move when `note_name` changes, for a reason argued at `note_name`; they may
+    /// never move because a repository happens to sit inside a configured
+    /// workspace, because that would happen by inference rather than by a release.
+    ///
+    /// The other half of #570's promise — that a project render is byte-identical
+    /// apart from names — is now [`render_note_is_the_project_scoped_render_byte_for_byte`]
+    /// and `render_cli`'s end-to-end pair.
     #[test]
-    fn a_project_scope_leaves_every_note_name_exactly_as_it_was() {
-        // The compatibility promise of issue #442, as a test rather than a claim:
-        // a user's own notes live outside the vault and link into it *by name*, so
-        // a name that moves breaks those links silently. Whatever workspace mode
-        // does, `VaultScope::PROJECT` must reduce to `note_name` of the bare key.
+    fn a_project_scope_never_qualifies_a_name() {
+        // A user's own notes live outside the vault and link into it *by name*
+        // (#442), so a rename breaks them silently, with no error and nothing to
+        // grep for. Whatever workspace mode does, `VaultScope::PROJECT` must
+        // reduce to `note_name` of the bare key.
         for key in [
             "file:README.md",
             "adr:0001",
@@ -1453,6 +1703,20 @@ mod tests {
                 scoped_note_name(&VaultScope::PROJECT, key),
                 note_name(key),
                 "single-project name moved for `{key}`"
+            );
+            // And the qualified form really is a different name, so the assertion
+            // above is not vacuously true of every scope.
+            let ms = members(&["app"]);
+            assert_ne!(
+                scoped_note_name(
+                    &VaultScope {
+                        project: Some("app"),
+                        members: &ms,
+                    },
+                    key
+                ),
+                note_name(key),
+                "qualification must move the name for `{key}`, or nothing above holds"
             );
         }
     }
@@ -1485,7 +1749,13 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(names, ["api-file-README.md", "sdk-file-README.md"]);
+        assert_eq!(
+            names,
+            [
+                note_name("api::file:README.md"),
+                note_name("sdk::file:README.md")
+            ]
+        );
         assert_ne!(names[0], names[1], "two members must not share one note");
     }
 
@@ -1510,12 +1780,13 @@ mod tests {
         // The key: project-qualified, `::` intact — this is what the graph and
         // ADR-0009's external refs use.
         let qualified = "app::file:README.md";
-        // The note name: `note_name` of exactly that key, `::` slugged to `-`.
+        // The note name: `note_name` of exactly that key, `::` slugged to `-`,
+        // the whole hint lowercased, and the key's own hash appended.
         assert_eq!(
             scoped_note_name(&scope, "file:README.md"),
-            "app-file-README.md"
+            "app-file-readme.md-a114bde6dcaba1c1"
         );
-        assert_eq!(note_name(qualified), "app-file-README.md");
+        assert_eq!(note_name(qualified), "app-file-readme.md-a114bde6dcaba1c1");
         assert!(
             !scoped_note_name(&scope, "file:README.md").contains("::"),
             "no note name ever contains `::`"
@@ -1528,7 +1799,7 @@ mod tests {
             None,
             &scope,
         );
-        assert_eq!(note.filename, "app-file-README.md.md");
+        assert_eq!(note.filename, "app-file-readme.md-a114bde6dcaba1c1.md");
     }
 
     #[test]
@@ -1544,7 +1815,10 @@ mod tests {
                 members: &ms,
             },
         );
-        assert_eq!(note.filename, "api-cfgkey-config.toml-addr.md");
+        assert_eq!(
+            note.filename,
+            format!("{}.md", note_name("api::cfgkey:config.toml#addr"))
+        );
         assert!(
             note.content.contains("project: \"api\""),
             "{}",
@@ -1557,7 +1831,8 @@ mod tests {
         );
         // A within-member edge is qualified to the same member, not left bare.
         assert!(
-            note.content.contains("→ [[api-sym-rust-a.rs-A]]"),
+            note.content
+                .contains(&format!("→ [[{}]]", note_name("api::sym:rust:a.rs#A"))),
             "{}",
             note.content
         );
@@ -1594,7 +1869,10 @@ mod tests {
         );
         let note = render_note_scoped(&ex, None, None, &scope);
         assert!(
-            note.content.contains("→ [[hub-cfgkey-config.toml-addr]]"),
+            note.content.contains(&format!(
+                "→ [[{}]]",
+                note_name("hub::cfgkey:config.toml#addr")
+            )),
             "the edge must land on the hub's own note: {}",
             note.content
         );
@@ -1628,8 +1906,10 @@ mod tests {
         let ex = node_linking_to("cfgkey:config.toml#addr", "addr", &key);
         let note = render_note_scoped(&ex, None, None, &scope);
         assert!(
-            note.content
-                .contains("→ [[spoke-extref-elsewhere-cfgkey-config.toml-addr]]"),
+            note.content.contains(&format!(
+                "→ [[{}]]",
+                note_name("spoke::extref:elsewhere::cfgkey:config.toml#addr")
+            )),
             "{}",
             note.content
         );
@@ -1726,22 +2006,22 @@ mod tests {
             );
         }
         // And every link inside a member's section resolves within that member.
-        assert!(
-            note.content
-                .contains("**Accepted** — [[api-adr-0001|First]]")
-        );
-        assert!(
-            note.content
-                .contains("**Accepted** — [[sdk-adr-0001|First]]")
-        );
-        assert!(
-            note.content
-                .contains("[[api-sym-rust-a.rs-helper\\|helper]] | 7 |")
-        );
-        assert!(
-            note.content
-                .contains("[[sdk-file-src-small.rs\\|src/small.rs]]")
-        );
+        assert!(note.content.contains(&format!(
+            "**Accepted** — [[{}|First]]",
+            note_name("api::adr:0001")
+        )));
+        assert!(note.content.contains(&format!(
+            "**Accepted** — [[{}|First]]",
+            note_name("sdk::adr:0001")
+        )));
+        assert!(note.content.contains(&format!(
+            "[[{}\\|helper]] | 7 |",
+            note_name("api::sym:rust:a.rs#helper")
+        )));
+        assert!(note.content.contains(&format!(
+            "[[{}\\|src/small.rs]]",
+            note_name("sdk::file:src/small.rs")
+        )));
     }
 
     #[test]
@@ -1774,10 +2054,11 @@ mod tests {
         let note = render_workspace_home(&ws);
         // Resolvable: a link to the other member's note, with its confidence.
         assert!(
-            note.content.contains(
-                "| [[sdk-cfgkey-config.toml-addr\\|addr]] | sdk | \
-                 [[api-cfgkey-config.toml-addr\\|api::cfgkey:config.toml#addr]] | links (0.91) |"
-            ),
+            note.content.contains(&format!(
+                "| [[{}\\|addr]] | sdk | [[{}\\|api::cfgkey:config.toml#addr]] | links (0.91) |",
+                note_name("sdk::cfgkey:config.toml#addr"),
+                note_name("api::cfgkey:config.toml#addr"),
+            )),
             "{}",
             note.content
         );
