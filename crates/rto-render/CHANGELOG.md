@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.29.0...rto-render-v1.30.0) - 2026-08-21
+
+### Added
+
+- *(render)* render an Obsidian vault for a whole workspace (#442 part 1)
+
+### Fixed
+
+- *(render)* one YAML escaping rule for every frontmatter field
+
+### Other
+
+- *(render)* the qualified key and the note name are two strings
+
 ## [1.29.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.28.0...rto-render-v1.29.0) - 2026-08-20
 
 ### Fixed
