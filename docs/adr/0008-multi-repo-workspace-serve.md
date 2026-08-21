@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.2"
-last-modified: 2026-08-11
+version: "1.3"
+last-modified: 2026-08-20
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -198,6 +198,74 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
   ambiguous; mitigated by requiring the selector (or a configured default) and
   shipping `list_projects` so an agent can discover names first.
 
+## Nested workspaces (v1.3)
+
+A `[[workspaces]]` entry may name other named workspaces whose members fold into
+it:
+
+```toml
+[[workspaces]]
+name = "backend"
+repos = ["~/git/api", "~/git/worker"]
+
+[[workspaces]]
+name  = "platform"
+includes = ["backend", "frontend"]     # members of both, plus anything below
+repos    = ["~/git/shared-infra"]
+```
+
+**Nesting adds no expressiveness. It adds non-duplication.** Everything it can
+express is already expressible by listing the same paths under two names — a
+repo may belong to any number of workspaces, and nothing checks otherwise. What
+it buys is that the two lists cannot drift: a repo added to `backend` is in
+`platform` on the next resolution, rather than on the next time somebody
+remembers. That is the whole of the case for it, and it is the same argument
+this project has applied a dozen times to two copies of one fact.
+
+### Resolution flattens
+
+`includes` is resolved transitively into the member set, and a composed
+workspace **is a workspace with more members** — the same flat
+`ResolvedWorkspace { name, roots, repos, linked }` every surface already
+consumes. No surface learns a new concept, and none needs to change: `links`,
+`serve`, the explorer and the vault see a longer list of repos and nothing else.
+
+This is deliberately the cheap half. Whether any surface should *display* the
+nesting — grouped sections in a rendered vault, a tree in the explorer — is **not
+decided here and is not foreclosed.** Flattening at resolution discards nothing,
+because the declaration remains in the config: a later hierarchy-aware surface
+can re-derive the tree from `includes` without a format change. The config shape
+is the commitment; the rendering is not.
+
+### What is refused, and why
+
+- **Cycles** — `a` includes `b` includes `a` — are a config error naming the
+  path, never a silent flatten and never a hang. A cycle is a mistake in a file
+  a person wrote, and the honest response is to say which one.
+- **An unknown name** in `includes` is an error listing the workspaces that do
+  exist, matching how `--workspace-name` already refuses (`no workspace named
+  'nope' (known: one, two, gamma)`).
+- **`[standalone]` cannot be included.** It is a single unnamed table, so there
+  is no name to reference — and that removes an incoherence by construction
+  rather than by rule: a `linked` workspace absorbing repos declared to have *no*
+  cross-repo links would be asking for links among repos whose whole point is
+  that they have none.
+
+Diamonds need no special handling: `a` including `b` and `c` which both include
+`d` yields `d` once. Not because workspaces de-duplicate their members — they do
+not, and a repo a user lists twice in one entry still resolves twice — but
+because the fold carries a dedupe of its own, in two parts: a workspace is
+expanded at most once by name, and every root and repo an include contributes is
+checked against a seen-set spanning the whole expansion. That set matches on the
+*expanded* path, so `~/git/api` and the spelling it expands to are one member
+rather than two, and it is **seeded from what the including workspace already
+declares** — so an included member duplicating a declared one is dropped, while a
+duplicate the user wrote by hand is left exactly as it was.
+
+The distinction matters because the fold's dedupe is the only thing holding this
+property. Read as a pre-existing invariant it looks redundant, and the next
+person to tidy it away would reintroduce diamonds silently.
+
 ## Build-plan outline (grounded)
 
 1. Extract a `(repo_path) -> (Repo, Store, cache)` resolver from
@@ -223,3 +291,4 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
 | 1.0 | 2026-08-11 | Accepted and implemented. Added `rto_graph::Workspace` (name→store registry, opened on demand, cached), a `[workspace]` config table (`roots`/`repos`) and `serve --workspace <root>` (shallow repo discovery). Both tool surfaces are workspace-backed: the MCP tools and the `/v1` graph tools gained an optional `project` argument and a `list_projects` tool, exposed only when several projects are hosted. Single-repo serve is unchanged (the cwd repo is the sole default project). **Realised `/v1` selection as a uniform `project` tool argument, not a `/v1/<project>/…` path prefix** — one mechanism across MCP and `/v1`, no bespoke routing. |
 | 1.1 | 2026-08-11 | Added `busy_timeout` on every store connection (a workspace read that lands during a project's concurrent `sync`-commit waits briefly instead of failing with `database is locked`), and **live registry reload on `SIGHUP`** — a dedicated thread re-scans the workspace roots and swaps the registry in place (added/removed repos, no restart). Content freshness already needed no reload (in-place `graph.db` writes are read on the next query). |
 | 1.2 | 2026-08-11 | Implemented the two optional extras this ADR left open. **`/v1/{project}/…` path routing** (`rto-serve`): a client uses `…/v1/<project>` as its base URL and tool calls are pre-bound to that project (a `ScopedTools` wrapper fills `project` when the model omits it); `models`/`embeddings` accept and ignore the prefix. **`serve --sync-on-access`**: a first-open hook on the `Workspace` (re)builds a project's graph on first touch, so a stale/never-synced repo is prepared before serving. Also added **`GET /v1/projects`** so a client-side router can enumerate hosted projects without a model round-trip. And `serve --models --mcp` **merges `/v1` and `/mcp` onto one port** (both are axum path prefixes), so a single process — one loaded model, one Workspace — serves both surfaces. |
+| 1.3 | 2026-08-20 | Added **nested workspaces**: a `[[workspaces]]` entry may `includes` other named workspaces, whose members fold in transitively. Resolution **flattens** — a composed workspace is a flat `ResolvedWorkspace` like any other, so no surface learns a new concept and none changes. Records that nesting adds no expressiveness, only non-duplication (the lists cannot drift), and that whether a surface should *display* hierarchy is undecided and unforeclosed, since the declaration survives in config for a later tree-aware surface to re-derive. Cycles and unknown names are named errors; `[standalone]` is unnameable and therefore uncomposable, which removes the `linked`-across-a-boundary incoherence by construction. |

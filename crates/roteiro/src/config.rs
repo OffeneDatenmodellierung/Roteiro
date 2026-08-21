@@ -742,6 +742,28 @@ pub struct NamedWorkspace {
     pub roots: Option<Vec<String>>,
     /// Explicit member repo paths, in addition to anything found under `roots`.
     pub repos: Option<Vec<String>>,
+    /// Names of other **named** workspaces whose members fold into this one,
+    /// transitively (ADR-0008 v1.3 nested workspaces): every `roots`/`repos` entry
+    /// of each included workspace — and of everything *it* includes — joins this
+    /// workspace's own.
+    ///
+    /// Nesting adds no expressiveness: the same paths could be listed under both
+    /// names, since a repo may belong to any number of workspaces. What it adds is
+    /// that the two lists cannot drift. Resolution therefore **flattens** — a
+    /// composed workspace is an ordinary flat [`rto_graph::ResolvedWorkspace`] with
+    /// more members, so no consumer of [`Config::resolved_workspaces`] learns a new
+    /// concept.
+    ///
+    /// Only names that exist are includable: every `[[workspaces]]` entry, plus the
+    /// legacy `[workspace]` under the name it folds in as (`default`). A
+    /// `[standalone]` repo cannot be included — the table is unnamed, so there is
+    /// nothing to reference, which also removes by construction the incoherence of a
+    /// linked workspace absorbing repos declared to have no cross-repo links.
+    ///
+    /// Shaped as `Option<Vec<String>>` to match its `roots`/`repos` siblings: the
+    /// three are read, merged and serialised by the same paths, and an unset key
+    /// means the same "not declared here" for all of them.
+    pub includes: Option<Vec<String>>,
 }
 
 /// One authored cross-repo link (ADR-0009): a `[[links]]` entry in a spoke repo's
@@ -1277,7 +1299,8 @@ impl Config {
     ///
     /// - the legacy `[workspace]` table, **when it names any roots/repos**, folds in
     ///   as a linked group named `default`;
-    /// - each `[[workspaces]]` entry is a linked group under its own name;
+    /// - each `[[workspaces]]` entry is a linked group under its own name, with the
+    ///   members of everything it `includes` folded in transitively (ADR-0008 v1.3);
     /// - `[standalone]` expands — by discovering the repos under its roots plus its
     ///   explicit repos — into one **unlinked**, single-repo group per repo, named
     ///   after the repo directory (deduped `-2`/`-3` on collision, as the workspace
@@ -1290,13 +1313,23 @@ impl Config {
     /// from repo directory names) take a `-2`/`-3` suffix on collision, including
     /// against a linked name.
     ///
+    /// **Nesting flattens.** A workspace that `includes` others is a workspace with
+    /// more members and nothing else — the same flat [`rto_graph::ResolvedWorkspace`]
+    /// every surface already consumes, so `links`, `serve`, the explorer and the vault
+    /// see a longer member list and no new concept. See [`NamedWorkspace::includes`].
+    ///
     /// Fully backward-compatible: a config with only `[workspace]` yields exactly one
     /// `default` linked group with the same membership as before; a config naming no
-    /// workspaces at all yields an empty list.
+    /// workspaces at all yields an empty list. A config declaring no `includes`
+    /// anywhere is untouched by the fold — [`Self::fold_includes`] appends to a
+    /// workspace only what its `includes` reach, and reads (never rewrites) each
+    /// entry's own declarations, so such a config resolves exactly as it did before
+    /// nesting existed.
     ///
     /// # Errors
-    /// A duplicate **linked** workspace name, or a discovery failure (an unreadable
-    /// `[standalone]` root).
+    /// A duplicate **linked** workspace name, an `includes` cycle, an `includes` entry
+    /// naming no known workspace, or a discovery failure (an unreadable `[standalone]`
+    /// root).
     pub fn resolved_workspaces(&self) -> anyhow::Result<Vec<rto_graph::ResolvedWorkspace>> {
         use std::collections::HashSet;
 
@@ -1333,6 +1366,11 @@ impl Config {
             });
         }
 
+        // Fold each composed workspace's `includes` in, transitively (ADR-0008 v1.3).
+        // After the loop above, so a name can be included before it is declared and
+        // so a duplicate name is refused before anything tries to reference it.
+        self.fold_includes(&mut out)?;
+
         // `[standalone]` → one unlinked, single-repo group per discovered repo.
         for repo in self.standalone_repo_paths()? {
             let base = repo
@@ -1348,6 +1386,135 @@ impl Config {
         }
 
         Ok(out)
+    }
+
+    /// Fold every composed workspace's `includes` into its resolved membership,
+    /// transitively (ADR-0008 v1.3 nested workspaces).
+    ///
+    /// Each `[[workspaces]]` entry that declares `includes` gains, appended after its
+    /// own declarations and in `includes` order, every `roots`/`repos` entry of each
+    /// included workspace and of everything *those* include. The included workspaces'
+    /// own resolved groups are left alone: including a workspace composes it, it does
+    /// not consume it.
+    ///
+    /// **Declarations are read, never rewritten**, so this is a pure append and a
+    /// config with no `includes` anywhere is untouched — every loop below is entered
+    /// zero times, and the resolved list is exactly what it was before nesting
+    /// existed. Members are read from the *declared* tables ([`Self::declared_members`])
+    /// rather than from the partially-folded groups in `out`, so the result does not
+    /// depend on the order the entries were written in: `a` may include `b` whether
+    /// `b` is declared above or below it.
+    ///
+    /// # Errors
+    /// A cycle (naming the path) or an `includes` entry that names no known workspace
+    /// (listing the ones that do exist).
+    fn fold_includes(&self, out: &mut [rto_graph::ResolvedWorkspace]) -> anyhow::Result<()> {
+        for nw in &self.workspaces {
+            let includes = nw.includes.as_deref().unwrap_or_default();
+            if includes.is_empty() {
+                continue;
+            }
+            // The group pushed for this entry above. Absent only if a future caller
+            // folds a partial list; skipping is then the honest no-op.
+            let Some(group) = out.iter_mut().find(|r| r.name == nw.name) else {
+                continue;
+            };
+            let mut fold = IncludeFold::starting_at(&nw.name, group);
+            for name in includes {
+                self.fold_one(name, &mut fold)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fold the workspace `name` — and, depth-first, everything it includes — into
+    /// the group being composed.
+    ///
+    /// Cycle detection is the include *path* (the chain currently being expanded),
+    /// which is also what the error prints; self-inclusion is the degenerate case of
+    /// the same check, with a one-hop path. `expanded` is the separate "already
+    /// folded in" set that makes a diamond cost one visit rather than two, and makes
+    /// a wide graph linear rather than exponential. A name reached a second time is
+    /// therefore skipped, not re-appended — but it is skipped only *after* the path
+    /// check, so a cycle is still reported rather than silently absorbed.
+    ///
+    /// # Errors
+    /// A cycle, or a name no declared workspace answers to.
+    fn fold_one(&self, name: &str, fold: &mut IncludeFold<'_>) -> anyhow::Result<()> {
+        if fold.path.iter().any(|step| step == name) {
+            anyhow::bail!(
+                "workspace include cycle: {} — a `[[workspaces]]` entry cannot include \
+                 itself, directly or through the workspaces it includes",
+                fold.cycle_path(name)
+            );
+        }
+        let Some(member) = self.declared_members(name) else {
+            anyhow::bail!(
+                "`includes` in workspace `{}`: no workspace named `{name}` (known: {}) — only \
+                 named `[[workspaces]]` (and the legacy `[workspace]`, which folds in as \
+                 `default`) can be included; `[standalone]` repos are unnamed, so there is no \
+                 name to reference",
+                fold.referrer(),
+                self.includable_names().join(", ")
+            );
+        };
+        if !fold.expanded.insert(name.to_owned()) {
+            // Already folded in by another branch (a diamond), and its subtree with
+            // it — so each member lands exactly once.
+            return Ok(());
+        }
+        for root in member.roots {
+            fold.push_root(expand_tilde(root).to_string_lossy().into_owned());
+        }
+        for repo in member.repos {
+            fold.push_repo(expand_tilde(repo).to_string_lossy().into_owned());
+        }
+        fold.path.push(name.to_owned());
+        for next in member.includes {
+            self.fold_one(next, fold)?;
+        }
+        fold.path.pop();
+        Ok(())
+    }
+
+    /// The declared membership of the named workspace `name`, or `None` if no
+    /// declaration answers to that name.
+    ///
+    /// The legacy `[workspace]` answers to `default` — the name it folds in as — when
+    /// it names anything, so a composed workspace can include it like any other named
+    /// linked workspace. `[standalone]` answers to nothing: it is one unnamed table,
+    /// and the per-repo names its members resolve to are derived from directory names
+    /// rather than declared, so there is no name in the config to reference.
+    fn declared_members(&self, name: &str) -> Option<DeclaredMembers<'_>> {
+        const NONE: &[String] = &[];
+        if name == "default" && !self.workspace.is_empty() {
+            return Some(DeclaredMembers {
+                roots: self.workspace.roots.as_deref().unwrap_or(NONE),
+                repos: self.workspace.repos.as_deref().unwrap_or(NONE),
+                includes: NONE,
+            });
+        }
+        self.workspaces
+            .iter()
+            .find(|w| w.name == name)
+            .map(|w| DeclaredMembers {
+                roots: w.roots.as_deref().unwrap_or(NONE),
+                repos: w.repos.as_deref().unwrap_or(NONE),
+                includes: w.includes.as_deref().unwrap_or(NONE),
+            })
+    }
+
+    /// Every name an `includes` entry may reference, in resolution order — the
+    /// `known:` list an unknown name is refused with. Exactly the names
+    /// [`Self::declared_members`] answers to, derived from the same two sources, so
+    /// the list cannot come to disagree with what is actually includable.
+    fn includable_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::new();
+        if !self.workspace.is_empty() {
+            names.push("default");
+        }
+        names.extend(self.workspaces.iter().map(|w| w.name.as_str()));
+        names
     }
 
     /// Every standalone repo: those discovered under each `[standalone] roots` entry
@@ -1371,6 +1538,94 @@ impl Config {
             }
         }
         Ok(out)
+    }
+}
+
+/// One workspace's declarations as written, as [`Config::declared_members`] reads
+/// them: the three lists an `includes` fold needs, borrowed from the config rather
+/// than cloned, with an unset key read as an empty list.
+struct DeclaredMembers<'a> {
+    /// `roots` as declared (before `~` expansion or any scanning).
+    roots: &'a [String],
+    /// `repos` as declared (before `~` expansion).
+    repos: &'a [String],
+    /// The workspaces this one includes — the next hop of the fold. Always empty for
+    /// the legacy `[workspace]`, which has no `includes` key.
+    includes: &'a [String],
+}
+
+/// The accumulating state of one composed workspace's `includes` fold
+/// ([`Config::fold_one`]): the group being composed, the include path currently
+/// being expanded (for cycle detection and for the error message), and the three
+/// sets that keep the result exactly-once.
+struct IncludeFold<'a> {
+    /// The resolved group being composed — appended to, never rewritten.
+    group: &'a mut rto_graph::ResolvedWorkspace,
+    /// The chain of workspace names currently being expanded, starting with the
+    /// composed workspace itself. A name that reappears here closes a cycle.
+    path: Vec<String>,
+    /// Names already folded in, so a diamond folds each member once and a wide
+    /// include graph costs one visit per node rather than one per path to it.
+    expanded: std::collections::HashSet<String>,
+    /// Expanded root paths already present in `group.roots`.
+    seen_roots: std::collections::HashSet<String>,
+    /// Expanded repo paths already present in `group.repos`.
+    seen_repos: std::collections::HashSet<String>,
+}
+
+impl<'a> IncludeFold<'a> {
+    /// Begin folding into `group`, the resolved group of the workspace `name`.
+    ///
+    /// The seen-sets are seeded from what the group already holds — its own declared
+    /// `roots`/`repos` — so an included workspace re-listing a path the composing one
+    /// already names adds nothing. They are seeded from the *expanded* strings the
+    /// group holds, the same form [`Config::fold_one`] pushes, so the two agree on
+    /// what "the same path" means: `~/git/api` and the expanded spelling of it are
+    /// one member, not two.
+    fn starting_at(name: &str, group: &'a mut rto_graph::ResolvedWorkspace) -> Self {
+        let seen_roots = group.roots.iter().cloned().collect();
+        let seen_repos = group.repos.iter().cloned().collect();
+        Self {
+            group,
+            path: vec![name.to_owned()],
+            expanded: std::collections::HashSet::new(),
+            seen_roots,
+            seen_repos,
+        }
+    }
+
+    /// Append an expanded root, unless this group already has it.
+    fn push_root(&mut self, root: String) {
+        if self.seen_roots.insert(root.clone()) {
+            self.group.roots.push(root);
+        }
+    }
+
+    /// Append an expanded repo path, unless this group already has it.
+    fn push_repo(&mut self, repo: String) {
+        if self.seen_repos.insert(repo.clone()) {
+            self.group.repos.push(repo);
+        }
+    }
+
+    /// The include path closed by reaching `name` again, rendered for the cycle
+    /// error: `` `platform` → `backend` → `platform` ``. Naming the path is the whole
+    /// point of refusing here — a cycle is a mistake in a file a person wrote, and
+    /// the useful answer is which chain of includes closed it.
+    fn cycle_path(&self, name: &str) -> String {
+        self.path
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(name))
+            .map(|step| format!("`{step}`"))
+            .collect::<Vec<_>>()
+            .join(" → ")
+    }
+
+    /// The workspace whose `includes` list is being read right now — the one to blame
+    /// for an unknown name. Never empty: the path starts with the composed workspace.
+    fn referrer(&self) -> &str {
+        self.path.last().map_or("", String::as_str)
     }
 }
 
@@ -2104,11 +2359,13 @@ mod tests {
                     name: "api".to_owned(),
                     roots: Some(vec!["/api".to_owned()]),
                     repos: None,
+                    includes: None,
                 },
                 NamedWorkspace {
                     name: "web".to_owned(),
                     roots: None,
                     repos: Some(vec!["/web/app".to_owned()]),
+                    includes: None,
                 },
             ],
             standalone: WorkspaceConfig {
@@ -2212,6 +2469,45 @@ mod tests {
         );
     }
 
+    /// The ADR-0008 v1.3 example config, verbatim: `includes` parses off the wire as
+    /// a sibling of `roots`/`repos`, and the workspace it composes resolves to the
+    /// union of its own repos and its members'.
+    ///
+    /// The end-to-end case — every other `includes` test builds the `Config` by hand,
+    /// which would pass just as well if the key were spelled differently in TOML or
+    /// were not read at all.
+    #[test]
+    fn the_adr_example_parses_and_composes() {
+        let cfg: Config = toml::from_str(
+            "[[workspaces]]\nname = \"backend\"\nrepos = [\"~/git/api\", \"~/git/worker\"]\n\n\
+             [[workspaces]]\nname = \"frontend\"\nrepos = [\"~/git/web\"]\n\n\
+             [[workspaces]]\nname = \"platform\"\nincludes = [\"backend\", \"frontend\"]\n\
+             repos = [\"~/git/shared-infra\"]\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            cfg.workspaces[2].includes.as_deref(),
+            Some(&["backend".to_owned(), "frontend".to_owned()][..]),
+            "`includes` must be read from the config file, not merely constructible"
+        );
+        assert_eq!(
+            cfg.workspaces[0].includes, None,
+            "an entry that declares no `includes` reads as unset"
+        );
+
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let expect = |p: &str| super::expand_tilde(p).to_string_lossy().into_owned();
+        assert_eq!(
+            members(&resolved, "platform").1,
+            vec![
+                expect("~/git/shared-infra"),
+                expect("~/git/api"),
+                expect("~/git/worker"),
+                expect("~/git/web"),
+            ],
+        );
+    }
+
     /// A **linked** workspace name collision is a config error (never a silent
     /// rename that would resolve links against the wrong repos) — both between two
     /// `[[workspaces]]` and between a `[[workspaces]]` and the folded-in `default`.
@@ -2224,11 +2520,13 @@ mod tests {
                     name: "api".to_owned(),
                     roots: Some(vec!["/a".to_owned()]),
                     repos: None,
+                    includes: None,
                 },
                 NamedWorkspace {
                     name: "api".to_owned(),
                     roots: Some(vec!["/b".to_owned()]),
                     repos: None,
+                    includes: None,
                 },
             ],
             ..Default::default()
@@ -2253,6 +2551,7 @@ mod tests {
                 name: "default".to_owned(),
                 roots: Some(vec!["/x".to_owned()]),
                 repos: None,
+                includes: None,
             }],
             ..Default::default()
         };
@@ -2261,6 +2560,349 @@ mod tests {
             .expect_err("[[workspaces]] named `default` must collide with the legacy fold-in")
             .to_string();
         assert!(err.contains("default"), "{err}");
+    }
+
+    /// A `[[workspaces]]` entry with `roots`/`repos` and nothing else — the shape
+    /// every existing config has.
+    fn ws(name: &str, roots: &[&str], repos: &[&str]) -> NamedWorkspace {
+        NamedWorkspace {
+            name: name.to_owned(),
+            roots: (!roots.is_empty()).then(|| roots.iter().map(|r| (*r).to_owned()).collect()),
+            repos: (!repos.is_empty()).then(|| repos.iter().map(|r| (*r).to_owned()).collect()),
+            includes: None,
+        }
+    }
+
+    /// The same, composed: `includes` on top of its own declarations.
+    fn composed(name: &str, includes: &[&str], roots: &[&str], repos: &[&str]) -> NamedWorkspace {
+        NamedWorkspace {
+            includes: Some(includes.iter().map(|i| (*i).to_owned()).collect()),
+            ..ws(name, roots, repos)
+        }
+    }
+
+    /// One resolved group's member lists, for comparing a fold against an expectation.
+    fn members(
+        resolved: &[rto_graph::ResolvedWorkspace],
+        name: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let g = resolved
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("no resolved workspace `{name}` in {resolved:?}"));
+        (g.roots.clone(), g.repos.clone())
+    }
+
+    /// **The compatibility case, and the one that matters most**: a config that
+    /// declares no `includes` anywhere resolves to exactly what it resolved to before
+    /// nesting existed — every existing config is this case.
+    ///
+    /// Asserted against the whole resolved list written out literally, not against a
+    /// property of it, so a fold that appended, reordered or de-duplicated anything
+    /// fails here. (`[standalone]` is left out only because its expansion touches the
+    /// filesystem; the other tests cover it.)
+    #[test]
+    fn config_without_includes_resolves_exactly_as_before() {
+        let cfg = Config {
+            workspace: WorkspaceConfig {
+                roots: Some(vec!["/legacy/root".to_owned()]),
+                repos: Some(vec!["/legacy/repo".to_owned()]),
+            },
+            workspaces: vec![
+                ws("api", &["/api/root"], &["/api/one", "/api/two"]),
+                // A repo listed twice in one entry, and a repo also named by another
+                // workspace: neither is de-duplicated today, and the fold must not
+                // start de-duplicating them.
+                ws("web", &[], &["/web/app", "/web/app", "/api/one"]),
+            ],
+            ..Default::default()
+        };
+
+        let expected = vec![
+            rto_graph::ResolvedWorkspace {
+                name: "default".to_owned(),
+                roots: vec!["/legacy/root".to_owned()],
+                repos: vec!["/legacy/repo".to_owned()],
+                linked: true,
+            },
+            rto_graph::ResolvedWorkspace {
+                name: "api".to_owned(),
+                roots: vec!["/api/root".to_owned()],
+                repos: vec!["/api/one".to_owned(), "/api/two".to_owned()],
+                linked: true,
+            },
+            rto_graph::ResolvedWorkspace {
+                name: "web".to_owned(),
+                roots: Vec::new(),
+                repos: vec![
+                    "/web/app".to_owned(),
+                    "/web/app".to_owned(),
+                    "/api/one".to_owned(),
+                ],
+                linked: true,
+            },
+        ];
+        assert_eq!(
+            cfg.resolved_workspaces().expect("resolve"),
+            expected,
+            "a config with no `includes` must resolve exactly as it did before nesting"
+        );
+    }
+
+    /// A two-level compose resolves to the **union**: the composing workspace's own
+    /// declarations first, then each included workspace's, in `includes` order — and
+    /// the included workspaces are unchanged, because including a workspace composes
+    /// it rather than consuming it.
+    #[test]
+    fn includes_resolve_to_the_union_of_members() {
+        let cfg = Config {
+            workspaces: vec![
+                ws("backend", &["/backend/root"], &["/api", "/worker"]),
+                ws("frontend", &[], &["/web"]),
+                composed(
+                    "platform",
+                    &["backend", "frontend"],
+                    &[],
+                    &["/shared-infra"],
+                ),
+            ],
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+
+        assert_eq!(
+            members(&resolved, "platform"),
+            (
+                vec!["/backend/root".to_owned()],
+                vec![
+                    "/shared-infra".to_owned(),
+                    "/api".to_owned(),
+                    "/worker".to_owned(),
+                    "/web".to_owned(),
+                ]
+            ),
+            "own declarations first, then each included workspace's, in `includes` order"
+        );
+        assert_eq!(
+            members(&resolved, "backend"),
+            (
+                vec!["/backend/root".to_owned()],
+                vec!["/api".to_owned(), "/worker".to_owned()]
+            ),
+            "an included workspace is composed, not consumed"
+        );
+        assert_eq!(members(&resolved, "frontend").1, vec!["/web".to_owned()]);
+        assert!(
+            resolved.iter().all(|r| r.linked),
+            "a composed workspace is an ordinary linked group: {resolved:?}"
+        );
+    }
+
+    /// Three levels fold transitively — `everything` includes `platform`, which
+    /// includes `backend` — and the depth is not a special case: the fold walks
+    /// declarations, so it does not matter that `platform` is itself composed.
+    #[test]
+    fn includes_fold_transitively_through_three_levels() {
+        let cfg = Config {
+            workspaces: vec![
+                composed("everything", &["platform"], &[], &["/top"]),
+                composed("platform", &["backend"], &[], &["/shared-infra"]),
+                ws("backend", &[], &["/api"]),
+            ],
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+
+        assert_eq!(
+            members(&resolved, "everything").1,
+            vec![
+                "/top".to_owned(),
+                "/shared-infra".to_owned(),
+                "/api".to_owned()
+            ],
+            "a member three levels down folds in"
+        );
+        // Declared above the workspaces it includes, and resolved just the same.
+        assert_eq!(
+            members(&resolved, "platform").1,
+            vec!["/shared-infra".to_owned(), "/api".to_owned()]
+        );
+    }
+
+    /// A diamond — `top` includes `left` and `right`, both of which include `base` —
+    /// yields each member **once**, and in first-reached order.
+    ///
+    /// This needs no special handling beyond folding each name once: the fold appends
+    /// a member only if the composed group does not already have it, keyed by the
+    /// expanded path string.
+    #[test]
+    fn includes_diamond_yields_each_member_once() {
+        let cfg = Config {
+            workspaces: vec![
+                composed("top", &["left", "right"], &[], &["/top"]),
+                composed("left", &["base"], &[], &["/left"]),
+                composed("right", &["base"], &[], &["/right"]),
+                ws("base", &["/base/root"], &["/base"]),
+            ],
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+
+        assert_eq!(
+            members(&resolved, "top"),
+            (
+                vec!["/base/root".to_owned()],
+                vec![
+                    "/top".to_owned(),
+                    "/left".to_owned(),
+                    "/base".to_owned(),
+                    "/right".to_owned(),
+                ]
+            ),
+            "the shared member appears once, at the point it was first reached"
+        );
+    }
+
+    /// The same repo declared under two spellings — a literal path and the `~` form
+    /// of it — folds in **once**: the fold compares members after `~` expansion, the
+    /// same normalisation resolution already applies on the way in, so the dedupe is
+    /// by resolved path rather than by the string somebody happened to type.
+    #[test]
+    fn includes_dedupe_by_expanded_path_not_by_declared_string() {
+        let Some(home) = super::home_dir() else {
+            return; // No `HOME`: `~` does not expand, so there is nothing to compare.
+        };
+        let literal = home.join("git/api").to_string_lossy().into_owned();
+        let cfg = Config {
+            workspaces: vec![
+                composed("platform", &["backend"], &[], &[&literal]),
+                ws("backend", &[], &["~/git/api"]),
+            ],
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        assert_eq!(
+            members(&resolved, "platform").1,
+            vec![literal],
+            "`~/git/api` and its expansion are one member, not two"
+        );
+    }
+
+    /// A cycle is a config error **naming the path** — never a silent flatten and
+    /// never a hang.
+    #[test]
+    fn includes_cycle_is_refused_naming_the_path() {
+        let cfg = Config {
+            workspaces: vec![
+                composed("a", &["b"], &[], &["/a"]),
+                composed("b", &["c"], &[], &["/b"]),
+                composed("c", &["a"], &[], &["/c"]),
+            ],
+            ..Default::default()
+        };
+        let err = cfg
+            .resolved_workspaces()
+            .expect_err("a cycle must be refused")
+            .to_string();
+        assert!(err.contains("workspace include cycle"), "{err}");
+        assert!(
+            err.contains("`a` → `b` → `c` → `a`"),
+            "the error must name the path that closed the cycle; was: {err}"
+        );
+    }
+
+    /// Self-inclusion is the degenerate cycle, and is refused by the same check with
+    /// a one-hop path.
+    #[test]
+    fn includes_self_reference_is_refused() {
+        let cfg = Config {
+            workspaces: vec![composed("solo", &["solo"], &[], &["/solo"])],
+            ..Default::default()
+        };
+        let err = cfg
+            .resolved_workspaces()
+            .expect_err("self-inclusion must be refused")
+            .to_string();
+        assert!(err.contains("workspace include cycle"), "{err}");
+        assert!(err.contains("`solo` → `solo`"), "{err}");
+    }
+
+    /// An unknown name in `includes` is refused **listing the workspaces that do
+    /// exist**, in the same phrasing `--workspace-name` refuses with, plus which
+    /// workspace referred to it.
+    #[test]
+    fn unknown_include_is_refused_listing_the_known_workspaces() {
+        let cfg = Config {
+            workspaces: vec![
+                ws("one", &[], &["/one"]),
+                ws("two", &[], &["/two"]),
+                composed("gamma", &["nope"], &[], &["/gamma"]),
+            ],
+            ..Default::default()
+        };
+        let err = cfg
+            .resolved_workspaces()
+            .expect_err("an unknown include must be refused")
+            .to_string();
+        assert!(
+            err.contains("no workspace named `nope` (known: one, two, gamma)"),
+            "the refusal must match how `--workspace-name` refuses; was: {err}"
+        );
+        assert!(
+            err.contains("`gamma`"),
+            "and name the workspace that referred to it; was: {err}"
+        );
+    }
+
+    /// A `[standalone]` repo **cannot be included**: the table is unnamed, so the
+    /// per-repo names its members resolve to are not names anything in the config can
+    /// reference. The refusal is the ordinary unknown-name one, whose tail says why.
+    #[test]
+    fn standalone_repos_cannot_be_included() {
+        let cfg = Config {
+            workspaces: vec![composed("platform", &["docs"], &[], &["/shared"])],
+            standalone: WorkspaceConfig {
+                roots: None,
+                // Resolves to a standalone workspace *named* `docs` — and still not
+                // includable, which is the point.
+                repos: Some(vec!["/solo/docs".to_owned()]),
+            },
+            ..Default::default()
+        };
+        let err = cfg
+            .resolved_workspaces()
+            .expect_err("a `[standalone]` repo must not be includable")
+            .to_string();
+        assert!(err.contains("no workspace named `docs`"), "{err}");
+        assert!(
+            err.contains("`[standalone]` repos are unnamed"),
+            "the refusal must say why a standalone repo is not includable; was: {err}"
+        );
+    }
+
+    /// The legacy `[workspace]` is includable under the name it folds in as
+    /// (`default`) — it is a named linked workspace like any other once resolved, and
+    /// `[standalone]` is excluded for being unnamed, not for being legacy.
+    #[test]
+    fn legacy_workspace_is_includable_as_default() {
+        let cfg = Config {
+            workspace: WorkspaceConfig {
+                roots: None,
+                repos: Some(vec!["/legacy".to_owned()]),
+            },
+            workspaces: vec![composed("platform", &["default"], &[], &["/shared"])],
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        assert_eq!(
+            members(&resolved, "platform").1,
+            vec!["/shared".to_owned(), "/legacy".to_owned()]
+        );
+        assert_eq!(
+            members(&resolved, "default").1,
+            vec!["/legacy".to_owned()],
+            "including the legacy table composes it, it does not consume it"
+        );
     }
 
     /// A `[standalone]` root holding several repos expands to one **single-repo**,
@@ -2348,6 +2990,7 @@ mod tests {
                 name: "api".to_owned(),
                 roots: Some(vec!["~/api/root".to_owned()]),
                 repos: Some(vec!["~/api/repo".to_owned()]),
+                includes: None,
             }],
             standalone: WorkspaceConfig {
                 roots: None,
