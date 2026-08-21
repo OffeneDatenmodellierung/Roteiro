@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v2.0.0...rto-llama-v2.0.1) - 2026-08-21
+
+### Other
+
+- *(llama)* fix subject-verb agreement in the measurement caveat
+- *(llama)* scope the context-cost measurement, and settle n_ubatch
+
 ## [1.26.6](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v1.26.5...rto-llama-v1.26.6) - 2026-08-20
 
 ### Other
