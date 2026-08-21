@@ -85,13 +85,27 @@ fn scan_root() -> PathBuf {
 
 /// Every `.rs` and `.md` file under `dir`, recursively.
 ///
-/// An unreadable directory is a failure, not an empty one: returning quietly
-/// would drop a subtree while leaving `files` non-empty, so the "scanned
-/// nothing" assertion would not notice.
+/// Anything unreadable is a failure, not an empty one: returning quietly would
+/// drop a subtree while leaving `files` non-empty, so the "scanned nothing"
+/// assertion would not notice.
+///
+/// That applies to a single **entry** as much as to the directory holding it.
+/// `flatten()` here would discard a per-entry `Err` and silently omit one file
+/// or one subtree — partial silence, which the total-silence assertion is
+/// structurally unable to catch. So the `Result` is unwrapped with the
+/// directory and the error kind named: an entry that cannot be read has not
+/// been scanned, and this guard's whole claim is that everything was.
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("cannot list {} ({:?}: {e})", dir.display(), e.kind()));
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "cannot read an entry of {} ({:?}: {e})",
+                dir.display(),
+                e.kind()
+            )
+        });
         let path = entry.path();
         if path.is_dir() {
             let skip = path
@@ -125,10 +139,20 @@ fn no_file_describes_a_note_name_as_the_pre_574_form() {
     let needle = dead_spelling();
     let mut hits = Vec::new();
     for path in &files {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            // Not UTF-8: cannot contain the needle, and is not prose.
-            continue;
-        };
+        // Bytes, not `read_to_string`. The skip this replaces claimed a file
+        // that fails to decode "cannot contain the needle", which is false on
+        // its own terms: the needle is pure ASCII and a file with invalid UTF-8
+        // bytes *anywhere* carries it perfectly well, so the skip discarded
+        // exactly the hit it was looking for — and swallowed permission and I/O
+        // errors on top of that. Reading bytes removes the skip rather than
+        // relocating it: there is no decode to fail, so there is no case left to
+        // justify.
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|e| panic!("cannot read {} ({:?}: {e})", path.display(), e.kind()));
+        // Lossy decoding is for *reporting* only. Invalid bytes become U+FFFD
+        // and `\n` is preserved, so an ASCII needle survives byte for byte and
+        // the reported line number is the file's own.
+        let text = String::from_utf8_lossy(&bytes);
         for (i, line) in text.lines().enumerate() {
             if line.contains(&needle) {
                 let rel = path.strip_prefix(&root).unwrap_or(path);
