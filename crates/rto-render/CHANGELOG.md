@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.30.0...rto-render-v2.0.0) - 2026-08-21
+
+### Fixed
+
+- *(render)* [**breaking**] make note_name injective under filename case folding
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into fix/574-lossless-note-names
+
 ## [1.30.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v1.29.0...rto-render-v1.30.0) - 2026-08-21
 
 ### Added
