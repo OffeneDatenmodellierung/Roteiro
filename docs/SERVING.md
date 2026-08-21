@@ -84,6 +84,7 @@ than a surprise.
 | a tool whose `type` is not `"function"` | **400** | `function` is the only kind in OpenAI's envelope; coercing a `retrieval` tool into one would tell the client it was understood |
 | a model's `<think>` reasoning block | **stripped** — never in `content`, streamed or not | the rule every other Roteiro consumer already applied. Not offered as `reasoning_content` either — see below |
 | a generation that never leaves its `<think>` block | **refused** in the assistant slot, prefixed `Roteiro: ` | there is no answer in it; the deliberation is not returned as a consolation |
+| an answer that merely *mentions* `<think>` or `</think>` | **untouched** | a block is text that *opened* with `<think>`. Ask this endpoint what the tags mean and the reply quotes them; treating a quoted tag as a block would truncate a correct answer with `finish_reason: "stop"` still saying nothing was cut |
 
 **A model's reasoning never reaches you, and that is a decision.**
 A reasoning-capable GGUF (Qwen3, DeepSeek-R1, …) writes a `<think>…</think>` block
@@ -104,6 +105,15 @@ Three reasons this endpoint strips rather than forwarding:
   the next round.
 * **The rule now lives in one place.** `rto_llama::thinking` is shared by this
   endpoint and by every CLI path, so the two cannot drift apart again.
+
+**Stripping keys on a block being opened, never on a tag appearing.** The rule asks
+whether the content *starts* with `<think>` — after leading whitespace — and only
+then looks for the close tag. This is the whole reason you can ask this endpoint
+about its own reasoning handling and get the answer back intact: a reply quoting
+`</think>` is prose, and cutting everything before a quoted tag would be the silent
+truncation `docs/REVIEW_CHECKLIST.md` §Refusals forbids. The streaming filter has
+always read it this way; since #589 the non-streaming half does too, so the two
+surfaces agree on what counts as a block as well as on what to do with one.
 
 **`reasoning_content` is deliberately not implemented.** Returning the block under
 a field name would be adopting a convention Roteiro does not otherwise speak, and

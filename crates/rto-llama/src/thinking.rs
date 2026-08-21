@@ -51,6 +51,15 @@
 //!
 //! # What this does *not* refuse
 //!
+//! **An answer that talks about the tags is an answer.** A block is content that
+//! *opened* with `<think>`; a `<think>` or `</think>` appearing anywhere else is
+//! prose about a tag, and both [`answer`] and [`StreamFilter`] hand it back whole.
+//! That is not a corner: this repository's own `docs/SERVING.md`, #582 and #583
+//! all discuss the tags, so asking Ask about them is the reproduction. Keying on
+//! a close tag alone truncated such a reply at the quote — silently, with
+//! [`FinishReason`] still reporting `Stop` and nothing saying anything had been
+//! cut (#589).
+//!
 //! A generation that closed its block and was then cut off mid-answer is a
 //! partial answer, not a missing one, and this hands it over. The caller already
 //! has [`FinishReason`] and can decide — `rto-remote` refuses that case at its
@@ -127,26 +136,36 @@ impl Unterminated {
 /// [`Unterminated`] if the generation opened a block it never closed — see the
 /// module documentation for why that is a refusal rather than a passthrough.
 pub fn answer(content: &str, finish_reason: FinishReason) -> Result<&str, Unterminated> {
+    // **Whether a block was opened is decided first, and once.** `starts_with`
+    // rather than `contains`, and that precision is the point: a model asked what
+    // a reasoning tag looks like will write `<think>` or `</think>` in the middle
+    // of a perfectly good answer, and treating either as a block would be this
+    // module inventing a truncation. Both live reproductions in #582 and #583
+    // show llama.cpp emitting the opening tag at position zero, which is where a
+    // block that was actually opened puts it.
+    //
+    // The check governs *both* readings below, because a close tag means nothing
+    // without an open one. Asking it only about the unterminated case is how a
+    // reply quoting `</think>` — which `docs/SERVING.md` and this PR's own issues
+    // provoke — lost everything before the quote, silently and with a
+    // `finish_reason` still saying `stop`. That is also the reading
+    // [`StreamFilter`] has always taken, and the two surfaces answer the same
+    // question the same way or they are the defect #582 was filed on.
+    if !content.trim_start().starts_with(OPEN) {
+        // No block at all — a non-reasoning model, a reasoning model that did not
+        // use one, or an answer that merely talks about the tags. Handed back
+        // untouched.
+        return Ok(content);
+    }
     match content.find(CLOSE) {
-        // A closed block: the answer is what follows it. Leading whitespace goes
-        // because the close tag is followed by the model's newlines, not by the
-        // reader's.
+        // A closed block: the answer is what follows it. The *first* close tag,
+        // so an answer that goes on to quote the tag keeps its quote. Leading
+        // whitespace goes because the close tag is followed by the model's
+        // newlines, not by the reader's.
         Some(end) => Ok(content[end + CLOSE.len()..].trim_start()),
-        // No close tag, and the generation opened with one: the block never
-        // ended, so everything here is deliberation.
-        //
-        // `starts_with` rather than `contains`, and that precision is the point.
-        // A model asked what a reasoning tag looks like will write `<think>` in
-        // the middle of a perfectly good answer, and refusing that would be this
-        // module inventing a truncation. Both live reproductions in #582 and
-        // #583 show llama.cpp emitting the opening tag at position zero, which is
-        // where a block that was actually opened puts it.
-        None if content.trim_start().starts_with(OPEN) => {
-            Err(Unterminated::from_finish_reason(finish_reason))
-        }
-        // No block at all — a non-reasoning model, or a reasoning model that did
-        // not use one. Handed back untouched.
-        None => Ok(content),
+        // Opened and never closed: the block never ended, so everything here is
+        // deliberation.
+        None => Err(Unterminated::from_finish_reason(finish_reason)),
     }
 }
 
@@ -368,6 +387,32 @@ mod tests {
         assert_eq!(answer(reply, FinishReason::Stop), Ok(reply));
     }
 
+    /// **And neither is talking about the *closing* tag.** The same argument as
+    /// the test above, on the other half of the `match`: a close tag counts only
+    /// when the content opened with a block, so a reply that merely quotes
+    /// `</think>` keeps everything before it. Getting this wrong discards the
+    /// whole answer up to the quoted tag, silently and with no `finish_reason`
+    /// saying so — and `docs/SERVING.md`, #582 and #583 are all documents that
+    /// would provoke exactly that reply.
+    #[test]
+    fn a_mention_of_the_close_tag_is_not_the_end_of_a_block() {
+        let reply = "A reasoning model ends its scratchpad with </think>, and Roteiro strips it.";
+        assert_eq!(answer(reply, FinishReason::Stop), Ok(reply));
+    }
+
+    /// A real block wins over a later mention: the strip keys on the *first*
+    /// close tag, so an answer that goes on to quote the tag keeps the quote.
+    #[test]
+    fn a_real_block_is_stripped_and_a_later_mention_is_not() {
+        assert_eq!(
+            answer(
+                "<think>hm</think>\n\nthe tag is spelled </think>",
+                FinishReason::Stop
+            ),
+            Ok("the tag is spelled </think>")
+        );
+    }
+
     /// A block that closed and *then* ran out of budget is a partial answer, not
     /// a missing one — see the module docs. The caller still has the stop reason
     /// and decides for itself; this hands over what was written.
@@ -404,6 +449,8 @@ mod tests {
             "<think>a</think>b",
             "",
             "a reply mentioning <think> in passing",
+            "a reply mentioning </think> in passing",
+            "<think>a</think>b then </think> again",
         ] {
             let pieces: Vec<String> = text.chars().map(|c| c.to_string()).collect();
             let refs: Vec<&str> = pieces.iter().map(String::as_str).collect();
