@@ -150,6 +150,10 @@ pub struct Config {
     pub media: MediaConfig,
     /// `roteiro serve --models` local endpoint settings.
     pub serve: ServeConfig,
+    /// `[mcp]` — the MCP graph server's advertised tool surface (issue #584).
+    /// **The one table here whose list layers by intersection**; see
+    /// [`ToolAllowList`].
+    pub mcp: McpConfig,
     /// `roteiro debt` tuning (paths excluded from the intent-debt scan).
     pub debt: DebtConfig,
     /// `[remote]` — the optional, default-off remote model tier (ADR-0019).
@@ -1045,6 +1049,111 @@ pub struct ServeConfig {
     pub tls_key: Option<String>,
 }
 
+/// `[mcp]` — what the MCP graph server advertises (`roteiro mcp`,
+/// `roteiro serve --mcp`).
+///
+/// Separate from `[serve]` because `[serve] tools` is already taken and means
+/// something else: a boolean deciding whether the *served-chat* model is given
+/// the graph tools at all. Two keys called `tools` in one table, one a boolean
+/// over a different surface, would be a worse outcome than a second table.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct McpConfig {
+    /// The tools this layer is willing for the MCP server to advertise. Unset ⇒
+    /// this layer restricts nothing. See [`ToolAllowList`] for the layering,
+    /// which is not this file's usual one.
+    pub tools: Option<ToolAllowList>,
+}
+
+/// `[mcp] tools` as **one layer** states it (issue #584).
+///
+/// # Its layers intersect, and that is the design rather than a detail
+///
+/// Every other list in this file either replaces — `[serve] models` is a
+/// selection, `roots`/`repos` are discovery — or unions, as `[debt] ignore`
+/// does. This one does neither, because of what an entry *means*: naming a tool
+/// does not ask for that tool, it declines every tool not named. A layer's
+/// effect is therefore always a **denial**, and the ordinary "nearer layer wins"
+/// would let a nearer layer *un-deny* — a committed `roteiro.toml` restoring
+/// `sandbox_clear` after the machine's owner removed it in
+/// `~/.roteiro/config.toml`. That is the failure ADR-0007 v1.4's inversion
+/// exists to prevent, reached from the other direction.
+///
+/// So the effective surface is the intersection of the built-in set with every
+/// layer that names one, **the invocation's `--tools` included**. Intersection
+/// is a lattice meet: order-independent, idempotent, and monotone downwards, so
+/// "a layer may deny and may not grant" holds by construction rather than by a
+/// rule each new call site has to remember — which is what ADR-0007 v1.4 means
+/// by requiring the mechanism be structural.
+///
+/// # Why `--tools` narrows rather than wins
+///
+/// ADR-0007's headline order puts the flag first, and it still does for every
+/// key where a flag has a value to state. Here it has none: there is no grant
+/// for a flag to express, only a further denial, exactly as the ADR says of a
+/// value key that "there is no deny for `[models] generative`, only a different
+/// value". The reading that matters is who writes the flag. Under issue #579
+/// Roteiro may write its own `roteiro mcp …` line into a third-party agent's
+/// config, so the invocation is not reliably a person typing at a prompt, while
+/// `~/.roteiro/config.toml` is unambiguously the machine owner's standing
+/// intent. A flag that could widen would let a generated registration undo it.
+/// To widen, widen the config layer — the same answer `[lint]` gives.
+///
+/// # It is a value, not a capability, under ADR-0007 v1.4
+///
+/// By the ADR's own default rule rather than by assertion: the built-in default
+/// already advertises every tool, so setting this in a committed project file
+/// cannot cause anything that would not otherwise happen, and the capability
+/// test fails at its first clause. What a project file *can* do is fail to keep
+/// a denial the user layer made, which is why the layering is the type's job.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct ToolAllowList(Vec<String>);
+
+impl ToolAllowList {
+    /// The names this layer allows, in the order written.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.0
+    }
+
+    /// The tools **both** layers allow — the meet described on this type.
+    #[must_use]
+    fn narrowed_by(&self, over: &Self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|name| over.0.iter().any(|o| o == *name))
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+impl From<Vec<String>> for ToolAllowList {
+    fn from(names: Vec<String>) -> Self {
+        Self(names)
+    }
+}
+
+impl McpConfig {
+    /// Overlay the project layer (`over`) on the user layer (`self`).
+    ///
+    /// Its own function, like [`RemoteConfig::overlaid_with`], because the one
+    /// key in it does not follow this file's ordinary precedence and that is
+    /// worth seeing where it is applied.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            tools: match (self.tools.as_ref(), over.tools.as_ref()) {
+                // A layer that says nothing restricts nothing, so the other
+                // layer's denial stands rather than being widened by silence.
+                (None, other) | (other, None) => other.cloned(),
+                (Some(user), Some(project)) => Some(user.narrowed_by(project)),
+            },
+        }
+    }
+}
+
 /// `[infer]` — defaults for the similarity-inference command.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -1182,6 +1291,7 @@ impl Config {
                 silence_rms: over.media.silence_rms.or(self.media.silence_rms),
                 image_variance: over.media.image_variance.or(self.media.image_variance),
             },
+            mcp: self.mcp.overlaid_with(&over.mcp),
             serve: ServeConfig {
                 addr: over.serve.addr.clone().or(self.serve.addr.clone()),
                 models: over.serve.models.clone().or(self.serve.models.clone()),
@@ -1925,6 +2035,68 @@ mod tests {
         assert_eq!(find_project_config(&root), None);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `[mcp] tools` layers by **intersection**, and the direction is the point:
+    /// a committed `roteiro.toml` may narrow what the machine's owner allowed and
+    /// may not widen it (issue #584).
+    ///
+    /// The failing case is the third block. Under this file's ordinary "nearer
+    /// layer wins" the project file would restore `sandbox_clear` after the user
+    /// removed it — consent granted by pull request, which is exactly what
+    /// ADR-0007 v1.4's inversion exists to stop, reached from the other direction.
+    #[test]
+    fn mcp_tools_intersect_so_a_project_file_can_narrow_but_never_widen() {
+        let dir = std::env::temp_dir().join(format!("roteiro-mcp-tools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+        let tools = |loaded: &super::Loaded| -> Option<Vec<String>> {
+            loaded
+                .effective
+                .mcp
+                .tools
+                .as_ref()
+                .map(|t| t.names().to_vec())
+        };
+
+        // A layer that says nothing restricts nothing, so the other layer stands.
+        std::fs::write(&user, "[mcp]\ntools = [\"search\", \"explain\"]\n").expect("write");
+        std::fs::write(&project, "[infer]\ntop_k = 3\n").expect("write");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(
+            tools(&loaded),
+            Some(vec!["search".to_owned(), "explain".to_owned()])
+        );
+
+        // The project layer may narrow.
+        std::fs::write(&project, "[mcp]\ntools = [\"search\"]\n").expect("write");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(tools(&loaded), Some(vec!["search".to_owned()]));
+
+        // And it may NOT widen: naming a tool the user layer withheld adds
+        // nothing, and naming a disjoint set leaves nothing rather than
+        // everything — which is the reading that would be dangerous.
+        std::fs::write(
+            &project,
+            "[mcp]\ntools = [\"search\", \"explain\", \"sandbox_clear\"]\n",
+        )
+        .expect("write");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(
+            tools(&loaded),
+            Some(vec!["search".to_owned(), "explain".to_owned()]),
+            "the project layer must not restore a tool the user layer withheld",
+        );
+
+        std::fs::write(&project, "[mcp]\ntools = [\"debt\"]\n").expect("write");
+        let loaded = load_from(Some(user), Some(project)).expect("load");
+        assert_eq!(
+            tools(&loaded),
+            Some(Vec::new()),
+            "disjoint layers leave an empty surface, which the server refuses to \
+             start on — never an unrestricted one",
+        );
     }
 
     #[test]

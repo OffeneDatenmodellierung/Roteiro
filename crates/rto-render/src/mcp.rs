@@ -181,6 +181,7 @@
 //! gap here is this crate's missing config access, not a defect in the CLI that
 //! would excuse duplicating it.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -473,19 +474,20 @@ struct GraphServer {
     /// before, and the tests point it somewhere disposable.
     #[cfg(feature = "execution")]
     asset_root: std::path::PathBuf,
-    // Populated by the `#[tool_router]` macro and consumed by the
-    // `#[tool_handler]`-generated routing; not read by hand.
-    #[allow(dead_code)]
+    /// The advertised **and** dispatchable set, built once by
+    /// [`GraphServer::routes`] and read by the `#[tool_handler]`-generated
+    /// `list_tools`, `call_tool` and `get_tool`. One object, so a restriction
+    /// cannot reach the listing and miss the dispatch (issue #584).
     tool_router: ToolRouter<Self>,
 }
 
 impl GraphServer {
-    fn new(workspace: SharedWorkspace) -> Self {
+    fn new(workspace: SharedWorkspace, advertised: &Advertised) -> Self {
         Self {
             workspace,
             #[cfg(feature = "execution")]
             asset_root: rto_exec::asset_root(),
-            tool_router: Self::routes(),
+            tool_router: Self::routes(advertised),
         }
     }
 
@@ -511,15 +513,42 @@ impl GraphServer {
     /// the whole feature-gated block rather than sprinkled through one.
     ///
     /// This is also the single definition of the advertised set: `new` stores it,
-    /// `tool_names` reads it, and `#[tool_handler(router = Self::routes())]`
-    /// dispatches against it — so a tool cannot be listed and unroutable, or
-    /// routable and unlisted.
-    fn routes() -> ToolRouter<Self> {
+    /// `tool_names` reads it, and `#[tool_handler(router = self.tool_router)]`
+    /// dispatches against **that stored value** — so a tool cannot be listed and
+    /// unroutable, or routable and unlisted.
+    ///
+    /// # Why the handler reads the field rather than calling this again
+    ///
+    /// It used to be `#[tool_handler(router = Self::routes())]`, which rebuilt an
+    /// unrestricted router on every `tools/list` and every `tools/call` and never
+    /// looked at the field at all. That was harmless while the two could not
+    /// differ. With `advertised` (issue #584) they can, and the difference would
+    /// have been exactly the failure this feature exists to prevent: a restricted
+    /// `tools/list` over a router that still dispatched all fifteen. Advertisement
+    /// is not authority, so both halves now read one object.
+    fn routes(advertised: &Advertised) -> ToolRouter<Self> {
         let routes = Self::tool_router();
         #[cfg(feature = "execution")]
         let routes = routes + Self::security_tool_router();
         #[cfg(feature = "execution")]
         let routes = routes + Self::sandbox_tool_router();
+        let Advertised::Only(allowed) = advertised else {
+            return routes;
+        };
+        // `remove_route` rather than `disable_route`: a disabled route stays in
+        // the map and its name stays in the disabled set, so a later `merge`
+        // could resurrect it. A removed one is gone from both `list_all` and
+        // `call`, which is the guarantee the operator asked for.
+        let mut routes = routes;
+        for name in routes
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .filter(|name| !allowed.contains(name))
+            .collect::<Vec<_>>()
+        {
+            routes.remove_route(&name);
+        }
         routes
     }
 
@@ -1155,6 +1184,125 @@ impl GraphServer {
     }
 }
 
+impl GraphServer {
+    /// The `instructions` string a client is handed on `initialize`: one clause
+    /// per tool **this server actually advertises**.
+    ///
+    /// Assembled rather than written as one literal, and assembled from
+    /// [`GraphServer::tool_router`] rather than from `#[cfg]` alone. The reason is
+    /// the old one with a wider scope: a server that does not offer a tool must
+    /// not announce it, because a model told a tool exists and then handed
+    /// `unknown tool` has been misinformed by its own server. Until `--tools`
+    /// (issue #584) a feature gate was the only way that could happen, so `#[cfg]`
+    /// was enough; an operator can now remove a tool a build does have. Reading
+    /// the router makes the announcement, the listing and the dispatch three views
+    /// of one object.
+    fn instructions(&self) -> String {
+        let has = |name: &str| self.tool_router.has_route(name);
+        let mut out = String::from("Roteiro codebase knowledge graph.");
+        // One clause per tool, each independently omissible. The prose is the
+        // prose that was here, cut at the joints rather than rewritten, so a
+        // restricted server says less and never says something different.
+        if has("search") {
+            out.push_str(
+                " Start with `search` to find nodes by text (it searches captured \
+                 content too — README/ADR/blueprint prose — and ranks curated docs \
+                 first, so it answers \"what is X / why\").",
+            );
+        }
+        if has("explain") {
+            out.push_str(" `explain` gives a key's provenance-labelled neighbourhood.");
+        }
+        if has("context") {
+            out.push_str(" `context` returns that neighbourhood bounded and fingerprinted.");
+        }
+        if has("list_kind") {
+            out.push_str(" `list_kind` enumerates a kind.");
+        }
+        if has("path") {
+            out.push_str(" `path` finds how two nodes connect.");
+        }
+        if has("debt") {
+            out.push_str(" `debt` lists intent-debt markers.");
+        }
+        if has("debt_density") {
+            out.push_str(" `debt_density` ranks files by markers per 1,000 lines.");
+        }
+        if has("coupling") {
+            out.push_str(" `coupling` ranks symbols by directed call fan-in/fan-out.");
+        }
+        if has("config_secrets") {
+            out.push_str(
+                " `config_secrets` inventories secret-named config keys (an inventory, \
+                 not a secret scan — see its description).",
+            );
+        }
+        if has("check") {
+            out.push_str(
+                " `check` runs the authored-layer drift gate and returns its verdict as \
+                 data (read its `gate` field: `not-run` is a real outcome and is not a \
+                 clean repository).",
+            );
+        }
+        if has("sandbox_status") {
+            out.push_str(
+                " `sandbox_status` reports what the MACHINE-GLOBAL container-image cache \
+                 is holding and what it costs.",
+            );
+        }
+        if has("sandbox_clear") {
+            out.push_str(
+                " `sandbox_clear` deletes from that cache and is the ONE tool here that \
+                 changes anything — everything it drops is re-obtainable from a pinned \
+                 digest, so it costs a re-download and never information. Show the user \
+                 `sandbox_status` before calling it, quote the bytes it reports freeing, \
+                 and pass exactly one of `image` and `everything` — neither has a default \
+                 and supplying neither is an error rather than a request to clear \
+                 everything.",
+            );
+        }
+        if has("security_list") {
+            out.push_str(" `security_list` lists stored analyzer findings.");
+        }
+        if has("security_status") {
+            out.push_str(
+                " `security_status` reports readiness in two separately scoped halves \
+                 (`machine` = what this host has provisioned AND installed, `repository` \
+                 = one project's layers).",
+            );
+        }
+        if has("security_list") || has("security_status") {
+            out.push_str(
+                " Read `coverage` before concluding anything from either, because \
+                 `no-analyzer-on-record` means nothing has been analyzed and is not a \
+                 clean repository. Neither can run an analyzer, ingest a report or \
+                 prefetch an asset; ask the user to run those.",
+            );
+        }
+        // Two spellings of one rule, chosen by whether the mutating tool is on
+        // this server: with `sandbox_clear` advertised the flat one is false, and
+        // stating a rule with its exception named is the difference between a rule
+        // and a claim a model can catch the server out on. The rule the read-only
+        // stance protects — a model must not change what the graph says — is
+        // unweakened either way.
+        if has("sandbox_clear") {
+            out.push_str(
+                " Every tool here answers from the graph and none of them changes it, \
+                 with exactly one exception: `sandbox_clear` deletes cached container \
+                 images — bytes a pinned digest re-obtains — and changes nothing the \
+                 graph says.",
+            );
+        } else {
+            out.push_str(" Every tool here is read-only.");
+        }
+        out.push_str(
+            " There is no `review` tool — `roteiro review` is CLI-first and needs no \
+             server; see this module's documentation for why it is not exposed.",
+        );
+        out
+    }
+}
+
 // The async methods this trait needs are generated by `#[tool_handler]`;
 // whether a given expansion awaits anything is rmcp's business, and
 // `ServerHandler` fixes the signatures as `async` either way. The lint is
@@ -1167,7 +1315,7 @@ impl GraphServer {
 // clippy, which would break the checklist command for a contributor whose
 // `stable` has not rolled over yet.
 #[allow(unknown_lints, clippy::unused_async_trait_impl)]
-#[tool_handler(router = Self::routes())]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for GraphServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` is `#[non_exhaustive]`; build from default then set fields.
@@ -1175,65 +1323,7 @@ impl ServerHandler for GraphServer {
         info.protocol_version = ProtocolVersion::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("roteiro", env!("CARGO_PKG_VERSION"));
-        // Assembled rather than a single literal because the `security_*` pair is
-        // feature-gated: a server that does not offer them must not announce them,
-        // and a model told a tool exists and then handed "unknown tool" has been
-        // misinformed by its own server.
-        let mut instructions = String::from(
-            "Roteiro codebase knowledge graph. Start with `search` to find nodes by \
-             text (it searches captured content too — README/ADR/blueprint prose — \
-             and ranks curated docs first, so it answers \"what is X / why\"); then \
-             `explain` a key for its provenance-labelled neighbourhood, or `context` \
-             for the same neighbourhood bounded and fingerprinted. `list_kind` \
-             enumerates a kind, `path` finds how two nodes connect, `debt` lists \
-             intent-debt markers, `debt_density` ranks files by markers per 1,000 \
-             lines, `coupling` ranks symbols by directed call fan-in/fan-out, \
-             `config_secrets` inventories secret-named config keys (an inventory, \
-             not a secret scan — see its description), and `check` runs the \
-             authored-layer drift gate and returns its verdict as data (read its \
-             `gate` field: `not-run` is a real outcome and is not a clean \
-             repository).",
-        );
-        #[cfg(feature = "execution")]
-        instructions.push_str(
-            " `sandbox_status` reports what the MACHINE-GLOBAL container-image cache \
-             is holding and what it costs; `sandbox_clear` deletes from it and is the \
-             ONE tool here that changes anything — everything it drops is re-obtainable \
-             from a pinned digest, so it costs a re-download and never information. Show \
-             the user `sandbox_status` before calling it, quote the bytes it reports \
-             freeing, and pass exactly one of `image` and `everything` — neither has a \
-             default and supplying neither is an error rather than a request to clear \
-             everything.",
-        );
-        #[cfg(feature = "execution")]
-        instructions.push_str(
-            " `security_list` lists stored analyzer findings and `security_status` \
-             reports readiness in two separately scoped halves (`machine` = what this \
-             host has provisioned AND installed, `repository` = one project's \
-             layers) — read \
-             `coverage` on both before concluding anything, because \
-             `no-analyzer-on-record` means nothing has been analyzed and is not a \
-             clean repository. Neither can run an analyzer, ingest a report or \
-             prefetch an asset; ask the user to run those.",
-        );
-        // Two spellings of one rule, because under `execution` the flat one is no
-        // longer true: `sandbox_clear` changes something. The rule the read-only
-        // stance protects — a model must not change what the graph says — is
-        // unweakened, and stating it with its exception named is the difference
-        // between a rule and a claim a model can catch the server out on.
-        #[cfg(feature = "execution")]
-        instructions.push_str(
-            " Every tool here answers from the graph and none of them changes it, with \
-             exactly one exception: `sandbox_clear` deletes cached container images — \
-             bytes a pinned digest re-obtains — and changes nothing the graph says.",
-        );
-        #[cfg(not(feature = "execution"))]
-        instructions.push_str(" Every tool here is read-only.");
-        instructions.push_str(
-            " There is no `review` tool — `roteiro review` is CLI-first and needs no \
-             server; see this module's documentation for why it is not exposed.",
-        );
-        info.instructions = Some(instructions);
+        info.instructions = Some(self.instructions());
         info
     }
 }
@@ -1250,13 +1340,211 @@ impl ServerHandler for GraphServer {
 /// (#393) are what that costs.
 #[must_use]
 pub fn tool_names() -> Vec<String> {
-    let mut names: Vec<String> = GraphServer::routes()
+    let mut names: Vec<String> = GraphServer::routes(&Advertised::All)
         .list_all()
         .into_iter()
         .map(|t| t.name.to_string())
         .collect();
     names.sort();
     names
+}
+
+/// The bytes a client is handed for a tool surface: for each advertised tool, its
+/// name plus its description plus its `inputSchema` as compact JSON.
+///
+/// The same sum issue #584 measured by driving `roteiro mcp` over stdio and
+/// reading `tools/list`, brought in-tree so the number is a property of the build
+/// rather than of a script somebody has to still have. It matters because it is
+/// not tidiness: a byte-bounded provider refuses a surface over its limit, and at
+/// the 3.13 ms/token prefill measured in issue #578 these bytes are seconds on
+/// every turn.
+///
+/// Excludes the server `instructions`, which are handed over once at `initialize`
+/// rather than per tool — a different line item, counted separately by anything
+/// that wants the total.
+#[must_use]
+pub fn advertised_bytes(advertised: &Advertised) -> usize {
+    GraphServer::routes(advertised)
+        .list_all()
+        .iter()
+        .map(|t| {
+            t.name.len()
+                + t.description.as_deref().map_or(0, str::len)
+                + serde_json::to_string(&t.input_schema).map_or(0, |s| s.len())
+        })
+        .sum()
+}
+
+/// Every tool name this module declares, **in every feature configuration** —
+/// unlike [`tool_names`], which answers what *this build* offers.
+///
+/// The two questions are different and only one of them can validate an
+/// operator's `--tools` list. A build without `execution` has no `sandbox_clear`;
+/// rejecting the name there would make one restriction file mean different things
+/// on different machines, and the operator would have no way to tell a typo from
+/// a feature gate. So a name is **unknown** only when it is not a Roteiro tool at
+/// all, and a real name this build lacks restricts nothing and is reported as
+/// such — which is ADR-0007's feature-availability rule (warn, do not error)
+/// applied to a name instead of a key.
+///
+/// Hand-written because `#[cfg]`-ed-out routes leave no trace to enumerate, and
+/// kept honest by `every_tool_covers_this_build`: it fails if a router offers a
+/// name this list does not carry, in whatever feature set the test is run under.
+pub const EVERY_TOOL: [&str; 15] = [
+    "check",
+    "config_secrets",
+    "context",
+    "coupling",
+    "debt",
+    "debt_density",
+    "explain",
+    "list_kind",
+    "list_projects",
+    "path",
+    "sandbox_clear",
+    "sandbox_status",
+    "search",
+    "security_list",
+    "security_status",
+];
+
+/// The tools that change something — the complement of what [`READ_ONLY`] selects.
+///
+/// Exactly one, and this server's own `instructions` already say so in those
+/// words ("none of them changes it, with exactly one exception: `sandbox_clear`").
+/// Naming it here rather than leaving the claim in prose is what lets
+/// `--tools read-only` stay correct when a second mutating tool is added:
+/// `read_only_is_every_tool_but_the_mutating_ones` fails if this list and that
+/// sentence come apart.
+pub const MUTATING_TOOLS: [&str; 1] = ["sandbox_clear"];
+
+/// The `--tools` / `[mcp] tools` alias for "everything except [`MUTATING_TOOLS`]".
+///
+/// Worth having because the alternative is enumerating fourteen names that grow
+/// stale the moment a tool is added — an allow-list written by hand in a client
+/// config is exactly how issue #584's consumer ended up with a restriction that
+/// did not restrict.
+pub const READ_ONLY: &str = "read-only";
+
+/// What an MCP server advertises **and** dispatches: everything this build
+/// offers, or the subset an operator named (issue #584).
+///
+/// One value covers both halves on purpose. The restriction the server was asked
+/// for has to bind `tools/call` as well as `tools/list` — a tool that is not
+/// advertised must also not be callable, because a client that already knows the
+/// name is precisely the case a restriction is for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Advertised {
+    /// Every tool this build offers.
+    #[default]
+    All,
+    /// Only these — already validated and resolved against this build by
+    /// [`restrict`].
+    Only(BTreeSet<String>),
+}
+
+impl Advertised {
+    /// Whether `name` is advertised (and therefore callable).
+    #[must_use]
+    pub fn allows(&self, name: &str) -> bool {
+        match self {
+            Self::All => tool_names().iter().any(|t| t == name),
+            Self::Only(allowed) => allowed.contains(name),
+        }
+    }
+}
+
+/// Why an operator's tool list was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestrictError {
+    /// A name that is not a Roteiro tool in any build — a typo.
+    Unknown(String),
+    /// The list resolved to nothing this build can serve.
+    ///
+    /// **This is the failure the whole feature exists to prevent**, seen from our
+    /// own side of the wire. In [omnigent#5178] a sidecar allow-list parsed to
+    /// zero entries and the client read that as "no restriction", so a server the
+    /// operator believed restricted advertised everything. An empty result is a
+    /// refusal to start, never a licence to serve the full surface.
+    ///
+    /// [omnigent#5178]: https://github.com/omnigent-ai/omnigent/issues/5178
+    Empty,
+}
+
+impl std::fmt::Display for RestrictError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(name) => write!(
+                f,
+                "unknown tool `{name}` (expected one of {}, or `{READ_ONLY}`)",
+                EVERY_TOOL.join(", ")
+            ),
+            Self::Empty => write!(
+                f,
+                "the tool restriction leaves nothing to serve — refusing to start \
+                 rather than advertising the full surface. Name at least one of {}",
+                tool_names().join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RestrictError {}
+
+/// An operator's tool list, resolved against this build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restriction {
+    /// What the server should advertise and dispatch.
+    pub advertised: Advertised,
+    /// Names that are real Roteiro tools but are not compiled into this binary,
+    /// so they restrict nothing here. Reported, never fatal — see [`EVERY_TOOL`].
+    pub absent: Vec<String>,
+}
+
+/// Resolve an operator's `--tools` / `[mcp] tools` list into a [`Restriction`].
+///
+/// `names` may hold tool names and the [`READ_ONLY`] alias, in any order; the
+/// alias contributes every tool this build offers except [`MUTATING_TOOLS`].
+///
+/// # Errors
+/// [`RestrictError::Unknown`] for a name that is not a Roteiro tool at all, and
+/// [`RestrictError::Empty`] when nothing survives — both loud, because a
+/// restriction that quietly restricts nothing is the defect this feature is a
+/// response to.
+pub fn restrict(names: &[String]) -> Result<Restriction, RestrictError> {
+    let in_build = tool_names();
+    let mut allowed = BTreeSet::new();
+    let mut absent = Vec::new();
+    for raw in names {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name == READ_ONLY {
+            allowed.extend(
+                in_build
+                    .iter()
+                    .filter(|t| !MUTATING_TOOLS.contains(&t.as_str()))
+                    .cloned(),
+            );
+            continue;
+        }
+        if !EVERY_TOOL.contains(&name) {
+            return Err(RestrictError::Unknown(name.to_owned()));
+        }
+        if in_build.iter().any(|t| t == name) {
+            allowed.insert(name.to_owned());
+        } else if !absent.iter().any(|a| a == name) {
+            absent.push(name.to_owned());
+        }
+    }
+    if allowed.is_empty() {
+        return Err(RestrictError::Empty);
+    }
+    Ok(Restriction {
+        advertised: Advertised::Only(allowed),
+        absent,
+    })
 }
 
 /// An error `tools/call` result carrying `message`.
@@ -1286,10 +1574,11 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 ///
 /// # Errors
 /// Returns an error if the runtime cannot start or the transport fails.
-pub fn serve_stdio(workspace: Arc<Workspace>) -> Result<(), McpError> {
+pub fn serve_stdio(workspace: Arc<Workspace>, advertised: &Advertised) -> Result<(), McpError> {
     let shared: SharedWorkspace = workspace;
+    let advertised = advertised.clone();
     runtime()?.block_on(async move {
-        let service = GraphServer::new(shared).serve(stdio()).await?;
+        let service = GraphServer::new(shared, &advertised).serve(stdio()).await?;
         service.waiting().await?;
         Ok(())
     })
@@ -1300,10 +1589,11 @@ pub fn serve_stdio(workspace: Arc<Workspace>) -> Result<(), McpError> {
 /// another app** — e.g. alongside the `/v1` model endpoint on one port
 /// (ADR-0008), so a single process serves both surfaces over one Workspace.
 /// Takes ownership of `workspace`.
-pub fn mcp_router(workspace: Arc<Workspace>) -> axum::Router {
+pub fn mcp_router(workspace: Arc<Workspace>, advertised: &Advertised) -> axum::Router {
     let shared: SharedWorkspace = workspace;
+    let advertised = advertised.clone();
     let service = StreamableHttpService::new(
-        move || Ok(GraphServer::new(shared.clone())),
+        move || Ok(GraphServer::new(shared.clone(), &advertised)),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
@@ -1317,8 +1607,12 @@ pub fn mcp_router(workspace: Arc<Workspace>) -> axum::Router {
 /// # Errors
 /// Returns an error if the runtime cannot start, the address cannot be bound, or
 /// the server fails.
-pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), McpError> {
-    let router = mcp_router(workspace);
+pub fn serve_http(
+    workspace: Arc<Workspace>,
+    addr: SocketAddr,
+    advertised: &Advertised,
+) -> Result<(), McpError> {
+    let router = mcp_router(workspace, advertised);
     runtime()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, router).await?;
@@ -1328,9 +1622,11 @@ pub fn serve_http(workspace: Arc<Workspace>, addr: SocketAddr) -> Result<(), Mcp
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
-        CheckArgs, ConfigSecretArgs, ContextArgs, CouplingArgs, DebtArgs, DensityArgs, ExplainArgs,
-        GraphServer, ListKindArgs, PathArgs, SearchArgs, model_limit,
+        Advertised, CheckArgs, ConfigSecretArgs, ContextArgs, CouplingArgs, DebtArgs, DensityArgs,
+        ExplainArgs, GraphServer, ListKindArgs, PathArgs, SearchArgs, model_limit, tool_names,
     };
     #[cfg(feature = "execution")]
     use super::{SandboxClearArgs, SecurityListArgs, SecurityStatusArgs};
@@ -1381,7 +1677,13 @@ mod tests {
                 EdgeKind::Contains,
             ));
         store.apply_factset(&facts).expect("apply");
-        GraphServer::new(Arc::new(Workspace::single("test", store)))
+        GraphServer::new(Arc::new(Workspace::single("test", store)), &Advertised::All)
+    }
+
+    /// [`seeded`]'s graph behind a chosen tool surface, for the `--tools` tests.
+    #[cfg(feature = "execution")]
+    fn seeded_with(advertised: &Advertised) -> GraphServer {
+        GraphServer::new(seeded().workspace, advertised)
     }
 
     fn text_of(result: &rmcp::model::CallToolResult) -> String {
@@ -2030,7 +2332,7 @@ mod tests {
                 &[finding("semgrep", "rules.taint", Severity::High)],
             )
             .expect("semgrep layer");
-        GraphServer::new(Arc::new(Workspace::single("test", store)))
+        GraphServer::new(Arc::new(Workspace::single("test", store)), &Advertised::All)
     }
 
     /// The trap: `security_list` on a repository no analyzer has run against must
@@ -2561,6 +2863,149 @@ mod tests {
         }
     }
 
+    /// [`EVERY_TOOL`] is hand-written because a `#[cfg]`-ed-out route leaves
+    /// nothing to enumerate. This is what stops it going stale: whatever feature
+    /// set the suite runs under, every route this build offers must be in the
+    /// list, and under `--all-features` the two are the same set.
+    #[test]
+    fn every_tool_covers_this_build() {
+        let in_build: BTreeSet<String> = tool_names().into_iter().collect();
+        let declared: BTreeSet<String> =
+            super::EVERY_TOOL.iter().map(|s| (*s).to_owned()).collect();
+        let missing: Vec<&String> = in_build.difference(&declared).collect();
+        assert!(
+            missing.is_empty(),
+            "`EVERY_TOOL` is missing routes this build offers: {missing:?} — a new \
+             tool has to be added there or `--tools` will refuse its name as a typo",
+        );
+        #[cfg(feature = "execution")]
+        assert_eq!(
+            in_build, declared,
+            "with every feature on, `EVERY_TOOL` must be exactly what is routed",
+        );
+    }
+
+    /// `--tools read-only` has to stay correct when a second mutating tool lands,
+    /// so it is defined as the complement of [`MUTATING_TOOLS`] rather than as a
+    /// list somebody remembers to edit. This pins the two ends together: the
+    /// alias's result, and the sentence `get_info` puts in front of a model.
+    #[test]
+    fn read_only_is_every_tool_but_the_mutating_ones() {
+        let restriction = super::restrict(&[super::READ_ONLY.to_owned()]).expect("resolves");
+        let Advertised::Only(allowed) = restriction.advertised else {
+            panic!("`read-only` must restrict");
+        };
+        for name in tool_names() {
+            assert_eq!(
+                allowed.contains(&name),
+                !super::MUTATING_TOOLS.contains(&name.as_str()),
+                "`read-only` and `MUTATING_TOOLS` disagree about `{name}`",
+            );
+        }
+        // And the server says the same thing in the prose a model actually reads.
+        let server = GraphServer::new(
+            Arc::new(rto_graph::Workspace::single(
+                "test",
+                rto_graph::Store::open_in_memory().expect("store"),
+            )),
+            &Advertised::Only(allowed),
+        );
+        let instructions = server.get_info().instructions.unwrap_or_default();
+        assert!(
+            instructions.contains("Every tool here is read-only"),
+            "a read-only surface must claim to be one: {instructions}",
+        );
+    }
+
+    /// **Advertisement is not authority.** A tool the operator withheld must be
+    /// absent from `tools/list` *and* unreachable by `tools/call` — a client that
+    /// already knows the name is exactly the case a restriction is for.
+    ///
+    /// `list_tools` and `get_tool` are both generated from
+    /// `#[tool_handler(router = self.tool_router)]`, and `call_tool` is generated
+    /// from the same expression, so asserting the first two holds the third: they
+    /// are three reads of one object rather than three lookups that could differ.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn a_withheld_tool_is_neither_listed_nor_dispatchable() {
+        use rmcp::ServerHandler as _;
+
+        let restriction =
+            super::restrict(&["search".to_owned(), "explain".to_owned()]).expect("resolves");
+        let server = seeded_with(&restriction.advertised);
+        let listed: BTreeSet<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert_eq!(
+            listed,
+            ["explain", "search"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<String>>(),
+        );
+        assert!(
+            server.get_tool("sandbox_clear").is_none(),
+            "a withheld tool must not be dispatchable",
+        );
+        assert!(
+            server.get_tool("search").is_some(),
+            "an allowed tool must be"
+        );
+        // The announcement has to follow the surface too, or a model is told a
+        // tool exists and then handed `unknown tool` by its own server.
+        let instructions = server.get_info().instructions.unwrap_or_default();
+        assert!(
+            !instructions.contains("`sandbox_clear`") && instructions.contains("`search`"),
+            "{instructions}",
+        );
+    }
+
+    /// A typo must not pass. It would otherwise silently drop the tool it meant
+    /// to keep, and the operator would have no way to tell that from a tool that
+    /// was never there.
+    #[test]
+    fn an_unknown_tool_name_is_refused_rather_than_ignored() {
+        let err = super::restrict(&["explian".to_owned()]).expect_err("must refuse");
+        assert_eq!(err, super::RestrictError::Unknown("explian".to_owned()));
+        assert!(
+            err.to_string().contains("explain"),
+            "the refusal must list the real names: {err}",
+        );
+    }
+
+    /// **The failure this whole feature is a response to**, reproduced on our side
+    /// of the wire and refused. In omnigent#5178 an allow-list parsed to zero
+    /// entries and the client read that as "no restriction", so a server the
+    /// operator believed restricted advertised everything. An empty result here is
+    /// a refusal to start.
+    #[test]
+    fn a_restriction_that_resolves_to_nothing_refuses_rather_than_serving_everything() {
+        for names in [vec![], vec![String::new()], vec!["  ".to_owned()]] {
+            assert_eq!(
+                super::restrict(&names),
+                Err(super::RestrictError::Empty),
+                "{names:?} must not be read as `advertise everything`",
+            );
+        }
+    }
+
+    /// The byte figure `--tools` exists to move, measured the way a client
+    /// experiences it. `polly-local`'s ten-tool surface is the case from #584.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn restricting_the_surface_removes_advertised_bytes() {
+        let all = super::advertised_bytes(&Advertised::All);
+        let restriction = super::restrict(&[super::READ_ONLY.to_owned()]).expect("resolves");
+        let read_only = super::advertised_bytes(&restriction.advertised);
+        assert!(
+            read_only < all,
+            "dropping the mutating tool must drop bytes: {read_only} vs {all}",
+        );
+    }
+
     #[test]
     fn get_info_advertises_tools() {
         let server = seeded();
@@ -2651,7 +3096,7 @@ mod tests {
         drop(store);
 
         let ws = Workspace::from_repo_paths([dir.clone()]).unwrap();
-        let server = GraphServer::new(Arc::new(ws));
+        let server = GraphServer::new(Arc::new(ws), &Advertised::All);
 
         let out = server.check(Parameters(CheckArgs::default())).await;
         let json: serde_json::Value = serde_json::from_str(&text_of(&out)).expect("json");
@@ -2684,7 +3129,7 @@ mod tests {
         drop(store);
 
         let ws = Workspace::from_repo_paths([dir.clone()]).unwrap();
-        let out = GraphServer::new(Arc::new(ws))
+        let out = GraphServer::new(Arc::new(ws), &Advertised::All)
             .check(Parameters(CheckArgs::default()))
             .await;
         let json: serde_json::Value = serde_json::from_str(&text_of(&out)).expect("json");
@@ -2711,7 +3156,7 @@ mod tests {
         repo_with_node(&base.join("app"), "sym:rust:a.rs#OnlyInApp");
         repo_with_node(&base.join("deploy"), "sym:rust:b.rs#OnlyInDeploy");
         let ws = Workspace::from_repo_paths([base.join("app"), base.join("deploy")]).unwrap();
-        let server = GraphServer::new(Arc::new(ws));
+        let server = GraphServer::new(Arc::new(ws), &Advertised::All);
 
         // A project-qualified key follows the link into `app` — even though the
         // `project` argument names `deploy`, the qualifier wins.
