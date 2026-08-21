@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.29.0...roteiro-v1.30.0) - 2026-08-21
+
+### Added
+
+- *(config)* nested workspaces, resolved by flattening
+
 ## [1.29.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v1.28.0...roteiro-v1.29.0) - 2026-08-20
 
 ### Fixed
