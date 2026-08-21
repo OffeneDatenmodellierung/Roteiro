@@ -307,7 +307,20 @@ inference-local-models = [
 #     `roteiro model` commands, both already in `default`). It pulls no
 #     llama.cpp, and it does **not** enable the tier: the user layer and the
 #     invocation still have to grant, every run.
-remote = ["dep:rto-remote", "dep:rto-exec", "dep:ureq", "models"]
+#
+# Part 2c adds a fifth, and it adds **no toolchain**: `rto-llama` without its
+# `llama` feature is the pure-Rust `Engine` trait and its request/result types,
+# with no `build.rs` and no vendored C++. What this tier needs from it is
+# `rto_llama::thinking` — the rule for reading a reasoning model's `<think>`
+# block, which moved there in #582 because `rto-serve` needs it too and cannot
+# depend on `roteiro`. A hosted reasoning model emits the same block as a local
+# one, so `spec_draft_remote` reads it with the same function every other
+# consumer does, rather than keeping a copy for the one build that could not see
+# the original. Do **not** write this as `rto-llama/llama`: that would put
+# cmake/libclang between a user and the remote tier, which is one of the costs
+# this tier exists to avoid.
+#   * `rto-llama` — the `<think>` rule and `FinishReason`. No C/C++ toolchain.
+remote = ["dep:rto-remote", "dep:rto-exec", "dep:ureq", "dep:rto-llama", "models"]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
 pdf-text = ["rto-graph/pdf-text"]

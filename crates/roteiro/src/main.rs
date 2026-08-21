@@ -5404,7 +5404,16 @@ fn spec_draft_remote(
         if let Some(note) = answer.model_discrepancy(grant.endpoint.model()) {
             eprintln!("{note}");
         }
-        drafts.push((heading, strip_thinking(&answer.text)));
+        // `rto_remote::response::parse` has already refused every stop reason
+        // outside its `COMPLETE` allow-list, so a generation that reached here
+        // ended on its own terms — which is exactly `FinishReason::Stop`, and why
+        // that is not a guess. What it cannot refuse is a model that *finished*
+        // without ever leaving its reasoning block: the endpoint reported `stop`
+        // and a whole-looking body arrived, and only reading the block tells the
+        // two apart (#583).
+        let prose = rto_llama::thinking::answer(&answer.text, rto_llama::FinishReason::Stop)
+            .map_err(|why| unanswered_draft(&heading, why, None))?;
+        drafts.push((heading, prose.to_owned()));
     }
 
     // On stderr and unconditional, on the same terms as `roteiro remote call`'s
@@ -5540,40 +5549,66 @@ fn draft_sections(
         // A reasoning-capable GGUF (Qwen3, DeepSeek-R1, …) emits a
         // `<think>…</think>` block before its answer; keep only the answer so the
         // reasoning never lands in the drafted document.
-        let prose = strip_thinking(&completion.content);
+        //
+        // And when there is no answer to keep, say so rather than writing the
+        // deliberation into the file. `DRAFT_MAX_TOKENS` is 800 and Stage 35b
+        // measured `qwen3.8-27b` spending 1,200 inside `<think>`, so this arm is
+        // reachable with the model this command is configured for (#583).
+        let prose = rto_llama::thinking::answer(&completion.content, completion.finish_reason)
+            .map_err(|why| unanswered_draft(&heading, why, Some(DRAFT_MAX_TOKENS)))?;
         if !prose.trim().is_empty() {
-            drafts.push((heading, prose));
+            drafts.push((heading, prose.to_owned()));
         }
     }
     Ok(drafts)
 }
 
-/// Drop a leading `<think>…</think>` reasoning block, returning the answer that
-/// follows it. Text with no closing `</think>` is returned unchanged.
+/// The error for a section whose generation never got past its reasoning block.
 ///
-/// Applied to remote completions as well as local ones: a hosted reasoning model
-/// emits the same block, and leaving it in would splice a model's scratch
-/// thinking into a drafted document.
+/// **A failed draft, not a short one.** `spec draft` is about to write prose into
+/// a file a human will read as their own document, and the old stripper handed
+/// the model's scratch deliberation to that writer as though it were the section
+/// (#583). Refusing here is the rule `rto_remote::response::parse` already
+/// applies to the sibling backend — *"Roteiro will not hand you a truncated
+/// answer as though it were a whole one"* — which is also why the local and
+/// remote paths must not disagree about it: they draft the same document.
+///
+/// Fails the command rather than skipping the section, on the same grounds. A
+/// skipped section is indistinguishable from one the scaffold did not ask for,
+/// so a person would get a short document and no reason for it; the remote path
+/// already stops the whole draft on a truncated section, and this matches it.
+///
+/// `budget` is the local path's `max_tokens`, which is the number worth quoting
+/// because it is the one the user can raise. The remote tier has no such knob
+/// here — the endpoint chose the cap — so it passes `None` rather than naming a
+/// limit Roteiro does not set.
 #[cfg(any(
     feature = "serve",
     feature = "inference-local-models",
     feature = "remote"
 ))]
-fn strip_thinking(text: &str) -> String {
-    match text.find("</think>") {
-        Some(end) => text[end + "</think>".len()..].trim_start().to_owned(),
-        None => text.to_owned(),
-    }
-}
-
-/// [`strip_thinking`] for `review_llm`, which needs it for the same reason and
-/// must not grow a second copy: a reviewer that parsed a model's `<think>` block
-/// would read its scratch reasoning as findings, and a reasoning model deliberates
-/// about defects it then rejects.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
-#[must_use]
-pub fn strip_thinking_public(text: &str) -> String {
-    strip_thinking(text)
+fn unanswered_draft(
+    heading: &str,
+    why: rto_llama::Unterminated,
+    budget: Option<u32>,
+) -> anyhow::Error {
+    let way_forward = match (why, budget) {
+        (rto_llama::Unterminated::CutAtTokenCap, Some(max_tokens)) => format!(
+            " Nothing was written. Retry with a narrower topic, or raise the drafting budget \
+             above its current {max_tokens} tokens."
+        ),
+        (rto_llama::Unterminated::CutAtTokenCap, None) => {
+            " Nothing was written. Retry with a narrower topic, or use an endpoint with a \
+             larger completion budget."
+                .to_owned()
+        }
+        (rto_llama::Unterminated::CutShort, _) => {
+            " Nothing was written. Retry; if it keeps happening, this model is not finishing \
+             its reasoning and `roteiro model list` shows the others installed."
+                .to_owned()
+        }
+    };
+    anyhow::anyhow!("drafting `{heading}`: {}.{way_forward}", why.as_str())
 }
 
 /// `spec draft` without any generation backend: guide the user to enable one.
@@ -17862,6 +17897,56 @@ mod workspace_tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+/// `spec draft`'s refusal when a generation never got past its reasoning block
+/// (#583) — the CLI half of the rule `rto_llama::thinking` holds.
+#[cfg(all(
+    test,
+    any(
+        feature = "serve",
+        feature = "inference-local-models",
+        feature = "remote"
+    )
+))]
+mod spec_draft_refusal_tests {
+    use super::unanswered_draft;
+    use rto_llama::Unterminated;
+
+    /// **The deliberation must not appear in the message either.** The whole
+    /// defect is a model's scratch reasoning being presented as content; a
+    /// refusal that quoted it back would be a smaller version of the same thing.
+    /// It names the section instead, which is what a person needs to retry.
+    #[test]
+    fn the_refusal_names_the_section_and_not_the_reasoning() {
+        let e = unanswered_draft("Trade-offs", Unterminated::CutAtTokenCap, Some(800));
+        let text = e.to_string();
+        assert!(text.contains("Trade-offs"), "{text}");
+        assert!(text.contains("Nothing was written"), "{text}");
+    }
+
+    /// The local path can name a budget the user controls; the remote tier
+    /// cannot, because the endpoint chose the cap. Quoting a limit Roteiro does
+    /// not set would send someone to a knob that is not there.
+    #[test]
+    fn only_the_local_path_quotes_a_budget() {
+        let local = unanswered_draft("A", Unterminated::CutAtTokenCap, Some(800)).to_string();
+        assert!(local.contains("800"), "{local}");
+
+        let remote = unanswered_draft("A", Unterminated::CutAtTokenCap, None).to_string();
+        assert!(!remote.contains("800"), "{remote}");
+        assert!(remote.contains("larger completion budget"), "{remote}");
+    }
+
+    /// A model that stopped on its own is a different problem from one that ran
+    /// out, and gets different advice — raising a budget that was never the
+    /// binding constraint is the wrong thing to tell someone.
+    #[test]
+    fn a_model_that_stopped_on_its_own_is_not_told_to_raise_the_budget() {
+        let text = unanswered_draft("A", Unterminated::CutShort, Some(800)).to_string();
+        assert!(!text.contains("800"), "{text}");
+        assert!(text.contains("roteiro model list"), "{text}");
     }
 }
 

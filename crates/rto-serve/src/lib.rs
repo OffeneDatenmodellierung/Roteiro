@@ -20,6 +20,12 @@ pub mod types;
 // / `rto_serve::llama` (and the engine types) keep resolving for this crate's
 // modules and existing callers.
 pub use rto_llama::engine;
+// Reading a reasoning model's `<think>` block, which lives in `rto-llama` for
+// the reason recorded there: the `roteiro` CLI needs the same rule and depends
+// on *this* crate, so the rule cannot live here without a cycle (#582).
+// Re-exported on the same terms as `engine` above, so this crate's modules name
+// it the way they name every other shared inference type.
+pub use rto_llama::thinking;
 // The process-wide llama.cpp backend the served engine shares with every other
 // engine in the process (issue #296) — re-exported so an embedder depending on
 // `rto-serve` alone can still give it a deterministic end of life.

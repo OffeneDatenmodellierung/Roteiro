@@ -82,6 +82,53 @@ than a surprise.
 | a client's `role: "tool"` content | **not truncated** | `MAX_TOOL_RESULT` caps results of tools *Roteiro* executes. A client's own result is its own context budget, and silently trimming it would corrupt the transcript the client is correlating against |
 | a `tools` array over **128 entries or 32 KiB** | **400, never truncated** | a bound on what a caller can make Roteiro allocate — see below. Trimming instead would leave the model calling tools whose schemas no longer match what you will execute |
 | a tool whose `type` is not `"function"` | **400** | `function` is the only kind in OpenAI's envelope; coercing a `retrieval` tool into one would tell the client it was understood |
+| a model's `<think>` reasoning block | **stripped** — never in `content`, streamed or not | the rule every other Roteiro consumer already applied. Not offered as `reasoning_content` either — see below |
+| a generation that never leaves its `<think>` block | **refused** in the assistant slot, prefixed `Roteiro: ` | there is no answer in it; the deliberation is not returned as a consolation |
+| an answer that merely *mentions* `<think>` or `</think>` | **untouched** | a block is text that *opened* with `<think>`. Ask this endpoint what the tags mean and the reply quotes them; treating a quoted tag as a block would truncate a correct answer with `finish_reason: "stop"` still saying nothing was cut |
+
+**A model's reasoning never reaches you, and that is a decision.**
+A reasoning-capable GGUF (Qwen3, DeepSeek-R1, …) writes a `<think>…</think>` block
+before its answer. Roteiro drops it here exactly as it drops it for `spec draft`
+and `review --llm`, and the fact that it did **not** used to was an omission rather
+than a policy (#582): the same model producing the same block was cleaned for a CLI
+consumer and passed through raw over HTTP. Measured live, that was ~95 of 105
+completion tokens of deliberation for a one-word answer.
+
+Three reasons this endpoint strips rather than forwarding:
+
+* **It is Roteiro's Ask over HTTP, not a general model backend** — ADR-0006 and
+  #487 settled that framing, and Ask's consumer wants the answer.
+* **Multi-turn callers echo assistant turns back as history**, so a block passed
+  through is re-sent verbatim on *every* subsequent turn, against a prompt budget
+  with no prefix cache today (#578). The same compounding happens inside Roteiro's
+  own tool loop, which is why the block is dropped before a turn is fed back into
+  the next round.
+* **The rule now lives in one place.** `rto_llama::thinking` is shared by this
+  endpoint and by every CLI path, so the two cannot drift apart again.
+
+**Stripping keys on a block being opened, never on a tag appearing.** The rule asks
+whether the content *starts* with `<think>` — after leading whitespace — and only
+then looks for the close tag. This is the whole reason you can ask this endpoint
+about its own reasoning handling and get the answer back intact: a reply quoting
+`</think>` is prose, and cutting everything before a quoted tag would be the silent
+truncation `docs/REVIEW_CHECKLIST.md` §Refusals forbids. The streaming filter has
+always read it this way; since #589 the non-streaming half does too, so the two
+surfaces agree on what counts as a block as well as on what to do with one.
+
+**`reasoning_content` is deliberately not implemented.** Returning the block under
+a field name would be adopting a convention Roteiro does not otherwise speak, and
+the block would still cost a multi-turn caller its budget the moment that caller
+echoed the turn back. If you want a model's deliberation, run the model directly —
+this endpoint is not the place to get it.
+
+**An unterminated block is a refusal, not a short answer.** If generation stops
+inside `<think>`, there is no answer in the completion at all, so `content` carries
+a `Roteiro: `-prefixed sentence saying which budget ran out rather than the raw
+deliberation (#583). This is not hypothetical for the models this registry serves:
+`qwen3.8-27b` was measured spending an entire 1,200-token budget inside `<think>`
+and emitting no answer. `finish_reason` and the token counts are left exactly as
+the model produced them, so a machine client still sees `length` and still bills
+for what was really spent.
 
 **`role: "tool"` becomes a `user` turn carrying `<tool_response>`, deliberately.**
 `llama_chat_apply_template` does not run a Jinja parser — it renders a fixed set of
