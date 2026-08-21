@@ -78,6 +78,115 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Emit `value` as a YAML **double-quoted** scalar, `"`-delimited and escaped so
+/// it parses back to exactly `value`.
+///
+/// The one escaping rule for this module's frontmatter. It exists because the
+/// three hand-rolled variants it replaced disagreed with each other — `key:` and
+/// `project:` turned a `"` into an apostrophe, and `path:` escaped nothing — and
+/// two of the three could emit YAML that does not mean what it says:
+///
+/// | value | was emitted | parsed back as |
+/// | --- | --- | --- |
+/// | `foo\bar` | `"foo\bar"` | `foo<BS>ar` — `\b` is YAML's **backspace** escape |
+/// | `foo\dir` | `"foo\dir"` | *parse error* — `\d` is not a YAML escape |
+/// | `say"hi".rs` | `"say"hi".rs"` | *parse error* — the scalar ends at the `"` |
+///
+/// The first is the dangerous one: seven characters silently become six, and
+/// nothing anywhere reports it. The other two cost the reader every property on
+/// the note, because Obsidian parses this block as the note's properties and a
+/// block that does not parse yields no properties at all rather than an error.
+///
+/// All three inputs are legal path components on Linux and macOS. None occurs in
+/// this repository today, so this is a latent defect rather than an observed one.
+///
+/// Escapes, per YAML 1.2 §7.3.1: the two structural characters `\` and `"`, then
+/// anything a parser is not obliged to accept literally — C0 controls, `DEL`, the
+/// C1 range, and the three separators (`U+2028`, `U+2029`, `U+FEFF`) that some
+/// parsers treat as line breaks. Short escapes where YAML defines one, so the
+/// common cases stay readable, and `\uXXXX` otherwise.
+fn yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            '\u{0}' => out.push_str(r"\0"),
+            '\u{7}' => out.push_str(r"\a"),
+            '\u{8}' => out.push_str(r"\b"),
+            '\u{b}' => out.push_str(r"\v"),
+            '\u{c}' => out.push_str(r"\f"),
+            '\u{1b}' => out.push_str(r"\e"),
+            // Everything else a YAML parser may reject or fold: the rest of C0,
+            // DEL, the C1 range, and the separators that can read as line breaks.
+            c if (c < ' ')
+                || c == '\u{7f}'
+                || ('\u{80}'..='\u{9f}').contains(&c)
+                || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}') =>
+            {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Emit `value` in YAML **plain** (unquoted) style when that round-trips, and as
+/// [`yaml_double_quoted`] when it would not.
+///
+/// For the frontmatter fields that are written bare today — `kind`, `lang`,
+/// `status`. Those are constrained by *today's* producers (an ADR's status is
+/// validated against the house states; kinds and languages come from extraction),
+/// but `roteiro load` installs a caller-supplied graph artifact whose nodes carry
+/// whatever JSON they carry, so "the producer is careful" is not a property this
+/// renderer can rely on. A `status:` of `Accepted: superseded by 0012` emitted
+/// bare is a parse error, and `Accepted # pending` silently truncates to
+/// `Accepted`.
+///
+/// Escalating only when needed is what keeps the bytes of an existing vault
+/// unchanged — every `kind`, `lang` and `status` in this repository is plain-safe
+/// and stays bare. [`is_plain_safe`] is deliberately stricter than YAML's plain
+/// grammar for the same reason it is safe: a value it rejects is merely quoted.
+fn yaml_scalar(value: &str) -> String {
+    if is_plain_safe(value) {
+        value.to_owned()
+    } else {
+        yaml_double_quoted(value)
+    }
+}
+
+/// Whether `value` can be written as a bare YAML scalar and read back unchanged.
+///
+/// A conservative allowlist rather than YAML's actual plain-scalar grammar, which
+/// is subtle enough (indicator characters, `: ` and ` #` only in some positions,
+/// leading and trailing space, implicit typing) that implementing it is how the
+/// bug this replaces gets written a second time. Getting this wrong in the
+/// strict direction costs a pair of quotation marks; getting it wrong in the
+/// permissive direction costs the note's properties.
+///
+/// So: a leading ASCII letter, then letters, digits, `_`, `-`, `.` and `/` — which
+/// covers every kind, language and status this renderer emits — and never a word
+/// YAML resolves to a boolean or null. That last exclusion is not hypothetical:
+/// `no` is the ISO 639-1 code for Norwegian, and YAML 1.1 parsers read a bare `no`
+/// as `false`.
+fn is_plain_safe(value: &str) -> bool {
+    const NOT_STRINGS: [&str; 11] = [
+        "true", "false", "yes", "no", "on", "off", "null", "nil", "none", "y", "n",
+    ];
+    !value.is_empty()
+        && value.starts_with(|c: char| c.is_ascii_alphabetic())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        && !NOT_STRINGS.contains(&value.to_ascii_lowercase().as_str())
+}
+
 /// Which vault a note is being rendered into: a single project's, or one member
 /// of a **workspace** vault spanning several repositories.
 ///
@@ -220,22 +329,22 @@ pub fn render_note_scoped(
 
     let mut c = String::new();
     c.push_str("---\n");
-    let _ = writeln!(c, "key: \"{}\"", ex.node.key.replace('"', "'"));
-    let _ = writeln!(c, "kind: {}", ex.node.kind);
+    let _ = writeln!(c, "key: {}", yaml_double_quoted(&ex.node.key));
+    let _ = writeln!(c, "kind: {}", yaml_scalar(ex.node.kind.as_str()));
     // Which member this note came from. Absent in a single-project vault, where
     // it would be one constant repeated on every note — and where adding it would
     // change every note's bytes.
     if let Some(project) = scope.project {
-        let _ = writeln!(c, "project: \"{}\"", project.replace('"', "'"));
+        let _ = writeln!(c, "project: {}", yaml_double_quoted(project));
     }
     if let Some(path) = &ex.node.path {
-        let _ = writeln!(c, "path: \"{path}\"");
+        let _ = writeln!(c, "path: {}", yaml_double_quoted(path));
     }
     if let Some(lang) = &ex.node.lang {
-        let _ = writeln!(c, "lang: {lang}");
+        let _ = writeln!(c, "lang: {}", yaml_scalar(lang));
     }
     if let Some(status) = status {
-        let _ = writeln!(c, "status: {status}");
+        let _ = writeln!(c, "status: {}", yaml_scalar(status));
     }
     // Nested tags group in Obsidian's tag pane and colour the graph view.
     c.push_str("tags:\n");
@@ -1686,5 +1795,286 @@ mod tests {
         // Singular, because getting this wrong on a one-member workspace is the
         // kind of thing nobody notices until it ships.
         assert!(note.content.contains("**1** member repository."));
+    }
+
+    // ---- YAML frontmatter escaping -------------------------------------------
+
+    /// Parse a note's frontmatter block with a **real** YAML parser and return
+    /// `field`'s value, or the parse error.
+    ///
+    /// Every assertion below goes through this rather than checking the emitted
+    /// bytes. An escaper that is wrong in a self-consistent way passes a
+    /// byte-comparison — that is precisely how `"foo\bar"` survived: it looks
+    /// exactly like what was asked for, and means something else.
+    fn frontmatter_field(note: &str, field: &str) -> Result<Option<String>, String> {
+        let block = note
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .map(|(block, _)| block)
+            .expect("note must open with a frontmatter block");
+        let docs = yaml_rust2::YamlLoader::load_from_str(block).map_err(|e| e.to_string())?;
+        Ok(docs[0][field].as_str().map(ToOwned::to_owned))
+    }
+
+    /// A node whose key, path and language are whatever the test needs.
+    fn node_with(key: &str, path: Option<&str>, lang: Option<&str>) -> Explanation {
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: NodeSummary {
+                key: key.into(),
+                kind: "fn".into(),
+                name: "n".into(),
+                path: path.map(ToOwned::to_owned),
+                lang: lang.map(ToOwned::to_owned),
+            },
+            meta: serde_json::Value::Null,
+            outgoing: vec![],
+            incoming: vec![],
+        }
+    }
+
+    /// The three measured failure modes of the escaping this replaced, each
+    /// asserted on the **parsed** value.
+    ///
+    /// Before the fix: `foo\bar` parsed back as `foo<BS>ar` (silently six
+    /// characters, not seven), and the other two made the whole block
+    /// unparseable — which in Obsidian costs the note *every* property, with no
+    /// error shown.
+    #[test]
+    fn a_backslash_or_quote_in_a_path_still_parses_back_to_itself() {
+        for path in [
+            r"foo\bar",     // `\b` was YAML's backspace escape: silent corruption
+            r"foo\dir",     // `\d` is not a YAML escape at all: parse error
+            "say\"hi\".rs", // an unescaped `"` ended the scalar early: parse error
+            r"a\\b",
+            "trailing-backslash\\",
+        ] {
+            let note = render_note(&node_with("file:x", Some(path), None), None, None);
+            assert_eq!(
+                frontmatter_field(&note.content, "path"),
+                Ok(Some(path.to_owned())),
+                "path {path:?} must round-trip"
+            );
+        }
+    }
+
+    /// `key:` is not hypothetical for this: node keys already carry `:` and `#`,
+    /// and a symbol name can contain a quotation mark.
+    #[test]
+    fn a_node_key_round_trips_whatever_punctuation_it_carries() {
+        for key in [
+            "sym:rust:src/a.rs#Store",
+            r"sym:rust:src\weird.rs#Thing",
+            "sym:rust:a.rs#say\"hi\"",
+            "cfgkey:config.toml#serve.addr",
+        ] {
+            let note = render_note(&node_with(key, None, None), None, None);
+            assert_eq!(
+                frontmatter_field(&note.content, "key"),
+                Ok(Some(key.to_owned())),
+                "key {key:?} must round-trip"
+            );
+        }
+        // The old rule turned a `"` into an apostrophe, so the note reported a key
+        // that was not the node's key — parseable, and wrong.
+        let note = render_note(
+            &node_with("sym:rust:a.rs#say\"hi\"", None, None),
+            None,
+            None,
+        );
+        assert!(
+            !note.content.contains("say'hi'"),
+            "a quotation mark must be escaped, not rewritten: {}",
+            note.content
+        );
+    }
+
+    /// A member directory name is a path component, so it reaches the same rule.
+    #[test]
+    fn a_member_project_name_round_trips() {
+        let ms: std::collections::BTreeSet<String> =
+            std::iter::once(r"odd\name".to_owned()).collect();
+        let note = render_note_scoped(
+            &node_with("file:x", None, None),
+            None,
+            None,
+            &VaultScope {
+                project: Some(r"odd\name"),
+                members: &ms,
+            },
+        );
+        assert_eq!(
+            frontmatter_field(&note.content, "project"),
+            Ok(Some(r"odd\name".to_owned()))
+        );
+    }
+
+    /// The **bare** fields are the other half of the same class, and were missed
+    /// by the review that found the quoted ones: `status` is written unquoted, and
+    /// `roteiro load` installs a caller-supplied artifact whose nodes carry
+    /// whatever they carry.
+    #[test]
+    fn a_bare_field_is_quoted_only_when_being_bare_would_change_it() {
+        let with_status = |status: &str| {
+            let mut ex = node_with("adr:0001", None, None);
+            ex.meta = serde_json::json!({ "status": status });
+            render_note(&ex, None, None)
+        };
+
+        // Would be a parse error bare; would silently truncate bare.
+        for status in [
+            "Accepted: superseded by 0012",
+            "Accepted # pending",
+            "{draft}",
+            "",
+        ] {
+            let note = with_status(status);
+            assert_eq!(
+                frontmatter_field(&note.content, "status"),
+                Ok(Some(status.to_owned())),
+                "status {status:?} must round-trip"
+            );
+        }
+
+        // …and a safe one stays bare, which is what keeps an existing vault's
+        // bytes unchanged.
+        let note = with_status("Accepted");
+        assert!(
+            note.content.contains("\nstatus: Accepted\n"),
+            "a plain-safe status must not gain quotes: {}",
+            note.content
+        );
+    }
+
+    /// `no` is Norwegian, and a bare `no` reads as `false` to a YAML **1.1**
+    /// parser.
+    ///
+    /// The only assertion here that pins emitted bytes, and deliberately so:
+    /// `yaml-rust2` implements YAML 1.2, whose core schema resolves a bare `no`
+    /// to the *string* `no`, so a round-trip through this test's own oracle
+    /// cannot see the problem — it passes either way. The exposure is to the
+    /// parser on the other side, and Obsidian's is not this one. Quoting costs
+    /// two characters on a value that never occurs here; guessing which YAML
+    /// version every downstream reader implements does not seem like the better
+    /// bet.
+    #[test]
+    fn a_language_that_spells_a_yaml_boolean_is_quoted() {
+        let note = render_note(&node_with("file:x", None, Some("no")), None, None);
+        assert!(
+            note.content.contains("\nlang: \"no\"\n"),
+            "a bare `no` is `false` to a 1.1 parser and must be quoted: {}",
+            note.content
+        );
+        assert_eq!(
+            frontmatter_field(&note.content, "lang"),
+            Ok(Some("no".to_owned())),
+            "and it must still read back as the string: {}",
+            note.content
+        );
+        // And an ordinary language is untouched.
+        let rust = render_note(&node_with("file:x", None, Some("rust")), None, None);
+        assert!(rust.content.contains("\nlang: rust\n"), "{}", rust.content);
+    }
+
+    /// Control characters and the separators some parsers fold as line breaks.
+    #[test]
+    fn control_characters_cannot_break_out_of_the_block() {
+        for path in [
+            "a\nb",
+            "a\tb",
+            "a\u{0}b",
+            "a\u{2028}b",
+            "a\u{7f}b",
+            "a\u{85}b",
+        ] {
+            let note = render_note(&node_with("file:x", Some(path), None), None, None);
+            assert_eq!(
+                frontmatter_field(&note.content, "path"),
+                Ok(Some(path.to_owned())),
+                "path {path:?} must round-trip"
+            );
+            // A raw newline would end the scalar and inject a sibling key.
+            assert_eq!(
+                note.content.matches("\npath: ").count(),
+                1,
+                "the value must stay on one line: {}",
+                note.content
+            );
+        }
+    }
+
+    /// The escaping is *only* an escaping: for a value with nothing to escape it
+    /// must emit the same bytes it always did, or #442's promise that a
+    /// single-project vault is byte-identical does not hold.
+    #[test]
+    fn an_ordinary_value_is_emitted_exactly_as_before() {
+        let note = render_note(
+            &node_with("sym:rust:src/a.rs#Store", Some("src/a.rs"), Some("rust")),
+            None,
+            None,
+        );
+        assert!(
+            note.content
+                .contains("\nkey: \"sym:rust:src/a.rs#Store\"\n")
+        );
+        assert!(note.content.contains("\nkind: fn\n"));
+        assert!(note.content.contains("\npath: \"src/a.rs\"\n"));
+        assert!(note.content.contains("\nlang: rust\n"));
+    }
+
+    /// The plain-style decision is checked against a real parser rather than
+    /// against itself: whatever `is_plain_safe` accepts must actually round-trip
+    /// bare, and whatever it rejects must round-trip quoted.
+    #[test]
+    fn the_plain_style_decision_agrees_with_a_real_yaml_parser() {
+        for value in [
+            "fn",
+            "config_key",
+            "rust",
+            "Accepted",
+            "a.b",
+            "a/b",
+            "a-b_c",
+            "no",
+            "yes",
+            "true",
+            "null",
+            "y",
+            "N",
+            "",
+            " lead",
+            "trail ",
+            "a: b",
+            "a #c",
+            "{x}",
+            "[x]",
+            "*x",
+            "&x",
+            "!x",
+            "#x",
+            ">x",
+            "|x",
+            "%x",
+            "@x",
+            "`x",
+            "\"x",
+            "'x",
+            ",x",
+            "123",
+            "1.5",
+            "-x",
+            ".x",
+            "a\\b",
+        ] {
+            let emitted = super::yaml_scalar(value);
+            let doc = format!("v: {emitted}");
+            let parsed = yaml_rust2::YamlLoader::load_from_str(&doc)
+                .unwrap_or_else(|e| panic!("{value:?} emitted {emitted:?}: {e}"));
+            assert_eq!(
+                parsed[0]["v"].as_str(),
+                Some(value),
+                "{value:?} emitted as {emitted:?} did not round-trip"
+            );
+        }
     }
 }

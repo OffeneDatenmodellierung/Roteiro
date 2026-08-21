@@ -38,6 +38,18 @@ serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# A real YAML parser, used **only** to prove the frontmatter this crate emits
+# parses back to the value it was given (`yaml_double_quoted` / `yaml_scalar`).
+# Asserting the emitted bytes instead would pass just as happily on an escaper
+# that is self-consistently wrong, which is the defect being fixed.
+#
+# Already in the tree — `rto-graph` depends on it non-optionally and `roteiro`
+# does too — so this adds a dev-only edge, not a dependency. It is deliberately
+# not a real dependency: `YamlEmitter` dumps a whole document with its own
+# layout and cannot write one scalar into a hand-built block, so using it to
+# emit would rewrite every note's frontmatter and break #442's byte-identity
+# promise.
+yaml-rust2 = "0.11.0"
 
 [features]
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp

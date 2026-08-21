@@ -4342,6 +4342,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "yaml-rust2",
 ]
 
 [[package]]
