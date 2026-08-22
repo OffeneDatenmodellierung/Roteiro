@@ -124,6 +124,166 @@ impl LogArgs {
     }
 }
 
+/// Which tree a command reads, shared by every surface that answers a question
+/// about *this* repository (`debt`, `debt-density`, `coupling`, `config-secrets`,
+/// `search`, `query`, `context`, `path`) and by the `check` gate.
+///
+/// `duplicates` is the one read command still hard-wired to `Committed`. It is
+/// behind the non-default `inference` feature, so the change could not be
+/// compile-tested with the rest; it is left for a follow-up rather than shipped
+/// unverified. Do not read its absence here as a decision that it should stay on
+/// `HEAD` — it is the same defect, untested.
+///
+/// # Why this is one type and not a flag per command
+///
+/// The graph store holds **one** tree at a time: `sync_worktree` stamps
+/// `sync_state` as `{tree}:dirty:{hash}` precisely so a later committed `sync`
+/// supersedes the overlay (`rto_graph::sync_worktree`). That makes the source a
+/// property of the *store*, not of the question — so a command that rebuilds to a
+/// different source does not merely read differently, it **rewrites the store**
+/// and discards what the previous sync assembled.
+///
+/// Issue #599 is what that costs. `roteiro sync` builds the working tree,
+/// announces `+1 uncommitted`, and writes the marker node; `roteiro debt` then
+/// rebuilt to `HEAD`, deleting it, and reported `intent debt: none`. Two commands,
+/// one store, two worlds, and nothing said which. The same read reverted the store
+/// for `search`, `coupling`, `config-secrets` and the rest of the report family —
+/// `search TODO` printing `no matches` after deleting the node it was about to
+/// match.
+///
+/// The fix is that these commands default to the working tree, exactly as `sync`,
+/// `check` and `review` already did, so the common sequence never switches source
+/// and never clobbers. `--committed` and `--staged` remain available, and because
+/// they *are* a source switch the resolved source is named in the report rather
+/// than left implicit.
+///
+/// # Why some surfaces deliberately stay on `Committed`
+///
+/// Not every build site is a read of the developer's current work:
+///
+/// - **`serve` / the MCP tools** (`build_serve_workspaces`, `sync_project_graph`)
+///   are a *server*. It answers for a repository, not for whoever's editor happens
+///   to have unsaved work; following a dirty worktree would make one client's
+///   uncommitted edit visible to every other.
+/// - **`export`, `render obsidian`** produce a shareable snapshot, whose whole
+///   value is being reproducible from a commit (#442's manifest half depends on
+///   exactly that).
+/// - **`init`, the importers, `infer --write`, `compare-codegraph`, `scaffold`**
+///   write, and persisting an edge inferred from an uncommitted edit would put a
+///   fact in the store that no commit supports.
+///
+/// Those are choices rather than oversights, which is the distinction #599 asks
+/// for: a surface may read the committed tree, but it may not do so silently.
+///
+/// # What the default costs
+///
+/// A worktree sync reads and hashes **every tracked file** to find the dirty set,
+/// and unlike the committed sync it has no incremental fast path — so this is not
+/// free. Measured on this repository (339 tracked files, 8.7 MB), release build,
+/// warm store, medians of three:
+///
+/// | `roteiro debt` | median |
+/// |---|--:|
+/// | working tree (the new default) | 0.16 s |
+/// | `--committed` | 0.05 s |
+///
+/// About 0.32 ms per tracked file, so ~3x here and imperceptible in absolute
+/// terms — but it scales with the file count, and a repository an order of
+/// magnitude larger pays an order of magnitude more. `--committed` is the escape
+/// hatch, and on a clean tree it answers the identical question faster.
+#[derive(clap::Args, Debug, Clone, Copy)]
+struct SourceArgs {
+    /// Read only the committed `HEAD` tree, ignoring uncommitted edits.
+    #[arg(long, conflicts_with = "staged")]
+    committed: bool,
+    /// Read the git index — exactly what a commit would record (staged changes
+    /// only, not unstaged working-tree edits).
+    #[arg(long)]
+    staged: bool,
+}
+
+/// How `debt-density` ranks and trims its table. One struct because the three
+/// move together — they are the ranking, not three unrelated knobs — and because
+/// carrying them individually pushed `run_debt_density` past the argument bound
+/// the rest of this file keeps to.
+#[derive(clap::Args, Debug, Clone)]
+struct RankArgs {
+    /// Rank by: `density` | `markers` | `lines`. Defaults to `density`.
+    #[arg(long, value_name = "ORDER", default_value = "density")]
+    order: String,
+    /// Max rows to show; `0` shows every ranked file.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Exclude files shorter than this from the ranking (`0` ranks every file).
+    /// Short files are still counted and reported: one marker in a 10-line file
+    /// is 100 per 1,000 lines, which is arithmetic rather than a finding.
+    #[arg(long, value_name = "N", default_value_t = rto_graph::DEFAULT_MIN_LINES)]
+    min_lines: u32,
+}
+
+impl SourceArgs {
+    /// The [`GraphSource`] these flags select. The default — neither flag — is the
+    /// working tree, matching `sync`, `check` and `review`.
+    fn source(self) -> GraphSource {
+        if self.staged {
+            GraphSource::Index
+        } else if self.committed {
+            GraphSource::Committed
+        } else {
+            GraphSource::Worktree
+        }
+    }
+
+    /// A one-line note naming the tree a report describes, or `None` for the
+    /// default. Printed by the report commands so `debt` and `sync` can never
+    /// disagree about which world they are describing without saying so (#599).
+    ///
+    /// `None` for the default because the working tree is what every
+    /// neighbouring command already reads: a line on every invocation saying so
+    /// would be noise, and noise is what gets filtered out before the one line
+    /// that mattered.
+    ///
+    /// Worded with the **flag** the reader typed rather than
+    /// [`GraphSource::as_str`]'s token: a note reading "the index tree" after
+    /// `--staged` leaves them matching a word they never wrote, and anything
+    /// grepping this output has the flag name and not the internal one. The
+    /// token still appears, in parentheses, because it is what the JSON reports
+    /// and the two should be connectable.
+    /// Print [`SourceArgs::note`] to stderr, if there is one.
+    ///
+    /// Naming the tree when it is not the default is the whole of #599's *"must
+    /// not report different worlds without saying which"*: a report that
+    /// silently answers about `HEAD` while the developer is looking at an
+    /// uncommitted edit is the wrong answer wearing a right one.
+    ///
+    /// **stderr**, so a `--json` consumer's stdout stays exactly one document.
+    ///
+    /// A method rather than the same eight lines at each of the nine report
+    /// surfaces — which is what it was, and what a reviewer correctly objected
+    /// to. Nine copies of a rule is nine chances for one of them to be dropped
+    /// when a surface is edited, and a surface that quietly stops announcing its
+    /// tree is precisely the defect this exists to prevent.
+    fn announce(self) {
+        if let Some(note) = self.note() {
+            eprintln!("{note}");
+        }
+    }
+
+    fn note(self) -> Option<String> {
+        let (flag, what) = if self.staged {
+            ("--staged", "the git index")
+        } else if self.committed {
+            ("--committed", "the committed `HEAD` tree")
+        } else {
+            return None;
+        };
+        Some(format!(
+            "note: {flag} — reporting on {what} (source: {}), not the working tree.",
+            self.source().as_str()
+        ))
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Scaffold Roteiro in the current repository (store, hooks, agent skill).
@@ -225,13 +385,8 @@ enum Command {
         /// Emit the check report as JSON.
         #[arg(long)]
         json: bool,
-        /// Validate only the committed `HEAD` tree, ignoring uncommitted edits.
-        #[arg(long, conflicts_with = "staged")]
-        committed: bool,
-        /// Validate the git index — exactly what a commit would record (staged
-        /// changes only, not unstaged working-tree edits).
-        #[arg(long)]
-        staged: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Query the graph: explain a node, or list all nodes of a kind.
     Query {
@@ -248,6 +403,8 @@ enum Command {
         /// Emit the result as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Search the graph by text — ranked hits over names, keys, paths and
     /// captured content (doc/ADR/blueprint prose). The entry point for
@@ -294,6 +451,8 @@ enum Command {
         /// — so only a caller that opted in sees a different shape.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Generated media content: build it, report on it, discard it (ADR-0015).
     ///
@@ -341,6 +500,8 @@ enum Command {
         /// Emit the result as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Show the effective, merged configuration. The default human-readable
     /// output labels each value's provenance (which layer set it); `--json`
@@ -364,6 +525,11 @@ enum Command {
         cmd: RemoteCmd,
     },
     /// List intent-debt markers (TODOs, stubs, deferred work) in the graph.
+    ///
+    /// By default this reports on the **working tree** — the marker you just
+    /// wrote counts before you commit it, which is when "does my change add
+    /// debt?" is actually asked. `--committed` reports only the `HEAD` tree and
+    /// `--staged` only the git index; both say so in their output.
     Debt {
         /// Restrict to these categories (repeatable): todo | fixme | hack |
         /// stub | deferred. Omit to list all.
@@ -372,6 +538,8 @@ enum Command {
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Rank files by intent-debt **density** — markers per 1,000 lines — rather
     /// than by raw marker count, which ranks the biggest file first by
@@ -381,26 +549,21 @@ enum Command {
     /// length in lines as recorded at extraction — every line, blanks and
     /// comments included, *not* source lines of code. Markers are filtered
     /// exactly as `roteiro debt` filters them, `[debt] ignore` globs included.
+    ///
+    /// Reads the working tree by default, exactly as `roteiro debt` does, and
+    /// takes the same `--committed` / `--staged` flags.
     DebtDensity {
         /// Restrict to these categories (repeatable): todo | fixme | hack |
         /// stub | deferred. Omit to count all.
         #[arg(long, value_name = "CATEGORY")]
         kind: Vec<String>,
-        /// Rank by: `density` | `markers` | `lines`. Defaults to `density`.
-        #[arg(long, value_name = "ORDER", default_value = "density")]
-        order: String,
-        /// Max rows to show; `0` shows every ranked file.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        /// Exclude files shorter than this from the ranking (`0` ranks every
-        /// file). Short files are still counted and reported: one marker in a
-        /// 10-line file is 100 per 1,000 lines, which is arithmetic rather than
-        /// a finding.
-        #[arg(long, value_name = "N", default_value_t = rto_graph::DEFAULT_MIN_LINES)]
-        min_lines: u32,
+        #[command(flatten)]
+        rank: RankArgs,
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Inventory the **secret-named** config keys in the graph: where they are,
     /// what they are called, and whether their values were redacted before being
@@ -423,6 +586,8 @@ enum Command {
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Rank nodes by **directed** call coupling: fan-in (how many distinct
     /// symbols call this one) and fan-out (how many it calls), over `calls`
@@ -441,6 +606,8 @@ enum Command {
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Find a shortest path between two nodes (edges followed either direction).
     Path {
@@ -451,6 +618,8 @@ enum Command {
         /// Emit the result as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Verify cross-repo links across a workspace (ADR-0009): resolve each repo's
     /// authored `[[links]]` against the other repos' graphs, reporting the target
@@ -1715,11 +1884,7 @@ fn main() -> anyhow::Result<()> {
     let _engines = rto_graph::MediaEngineGuard::hold();
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
-        Command::Check {
-            json,
-            committed,
-            staged,
-        } => run_check(ingest, json, committed, staged, debt_ignore),
+        Command::Check { json, source } => run_check(ingest, json, source, debt_ignore),
         Command::Review {
             json,
             base,
@@ -1745,13 +1910,15 @@ fn main() -> anyhow::Result<()> {
             kind,
             app_config_only,
             json,
-        } => run_query(ingest, key, kind, app_config_only, json),
+            source,
+        } => run_query(ingest, key, kind, app_config_only, json, source),
         Command::Search {
             query,
             limit,
             include_generated,
             include_memory,
             json,
+            source,
         } => run_search(
             ingest,
             &query,
@@ -1759,21 +1926,40 @@ fn main() -> anyhow::Result<()> {
             include_generated,
             include_memory,
             json,
+            source,
         ),
         Command::Media { action } => run_media(ingest, gate, action),
         Command::Memory { action } => run_memory(action),
-        Command::Context { key, refresh, json } => run_context(ingest, key, refresh, json),
-        Command::Debt { kind, json } => run_debt(ingest, &kind, json, debt_ignore),
+        Command::Context {
+            key,
+            refresh,
+            json,
+            source,
+        } => run_context(ingest, key, refresh, json, source),
+        Command::Debt { kind, json, source } => run_debt(ingest, &kind, json, debt_ignore, source),
         Command::DebtDensity {
             kind,
+            rank,
+            json,
+            source,
+        } => run_debt_density(ingest, &kind, &rank, json, debt_ignore, source),
+        Command::ConfigSecrets {
+            limit,
+            json,
+            source,
+        } => run_config_secrets(ingest, limit, json, source),
+        Command::Coupling {
             order,
             limit,
-            min_lines,
             json,
-        } => run_debt_density(ingest, &kind, &order, limit, min_lines, json, debt_ignore),
-        Command::ConfigSecrets { limit, json } => run_config_secrets(ingest, limit, json),
-        Command::Coupling { order, limit, json } => run_coupling(ingest, &order, limit, json),
-        Command::Path { from, to, json } => run_path(ingest, &from, &to, json),
+            source,
+        } => run_coupling(ingest, &order, limit, json, source),
+        Command::Path {
+            from,
+            to,
+            json,
+            source,
+        } => run_path(ingest, &from, &to, json, source),
         Command::Links {
             workspace,
             workspace_name,
@@ -3885,19 +4071,12 @@ fn build_graph(
 fn run_check(
     ingest: rto_graph::IngestConfig,
     json: bool,
-    committed: bool,
-    staged: bool,
+    source: SourceArgs,
     debt_ignore: &[String],
 ) -> anyhow::Result<()> {
-    let source = if staged {
-        GraphSource::Index
-    } else if committed {
-        GraphSource::Committed
-    } else {
-        GraphSource::Worktree
-    };
     let (repo, mut store, cache) = open_graph()?;
-    let report = build_graph(&repo, &mut store, &cache, ingest, source)?;
+    let report = build_graph(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     if json {
         emit_json(&report)?;
@@ -5830,11 +6009,13 @@ fn run_query(
     kind: Option<String>,
     app_config_only: bool,
     json: bool,
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
     use rto_graph::{NodeKind, explain, list_kind};
 
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     match (key, kind) {
         (Some(key), _) => {
@@ -5958,9 +6139,11 @@ fn run_search(
     include_generated: bool,
     include_memory: bool,
     json: bool,
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     let opts = rto_graph::SearchOptions {
         limit,
@@ -6791,11 +6974,13 @@ fn run_context(
     key: Option<String>,
     refresh: bool,
     json: bool,
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
     use rto_graph::{context, refresh_contexts};
 
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     if refresh {
         let report = refresh_contexts(&store)?;
@@ -6905,9 +7090,11 @@ fn run_debt(
     kinds: &[String],
     json: bool,
     debt_ignore: &[String],
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    build_graph(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     let report = rto_graph::debt(&store, kinds, debt_ignore)?;
     if json {
@@ -6961,17 +7148,27 @@ fn parse_density_order(token: &str) -> anyhow::Result<rto_graph::DensityOrder> {
 fn run_debt_density(
     ingest: rto_graph::IngestConfig,
     kinds: &[String],
-    order: &str,
-    limit: usize,
-    min_lines: u32,
+    rank: &RankArgs,
     json: bool,
     debt_ignore: &[String],
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
-    let order = parse_density_order(order)?;
+    // Parsed here rather than by clap so the refusal keeps naming the accepted
+    // set from `rto_graph::DensityOrder` itself (`parse_density_order`), which a
+    // clap value parser would replace with its own wording.
+    let order = parse_density_order(&rank.order)?;
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    build_graph(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
-    let report = rto_graph::debt_density(&store, kinds, debt_ignore, order, limit, min_lines)?;
+    let report = rto_graph::debt_density(
+        &store,
+        kinds,
+        debt_ignore,
+        order,
+        rank.limit,
+        rank.min_lines,
+    )?;
     if json {
         emit_json(&report)?;
     } else {
@@ -7045,9 +7242,11 @@ fn run_config_secrets(
     ingest: rto_graph::IngestConfig,
     limit: usize,
     json: bool,
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    build_graph(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     let report = rto_graph::config_secrets(&store, limit)?;
     if json {
@@ -7134,10 +7333,12 @@ fn run_coupling(
     order: &str,
     limit: usize,
     json: bool,
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
     let order = parse_coupling_order(order)?;
     let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    build_graph(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     let report = rto_graph::coupling(&store, order, limit)?;
     if json {
@@ -7194,9 +7395,11 @@ fn run_path(
     from: &str,
     to: &str,
     json: bool,
+    source: SourceArgs,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
+    source.announce();
 
     let result = rto_graph::path(&store, from, to)?;
     if json {

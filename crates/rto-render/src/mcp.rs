@@ -1299,6 +1299,22 @@ impl GraphServer {
             " There is no `review` tool — `roteiro review` is CLI-first and needs no \
              server; see this module's documentation for why it is not exposed.",
         );
+        // Stated once, for every tool, rather than per description: the surface's
+        // mass is already description prose (#590), and this is one fact about the
+        // server rather than a property of any single tool.
+        //
+        // It is stated at all because of #599. The CLI's report commands read the
+        // **working tree** — `roteiro debt` answers about the edit in front of you
+        // — while this server answers from the graph it synced, which is `HEAD`. A
+        // model that reads `roteiro debt` in a terminal and calls `debt` here can
+        // legitimately be told two different numbers; what it must never be is
+        // told them without being told why.
+        out.push_str(
+            " These tools answer from the committed (`HEAD`) graph this server \
+             synced, not from anyone's uncommitted working-tree edits — so a count \
+             here can differ from the same command run in a terminal, which reads \
+             the working tree by default (its `--committed` flag matches this).",
+        );
         out
     }
 }
