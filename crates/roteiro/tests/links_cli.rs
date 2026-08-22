@@ -515,7 +515,10 @@ fn a_struct_derived_hub_key_is_not_a_pinned_baseline() {
     git(&app, &["commit", "-q", "-m", "v2"]);
     assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
 
-    std::fs::write(deploy.join("prod.env"), "TOOLS=head-value\n").expect("write");
+    // Deliberately **different** from HEAD's value. If the spoke matched HEAD,
+    // falling back to HEAD and refusing to compare would both yield
+    // `differs: false` and the test could not tell them apart.
+    std::fs::write(deploy.join("prod.env"), "TOOLS=spoke-value\n").expect("write");
     std::fs::write(
         deploy.join(".gitmodules"),
         "[submodule \"app\"]\n\tpath = app\n\turl = https://github.com/acme/app.git\n",
@@ -568,6 +571,14 @@ fn a_struct_derived_hub_key_is_not_a_pinned_baseline() {
     assert_eq!(
         cell["differs"], false,
         "and must not be reported as overriding a value that does not exist: {m}"
+    );
+    // …and `differs: false` here means "no override is *known*", not "no override
+    // exists". Both silent alternatives assert something untrue — comparing
+    // against HEAD, a revision this spoke does not run, or declaring equality
+    // with a value nobody has — so the cell says the comparison is unavailable.
+    assert_eq!(
+        cell["baseline_unknown"], true,
+        "the cell must say why it made no comparison: {m}"
     );
 
     std::fs::remove_dir_all(&base).ok();

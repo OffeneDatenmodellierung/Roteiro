@@ -7775,6 +7775,12 @@ struct InferredRepo {
     /// distinct rev in the workspace.
     #[serde(skip)]
     hub_baseline: Option<std::collections::BTreeMap<(String, String), String>>,
+    /// `(file, key)` pairs the pinned revision declares **without a value** — a
+    /// struct-derived key. Separate from [`Self::hub_baseline`] because absence
+    /// from that map already means "not resolved against its own revision", and
+    /// conflating the two makes a cell borrow `HEAD`'s value silently.
+    #[serde(skip)]
+    hub_unknown: std::collections::BTreeSet<(String, String)>,
 }
 
 /// The `graph.db` path for the repo at `path` (`<repo>/.git/roteiro/graph.db`).
@@ -8149,10 +8155,30 @@ fn resolve_infer_report(
         let hub_baseline = pinned_to_own_rev.then(|| {
             hub_keys
                 .iter()
+                // Defence in depth: a map *of values* should not carry
+                // placeholders. The observable guarantee is carried by
+                // `hub_unknown` below — with that in place this filter cannot be
+                // seen to matter from outside, and an injection removing it stays
+                // green. It is kept because the alternative is a map whose
+                // entries mean two different things depending on another field.
                 .filter(|k| k.value_known)
                 .map(|k| ((k.file.clone(), k.key.clone()), k.value.clone()))
                 .collect()
         });
+        // The keys the pinned revision *has* but states no value for. Kept apart
+        // from the baseline map because "absent from the map" already means
+        // something else — "not resolved against its own revision" — and a
+        // consumer that cannot tell the two apart silently falls back to `HEAD`,
+        // a revision this spoke does not deploy.
+        let hub_unknown: std::collections::BTreeSet<(String, String)> = if pinned_to_own_rev {
+            hub_keys
+                .iter()
+                .filter(|k| !k.value_known)
+                .map(|k| (k.file.clone(), k.key.clone()))
+                .collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         let (matches, orphans) = infer_links::match_against_hub(keys, hub_keys);
         report.push(InferredRepo {
             repo: name.clone(),
@@ -8161,6 +8187,7 @@ fn resolve_infer_report(
             hub_rev,
             pin_via,
             hub_baseline,
+            hub_unknown,
         });
     }
     Ok(report)
@@ -8347,6 +8374,9 @@ fn run_links_matrix(
                             .hub_baseline
                             .as_ref()
                             .and_then(|b| b.get(&(m.hub_file.clone(), m.hub_key.clone())).cloned()),
+                        hub_value_unknown: rep
+                            .hub_unknown
+                            .contains(&(m.hub_file.clone(), m.hub_key.clone())),
                         hub_key: m.hub_key.clone(),
                         // The hub key's source file, so the matrix row can be
                         // classified as app vs tooling config (parity with the API).

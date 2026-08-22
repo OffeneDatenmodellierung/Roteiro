@@ -1056,6 +1056,7 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                     // This endpoint resolves no pins (see `pin: None` below), so
                     // every cell shares the one hub baseline.
                     hub_value: None,
+                    hub_value_unknown: false,
                 }),
                 // Hub node gone, or its project isn't hosted / has no graph → drift
                 // (an orphan spoke key), not a fatal error for the endpoint.

@@ -47,6 +47,16 @@ pub struct MatchInput {
     /// an override of nothing. Carrying the baseline per cell is what lets the
     /// column stay one column and still be honest.
     pub hub_value: Option<String>,
+    /// The pinned revision **has** this key but states no value for it — a
+    /// struct-derived key (`@rto:config`), whose `ConfigKey::value` is an empty
+    /// placeholder that carries no meaning.
+    ///
+    /// Distinct from `hub_value: None`, which means "no pinned baseline, use the
+    /// shared one". Falling back there would compare the spoke against a
+    /// revision it does not deploy; asserting equality would claim a match
+    /// nobody can check. Neither is true, so the cell says the comparison is
+    /// unavailable and `differs` claims nothing.
+    pub hub_value_unknown: bool,
 }
 
 /// One spoke's contribution to the matrix.
@@ -107,6 +117,15 @@ pub struct Cell {
     /// table is right, and the two values belong to two revisions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<String>,
+    /// The revision this spoke deploys declares the key but states no value, so
+    /// there is nothing to compare against and [`Cell::differs`] is `false`
+    /// because no override is *known* — not because one was ruled out.
+    ///
+    /// Surfaced rather than resolved: the two silent alternatives both assert
+    /// something untrue (comparing against `HEAD`, a revision this spoke does
+    /// not run; or declaring equality with a value nobody has).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub baseline_unknown: bool,
 }
 
 /// One hub key's row: its default value and each spoke's override of it.
@@ -232,8 +251,13 @@ pub fn build(
             // `--pinned` is its own rev. They coincide in the ordinary case.
             let hub_value = hub_values.get(&m.hub_key).cloned().unwrap_or_default();
             let measured_against = m.hub_value.clone().unwrap_or_else(|| hub_value.clone());
-            let differs = measured_against != m.spoke_value;
-            let baseline = (measured_against != hub_value).then_some(measured_against);
+            // An unknown baseline is not a comparison. `differs` stays false —
+            // no override is *known* — and the cell says why, rather than
+            // silently borrowing HEAD's value from a revision this spoke does
+            // not deploy.
+            let differs = !m.hub_value_unknown && measured_against != m.spoke_value;
+            let baseline =
+                (!m.hub_value_unknown && measured_against != hub_value).then_some(measured_against);
             let row = rows.entry(m.hub_key.clone()).or_insert_with(|| Row {
                 hub_key: m.hub_key.clone(),
                 file: String::new(),
@@ -258,6 +282,7 @@ pub fn build(
                 provenance: m.provenance,
                 differs,
                 baseline,
+                baseline_unknown: m.hub_value_unknown,
             };
             // A spoke may set the same hub key in more than one file. Keep a *real*
             // override visible: never let a redundant restatement (`differs = false`)
@@ -321,6 +346,11 @@ pub fn build(
 /// Without it, `=` beside a hub column showing a different value reads as a
 /// broken table. The table is right; the two values belong to two revisions.
 fn baseline_label(cell: &Cell) -> String {
+    if cell.baseline_unknown {
+        return "<span class=\"vs\" title=\"the revision this spoke deploys declares \
+                this key with no value, so no comparison was made\">not compared</span>"
+            .to_owned();
+    }
     cell.baseline.as_deref().map_or_else(String::new, |b| {
         format!(
             "<span class=\"vs\" title=\"the hub value at this spoke's pinned \
@@ -464,10 +494,13 @@ pub fn render_text(m: &OverrideMatrix) -> String {
                 // it was measured against. Without it, `=` beside a hub column
                 // showing something else reads as a broken table rather than as
                 // two revisions.
-                let vs = cell
-                    .baseline
-                    .as_deref()
-                    .map_or_else(String::new, |b| format!("  [vs {b} at its rev]"));
+                let vs = if cell.baseline_unknown {
+                    "  [its rev declares this key with no value — not compared]".to_owned()
+                } else {
+                    cell.baseline
+                        .as_deref()
+                        .map_or_else(String::new, |b| format!("  [vs {b} at its rev]"))
+                };
                 let _ = writeln!(
                     out,
                     "    {flag} {spoke}: {} ({:.2}){vs}",
@@ -668,6 +701,7 @@ mod tests {
                 confidence: 0.9,
                 provenance: Provenance::Inferred,
                 hub_value: None,
+                hub_value_unknown: false,
             }],
             orphans: vec![("MAX_CONNECTIONS".to_owned(), value.to_owned())],
             pin,
@@ -743,6 +777,7 @@ mod tests {
                     provenance: Provenance::Inferred,
                     // …and at that rev the hub said exactly this.
                     hub_value: Some("127.0.0.1:8017".to_owned()),
+                    hub_value_unknown: false,
                 }],
                 orphans: vec![],
                 pin: Some(SpokePin {
@@ -801,6 +836,7 @@ mod tests {
                     confidence: 0.9,
                     provenance: Provenance::Inferred,
                     hub_value: Some("from-base".to_owned()),
+                    hub_value_unknown: false,
                 }],
                 orphans: vec![],
                 pin: Some(SpokePin {
@@ -878,6 +914,7 @@ mod tests {
                 confidence: 0.9,
                 provenance: Provenance::Inferred,
                 hub_value: None,
+                hub_value_unknown: false,
             }],
             orphans: vec![],
             pin: None,
@@ -906,6 +943,7 @@ mod tests {
                     confidence: 0.9,
                     provenance: Provenance::Inferred,
                     hub_value: None,
+                    hub_value_unknown: false,
                 },
                 MatchInput {
                     hub_key: "serve.tools".to_owned(),
@@ -915,6 +953,7 @@ mod tests {
                     confidence: 0.98,
                     provenance: Provenance::Inferred,
                     hub_value: None,
+                    hub_value_unknown: false,
                 },
             ],
             orphans: vec![("MAX_CONNECTIONS".to_owned(), "512".to_owned())],
@@ -954,6 +993,7 @@ mod tests {
             confidence: 0.98,
             provenance: Provenance::Inferred,
             hub_value: None,
+            hub_value_unknown: false,
         };
         let over = || MatchInput {
             hub_key: "serve.addr".to_owned(),
@@ -963,6 +1003,7 @@ mod tests {
             confidence: 0.9,
             provenance: Provenance::Inferred,
             hub_value: None,
+            hub_value_unknown: false,
         };
         for matches in [vec![same(), over()], vec![over(), same()]] {
             let m = build(
@@ -1007,6 +1048,7 @@ mod tests {
                         confidence: 0.0, // authored links carry no score
                         provenance: Provenance::Authored,
                         hub_value: None,
+                        hub_value_unknown: false,
                     },
                     MatchInput {
                         hub_key: "serve.tools".to_owned(),
@@ -1016,6 +1058,7 @@ mod tests {
                         confidence: 0.9,
                         provenance: Provenance::Inferred,
                         hub_value: None,
+                        hub_value_unknown: false,
                     },
                 ],
                 orphans: vec![],
@@ -1063,6 +1106,7 @@ mod tests {
                         confidence: 0.9,
                         provenance: Provenance::Inferred,
                         hub_value: None,
+                        hub_value_unknown: false,
                     },
                     MatchInput {
                         hub_key: "package.name".to_owned(),
@@ -1072,6 +1116,7 @@ mod tests {
                         confidence: 0.9,
                         provenance: Provenance::Inferred,
                         hub_value: None,
+                        hub_value_unknown: false,
                     },
                 ],
                 orphans: vec![],
@@ -1111,6 +1156,7 @@ mod tests {
             confidence: 0.9,
             provenance: Provenance::Inferred,
             hub_value: None,
+            hub_value_unknown: false,
         };
         // Two spokes resolve the same hub key to different files; a third repeats the
         // first file — the row must stay ambiguous (empty) regardless.
