@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v2.1.1...rto-spec-v2.2.0) - 2026-08-22
+
+### Added
+
+- *(spec)* ADR version rules 4 and 5 — frontmatter vs history, and last-modified
+
+### Fixed
+
+- *(spec)* make DocDate::parse exactly YYYY-MM-DD, as its doc already claimed
+
 ## [1.27.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v1.27.0...rto-spec-v1.27.1) - 2026-08-20
 
 ### Fixed
