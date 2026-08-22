@@ -57,11 +57,25 @@ them in the spoke and fail the build when a target vanishes — the
 authored-vs-reality check of `roteiro check`, run *between* repos:
 
 <pre><code>roteiro links --workspace ~/code   <span class="c"># resolves every &#91;&#91;links&#93;&#93; entry; exits non-zero on drift</span>
+roteiro links --write              <span class="c"># …and persist them as durable **authored**</span>
+                                   <span class="c">#    edges — gold, not candidates</span>
 
 <span class="c"># Or skip the authoring — match config keys automatically:</span>
 roteiro links --infer --hub app    <span class="c"># correspondences + orphan (drift) keys, confidence-scored</span>
 roteiro links --infer --write      <span class="c"># …and persist them as durable inferred</span>
                                    <span class="c">#    cross-repo edges that survive re-sync</span></code></pre>
+
+Without `--write`, `links` only reports — it is a CI gate, and a gate that
+mutates as a side effect is a surprise, the more so because it writes into the
+*other* repositories' graphs. With it, each resolved declaration becomes an
+`authored` edge that survives re-sync and is replaced wholesale on the next run,
+so deleting a `[[links]]` entry removes its edge.
+
+The authored and inferred layers are **independent**: running one never
+reclassifies or deletes the other's edges, which is what makes the
+`authored` / `inferred` distinction worth reading. A declaration with no `from`
+anchor has nothing local to attach an edge to; it is still reported, and the run
+says how many were skipped for that reason.
 
 ## Resolve against the version actually deployed
 

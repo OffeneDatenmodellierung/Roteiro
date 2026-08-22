@@ -889,6 +889,15 @@ pub struct CrossLink {
     pub kind: String,
     /// Confidence, for an `inferred` edge.
     pub confidence: Option<f64>,
+    /// Whether this link was **declared** (`[[links]]` in the source repo's
+    /// config, ADR-0009) rather than inferred by key matching.
+    ///
+    /// The distinction is the whole of ADR-0009's `authored → gold,
+    /// inferred → slate`: a declaration is a statement of intent by someone who
+    /// knows the topology, a match is a candidate. Until #573 the vault could not
+    /// draw it, because nothing persisted an authored cross-repo edge — so this
+    /// section carried a blanket caveat saying every row was a candidate.
+    pub authored: bool,
     /// The project-qualified target, `<project>::<key>` (ADR-0009).
     pub to_qualified: String,
     /// Whether `to_qualified`'s project is a member of this workspace — and so
@@ -1043,11 +1052,20 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
         );
         return;
     }
-    c.push_str(
+    // The caveat is per-row now, because the two provenances are no longer the
+    // same claim: an **authored** row was declared by someone who knows the
+    // topology, an **inferred** row is a scored guess. Saying "these are all
+    // candidates" over a table containing declarations would understate the
+    // declarations exactly as saying nothing would overstate the matches.
+    let authored = ws.cross_links.iter().filter(|l| l.authored).count();
+    let inferred = ws.cross_links.len() - authored;
+    let _ = writeln!(
+        c,
         "*A spoke's config key and the hub key it corresponds to, across \
-         repositories — the one thing a per-project vault structurally cannot show. \
-         These are `inferred` matches persisted by `roteiro links --infer --write` \
-         (ADR-0009), not authored facts: read a row as a candidate correspondence.*\n\n",
+         repositories — the one thing a per-project vault structurally cannot \
+         show. **{authored} declared** (`[[links]]`, ADR-0009 — a statement of \
+         intent) and **{inferred} inferred** (`roteiro links --infer --write` — \
+         read those as candidate correspondences).*\n"
     );
     c.push_str("| From | | To | Kind |\n| --- | --- | --- | --- |\n");
     for l in &ws.cross_links {
@@ -1063,14 +1081,21 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
             // merely unwritten.
             format!("`{}` *(outside this workspace)*", l.to_qualified)
         };
+        // `declared` rather than a confidence score: an authored link carries no
+        // score by construction, so an empty cell there would read as "confidence
+        // unknown" instead of "not that kind of claim".
+        let how = if l.authored {
+            " *(declared)*".to_owned()
+        } else {
+            confidence(l.confidence)
+        };
         let _ = writeln!(
             c,
-            "| [[{}\\|{}]] | {} | {to} | {}{} |",
+            "| [[{}\\|{}]] | {} | {to} | {}{how} |",
             scoped_note_name(&from_scope, &l.from_key),
             l.from_name,
             l.from_project,
             l.kind,
-            confidence(l.confidence)
         );
     }
     if ws.cross_links_total > ws.cross_links.len() {
@@ -1872,6 +1897,7 @@ mod tests {
                 confidence: Some(0.91),
                 to_qualified: "api::cfgkey:config.toml#addr".into(),
                 resolves: true,
+                authored: false,
             }],
             cross_links_total: 1,
         };
@@ -2174,6 +2200,7 @@ mod tests {
                     confidence: Some(0.91),
                     to_qualified: "api::cfgkey:config.toml#addr".into(),
                     resolves: true,
+                    authored: false,
                 },
                 CrossLink {
                     from_project: "sdk".into(),
@@ -2183,6 +2210,7 @@ mod tests {
                     confidence: None,
                     to_qualified: "absent::cfgkey:config.toml#other".into(),
                     resolves: false,
+                    authored: false,
                 },
             ],
             cross_links_total: 2,
@@ -2227,6 +2255,7 @@ mod tests {
                 confidence: None,
                 to_qualified: "api::cfgkey:config.toml#addr".into(),
                 resolves: true,
+                authored: false,
             }],
             cross_links_total: 40,
         };

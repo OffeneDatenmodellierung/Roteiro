@@ -676,10 +676,18 @@ enum Command {
         /// measure drift against two different things at once.
         #[arg(long, conflicts_with = "hub_rev")]
         pinned: bool,
-        /// With `--infer`: persist the inferred correspondences into each spoke's
-        /// graph as durable cross-repo edges (an `inferred` import layer that
-        /// survives sync), instead of only reporting them.
-        #[arg(long, requires = "infer")]
+        /// Persist the resolved links into each repo's graph as durable cross-repo
+        /// edges (an import layer that survives sync), instead of only reporting
+        /// them.
+        ///
+        /// With `--infer` that is the inferred correspondences; without it, the
+        /// repo's **authored** `[[links]]` declarations — which until #573 were
+        /// resolved, printed and then discarded, leaving the `authored → gold`
+        /// path ADR-0009 documents unreachable.
+        ///
+        /// The two go into **separate** import layers, so re-running one never
+        /// reclassifies the other's edges.
+        #[arg(long)]
         write: bool,
         /// With `--matrix`: write a self-contained HTML page (the `render web-graph`
         /// output) to `--out` (default `roteiro-overview.html`; `-` for stdout).
@@ -2022,7 +2030,7 @@ fn main() -> anyhow::Result<()> {
                          `roteiro query --kind config_key --app-config-only` supports it too"
                     );
                 }
-                run_links(&cfg.effective, &scope, json)
+                run_links(&cfg.effective, &scope, write, json)
             }
         }
         Command::Export { out } => run_export(ingest, out),
@@ -7493,6 +7501,44 @@ struct LinkResult {
     detail: String,
 }
 
+/// Apply one repo's authored-link layer to its graph, returning the edges
+/// applied. Mirrors [`persist_inferred_links`], under its own ref.
+///
+/// An unsynced repo (no `graph.db`) is skipped rather than failing: there is no
+/// graph to attach edges to, and the report already names its links as resolved.
+fn persist_authored_links(
+    path: &std::path::Path,
+    facts: &rto_graph::FactSet,
+) -> anyhow::Result<usize> {
+    let db = graph_db_path(path)?;
+    if !db.exists() {
+        return Ok(0);
+    }
+    let mut store = rto_graph::Store::open(&db)?;
+    Ok(store
+        .apply_import_layer(rto_graph::LINKS_AUTHORED_REF, facts)?
+        .edges_applied)
+}
+
+/// The persistable facts for **one** authored `[[links]]` declaration: the
+/// external-ref placeholder standing in for the (foreign) target, and an
+/// `authored` edge from this repo's local anchor to it.
+///
+/// The mirror of [`infer_links::link_facts`], differing in exactly the two ways
+/// that matter: [`Provenance::Authored`] rather than `Inferred` (no confidence —
+/// a declaration is not scored), and [`rto_graph::LINKS_AUTHORED_REF`] rather
+/// than `LINKS_REF`, so the two layers replace independently.
+fn authored_link_facts(from: &str, to: &str, kind: &str) -> rto_graph::FactSet {
+    let target = rto_graph::external_ref_node_with(to, rto_graph::Provenance::Authored);
+    let mut edge = rto_graph::Edge::authored(
+        from.to_owned(),
+        target.key.clone(),
+        rto_graph::EdgeKind::from_token(kind),
+    );
+    edge.src_ref = Some(rto_graph::LINKS_AUTHORED_REF.to_owned());
+    rto_graph::FactSet::new().with_node(target).with_edge(edge)
+}
+
 /// Project (display) names for `paths`, matching how [`rto_graph::Workspace`]
 /// names them — the repo directory name, with `-2`/`-3`/… suffixes disambiguating
 /// collisions — so a report's `repo` label (and the `<project>` used in a link
@@ -7685,7 +7731,12 @@ const WORKSPACE_CONFIG_ADVICE: &str = "workspaces are machine-specific, so prefe
 /// its `[[links]]` and resolve each project-qualified `to` against the other
 /// repos' graphs. A target that no longer resolves is **drift** — the cross-repo
 /// form of `roteiro check`. Exits non-zero if any link drifts.
-fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow::Result<()> {
+fn run_links(
+    cfg: &config::Config,
+    scope: &LinksScope<'_>,
+    write: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let paths = links_scope_paths(cfg, scope)?;
     if paths.is_empty() {
         anyhow::bail!(
@@ -7697,7 +7748,18 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
 
     // Collect each repo's declared links from its own config.
     let mut results: Vec<LinkResult> = Vec::new();
+    // Per repo, the authored facts to persist under `--write`: keyed by path so
+    // each repo's layer is applied to its own store, and built for **every** repo
+    // in scope — including ones whose links all drifted — because
+    // `apply_import_layer` is what clears a ref's prior edges, so a repo that has
+    // since removed a declaration must still be re-applied (with an empty layer)
+    // to drop the stale one.
+    let mut authored: std::collections::BTreeMap<std::path::PathBuf, rto_graph::FactSet> =
+        std::collections::BTreeMap::new();
     for (path, repo_name) in workspace_project_names(&paths) {
+        if write {
+            authored.entry(path.clone()).or_default();
+        }
         let repo_cfg = config::load(path)?.effective;
         for link in &repo_cfg.links {
             let kind = link.kind.clone().unwrap_or_else(|| "references".to_owned());
@@ -7706,6 +7768,20 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
                 Ok(None) => ("drift", "no such node in the target project".to_owned()),
                 Err(e) => ("drift", e.to_string()),
             };
+            // Only a resolved link with a local anchor can become an edge: an
+            // edge needs a source node in *this* store. `from` is optional, so a
+            // declaration without one is reported as unanchored rather than
+            // silently dropped — `apply_import_layer` would prune it anyway, and
+            // a pruned edge tells the author nothing.
+            if write
+                && status == "ok"
+                && let Some(from) = link.from.as_deref()
+            {
+                let facts = authored_link_facts(from, &link.to, &kind);
+                let acc = authored.entry(path.clone()).or_default();
+                acc.nodes.extend(facts.nodes);
+                acc.edges.extend(facts.edges);
+            }
             results.push(LinkResult {
                 repo: repo_name.clone(),
                 from: link.from.clone(),
@@ -7718,6 +7794,24 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
     }
 
     let drift = results.iter().filter(|r| r.status == "drift").count();
+
+    // Persist before reporting, so the report can state what was written.
+    // Resolved links whose declaration carries no `from` cannot become an edge —
+    // an edge needs a source node in this store — and are counted so the report
+    // says so rather than leaving the author to wonder why their count is short.
+    let mut written = 0usize;
+    let unanchored = if write {
+        for (path, facts) in &authored {
+            written += persist_authored_links(path, facts)?;
+        }
+        results
+            .iter()
+            .filter(|r| r.status == "ok" && r.from.is_none())
+            .count()
+    } else {
+        0
+    };
+
     if json {
         emit_json(&results)?;
     } else if results.is_empty() {
@@ -7725,6 +7819,17 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
             "no cross-repo links declared across {} repo(s) (add `[[links]]` to a repo's roteiro.toml)",
             paths.len()
         );
+        // An empty layer is still a write, and it is the one that *removes* a
+        // declaration's edges. Staying silent here made deleting the last
+        // `[[links]]` entry look like a no-op while it authoritatively cleared
+        // the layer — a write with no report is the shape this repository keeps
+        // filing issues about.
+        if write {
+            println!(
+                "cleared the authored cross-repo layer in {} repo(s)",
+                paths.len()
+            );
+        }
     } else {
         for r in &results {
             let marker = if r.status == "ok" { "ok   " } else { "DRIFT" };
@@ -7737,6 +7842,15 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
             results.len() - drift,
             drift
         );
+        if write {
+            println!("\npersisted {written} authored cross-repo edge(s) into repo graphs");
+            if unanchored > 0 {
+                println!(
+                    "  {unanchored} resolved link(s) declared no `from`, so they have no \
+                     local anchor to attach an edge to and were not persisted"
+                );
+            }
+        }
     }
 
     if drift > 0 {
@@ -14321,6 +14435,7 @@ fn collect_cross_links(
                 from_name: name,
                 kind: edge.kind,
                 confidence: edge.confidence,
+                authored: edge.provenance == rto_graph::Provenance::Authored.as_str(),
                 to_qualified: qualified.clone(),
                 resolves,
             });
