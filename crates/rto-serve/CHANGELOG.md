@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v2.1.0...rto-serve-v2.1.1) - 2026-08-22
+
+### Other
+
+- *(serve)* say which of the two renderers a flip actually exposes
+- Merge remote-tracking branch 'origin/main' into feat/mcp-surface-bundle
+- *(serve)* watch the assumption the argument sort exists to survive
+
 ## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v2.0.2...rto-serve-v2.1.0) - 2026-08-22
 
 ### Fixed
