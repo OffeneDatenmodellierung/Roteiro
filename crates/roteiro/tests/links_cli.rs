@@ -454,6 +454,23 @@ fn matrix_accepts_pinned_and_resolves_each_spoke_against_its_own_version() {
         "the matrix compared against the pinned version, not HEAD: {m}"
     );
 
+    // …and the comparison itself used that version. `serve.tools` is `true` at
+    // v1 and **absent at HEAD**, so a matrix that computed `differs` off the HEAD
+    // column would call an identical value an override — the false drift pinning
+    // exists to remove, which is the correctness half ADR-0009 v1.9 declined this
+    // combination over.
+    let cell = &m["rows"][0]["cells"]["deploy"];
+    assert_eq!(
+        cell["differs"], false,
+        "identical at the deployed revision is not an override: {m}"
+    );
+    assert_eq!(
+        cell["baseline"], "true",
+        "and the cell states the baseline it was measured against: {m}"
+    );
+    // One hub column still, showing HEAD — where this key no longer exists.
+    assert_eq!(m["rows"][0]["hub_value"], "", "the column is HEAD: {m}");
+
     std::fs::remove_dir_all(&base).ok();
 }
 

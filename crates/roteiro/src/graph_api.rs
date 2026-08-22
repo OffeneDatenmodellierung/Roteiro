@@ -1045,6 +1045,9 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                     spoke_value,
                     confidence: confidence.unwrap_or(0.0),
                     provenance: *provenance,
+                    // This endpoint resolves no pins (see `pin: None` below), so
+                    // every cell shares the one hub baseline.
+                    hub_value: None,
                 }),
                 // Hub node gone, or its project isn't hosted / has no graph → drift
                 // (an orphan spoke key), not a fatal error for the endpoint.
@@ -1057,10 +1060,21 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
             name: name.clone(),
             matches,
             orphans,
+            // This endpoint reads **persisted** `external_ref` edges from each
+            // spoke's graph, which record a correspondence and not the hub
+            // version it was computed against. Per-spoke pin resolution
+            // (ADR-0009 step 8b) is a `roteiro links --pinned` operation: it
+            // re-extracts the hub at each spoke's rev, which is a git walk this
+            // endpoint deliberately does not do while serving a request.
+            //
+            // So `None` here is "this view does not resolve pins", not "this
+            // spoke pins nothing" — and `pinned: false` below is what keeps the
+            // response from claiming otherwise (#504/#505).
+            pin: None,
         });
     }
 
-    let assembled = overview::build(&hub, &hub_values, spokes);
+    let assembled = overview::build(&hub, &hub_values, spokes, false);
     Ok(Json(assembled).into_response())
 }
 

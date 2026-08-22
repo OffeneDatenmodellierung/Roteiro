@@ -34,6 +34,19 @@ pub struct MatchInput {
     /// `[[links]]`) or [`Provenance::Inferred`] (a confidence-scored match). The
     /// real per-cell provenance, carried onto the [`Cell`].
     pub provenance: Provenance,
+    /// The hub value this match was **actually** measured against, when that is
+    /// not the hub's `HEAD` — i.e. under `--pinned`, the value at the rev this
+    /// spoke pins. `None` means the shared hub baseline, which is the ordinary
+    /// case.
+    ///
+    /// ADR-0009 v1.9 declined `--matrix --pinned` on the grounds that a
+    /// per-spoke-heterogeneous matrix has no single hub column, and it was right
+    /// that there is no single *baseline*: computing `differs` from the HEAD
+    /// column while the cell came from a pinned rev reports a key identical at
+    /// the deployed version as an override, and a key HEAD has since dropped as
+    /// an override of nothing. Carrying the baseline per cell is what lets the
+    /// column stay one column and still be honest.
+    pub hub_value: Option<String>,
 }
 
 /// One spoke's contribution to the matrix.
@@ -81,7 +94,19 @@ pub struct Cell {
     pub provenance: Provenance,
     /// The spoke value differs from the hub's default — a *real* override, not a
     /// redundant restatement. The signal a reader scans for.
+    ///
+    /// Computed against [`Cell::baseline`] when there is one, so under
+    /// `--pinned` it answers about the version this spoke actually deploys.
     pub differs: bool,
+    /// The hub value this cell was measured against, when that is **not** the
+    /// value in the row's hub column — i.e. under `--pinned`, where this spoke
+    /// resolved to a rev at which the hub said something else.
+    ///
+    /// Rendered beside the cell. Without it a reader sees `=` against a hub
+    /// column showing a different value and concludes the table is broken; the
+    /// table is right, and the two values belong to two revisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<String>,
 }
 
 /// One hub key's row: its default value and each spoke's override of it.
@@ -195,8 +220,13 @@ pub fn build(
 
     for spoke in spokes {
         for m in spoke.matches {
+            // The row's column is the hub at HEAD; the cell's comparison is
+            // against whatever *this spoke* was resolved against, which under
+            // `--pinned` is its own rev. They coincide in the ordinary case.
             let hub_value = hub_values.get(&m.hub_key).cloned().unwrap_or_default();
-            let differs = hub_value != m.spoke_value;
+            let measured_against = m.hub_value.clone().unwrap_or_else(|| hub_value.clone());
+            let differs = measured_against != m.spoke_value;
+            let baseline = (measured_against != hub_value).then_some(measured_against);
             let row = rows.entry(m.hub_key.clone()).or_insert_with(|| Row {
                 hub_key: m.hub_key.clone(),
                 file: String::new(),
@@ -220,6 +250,7 @@ pub fn build(
                 confidence: m.confidence,
                 provenance: m.provenance,
                 differs,
+                baseline,
             };
             // A spoke may set the same hub key in more than one file. Keep a *real*
             // override visible: never let a redundant restatement (`differs = false`)
@@ -276,11 +307,31 @@ pub fn build(
     }
 }
 
+/// The hub value one cell was measured against, when that is not the value in
+/// its row's hub column — i.e. under `--pinned`, where this spoke resolved to a
+/// rev at which the hub said something else. Empty otherwise.
+///
+/// Without it, `=` beside a hub column showing a different value reads as a
+/// broken table. The table is right; the two values belong to two revisions.
+fn baseline_label(cell: &Cell) -> String {
+    cell.baseline.as_deref().map_or_else(String::new, |b| {
+        format!(
+            "<span class=\"vs\" title=\"the hub value at this spoke's pinned \
+             revision\">vs <code>{}</code></span>",
+            esc(b)
+        )
+    })
+}
+
 /// The table's header row: the two fixed columns, then one per spoke carrying
 /// that spoke's [`pin_label`].
 fn html_head_row(m: &OverrideMatrix) -> String {
     use std::fmt::Write as _;
-    let mut thead = String::from("<th scope=\"col\">config key</th><th scope=\"col\">hub</th>");
+    // Under `--pinned` this column is the hub at HEAD while the cells were
+    // measured against their own revs; unlabelled it reads as everyone's
+    // baseline, which is the misreading ADR-0009 v1.9 declined to risk.
+    let hub_col = if m.pinned { "hub @ HEAD" } else { "hub" };
+    let mut thead = format!("<th scope=\"col\">config key</th><th scope=\"col\">{hub_col}</th>");
     for s in &m.spokes {
         let _ = write!(
             thead,
@@ -393,13 +444,26 @@ pub fn render_text(m: &OverrideMatrix) -> String {
         }
     }
     for row in &m.rows {
-        let _ = writeln!(out, "\n  {} = {}", row.hub_key, row.hub_value);
+        // Under `--pinned` the column is the hub at HEAD while the cells were
+        // measured against their own revs, so the column says which it is. Left
+        // unlabelled it reads as the baseline for every cell, which is the exact
+        // misreading ADR-0009 v1.9 declined this combination to avoid.
+        let at = if m.pinned { " (hub @ HEAD)" } else { "" };
+        let _ = writeln!(out, "\n  {} = {}{at}", row.hub_key, row.hub_value);
         for spoke in &m.spokes {
             if let Some(cell) = row.cells.get(spoke) {
                 let flag = if cell.differs { "≠" } else { "=" };
+                // A cell measured against a different revision states the value
+                // it was measured against. Without it, `=` beside a hub column
+                // showing something else reads as a broken table rather than as
+                // two revisions.
+                let vs = cell
+                    .baseline
+                    .as_deref()
+                    .map_or_else(String::new, |b| format!("  [vs {b} at its rev]"));
                 let _ = writeln!(
                     out,
-                    "    {flag} {spoke}: {} ({:.2})",
+                    "    {flag} {spoke}: {} ({:.2}){vs}",
                     cell.value, cell.confidence
                 );
             }
@@ -444,9 +508,10 @@ pub fn render_html(m: &OverrideMatrix) -> String {
                     let _ = write!(
                         tbody,
                         "<td class=\"{cls}\"><code>{}</code>\
-                         <span class=\"conf\" title=\"confidence\">{:.2}</span></td>",
+                         <span class=\"conf\" title=\"confidence\">{:.2}</span>{}</td>",
                         esc(&cell.value),
-                        cell.confidence
+                        cell.confidence,
+                        baseline_label(cell)
                     );
                 }
                 None => tbody.push_str("<td class=\"cell none\">·</td>"),
@@ -462,7 +527,12 @@ pub fn render_html(m: &OverrideMatrix) -> String {
         // mirroring the override matrix above rather than one row per (spoke, key).
         let mut dhead = String::from("<th scope=\"col\">key</th>");
         for s in &m.spokes {
-            let _ = write!(dhead, "<th scope=\"col\">{}</th>", esc(s));
+            let _ = write!(
+                dhead,
+                "<th scope=\"col\">{}{}</th>",
+                esc(s),
+                pin_label(m, s)
+            );
         }
         let mut rows = String::new();
         for d in &m.drift {
@@ -551,6 +621,7 @@ font-variant-numeric:tabular-nums}\
 letter-spacing:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;\
 font-weight:400}\
 .pin.unpinned{opacity:.55;font-style:italic}\
+.vs{display:block;margin-top:.15rem;font-size:.7rem;opacity:.75}\
 .legend{color:var(--muted);font-size:.85rem;margin:1rem 0}\
 .swatch{display:inline-block;width:.8rem;height:.8rem;border-radius:3px;\
 vertical-align:-1px;border:1px solid var(--line)}\
@@ -577,6 +648,9 @@ mod tests {
     /// version each pins — two spokes on different revs, one pinning nothing.
     fn pinned_matrix() -> OverrideMatrix {
         let hub_values = BTreeMap::from([("serve.addr".to_owned(), "127.0.0.1:8017".to_owned())]);
+        // Each spoke carries an orphan as well as an override, so the fixture
+        // renders **both** tables — the drift table is a separate header row and
+        // is exactly as rev-dependent as the override one.
         let spoke = |name: &str, value: &str, pin: Option<SpokePin>| SpokeInput {
             name: name.to_owned(),
             matches: vec![MatchInput {
@@ -586,8 +660,9 @@ mod tests {
                 spoke_value: value.to_owned(),
                 confidence: 0.9,
                 provenance: Provenance::Inferred,
+                hub_value: None,
             }],
-            orphans: vec![],
+            orphans: vec![("MAX_CONNECTIONS".to_owned(), value.to_owned())],
             pin,
         };
         build(
@@ -637,6 +712,77 @@ mod tests {
         assert!(text.contains("deploy-c @ HEAD (no pin detected)"), "{text}");
     }
 
+    /// The correctness half of #504, and the reason ADR-0009 v1.9 declined this
+    /// combination: under `--pinned` a cell was measured against **its spoke's**
+    /// hub revision, while the hub column shows `HEAD`. Computing `differs` from
+    /// the column reports a value identical at the deployed version as an
+    /// override — false drift, which is the very thing pinning exists to remove.
+    #[test]
+    fn differs_is_measured_against_the_revision_the_spoke_deploys() {
+        // HEAD moved `serve.addr` on; the spoke still deploys the old value and
+        // is pinned to the rev where that value was current.
+        let hub_values = BTreeMap::from([("serve.addr".to_owned(), "127.0.0.1:9999".to_owned())]);
+        let m = build(
+            "app",
+            &hub_values,
+            vec![SpokeInput {
+                name: "deploy".to_owned(),
+                matches: vec![MatchInput {
+                    hub_key: "serve.addr".to_owned(),
+                    file: "config.toml".to_owned(),
+                    spoke_key: "SERVE_ADDR".to_owned(),
+                    spoke_value: "127.0.0.1:8017".to_owned(),
+                    confidence: 0.9,
+                    provenance: Provenance::Inferred,
+                    // …and at that rev the hub said exactly this.
+                    hub_value: Some("127.0.0.1:8017".to_owned()),
+                }],
+                orphans: vec![],
+                pin: Some(SpokePin {
+                    rev: "v1.0.0".to_owned(),
+                    via: None,
+                }),
+            }],
+            true,
+        );
+
+        let cell = &m.rows[0].cells["deploy"];
+        assert!(
+            !cell.differs,
+            "identical at the deployed revision is not an override: {cell:?}"
+        );
+        // The column still shows HEAD — one hub column, as the matrix requires —
+        // so the cell states what it was actually measured against.
+        assert_eq!(m.rows[0].hub_value, "127.0.0.1:9999");
+        assert_eq!(cell.baseline.as_deref(), Some("127.0.0.1:8017"));
+
+        let text = render_text(&m);
+        assert!(
+            text.contains("(hub @ HEAD)"),
+            "the column is labelled: {text}"
+        );
+        assert!(
+            text.contains("= deploy: 127.0.0.1:8017 (0.90)  [vs 127.0.0.1:8017 at its rev]"),
+            "and the cell names its own baseline: {text}"
+        );
+    }
+
+    /// The unpinned matrix must be untouched by all of the above: no baseline on
+    /// any cell, no `hub @ HEAD` label, `differs` straight off the hub column.
+    #[test]
+    fn an_unpinned_matrix_is_unchanged() {
+        let m = matrix();
+        assert!(!m.pinned);
+        assert!(m.pins.is_empty());
+        for row in &m.rows {
+            for cell in row.cells.values() {
+                assert_eq!(cell.baseline, None, "no per-cell baseline without --pinned");
+            }
+        }
+        assert!(!render_text(&m).contains("hub @ HEAD"));
+        assert!(!render_html(&m).contains("class=\"vs\""));
+    }
+
     /// The HTML puts it in the column header, because that is where a reader
     /// compares two cells and would otherwise be comparing two hub versions.
     #[test]
@@ -651,6 +797,16 @@ mod tests {
         assert!(
             html.contains("pin unpinned"),
             "the unpinned spoke is marked, not blank"
+        );
+
+        // Both tables. A drift-only matrix has no override rows at all, so a pin
+        // label living only in the override header would leave that whole view
+        // unlabelled — and a drift cell is exactly as rev-dependent as an
+        // override cell.
+        assert_eq!(
+            html.matches("@ v2.1.0").count(),
+            2,
+            "the drift table's header carries the pins too: {html}"
         );
     }
 
@@ -670,6 +826,7 @@ mod tests {
                 spoke_value: "0.0.0.0:8443".to_owned(),
                 confidence: 0.9,
                 provenance: Provenance::Inferred,
+                hub_value: None,
             }],
             orphans: vec![],
             pin: None,
@@ -697,6 +854,7 @@ mod tests {
                     spoke_value: "0.0.0.0:8443".to_owned(), // differs → override
                     confidence: 0.9,
                     provenance: Provenance::Inferred,
+                    hub_value: None,
                 },
                 MatchInput {
                     hub_key: "serve.tools".to_owned(),
@@ -705,6 +863,7 @@ mod tests {
                     spoke_value: "true".to_owned(), // same → redundant
                     confidence: 0.98,
                     provenance: Provenance::Inferred,
+                    hub_value: None,
                 },
             ],
             orphans: vec![("MAX_CONNECTIONS".to_owned(), "512".to_owned())],
@@ -743,6 +902,7 @@ mod tests {
             spoke_value: "127.0.0.1:8017".to_owned(),
             confidence: 0.98,
             provenance: Provenance::Inferred,
+            hub_value: None,
         };
         let over = || MatchInput {
             hub_key: "serve.addr".to_owned(),
@@ -751,6 +911,7 @@ mod tests {
             spoke_value: "0.0.0.0:8443".to_owned(),
             confidence: 0.9,
             provenance: Provenance::Inferred,
+            hub_value: None,
         };
         for matches in [vec![same(), over()], vec![over(), same()]] {
             let m = build(
@@ -794,6 +955,7 @@ mod tests {
                         spoke_value: "0.0.0.0:8443".to_owned(),
                         confidence: 0.0, // authored links carry no score
                         provenance: Provenance::Authored,
+                        hub_value: None,
                     },
                     MatchInput {
                         hub_key: "serve.tools".to_owned(),
@@ -802,6 +964,7 @@ mod tests {
                         spoke_value: "false".to_owned(),
                         confidence: 0.9,
                         provenance: Provenance::Inferred,
+                        hub_value: None,
                     },
                 ],
                 orphans: vec![],
@@ -848,6 +1011,7 @@ mod tests {
                         spoke_value: "0.0.0.0:8443".to_owned(),
                         confidence: 0.9,
                         provenance: Provenance::Inferred,
+                        hub_value: None,
                     },
                     MatchInput {
                         hub_key: "package.name".to_owned(),
@@ -856,6 +1020,7 @@ mod tests {
                         spoke_value: "deploy".to_owned(),
                         confidence: 0.9,
                         provenance: Provenance::Inferred,
+                        hub_value: None,
                     },
                 ],
                 orphans: vec![],
@@ -894,6 +1059,7 @@ mod tests {
             spoke_value: "x".to_owned(),
             confidence: 0.9,
             provenance: Provenance::Inferred,
+            hub_value: None,
         };
         // Two spokes resolve the same hub key to different files; a third repeats the
         // first file — the row must stay ambiguous (empty) regardless.

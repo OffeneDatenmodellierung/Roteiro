@@ -7761,6 +7761,20 @@ struct InferredRepo {
     /// Where the pin came from (e.g. `submodule vendor/app`), when auto-detected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pin_via: Option<String>,
+    /// Hub key → value **at the rev this spoke resolved against**, when that is
+    /// not the shared baseline (`--pinned`, and this spoke pinned something).
+    ///
+    /// The matrix needs it and the infer report does not: `--infer` prints one
+    /// spoke at a time under a heading naming its rev, so its baseline is never
+    /// ambiguous. The matrix puts the spokes side by side under one hub column,
+    /// which is precisely the shape ADR-0009 v1.9 declined — carrying the
+    /// baseline per spoke is what makes it answerable.
+    ///
+    /// `#[serde(skip)]` because it is an input to a view, not a fact about the
+    /// spoke, and the infer JSON would otherwise grow a copy of the hub for every
+    /// distinct rev in the workspace.
+    #[serde(skip)]
+    hub_baseline: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// The `graph.db` path for the repo at `path` (`<repo>/.git/roteiro/graph.db`).
@@ -8096,10 +8110,21 @@ fn resolve_infer_report(
             // Global: HEAD, or the explicit `--hub-rev` already in `hub_base`.
             None => (pin.rev.map(str::to_owned), None),
         };
-        let hub_keys: &[infer_links::ConfigKey] = match &hub_rev {
-            Some(rev) if pin.auto => rev_cache[rev].as_slice(),
-            _ => hub_base,
+        let pinned_to_own_rev = pin.auto && hub_rev.is_some();
+        let hub_keys: &[infer_links::ConfigKey] = if pinned_to_own_rev {
+            // `hub_rev` is `Some` here by the guard above.
+            rev_cache[hub_rev.as_deref().unwrap_or_default()].as_slice()
+        } else {
+            hub_base
         };
+        // Only when this spoke was measured against something other than the
+        // shared baseline is there a second value for a view to reconcile.
+        let hub_baseline = pinned_to_own_rev.then(|| {
+            hub_keys
+                .iter()
+                .map(|k| (k.key.clone(), k.value.clone()))
+                .collect()
+        });
         let (matches, orphans) = infer_links::match_against_hub(keys, hub_keys);
         report.push(InferredRepo {
             repo: name.clone(),
@@ -8107,6 +8132,7 @@ fn resolve_infer_report(
             orphans,
             hub_rev,
             pin_via,
+            hub_baseline,
         });
     }
     Ok(report)
@@ -8255,14 +8281,34 @@ fn run_links_matrix(
                 // per-spoke resolution for `--infer`; the matrix shares that
                 // scan, so this is carrying a fact it computed rather than
                 // recomputing one.
-                pin: rep.hub_rev.clone().map(|rev| overview::SpokePin {
-                    rev,
-                    via: rep.pin_via.clone(),
-                }),
+                //
+                // Gated on `pin.auto` because `hub_rev` is set on **every** spoke
+                // under the global `--hub-rev` too, where no spoke pinned
+                // anything. Without the gate a `--matrix --hub-rev REV` run
+                // emits a populated `pins` map beside `pinned: false`, reporting
+                // one workspace-wide resolution as N per-spoke pins — the same
+                // "says a thing it did not do" this PR exists to prevent.
+                pin: opts
+                    .pin
+                    .auto
+                    .then(|| {
+                        rep.hub_rev.clone().map(|rev| overview::SpokePin {
+                            rev,
+                            via: rep.pin_via.clone(),
+                        })
+                    })
+                    .flatten(),
                 matches: rep
                     .matches
                     .iter()
                     .map(|m| overview::MatchInput {
+                        // The hub value this spoke was really compared against.
+                        // Only present when it resolved to its own rev, so the
+                        // ordinary matrix is unchanged byte for byte.
+                        hub_value: rep
+                            .hub_baseline
+                            .as_ref()
+                            .and_then(|b| b.get(&m.hub_key).cloned()),
                         hub_key: m.hub_key.clone(),
                         // The hub key's source file, so the matrix row can be
                         // classified as app vs tooling config (parity with the API).
