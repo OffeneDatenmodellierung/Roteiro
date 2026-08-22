@@ -938,12 +938,24 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
     };
 
     let mut links: Vec<Value> = Vec::new();
-    let mut spokes: Vec<Value> = Vec::new();
+    let mut projects: Vec<Value> = Vec::new();
     for name in &names {
-        if Some(name) == hub.as_ref() {
-            continue;
-        }
-        let (refs, live_orphans) = spoke_correspondence(ws, name, hub.as_deref(), &hub_keys)?;
+        // The hub participates as an ordinary node (#572). It is still the
+        // inference *target* — `spoke_correspondence` matches every other
+        // project against it — but it also has a store of its own, and any
+        // `external_ref` edges in that store are links **out of** the hub. While
+        // this loop skipped it, those edges were never read: a deployment chain
+        // `infra → chart → app` could not draw its last hop, because whichever
+        // repo won the hub tiebreak had its outgoing links silently dropped.
+        //
+        // It must not be matched against itself, though — inferring a project's
+        // keys against its own would report every key as its own correspondence.
+        // So the hub gets its persisted refs and no live inference.
+        let (refs, live_orphans) = if Some(name) == hub.as_ref() {
+            (ws.with_store(Some(name), external_refs)??, Vec::new())
+        } else {
+            spoke_correspondence(ws, name, hub.as_deref(), &hub_keys)?
+        };
         if refs.is_empty() && live_orphans.is_empty() {
             continue; // Only projects that reference (or infer against) the hub are spokes.
         }
@@ -972,15 +984,23 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
                 drift_count += 1;
             }
         }
-        spokes.push(json!({
+        projects.push(json!({
             "name": name,
             "label": name,
+            // Named rather than left for the client to infer by comparing against
+            // `hub`: the hub is now one entry among others, and a consumer that
+            // has to re-derive which one it is will eventually derive it wrongly.
+            "role": if Some(name) == hub.as_ref() { "hub" } else { "spoke" },
             "keyCount": key_count,
             "driftCount": drift_count,
         }));
     }
 
-    Ok(Json(json!({ "hub": hub, "spokes": spokes, "links": links })).into_response())
+    // `projects`, not `spokes`. The array now contains the hub, and a key called
+    // `spokes` whose first element is the hub is the kind of name that survives
+    // one reader and misleads the next. The explorer is served from this same
+    // binary, so the rename lands with its only consumer (ADR-0010).
+    Ok(Json(json!({ "hub": hub, "projects": projects, "links": links })).into_response())
 }
 
 /// `GET /v1/graph[/workspaces/{ws}]/matrix` → the cross-repo config override
@@ -1965,6 +1985,21 @@ mod tests {
 
     /// Drive `uri` against a router built over `set` with default workspace
     /// `default`, returning the status and parsed JSON body.
+    /// The non-hub entries of a topology response.
+    ///
+    /// `projects` includes the hub since #572 — it is an ordinary node with its
+    /// own `keyCount` and `driftCount`, which is the whole point — so the tests
+    /// that reason about *spokes* filter it out here rather than each adjusting
+    /// an index or a count by one.
+    fn spokes_of(json: &Value) -> Vec<&Value> {
+        json["projects"]
+            .as_array()
+            .expect("projects array")
+            .iter()
+            .filter(|p| p["role"] != "hub")
+            .collect()
+    }
+
     async fn get(set: WorkspaceSet, default: Option<&str>, uri: &str) -> (StatusCode, Value) {
         let resp = router(Arc::new(set), default.map(str::to_owned))
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -2091,7 +2126,7 @@ mod tests {
         let (status, linked) = get(multi_set(), None, "/v1/graph/workspaces/linked/topology").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(linked["hub"], HUB);
-        assert_eq!(linked["spokes"].as_array().unwrap().len(), 1);
+        assert_eq!(spokes_of(&linked).len(), 1);
 
         // …while the standalone singleton has no cross-repo links → no hub.
         let (_, solo) = get(multi_set(), None, "/v1/graph/workspaces/solo/topology").await;
@@ -3024,7 +3059,7 @@ mod tests {
         let (status, json) = get(single_set(linked_workspace()), None, "/v1/graph/topology").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["hub"], HUB);
-        let spokes = json["spokes"].as_array().unwrap();
+        let spokes = spokes_of(&json);
         assert_eq!(spokes.len(), 1);
         assert_eq!(spokes[0]["name"], SPOKE);
         // One live link + one drifted link → driftCount 1, two links total.
@@ -3205,7 +3240,7 @@ mod tests {
         let (status, json) = get(single_set(ws), None, "/v1/graph/topology").await;
         assert_eq!(status, StatusCode::OK, "an unhosted target must not 404");
         assert_eq!(json["hub"], Value::Null, "no hosted project is referenced");
-        let spokes = json["spokes"].as_array().unwrap();
+        let spokes = spokes_of(&json);
         assert_eq!(spokes.len(), 1);
         assert_eq!(spokes[0]["driftCount"], 2, "both unhosted links are drift");
         assert_eq!(json["links"].as_array().unwrap().len(), 2);
@@ -3234,7 +3269,7 @@ mod tests {
             json["hub"], HUB,
             "the config-key-rich repo is the inferred hub"
         );
-        let spokes = json["spokes"].as_array().unwrap();
+        let spokes = spokes_of(&json);
         assert_eq!(spokes.len(), 1);
         assert_eq!(spokes[0]["name"], SPOKE);
         // Two live-inferred links (SERVE_ADDR, SERVE_TOOLS); the orphan EXTRA_FLAG drifts.
@@ -3335,6 +3370,84 @@ mod tests {
         ));
     }
 
+    /// #572: a chain's **last hop** is drawable, because the hub is an ordinary
+    /// node now rather than a place the collecting loop skips.
+    ///
+    /// The issue's own shape: `infra1,infra2 → chart → app`. `chart` is pointed
+    /// at twice and `app` once, so `chart` wins the hub — and it is exactly the
+    /// repo whose *outgoing* edge used to be dropped, making the chain's last
+    /// hop structurally undrawable however the workspace was arranged.
+    #[tokio::test]
+    async fn a_link_out_of_the_hub_is_emitted_so_a_chain_can_be_drawn() {
+        // One repo's store, holding `refs` as authored external-ref edges out of
+        // a local config key.
+        let repo = |own: &str, refs: &[&str]| {
+            let mut facts = FactSet::new().with_node(cfg_node("cfg.toml", own, "v"));
+            for (i, target) in refs.iter().enumerate() {
+                let src = format!("cfgkey:cfg.toml#{own}");
+                facts = facts.with_node(external_ref_node(target)).with_edge({
+                    let mut e = Edge::authored(
+                        if i == 0 {
+                            src
+                        } else {
+                            format!("cfgkey:cfg.toml#{own}")
+                        },
+                        external_ref_key(target),
+                        EdgeKind::References,
+                    );
+                    e.src_ref = Some(LINKS_REF.to_owned());
+                    e
+                });
+            }
+            apply(Store::open_in_memory().expect("store"), &facts)
+        };
+
+        let ws = Workspace::from_stores([
+            (
+                "infra1".to_owned(),
+                repo("a", &["chart::cfgkey:cfg.toml#c"]),
+            ),
+            (
+                "infra2".to_owned(),
+                repo("b", &["chart::cfgkey:cfg.toml#c"]),
+            ),
+            ("chart".to_owned(), repo("c", &["app::cfgkey:cfg.toml#d"])),
+            ("app".to_owned(), repo("d", &[])),
+        ]);
+
+        let (status, json) = get(single_set(ws), None, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["hub"], "chart",
+            "pointed at twice, so it wins the hub — the case the loop used to skip: {json}"
+        );
+
+        // The hub is a node in its own right, with its own counts, rather than a
+        // special case carrying zeroes.
+        let hub_entry = json["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["role"] == "hub")
+            .expect("the hub appears in projects");
+        assert_eq!(hub_entry["name"], "chart");
+
+        // And the edge **out of** the hub is in the payload — the chain's last hop.
+        let out_of_hub: Vec<&Value> = json["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["from"].as_str().is_some_and(|f| f.starts_with("chart::")))
+            .collect();
+        assert_eq!(
+            out_of_hub.len(),
+            1,
+            "the hub's own outgoing link must be emitted: {json}"
+        );
+        assert_eq!(out_of_hub[0]["to"], "app::cfgkey:cfg.toml#d");
+        assert_eq!(out_of_hub[0]["provenance"], "authored");
+    }
+
     #[tokio::test]
     async fn topology_merges_persisted_authored_with_live_inferred() {
         // A spoke with one AUTHORED persisted link and other keys that only match
@@ -3359,7 +3472,8 @@ mod tests {
             "the authored link and the live-inferred one both render"
         );
         assert_eq!(
-            json["spokes"][0]["driftCount"], 1,
+            spokes_of(&json)[0]["driftCount"],
+            1,
             "the two matched keys resolve; the orphan drifts"
         );
     }
@@ -3415,7 +3529,7 @@ mod tests {
         // resolve; the orphan still drifts).
         let (_, top) = send(app.clone(), "GET", "/v1/graph/topology").await;
         assert_eq!(top["links"].as_array().unwrap().len(), 2);
-        assert_eq!(top["spokes"][0]["driftCount"], 1);
+        assert_eq!(spokes_of(&top)[0]["driftCount"], 1);
     }
 
     // -- per-project cross-repo links (the spoke-graph rendering payload) ----

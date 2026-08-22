@@ -3,7 +3,7 @@
 // (loaded from /vendor/cytoscape.min.js). It consumes ONLY the read-only data
 // API this same server exposes:
 //   GET /v1/graph/workspaces                          — the workspace switcher
-//   GET /v1/graph/workspaces/{ws}/topology            — hub + spokes + links
+//   GET /v1/graph/workspaces/{ws}/topology            — hub + projects + links
 //   GET /v1/graph/workspaces/{ws}/matrix              — override matrix + drift
 //   GET /v1/graph/workspaces/{ws}/{project}           — a project's nodes + edges
 //   GET /v1/graph/workspaces/{ws}/{project}/hotspots  — most-called (by degree)
@@ -425,7 +425,10 @@
   // -- stat tiles ------------------------------------------------------------
 
   function renderTiles(topology, matrix) {
-    const spokeRepos = (topology.spokes || []).length;
+    // `projects` includes the hub (#572), so the spoke count subtracts it.
+    const spokeRepos = (topology.projects || []).filter(
+      (p) => p.role !== "hub"
+    ).length;
     const rows = matrix.rows || [];
     const appKeys = rows.length;
     const links = (topology.links || []).length;
@@ -487,20 +490,21 @@
       hosted.add(data.id);
       elements.push({ data });
     };
-    addNode({
-      id: `p:${hub}`,
-      label: hub,
-      role: "hub",
-      sub: "app · source of truth",
-      drift: 0,
-    });
-    for (const s of topology.spokes || []) {
+    // One loop over `projects` — the hub is an entry in it (#572), carrying its
+    // own `keyCount` and `driftCount` like any other. It used to be added
+    // separately with `sub: "app · source of truth"` hardcoded and `drift: 0`,
+    // which rendered a false label for every workspace whose hub is not literally
+    // named `app`, and hid the hub's own drift.
+    for (const p of topology.projects || []) {
+      const isHub = p.role === "hub";
       addNode({
-        id: `p:${s.name}`,
-        label: s.label || s.name,
-        role: "spoke",
-        sub: `${s.keyCount || 0} keys`,
-        drift: s.driftCount || 0,
+        id: `p:${p.name}`,
+        label: p.label || p.name,
+        role: isHub ? "hub" : "spoke",
+        sub: isHub
+          ? `${p.keyCount || 0} keys · source of truth`
+          : `${p.keyCount || 0} keys`,
+        drift: p.driftCount || 0,
       });
     }
     // Edges: colour by provenance (gold authored / slate inferred). `from`/`to`
@@ -657,7 +661,13 @@
     // Header: config key | hub | one column per spoke (clickable drill intent).
     const headCells = [
       el("th", { scope: "col", text: "config key" }),
-      el("th", { scope: "col", text: "app (hub)" }),
+      // The matrix payload names its own hub. This was hardcoded `app (hub)`,
+      // which was a false label for every workspace whose hub is not literally
+      // called `app` — accidentally true here and nowhere else (#572).
+      el("th", {
+        scope: "col",
+        text: matrix.hub ? `${matrix.hub} (hub)` : "hub",
+      }),
     ];
     for (const s of spokes) {
       headCells.push(
