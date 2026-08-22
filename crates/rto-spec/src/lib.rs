@@ -26,8 +26,8 @@ mod text;
 mod tool_check;
 
 pub use adr::{
-    AdrDoc, AdrMeta, AdrStatus, DocVersion, InlineVersionRef, ParseError, Section, VersionFacts,
-    WikiLink, parse_adr,
+    AdrDoc, AdrMeta, AdrStatus, DocDate, DocVersion, HistoryRow, InlineVersionRef, ParseError,
+    Section, VersionFacts, WikiLink, parse_adr,
 };
 pub use annotate::{Annotation, scan_annotations};
 pub use blueprint::{BlueprintDoc, is_blueprint, parse_blueprint};

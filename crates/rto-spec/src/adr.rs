@@ -142,14 +142,79 @@ pub struct InlineVersionRef {
     pub version: DocVersion,
 }
 
+/// A calendar date as an ADR writes one: `YYYY-MM-DD`, in a frontmatter
+/// `last-modified:` field or a version-history row's Date cell.
+///
+/// Three `u32`s rather than a `chrono` type because the only thing asked of it
+/// is ordering, and ISO-8601 components compare correctly component-wise — the
+/// same reason [`DocVersion`] is a pair of numbers. Adding a date library to
+/// compare two strings the parser has already split would be the larger change.
+///
+/// Nothing here validates that a date exists: `2026-02-31` parses. A check that
+/// refused impossible dates would be a different rule with a different failure
+/// mode, and the rules that consume this only ever ask which of two dates is
+/// later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DocDate {
+    /// Four-digit year.
+    pub year: u32,
+    /// Month, `1..=12` as written — unvalidated.
+    pub month: u32,
+    /// Day, as written — unvalidated.
+    pub day: u32,
+}
+
+impl DocDate {
+    /// Parse a string that is *exactly* `YYYY-MM-DD`. Anything else is `None`,
+    /// which is how a `TBD`, an empty cell or a prose date is skipped rather
+    /// than guessed at.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut parts = s.trim().split('-');
+        let year = parts.next()?.parse().ok()?;
+        let month = parts.next()?.parse().ok()?;
+        let day = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self { year, month, day })
+    }
+}
+
+impl std::fmt::Display for DocDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
+/// One row of an ADR's version-history table: the version it records and the
+/// date it claims to have been made on.
+///
+/// The date is `Option` because the column is prose in practice — rows carrying
+/// `TBD`, a range, or nothing at all exist — and a row without a parseable date
+/// is still a real history row for the ordering rule. Only the rules that
+/// compare dates skip it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryRow {
+    /// The version in the row's first cell.
+    pub version: DocVersion,
+    /// The date in the row's second cell, when it parses as `YYYY-MM-DD`.
+    pub date: Option<DocDate>,
+}
+
 /// Every claim an ADR makes about its own version, gathered so
 /// [`crate::check::validate`] can cross-check them against each other.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VersionFacts {
     /// The version cell of the `| **Document version** | X.Y |` summary row.
     pub summary_row: Option<DocVersion>,
-    /// The first cell of each version-history row, in document order.
-    pub history: Vec<DocVersion>,
+    /// Each version-history row, in document order.
+    ///
+    /// Carries the row's date as well as its version because two of the five
+    /// version rules need one and three need the other, and keeping them in
+    /// parallel `Vec`s would let a row's version and its date drift apart —
+    /// the precise defect class this whole family exists to catch.
+    pub history: Vec<HistoryRow>,
     /// `(Update, vX.Y…)` notes in the body, **excluding** the version-history
     /// section — a history row that describes removing such a note quotes it,
     /// and quoting it is not making the claim again.
@@ -167,6 +232,8 @@ pub struct AdrMeta {
     pub status: AdrStatus,
     /// The `version:` frontmatter field, when it parses as `X.Y`.
     pub version: Option<DocVersion>,
+    /// The `last-modified:` frontmatter field, when it parses as `YYYY-MM-DD`.
+    pub last_modified: Option<DocDate>,
 }
 
 /// One `## ` section of an ADR body.
@@ -323,6 +390,7 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
     let mut status = AdrStatus::Draft;
     let mut fm_title = None;
     let mut fm_version = None;
+    let mut fm_modified = None;
     for line in frontmatter.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -337,6 +405,7 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
             "status" if !value.is_empty() => status = value.parse()?,
             "title" => fm_title = Some(value.to_owned()),
             "version" => fm_version = DocVersion::parse(value),
+            "last-modified" => fm_modified = DocDate::parse(value),
             _ => {}
         }
     }
@@ -357,6 +426,7 @@ pub fn parse_adr(rel_path: &str, text: &str) -> Result<AdrDoc, ParseError> {
             title,
             status,
             version: fm_version,
+            last_modified: fm_modified,
         },
         path: rel_path.to_owned(),
         sections: scan.sections,
@@ -447,7 +517,7 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
             });
         }
         if in_history {
-            versions.history.extend(history_row_version(line));
+            versions.history.extend(history_row(line));
         } else {
             versions.summary_row = versions.summary_row.or_else(|| summary_row_version(line));
             let file_line = body_line1 + line_idx;
@@ -497,13 +567,19 @@ fn is_version_history(title: &str) -> bool {
         || title.eq_ignore_ascii_case("Version history")
 }
 
-/// The version in a table row's first cell, when that cell holds a version and
-/// nothing else. The header (`| Version | …`) and separator (`|---|…`) rows fail
-/// to parse, which is exactly how they are skipped.
-fn history_row_version(line: &str) -> Option<DocVersion> {
+/// One version-history row: the version in its first cell, and the date in its
+/// second when that cell holds one.
+///
+/// A row is a row only when the first cell holds a version and nothing else, so
+/// the header (`| Version | …`) and separator (`|---|…`) rows fail to parse —
+/// which is exactly how they are skipped. The date is read independently and
+/// may be absent without costing the row its version.
+fn history_row(line: &str) -> Option<HistoryRow> {
     let rest = line.trim_start().strip_prefix('|')?;
-    let (first, _) = rest.split_once('|')?;
-    DocVersion::parse(first.trim())
+    let (first, after) = rest.split_once('|')?;
+    let version = DocVersion::parse(first.trim())?;
+    let date = after.split('|').next().and_then(DocDate::parse);
+    Some(HistoryRow { version, date })
 }
 
 /// The version in the `| **Document version** | X.Y |` row of the summary table.

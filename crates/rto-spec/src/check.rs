@@ -205,38 +205,42 @@ fn duplicate_site_slugs(pages: &[SitePage]) -> Vec<Violation> {
 /// when the document was at 1.1, and it never got a history row at all. A
 /// version claim nobody checks is a claim that quietly stops being true.
 ///
-/// Three contradictions, reported under one kind because a caller does the same
-/// thing with all three — fail the gate and print the message — and because the
-/// message, not the label, is what tells the reader which one fired. This
+/// Five contradictions, reported under one kind because a caller does the same
+/// thing with all of them — fail the gate and print the message — and because
+/// the message, not the label, is what tells the reader which one fired. This
 /// follows [`ViolationKind::MalformedAdr`], which likewise covers every
 /// [`crate::adr::ParseError`] behind one label and puts the specifics in prose.
+/// It is also why rules 4 and 5 (issue #432) needed no new variant, and so
+/// reopened no part of the semver question this enum's exhaustiveness raises.
 ///
 /// Each message names the file and **both** conflicting values, for the reason
 /// [`duplicate_adr_ids`] names both paths: a message that reports only what it
 /// found leaves the reader to hunt for what it was compared against.
 ///
-/// Deliberately *not* checked, because widening a rule that returns one hit or
-/// none is how it becomes a rule nobody reads:
-/// - that a `version:`, a summary row or a history table exists at all — the
-///   contradiction is the finding, and ADR-0011 legitimately has no history;
-/// - that the frontmatter version equals the highest history row. Real: found
-///   twice while this rule was written (ADR-0009 had reached 1.11 and ADR-0014
-///   1.5, neither bumped);
-/// - that `last-modified` is no older than the newest history date. Also real,
-///   and worse — eight of the twenty lagged, and three of those were introduced
-///   by people actively repairing this same family, ADR-0006's by #413 itself.
-///   One-directional: running *ahead* is legitimate, because a typo fix or a
-///   link repair need not earn a history row.
+/// # Why rules 4 and 5 are separate rules rather than widenings
 ///
-/// Those are a fourth and a fifth rule rather than widenings of these three,
-/// and both land under this one kind — the variant was shaped so the message,
-/// not the label, says which check fired. Neither therefore reopens the semver
-/// question this enum's exhaustiveness raises. The fourth is free: `meta.version`
-/// and [`crate::adr::VersionFacts::history`] already hold everything it compares.
-/// The fifth is not quite free — nothing yet parses `last-modified`, and history
-/// rows are kept without their dates, so it wants a field on
-/// [`crate::adr::AdrMeta`] and dates alongside the history versions. That is the
-/// same already-taken API decision, not a new one.
+/// Rule 1 compares the frontmatter to the **summary row**, and rule 4 compares
+/// it to the **history**. That looks redundant until you see how the defect
+/// actually happens: the row and the frontmatter are usually forgotten in the
+/// *same* edit, so they agree with each other and both lag the history. Rule 1
+/// is silent on exactly the documents rule 4 catches — ADR-0009 sat at 1.10
+/// over a history reaching 1.11, and ADR-0014 at 1.4 over 1.5. Both were found
+/// by hand while rule 1 was being written, by the rule's own author, with rule 1
+/// passing.
+///
+/// Rule 5 is **one-directional on purpose**, and getting that backwards would be
+/// worse than not having it. `last-modified` running *ahead* of the newest
+/// history row is legitimate — a typo fix or a link repair need not earn a row —
+/// so an equality rule would fire on every small edit and be switched off within
+/// a week. Only the impossible direction is checked: a document cannot have been
+/// last modified before a change it itself lists. When it was measured, eight of
+/// this repository's twenty ADRs lagged, three of them put there by people
+/// actively repairing this same family.
+///
+/// Still deliberately *not* checked, because widening a rule that returns one
+/// hit or none is how it becomes a rule nobody reads: that a `version:`, a
+/// summary row or a history table exists at all. The contradiction is the
+/// finding, and ADR-0011 legitimately has no history.
 fn adr_version_drift(docs: &[AdrDoc]) -> Vec<Violation> {
     let mut out = Vec::new();
     for doc in docs {
@@ -262,7 +266,7 @@ fn adr_version_drift(docs: &[AdrDoc]) -> Vec<Violation> {
         //    component-wise: 1.10 follows 1.9, and any ordering that puts it
         //    first would report this repository's longest-running ADR as broken.
         for pair in facts.history.windows(2) {
-            let (prev, next) = (pair[0], pair[1]);
+            let (prev, next) = (pair[0].version, pair[1].version);
             if next > prev {
                 continue;
             }
@@ -288,13 +292,13 @@ fn adr_version_drift(docs: &[AdrDoc]) -> Vec<Violation> {
             continue;
         }
         for reference in &facts.inline_refs {
-            if facts.history.contains(&reference.version) {
+            if facts.history.iter().any(|r| r.version == reference.version) {
                 continue;
             }
             let known = facts
                 .history
                 .iter()
-                .map(ToString::to_string)
+                .map(|r| r.version.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             out.push(Violation {
@@ -303,6 +307,58 @@ fn adr_version_drift(docs: &[AdrDoc]) -> Vec<Violation> {
                     "{path}:{}: an inline note cites (Update, v{}), a version this \
                      document has never had — its history records {known}",
                     reference.line, reference.version
+                ),
+            });
+        }
+
+        // 4. The frontmatter must have kept up with the history. A row is added
+        //    by the person making the change; `version:` is a second place the
+        //    same fact is written, and it is the one that gets forgotten —
+        //    ADR-0009 sat at 1.10 over a history reaching 1.11, ADR-0014 at 1.4
+        //    over 1.5, both found while rule 1 was being written and neither
+        //    caught by it, because rule 1 compares frontmatter to the *summary
+        //    row* and the summary row was forgotten in the same edit.
+        //
+        //    Compared against the highest row rather than the last one so this
+        //    still reports honestly on a document rule 2 has already failed:
+        //    with the rows out of order, "the last row" is not the version the
+        //    document has reached.
+        if let (Some(front), Some(highest)) = (
+            doc.meta.version,
+            facts.history.iter().map(|r| r.version).max(),
+        ) && front != highest
+        {
+            out.push(Violation {
+                kind: ViolationKind::AdrVersionDrift,
+                message: format!(
+                    "{path}: frontmatter says version {front} but the version \
+                     history reaches {highest} — the frontmatter was not bumped \
+                     with the row that records the change"
+                ),
+            });
+        }
+
+        // 5. `last-modified` must not predate a change the document itself
+        //    records. **One-directional on purpose.** Running *ahead* of the
+        //    newest row is legitimate — a typo fix or a link repair need not
+        //    earn a history row — so an equality rule would fire on every small
+        //    edit and be switched off within a week. Only the impossible
+        //    direction is a violation: the document cannot have last been
+        //    modified before a change it lists.
+        //
+        //    Rows without a parseable date are skipped rather than guessed at;
+        //    a row reading `TBD` makes no claim to contradict.
+        if let (Some(modified), Some(newest)) = (
+            doc.meta.last_modified,
+            facts.history.iter().filter_map(|r| r.date).max(),
+        ) && modified < newest
+        {
+            out.push(Violation {
+                kind: ViolationKind::AdrVersionDrift,
+                message: format!(
+                    "{path}: frontmatter last-modified is {modified} but the \
+                     version history records a change on {newest} — a document \
+                     cannot have been last modified before a change it lists"
                 ),
             });
         }
@@ -946,6 +1002,107 @@ Taken with `axum` v1.13.0, and boxlite v0.9.7 alongside it.
         assert!(msg.contains("(Update, v1.5)"), "{msg}");
         assert!(msg.contains("never had"), "{msg}");
         assert!(msg.contains("1.0, 1.1, 1.2, 1.4"), "{msg}");
+    }
+
+    #[test]
+    fn frontmatter_lagging_the_history_is_a_violation() {
+        // ADR-0009 (1.10 over a history reaching 1.11) and ADR-0014 (1.4 over
+        // 1.5). The summary row is moved down **with** the frontmatter, because
+        // that is how the defect really occurs — both are forgotten in one edit,
+        // so they agree with each other and rule 1 stays silent. If rule 1 could
+        // catch this, rule 4 would not be worth having.
+        let lagged = VERSIONED
+            .replace("version: \"1.4\"", "version: \"1.2\"")
+            .replace(
+                "| **Document version** | 1.4 |",
+                "| **Document version** | 1.2 |",
+            );
+        let msgs = drift(&lagged);
+        assert_eq!(msgs.len(), 1, "rule 1 must stay silent here: {msgs:?}");
+        assert!(
+            msgs[0].contains("frontmatter says version 1.2"),
+            "{}",
+            msgs[0]
+        );
+        assert!(msgs[0].contains("history reaches 1.4"), "{}", msgs[0]);
+    }
+
+    #[test]
+    fn rule_four_compares_against_the_highest_row_not_the_last_one() {
+        // On a document rule 2 has already failed, "the last row" is not the
+        // version the document has reached — so comparing against it would
+        // report a second, false contradiction on top of the real one.
+        let out_of_order = VERSIONED.replace(
+            "| 1.4 | 2026-08-18 | HTTP/2 is a non-goal. |",
+            "| 1.4 | 2026-08-18 | HTTP/2 is a non-goal. |\n| 1.3 | 2026-08-19 | Later, lower. |",
+        );
+        let msgs = drift(&out_of_order);
+        assert!(
+            msgs.iter().any(|m| m.contains("out of order")),
+            "rule 2 still fires: {msgs:?}"
+        );
+        assert!(
+            !msgs.iter().any(|m| m.contains("history reaches")),
+            "frontmatter 1.4 *is* the highest row, so rule 4 must not fire: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn last_modified_older_than_the_newest_history_row_is_a_violation() {
+        let stale = VERSIONED.replace(
+            "version: \"1.4\"",
+            "version: \"1.4\"\nlast-modified: 2026-08-15",
+        );
+        let msgs = drift(&stale);
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert!(
+            msgs[0].contains("last-modified is 2026-08-15"),
+            "{}",
+            msgs[0]
+        );
+        assert!(msgs[0].contains("change on 2026-08-18"), "{}", msgs[0]);
+    }
+
+    #[test]
+    fn last_modified_ahead_of_the_history_is_not_a_violation() {
+        // The direction that makes this rule survivable. A typo fix or a link
+        // repair moves `last-modified` and earns no history row; an equality
+        // rule would fire on every one of them and be switched off within a
+        // week. Only the impossible direction is a finding.
+        let ahead = VERSIONED.replace(
+            "version: \"1.4\"",
+            "version: \"1.4\"\nlast-modified: 2026-09-30",
+        );
+        assert!(drift(&ahead).is_empty(), "{:?}", drift(&ahead));
+    }
+
+    #[test]
+    fn a_history_row_without_a_parseable_date_is_skipped_not_guessed() {
+        // The Date column is prose in practice — `TBD`, a range, an empty cell.
+        // Such a row still counts for the ordering rules (it has a version), but
+        // it makes no date claim, so rule 5 has nothing to contradict. Guessing
+        // one would invent the finding.
+        let tbd = VERSIONED
+            .replace(
+                "| 1.4 | 2026-08-18 | HTTP/2 is a non-goal. |",
+                "| 1.4 | TBD | HTTP/2 is a non-goal. |",
+            )
+            .replace(
+                "version: \"1.4\"",
+                "version: \"1.4\"\nlast-modified: 2026-08-16",
+            );
+        // 2026-08-16 is older than the *undated* 1.4 row but newer than 1.2's
+        // 2026-08-15, which is the newest row that actually states a date.
+        assert!(drift(&tbd).is_empty(), "{:?}", drift(&tbd));
+    }
+
+    #[test]
+    fn an_adr_with_no_last_modified_field_reports_nothing_for_rule_five() {
+        // Rule 5 compares two claims. A document that makes only one of them
+        // cannot contradict itself, and requiring the field is the rule this
+        // deliberately is not.
+        assert!(!VERSIONED.contains("last-modified"));
+        assert!(drift(VERSIONED).is_empty());
     }
 
     #[test]
