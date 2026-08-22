@@ -1128,11 +1128,15 @@ pub fn render_workspace_home(ws: &WorkspaceSummary) -> VaultNote {
             m.project, m.project, m.total_nodes, m.total_edges
         );
     }
+    // `[[#Heading]]`, the form the member rows above already use, rather than a
+    // `](#slug)` anchor: the slug a renderer computes and the slug a reader's
+    // tool computes are exactly what issue #524 is about, and a manifest is a
+    // poor place to find out they disagree.
     c.push_str(
         "\n*The `Repository` and `Commit` columns say where each member came from \
-         and what was read. They are **not** a replication manifest — reconstructing \
-         a workspace from a vault is issue #442 part 2, and nothing here is designed \
-         to be handed to someone else.*\n",
+         and what was read. The manifest that makes those reconstructable — and \
+         states what this vault carries before you share it — is \
+         [[#Reproducing this vault]], below.*\n",
     );
 
     write_cross_links(&mut c, ws);
@@ -1340,7 +1344,7 @@ fn inline_code(s: &str) -> String {
 /// the "quoted, not absorbed" property held for one field out of four. A `rule`
 /// or `path` carrying a backtick escapes the code span it is wrapped in.
 ///
-/// Three steps, in order:
+/// Four steps, in order:
 ///
 /// 1. **Collapse every whitespace run to one space.** This is what removes the
 ///    structural attack: Markdown block constructs need a line start, and after
