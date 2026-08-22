@@ -111,7 +111,8 @@ pub fn parse_blueprint(rel_path: &str, text: &str) -> BlueprintDoc {
         }
         if let Some(heading) = line.strip_prefix("## ") {
             let title = heading.trim().to_owned();
-            let slug = crate::text::slugify(&title);
+            // The shared rule, as for ADRs and site pages (#524).
+            let slug = crate::text::heading_id(heading);
             current = Some(slug.clone());
             // No `text`: `Section` is shared with `parse_adr`, and only that
             // parser populates it so far. A blueprint section note is empty in
@@ -167,6 +168,17 @@ mod tests {
                       Touches [[crates/rto-graph/src/store.rs#Store]].\n\n\
                       ## 2. Design\n\n\
                       ```\n[[not/a/real#Link]]\n```\n\nDone.\n";
+
+    /// #524, for blueprints: the same rule as ADRs and site pages.
+    #[test]
+    fn a_blueprint_heading_declaring_an_id_is_keyed_by_it() {
+        let doc = parse_blueprint(
+            "docs/BUILD_PLAN.md",
+            "# Plan\n\n## Stage one {#s1}\n\n## Stage two\n",
+        );
+        let slugs: Vec<_> = doc.sections.iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(slugs, ["s1", "stage-two"]);
+    }
 
     #[test]
     fn detects_blueprints_by_marker_or_path() {

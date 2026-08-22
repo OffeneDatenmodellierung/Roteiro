@@ -526,7 +526,12 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
         if let Some(heading) = line.strip_prefix("## ") {
             let title = heading.trim().to_owned();
             in_history = is_version_history(&title);
-            let slug = crate::text::slugify(&title);
+            // The heading's declared id when it has one, exactly as a site page's
+            // is (#524). No ADR carries an explicit `{#id}` today, so this moves
+            // no key — it removes the trap rather than repairing damage: the
+            // first author to write one would otherwise get the site-page bug
+            // back, in a document class the fix had not reached.
+            let slug = crate::text::heading_id(heading);
             current = Some(slug.clone());
             // Close the span this heading ends — the preamble if it is the first.
             match sections.last_mut() {
@@ -1024,6 +1029,23 @@ mod tests {
             parse_adr("x.md", text),
             Err(super::ParseError::MissingAdrId)
         );
+    }
+
+    /// #524, for ADRs: a heading that declares an address is keyed by it, exactly
+    /// as a site page's is.
+    ///
+    /// No ADR in this repository carries an explicit `{#id}`, so extending the
+    /// rule here moved no key — verified by diffing all 233 section keys before
+    /// and after. It removes the trap rather than repairing damage: the first
+    /// author to write one would otherwise have got the site-page bug back, in a
+    /// document class the fix had not reached.
+    #[test]
+    fn an_adr_heading_declaring_an_id_is_keyed_by_it() {
+        let adr = "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n\
+                   # T\n\n## Design notes {#arch}\n\n## Plain heading\n";
+        let doc = parse_adr("docs/adr/0001-x.md", adr).expect("parse");
+        let slugs: Vec<_> = doc.sections.iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(slugs, ["arch", "plain-heading"]);
     }
 
     #[test]

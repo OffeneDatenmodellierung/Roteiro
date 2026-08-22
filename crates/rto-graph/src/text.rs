@@ -126,11 +126,21 @@ pub fn heading_text(source: &str) -> String {
 ///
 /// # One rule, two callers — which is the whole point
 ///
-/// `rto_render` puts this on the rendered heading as its `id` attribute and
-/// `rto_spec` builds the section's node key from it, so a `[[doc#section]]` link
-/// resolves in the graph *and* lands in the browser. Both files already claimed
-/// that agreement in prose; before issue #524 the code only had it on one of two
-/// branches. The renderer honoured an explicit `{#id}` and the graph slugified
+/// `rto_render` puts this on the rendered heading as its `id` attribute, and
+/// `rto_spec` builds the section's node key from it for **all three** document
+/// classes it parses — ADRs, blueprints and site pages — so a `[[doc#section]]`
+/// link resolves in the graph *and* lands in the browser.
+///
+/// The three are named rather than summarised because "universally" is the kind
+/// of claim that goes quietly stale: #524's first fix reached site pages only,
+/// and ADRs and blueprints kept slugifying the heading text, so an author who
+/// wrote `{#id}` in an ADR would have got the same bug in a document class the
+/// fix had not reached. Extending it moved **no** existing key — none of the
+/// repository's 233 section keys changed — because no ADR or blueprint declares
+/// an explicit id today. It removes the trap rather than repairing damage.
+///
+/// Both files already claimed that agreement in prose; before #524 the code only
+/// had it on one of two branches. The renderer honoured an explicit `{#id}` and the graph slugified
 /// the heading text regardless, so
 ///
 /// ```text
