@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.1.0...roteiro-v2.1.1) - 2026-08-22
+
+### Fixed
+
+- *(init)* put SKILL.md frontmatter first, and assert its position
+
 ## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.0.2...roteiro-v2.1.0) - 2026-08-22
 
 ### Added
