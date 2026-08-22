@@ -849,6 +849,147 @@ fn roteiro_in(dir: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .expect("run roteiro")
 }
 
+/// The real `osv-scanner` capture the `security` tests ingest, rewritten to name
+/// `repo` as its checkout — so the vault's findings section is exercised against
+/// genuine analyzer output rather than a shape invented to match the renderer.
+fn ingest_real_findings(repo: &Path, home: &Path) {
+    let capture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rto-exec/tests/fixtures/native/osv-scanner-deps.json");
+    let text = String::from_utf8(std::fs::read(&capture).expect("read capture"))
+        .expect("capture is utf-8")
+        // The capture names `/checkout`; point it at this fixture so the ingest
+        // has a real tree to relativise paths against.
+        .replace("/checkout", repo.to_str().expect("utf-8 path"));
+    std::fs::write(repo.join("osv.json"), text).expect("write");
+
+    let out = roteiro_in(
+        repo,
+        home,
+        &[
+            "security",
+            "ingest",
+            "osv.json",
+            "--analyzer",
+            "osv-scanner",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "ingest failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// #442 part 2: the workspace vault carries each member's **analyzer findings**,
+/// and distinguishes *"nothing was found"* from *"nobody looked"*.
+///
+/// That distinction is the whole reason this renders in two shapes. `roteiro
+/// security status` calls the second case `no-analyzer-on-record` and refuses to
+/// let it read as clean; a vault must refuse harder, because the person holding
+/// it is the one who cannot go and check. So the fixture analyzes **one** member
+/// and leaves the other alone — a workspace where both were analyzed could not
+/// tell the two renderings apart.
+#[test]
+fn the_workspace_vault_lists_findings_and_says_who_was_never_analyzed() {
+    let (base, home) = workspace_fixture("ws-findings");
+    let vault = base.join("vault");
+
+    // `app` is analyzed; `deploy` deliberately is not.
+    ingest_real_findings(&base.join("app"), &home);
+
+    // …and `deploy` turns an ingest toggle **off**, so the manifest's settings
+    // row differs between the two members. With every toggle on everywhere,
+    // reporting only the enabled ones and reporting all of them render
+    // identically — the row would be exercised and prove nothing.
+    write(
+        &base.join("deploy"),
+        "roteiro.toml",
+        "[ingest]\nprose = false\n\n[debt]\nignore = [\"vendor/**\"]\n",
+    );
+
+    let out = roteiro_in(
+        &base,
+        &home,
+        &[
+            "render",
+            "obsidian",
+            "-w",
+            "prod",
+            "--out",
+            vault.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let home_note = std::fs::read_to_string(vault.join("_Home.md")).expect("read _Home");
+
+    assert!(
+        home_note.contains("## Security findings"),
+        "the section renders: {home_note}"
+    );
+    // The analyzed member's findings are listed, attributed to the tool that
+    // produced them.
+    assert!(
+        home_note.contains("### app — ") && home_note.contains("osv-scanner"),
+        "the analyzed member names its analyzer: {home_note}"
+    );
+    assert!(
+        home_note.contains("GHSA-") || home_note.contains("RUSTSEC-"),
+        "real advisory ids from the capture reach the vault: {home_note}"
+    );
+
+    // …and the unanalyzed member is called out as such, NOT rendered as clean.
+    assert!(
+        home_note.contains("### deploy — **not analyzed**"),
+        "a member nobody analyzed must say so: {home_note}"
+    );
+    assert!(
+        !home_note.contains("### deploy — no findings"),
+        "and must never be rendered as having come back clean: {home_note}"
+    );
+
+    // The settings a re-render would have to match, per member — and they differ,
+    // so this asserts the filter rather than the section's existence.
+    assert!(
+        home_note.contains("### Rendered under"),
+        "the settings table renders: {home_note}"
+    );
+    let row = home_note
+        .lines()
+        .find(|l| l.starts_with("| deploy |"))
+        .unwrap_or_else(|| panic!("a row for deploy: {home_note}"));
+    assert!(
+        !row.contains("`prose`"),
+        "a toggle turned off must not be listed as enabled: {row}"
+    );
+    assert!(
+        row.contains("`vendor/**`"),
+        "and its debt filter is recorded, because it already filtered the \
+         figures on this page: {row}"
+    );
+    let app_row = home_note
+        .lines()
+        .find(|l| l.starts_with("| app |"))
+        .unwrap_or_else(|| panic!("a row for app: {home_note}"));
+    assert!(
+        app_row.contains("`prose`"),
+        "while the member that left it on says so: {app_row}"
+    );
+
+    // The share-time warning changed with the decision to include findings: the
+    // vault now says it carries them, rather than saying it leaves them out.
+    assert!(home_note.contains("Before you share this"), "{home_note}");
+    assert!(
+        home_note.contains("cannot be un-shared"),
+        "the consequence of including them is stated where it is acted on: {home_note}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// `render obsidian -w <name>` renders **one vault spanning the workspace**: both
 /// members' notes, project-qualified so they cannot overwrite each other, and one
 /// `_Home` carrying each member's own aggregates.
