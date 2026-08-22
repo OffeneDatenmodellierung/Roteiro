@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.2.0"
+version = "2.3.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
@@ -22,14 +22,14 @@ homepage = "https://roteiro.dev"
 authors = ["The Roteiro Project Team"]
 
 [workspace.dependencies]
-rto-exec = { path = "crates/rto-exec", version = "2.2.0" }
-rto-faithful = { path = "crates/rto-faithful", version = "2.2.0" }
-rto-graph = { path = "crates/rto-graph", version = "2.2.0" }
-rto-llama = { path = "crates/rto-llama", version = "2.2.0" }
-rto-remote = { path = "crates/rto-remote", version = "2.2.0" }
-rto-spec = { path = "crates/rto-spec", version = "2.2.0" }
-rto-render = { path = "crates/rto-render", version = "2.2.0" }
-rto-serve = { path = "crates/rto-serve", version = "2.2.0" }
+rto-exec = { path = "crates/rto-exec", version = "2.3.0" }
+rto-faithful = { path = "crates/rto-faithful", version = "2.3.0" }
+rto-graph = { path = "crates/rto-graph", version = "2.3.0" }
+rto-llama = { path = "crates/rto-llama", version = "2.3.0" }
+rto-remote = { path = "crates/rto-remote", version = "2.3.0" }
+rto-spec = { path = "crates/rto-spec", version = "2.3.0" }
+rto-render = { path = "crates/rto-render", version = "2.3.0" }
+rto-serve = { path = "crates/rto-serve", version = "2.3.0" }
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive", "env"] }
 # Pinned to 0.39 (not the latest 0.40.x): libsqlite3-sys's build script from

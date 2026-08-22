@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v2.2.0...rto-graph-v2.3.0) - 2026-08-22
+
+### Added
+
+- *(links)* persist authored [[links]], making the `authored → gold` path reachable
+
 ## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v2.0.2...rto-graph-v2.1.0) - 2026-08-22
 
 ### Fixed
