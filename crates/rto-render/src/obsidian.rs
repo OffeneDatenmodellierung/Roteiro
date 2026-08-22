@@ -889,6 +889,15 @@ pub struct CrossLink {
     pub kind: String,
     /// Confidence, for an `inferred` edge.
     pub confidence: Option<f64>,
+    /// Whether this link was **declared** (`[[links]]` in the source repo's
+    /// config, ADR-0009) rather than inferred by key matching.
+    ///
+    /// The distinction is the whole of ADR-0009's `authored → gold,
+    /// inferred → slate`: a declaration is a statement of intent by someone who
+    /// knows the topology, a match is a candidate. Until #573 the vault could not
+    /// draw it, because nothing persisted an authored cross-repo edge — so this
+    /// section carried a blanket caveat saying every row was a candidate.
+    pub authored: bool,
     /// The project-qualified target, `<project>::<key>` (ADR-0009).
     pub to_qualified: String,
     /// Whether `to_qualified`'s project is a member of this workspace — and so
@@ -912,6 +921,15 @@ pub struct WorkspaceSummary {
     /// Cross-repo links found in total, which `cross_links` may be a capped view
     /// of — so the section can say what it is not showing.
     pub cross_links_total: usize,
+    /// How many of `cross_links_total` were **declared** (`[[links]]`) rather
+    /// than inferred.
+    ///
+    /// Counted before the cap, not from `cross_links`: that vector is truncated
+    /// to [`WORKSPACE_CROSS_LINK_ROWS`](crate::WORKSPACE_CROSS_LINK_ROWS) rows,
+    /// so counting it would describe the rows on screen while reading as a
+    /// statement about the workspace — a caption that quietly changes meaning
+    /// once a workspace grows past the cap.
+    pub cross_links_authored: usize,
 }
 
 /// Render a **workspace** vault's overview: the members and their scale, the
@@ -1043,11 +1061,30 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
         );
         return;
     }
-    c.push_str(
+    // The caveat is per-row now, because the two provenances are no longer the
+    // same claim: an **authored** row was declared by someone who knows the
+    // topology, an **inferred** row is a scored guess. Saying "these are all
+    // candidates" over a table containing declarations would understate the
+    // declarations exactly as saying nothing would overstate the matches.
+    let authored = ws.cross_links_authored;
+    // `saturating_sub`: `WorkspaceSummary` is public, so a caller can hand us a
+    // count larger than the total. In release that subtraction wraps and the
+    // caption reports billions of inferred links — a rendering function should
+    // not be the place an inconsistent input becomes nonsense. The debug
+    // assertion says which caller was wrong, in the build that can afford to.
+    debug_assert!(
+        authored <= ws.cross_links_total,
+        "cross_links_authored ({authored}) exceeds cross_links_total ({})",
+        ws.cross_links_total
+    );
+    let inferred = ws.cross_links_total.saturating_sub(authored);
+    let _ = writeln!(
+        c,
         "*A spoke's config key and the hub key it corresponds to, across \
-         repositories — the one thing a per-project vault structurally cannot show. \
-         These are `inferred` matches persisted by `roteiro links --infer --write` \
-         (ADR-0009), not authored facts: read a row as a candidate correspondence.*\n\n",
+         repositories — the one thing a per-project vault structurally cannot \
+         show. **{authored} declared** (`[[links]]`, ADR-0009 — a statement of \
+         intent) and **{inferred} inferred** (`roteiro links --infer --write` — \
+         read those as candidate correspondences).*\n"
     );
     c.push_str("| From | | To | Kind |\n| --- | --- | --- | --- |\n");
     for l in &ws.cross_links {
@@ -1063,14 +1100,21 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
             // merely unwritten.
             format!("`{}` *(outside this workspace)*", l.to_qualified)
         };
+        // `declared` rather than a confidence score: an authored link carries no
+        // score by construction, so an empty cell there would read as "confidence
+        // unknown" instead of "not that kind of claim".
+        let how = if l.authored {
+            " *(declared)*".to_owned()
+        } else {
+            confidence(l.confidence)
+        };
         let _ = writeln!(
             c,
-            "| [[{}\\|{}]] | {} | {to} | {}{} |",
+            "| [[{}\\|{}]] | {} | {to} | {}{how} |",
             scoped_note_name(&from_scope, &l.from_key),
             l.from_name,
             l.from_project,
             l.kind,
-            confidence(l.confidence)
         );
     }
     if ws.cross_links_total > ws.cross_links.len() {
@@ -1859,6 +1903,55 @@ mod tests {
     /// a name rendered for a node the vault does not hold is a true sentence
     /// about a note nobody can open. The empty case is
     /// `the_workspace_home_claims_no_example_note_when_it_has_no_real_key`.
+    /// #573: the cross-repo section distinguishes a **declaration** from a
+    /// **match**, and says how many of each.
+    ///
+    /// Before authored links could be persisted, every row was a candidate and
+    /// the section said so in one blanket caveat. That caveat is now false for
+    /// declared rows, and an edge that exists but renders as a guess leaves
+    /// ADR-0009's `authored → gold` path just as unreachable as no edge at all —
+    /// so the rendering is part of the contract, not decoration.
+    #[test]
+    fn the_cross_repo_section_separates_declared_links_from_inferred_ones() {
+        let link = |authored: bool, key: &str| CrossLink {
+            from_project: "sdk".into(),
+            from_key: format!("cfgkey:config.toml#{key}"),
+            from_name: key.into(),
+            kind: "references".into(),
+            // A declaration carries no score by construction; a match does.
+            confidence: if authored { None } else { Some(0.91) },
+            to_qualified: format!("api::cfgkey:config.toml#{key}"),
+            resolves: true,
+            authored,
+        };
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            cross_links: vec![link(true, "addr"), link(false, "port")],
+            // Totals deliberately **larger** than the two rows shown: the caption
+            // is a statement about the workspace, and `cross_links` is a capped
+            // view of it. Counting the rows would give 1 and 1 here and read as
+            // correct — which is exactly the bug, invisible until a workspace
+            // outgrows the cap.
+            cross_links_total: 9,
+            cross_links_authored: 4,
+        };
+        let c = render_workspace_home(&ws).content;
+
+        assert!(
+            c.contains("**4 declared**"),
+            "the caption counts the workspace, not the rows on screen: {c}"
+        );
+        assert!(c.contains("**5 inferred**"), "{c}");
+        assert!(
+            !c.contains("not authored facts"),
+            "the blanket caveat is false once a declared row can appear: {c}"
+        );
+        // Per row: a declaration is marked as one, and a match keeps its score.
+        assert!(c.contains("references *(declared)*"), "{c}");
+        assert!(c.contains("references (0.91)"), "{c}");
+    }
+
     #[test]
     fn the_workspace_home_names_an_example_note_name_actually_produces() {
         let ws = WorkspaceSummary {
@@ -1872,8 +1965,10 @@ mod tests {
                 confidence: Some(0.91),
                 to_qualified: "api::cfgkey:config.toml#addr".into(),
                 resolves: true,
+                authored: false,
             }],
             cross_links_total: 1,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
 
@@ -1914,6 +2009,7 @@ mod tests {
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![],
             cross_links_total: 0,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
 
@@ -2105,6 +2201,7 @@ mod tests {
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![],
             cross_links_total: 0,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         assert_eq!(note.filename, HOME_NOTE);
@@ -2174,6 +2271,7 @@ mod tests {
                     confidence: Some(0.91),
                     to_qualified: "api::cfgkey:config.toml#addr".into(),
                     resolves: true,
+                    authored: false,
                 },
                 CrossLink {
                     from_project: "sdk".into(),
@@ -2183,9 +2281,11 @@ mod tests {
                     confidence: None,
                     to_qualified: "absent::cfgkey:config.toml#other".into(),
                     resolves: false,
+                    authored: false,
                 },
             ],
             cross_links_total: 2,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         // Resolvable: a link to the other member's note, with its confidence.
@@ -2227,8 +2327,10 @@ mod tests {
                 confidence: None,
                 to_qualified: "api::cfgkey:config.toml#addr".into(),
                 resolves: true,
+                authored: false,
             }],
             cross_links_total: 40,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         assert!(note.content.contains("Showing 1 of 40"), "{}", note.content);
@@ -2242,6 +2344,7 @@ mod tests {
             members: vec![member_summary("api", 7)],
             cross_links: vec![],
             cross_links_total: 0,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         assert!(note.content.contains("## Cross-repo links"));

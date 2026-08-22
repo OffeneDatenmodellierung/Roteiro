@@ -676,10 +676,18 @@ enum Command {
         /// measure drift against two different things at once.
         #[arg(long, conflicts_with = "hub_rev")]
         pinned: bool,
-        /// With `--infer`: persist the inferred correspondences into each spoke's
-        /// graph as durable cross-repo edges (an `inferred` import layer that
-        /// survives sync), instead of only reporting them.
-        #[arg(long, requires = "infer")]
+        /// Persist the resolved links into each repo's graph as durable cross-repo
+        /// edges (an import layer that survives sync), instead of only reporting
+        /// them.
+        ///
+        /// With `--infer` that is the inferred correspondences; without it, the
+        /// repo's **authored** `[[links]]` declarations — which until #573 were
+        /// resolved, printed and then discarded, leaving the `authored → gold`
+        /// path ADR-0009 documents unreachable.
+        ///
+        /// The two go into **separate** import layers, so re-running one never
+        /// reclassifies the other's edges.
+        #[arg(long)]
         write: bool,
         /// With `--matrix`: write a self-contained HTML page (the `render web-graph`
         /// output) to `--out` (default `roteiro-overview.html`; `-` for stdout).
@@ -2012,6 +2020,20 @@ fn main() -> anyhow::Result<()> {
                          `[[links]]` against each repo's current graph"
                     );
                 }
+                // Same again for the two hub selectors. They choose what
+                // `--infer`/`--matrix` match *against*; the authored report
+                // resolves each `[[links]]` target by its own qualified name and
+                // consults no hub at all, so passing them looks like selecting a
+                // hub or a version while selecting nothing.
+                if hub.is_some() || hub_rev.is_some() {
+                    anyhow::bail!(
+                        "`--hub` / `--hub-rev` apply only to `roteiro links --infer` / \
+                         `--matrix` (they choose the project, and the version of it, \
+                         that config keys are matched against); an authored \
+                         `[[links]]` entry names its own target, so there is no hub \
+                         to select"
+                    );
+                }
                 // `--app-config-only` only filters config-key matching, which the
                 // plain authored-links report doesn't do. Reject it here rather than
                 // silently ignoring it, so the flag never looks like it took effect.
@@ -2022,7 +2044,7 @@ fn main() -> anyhow::Result<()> {
                          `roteiro query --kind config_key --app-config-only` supports it too"
                     );
                 }
-                run_links(&cfg.effective, &scope, json)
+                run_links(&cfg.effective, &scope, write, json)
             }
         }
         Command::Export { out } => run_export(ingest, out),
@@ -7493,6 +7515,78 @@ struct LinkResult {
     detail: String,
 }
 
+/// Persist every repo's authored layer, returning `(written, pruned, unanchored)`.
+///
+/// Three numbers rather than one because they need different fixes: `written`
+/// landed, `pruned` named a `from` that does not resolve in its own repo's graph
+/// (unsynced, or a stale/typoed key), and `unanchored` declared no `from` at all
+/// and so has nothing local for an edge to start from. Reporting one total would
+/// leave an author with a short count and no way to tell which.
+///
+/// A no-op that returns zeros when `write` is unset, so the caller has no branch.
+fn persist_authored_layers(
+    write: bool,
+    authored: &std::collections::BTreeMap<std::path::PathBuf, rto_graph::FactSet>,
+    results: &[LinkResult],
+) -> anyhow::Result<(usize, usize, usize)> {
+    if !write {
+        return Ok((0, 0, 0));
+    }
+    let (mut written, mut pruned) = (0usize, 0usize);
+    for (path, facts) in authored {
+        let (applied, dropped) = persist_authored_links(path, facts)?;
+        written += applied;
+        pruned += dropped;
+    }
+    let unanchored = results
+        .iter()
+        .filter(|r| r.status == "ok" && r.from.is_none())
+        .count();
+    Ok((written, pruned, unanchored))
+}
+
+/// Apply one repo's authored-link layer to its graph, returning the edges
+/// applied. Mirrors [`persist_inferred_links`], under its own ref.
+///
+/// An unsynced repo (no `graph.db`) is skipped rather than failing: there is no
+/// graph to attach edges to, and the report already names its links as resolved.
+fn persist_authored_links(
+    path: &std::path::Path,
+    facts: &rto_graph::FactSet,
+) -> anyhow::Result<(usize, usize)> {
+    let db = graph_db_path(path)?;
+    if !db.exists() {
+        return Ok((0, 0));
+    }
+    let mut store = rto_graph::Store::open(&db)?;
+    let applied = store.apply_import_layer(rto_graph::LINKS_AUTHORED_REF, facts)?;
+    // Pruned edges are unpersisted links too. `apply_import_layer` drops an edge
+    // whose `from` does not resolve to a node in this store — a stale graph, an
+    // unsynced repo, a typoed key — and without counting them the total is
+    // simply short, which reads as the write having done less than it claims
+    // rather than as a declaration that could not be attached.
+    Ok((applied.edges_applied, applied.edges_pruned))
+}
+
+/// The persistable facts for **one** authored `[[links]]` declaration: the
+/// external-ref placeholder standing in for the (foreign) target, and an
+/// `authored` edge from this repo's local anchor to it.
+///
+/// The mirror of [`infer_links::link_facts`], differing in exactly the two ways
+/// that matter: [`Provenance::Authored`] rather than `Inferred` (no confidence —
+/// a declaration is not scored), and [`rto_graph::LINKS_AUTHORED_REF`] rather
+/// than `LINKS_REF`, so the two layers replace independently.
+fn authored_link_facts(from: &str, to: &str, kind: &str) -> rto_graph::FactSet {
+    let target = rto_graph::external_ref_node_with(to, rto_graph::Provenance::Authored);
+    let mut edge = rto_graph::Edge::authored(
+        from.to_owned(),
+        target.key.clone(),
+        rto_graph::EdgeKind::from_token(kind),
+    );
+    edge.src_ref = Some(rto_graph::LINKS_AUTHORED_REF.to_owned());
+    rto_graph::FactSet::new().with_node(target).with_edge(edge)
+}
+
 /// Project (display) names for `paths`, matching how [`rto_graph::Workspace`]
 /// names them — the repo directory name, with `-2`/`-3`/… suffixes disambiguating
 /// collisions — so a report's `repo` label (and the `<project>` used in a link
@@ -7685,7 +7779,12 @@ const WORKSPACE_CONFIG_ADVICE: &str = "workspaces are machine-specific, so prefe
 /// its `[[links]]` and resolve each project-qualified `to` against the other
 /// repos' graphs. A target that no longer resolves is **drift** — the cross-repo
 /// form of `roteiro check`. Exits non-zero if any link drifts.
-fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow::Result<()> {
+fn run_links(
+    cfg: &config::Config,
+    scope: &LinksScope<'_>,
+    write: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let paths = links_scope_paths(cfg, scope)?;
     if paths.is_empty() {
         anyhow::bail!(
@@ -7697,7 +7796,18 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
 
     // Collect each repo's declared links from its own config.
     let mut results: Vec<LinkResult> = Vec::new();
+    // Per repo, the authored facts to persist under `--write`: keyed by path so
+    // each repo's layer is applied to its own store, and built for **every** repo
+    // in scope — including ones whose links all drifted — because
+    // `apply_import_layer` is what clears a ref's prior edges, so a repo that has
+    // since removed a declaration must still be re-applied (with an empty layer)
+    // to drop the stale one.
+    let mut authored: std::collections::BTreeMap<std::path::PathBuf, rto_graph::FactSet> =
+        std::collections::BTreeMap::new();
     for (path, repo_name) in workspace_project_names(&paths) {
+        if write {
+            authored.entry(path.clone()).or_default();
+        }
         let repo_cfg = config::load(path)?.effective;
         for link in &repo_cfg.links {
             let kind = link.kind.clone().unwrap_or_else(|| "references".to_owned());
@@ -7706,6 +7816,20 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
                 Ok(None) => ("drift", "no such node in the target project".to_owned()),
                 Err(e) => ("drift", e.to_string()),
             };
+            // Only a resolved link with a local anchor can become an edge: an
+            // edge needs a source node in *this* store. `from` is optional, so a
+            // declaration without one is reported as unanchored rather than
+            // silently dropped — `apply_import_layer` would prune it anyway, and
+            // a pruned edge tells the author nothing.
+            if write
+                && status == "ok"
+                && let Some(from) = link.from.as_deref()
+            {
+                let facts = authored_link_facts(from, &link.to, &kind);
+                let acc = authored.entry(path.clone()).or_default();
+                acc.nodes.extend(facts.nodes);
+                acc.edges.extend(facts.edges);
+            }
             results.push(LinkResult {
                 repo: repo_name.clone(),
                 from: link.from.clone(),
@@ -7718,6 +7842,13 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
     }
 
     let drift = results.iter().filter(|r| r.status == "drift").count();
+
+    // Persist before reporting, so the report can state what was written.
+    // Resolved links whose declaration carries no `from` cannot become an edge —
+    // an edge needs a source node in this store — and are counted so the report
+    // says so rather than leaving the author to wonder why their count is short.
+    let (written, pruned, unanchored) = persist_authored_layers(write, &authored, &results)?;
+
     if json {
         emit_json(&results)?;
     } else if results.is_empty() {
@@ -7725,6 +7856,17 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
             "no cross-repo links declared across {} repo(s) (add `[[links]]` to a repo's roteiro.toml)",
             paths.len()
         );
+        // An empty layer is still a write, and it is the one that *removes* a
+        // declaration's edges. Staying silent here made deleting the last
+        // `[[links]]` entry look like a no-op while it authoritatively cleared
+        // the layer — a write with no report is the shape this repository keeps
+        // filing issues about.
+        if write {
+            println!(
+                "cleared the authored cross-repo layer in {} repo(s)",
+                paths.len()
+            );
+        }
     } else {
         for r in &results {
             let marker = if r.status == "ok" { "ok   " } else { "DRIFT" };
@@ -7737,6 +7879,21 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
             results.len() - drift,
             drift
         );
+        if write {
+            println!("\npersisted {written} authored cross-repo edge(s) into repo graphs");
+            if unanchored > 0 {
+                println!(
+                    "  {unanchored} resolved link(s) declared no `from`, so they have no \
+                     local anchor to attach an edge to and were not persisted"
+                );
+            }
+            if pruned > 0 {
+                println!(
+                    "  {pruned} link(s) named a `from` that does not resolve in their own \
+                     repo's graph (unsynced, or a stale/typoed key) and were dropped"
+                );
+            }
+        }
     }
 
     if drift > 0 {
@@ -14023,6 +14180,10 @@ fn render_obsidian_workspace(
         ))
     });
     let cross_links_total = cross_links.len();
+    // Counted before the cap: the caption reads as a statement about the
+    // workspace, so counting the truncated view would make it quietly wrong the
+    // moment a workspace outgrows `WORKSPACE_CROSS_LINK_ROWS`.
+    let cross_links_authored = cross_links.iter().filter(|l| l.authored).count();
     cross_links.truncate(WORKSPACE_CROSS_LINK_ROWS);
 
     let home = rto_render::render_workspace_home(&rto_render::WorkspaceSummary {
@@ -14030,6 +14191,7 @@ fn render_obsidian_workspace(
         members: summaries,
         cross_links,
         cross_links_total,
+        cross_links_authored,
     });
     std::fs::write(out.join(&home.filename), &home.content)?;
 
@@ -14321,6 +14483,7 @@ fn collect_cross_links(
                 from_name: name,
                 kind: edge.kind,
                 confidence: edge.confidence,
+                authored: edge.provenance == rto_graph::Provenance::Authored.as_str(),
                 to_qualified: qualified.clone(),
                 resolves,
             });

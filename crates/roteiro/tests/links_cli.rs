@@ -584,6 +584,173 @@ fn a_struct_derived_hub_key_is_not_a_pinned_baseline() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// A two-repo workspace where `chart` **declares** a `[[links]]` entry pointing
+/// at a key in `app`, and both are synced. Returns the workspace root and the
+/// chart's path.
+///
+/// Shared so the two authored-link tests cannot drift apart on the fixture the
+/// way they could on two copies of it.
+fn declared_link_workspace(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = std::env::temp_dir().join(format!("roteiro-{tag}-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let chart = base.join("chart");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&chart).expect("mkdir chart");
+
+    std::fs::write(app.join("config.toml"), "[batch]\nmax_bytes = 1048576\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app sync");
+
+    std::fs::write(chart.join("values.yaml"), "batch:\n  max_bytes: 2097152\n").expect("write");
+    let decl = "[[links]]\nfrom = \"cfgkey:values.yaml#batch.max_bytes\"\n\
+                to = \"app::cfgkey:config.toml#batch.max_bytes\"\nkind = \"references\"\n";
+    std::fs::write(chart.join("roteiro.toml"), decl).expect("write");
+    git(&chart, &["init", "-q"]);
+    git(&chart, &["add", "."]);
+    git(&chart, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&chart, &["sync"]).status.success(), "chart sync");
+
+    (base, chart)
+}
+
+/// #573: an authored `[[links]]` declaration becomes a durable **`authored`**
+/// cross-repo edge, so the `authored → gold` path ADR-0009 documents in three
+/// places is reachable at last.
+///
+/// Covers all three questions the issue left open, because they are one
+/// mechanism: the layer is written only under `--write`, replaces by its own ref
+/// on re-run, and survives `sync` — and it does none of that to the *inferred*
+/// layer, which is why they have separate refs.
+#[test]
+fn authored_links_are_persisted_as_a_durable_authored_layer() {
+    let (base, chart) = declared_link_workspace("authored");
+    let base_s = base.to_str().unwrap();
+    // Counted on the **edges**, not the placeholder node. Both layers share one
+    // placeholder per target (same `extref:` key), so the node's own provenance
+    // is whichever layer was applied last and says nothing about a given link.
+    // The edge is where `authored` vs `inferred` actually lives.
+    let authored_edges = || -> usize {
+        let key = "extref:app::cfgkey:config.toml#batch.max_bytes";
+        let out = roteiro(&chart, &["query", key, "--json"]);
+        if !out.status.success() {
+            return 0; // no placeholder at all — nothing was persisted
+        }
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        v["incoming"].as_array().map_or(0, |a| {
+            a.iter().filter(|e| e["provenance"] == "authored").count()
+        })
+    };
+
+    // Reporting alone must not write — `roteiro links` is a CI gate, and a gate
+    // that mutates as a side effect is the surprise this flag exists to avoid.
+    let report = roteiro(&base, &["links", "--workspace", base_s]);
+    assert!(report.status.success(), "links failed: {report:?}");
+    assert_eq!(
+        authored_edges(),
+        0,
+        "a plain report must not persist anything"
+    );
+
+    let wrote = roteiro(&base, &["links", "--workspace", base_s, "--write"]);
+    assert!(wrote.status.success(), "links --write failed: {wrote:?}");
+    assert!(
+        String::from_utf8_lossy(&wrote.stdout).contains("persisted 1 authored"),
+        "the write must report itself: {wrote:?}"
+    );
+    assert_eq!(
+        authored_edges(),
+        1,
+        "the declaration is now a persisted fact"
+    );
+
+    // Durable across a re-sync — the property `reapply_imports` gives every
+    // import layer, and the one ADR-0009 never wrote down for authored links.
+    assert!(roteiro(&chart, &["sync"]).status.success(), "re-sync");
+    assert_eq!(authored_edges(), 1, "an authored edge survives sync");
+
+    // Removing the declaration removes the edge: the layer is authoritative for
+    // its own ref, so a re-run with nothing to say clears what it said before.
+    std::fs::write(chart.join("roteiro.toml"), "").expect("write");
+    let cleared = roteiro(&base, &["links", "--workspace", base_s, "--write"]);
+    assert!(
+        cleared.status.success(),
+        "links --write failed: {cleared:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&cleared.stdout).contains("cleared the authored"),
+        "clearing is a write and must say so, not look like a no-op: {cleared:?}"
+    );
+    assert_eq!(authored_edges(), 0, "the stale edge is gone");
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// The two link layers replace **independently** — the load-bearing property of
+/// giving them separate refs.
+///
+/// `apply_import_layer` is authoritative per ref: it clears that ref's prior
+/// edges before re-applying. Sharing one ref would make `--infer --write` delete
+/// every authored edge and the authored write delete every inferred one, each
+/// command silently reclassifying the other's work — which would also make
+/// ADR-0009's `authored → gold, inferred → slate` meaningless.
+#[test]
+fn the_authored_and_inferred_link_layers_replace_independently() {
+    let (base, chart) = declared_link_workspace("indep");
+    let base_s = base.to_str().unwrap();
+
+    assert!(
+        roteiro(&base, &["links", "--workspace", base_s, "--write"])
+            .status
+            .success(),
+        "authored write"
+    );
+    let inferred = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--write",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+        ],
+    );
+    assert!(
+        inferred.status.success(),
+        "infer --write failed: {inferred:?}"
+    );
+
+    let out = roteiro(
+        &chart,
+        &[
+            "query",
+            "extref:app::cfgkey:config.toml#batch.max_bytes",
+            "--json",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let kinds: Vec<&str> = v["incoming"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["provenance"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"authored"),
+        "inferring must not delete the authored edge: {v}"
+    );
+    assert!(
+        kinds.contains(&"inferred"),
+        "and both provenances coexist on one target: {v}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// The **no-op** envelope must carry the same contract as a populated one.
 ///
 /// This is the CLI twin of the served endpoint's no-hub branch, and it had the
@@ -1309,10 +1476,14 @@ fn unrelated_misconfigured_workspace_does_not_break_legacy_fallback() {
 #[test]
 fn incompatible_link_flag_combinations_are_rejected() {
     // clap constraints fail fast rather than silently running a surprising path.
+    //
+    // `["links", "--write"]` used to be here, and is deliberately gone: since
+    // #573 it is the **authored** persist path (`[[links]]` declarations → a
+    // durable `authored` import layer), not a mistake. It is covered positively
+    // by `authored_links_are_persisted_as_a_durable_authored_layer`.
     for args in [
         ["links", "--infer", "--matrix"].as_slice(),
-        ["links", "--write"].as_slice(), // --write without --infer
-        ["links", "--html"].as_slice(),  // --html without --matrix
+        ["links", "--html"].as_slice(), // --html without --matrix
         ["links", "--out", "x.html"].as_slice(), // --out without --html
     ] {
         let out = roteiro(Path::new("."), args);

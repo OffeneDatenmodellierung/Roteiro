@@ -110,7 +110,8 @@ pub use infer::{
     InferenceConfig, duplicates, duplicates_with, embed, infer_edges, infer_edges_with, similarity,
 };
 pub use links::{
-    EXTERNAL_REF_KIND, LINKS_REF, external_ref_key, external_ref_node, external_ref_target,
+    EXTERNAL_REF_KIND, LINKS_AUTHORED_REF, LINKS_REF, external_ref_key, external_ref_node,
+    external_ref_node_with, external_ref_target,
 };
 pub use media::{
     CandidateCount, GateReason, GateThresholds, GeneratedContent, MAX_MODEL_ID, MAX_PROMPT,

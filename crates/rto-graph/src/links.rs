@@ -23,6 +23,21 @@ use crate::model::{Node, NodeKind};
 /// can re-derive it authoritatively without touching other import layers.
 pub const LINKS_REF: &str = "import:links";
 
+/// The import-layer `src_ref` for **authored** cross-repo links — a repo's
+/// `[[links]]` declarations (ADR-0009), as opposed to [`LINKS_REF`]'s inferred
+/// matches.
+///
+/// A **separate** ref, and that is the load-bearing part. `apply_import_layer`
+/// is authoritative per ref: it clears the ref's prior edges before re-applying.
+/// Sharing one ref would therefore make `links --write` delete every inferred
+/// edge and `links --infer --write` delete every authored one — each command
+/// silently reclassifying the other's work on every run.
+///
+/// It is also what lets "authored → gold, inferred → slate" mean anything: the
+/// two provenances have to be independently replaceable, or re-running one
+/// changes the colour of the other.
+pub const LINKS_AUTHORED_REF: &str = "import:links/authored";
+
 /// The node-kind token for an external-ref placeholder — a stand-in, in one
 /// repo's store, for a node that actually lives in another repo's graph.
 pub const EXTERNAL_REF_KIND: &str = "external_ref";
@@ -34,12 +49,37 @@ pub const EXTERNAL_REF_KIND: &str = "external_ref";
 /// can resolve it across the workspace. Tagged [`Provenance::Inferred`].
 #[must_use]
 pub fn external_ref_node(qualified: &str) -> Node {
+    external_ref_node_with(qualified, Provenance::Inferred)
+}
+
+/// [`external_ref_node`], with the placeholder's provenance chosen by the caller.
+///
+/// The placeholder carries the provenance of the *claim that the target exists*:
+/// [`Provenance::Inferred`] for a confidence-scored match, [`Provenance::Authored`]
+/// for a `[[links]]` declaration someone wrote.
+///
+/// # The placeholder's provenance is not the link's
+///
+/// Both flavours share a key, so a repo that both declares *and* infers the same
+/// target has **one** placeholder — and since each layer upserts it, the node's
+/// own provenance is whichever layer was applied last. Do not read it as the
+/// link's provenance. The **edges** carry that, one per ref, and a consumer
+/// asking "is this link authored?" must look there:
+///
+/// ```text
+/// "incoming": [
+///   { "provenance": "authored", "confidence": null },
+///   { "provenance": "inferred", "confidence": 0.9   }
+/// ]
+/// ```
+#[must_use]
+pub fn external_ref_node_with(qualified: &str, provenance: Provenance) -> Node {
     let mut node = Node::new(
         external_ref_key(qualified),
         NodeKind::Other(EXTERNAL_REF_KIND.to_owned()),
         qualified.to_owned(),
     )
-    .with_provenance(Provenance::Inferred);
+    .with_provenance(provenance);
     node.meta = serde_json::json!({ "qualified": qualified });
     node
 }
