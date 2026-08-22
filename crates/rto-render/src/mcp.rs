@@ -1313,7 +1313,7 @@ impl GraphServer {
             " These tools answer from the committed (`HEAD`) graph this server \
              synced, not from anyone's uncommitted working-tree edits — so a count \
              here can differ from the same command run in a terminal, which reads \
-             the working tree.",
+             the working tree by default (its `--committed` flag matches this).",
         );
         out
     }

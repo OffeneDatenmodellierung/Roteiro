@@ -126,7 +126,13 @@ impl LogArgs {
 
 /// Which tree a command reads, shared by every surface that answers a question
 /// about *this* repository (`debt`, `debt-density`, `coupling`, `config-secrets`,
-/// `search`, `query`, `context`, `path`, `duplicates`) and by the `check` gate.
+/// `search`, `query`, `context`, `path`) and by the `check` gate.
+///
+/// `duplicates` is the one read command still hard-wired to `Committed`. It is
+/// behind the non-default `inference` feature, so the change could not be
+/// compile-tested with the rest; it is left for a follow-up rather than shipped
+/// unverified. Do not read its absence here as a decision that it should stay on
+/// `HEAD` — it is the same defect, untested.
 ///
 /// # Why this is one type and not a flag per command
 ///
@@ -228,24 +234,33 @@ impl SourceArgs {
         }
     }
 
-    /// Whether the resolved source needs naming in the report. The working-tree
-    /// default is what every neighbouring command already reads, so saying so on
-    /// every line would be noise; `--committed` and `--staged` are a deliberate
-    /// switch away from it and are worth one line.
-    fn is_default(self) -> bool {
-        !self.committed && !self.staged
-    }
-
     /// A one-line note naming the tree a report describes, or `None` for the
     /// default. Printed by the report commands so `debt` and `sync` can never
     /// disagree about which world they are describing without saying so (#599).
+    ///
+    /// `None` for the default because the working tree is what every
+    /// neighbouring command already reads: a line on every invocation saying so
+    /// would be noise, and noise is what gets filtered out before the one line
+    /// that mattered.
+    ///
+    /// Worded with the **flag** the reader typed rather than
+    /// [`GraphSource::as_str`]'s token: a note reading "the index tree" after
+    /// `--staged` leaves them matching a word they never wrote, and anything
+    /// grepping this output has the flag name and not the internal one. The
+    /// token still appears, in parentheses, because it is what the JSON reports
+    /// and the two should be connectable.
     fn note(self) -> Option<String> {
-        (!self.is_default()).then(|| {
-            format!(
-                "note: reporting on the {} tree, not the working tree.",
-                self.source().as_str()
-            )
-        })
+        let (flag, what) = if self.staged {
+            ("--staged", "the git index")
+        } else if self.committed {
+            ("--committed", "the committed `HEAD` tree")
+        } else {
+            return None;
+        };
+        Some(format!(
+            "note: {flag} — reporting on {what} (source: {}), not the working tree.",
+            self.source().as_str()
+        ))
     }
 }
 

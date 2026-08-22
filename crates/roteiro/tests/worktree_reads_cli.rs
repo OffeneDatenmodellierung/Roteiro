@@ -101,20 +101,28 @@ fn debt_reports_the_marker_the_developer_is_looking_at() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// One `roteiro sync --json` report, as the fields this test reasons about.
+fn sync_json(dir: &Path) -> serde_json::Value {
+    let out = roteiro(dir, &["sync", "--json"]);
+    assert!(out.status.success(), "sync failed: {out:?}");
+    serde_json::from_slice(&out.stdout).expect("sync --json is valid JSON")
+}
+
 /// The half that makes this a data-loss bug rather than a reporting one: the
-/// read must leave the store as `sync` built it. Asserted through the CLI alone
-/// — a second `sync` reports `up to date` only if nothing has disturbed the
-/// state the first one recorded.
+/// read must leave the store as `sync` built it.
+///
+/// Asserted on `sync --json`'s `no_op` boolean rather than on the human line
+/// containing "up to date": the JSON field is the stable contract, and a test
+/// that pins prose fails the next time someone improves the wording — a false
+/// red that teaches people to edit the assertion rather than read it.
 #[test]
 fn a_read_does_not_discard_the_graph_sync_assembled() {
     let dir = repo_with_uncommitted_marker("survive");
 
-    let first = roteiro(&dir, &["sync"]);
-    assert!(first.status.success(), "sync failed: {first:?}");
-    assert!(
-        stdout(&first).contains("+1 uncommitted"),
-        "the fixture must actually be dirty: {}",
-        stdout(&first)
+    let first = sync_json(&dir);
+    assert_eq!(
+        first["blobs_dirty"], 1,
+        "the fixture must actually be dirty: {first}"
     );
 
     for read in [
@@ -127,14 +135,13 @@ fn a_read_does_not_discard_the_graph_sync_assembled() {
         let out = roteiro(&dir, &read);
         assert!(out.status.success(), "{read:?} failed: {out:?}");
 
-        let again = roteiro(&dir, &["sync"]);
-        assert!(again.status.success(), "sync failed: {again:?}");
-        assert!(
-            stdout(&again).contains("up to date"),
+        let again = sync_json(&dir);
+        assert_eq!(
+            again["no_op"],
+            serde_json::Value::Bool(true),
             "`roteiro {}` rewrote the store to a different tree, so the next sync \
-             had to rebuild: {}",
+             had to rebuild it: {again}",
             read.join(" "),
-            stdout(&again)
         );
     }
 
@@ -183,10 +190,20 @@ fn committed_stays_reachable_and_says_which_tree_it_answered_about() {
         "--committed still means HEAD, uncommitted work excluded: {report}"
     );
 
+    // The note must name the **flag the reader typed**, not just the internal
+    // source token: someone who wrote `--staged` and reads "the index tree" is
+    // left matching a word they never used, and anything grepping this output
+    // has the flag name to hand and not `GraphSource`'s.
     let note = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
-        note.contains("committed tree"),
-        "the tree a report describes must be stated when it is not the default: {note}"
+        note.contains("--committed"),
+        "the tree a report describes must be stated, by the flag that selected \
+         it, when it is not the default: {note}"
+    );
+    assert!(
+        note.contains("not the working tree"),
+        "and must say what it is *not*, since that is the default it departs \
+         from: {note}"
     );
 
     // The note goes to stderr, so a `--json` consumer's stdout stays exactly one
