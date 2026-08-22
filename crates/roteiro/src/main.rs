@@ -3027,7 +3027,8 @@ fn remote_payload(
     let mut nodes = Vec::with_capacity(keys.len());
     if !keys.is_empty() {
         let (repo, mut store, cache) = open_graph()?;
-        refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+        // Nothing here announces a tree, so the outcome changes nothing.
+        let _ = refresh_for_read(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
         for key in keys {
             let node = store.get_node(key)?.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -3919,16 +3920,35 @@ fn refresh_for_read(
     cache: &rto_graph::ObjectCache,
     ingest: rto_graph::IngestConfig,
     source: GraphSource,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Refreshed> {
     if let Some(ahead) = store.schema_ahead()? {
         eprintln!(
             "note: {ahead}\n      Answering from the graph that newer build left; \
              it has not been refreshed for the current source."
         );
-        return Ok(());
+        return Ok(Refreshed::No);
     }
     build_graph(repo, store, cache, ingest, source)?;
-    Ok(())
+    Ok(Refreshed::Yes)
+}
+
+/// Whether [`refresh_for_read`] actually rebuilt the graph, or served the store
+/// as it found it.
+///
+/// Returned rather than discarded because the caller says something about the
+/// tree it read, and on the skipped path that statement would be false. A
+/// `--committed` report on a schema-ahead store is answered from whatever the
+/// newer build left, which is *not* necessarily `HEAD` — so announcing "the
+/// committed tree" there would be the same class of confident-wrong answer
+/// #599 is about, reintroduced by the fix for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refreshed {
+    /// The graph was rebuilt for the requested source; a statement about that
+    /// source is true.
+    Yes,
+    /// The rebuild was skipped (schema-ahead store). `refresh_for_read` has
+    /// already said so, and nothing further may claim a tree.
+    No,
 }
 
 /// Parse the authored layer out of `blobs` and apply it to `store`, returning the
@@ -6014,8 +6034,9 @@ fn run_query(
     use rto_graph::{NodeKind, explain, list_kind};
 
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    source.announce();
+    if refresh_for_read(&repo, &mut store, &cache, ingest, source.source())? == Refreshed::Yes {
+        source.announce();
+    }
 
     match (key, kind) {
         (Some(key), _) => {
@@ -6142,8 +6163,9 @@ fn run_search(
     source: SourceArgs,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    source.announce();
+    if refresh_for_read(&repo, &mut store, &cache, ingest, source.source())? == Refreshed::Yes {
+        source.announce();
+    }
 
     let opts = rto_graph::SearchOptions {
         limit,
@@ -6979,8 +7001,9 @@ fn run_context(
     use rto_graph::{context, refresh_contexts};
 
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    source.announce();
+    if refresh_for_read(&repo, &mut store, &cache, ingest, source.source())? == Refreshed::Yes {
+        source.announce();
+    }
 
     if refresh {
         let report = refresh_contexts(&store)?;
@@ -7398,8 +7421,9 @@ fn run_path(
     source: SourceArgs,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
-    refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    source.announce();
+    if refresh_for_read(&repo, &mut store, &cache, ingest, source.source())? == Refreshed::Yes {
+        source.announce();
+    }
 
     let result = rto_graph::path(&store, from, to)?;
     if json {
