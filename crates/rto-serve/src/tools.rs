@@ -1404,12 +1404,16 @@ mod tests {
         assert!(!prompt.contains("arguments schema:"), "{prompt}");
     }
 
-    /// Two things in this module render a `serde_json::Map` in the map's own
-    /// iteration order: `advertise` sorts the properties before rendering them,
-    /// and the fallback beside it hands the whole schema to
-    /// `serde_json::to_string`, which has no sort and cannot have one — it is
-    /// meant to be verbatim. Both are stable today for one reason, which is not
-    /// visible in this file: nothing in the *normal* dependency graph enables
+    /// One thing in this module renders a `serde_json::Map` in the map's own
+    /// iteration order: the verbatim fallback in `tool_system_prompt`, which
+    /// hands the whole schema to `serde_json::to_string` — that has no sort and
+    /// cannot have one, because being verbatim is the point of it. `advertise`
+    /// beside it collects the properties into a `Vec` and sorts that, so an
+    /// order flip leaves every signature it renders exactly where it was: the
+    /// fallback is the surface that stays exposed to one.
+    ///
+    /// What holds the fallback still today is one thing not visible in this
+    /// file: nothing in the *normal* dependency graph enables
     /// `serde_json/preserve_order`, so a `Map` is a `BTreeMap`. `tree-sitter`
     /// does enable it, but as a build-dependency, and `resolver = "3"` resolves
     /// those features separately.
@@ -1418,6 +1422,13 @@ mod tests {
     /// any dependency can flip it with no diff in this crate to show for it, and
     /// `Cargo.lock` records packages rather than features — grepping the lock
     /// would not see it. This is what sees it.
+    ///
+    /// A flip is worth being told about for both halves, not just the exposed
+    /// one. The fallback starts emitting whatever key order the client sent; and
+    /// the sort in `advertise` stops being belt-and-braces over a `BTreeMap` and
+    /// becomes the only thing holding the advertised signatures still, which is
+    /// a change in what that line is load-bearing for and in what deleting it
+    /// would cost.
     ///
     /// It is deliberately not a test of the sort. The signature test above
     /// cannot distinguish a sorted `advertise` from a sorted `Map`, and nothing
