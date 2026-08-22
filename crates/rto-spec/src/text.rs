@@ -26,6 +26,16 @@ pub(crate) fn lang_for(path: &str) -> String {
 /// argument.
 pub(crate) use rto_graph::slugify;
 
+/// The `id` a `## ` heading claims — its explicit `{#id}` when the author wrote
+/// one, else [`slugify`] of its visible text.
+///
+/// Re-exported for the same reason as [`slugify`], and it is the half that was
+/// missing: this crate built every section key by slugifying the text even when
+/// the heading declared an address of its own, so a page's `{#offline}` anchor
+/// and its `site:modes#1-offline-mode-…` node key named different places (#524).
+/// The section key now *is* the anchor, for every heading, by construction.
+pub(crate) use rto_graph::heading_id;
+
 /// The visible text of a document's first `# ` heading, and of a `## ` heading's
 /// source content.
 ///

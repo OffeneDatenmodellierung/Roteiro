@@ -121,6 +121,78 @@ pub fn heading_text(source: &str) -> String {
     first_h1(&format!("# {source}")).unwrap_or_default()
 }
 
+/// The `id` a heading claims, from its **explicit** `{#id}` attribute when the
+/// author wrote one and its visible text otherwise.
+///
+/// # One rule, two callers — which is the whole point
+///
+/// `rto_render` puts this on the rendered heading as its `id` attribute and
+/// `rto_spec` builds the section's node key from it, so a `[[doc#section]]` link
+/// resolves in the graph *and* lands in the browser. Both files already claimed
+/// that agreement in prose; before issue #524 the code only had it on one of two
+/// branches. The renderer honoured an explicit `{#id}` and the graph slugified
+/// the heading text regardless, so
+///
+/// ```text
+/// ## 1 · Offline mode — the default {#offline}
+///
+///   graph  site:modes#1-offline-mode-the-default
+///   html   id="offline"
+/// ```
+///
+/// — **correct on the surface everyone looks at, wrong in the one tools read.**
+/// Five of this repository's site headings diverged; the other eight agreed only
+/// because their explicit id happened to equal the slug of their own text.
+///
+/// The explicit id is taken **verbatim**, not slugified: the author wrote an
+/// address, and re-slugifying it would silently answer a different one — the
+/// very move that produced the divergence.
+///
+/// # What this deliberately does not decide
+///
+/// It returns empty for a heading with no explicit id and no text that slugifies
+/// to anything (`## ###`), and it does not de-duplicate. Both are **document**
+/// questions — a heading's position, and whether an earlier heading already took
+/// the id — and this sees one heading. `rto_render::docs` owns them, because two
+/// elements sharing an `id` means one is unreachable and only the renderer emits
+/// elements. That asymmetry is latent rather than academic: no site page carries
+/// two headings with the same text today, so nothing diverges from it yet.
+#[must_use]
+pub fn heading_id_from(explicit: Option<&str>, text: &str) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map_or_else(|| slugify(text), ToOwned::to_owned)
+}
+
+/// [`heading_id_from`] for a heading whose Markdown **source content** is
+/// `source` — the part after the `## `.
+///
+/// Parsed rather than scanned, by the same parser and dialect the renderer uses,
+/// so "what id will this heading get" is answered once and identically on both
+/// sides. A line scan would have to re-implement attribute-block parsing, which
+/// is how a third rule gets born.
+#[must_use]
+pub fn heading_id(source: &str) -> String {
+    let md = format!("# {source}");
+    let (mut explicit, mut text) = (None, String::new());
+    let mut open = false;
+    for event in Parser::new_ext(&md, markdown_dialect()) {
+        match event {
+            Event::Start(Tag::Heading { id, .. }) => {
+                explicit = id.map(|i| i.to_string());
+                open = true;
+            }
+            // A code span is part of the heading's text, exactly as it is for
+            // [`first_h1`] and for the heading `rto_render` emits.
+            Event::Text(t) | Event::Code(t) if open => text.push_str(&t),
+            Event::End(TagEnd::Heading(_)) => break,
+            _ => {}
+        }
+    }
+    heading_id_from(explicit.as_deref(), text.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{first_h1, heading_text, slugify};

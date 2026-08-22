@@ -37,7 +37,7 @@
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 
 use crate::adr::{Section, WikiLink, clean_value, resolve_target, split_frontmatter};
-use crate::text::{first_h1, heading_text};
+use crate::text::{first_h1, heading_id, heading_text};
 
 /// The frontmatter field that declares a document published, and carries its
 /// slug. Its presence is the whole classification rule.
@@ -194,7 +194,11 @@ pub fn parse_site_page(rel_path: &str, text: &str) -> Result<SitePage, ParseErro
         }
         if let Some(heading) = line.strip_prefix("## ") {
             let title = heading_text(heading);
-            let slug = crate::text::slugify(&title);
+            // The heading's *declared* id, not the slug of its text: an explicit
+            // `{#offline}` is an address the author wrote, and the renderer has
+            // always honoured it. Slugifying the text regardless made the section
+            // key name a place the page does not have (#524).
+            let slug = heading_id(heading);
             current = Some(slug.clone());
             // No `text`: `Section` is shared with `parse_adr`, and only that
             // parser populates it so far. A site page section note is empty in
@@ -298,13 +302,16 @@ mod tests {
         assert_eq!(p.nav, "Modes");
         assert_eq!(p.order, 3);
         assert_eq!(p.title, "The five ways to run it");
-        // The explicit anchor is markup, not part of the section's name.
+        // The explicit anchor is markup, not part of the section's *name* — and
+        // since #524 it **is** its address, because the renderer has always made
+        // it the heading's `id` and a key that named somewhere else was a link
+        // that resolved here and scrolled nowhere there.
         assert_eq!(p.sections.len(), 1);
         assert_eq!(p.sections[0].title, "Offline mode");
-        assert_eq!(p.sections[0].slug, "offline-mode");
+        assert_eq!(p.sections[0].slug, "offline");
         // The authored link resolves like an ADR's, attributed to its section.
         assert_eq!(p.links.len(), 1);
-        assert_eq!(p.links[0].from, "site:modes#offline-mode");
+        assert_eq!(p.links[0].from, "site:modes#offline");
         assert_eq!(
             p.links[0].target_key,
             "sym:rust:crates/roteiro/src/main.rs#run_check"
@@ -346,17 +353,27 @@ mod tests {
     }
 
     #[test]
-    fn section_keys_are_unchanged_by_reading_headings_with_the_parser() {
-        // The site pages carry markup in `## ` headings; folding the hand-written
-        // stripper into the shared rule must not silently re-key their sections,
-        // because a section key is a graph key, not display text.
+    fn an_explicit_anchor_keys_the_section_and_markup_still_reduces_to_text() {
+        // Was `section_keys_are_unchanged_by_reading_headings_with_the_parser`,
+        // and it asserted `1-offline-mode-the-default` for the first heading.
+        //
+        // That was the right guard for the change it was written against —
+        // folding a hand-written stripper into the shared rule must not
+        // **silently** re-key a section, because a section key is a graph key and
+        // not display text. #524 re-keys it *deliberately*: the heading declares
+        // `{#offline}`, the renderer has always emitted that as its `id`, and the
+        // graph now agrees. The word the old comment turned on was `silently`.
+        //
+        // The second heading is why this test still earns its place: a heading
+        // with no anchor is unaffected, so markup in `## What `init` sets up`
+        // still reduces to the text a reader sees.
         let p = parse_site_page(
             "website/pages/modes.md",
             "---\nsite-page: modes\n---\n\n# T\n\n## 1 · Offline mode — the default {#offline}\n\n## What `init` sets up\n",
         )
         .expect("parse");
         let slugs: Vec<_> = p.sections.iter().map(|s| s.slug.as_str()).collect();
-        assert_eq!(slugs, ["1-offline-mode-the-default", "what-init-sets-up"]);
+        assert_eq!(slugs, ["offline", "what-init-sets-up"]);
         // The title is now the text a reader sees, markup and all removed.
         assert_eq!(p.sections[1].title, "What init sets up");
     }
@@ -449,13 +466,13 @@ mod tests {
         assert_eq!(page.path.as_deref(), Some("docs/site/modes.md"));
         assert_eq!(page.meta["slug"], "modes");
         assert!(
-            fs.nodes.iter().any(|n| n.key == "site:modes#offline-mode"),
-            "section node"
+            fs.nodes.iter().any(|n| n.key == "site:modes#offline"),
+            "section node, keyed by the anchor the heading declares (#524)"
         );
         assert!(
             fs.edges
                 .iter()
-                .any(|e| e.src == "site:modes" && e.dst == "site:modes#offline-mode"),
+                .any(|e| e.src == "site:modes" && e.dst == "site:modes#offline"),
             "contains edge"
         );
     }
