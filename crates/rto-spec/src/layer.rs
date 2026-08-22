@@ -45,6 +45,14 @@ pub struct AuthoredLayer {
     /// published and then failed to parse is the same failure with a public
     /// consequence: the page silently does not exist.
     pub malformed: Vec<Violation>,
+    /// House-style convention breaches found while reading the same blobs — see
+    /// [`crate::convention`].
+    ///
+    /// Carried beside [`Self::malformed`] rather than inside it because the two
+    /// are different claims: `malformed` is *this document does not parse*, and
+    /// this is *this source breaks a rule we wrote down*. A caller that wants
+    /// only parse failures should not have to filter prose to get them.
+    pub conventions: Vec<Violation>,
 }
 
 /// Which files in `source`'s tree carry the authored layer.
@@ -231,6 +239,14 @@ pub fn authored_docs_from<E>(
             layer
                 .annotations
                 .extend(crate::annotate::scan_annotations(&blob.path, &text));
+            // The same text, read once, for the conventions that are written
+            // down and were not enforced. Riding this pass rather than adding a
+            // second walk of the tree: the blobs are already open.
+            layer
+                .conventions
+                .extend(crate::convention::scan_unjustified_allows(
+                    &blob.path, &text,
+                ));
         }
     }
     Ok(out)
