@@ -872,7 +872,9 @@ fn advertise(t: &ToolDef) -> Advertisement {
         // insertion order and change every advertised signature, with no diff to
         // show for it. Holding the advertised surface still is what this renderer
         // is for — issue #578 measured 3.13 ms per prompt token — so sort here
-        // and mean it.
+        // and mean it. No test can tell this sort from the `BTreeMap` it is
+        // shadowing, so what watches the assumption is
+        // `nothing_has_turned_on_preserve_order_behind_the_advertised_surface`.
         let mut props: Vec<_> = props.iter().collect();
         props.sort_by_key(|(name, _)| *name);
         for (name, spec) in props {
@@ -1377,10 +1379,16 @@ mod tests {
             }),
         }];
         let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
-        // Sorted, not in the order the schema declared them: `advertise` sorts
-        // the properties explicitly so the advertised surface cannot shift under
-        // a `serde_json/preserve_order` a dependency turns on. This assertion is
-        // what holds that — the declaration order here is deliberately different.
+        // One exact line, because the rendering is the thing being pinned:
+        // every argument present, `?` on each one `required` omits, each type
+        // and its bound, and the description after an em dash.
+        //
+        // The order is sorted rather than declared, but this cannot claim to
+        // hold that: a `serde_json::Map` is a `BTreeMap` here, so deleting the
+        // sort in `advertise` leaves this assertion green. What holds the
+        // ordering still is the sort; what notices if the ground under it moves
+        // is `nothing_has_turned_on_preserve_order_behind_the_advertised_surface`
+        // below.
         assert!(
             prompt.contains(
                 "- search(kinds?: [str], limit?: int 1..25, order?: rank|recent, query: str) \
@@ -1394,6 +1402,54 @@ mod tests {
         assert!(prompt.contains("1..25"), "{prompt}");
         // And the raw form is gone, or the rendering saved nothing.
         assert!(!prompt.contains("arguments schema:"), "{prompt}");
+    }
+
+    /// One thing in this module renders a `serde_json::Map` in the map's own
+    /// iteration order: the verbatim fallback in `tool_system_prompt`, which
+    /// hands the whole schema to `serde_json::to_string` — that has no sort and
+    /// cannot have one, because being verbatim is the point of it. `advertise`
+    /// beside it collects the properties into a `Vec` and sorts that, so an
+    /// order flip leaves every signature it renders exactly where it was: the
+    /// fallback is the surface that stays exposed to one.
+    ///
+    /// What holds the fallback still today is one thing not visible in this
+    /// file: nothing in the *normal* dependency graph enables
+    /// `serde_json/preserve_order`, so a `Map` is a `BTreeMap`. `tree-sitter`
+    /// does enable it, but as a build-dependency, and `resolver = "3"` resolves
+    /// those features separately.
+    ///
+    /// That is feature resolution rather than a decision anyone here made, so
+    /// any dependency can flip it with no diff in this crate to show for it, and
+    /// `Cargo.lock` records packages rather than features — grepping the lock
+    /// would not see it. This is what sees it.
+    ///
+    /// A flip is worth being told about for both halves, not just the exposed
+    /// one. The fallback starts emitting whatever key order the client sent; and
+    /// the sort in `advertise` stops being belt-and-braces over a `BTreeMap` and
+    /// becomes the only thing holding the advertised signatures still, which is
+    /// a change in what that line is load-bearing for and in what deleting it
+    /// would cost.
+    ///
+    /// It is deliberately not a test of the sort. The signature test above
+    /// cannot distinguish a sorted `advertise` from a sorted `Map`, and nothing
+    /// can while the `Map` is ordered; this asserts the assumption instead.
+    #[test]
+    fn nothing_has_turned_on_preserve_order_behind_the_advertised_surface() {
+        let mut map = serde_json::Map::new();
+        map.insert("b".to_owned(), serde_json::Value::Null);
+        map.insert("a".to_owned(), serde_json::Value::Null);
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["a", "b"],
+            "`serde_json/preserve_order` is enabled: a `serde_json::Map` now \
+             iterates in insertion order. The sort in `advertise` has gone from \
+             defensive to load-bearing and is now the only thing holding the \
+             signatures still, and the verbatim fallback beside it has no sort \
+             at all — it will emit whatever key order the client sent. Re-check \
+             the advertised surface and the prompt-byte figures these tests \
+             quote before accepting the change.",
+        );
     }
 
     /// A generated schema — `$schema`, a nullable union type, a `default`, a
