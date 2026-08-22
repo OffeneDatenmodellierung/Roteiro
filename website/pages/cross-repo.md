@@ -88,9 +88,9 @@ against, and every cell is compared to *that* version rather than to `HEAD`:
 
 <span class="c"># cross-repo config overrides (hub: app, 3 spoke(s))</span>
 <span class="c">#   resolved per spoke against the hub version each pins (2 of 3 pinned one):</span>
-<span class="c">#     deploy-web @ 4e0d5a6afd (via submodule app)</span>
-<span class="c">#     deploy-eu  @ v2.1.0</span>
-<span class="c">#     deploy-dev @ HEAD (no pin detected)</span></code></pre>
+<span class="c">#     deploy-dev @ HEAD (no pin detected)</span>
+<span class="c">#     deploy-eu @ v2.1.0</span>
+<span class="c">#     deploy-web @ 4e0d5a6afd (via submodule app)</span></code></pre>
 
 A spoke that pins nothing is **named**, not omitted, and the count says how many
 pinned anything — so a workspace where nothing is detectable reads as
