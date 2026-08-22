@@ -3941,6 +3941,13 @@ fn refresh_for_read(
 /// newer build left, which is *not* necessarily `HEAD` — so announcing "the
 /// committed tree" there would be the same class of confident-wrong answer
 /// #599 is about, reintroduced by the fix for it.
+///
+/// `#[must_use]` because the whole point is that a caller cannot forget it. The
+/// enclosing `anyhow::Result` is already `must_use`, but `?` unwraps it — so
+/// without this, `refresh_for_read(..)?;` silently drops the outcome and the
+/// type buys nothing over the `()` it replaced. With it, that statement is a
+/// warning, and this repository builds with `-D warnings`.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refreshed {
     /// The graph was rebuilt for the requested source; a statement about that
