@@ -962,6 +962,14 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
         // drop it — taking the whole diagram with it, because the explorer only
         // draws an edge when both endpoints are hosted nodes and every edge here
         // ends at the hub.
+        //
+        // A project that is only a link *target* is safe under this test, which
+        // is worth stating because it does not look safe: a resolving link
+        // implies the target holds that `config_key`, which implies
+        // `spoke_correspondence` yields it as a ref or an orphan, which keeps
+        // it here. The only target that is dropped is one whose link does not
+        // resolve — and that is drift, which the explorer already skips.
+        // Verified by construction rather than reasoned about alone.
         let is_hub = Some(name) == hub.as_ref();
         if !is_hub && refs.is_empty() && live_orphans.is_empty() {
             continue;
@@ -3487,6 +3495,22 @@ mod tests {
             "the hub's own outgoing link must be emitted: {json}"
         );
         assert_eq!(out_of_hub[0]["to"], "app::cfgkey:cfg.toml#d");
+
+        // …and the target is a node too, or the edge is unrenderable: the
+        // explorer draws an edge only when BOTH endpoints are hosted boxes.
+        // (`app` is present because its key orphans against the hub. More
+        // generally a *resolving* target always appears — see the note on the
+        // filter — but asserting it here keeps the claim on the chain itself.)
+        let names: Vec<&str> = json["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"app"),
+            "the chain's far end must be a node, or the hop still cannot be drawn: {json}"
+        );
         assert_eq!(out_of_hub[0]["provenance"], "authored");
     }
 
