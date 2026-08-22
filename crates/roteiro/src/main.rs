@@ -249,6 +249,26 @@ impl SourceArgs {
     /// grepping this output has the flag name and not the internal one. The
     /// token still appears, in parentheses, because it is what the JSON reports
     /// and the two should be connectable.
+    /// Print [`SourceArgs::note`] to stderr, if there is one.
+    ///
+    /// Naming the tree when it is not the default is the whole of #599's *"must
+    /// not report different worlds without saying which"*: a report that
+    /// silently answers about `HEAD` while the developer is looking at an
+    /// uncommitted edit is the wrong answer wearing a right one.
+    ///
+    /// **stderr**, so a `--json` consumer's stdout stays exactly one document.
+    ///
+    /// A method rather than the same eight lines at each of the nine report
+    /// surfaces — which is what it was, and what a reviewer correctly objected
+    /// to. Nine copies of a rule is nine chances for one of them to be dropped
+    /// when a surface is edited, and a surface that quietly stops announcing its
+    /// tree is precisely the defect this exists to prevent.
+    fn announce(self) {
+        if let Some(note) = self.note() {
+            eprintln!("{note}");
+        }
+    }
+
     fn note(self) -> Option<String> {
         let (flag, what) = if self.staged {
             ("--staged", "the git index")
@@ -4056,14 +4076,7 @@ fn run_check(
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     let report = build_graph(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     if json {
         emit_json(&report)?;
@@ -6002,14 +6015,7 @@ fn run_query(
 
     let (repo, mut store, cache) = open_graph()?;
     refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     match (key, kind) {
         (Some(key), _) => {
@@ -6137,14 +6143,7 @@ fn run_search(
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     let opts = rto_graph::SearchOptions {
         limit,
@@ -6981,14 +6980,7 @@ fn run_context(
 
     let (repo, mut store, cache) = open_graph()?;
     refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     if refresh {
         let report = refresh_contexts(&store)?;
@@ -7102,14 +7094,7 @@ fn run_debt(
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     let report = rto_graph::debt(&store, kinds, debt_ignore)?;
     if json {
@@ -7174,14 +7159,7 @@ fn run_debt_density(
     let order = parse_density_order(&rank.order)?;
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     let report = rto_graph::debt_density(
         &store,
@@ -7268,14 +7246,7 @@ fn run_config_secrets(
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     let report = rto_graph::config_secrets(&store, limit)?;
     if json {
@@ -7367,14 +7338,7 @@ fn run_coupling(
     let order = parse_coupling_order(order)?;
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     let report = rto_graph::coupling(&store, order, limit)?;
     if json {
@@ -7435,14 +7399,7 @@ fn run_path(
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     refresh_for_read(&repo, &mut store, &cache, ingest, source.source())?;
-    // Naming the tree when it is not the default is the whole of #599's
-    // "must not report different worlds without saying which": a report that
-    // silently answers about `HEAD` while the developer is looking at an
-    // uncommitted edit is the wrong answer wearing a right one. stderr, so a
-    // `--json` consumer's stdout stays exactly one document.
-    if let Some(note) = source.note() {
-        eprintln!("{note}");
-    }
+    source.announce();
 
     let result = rto_graph::path(&store, from, to)?;
     if json {

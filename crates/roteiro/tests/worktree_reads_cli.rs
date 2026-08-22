@@ -217,6 +217,38 @@ fn committed_stays_reachable_and_says_which_tree_it_answered_about() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Every report surface announces its tree, not just the one #599 was filed
+/// against.
+///
+/// The announcement is one method called from nine places. That is better than
+/// nine copies of it, but it moves the failure mode rather than removing it: a
+/// surface can still lose its `source.announce()` line while the other eight
+/// keep theirs, and a test that only ever looked at `debt` would not notice.
+#[test]
+fn every_report_surface_names_the_tree_it_answered_about() {
+    let dir = repo_with_uncommitted_marker("announce");
+
+    for cmd in [
+        vec!["debt", "--committed"],
+        vec!["debt-density", "--committed"],
+        vec!["coupling", "--committed"],
+        vec!["config-secrets", "--committed"],
+        vec!["search", "--committed", "Pending"],
+        vec!["path", "--committed", "file:src/lib.rs", "file:src/lib.rs"],
+    ] {
+        let out = roteiro(&dir, &cmd);
+        let note = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            note.contains("--committed"),
+            "`roteiro {}` answered about a different tree without saying so \
+             (stderr: {note:?})",
+            cmd.join(" "),
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `--staged` is the index, which is neither of the other two: an edit on disk
 /// but not staged is invisible to it, and staging the identical bytes makes it
 /// appear without anything being committed.
