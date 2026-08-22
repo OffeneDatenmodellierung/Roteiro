@@ -57,7 +57,8 @@ them in the spoke and fail the build when a target vanishes — the
 authored-vs-reality check of `roteiro check`, run *between* repos:
 
 <pre><code>roteiro links --workspace ~/code   <span class="c"># resolves every &#91;&#91;links&#93;&#93; entry; exits non-zero on drift</span>
-roteiro links --write              <span class="c"># …and persist them as durable **authored**</span>
+roteiro links --workspace ~/code --write
+                                   <span class="c"># …and persist them as durable **authored**</span>
                                    <span class="c">#    edges — gold, not candidates</span>
 
 <span class="c"># Or skip the authoring — match config keys automatically:</span>

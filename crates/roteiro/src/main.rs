@@ -2020,6 +2020,20 @@ fn main() -> anyhow::Result<()> {
                          `[[links]]` against each repo's current graph"
                     );
                 }
+                // Same again for the two hub selectors. They choose what
+                // `--infer`/`--matrix` match *against*; the authored report
+                // resolves each `[[links]]` target by its own qualified name and
+                // consults no hub at all, so passing them looks like selecting a
+                // hub or a version while selecting nothing.
+                if hub.is_some() || hub_rev.is_some() {
+                    anyhow::bail!(
+                        "`--hub` / `--hub-rev` apply only to `roteiro links --infer` / \
+                         `--matrix` (they choose the project, and the version of it, \
+                         that config keys are matched against); an authored \
+                         `[[links]]` entry names its own target, so there is no hub \
+                         to select"
+                    );
+                }
                 // `--app-config-only` only filters config-key matching, which the
                 // plain authored-links report doesn't do. Reject it here rather than
                 // silently ignoring it, so the flag never looks like it took effect.
@@ -7509,15 +7523,19 @@ struct LinkResult {
 fn persist_authored_links(
     path: &std::path::Path,
     facts: &rto_graph::FactSet,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<(usize, usize)> {
     let db = graph_db_path(path)?;
     if !db.exists() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let mut store = rto_graph::Store::open(&db)?;
-    Ok(store
-        .apply_import_layer(rto_graph::LINKS_AUTHORED_REF, facts)?
-        .edges_applied)
+    let applied = store.apply_import_layer(rto_graph::LINKS_AUTHORED_REF, facts)?;
+    // Pruned edges are unpersisted links too. `apply_import_layer` drops an edge
+    // whose `from` does not resolve to a node in this store — a stale graph, an
+    // unsynced repo, a typoed key — and without counting them the total is
+    // simply short, which reads as the write having done less than it claims
+    // rather than as a declaration that could not be attached.
+    Ok((applied.edges_applied, applied.edges_pruned))
 }
 
 /// The persistable facts for **one** authored `[[links]]` declaration: the
@@ -7800,9 +7818,12 @@ fn run_links(
     // an edge needs a source node in this store — and are counted so the report
     // says so rather than leaving the author to wonder why their count is short.
     let mut written = 0usize;
+    let mut pruned = 0usize;
     let unanchored = if write {
         for (path, facts) in &authored {
-            written += persist_authored_links(path, facts)?;
+            let (applied, dropped) = persist_authored_links(path, facts)?;
+            written += applied;
+            pruned += dropped;
         }
         results
             .iter()
@@ -7848,6 +7869,12 @@ fn run_links(
                 println!(
                     "  {unanchored} resolved link(s) declared no `from`, so they have no \
                      local anchor to attach an edge to and were not persisted"
+                );
+            }
+            if pruned > 0 {
+                println!(
+                    "  {pruned} link(s) named a `from` that does not resolve in their own \
+                     repo's graph (unsynced, or a stale/typoed key) and were dropped"
                 );
             }
         }

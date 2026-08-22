@@ -1884,6 +1884,46 @@ mod tests {
     /// a name rendered for a node the vault does not hold is a true sentence
     /// about a note nobody can open. The empty case is
     /// `the_workspace_home_claims_no_example_note_when_it_has_no_real_key`.
+    /// #573: the cross-repo section distinguishes a **declaration** from a
+    /// **match**, and says how many of each.
+    ///
+    /// Before authored links could be persisted, every row was a candidate and
+    /// the section said so in one blanket caveat. That caveat is now false for
+    /// declared rows, and an edge that exists but renders as a guess leaves
+    /// ADR-0009's `authored → gold` path just as unreachable as no edge at all —
+    /// so the rendering is part of the contract, not decoration.
+    #[test]
+    fn the_cross_repo_section_separates_declared_links_from_inferred_ones() {
+        let link = |authored: bool, key: &str| CrossLink {
+            from_project: "sdk".into(),
+            from_key: format!("cfgkey:config.toml#{key}"),
+            from_name: key.into(),
+            kind: "references".into(),
+            // A declaration carries no score by construction; a match does.
+            confidence: if authored { None } else { Some(0.91) },
+            to_qualified: format!("api::cfgkey:config.toml#{key}"),
+            resolves: true,
+            authored,
+        };
+        let ws = WorkspaceSummary {
+            name: "platform".into(),
+            members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            cross_links: vec![link(true, "addr"), link(false, "port")],
+            cross_links_total: 2,
+        };
+        let c = render_workspace_home(&ws).content;
+
+        assert!(c.contains("**1 declared**"), "{c}");
+        assert!(c.contains("**1 inferred**"), "{c}");
+        assert!(
+            !c.contains("not authored facts"),
+            "the blanket caveat is false once a declared row can appear: {c}"
+        );
+        // Per row: a declaration is marked as one, and a match keeps its score.
+        assert!(c.contains("references *(declared)*"), "{c}");
+        assert!(c.contains("references (0.91)"), "{c}");
+    }
+
     #[test]
     fn the_workspace_home_names_an_example_note_name_actually_produces() {
         let ws = WorkspaceSummary {
