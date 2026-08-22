@@ -838,19 +838,43 @@ fn advertise(t: &ToolDef) -> Advertisement {
     if schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
         return none();
     }
-    let required: Vec<&str> = schema
-        .get("required")
-        .map_or(Some(Vec::new()), |r| {
-            r.as_array()
-                .map(|a| a.iter().filter_map(serde_json::Value::as_str).collect())
-        })
-        .unwrap_or_default();
+    // Absent is not malformed: schemars renders a struct whose fields are all
+    // `Option<T>` with no `required` key at all, which legitimately means "no
+    // required arguments" and is what Roteiro's own MCP schemas do. Any *other*
+    // shape — a bare string, a number, an array holding a non-string — is a
+    // `required` this renderer does not understand, so it declines like every
+    // other keyword it cannot state. Reading it as empty instead would advertise
+    // each required argument as optional, and a model that then omits one gets a
+    // call that fails at dispatch: the lossy summary the doc above rules out,
+    // pointing the one direction that breaks the call.
+    let required: Vec<&str> = match schema.get("required") {
+        None => Vec::new(),
+        Some(r) => {
+            let Some(names) = r
+                .as_array()
+                .and_then(|a| a.iter().map(serde_json::Value::as_str).collect())
+            else {
+                return none();
+            };
+            names
+        }
+    };
     let mut args = Vec::new();
     let mut notes = Vec::new();
     if let Some(props) = schema.get("properties") {
         let Some(props) = props.as_object() else {
             return none();
         };
+        // `serde_json::Map` is a `BTreeMap` here, so this already iterated in
+        // sorted order — but only because nothing in the tree enables
+        // `serde_json/preserve_order`. That is feature resolution, not a
+        // decision: any dependency turning it on would silently switch this to
+        // insertion order and change every advertised signature, with no diff to
+        // show for it. Holding the advertised surface still is what this renderer
+        // is for — issue #578 measured 3.13 ms per prompt token — so sort here
+        // and mean it.
+        let mut props: Vec<_> = props.iter().collect();
+        props.sort_by_key(|(name, _)| *name);
         for (name, spec) in props {
             let Some(spec) = spec.as_object() else {
                 return none();
@@ -916,10 +940,20 @@ fn argument_type(spec: &serde_json::Map<String, serde_json::Value>) -> Option<St
         }
         _ => return None,
     };
-    let name = match spec.get("format").and_then(serde_json::Value::as_str) {
-        Some(format) => format!("{name}({format})"),
+    let name = match spec.get("format") {
         None => name,
+        Some(format) => format!("{name}({})", format.as_str()?),
     };
+    // A bound is allow-listed above *because* this renderer claims to state it,
+    // so one it cannot state — the fractional `minimum` JSON Schema permits on a
+    // `number` — declines the tool rather than falling through as if the keyword
+    // were absent, which would drop the bound from the signature silently and
+    // leave the model free to send a value the tool will reject.
+    for key in ["minimum", "maximum"] {
+        if spec.get(key).is_some_and(|v| v.as_i64().is_none()) {
+            return None;
+        }
+    }
     // The advertised bound, which every ranking tool here carries and also states
     // in its description. Rendering it in the signature is what makes the prose
     // restatement redundant rather than the only place it appears.
@@ -1343,6 +1377,10 @@ mod tests {
             }),
         }];
         let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        // Sorted, not in the order the schema declared them: `advertise` sorts
+        // the properties explicitly so the advertised surface cannot shift under
+        // a `serde_json/preserve_order` a dependency turns on. This assertion is
+        // what holds that — the declaration order here is deliberately different.
         assert!(
             prompt.contains(
                 "- search(kinds?: [str], limit?: int 1..25, order?: rank|recent, query: str) \
@@ -1419,6 +1457,35 @@ mod tests {
                 "type": "object",
                 "properties": { "a": { "type": "string" } },
                 "additionalProperties": true,
+            }),
+            // `required` as a bare string, and as an array holding a non-string.
+            // Neither is a `required` this understands, and the failure of
+            // reading them as "nothing is required" points the one direction
+            // that breaks the call: `name` would advertise as `name?: str`, the
+            // model would omit it, and dispatch would reject the call. Absent
+            // stays legitimate — the generated-schema test above renders a
+            // schema carrying no `required` key at all.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": "name",
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name", 1],
+            }),
+            // A fractional bound is legal JSON Schema on a `number` and the
+            // signature has no form for `>=0.5`; rendering a bare `num` would
+            // drop a bound the model is meant to respect.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "ratio": { "type": "number", "minimum": 0.5 } },
+            }),
+            // Likewise a `format` that is not a string.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "when": { "type": "string", "format": 7 } },
             }),
         ] {
             let tools = [ToolDef {
