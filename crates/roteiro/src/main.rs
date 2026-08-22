@@ -14052,6 +14052,7 @@ fn render_obsidian(
         repo_url,
         commit,
         debt_ignore,
+        ingest,
     )?);
     std::fs::write(out.join(&home.filename), &home.content)?;
 
@@ -14167,6 +14168,7 @@ fn render_obsidian_workspace(
             repo_url,
             commit,
             &debt_ignore,
+            ingest,
         )?);
     }
 
@@ -14187,6 +14189,10 @@ fn render_obsidian_workspace(
     cross_links.truncate(WORKSPACE_CROSS_LINK_ROWS);
 
     let home = rto_render::render_workspace_home(&rto_render::WorkspaceSummary {
+        // Stamped at render, not read from the graph: it records when this vault
+        // was produced, which is the fact a reader needs to judge whether it is
+        // still current (#442 part 2).
+        generated_at: rto_exec::rfc3339_utc(std::time::SystemTime::now()),
         name: workspace_name.to_owned(),
         members: summaries,
         cross_links,
@@ -14497,12 +14503,89 @@ fn collect_cross_links(
 /// `debt_ignore` is the repository's `[debt] ignore` list, threaded from `main`
 /// so `_Home` scopes intent debt exactly as `roteiro debt`, `roteiro
 /// debt-density`, `check` and the graph API do (ADR-0007 v1.1).
+/// This member's stored analyzer findings and its coverage, for the vault
+/// (#442 part 2, ADR-0012).
+///
+/// Two values because an empty list means nothing on its own: a member with no
+/// findings and a member nobody has analyzed are opposite facts that render
+/// identically unless the coverage is carried alongside. `findings_layers`
+/// returns one layer per run, so "were there any runs" is exactly the question
+/// [`rto_render::Coverage`] needs — and it is asked here rather than inferred
+/// from the findings being empty, which is the inference that gives the wrong
+/// answer.
+///
+/// Ordered most-severe first, then by rule, so the reader meets the worst thing
+/// first and the order is stable across renders. `Severity::Other` sorts last
+/// **and keeps its own label**: a level Roteiro does not recognise is still the
+/// analyzer's word, and mapping it onto a known rung would be inventing a
+/// judgement the tool did not make.
+fn vault_findings(
+    store: &rto_graph::Store,
+) -> anyhow::Result<(Vec<rto_render::FindingEntry>, rto_render::Coverage)> {
+    use rto_graph::Severity;
+
+    let layers = store.findings_layers(None)?;
+    let coverage = if layers.is_empty() {
+        rto_render::Coverage::NotRun
+    } else {
+        rto_render::Coverage::Ran(
+            layers
+                .iter()
+                .map(|l| (l.run.analyzer.clone(), l.run.analyzer_version.clone()))
+                .collect(),
+        )
+    };
+
+    let rank = |s: &Severity| match s {
+        Severity::Critical => 0u8,
+        Severity::High => 1,
+        Severity::Medium => 2,
+        Severity::Low => 3,
+        Severity::Info => 4,
+        Severity::Other(_) => 5,
+    };
+    // Sorted on a key that is **total**, so the claim of stability does not rest
+    // on `sort_by` happening to be stable and on `findings_layers` happening to
+    // return a fixed order. Two analyzers reporting the same advisory share a
+    // rank and a rule; without the last two components their relative order is
+    // whatever the store yielded, and a vault that reorders between renders
+    // shows a diff nobody made.
+    let mut ranked: Vec<(u8, rto_render::FindingEntry)> = layers
+        .iter()
+        .flat_map(|l| {
+            l.findings.iter().map(move |f| {
+                (
+                    rank(&f.severity),
+                    rto_render::FindingEntry {
+                        rule: f.rule.clone(),
+                        severity: f.severity.as_str().to_owned(),
+                        title: f.title.clone(),
+                        message: f.message.clone(),
+                        path: f.path.clone(),
+                        analyzer: l.run.analyzer.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.rule.cmp(&b.1.rule))
+            .then_with(|| a.1.analyzer.cmp(&b.1.analyzer))
+            .then_with(|| a.1.path.cmp(&b.1.path))
+            .then_with(|| a.1.title.cmp(&b.1.title))
+    });
+
+    Ok((ranked.into_iter().map(|(_, f)| f).collect(), coverage))
+}
+
 fn vault_summary(
     repo: &rto_graph::Repo,
     store: &rto_graph::Store,
     repo_url: Option<String>,
     commit: Option<String>,
     debt_ignore: &[String],
+    ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<rto_render::VaultSummary> {
     use rto_graph::{NodeKind, Provenance};
 
@@ -14512,6 +14595,12 @@ fn vault_summary(
         .and_then(|n| n.to_str())
         .unwrap_or("this project")
         .to_owned();
+
+    let (findings, coverage) = vault_findings(store)?;
+    let settings = rto_render::RenderedUnder {
+        ingest: enabled_ingest_toggles(ingest),
+        debt_ignore: debt_ignore.to_vec(),
+    };
 
     // Node counts by kind, most-frequent first (ties broken by kind for stability).
     let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -14614,7 +14703,37 @@ fn vault_summary(
         most_called,
         repo_url,
         commit,
+        findings,
+        coverage,
+        settings,
     })
+}
+
+/// The **enabled** `[ingest]` toggles that change what a vault contains, by name.
+///
+/// Named rather than dumped as a struct because the manifest is read by a person
+/// deciding whether their re-render will match: `prose, pdf` answers that, and
+/// `prose: true, pdf: true, ocr: false, …` buries it. Listing only what is *on*
+/// keeps the row short and makes an all-off member visibly empty rather than a
+/// wall of `false`.
+///
+/// **`vision` and `audio` are deliberately absent.** Since ADR-0015 they gate
+/// *generation* (`roteiro media build`), not extraction — a description is never
+/// written to `meta.content` — and the vault renders no generated media at all.
+/// Listing them would make the reproducibility claim *stricter than reality*:
+/// a reader who saw `vision` in this row and re-rendered without it would expect
+/// a different vault and get an identical one, which teaches them to distrust
+/// the row that the other entries depend on being trusted.
+fn enabled_ingest_toggles(ingest: rto_graph::IngestConfig) -> Vec<String> {
+    [
+        ("prose", ingest.prose),
+        ("pdf", ingest.pdf),
+        ("ocr", ingest.ocr),
+    ]
+    .into_iter()
+    .filter(|(_, on)| *on)
+    .map(|(name, _)| name.to_owned())
+    .collect()
 }
 
 /// The `_Home` note's secret-named config-key figures, or `None` when the graph

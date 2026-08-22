@@ -49,6 +49,27 @@ into it by name — and **note names changed in issue #574, with no migration**,
 stop two nodes silently landing on one file. Both are explained on the
 [Obsidian vault](obsidian-vault.html) page.
 
+A workspace vault is **shareable**, and says so about itself. Its `_Home`
+carries a *Reproducing this vault* section — when it was rendered, and for each
+member the repository its `origin` points at and the commit it was rendered
+from — so a reader can reconstruct the workspace it describes rather than take
+its word for it, and can tell a stale vault from a current one. That repository
+link is where the code lives rather than a guaranteed clone URL: a private
+repository still needs whatever access you would normally use, and the vault
+says so.
+
+It also carries each member's **analyzer findings**, so the vault answers *what
+is wrong with this workspace* as well as *what is in it*. Two things follow, and
+the vault states both where a reader is about to act on them. It distinguishes
+*"an analyzer ran and found nothing"* from *"nobody has ever looked"* — those are
+opposite facts, and only the first is good news. And because it lists unpatched
+weaknesses and where they are, a shared vault cannot be un-shared: treat it as
+you would the analyzer reports themselves. Agent memory is the one thing left
+out entirely (it has no redaction chokepoint at all), and config values are
+redacted by **key name**, so a secret in a value whose key is not named like one
+is not redacted — narrower than it sounds, and far more consequential in an
+artifact you hand to someone than in a local store.
+
 ## 2 · Online mode — richer inference with local models {#online}
 
 Pull a real embedding or generative model *once* (with consent), then run

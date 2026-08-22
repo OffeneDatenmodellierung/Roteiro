@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
-last-modified: 2026-08-17
+version: "1.2"
+last-modified: 2026-08-22
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Knowledge Graph |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -193,3 +193,4 @@ sequenced it: the runner trait, the normalized finding schema, and
 | Version | Date | Notes |
 |---|---|---|
 | 1.1 | 2026-08-17 | **Accepted.** No content changed. Status corrected: this ADR described shipped, released behaviour while still reading *For Review*. |
+| 1.2 | 2026-08-22 | **A workspace vault publishes findings — deliberately, and this ADR is where that is recorded** (issue #442 part 2). This document rejected `NodeKind::Other("security_finding")` on the grounds that it would leak into `export_factset`, *"silently publishing tool output into an artifact"*. `roteiro render obsidian --workspace-name` now does publish it, into a different artifact, and the distinction that keeps this ADR intact is **silently**. The mechanism is unchanged: findings are still not nodes or edges, they still carry no provenance class, and `export_factset` still cannot see them — still asserted by `export_factset_is_byte_identical_across_an_ingest`, which this change does not touch. What changed is that one renderer reads the findings store **on purpose**, because the owner ruled that a hand-over document should answer *"what is wrong with this workspace"* as well as *"what is in it"*. Three consequences are built rather than assumed. (1) The vault renders *"an analyzer ran and reported none"* and *"no analyzer has ever run"* as **different sections**, because they are opposite facts that an empty list renders identically — the failure `roteiro security status` records as `no-analyzer-on-record`, and a shareable artifact must refuse it harder than a CLI does, since its reader is the one person who cannot go and check. `Coverage::NotRun` is the `Default`, so a summary that never asked reads as unanalyzed rather than clean. (2) An analyzer's message is rendered **verbatim inside a fence sized to beat any backtick run it contains**, not as Markdown: it is tool output entering a document handed to people, and as Markdown it could open headings or links that restructure the note. The vault quotes it; the vault does not become it. (3) The `_Home` share-time section now **warns** instead of reassuring — it says the file lists unpatched weaknesses and where they are, and that unlike a local store it cannot be un-shared. Severity is rendered as the analyzer's own label, unrecognised levels included, because mapping one onto a known rung would invent a judgement the tool did not make. |

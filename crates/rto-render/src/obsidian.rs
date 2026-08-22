@@ -639,10 +639,46 @@ pub struct VaultSummary {
     /// and capped by the caller. Empty when the graph has no `calls` edges.
     pub most_called: Vec<CouplingEntry>,
     /// Web root of the repository (`https://host/owner/repo`), if derivable from
-    /// the git remote — for a "Repository" link in the overview.
+    /// the git remote — for a "Repository" link in the overview, and the
+    /// **clone-from** column of a workspace vault's manifest (#442 part 2).
+    ///
+    /// The web root rather than the raw `origin` fetch URL on purpose: a vault is
+    /// made to be handed to someone, and `git@host:owner/repo.git` is only
+    /// actionable for a reader who already has SSH access to that host.
+    ///
+    /// It is **where the code lives, not a guaranteed clone URL**, and the
+    /// manifest says so. `repo_web_root` normalises a remote to `https://host/…`,
+    /// which clones on the common forges and may not on an unusual one, and says
+    /// nothing about whether the reader can read a private repository. A manifest
+    /// that promised "clone from here" would be making a claim it cannot check.
     pub repo_url: Option<String>,
-    /// Hex commit the graph was rendered from, for a permalink note.
+    /// Hex commit the graph was rendered from, for a permalink note — and, in a
+    /// workspace vault, the commit this member is pinned at.
+    ///
+    /// With [`Self::repo_url`] it is what makes a workspace vault **replicable**
+    /// rather than merely browsable: *"here is my workspace"* is far less useful
+    /// than *"here is my workspace **at these commits**"*, and it is what lets a
+    /// reader tell a stale vault from a current one instead of guessing.
     pub commit: Option<String>,
+    /// The **enabled** `[ingest]` toggles this member was extracted under, by
+    /// name (`prose`, `pdf`, …), and its `[debt] ignore` globs.
+    ///
+    /// The manifest's third leg, after clone URL and commit: those two get a
+    /// reader the same *source*, and these two are what decide whether the same
+    /// source produces the same *vault*. `[ingest] prose` off means notes with no
+    /// captured content; a `[debt] ignore` glob means the debt figures on this
+    /// page are already filtered. Without them "reproducible" means "you can
+    /// obtain the code", which is a weaker claim than the section makes.
+    pub settings: RenderedUnder,
+    /// This member's stored analyzer findings (ADR-0012), ordered most severe
+    /// first by the caller. Rendered in a workspace vault's `_Home`; read
+    /// together with [`Self::coverage`], which is what says whether an empty
+    /// list means anything at all.
+    pub findings: Vec<FindingEntry>,
+    /// Whether an analyzer has ever run against this member — the context that
+    /// makes an empty [`Self::findings`] readable rather than reassuring. See
+    /// [`Coverage`].
+    pub coverage: Coverage,
 }
 
 /// Render the vault's overview note: what was scanned, the structure by kind,
@@ -906,11 +942,86 @@ pub struct CrossLink {
     pub resolves: bool,
 }
 
+/// The settings a member's notes were rendered under — the ones that change what
+/// the vault *contains*, not the whole merged config.
+///
+/// Deliberately a short list rather than the effective configuration in full.
+/// #442 asks the manifest to record "effective settings", and dumping every
+/// resolved key into a shareable artifact would re-open the redaction question
+/// this vault already has to warn about, to record settings that cannot change
+/// what a reader sees. These two can.
+#[derive(Debug, Clone, Default)]
+pub struct RenderedUnder {
+    /// Enabled `[ingest]` toggles by name, in declaration order. Empty means
+    /// every toggle was off — which is a real state and renders as such, not as
+    /// an absent row.
+    pub ingest: Vec<String>,
+    /// `[debt] ignore` globs. Non-empty means the debt figures on this page are
+    /// **already filtered**, and a reader comparing them against a fresh
+    /// `roteiro debt` without the same config will not match.
+    pub debt_ignore: Vec<String>,
+}
+
+/// One analyzer finding, as the vault renders it (ADR-0012).
+///
+/// A render-facing copy rather than `rto_graph::Finding`, matching [`AdrEntry`]
+/// and [`CouplingEntry`]: the renderer takes the fields it prints and stays free
+/// of the findings model. It deliberately does **not** carry `meta` — that is
+/// whatever the analyzer emitted, kept verbatim, and a shareable artifact is the
+/// worst place to reproduce "whatever the tool said" unread.
+#[derive(Debug, Clone)]
+pub struct FindingEntry {
+    /// The rule, advisory or check id the analyzer fired (`RUSTSEC-2026-0031`).
+    pub rule: String,
+    /// The severity the analyzer assigned — **a tool judgement, not a
+    /// confidence** — rendered as the analyzer's word rather than the vault's.
+    pub severity: String,
+    /// One-line summary.
+    pub title: String,
+    /// The analyzer's full message.
+    pub message: String,
+    /// Repository-relative path the finding is about, if the analyzer located one.
+    pub path: Option<String>,
+    /// The analyzer that produced it, so a reader can tell one tool's opinion
+    /// from another's rather than reading a merged list as a single verdict.
+    pub analyzer: String,
+}
+
+/// What a member's analyzer coverage actually is — the distinction the vault
+/// must never blur.
+///
+/// An empty findings list means one of two completely different things, and
+/// printing both as "no findings" is the failure `roteiro security status`
+/// records as `no-analyzer-on-record`: **nothing has been analyzed** is not
+/// **nothing is wrong**. A shareable artifact is the worst place to conflate
+/// them, because its reader is the one person who cannot check.
+///
+/// [`Coverage::NotRun`] is the `Default` deliberately. A `VaultSummary` built
+/// from `Default` has had no analyzer run against it, and defaulting the other
+/// way would render "no findings" for a member nobody looked at — the exact
+/// conflation this type exists to prevent, arrived at by omission.
+#[derive(Debug, Clone, Default)]
+pub enum Coverage {
+    /// No analyzer has ever run against this member. **Not** a clean result.
+    #[default]
+    NotRun,
+    /// At least one analyzer ran, as `(analyzer, version)` per run — so an empty
+    /// findings list is attributable to a tool that actually looked.
+    Ran(Vec<(String, String)>),
+}
+
 /// Aggregate figures for a **workspace** vault's `_Home` overview: the members,
 /// each with exactly the aggregates a single-project `_Home` carries, plus the
 /// cross-repo links between them.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceSummary {
+    /// When this vault was rendered, RFC 3339 UTC.
+    ///
+    /// A vault is **read-only and point-in-time**. Stamping it is what gives
+    /// that property teeth: with the per-member commits, a reader can tell
+    /// whether what they are looking at still describes the workspace, rather
+    /// than assuming it does.
+    pub generated_at: String,
     /// The workspace name (`--workspace-name`).
     pub name: String,
     /// One entry per member repository, in stable name order. Each is the very
@@ -1017,14 +1128,20 @@ pub fn render_workspace_home(ws: &WorkspaceSummary) -> VaultNote {
             m.project, m.project, m.total_nodes, m.total_edges
         );
     }
+    // `[[#Heading]]`, the form the member rows above already use, rather than a
+    // `](#slug)` anchor: the slug a renderer computes and the slug a reader's
+    // tool computes are exactly what issue #524 is about, and a manifest is a
+    // poor place to find out they disagree.
     c.push_str(
         "\n*The `Repository` and `Commit` columns say where each member came from \
-         and what was read. They are **not** a replication manifest — reconstructing \
-         a workspace from a vault is issue #442 part 2, and nothing here is designed \
-         to be handed to someone else.*\n",
+         and what was read. The manifest that makes those reconstructable — and \
+         states what this vault carries before you share it — is \
+         [[#Reproducing this vault]], below.*\n",
     );
 
     write_cross_links(&mut c, ws);
+    write_findings(&mut c, ws);
+    write_manifest(&mut c, ws);
 
     for m in &ws.members {
         let _ = writeln!(c, "\n## {}", m.project);
@@ -1047,6 +1164,422 @@ pub fn render_workspace_home(ws: &WorkspaceSummary) -> VaultNote {
         filename: HOME_NOTE.to_owned(),
         content: c,
     }
+}
+
+/// The `### Rendered under` table — the settings half of the manifest.
+///
+/// A clone URL and a commit get a reader the same **source**; these get them the
+/// same **vault**. Rendering the same commits with `[ingest] prose` off, or with
+/// a different `[debt] ignore`, produces a different document from the same
+/// code — so a manifest that omits them promises a reproducibility it cannot
+/// deliver, which is worse than promising less.
+fn write_rendered_under(c: &mut String, ws: &WorkspaceSummary) {
+    c.push_str("\n### Rendered under\n\n");
+    c.push_str(
+        "*These change what a vault **contains**, so re-rendering the commits \
+         above under different ones will not reproduce this document.*\n\n",
+    );
+    c.push_str("| Member | `[ingest]` | `[debt] ignore` |\n| --- | --- | --- |\n");
+    for m in &ws.members {
+        let list = |v: &[String]| {
+            if v.is_empty() {
+                // "none" as a word, not an empty cell: a blank reads as unknown,
+                // and these two are the difference between reproducing this
+                // vault and something that merely resembles it.
+                "*none*".to_owned()
+            } else {
+                // `[debt] ignore` is user config landing in a table cell: a
+                // glob carrying a backtick or a `|` reshapes the row. Not
+                // analyzer-sourced, but untrusted for the same reason — the
+                // vault did not write it.
+                v.iter()
+                    .map(|x| table_cell(x))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        let _ = writeln!(
+            c,
+            "| {} | {} | {} |",
+            inline_untrusted(&m.project),
+            list(&m.settings.ingest),
+            list(&m.settings.debt_ignore)
+        );
+    }
+}
+
+/// The `## Security findings` section: the stored analyzer output (ADR-0012) for
+/// every member.
+///
+/// # Why this is here at all, stated once
+///
+/// ADR-0012 keeps findings out of `nodes`/`edges` **specifically** so they cannot
+/// reach `export_factset`, and records the alternative as rejected because it
+/// would "silently publish tool output into an artifact". This section is that
+/// same publication, made **deliberately and visibly** rather than by accident:
+/// a workspace vault is a hand-over document, and the owner ruled that it should
+/// answer *"what is wrong with this workspace"* as well as *"what is in it"*.
+/// The exclusions section says so at the point a reader is about to share it.
+///
+/// # The distinction this section exists to preserve
+///
+/// A member with no findings is rendered **two different ways** depending on
+/// [`Coverage`], because "no analyzer has run" and "an analyzer ran and found
+/// nothing" are opposite facts that look identical when both are printed as an
+/// empty list. `roteiro security status` names that failure `no-analyzer-on-record`
+/// and refuses to let it read as clean; a shareable artifact must refuse harder,
+/// because its reader is the one person who cannot go and check.
+fn write_findings(c: &mut String, ws: &WorkspaceSummary) {
+    c.push_str("\n## Security findings\n\n");
+
+    let total: usize = ws.members.iter().map(|m| m.findings.len()).sum();
+    let unanalyzed = ws
+        .members
+        .iter()
+        .filter(|m| matches!(m.coverage, Coverage::NotRun))
+        .count();
+
+    let _ = writeln!(
+        c,
+        "*Stored analyzer output (ADR-0012). **{total} finding(s)** across \
+         {} member(s){}. A severity is the **analyzer's** judgement, not \
+         Roteiro's, and a finding is a tool's claim rather than a confirmed \
+         defect — read one as something to check, not something proven.*\n",
+        ws.members.len(),
+        if unanalyzed > 0 {
+            format!(", with {unanalyzed} never analyzed at all")
+        } else {
+            String::new()
+        }
+    );
+
+    for m in &ws.members {
+        match (&m.coverage, m.findings.is_empty()) {
+            // Never analyzed. Said loudly, and *not* in the same breath as a
+            // member that came back clean — the whole point of the split.
+            (Coverage::NotRun, _) => {
+                let _ = writeln!(c, "### {} — **not analyzed**\n", m.project);
+                c.push_str(
+                    "*No analyzer has run against this member, so nothing here is \
+                     a statement about it. An empty list is the absence of a \
+                     question, not a reassuring answer.*\n\n",
+                );
+            }
+            // Analyzed, nothing found — attributable to a tool that looked.
+            (Coverage::Ran(runs), true) => {
+                let _ = writeln!(
+                    c,
+                    "### {} — no findings\n\n*{} ran and reported none.*\n",
+                    m.project,
+                    describe_runs(runs)
+                );
+            }
+            (Coverage::Ran(runs), false) => {
+                let _ = writeln!(
+                    c,
+                    "### {} — {} finding(s)\n\n*Reported by {}.*\n",
+                    m.project,
+                    m.findings.len(),
+                    describe_runs(runs)
+                );
+                for f in &m.findings {
+                    let at = f
+                        .path
+                        .as_deref()
+                        .map_or_else(String::new, |p| format!(" · {}", inline_code(p)));
+                    let _ = writeln!(
+                        c,
+                        "**{}** · {}{at} — {}\n",
+                        inline_code(&f.severity),
+                        inline_code(&f.rule),
+                        // Prose, not a span: the title is the sentence a reader
+                        // scans, so it is escaped rather than monospaced.
+                        inline_untrusted(&f.title)
+                    );
+                    write_analyzer_message(c, f);
+                }
+            }
+        }
+    }
+}
+
+/// An untrusted value as a **complete code span**, delimiters included.
+///
+/// A code span renders its content literally — no emphasis, no links, no HTML —
+/// so the only thing that can escape one is a backtick run long enough to close
+/// it. Widening the delimiter past the longest run inside the value is therefore
+/// the whole defence, and it is the *right* defence: backslash-escaping inside a
+/// span protects nothing and does show, turning `vendor/**` into `vendor\*\*`
+/// on the page.
+///
+/// Whitespace is still collapsed — a newline ends the line the span sits on
+/// however well the span itself is delimited.
+///
+/// **Not sufficient inside a table cell.** GFM splits a row on `|` *before*
+/// inline parsing, so a pipe inside a code span still ends the cell. Use
+/// [`table_cell`] there.
+fn inline_code(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let longest_run = collapsed
+        .split(|ch| ch != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let tick = "`".repeat(longest_run + 1);
+    // CommonMark strips one leading and trailing space from a span, which is how
+    // content that itself starts or ends with a backtick is expressed.
+    let pad = if collapsed.starts_with('`') || collapsed.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{tick}{pad}{collapsed}{pad}{tick}")
+}
+
+/// One line of analyzer-sourced text, made safe to interpolate into the note.
+///
+/// The message gets a fence; **these fields did not**, and they come from the
+/// same place. A `title` carrying a newline ends the line it was placed on and
+/// starts a new block — one that can open a heading, a list or a table row — so
+/// the "quoted, not absorbed" property held for one field out of four. A `rule`
+/// or `path` carrying a backtick escapes the code span it is wrapped in.
+///
+/// Four steps, in order:
+///
+/// 1. **Collapse every whitespace run to one space.** This is what removes the
+///    structural attack: Markdown block constructs need a line start, and after
+///    this there are no line starts left inside the value.
+/// 2. **HTML-escape `&`, `<`, `>`.** Some of these values land inside raw HTML
+///    (`<sub>`, `<details><summary>`), where a backslash escapes nothing — an
+///    analyzer named `</sub><script>` would close the tag and keep going. This
+///    step is why there is **one** helper rather than a Markdown one and an HTML
+///    one: two helpers means two contexts to keep straight, and the reason this
+///    function exists at all is that the first version secured one context and
+///    missed its neighbour.
+/// 3. **Backslash-escape the remaining Markdown punctuation.** A link in a
+///    document handed to someone can point anywhere, and a stray backtick or
+///    pipe silently reshapes the line it lands in. `<` and `>` are absent from
+///    that set because step 2 already turned them into entities.
+/// 4. **Defuse bare URLs.** Escaping `[` stops explicit `[text](url)` syntax and
+///    nothing else: Obsidian and GFM *linkify* a plain `https://…`, so analyzer
+///    text could still hand the reader a clickable link to anywhere. Replacing
+///    the scheme's colon with `&#58;` renders identically and matches no
+///    linkifier — the reader still sees the URL and can copy it deliberately.
+///
+/// Safe in both contexts, so a caller never has to know which one it is in.
+fn inline_untrusted(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(collapsed.len());
+    for ch in collapsed.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            // `&` is deliberately absent below: the entities written above must
+            // survive intact, and backslash-escaping their `&` would render them
+            // literally.
+            '\\' | '`' | '*' | '_' | '[' | ']' | '|' | '#' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    defuse_autolinks(&out)
+}
+
+/// Stop a bare URL in untrusted text from being turned into a clickable link.
+///
+/// Escaping `[` covers explicit link syntax; it does nothing about linkification,
+/// which is on by default in Obsidian and GFM. `https&#58;//evil.example` renders
+/// as `https://evil.example` and matches no autolinker, so the URL stays
+/// readable and copyable while ceasing to be a thing the reader can click by
+/// accident in a document someone handed them.
+fn defuse_autolinks(s: &str) -> String {
+    s.replace("https://", "https&#58;//")
+        .replace("http://", "http&#58;//")
+}
+
+/// [`inline_code`] for a value that lands in a **table cell**.
+///
+/// A code span is not enough there: GFM splits a row on `|` before it parses
+/// inline content, so a pipe inside the span still ends the cell and shifts
+/// every column after it. `\|` is the documented escape, and it is applied to
+/// the finished span so the delimiter widening still holds.
+///
+/// The distinction is not cosmetic — it is a third rendering context, and this
+/// file has now been wrong about a context twice.
+fn table_cell(s: &str) -> String {
+    inline_code(s).replace('|', "\\|")
+}
+
+/// One finding's full analyzer message, collapsed and **verbatim**.
+///
+/// Collapsed because the messages are long — a single GHSA advisory runs to
+/// paragraphs, and seventeen of them inline turn `_Home` into a wall of text
+/// nobody reads, which loses the findings as surely as omitting them. `<details>`
+/// keeps every byte in the file (the ruling was to include them in full) while
+/// letting the reader see the list first.
+///
+/// **Verbatim, in a fence, rather than as Markdown.** An analyzer message is
+/// tool output travelling into a document that gets handed to people: rendered
+/// as Markdown it can open headings that restructure the note, or links that
+/// point anywhere. A fence is what makes it text the vault *quotes* rather than
+/// text the vault *becomes* — and it preserves the advisory's own line structure,
+/// which flattening to one line destroys.
+///
+/// The fence is sized to beat the longest backtick run in the message, for the
+/// reason [`crate::docs`] handles multi-backtick spans: a three-backtick fence
+/// around a message that itself contains one ends the block early and spills the
+/// remainder into the note as prose.
+fn write_analyzer_message(c: &mut String, f: &FindingEntry) {
+    let message = f.message.trim();
+    if message.is_empty() {
+        let _ = writeln!(
+            c,
+            "<sub>reported by `{}`</sub>\n",
+            inline_untrusted(&f.analyzer)
+        );
+        return;
+    }
+    let longest_run = message
+        .split(|ch| ch != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(2) + 1);
+    let _ = writeln!(
+        c,
+        "<details><summary><sub>what `{}` said</sub></summary>\n\n\
+         {fence}text\n{message}\n{fence}\n\n</details>\n",
+        inline_untrusted(&f.analyzer)
+    );
+}
+
+/// `analyzer version` for each run that produced a member's findings, joined —
+/// so "no findings" names the tool that looked rather than asserting a state of
+/// the world.
+fn describe_runs(runs: &[(String, String)]) -> String {
+    if runs.is_empty() {
+        // `Coverage::Ran` with no runs should not occur; say something true
+        // rather than rendering an empty clause that reads as a name.
+        return "an analyzer".to_owned();
+    }
+    runs.iter()
+        .map(|(a, v)| {
+            // `inline_untrusted`, not `inline_code`: this same value is also
+            // interpolated into `<summary>`/`<sub>` by `write_analyzer_message`,
+            // and keeping one treatment for it means there is no second context
+            // to get wrong later. That is the mistake this pair of helpers was
+            // introduced to fix, so it is not worth re-creating for monospace.
+            let (a, v) = (inline_untrusted(a), inline_untrusted(v));
+            // An ingested report often carries no version the producer stated,
+            // and the store keeps that as `unknown`. Printing "`osv-scanner`
+            // unknown" reads as a version string; saying nothing reads as the
+            // absence it is.
+            if v.is_empty() || v == "unknown" {
+                format!("`{a}`")
+            } else {
+                format!("`{a}` {v}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The `## Reproducing this vault` section — the **manifest** half of #442.
+///
+/// A vault that says *"here is my workspace"* is far less useful than one that
+/// says *"here is my workspace **at these commits**"*. With an origin and a
+/// commit per member, a reader can clone, check out, and hold exactly what this
+/// vault describes; without them they have a picture and no way back to the
+/// thing pictured.
+///
+/// It is also where the reader is told what a shared vault **does not** contain,
+/// at the moment they are most likely to share it. Each exclusion is a decision
+/// recorded on #442 rather than an oversight, so each is named with its reason.
+fn write_manifest(c: &mut String, ws: &WorkspaceSummary) {
+    c.push_str("\n## Reproducing this vault\n\n");
+    let _ = writeln!(
+        c,
+        "*Rendered **{}**. A vault is read-only and point-in-time: it describes \
+         these repositories at these commits, and does not change when they do.*\n",
+        ws.generated_at
+    );
+    // "Repository", not "Clone from". The value is the **web root derived from
+    // the `origin` remote**, which is the right thing to show a reader — an
+    // `git@host:owner/repo.git` is only actionable for someone who already has
+    // SSH to that host — but it is not guaranteed to be a working clone URL for
+    // every forge or for a private repository. Naming the column "Clone from"
+    // promised something this cannot deliver, and the manifest's whole value is
+    // that its promises hold.
+
+    let any_origin = ws.members.iter().any(|m| m.repo_url.is_some());
+    if any_origin {
+        // Stated here rather than above the `if`: it says "each repository
+        // below", and above the branch it would be followed immediately by
+        // "no member has an `origin` remote".
+        c.push_str(
+            "*Each repository below is the web root derived from that member's \
+             `origin` remote — where the code lives, not a guaranteed clone URL. \
+             A private repository, or a forge with a different clone path, still \
+             needs whatever access you would normally use.*\n\n",
+        );
+        c.push_str("| Member | Repository | At commit |\n| --- | --- | --- |\n");
+        for m in &ws.members {
+            let _ = writeln!(
+                c,
+                "| {} | {} | {} |",
+                // The name is prose, not a span — `inline_untrusted` already
+                // backslash-escapes `|`, so it is table-safe without becoming
+                // monospaced. The two values below *are* spans, and go through
+                // `table_cell`: a remote URL and a sha come from git, not from
+                // us, and this table sits thirty lines above the one that
+                // already knew that.
+                inline_untrusted(&m.project),
+                m.repo_url
+                    .as_deref()
+                    .map_or_else(|| "*(no `origin` remote)*".to_owned(), table_cell),
+                m.commit
+                    .as_deref()
+                    .map_or_else(|| "*(unknown)*".to_owned(), table_cell),
+            );
+        }
+    } else {
+        // Every member is local-only. Say so rather than rendering a table of
+        // "no origin" rows, which reads as a fault rather than as a workspace
+        // that was never pushed anywhere.
+        c.push_str(
+            "*No member has an `origin` remote, so this vault cannot be \
+             reconstructed from it — it describes repositories that exist only \
+             where it was rendered.*\n",
+        );
+    }
+
+    write_rendered_under(c, ws);
+
+    c.push_str(
+        "\n### Before you share this\n\n\
+         Stated here because this is the point at which a vault is handed to \
+         someone.\n\n\
+         - **It lists this workspace's known security findings** — see *Security \
+           findings* above. That is deliberate: a hand-over document should say \
+           what is wrong as well as what is there. But it means this file is a \
+           list of **unpatched weaknesses and where they are**, and unlike a \
+           local store it cannot be un-shared once sent. Treat it as you would \
+           the analyzer reports themselves.\n\
+         - **Config keys are redacted by *name*, and that is narrower than it \
+           looks.** The check matches ten well-known key names and inspects no \
+           values, so a secret in a value whose key is not named like one — \
+           `DATABASE_URL=postgres://user:pw@host` — is **not** redacted. \
+           Tolerable in a local store; materially different in an artifact whose \
+           purpose is to be handed on.\n\
+         - **Agent memory** (ADR-0013) is the one thing deliberately left out. It \
+           is per-developer and uncommitted, it records prose that can carry \
+           pasted tokens, stack traces and customer names, and it has **no \
+           redaction chokepoint** at all — so unlike the two above, there is no \
+           version of it that is safe to include.\n",
+    );
 }
 
 /// The `## Cross-repo links` section: the edges that only a workspace vault can
@@ -1136,9 +1669,10 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdrEntry, ConfigSecretSummary, CouplingEntry, CrossLink, DensityEntry, HOME_NOTE,
-        VaultScope, VaultSummary, WorkspaceSummary, note_name, render_home, render_note,
-        render_note_scoped, render_workspace_home, scoped_note_name,
+        AdrEntry, ConfigSecretSummary, CouplingEntry, Coverage, CrossLink, DensityEntry,
+        FindingEntry, HOME_NOTE, RenderedUnder, VaultScope, VaultSummary, WorkspaceSummary,
+        note_name, render_home, render_note, render_note_scoped, render_workspace_home,
+        scoped_note_name,
     };
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
 
@@ -1524,9 +2058,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_home_summarises_the_graph() {
-        let summary = VaultSummary {
+    /// The single-project `_Home` fixture, extracted so the test that reads its
+    /// rendering stays about the rendering. Every field is populated: the
+    /// sections it drives are individually omitted when empty, so a partial
+    /// fixture would silently stop exercising them.
+    fn home_summary() -> VaultSummary {
+        VaultSummary {
             project: "demo".into(),
             total_nodes: 3,
             total_edges: 2,
@@ -1559,7 +2096,15 @@ mod tests {
             }],
             repo_url: Some("https://github.com/org/repo".into()),
             commit: Some("abcdef0123456789".into()),
-        };
+            findings: vec![],
+            coverage: Coverage::NotRun,
+            settings: RenderedUnder::default(),
+        }
+    }
+
+    #[test]
+    fn render_home_summarises_the_graph() {
+        let summary = home_summary();
         let note = render_home(&summary);
         assert_eq!(note.filename, HOME_NOTE);
         assert!(note.content.contains("# demo — knowledge graph"));
@@ -1903,6 +2448,393 @@ mod tests {
     /// a name rendered for a node the vault does not hold is a true sentence
     /// about a note nobody can open. The empty case is
     /// `the_workspace_home_claims_no_example_note_when_it_has_no_real_key`.
+    fn finding(rule: &str, severity: &str, message: &str) -> FindingEntry {
+        FindingEntry {
+            rule: rule.to_owned(),
+            severity: severity.to_owned(),
+            title: "a title".to_owned(),
+            message: message.to_owned(),
+            path: Some("Cargo.lock".to_owned()),
+            analyzer: "osv-scanner".to_owned(),
+        }
+    }
+
+    fn ws_with(members: Vec<VaultSummary>) -> WorkspaceSummary {
+        WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
+            name: "platform".into(),
+            members,
+            cross_links: vec![],
+            cross_links_total: 0,
+            cross_links_authored: 0,
+        }
+    }
+
+    /// An analyzer message is **tool output** being embedded in a document that
+    /// gets handed to people. It must be quoted, never absorbed: a message
+    /// carrying its own fence would otherwise close the block early and spill the
+    /// rest into the note as vault prose — headings and links included.
+    #[test]
+    fn an_analyzer_message_cannot_break_out_of_its_fence() {
+        let mut api = member_summary("api", 1);
+        api.coverage = Coverage::Ran(vec![("osv-scanner".into(), "1.9.0".into())]);
+        api.findings = vec![finding(
+            "GHSA-x",
+            "high",
+            "before
+```
+## not a vault heading
+```
+after",
+        )];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        // The fence opened must be longer than any run inside the message, so the
+        // message's own ``` is content rather than a terminator.
+        assert!(
+            c.contains("````text"),
+            "fence widened past the message's own: {c}"
+        );
+        assert!(
+            c.contains("## not a vault heading"),
+            "and the text is still all there: {c}"
+        );
+        // Nothing between the finding and the next section may be loose prose.
+        let after = c.split("````text").nth(1).expect("a fenced block");
+        let body = after.split("````").next().expect("a closing fence");
+        assert!(
+            body.contains("## not a vault heading"),
+            "the heading is INSIDE the fence, not outside it: {body}"
+        );
+    }
+
+    /// The fence secured the **message**. Every other analyzer-sourced field on a
+    /// finding is interpolated into a line of prose, and they come from the same
+    /// place — so a title carrying a newline used to end its line and start a new
+    /// block, which can open a heading the vault never wrote.
+    #[test]
+    fn every_analyzer_sourced_field_is_quoted_not_absorbed() {
+        let mut api = member_summary("api", 1);
+        api.coverage = Coverage::Ran(vec![("osv-scanner".into(), "1.9.0".into())]);
+        api.findings = vec![FindingEntry {
+            // Each field carries a different escape hatch.
+            rule: "R-1`x".to_owned(),
+            severity: "high".to_owned(),
+            // Newlines, a heading, a link, and a list marker — the last of which
+            // no escape set covers, so only the whitespace collapse stops it.
+            title: "broken\n\n## an injected heading\n\n- a list item\n\n[a link](http://evil)"
+                .to_owned(),
+            message: "fine".to_owned(),
+            path: Some("src/a`b.rs".to_owned()),
+            analyzer: "osv-scanner".to_owned(),
+        }];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        assert!(
+            !c.contains("\n## an injected heading"),
+            "a newline in a title must not start a block: {c}"
+        );
+        assert!(
+            !c.contains("[a link](http://evil)"),
+            "and a link must not survive as a link: {c}"
+        );
+        // The text is still readable — escaped, not deleted. Losing it would be a
+        // different failure: a finding whose title vanished is a finding nobody
+        // acts on.
+        assert!(c.contains("an injected heading"), "the words remain: {c}");
+        // A widened delimiter, not a backslash: inside a span the backslash
+        // would show, and `vendor/**` would reach the reader as `vendor\*\*`.
+        assert!(
+            c.contains("``R-1`x``"),
+            "the span widens past the backtick inside it: {c}"
+        );
+
+        // The structural property, asserted directly rather than inferred from
+        // the absence of a heading: the whole finding stays on **one line**. An
+        // escape set can neutralise `#` and `[`, and a newline would still end
+        // the line and start a block — and nothing escapes a `-` list marker.
+        let line = c
+            .lines()
+            .find(|l| l.contains("R-1"))
+            .unwrap_or_else(|| panic!("the finding renders: {c}"));
+        assert!(
+            line.contains("a link") && line.contains("a list item"),
+            "every part of the title stays on the finding's own line: {line}"
+        );
+    }
+
+    /// The analyzer name is interpolated into **raw HTML** (`<sub>`,
+    /// `<details><summary>`), where a backslash escapes nothing. Fixing the
+    /// Markdown surface and leaving this one is how the first version of the
+    /// escaping shipped.
+    #[test]
+    fn analyzer_text_cannot_break_out_of_the_html_it_sits_in() {
+        let mut api = member_summary("api", 1);
+        let hostile = "osv</sub><script>alert(1)</script>".to_owned();
+        api.coverage = Coverage::Ran(vec![(hostile.clone(), "1.0".into())]);
+        api.findings = vec![FindingEntry {
+            rule: "R-1".to_owned(),
+            severity: "high".to_owned(),
+            title: "t".to_owned(),
+            message: "m".to_owned(),
+            path: None,
+            analyzer: hostile,
+        }];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        assert!(
+            !c.contains("<script>"),
+            "a tag in analyzer text must not survive as a tag: {c}"
+        );
+        assert!(
+            !c.contains("osv</sub>"),
+            "and must not close the element it was placed inside: {c}"
+        );
+        // Escaped, not dropped: the reader still sees which analyzer said it.
+        assert!(c.contains("&lt;script&gt;"), "the text remains, inert: {c}");
+    }
+
+    /// `[debt] ignore` is user config, not analyzer output — but the vault did
+    /// not write it either, and it lands in a table cell where a `|` reshapes
+    /// the row.
+    #[test]
+    fn a_config_glob_cannot_reshape_the_settings_table() {
+        let mut api = member_summary("api", 1);
+        api.settings = RenderedUnder {
+            ingest: vec!["prose".into()],
+            debt_ignore: vec!["a`b|c".into()],
+        };
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+        // Scoped to the settings table. The manifest table above it also has a
+        // row starting `| api |`, and a bare `.find` matched *that* one — so the
+        // first version of this test asserted against a row containing no glob
+        // at all, and stayed green with the escaping removed.
+        let section = c
+            .split("### Rendered under")
+            .nth(1)
+            .unwrap_or_else(|| panic!("the settings section: {c}"));
+        let row = section
+            .lines()
+            .find(|l| l.starts_with("| api |"))
+            .unwrap_or_else(|| panic!("a settings row: {section}"));
+        // Count **cell delimiters**, not `|` characters: an escaped `\|` is
+        // content, and GFM does not split on it. Counting raw pipes would fail
+        // on the correct output and pass on some wrong ones.
+        let delimiters = row
+            .char_indices()
+            .filter(|&(i, ch)| ch == '|' && !row[..i].ends_with('\\'))
+            .count();
+        assert_eq!(
+            delimiters, 4,
+            "the row keeps exactly its own four cell delimiters: {row}"
+        );
+    }
+
+    /// The manifest is a table too. `table_cell` was written for the settings
+    /// table and not applied to this one, thirty lines above it — a remote URL
+    /// and a project name both come from git rather than from us.
+    #[test]
+    fn a_remote_url_cannot_reshape_the_manifest_row() {
+        let mut api = member_summary("api", 1);
+        api.repo_url = Some("https://host/a|b/c".to_owned());
+        api.commit = Some("dead`beef".to_owned());
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        let section = c
+            .split("## Reproducing this vault")
+            .nth(1)
+            .unwrap_or_else(|| panic!("the manifest: {c}"));
+        let row = section
+            .lines()
+            .find(|l| l.starts_with("| api |"))
+            .unwrap_or_else(|| panic!("a manifest row: {section}"));
+        let delimiters = row
+            .char_indices()
+            .filter(|&(i, ch)| ch == '|' && !row[..i].ends_with('\\'))
+            .count();
+        assert_eq!(
+            delimiters, 4,
+            "the row keeps exactly its own four cell delimiters: {row}"
+        );
+        assert!(
+            row.contains("``dead`beef``"),
+            "and a backtick in a sha widens its span: {row}"
+        );
+    }
+
+    /// Escaping `[` stops explicit link syntax and nothing else. Obsidian and
+    /// GFM linkify a bare URL, so analyzer text could still hand the reader
+    /// something clickable in a document they were given.
+    #[test]
+    fn a_bare_url_in_analyzer_text_is_not_left_clickable() {
+        let mut api = member_summary("api", 1);
+        api.coverage = Coverage::Ran(vec![("osv-scanner".into(), "1.9.0".into())]);
+        api.findings = vec![FindingEntry {
+            rule: "R-1".to_owned(),
+            severity: "high".to_owned(),
+            title: "see https://evil.example/path for details".to_owned(),
+            message: "m".to_owned(),
+            path: None,
+            analyzer: "osv-scanner".to_owned(),
+        }];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        assert!(
+            !c.contains("https://evil.example"),
+            "a bare URL must not survive in linkifiable form: {c}"
+        );
+        // Rendered identically for a reader, and still copyable — defusing it
+        // must not amount to hiding it.
+        assert!(c.contains("https&#58;//evil.example/path"), "{c}");
+    }
+
+    /// The two empty states are opposite facts and must never render alike.
+    #[test]
+    fn an_unanalyzed_member_never_reads_as_one_that_came_back_clean() {
+        let mut looked = member_summary("api", 1);
+        looked.coverage = Coverage::Ran(vec![("osv-scanner".into(), "1.9.0".into())]);
+        let never = member_summary("sdk", 1); // Coverage::NotRun by default
+        let c = render_workspace_home(&ws_with(vec![looked, never])).content;
+
+        assert!(c.contains("### api — no findings"), "{c}");
+        assert!(
+            c.contains("osv-scanner` 1.9.0 ran and reported none"),
+            "{c}"
+        );
+        assert!(c.contains("### sdk — **not analyzed**"), "{c}");
+        assert!(
+            !c.contains("### sdk — no findings"),
+            "an unanalyzed member must never be rendered as clean: {c}"
+        );
+        assert!(c.contains("1 never analyzed at all"), "counted too: {c}");
+    }
+
+    /// The severity a finding carries is the **analyzer's** word. An unrecognised
+    /// level is rendered as given rather than mapped onto a known rung, because
+    /// mapping it would be inventing a judgement the tool did not make.
+    #[test]
+    fn an_unrecognised_severity_keeps_the_analyzers_own_label() {
+        let mut api = member_summary("api", 1);
+        api.coverage = Coverage::Ran(vec![("semgrep".into(), "1.2.3".into())]);
+        api.findings = vec![finding("R-1", "WARNING", "msg")];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+        assert!(c.contains("**`WARNING`**"), "{c}");
+    }
+
+    /// #442 part 2: the vault says how to reconstruct the workspace it describes,
+    /// and what it deliberately leaves out.
+    ///
+    /// A vault that says *"here is my workspace"* is far less useful than one
+    /// that says *"here is my workspace at these commits"* — and the exclusions
+    /// are stated at the point a reader is most likely to share it, because that
+    /// is when they matter.
+    #[test]
+    fn the_workspace_home_says_how_to_reproduce_itself_and_what_it_omits() {
+        let mut api = member_summary("api", 7);
+        api.repo_url = Some("https://github.com/acme/api".to_owned());
+        api.commit = Some("4e0d5a6afd0b1c2d".to_owned());
+        // Deliberately **mixed**: one member reproducible, one not. A fixture where
+        // every member has a remote never exercises the row that says so, and the
+        // gap is the thing a reader most needs to see.
+        let mut sdk = member_summary("sdk", 4);
+        sdk.repo_url = None;
+        sdk.commit = None;
+        let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
+            name: "platform".into(),
+            members: vec![api, sdk],
+            cross_links: vec![],
+            cross_links_total: 0,
+            cross_links_authored: 0,
+        };
+        let c = render_workspace_home(&ws).content;
+
+        assert!(c.contains("2026-08-22T10:00:00Z"), "stamped: {c}");
+        assert!(c.contains("read-only and point-in-time"), "{c}");
+        assert!(c.contains("https://github.com/acme/api"), "clone-from: {c}");
+        assert!(c.contains("4e0d5a6afd0b1c2d"), "pinned commit: {c}");
+        // A member with no remote is named as such rather than omitted — a gap in
+        // the manifest is the reader's problem to know about, not ours to hide.
+        assert!(c.contains("no `origin` remote"), "{c}");
+
+        // The share-time warning, each item with its reason. Two of the three are
+        // about what the vault *carries*, not what it omits — the owner ruled
+        // findings in, so this section warns rather than reassures.
+        assert!(
+            c.contains("cannot be un-shared"),
+            "including findings has a consequence, stated where it is acted on: {c}"
+        );
+        assert!(
+            c.contains("Agent memory"),
+            "the one genuine exclusion is still named: {c}"
+        );
+        assert!(
+            c.contains("no redaction chokepoint"),
+            "with its reason: {c}"
+        );
+        // The limit of what *is* included, which is narrower than it looks.
+        assert!(
+            c.contains("DATABASE_URL"),
+            "the redaction gap is shown, not described: {c}"
+        );
+    }
+
+    /// The manifest records the settings a re-render must match, because a clone
+    /// URL and a commit get a reader the same **source** and not the same
+    /// **vault**: `[ingest] prose` off produces notes with no captured content,
+    /// and a `[debt] ignore` glob means the debt figures on the page are already
+    /// filtered.
+    #[test]
+    fn the_manifest_records_the_settings_a_re_render_would_have_to_match() {
+        let mut api = member_summary("api", 1);
+        api.settings = RenderedUnder {
+            ingest: vec!["prose".into(), "pdf".into()],
+            debt_ignore: vec!["vendor/**".into()],
+        };
+        // A member with everything off is a real state, and must not render as a
+        // blank cell that reads as "unknown".
+        let sdk = member_summary("sdk", 1);
+        let c = render_workspace_home(&ws_with(vec![api, sdk])).content;
+
+        assert!(c.contains("### Rendered under"), "{c}");
+        assert!(c.contains("`prose`, `pdf`"), "the enabled toggles: {c}");
+        assert!(c.contains("`vendor/**`"), "the debt filter: {c}");
+        assert!(
+            c.contains("| sdk | *none* | *none* |"),
+            "all-off is stated, not left blank: {c}"
+        );
+        assert!(
+            c.contains("will not reproduce this document"),
+            "and the section says why it is there: {c}"
+        );
+    }
+
+    /// A workspace of purely local repositories cannot be reconstructed, and the
+    /// vault says so instead of rendering a table of blanks — which would read as
+    /// a fault rather than as repositories that were never pushed anywhere.
+    #[test]
+    fn a_vault_with_no_remotes_says_it_cannot_be_reconstructed() {
+        // `member_summary` gives every member a remote, so it must be cleared —
+        // the fixture has to actually be the case it names.
+        let mut api = member_summary("api", 1);
+        api.repo_url = None;
+        api.commit = None;
+        let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
+            name: "local".into(),
+            members: vec![api],
+            cross_links: vec![],
+            cross_links_total: 0,
+            cross_links_authored: 0,
+        };
+        let c = render_workspace_home(&ws).content;
+        assert!(c.contains("cannot be reconstructed"), "{c}");
+        assert!(
+            !c.contains("| Member | Repository |"),
+            "no empty table: {c}"
+        );
+    }
+
     /// #573: the cross-repo section distinguishes a **declaration** from a
     /// **match**, and says how many of each.
     ///
@@ -1925,6 +2857,7 @@ mod tests {
             authored,
         };
         let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![link(true, "addr"), link(false, "port")],
@@ -1955,6 +2888,7 @@ mod tests {
     #[test]
     fn the_workspace_home_names_an_example_note_name_actually_produces() {
         let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![CrossLink {
@@ -2005,6 +2939,7 @@ mod tests {
     #[test]
     fn the_workspace_home_claims_no_example_note_when_it_has_no_real_key() {
         let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![],
@@ -2187,6 +3122,9 @@ mod tests {
             }],
             repo_url: Some(format!("https://github.com/org/{project}")),
             commit: Some("abcdef0123456789".into()),
+            findings: vec![],
+            coverage: Coverage::NotRun,
+            settings: RenderedUnder::default(),
         }
     }
 
@@ -2197,6 +3135,7 @@ mod tests {
         // their repository's coupling and debt tables must still find them —
         // not a workspace total that averages them away.
         let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![],
@@ -2260,6 +3199,7 @@ mod tests {
     #[test]
     fn the_workspace_home_renders_cross_repo_links_and_marks_the_ones_it_cannot_follow() {
         let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![
@@ -2317,6 +3257,7 @@ mod tests {
     fn the_workspace_home_says_when_it_has_truncated_the_cross_links() {
         // A capped table that does not say it is capped reads as the whole set.
         let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7)],
             cross_links: vec![CrossLink {
@@ -2340,6 +3281,7 @@ mod tests {
     #[test]
     fn a_workspace_with_no_cross_repo_links_says_why_rather_than_showing_nothing() {
         let ws = WorkspaceSummary {
+            generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7)],
             cross_links: vec![],
