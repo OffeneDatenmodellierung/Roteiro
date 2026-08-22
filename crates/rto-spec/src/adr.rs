@@ -165,20 +165,47 @@ pub struct DocDate {
 }
 
 impl DocDate {
-    /// Parse a string that is *exactly* `YYYY-MM-DD`. Anything else is `None`,
-    /// which is how a `TBD`, an empty cell or a prose date is skipped rather
-    /// than guessed at.
+    /// Parse a string that is *exactly* `YYYY-MM-DD` — four digits, two, two.
+    /// Anything else is `None`, which is how a `TBD`, an empty cell or a prose
+    /// date is skipped rather than guessed at.
+    ///
+    /// **Fixed width is the contract, not an accident.** A looser split would
+    /// accept `2026-8-1`, and [`Display`](std::fmt::Display) would then render
+    /// it back as `2026-08-01` — so a violation message would quote a date the
+    /// document does not contain. A gate that reports what a file says has to
+    /// say what the file says.
+    ///
+    /// The cost of the strictness is that a hand-typed `2026-8-1` reads as *no
+    /// date claim* rather than as a date, exactly as `TBD` does. That is the
+    /// same trade every other cell in this column already makes, and it is the
+    /// safe direction: the rules that consume a date only ever report a
+    /// contradiction, so a skipped cell loses a finding while a guessed one
+    /// invents one. Every date across this repository's twenty ADRs is
+    /// zero-padded, and `roteiro spec` generates the frontmatter field, so
+    /// nothing today is affected either way.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        let mut parts = s.trim().split('-');
-        let year = parts.next()?.parse().ok()?;
-        let month = parts.next()?.parse().ok()?;
-        let day = parts.next()?.parse().ok()?;
-        if parts.next().is_some() {
-            return None;
-        }
-        Some(Self { year, month, day })
+        let s = s.trim();
+        let (year, rest) = fixed_width(s, 4)?;
+        let (month, rest) = fixed_width(rest.strip_prefix('-')?, 2)?;
+        let (day, rest) = fixed_width(rest.strip_prefix('-')?, 2)?;
+        rest.is_empty().then_some(Self { year, month, day })
     }
+}
+
+/// Split exactly `n` ASCII digits off the front of `s`, returning them as a
+/// number and the remainder. `None` if there are fewer than `n`, or if the
+/// character at `n` is itself a digit — which is what makes the width *exact*
+/// rather than merely a minimum.
+fn fixed_width(s: &str, n: usize) -> Option<(u32, &str)> {
+    let (head, tail) = s.split_at_checked(n)?;
+    if !head.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if tail.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((head.parse().ok()?, tail))
 }
 
 impl std::fmt::Display for DocDate {

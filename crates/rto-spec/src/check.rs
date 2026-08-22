@@ -1005,6 +1005,51 @@ Taken with `axum` v1.13.0, and boxlite v0.9.7 alongside it.
     }
 
     #[test]
+    fn a_date_that_is_not_exactly_iso_8601_is_not_a_date() {
+        use crate::adr::DocDate;
+
+        // Exactly four-two-two, and nothing else.
+        assert_eq!(
+            DocDate::parse("2026-08-18"),
+            Some(DocDate {
+                year: 2026,
+                month: 8,
+                day: 18
+            })
+        );
+        // A table cell arrives padded, so surrounding whitespace is trimmed
+        // before the width is counted — that is not leniency about the format.
+        assert!(DocDate::parse("  2026-08-18  ").is_some());
+
+        for bad in [
+            "2026-8-18",   // month not padded
+            "2026-08-1",   // day not padded
+            "26-08-18",    // two-digit year
+            "20260-08-18", // five-digit year
+            "2026-08-188", // three-digit day
+            "2026/08/18",  // wrong separator
+            "2026-08",     // no day
+            "TBD",
+            "",
+        ] {
+            assert_eq!(
+                DocDate::parse(bad),
+                None,
+                "`{bad}` must not parse as a date"
+            );
+        }
+
+        // Display round-trips exactly what a conforming file contains — which
+        // is why the width is fixed. A lenient parser would accept `2026-8-1`
+        // and then quote it back as `2026-08-01`, so a violation message would
+        // name a date the document does not contain.
+        assert_eq!(
+            DocDate::parse("2026-08-18").unwrap().to_string(),
+            "2026-08-18"
+        );
+    }
+
+    #[test]
     fn frontmatter_lagging_the_history_is_a_violation() {
         // ADR-0009 (1.10 over a history reaching 1.11) and ADR-0014 (1.4 over
         // 1.5). The summary row is moved down **with** the frontmatter, because
