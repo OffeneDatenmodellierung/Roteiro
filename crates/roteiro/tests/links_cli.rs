@@ -474,6 +474,186 @@ fn matrix_accepts_pinned_and_resolves_each_spoke_against_its_own_version() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// `--app-config-only` filters every repo's `HEAD` keys before matching, but the
+/// keys extracted from a spoke's **pinned revision** are a separate set that has
+/// never been through it. Left unfiltered, a spoke's app key can match a hub
+/// *tooling* key that the very same run dropped at `HEAD` — the flag half
+/// applied, which is worse than not applied because the asymmetry is invisible.
+///
+/// (Pre-existing: it reaches `--infer --pinned --app-config-only` too, which
+/// shipped in ADR-0009 v1.9. Found on this PR because `--matrix` gained the flag.)
+#[test]
+fn app_config_only_reaches_the_pinned_revision_too() {
+    let base = std::env::temp_dir().join(format!("roteiro-pinfilter-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // At v1 the ONLY definition of `serve.tools` is in tooling config.
+    std::fs::write(app.join("deny.toml"), "[serve]\ntools = true\n").expect("write");
+    std::fs::write(app.join("config.toml"), "[serve]\naddr = \"127.0.0.1\"\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    // HEAD drops it, so the key exists ONLY at the pinned revision.
+    std::fs::write(app.join("deny.toml"), "[serve]\nother = 1\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    std::fs::write(deploy.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    std::fs::write(
+        deploy.join(".gitmodules"),
+        "[submodule \"app\"]\n\tpath = app\n\turl = https://github.com/acme/app.git\n",
+    )
+    .expect("write .gitmodules");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "prod.env", ".gitmodules"]);
+    git(
+        &deploy,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{v1},app"),
+        ],
+    );
+    git(&deploy, &["commit", "-q", "-m", "deploy pinned to app@v1"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    let base_s = base.to_str().unwrap();
+    let args = [
+        "links",
+        "--matrix",
+        "--pinned",
+        "--hub",
+        "app",
+        "--workspace",
+        base_s,
+        "--json",
+    ];
+
+    // Without the flag the tooling-sourced row is there — proving the fixture
+    // really does match against the pinned revision's tooling key.
+    let all: serde_json::Value =
+        serde_json::from_slice(&roteiro(&base, &args).stdout).expect("JSON");
+    let has_tools = |m: &serde_json::Value| {
+        m["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["hub_key"] == "serve.tools")
+    };
+    assert!(
+        has_tools(&all),
+        "fixture must produce the row at all: {all}"
+    );
+
+    // With it, the row is gone: the pinned revision's keys went through the same
+    // filter as HEAD's.
+    let mut filtered_args = args.to_vec();
+    filtered_args.push("--app-config-only");
+    let filtered: serde_json::Value =
+        serde_json::from_slice(&roteiro(&base, &filtered_args).stdout).expect("JSON");
+    assert!(
+        !has_tools(&filtered),
+        "a tooling key from the pinned revision must be filtered too: {filtered}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A hub that sets the same dotted key in **two files** has two `config_key`
+/// nodes with two values. `match_against_hub` picks one and reports its file, so
+/// the pinned baseline must be looked up by that same `(file, key)` identity —
+/// key alone collapses the two and computes `differs` against whichever happened
+/// to land last.
+#[test]
+fn a_pinned_baseline_is_read_from_the_file_its_match_came_from() {
+    let base = std::env::temp_dir().join(format!("roteiro-dupkey-cli-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // v1 sets `serve.tools` in TWO files, with DIFFERENT values.
+    std::fs::write(app.join("alt.toml"), "[serve]\ntools = \"from-alt\"\n").expect("write");
+    std::fs::write(
+        app.join("config.toml"),
+        "[serve]\ntools = \"from-config\"\n",
+    )
+    .expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    let v1 = head_sha(&app);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    // HEAD renames the key away, so neither v1 value survives to HEAD.
+    std::fs::write(app.join("alt.toml"), "[serve]\nfeatures = true\n").expect("write");
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    std::fs::write(deploy.join("prod.env"), "SERVE_TOOLS=from-alt\n").expect("write");
+    std::fs::write(
+        deploy.join(".gitmodules"),
+        "[submodule \"app\"]\n\tpath = app\n\turl = https://github.com/acme/app.git\n",
+    )
+    .expect("write .gitmodules");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "prod.env", ".gitmodules"]);
+    git(
+        &deploy,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{v1},app"),
+        ],
+    );
+    git(&deploy, &["commit", "-q", "-m", "deploy pinned to app@v1"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    let base_s = base.to_str().unwrap();
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--matrix",
+            "--pinned",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "matrix failed: {out:?}");
+    let m: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+
+    let row = &m["rows"][0];
+    let file = row["file"].as_str().unwrap_or_default();
+    let cell = &row["cells"]["deploy"];
+    // Whichever file the match came from, the baseline must be *that* file's
+    // value — the relation, not a fixed string, so the assertion does not depend
+    // on which candidate the matcher happens to pick.
+    let expected = match file {
+        "alt.toml" => "from-alt",
+        "config.toml" => "from-config",
+        other => panic!("unexpected hub file {other:?}: {m}"),
+    };
+    assert_eq!(
+        cell["baseline"], expected,
+        "the baseline must come from the file the match reports ({file}): {m}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// The two combinations that must **still** be refused, now that clap no longer
 /// carries `requires = "infer"` for `--pinned`.
 #[test]

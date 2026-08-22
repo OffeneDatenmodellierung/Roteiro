@@ -7774,7 +7774,7 @@ struct InferredRepo {
     /// spoke, and the infer JSON would otherwise grow a copy of the hub for every
     /// distinct rev in the workspace.
     #[serde(skip)]
-    hub_baseline: Option<std::collections::BTreeMap<String, String>>,
+    hub_baseline: Option<std::collections::BTreeMap<(String, String), String>>,
 }
 
 /// The `graph.db` path for the repo at `path` (`<repo>/.git/roteiro/graph.db`).
@@ -8019,7 +8019,8 @@ fn scan_workspace_infer(
         by_project.insert(hub_name.clone(), keys);
     }
 
-    let report = resolve_infer_report(&by_project, &hub_name, &project_paths, pin)?;
+    let report =
+        resolve_infer_report(&by_project, &hub_name, &project_paths, pin, app_config_only)?;
 
     Ok(InferScan::Ready(InferReady {
         hub_name,
@@ -8058,6 +8059,7 @@ fn resolve_infer_report(
     hub_name: &str,
     project_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
     pin: PinnedHub<'_>,
+    app_config_only: bool,
 ) -> anyhow::Result<Vec<InferredRepo>> {
     let hub_base = by_project[hub_name].as_slice();
     // Under `--pinned`, set the hub up **once** — repo, object cache, extractor, its
@@ -8100,6 +8102,17 @@ fn resolve_infer_report(
                                     )
                                 },
                             )?;
+                            // `--app-config-only` filtered every repo's `HEAD`
+                            // keys before matching; these were just extracted
+                            // from a pinned rev and have never been through it.
+                            // Left unfiltered, a spoke's *app* key could match a
+                            // hub *tooling* key that the same run dropped at
+                            // HEAD — the flag half-applied, which is worse than
+                            // not applied because the asymmetry is invisible.
+                            let mut k = k;
+                            if app_config_only {
+                                k.retain(|c| !rto_graph::is_tooling_config_path(&c.file));
+                            }
                             rev_cache.insert(p.rev.clone(), k);
                         }
                         (Some(p.rev), Some(p.via))
@@ -8119,10 +8132,17 @@ fn resolve_infer_report(
         };
         // Only when this spoke was measured against something other than the
         // shared baseline is there a second value for a view to reconcile.
+        // Keyed by **(file, key)**, not by key alone. A `config_key` node is
+        // per-(file, key), so a hub that sets the same dotted key in two files
+        // has two nodes with two values — and `match_against_hub` picks one of
+        // them, carrying its `hub_file` on the match. Collapsing to the dotted
+        // key keeps whichever value happened to be last and computes `differs`
+        // against the wrong file's. The spoke side of this very function already
+        // keys its values `(file, key)` for the same reason.
         let hub_baseline = pinned_to_own_rev.then(|| {
             hub_keys
                 .iter()
-                .map(|k| (k.key.clone(), k.value.clone()))
+                .map(|k| ((k.file.clone(), k.key.clone()), k.value.clone()))
                 .collect()
         });
         let (matches, orphans) = infer_links::match_against_hub(keys, hub_keys);
@@ -8308,7 +8328,7 @@ fn run_links_matrix(
                         hub_value: rep
                             .hub_baseline
                             .as_ref()
-                            .and_then(|b| b.get(&m.hub_key).cloned()),
+                            .and_then(|b| b.get(&(m.hub_file.clone(), m.hub_key.clone())).cloned()),
                         hub_key: m.hub_key.clone(),
                         // The hub key's source file, so the matrix row can be
                         // classified as app vs tooling config (parity with the API).

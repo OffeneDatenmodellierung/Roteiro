@@ -999,9 +999,17 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
     let Some(hub) = effective_hub(ws, &names)? else {
         // Nothing references (or can infer against) anything — no hub, so an empty
         // (but well-shaped) matrix.
-        return Ok(Json(json!({
-            "hub": Value::Null, "spokes": [], "rows": [], "drift": []
-        }))
+        //
+        // "Well-shaped" means **the same shape the populated response has**, which
+        // is why this is built from `OverrideMatrix::default()` rather than
+        // hand-written JSON: a hand-written literal is a second definition of the
+        // response, and it drifted the moment `pinned`/`pins` were added (#504) —
+        // a client parsing the empty case got four fields where every other
+        // response now has six. Serialising the type cannot drift from itself.
+        return Ok(Json(overview::OverrideMatrix {
+            hub: String::new(),
+            ..Default::default()
+        })
         .into_response());
     };
 
@@ -2976,6 +2984,37 @@ mod tests {
         // One live link + one drifted link → driftCount 1, two links total.
         assert_eq!(spokes[0]["driftCount"], 1);
         assert_eq!(json["links"].as_array().unwrap().len(), 2);
+    }
+
+    /// The empty (no-hub) matrix must carry **the same keys** as a populated one.
+    ///
+    /// It used to be a hand-written `json!` literal — a second definition of the
+    /// response — and it drifted the moment `pinned`/`pins` were added to
+    /// `OverrideMatrix` (#504): a client parsing the empty case got four fields
+    /// where every other response had six. The fix is that both now serialise the
+    /// same type; this test is what would have caught the drift, and it compares
+    /// key sets rather than listing fields, so the next field added to
+    /// `OverrideMatrix` cannot slip past it either.
+    #[tokio::test]
+    async fn the_empty_matrix_has_the_same_shape_as_a_populated_one() {
+        let empty = Workspace::from_stores([(SPOKE.to_owned(), spoke_store())]);
+        let (status, none) = get(single_set(empty), None, "/v1/graph/matrix").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, some) = get(single_set(linked_workspace()), None, "/v1/graph/matrix").await;
+
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&none),
+            keys(&some),
+            "the empty response must not be a different object: {none}"
+        );
+        assert_eq!(none["pinned"], false, "and must state it resolved no pins");
+        assert!(none["rows"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

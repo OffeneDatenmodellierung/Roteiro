@@ -156,7 +156,14 @@ pub struct Drift {
 }
 
 /// The assembled cross-repo override matrix.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// `Default` is an **empty matrix**, and the served endpoint returns exactly that
+/// when a workspace has no hub. It is derived rather than hand-written as JSON
+/// because a literal is a second definition of the response shape: the one that
+/// used to live in `graph_api::matrix` drifted the moment `pinned`/`pins` were
+/// added here (#504), so a client parsing the empty case got four fields where
+/// every other response had six. A type cannot drift from itself.
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct OverrideMatrix {
     /// The hub project (source of truth).
     pub hub: String,
@@ -765,6 +772,50 @@ mod tests {
             text.contains("= deploy: 127.0.0.1:8017 (0.90)  [vs 127.0.0.1:8017 at its rev]"),
             "and the cell names its own baseline: {text}"
         );
+    }
+
+    /// A hub that sets the same dotted key in **two files** has two `config_key`
+    /// nodes with two values, and `match_against_hub` picks one of them —
+    /// carrying its `hub_file` on the match. The baseline must be looked up by
+    /// that same `(file, key)` identity, or `differs` is computed against
+    /// whichever file happened to be last.
+    ///
+    /// Asserted here at the `build` boundary; the `(file, key)` keying itself
+    /// lives in `resolve_infer_report`, and this pins the contract `build`
+    /// depends on — that a match's baseline is the one its own file supplied.
+    #[test]
+    fn a_baseline_belongs_to_the_file_its_match_came_from() {
+        let hub_values = BTreeMap::from([("serve.addr".to_owned(), "HEAD-value".to_owned())]);
+        let m = build(
+            "app",
+            &hub_values,
+            vec![SpokeInput {
+                name: "deploy".to_owned(),
+                matches: vec![MatchInput {
+                    hub_key: "serve.addr".to_owned(),
+                    // The match came from `base.toml`, so its baseline is
+                    // `base.toml`'s value — not `override.toml`'s.
+                    file: "base.toml".to_owned(),
+                    spoke_key: "SERVE_ADDR".to_owned(),
+                    spoke_value: "from-base".to_owned(),
+                    confidence: 0.9,
+                    provenance: Provenance::Inferred,
+                    hub_value: Some("from-base".to_owned()),
+                }],
+                orphans: vec![],
+                pin: Some(SpokePin {
+                    rev: "v1.0.0".to_owned(),
+                    via: None,
+                }),
+            }],
+            true,
+        );
+        let cell = &m.rows[0].cells["deploy"];
+        assert!(
+            !cell.differs,
+            "equal to the value its own file supplied is not an override: {cell:?}"
+        );
+        assert_eq!(cell.baseline.as_deref(), Some("from-base"));
     }
 
     /// The unpinned matrix must be untouched by all of the above: no baseline on
