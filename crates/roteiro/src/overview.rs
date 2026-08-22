@@ -44,6 +44,26 @@ pub struct SpokeInput {
     pub matches: Vec<MatchInput>,
     /// Its orphan `(key, value)`s — no hub counterpart (the drift candidates).
     pub orphans: Vec<(String, String)>,
+    /// The hub version this spoke was compared against, under `--pinned`
+    /// (ADR-0009 step 8b). `None` means it was compared against the hub's `HEAD`
+    /// — either because `--pinned` was not asked for, or because this spoke pins
+    /// nothing detectable.
+    pub pin: Option<SpokePin>,
+}
+
+/// Which hub version one spoke was resolved against, and where that came from.
+///
+/// Carried per spoke rather than per matrix because the whole point of
+/// `--pinned` is that spokes differ: a matrix that resolved seven spokes against
+/// seven revs and reported one number would be describing a comparison it did
+/// not make.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SpokePin {
+    /// The git rev — a sha, a tag, any rev.
+    pub rev: String,
+    /// Where the pin was detected (e.g. `submodule vendor/app`), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 /// One spoke's overriding value for a hub key.
@@ -115,6 +135,17 @@ pub struct Drift {
 pub struct OverrideMatrix {
     /// The hub project (source of truth).
     pub hub: String,
+    /// Whether per-spoke pin resolution was **asked for** (`--pinned`).
+    ///
+    /// Separate from `pins` being empty, and the distinction is the whole of
+    /// #505: "we asked and none of them pinned anything" is a different claim
+    /// from "we did not ask", and an inert `--pinned` that rendered
+    /// byte-identically to a plain run would be the answer to a question nobody
+    /// posed.
+    pub pinned: bool,
+    /// Spoke → the hub version it was compared against, for the spokes that
+    /// pinned one. Absent for a spoke compared against the hub's `HEAD`.
+    pub pins: BTreeMap<String, SpokePin>,
     /// Spoke column order — every deploy that either overrides at least one hub key
     /// *or* only drifts (sets a key with no hub counterpart), so a drift-only
     /// deploy still gets a column for its drift value. Sorted by name.
@@ -134,10 +165,16 @@ pub fn build(
     hub: &str,
     hub_values: &BTreeMap<String, String>,
     spokes: Vec<SpokeInput>,
+    pinned: bool,
 ) -> OverrideMatrix {
     // Per deploy, the distinct non-empty values it gave a drift key (sorted, so the
     // cell renders deterministically — one value, or a flagged conflict).
     type DriftValues = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+
+    let pins: BTreeMap<String, SpokePin> = spokes
+        .iter()
+        .filter_map(|s| s.pin.clone().map(|p| (s.name.clone(), p)))
+        .collect();
 
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -231,9 +268,66 @@ pub fn build(
 
     OverrideMatrix {
         hub: hub.to_owned(),
+        pinned,
+        pins,
         spokes: columns.into_iter().collect(),
         rows: rows.into_values().collect(),
         drift,
+    }
+}
+
+/// The table's header row: the two fixed columns, then one per spoke carrying
+/// that spoke's [`pin_label`].
+fn html_head_row(m: &OverrideMatrix) -> String {
+    use std::fmt::Write as _;
+    let mut thead = String::from("<th scope=\"col\">config key</th><th scope=\"col\">hub</th>");
+    for s in &m.spokes {
+        let _ = write!(
+            thead,
+            "<th scope=\"col\">{}{}</th>",
+            esc(s),
+            pin_label(m, s)
+        );
+    }
+    thead
+}
+
+/// The hub version one spoke's column was measured against, as an HTML fragment
+/// for its header — empty unless `--pinned` asked for per-spoke resolution.
+///
+/// It belongs *in the column header* because that is where the ambiguity is:
+/// under `--pinned` each column answers a different question, and a reader
+/// comparing two cells side by side is otherwise comparing two hub versions
+/// without being told. A spoke that pinned nothing is labelled rather than left
+/// blank, for the same reason it is named rather than omitted in the text
+/// output — a missing label reads as "not applicable", not as "compared against
+/// HEAD" (#505).
+fn pin_label(m: &OverrideMatrix, spoke: &str) -> String {
+    if !m.pinned {
+        return String::new();
+    }
+    match m.pins.get(spoke) {
+        Some(p) => format!(
+            "<span class=\"pin\" title=\"{}\">@ {}</span>",
+            esc(p.via.as_deref().unwrap_or("pinned by this spoke")),
+            esc(short_rev(&p.rev)),
+        ),
+        None => "<span class=\"pin unpinned\">@ HEAD (no pin)</span>".to_owned(),
+    }
+}
+
+/// Abbreviate a 40-hex commit sha to 10 chars; leave short refs (tags) as-is.
+///
+/// Lives here rather than in `main` because both pin renderings need it — the
+/// infer report's per-spoke line and this module's matrix header — and a sha
+/// abbreviated to ten characters in one and forty in the other would read as two
+/// different revisions.
+#[must_use]
+pub fn short_rev(rev: &str) -> &str {
+    if rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()) {
+        &rev[..10]
+    } else {
+        rev
     }
 }
 
@@ -268,6 +362,36 @@ pub fn render_text(m: &OverrideMatrix) -> String {
         m.hub,
         m.spokes.len()
     );
+    // Under `--pinned` the columns are not comparable to each other unless the
+    // reader knows which hub version each was measured against — that is the
+    // whole reason per-spoke pinning is worth having on the *matrix*, where
+    // spokes sit side by side. Stated before the table, once.
+    if m.pinned {
+        let _ = writeln!(
+            out,
+            "  resolved per spoke against the hub version each pins \
+             ({} of {} pinned one):",
+            m.pins.len(),
+            m.spokes.len()
+        );
+        for spoke in &m.spokes {
+            match m.pins.get(spoke) {
+                Some(p) => {
+                    let via = p
+                        .via
+                        .as_deref()
+                        .map_or_else(String::new, |v| format!(" (via {v})"));
+                    let _ = writeln!(out, "    {spoke} @ {}{via}", short_rev(&p.rev));
+                }
+                // Named rather than omitted: a spoke silently missing from this
+                // list reads as "not in the matrix", not as "compared against
+                // HEAD" (#505).
+                None => {
+                    let _ = writeln!(out, "    {spoke} @ HEAD (no pin detected)");
+                }
+            }
+        }
+    }
     for row in &m.rows {
         let _ = writeln!(out, "\n  {} = {}", row.hub_key, row.hub_value);
         for spoke in &m.spokes {
@@ -299,10 +423,7 @@ pub fn render_text(m: &OverrideMatrix) -> String {
 #[must_use]
 pub fn render_html(m: &OverrideMatrix) -> String {
     use std::fmt::Write as _;
-    let mut thead = String::from("<th scope=\"col\">config key</th><th scope=\"col\">hub</th>");
-    for s in &m.spokes {
-        let _ = write!(thead, "<th scope=\"col\">{}</th>", esc(s));
-    }
+    let thead = html_head_row(m);
 
     let mut tbody = String::new();
     for row in &m.rows {
@@ -426,6 +547,10 @@ td.cell{white-space:nowrap}td.over{background:var(--over);color:var(--over-fg)}\
 td.same{background:var(--same);color:var(--same-fg)}td.none{color:var(--muted);text-align:center}\
 .conf{display:inline-block;margin-left:.4rem;font-size:.7rem;opacity:.7;\
 font-variant-numeric:tabular-nums}\
+.pin{display:block;margin-top:.15rem;font-size:.7rem;text-transform:none;\
+letter-spacing:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;\
+font-weight:400}\
+.pin.unpinned{opacity:.55;font-style:italic}\
 .legend{color:var(--muted);font-size:.85rem;margin:1rem 0}\
 .swatch{display:inline-block;width:.8rem;height:.8rem;border-radius:3px;\
 vertical-align:-1px;border:1px solid var(--line)}\
@@ -447,6 +572,115 @@ fn esc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same fixture as [`matrix`], but resolved per spoke against the hub
+    /// version each pins — two spokes on different revs, one pinning nothing.
+    fn pinned_matrix() -> OverrideMatrix {
+        let hub_values = BTreeMap::from([("serve.addr".to_owned(), "127.0.0.1:8017".to_owned())]);
+        let spoke = |name: &str, value: &str, pin: Option<SpokePin>| SpokeInput {
+            name: name.to_owned(),
+            matches: vec![MatchInput {
+                hub_key: "serve.addr".to_owned(),
+                file: "config.toml".to_owned(),
+                spoke_key: "SERVE_ADDR".to_owned(),
+                spoke_value: value.to_owned(),
+                confidence: 0.9,
+                provenance: Provenance::Inferred,
+            }],
+            orphans: vec![],
+            pin,
+        };
+        build(
+            "app",
+            &hub_values,
+            vec![
+                spoke(
+                    "deploy-a",
+                    "0.0.0.0:8443",
+                    Some(SpokePin {
+                        rev: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                        via: Some("submodule vendor/app".to_owned()),
+                    }),
+                ),
+                spoke(
+                    "deploy-b",
+                    "0.0.0.0:9000",
+                    Some(SpokePin {
+                        rev: "v2.1.0".to_owned(),
+                        via: None,
+                    }),
+                ),
+                spoke("deploy-c", "0.0.0.0:9100", None),
+            ],
+            true,
+        )
+    }
+
+    /// #504: the matrix is the side-by-side view, so under `--pinned` each column
+    /// answers a question about a *different* hub version. Reporting the columns
+    /// without reporting their revs would present three incomparable measurements
+    /// as one comparison.
+    #[test]
+    fn a_pinned_matrix_says_which_hub_version_each_spoke_was_measured_against() {
+        let m = pinned_matrix();
+        let text = render_text(&m);
+
+        assert!(text.contains("2 of 3 pinned one"), "{text}");
+        // A sha is abbreviated, a tag is not — the same rule the infer report uses,
+        // which is why `short_rev` is shared rather than copied.
+        assert!(
+            text.contains("deploy-a @ 0123456789 (via submodule vendor/app)"),
+            "{text}"
+        );
+        assert!(text.contains("deploy-b @ v2.1.0"), "{text}");
+        // Named, not omitted: absence would read as "not in the matrix" (#505).
+        assert!(text.contains("deploy-c @ HEAD (no pin detected)"), "{text}");
+    }
+
+    /// The HTML puts it in the column header, because that is where a reader
+    /// compares two cells and would otherwise be comparing two hub versions.
+    #[test]
+    fn the_html_column_headers_carry_each_spokes_pin() {
+        let html = render_html(&pinned_matrix());
+        assert!(html.contains("@ 0123456789"), "{html}");
+        assert!(
+            html.contains("submodule vendor/app"),
+            "sha's origin is the title attr"
+        );
+        assert!(html.contains("@ v2.1.0"), "{html}");
+        assert!(
+            html.contains("pin unpinned"),
+            "the unpinned spoke is marked, not blank"
+        );
+    }
+
+    /// An inert `--pinned` must not render byte-identically to a plain run: "we
+    /// asked and none of them pinned anything" is a different claim from "we did
+    /// not ask" (#505), and it is the claim that tells a user their workspace has
+    /// no detectable pins rather than that the flag did nothing.
+    #[test]
+    fn a_pinned_run_that_found_no_pins_still_says_it_asked() {
+        let hub_values = BTreeMap::from([("serve.addr".to_owned(), "127.0.0.1:8017".to_owned())]);
+        let unpinned = || SpokeInput {
+            name: "deploy".to_owned(),
+            matches: vec![MatchInput {
+                hub_key: "serve.addr".to_owned(),
+                file: "config.toml".to_owned(),
+                spoke_key: "SERVE_ADDR".to_owned(),
+                spoke_value: "0.0.0.0:8443".to_owned(),
+                confidence: 0.9,
+                provenance: Provenance::Inferred,
+            }],
+            orphans: vec![],
+            pin: None,
+        };
+        let asked = render_text(&build("app", &hub_values, vec![unpinned()], true));
+        let not_asked = render_text(&build("app", &hub_values, vec![unpinned()], false));
+
+        assert_ne!(asked, not_asked, "an inert --pinned must not be invisible");
+        assert!(asked.contains("0 of 1 pinned one"), "{asked}");
+        assert!(!not_asked.contains("pinned"), "{not_asked}");
+    }
 
     fn matrix() -> OverrideMatrix {
         let hub_values = BTreeMap::from([
@@ -474,8 +708,9 @@ mod tests {
                 },
             ],
             orphans: vec![("MAX_CONNECTIONS".to_owned(), "512".to_owned())],
+            pin: None,
         }];
-        build("app", &hub_values, spokes)
+        build("app", &hub_values, spokes, false)
     }
 
     #[test]
@@ -525,7 +760,9 @@ mod tests {
                     name: "deploy".to_owned(),
                     matches,
                     orphans: vec![],
+                    pin: None,
                 }],
+                false,
             );
             let cell = &m.rows[0].cells["deploy"];
             assert!(
@@ -568,7 +805,9 @@ mod tests {
                     },
                 ],
                 orphans: vec![],
+                pin: None,
             }],
+            false,
         );
         let addr = m.rows.iter().find(|r| r.hub_key == "serve.addr").unwrap();
         assert_eq!(addr.cells["deploy"].provenance, Provenance::Authored);
@@ -620,7 +859,9 @@ mod tests {
                     },
                 ],
                 orphans: vec![],
+                pin: None,
             }],
+            false,
         );
         let app = m.rows.iter().find(|r| r.hub_key == "serve.addr").unwrap();
         assert_eq!(app.file, "config.toml");
@@ -671,9 +912,10 @@ mod tests {
                     name: format!("spoke{i}"),
                     matches: vec![mat],
                     orphans: vec![],
+                    pin: None,
                 })
                 .collect();
-            let built = build("app", &hub_values, spokes);
+            let built = build("app", &hub_values, spokes, false);
             let row = built
                 .rows
                 .iter()
@@ -695,13 +937,16 @@ mod tests {
                     name: "a".to_owned(),
                     matches: vec![m("Cargo.toml", "A")],
                     orphans: vec![],
+                    pin: None,
                 },
                 SpokeInput {
                     name: "b".to_owned(),
                     matches: vec![m("Cargo.toml", "B")],
                     orphans: vec![],
+                    pin: None,
                 },
             ],
+            false,
         );
         assert_eq!(consistent.rows[0].file, "Cargo.toml");
     }
@@ -722,7 +967,7 @@ mod tests {
     #[test]
     fn render_html_escapes_injected_markup() {
         let hub_values = BTreeMap::from([("k".to_owned(), "<v>".to_owned())]);
-        let m = build("app", &hub_values, vec![]);
+        let m = build("app", &hub_values, vec![], false);
         let html = render_html(&m);
         assert!(!html.contains("<v>"), "hub value must be escaped");
     }
@@ -756,13 +1001,16 @@ mod tests {
                         ("dq.mode".to_owned(), "strict".to_owned()),
                         ("component".to_owned(), "ingest".to_owned()),
                     ],
+                    pin: None,
                 },
                 SpokeInput {
                     name: "deploy-b".to_owned(),
                     matches: vec![],
                     orphans: vec![("dq.mode".to_owned(), "lax".to_owned())],
+                    pin: None,
                 },
             ],
+            false,
         );
         // `dq.mode` is set by two deploys → ONE row, not two.
         assert_eq!(
@@ -822,7 +1070,9 @@ mod tests {
                     name: "deploy".to_owned(),
                     matches: vec![],
                     orphans,
+                    pin: None,
                 }],
+                false,
             );
             assert_eq!(m.drift.len(), 1);
             assert_eq!(m.drift[0].cells.len(), 1, "one deploy → one cell");
@@ -856,7 +1106,9 @@ mod tests {
                     name: "deploy".to_owned(),
                     matches: vec![],
                     orphans,
+                    pin: None,
                 }],
+                false,
             );
             assert_eq!(m.drift.len(), 1);
             let cell = &m.drift[0].cells["deploy"];
@@ -881,7 +1133,9 @@ mod tests {
                     ("dq.mode".to_owned(), "strict".to_owned()),
                     ("dq.mode".to_owned(), "strict".to_owned()),
                 ],
+                pin: None,
             }],
+            false,
         );
         let cell = &m.drift[0].cells["deploy"];
         assert!(!cell.conflict);

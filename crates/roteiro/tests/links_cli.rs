@@ -308,9 +308,16 @@ fn pinned_uses_pins_config_template_for_image_tags() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-#[test]
-fn pinned_auto_resolves_each_spoke_against_the_version_it_vendors() {
-    let base = std::env::temp_dir().join(format!("roteiro-pinned-cli-{}", std::process::id()));
+/// A two-repo workspace where the spoke **vendors the hub as a submodule pinned
+/// to the hub's v1 commit**, while the hub itself has moved on and renamed the
+/// key. Returns the workspace root and that v1 sha.
+///
+/// Shared by the two `--pinned` tests rather than built twice: they assert the
+/// same per-spoke resolution on two different views (`--infer` and `--matrix`),
+/// and a fixture that drifted between them would let one view pass against a
+/// workspace the other never saw.
+fn vendored_hub_workspace(tag: &str) -> (std::path::PathBuf, String) {
+    let base = std::env::temp_dir().join(format!("roteiro-{tag}-cli-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     let app = base.join("app");
     let deploy = base.join("deploy");
@@ -350,6 +357,12 @@ fn pinned_auto_resolves_each_spoke_against_the_version_it_vendors() {
     git(&deploy, &["commit", "-q", "-m", "deploy pinned to app@v1"]);
     assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
 
+    (base, v1)
+}
+
+#[test]
+fn pinned_auto_resolves_each_spoke_against_the_version_it_vendors() {
+    let (base, v1) = vendored_hub_workspace("pinned");
     let base_s = base.to_str().unwrap();
     let out = roteiro(
         &base,
@@ -389,6 +402,95 @@ fn pinned_auto_resolves_each_spoke_against_the_version_it_vendors() {
     assert!(
         matched.contains(&"serve.tools"),
         "resolves at the pinned version: {v}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// #504: the same per-spoke resolution, on the **matrix** — the view where it
+/// matters most, because the matrix is the side-by-side comparison and spokes
+/// deploying different hub versions are exactly the case one shared rev
+/// misreports. `--matrix --pinned` was refused by clap until this issue.
+#[test]
+fn matrix_accepts_pinned_and_resolves_each_spoke_against_its_own_version() {
+    let (base, v1) = vendored_hub_workspace("matrixpinned");
+    let base_s = base.to_str().unwrap();
+
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--matrix",
+            "--pinned",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "`--matrix --pinned` must be accepted: {out:?}"
+    );
+    let m: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+
+    assert_eq!(m["pinned"], true, "the matrix records that it asked: {m}");
+    assert_eq!(
+        m["pins"]["deploy"]["rev"], v1,
+        "and which version this spoke was measured against: {m}"
+    );
+
+    // The row is the key that exists at v1, not the one the hub renamed it to —
+    // so the pin reached the *comparison*, not only the report about it.
+    let keys: Vec<&str> = m["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["hub_key"].as_str().unwrap())
+        .collect();
+    assert!(
+        keys.contains(&"serve.tools"),
+        "the matrix compared against the pinned version, not HEAD: {m}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// The two combinations that must **still** be refused, now that clap no longer
+/// carries `requires = "infer"` for `--pinned`.
+#[test]
+fn pinned_is_still_refused_where_it_cannot_mean_anything() {
+    let (base, _) = vendored_hub_workspace("pinnedrefuse");
+    let base_s = base.to_str().unwrap();
+
+    // One version for every spoke and each spoke's own version are opposite
+    // requests; asking for both is asking to measure drift against two things.
+    let both = roteiro(
+        &base,
+        &[
+            "links",
+            "--matrix",
+            "--pinned",
+            "--hub-rev",
+            "HEAD",
+            "--workspace",
+            base_s,
+        ],
+    );
+    assert!(
+        !both.status.success(),
+        "--pinned with --hub-rev must refuse"
+    );
+
+    // And the plain authored-link report resolves no hub version at all. This is
+    // the refusal `requires = "infer"` used to give for free, so it is asserted
+    // now that it is hand-written.
+    let plain = roteiro(&base, &["links", "--pinned", "--workspace", base_s]);
+    assert!(!plain.status.success(), "bare --pinned must refuse");
+    assert!(
+        String::from_utf8_lossy(&plain.stderr).contains("--infer"),
+        "and must name where it does apply: {plain:?}"
     );
 
     std::fs::remove_dir_all(&base).ok();

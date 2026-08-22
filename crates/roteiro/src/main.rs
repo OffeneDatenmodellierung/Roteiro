@@ -662,14 +662,19 @@ enum Command {
         /// (ADR-0009 step 8). Applies to `--infer` and `--matrix`.
         #[arg(long, value_name = "REV")]
         hub_rev: Option<String>,
-        /// With `--infer`: resolve **each spoke against the hub version it itself
-        /// pins** — read from the spoke's `submodule` / `image_ref` node — instead
-        /// of one version for all (ADR-0009 step 8b). Spokes with no detectable pin
-        /// fall back to the hub's `HEAD`, and **the report says so** — per spoke,
-        /// and in a summary line counting how many pinned anything. Falling back
-        /// silently would make an inert `--pinned` byte-identical to plain
-        /// `--infer`, which is the answer to a different question (#505).
-        #[arg(long, requires = "infer", conflicts_with_all = ["matrix", "hub_rev"])]
+        /// With `--infer` or `--matrix`: resolve **each spoke against the hub
+        /// version it itself pins** — read from the spoke's `submodule` /
+        /// `image_ref` node — instead of one version for all (ADR-0009 step 8b).
+        /// Spokes with no detectable pin fall back to the hub's `HEAD`, and **the
+        /// report says so** — per spoke, and in a summary line counting how many
+        /// pinned anything. Falling back silently would make an inert `--pinned`
+        /// byte-identical to a plain run, which is the answer to a different
+        /// question (#505).
+        ///
+        /// Still mutually exclusive with `--hub-rev`, which is the opposite
+        /// request: one version for every spoke. Asking for both is asking to
+        /// measure drift against two different things at once.
+        #[arg(long, conflicts_with = "hub_rev")]
         pinned: bool,
         /// With `--infer`: persist the inferred correspondences into each spoke's
         /// graph as durable cross-repo edges (an `inferred` import layer that
@@ -1993,6 +1998,20 @@ fn main() -> anyhow::Result<()> {
             } else if infer {
                 run_links_infer(&cfg.effective, &scope, opts, write, json)
             } else {
+                // Same rule as `--app-config-only` below, for the same reason:
+                // `--pinned` resolves each spoke against the hub version it pins,
+                // and the plain authored-links report does not resolve against a
+                // hub version at all. It used to be `requires = "infer"` in clap;
+                // that had to go so `--matrix` could take it (#504), so the
+                // refusal is stated here instead of being lost with it.
+                if pinned {
+                    anyhow::bail!(
+                        "`--pinned` applies only to `roteiro links --infer` / `--matrix` \
+                         (it resolves each spoke against the hub version it pins, \
+                         ADR-0009 step 8b); the authored-link report resolves \
+                         `[[links]]` against each repo's current graph"
+                    );
+                }
                 // `--app-config-only` only filters config-key matching, which the
                 // plain authored-links report doesn't do. Reject it here rather than
                 // silently ignoring it, so the flag never looks like it took effect.
@@ -8231,6 +8250,15 @@ fn run_links_matrix(
                 .collect();
             overview::SpokeInput {
                 name: rep.repo.clone(),
+                // The hub version this spoke was actually compared against
+                // (ADR-0009 step 8b). `resolve_infer_report` already did the
+                // per-spoke resolution for `--infer`; the matrix shares that
+                // scan, so this is carrying a fact it computed rather than
+                // recomputing one.
+                pin: rep.hub_rev.clone().map(|rev| overview::SpokePin {
+                    rev,
+                    via: rep.pin_via.clone(),
+                }),
                 matches: rep
                     .matches
                     .iter()
@@ -8262,11 +8290,17 @@ fn run_links_matrix(
     // When resolving a pinned version, label the hub with its rev so every output
     // (text header, HTML title, JSON `hub`) says which version drift was measured
     // against.
+    //
+    // `ready.hub_rev` is the *global* rev — `--hub-rev`, one version for every
+    // spoke. Under `--pinned` there is deliberately no such value, because each
+    // spoke was measured against its own; that is carried per spoke instead, and
+    // labelling the hub with any single rev there would state a comparison the
+    // matrix did not make.
     let hub_label = match &ready.hub_rev {
         Some(rev) => format!("{} @ {rev}", ready.hub_name),
         None => ready.hub_name.clone(),
     };
-    let matrix = overview::build(&hub_label, &hub_values, spokes);
+    let matrix = overview::build(&hub_label, &hub_values, spokes, opts.pin.auto);
 
     if json {
         emit_json(&matrix)?;
@@ -8321,15 +8355,6 @@ fn persist_inferred_links(
 }
 
 /// Human-readable rendering of the inferred cross-repo config report.
-/// Abbreviate a 40-hex commit sha to 10 chars; leave short refs (tags) as-is.
-fn short_rev(rev: &str) -> &str {
-    if rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()) {
-        &rev[..10]
-    } else {
-        rev
-    }
-}
-
 /// `pinned` is whether `--pinned` asked for per-spoke pin resolution, and it is a
 /// parameter rather than something inferred from the rows because **the rows a
 /// no-op produces are indistinguishable from the rows the flag was never passed
@@ -8346,8 +8371,8 @@ fn print_infer_report(report: &[InferredRepo], hub_name: &str, hub_keys: usize, 
         // Under `--pinned`, say which hub version this spoke resolved against —
         // including when the answer is "none of its own, so the hub's HEAD".
         let pin = match (&r.hub_rev, &r.pin_via) {
-            (Some(rev), Some(via)) => format!("  @ {} (via {via})", short_rev(rev)),
-            (Some(rev), None) => format!("  @ {}", short_rev(rev)),
+            (Some(rev), Some(via)) => format!("  @ {} (via {via})", overview::short_rev(rev)),
+            (Some(rev), None) => format!("  @ {}", overview::short_rev(rev)),
             (None, _) if pinned => "  @ HEAD (no pin detected)".to_owned(),
             _ => String::new(),
         };
