@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v2.0.2...rto-serve-v2.1.0) - 2026-08-22
+
+### Fixed
+
+- *(serve)* decline a `required` this renderer cannot read, and sort arguments
+
+### Other
+
+- Merge pull request #594 from OffeneDatenmodellierung/feat/mcp-surface-bundle
+- *(serve)* advertise tools as signatures, not raw JSON Schema
+
 ## [2.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v2.0.1...rto-serve-v2.0.2) - 2026-08-21
 
 ### Fixed

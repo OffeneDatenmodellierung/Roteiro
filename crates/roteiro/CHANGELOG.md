@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.0.2...roteiro-v2.1.0) - 2026-08-22
+
+### Added
+
+- *(mcp)* let the operator restrict the advertised tool surface (--tools)
+
+### Fixed
+
+- *(workspace,config)* say where a scan stopped, and which file is read
+
+### Other
+
+- Merge pull request #594 from OffeneDatenmodellierung/feat/mcp-surface-bundle
+- *(site)* document `[mcp] tools`, the scan depth, and what --tools bounds
+
 ## [2.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.0.1...roteiro-v2.0.2) - 2026-08-21
 
 ### Fixed
