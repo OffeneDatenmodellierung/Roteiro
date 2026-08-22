@@ -1197,7 +1197,7 @@ fn write_rendered_under(c: &mut String, ws: &WorkspaceSummary) {
         let _ = writeln!(
             c,
             "| {} | {} | {} |",
-            m.project,
+            inline_untrusted(&m.project),
             list(&m.settings.ingest),
             list(&m.settings.debt_ignore)
         );
@@ -1356,6 +1356,11 @@ fn inline_code(s: &str) -> String {
 ///    document handed to someone can point anywhere, and a stray backtick or
 ///    pipe silently reshapes the line it lands in. `<` and `>` are absent from
 ///    that set because step 2 already turned them into entities.
+/// 4. **Defuse bare URLs.** Escaping `[` stops explicit `[text](url)` syntax and
+///    nothing else: Obsidian and GFM *linkify* a plain `https://…`, so analyzer
+///    text could still hand the reader a clickable link to anywhere. Replacing
+///    the scheme's colon with `&#58;` renders identically and matches no
+///    linkifier — the reader still sees the URL and can copy it deliberately.
 ///
 /// Safe in both contexts, so a caller never has to know which one it is in.
 fn inline_untrusted(s: &str) -> String {
@@ -1376,7 +1381,19 @@ fn inline_untrusted(s: &str) -> String {
             _ => out.push(ch),
         }
     }
-    out
+    defuse_autolinks(&out)
+}
+
+/// Stop a bare URL in untrusted text from being turned into a clickable link.
+///
+/// Escaping `[` covers explicit link syntax; it does nothing about linkification,
+/// which is on by default in Obsidian and GFM. `https&#58;//evil.example` renders
+/// as `https://evil.example` and matches no autolinker, so the URL stays
+/// readable and copyable while ceasing to be a thing the reader can click by
+/// accident in a document someone handed them.
+fn defuse_autolinks(s: &str) -> String {
+    s.replace("https://", "https&#58;//")
+        .replace("http://", "http&#58;//")
 }
 
 /// [`inline_code`] for a value that lands in a **table cell**.
@@ -1492,27 +1509,36 @@ fn write_manifest(c: &mut String, ws: &WorkspaceSummary) {
     // every forge or for a private repository. Naming the column "Clone from"
     // promised something this cannot deliver, and the manifest's whole value is
     // that its promises hold.
-    c.push_str(
-        "*Each repository below is the web root derived from that member's \
-         `origin` remote. It is where the code lives, not a guaranteed clone \
-         URL — a private repository or a forge with a different clone path still \
-         needs whatever access you would normally use.*\n\n",
-    );
 
     let any_origin = ws.members.iter().any(|m| m.repo_url.is_some());
     if any_origin {
+        // Stated here rather than above the `if`: it says "each repository
+        // below", and above the branch it would be followed immediately by
+        // "no member has an `origin` remote".
+        c.push_str(
+            "*Each repository below is the web root derived from that member's \
+             `origin` remote — where the code lives, not a guaranteed clone URL. \
+             A private repository, or a forge with a different clone path, still \
+             needs whatever access you would normally use.*\n\n",
+        );
         c.push_str("| Member | Repository | At commit |\n| --- | --- | --- |\n");
         for m in &ws.members {
             let _ = writeln!(
                 c,
                 "| {} | {} | {} |",
-                m.project,
+                // The name is prose, not a span — `inline_untrusted` already
+                // backslash-escapes `|`, so it is table-safe without becoming
+                // monospaced. The two values below *are* spans, and go through
+                // `table_cell`: a remote URL and a sha come from git, not from
+                // us, and this table sits thirty lines above the one that
+                // already knew that.
+                inline_untrusted(&m.project),
                 m.repo_url
                     .as_deref()
-                    .map_or_else(|| "*(no `origin` remote)*".to_owned(), |u| format!("`{u}`")),
+                    .map_or_else(|| "*(no `origin` remote)*".to_owned(), table_cell),
                 m.commit
                     .as_deref()
-                    .map_or_else(|| "*(unknown)*".to_owned(), |sha| format!("`{sha}`")),
+                    .map_or_else(|| "*(unknown)*".to_owned(), table_cell),
             );
         }
     } else {
@@ -2598,6 +2624,64 @@ after",
             delimiters, 4,
             "the row keeps exactly its own four cell delimiters: {row}"
         );
+    }
+
+    /// The manifest is a table too. `table_cell` was written for the settings
+    /// table and not applied to this one, thirty lines above it — a remote URL
+    /// and a project name both come from git rather than from us.
+    #[test]
+    fn a_remote_url_cannot_reshape_the_manifest_row() {
+        let mut api = member_summary("api", 1);
+        api.repo_url = Some("https://host/a|b/c".to_owned());
+        api.commit = Some("dead`beef".to_owned());
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        let section = c
+            .split("## Reproducing this vault")
+            .nth(1)
+            .unwrap_or_else(|| panic!("the manifest: {c}"));
+        let row = section
+            .lines()
+            .find(|l| l.starts_with("| api |"))
+            .unwrap_or_else(|| panic!("a manifest row: {section}"));
+        let delimiters = row
+            .char_indices()
+            .filter(|&(i, ch)| ch == '|' && !row[..i].ends_with('\\'))
+            .count();
+        assert_eq!(
+            delimiters, 4,
+            "the row keeps exactly its own four cell delimiters: {row}"
+        );
+        assert!(
+            row.contains("``dead`beef``"),
+            "and a backtick in a sha widens its span: {row}"
+        );
+    }
+
+    /// Escaping `[` stops explicit link syntax and nothing else. Obsidian and
+    /// GFM linkify a bare URL, so analyzer text could still hand the reader
+    /// something clickable in a document they were given.
+    #[test]
+    fn a_bare_url_in_analyzer_text_is_not_left_clickable() {
+        let mut api = member_summary("api", 1);
+        api.coverage = Coverage::Ran(vec![("osv-scanner".into(), "1.9.0".into())]);
+        api.findings = vec![FindingEntry {
+            rule: "R-1".to_owned(),
+            severity: "high".to_owned(),
+            title: "see https://evil.example/path for details".to_owned(),
+            message: "m".to_owned(),
+            path: None,
+            analyzer: "osv-scanner".to_owned(),
+        }];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        assert!(
+            !c.contains("https://evil.example"),
+            "a bare URL must not survive in linkifiable form: {c}"
+        );
+        // Rendered identically for a reader, and still copyable — defusing it
+        // must not amount to hiding it.
+        assert!(c.contains("https&#58;//evil.example/path"), "{c}");
     }
 
     /// The two empty states are opposite facts and must never render alike.
