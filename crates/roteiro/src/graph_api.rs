@@ -956,8 +956,15 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
         } else {
             spoke_correspondence(ws, name, hub.as_deref(), &hub_keys)?
         };
-        if refs.is_empty() && live_orphans.is_empty() {
-            continue; // Only projects that reference (or infer against) the hub are spokes.
+        // A project with nothing to say about the hub is not part of this view.
+        // The hub itself is the exception, and a load-bearing one: in the ordinary
+        // hub-and-spoke case it has no *outgoing* refs at all, so this test would
+        // drop it — taking the whole diagram with it, because the explorer only
+        // draws an edge when both endpoints are hosted nodes and every edge here
+        // ends at the hub.
+        let is_hub = Some(name) == hub.as_ref();
+        if !is_hub && refs.is_empty() && live_orphans.is_empty() {
+            continue;
         }
         let key_count = ws.with_store(Some(name), |s| s.config_keys().map(|c| c.len()))??;
         // A spoke key that matches no hub key is drift, as are the resolving-to-nothing
@@ -990,7 +997,7 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
             // Named rather than left for the client to infer by comparing against
             // `hub`: the hub is now one entry among others, and a consumer that
             // has to re-derive which one it is will eventually derive it wrongly.
-            "role": if Some(name) == hub.as_ref() { "hub" } else { "spoke" },
+            "role": if is_hub { "hub" } else { "spoke" },
             "keyCount": key_count,
             "driftCount": drift_count,
         }));
@@ -3370,6 +3377,37 @@ mod tests {
         ));
     }
 
+    /// The hub appears even when it has **no outgoing refs** — the ordinary
+    /// hub-and-spoke case, and the one that matters most.
+    ///
+    /// Making the hub an ordinary participant put it behind the same
+    /// "nothing to say about the hub" filter as everyone else, where it has
+    /// nothing to say by definition. Dropping it takes the whole diagram with
+    /// it: the explorer only draws an edge when both endpoints are hosted nodes,
+    /// and in a star every edge ends at the hub.
+    #[tokio::test]
+    async fn the_hub_is_present_even_with_no_outgoing_refs() {
+        let (status, json) = get(single_set(linked_workspace()), None, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["hub"], HUB);
+
+        let projects = json["projects"].as_array().expect("projects");
+        let hub_entry = projects
+            .iter()
+            .find(|p| p["role"] == "hub")
+            .expect("the hub must appear even with nothing pointing out of it");
+        assert_eq!(hub_entry["name"], HUB);
+        assert!(
+            hub_entry["keyCount"].as_u64().unwrap_or(0) > 0,
+            "and carries its own counts: {json}"
+        );
+
+        // Both endpoints of the star's edge are present, so the explorer can draw
+        // it — the guard that made this worth testing rather than asserting.
+        let names: Vec<&str> = projects.iter().filter_map(|p| p["name"].as_str()).collect();
+        assert!(names.contains(&HUB) && names.contains(&SPOKE), "{json}");
+    }
+
     /// #572: a chain's **last hop** is drawable, because the hub is an ordinary
     /// node now rather than a place the collecting loop skips.
     ///
@@ -3395,7 +3433,11 @@ mod tests {
                         external_ref_key(target),
                         EdgeKind::References,
                     );
-                    e.src_ref = Some(LINKS_REF.to_owned());
+                    // `LINKS_AUTHORED_REF`, matching what `roteiro links --write`
+                    // actually writes for an authored link — a fixture that pairs
+                    // `Edge::authored` with the *inferred* layer's ref would be a
+                    // state the product never produces.
+                    e.src_ref = Some(rto_graph::LINKS_AUTHORED_REF.to_owned());
                     e
                 });
             }
