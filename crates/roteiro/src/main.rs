@@ -8139,9 +8139,17 @@ fn resolve_infer_report(
         // key keeps whichever value happened to be last and computes `differs`
         // against the wrong file's. The spoke side of this very function already
         // keys its values `(file, key)` for the same reason.
+        //
+        // Gated on `value_known`: a struct-derived key has **no literal value in
+        // code**, and `ConfigKey::value` is then an empty *placeholder* that
+        // "carries no meaning" by its own documentation. Recording it as a
+        // baseline would compare a spoke's genuine value against `""` and report
+        // an override of something that does not exist — the same false match
+        // `value_known` exists to stop `--infer` making.
         let hub_baseline = pinned_to_own_rev.then(|| {
             hub_keys
                 .iter()
+                .filter(|k| k.value_known)
                 .map(|k| ((k.file.clone(), k.key.clone()), k.value.clone()))
                 .collect()
         });
@@ -8265,9 +8273,19 @@ fn run_links_matrix(
     let ready = match scan_workspace_infer(cfg, scope, opts)? {
         InferScan::Nothing(reason) => {
             if json {
-                emit_json(
-                    &serde_json::json!({ "hub": null, "rows": [], "drift": [], "note": reason }),
-                )?;
+                // Built from the type, not hand-written. This is the CLI twin of
+                // the served endpoint's no-hub branch, and it had the identical
+                // defect: a literal is a second definition of the response, so it
+                // silently omitted `pinned`/`pins` and a caller could not tell an
+                // asked-for pin resolution from an ordinary no-op. `note` is the
+                // one field this envelope adds, so it is merged onto the
+                // serialised matrix rather than the matrix being retyped around it.
+                let mut envelope = serde_json::to_value(overview::OverrideMatrix {
+                    pinned: opts.pin.auto,
+                    ..Default::default()
+                })?;
+                envelope["note"] = reason.clone().into();
+                emit_json(&envelope)?;
             } else {
                 eprintln!("nothing to show — {reason}");
             }
