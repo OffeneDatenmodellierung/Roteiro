@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v2.3.0...rto-spec-v3.0.0) - 2026-08-22
+
+### Added
+
+- *(spec)* [**breaking**] check that an `#[allow(…)]` carries a justification
+
+### Other
+
+- Merge pull request #622 from OffeneDatenmodellierung/feat/438-justify-your-allow
+
 ## [2.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v2.1.1...rto-spec-v2.2.0) - 2026-08-22
 
 ### Added

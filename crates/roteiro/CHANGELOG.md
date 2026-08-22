@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.3.0...roteiro-v3.0.0) - 2026-08-22
+
+### Added
+
+- *(render)* the workspace vault carries findings, settings and a manifest
+- *(api)* the topology view is a directed graph, not a star
+
+### Fixed
+
+- *(test)* read the `id` attribute, and drop the import the rewrite orphaned
+- *(spec)* make the walk marker-driven, and stop the doc claiming more than the code
+- *(spec)* [**breaking**] a heading's id is one rule, honoured by the graph and the renderer
+- *(render)* quote every analyzer field, and stop the manifest overpromising
+- *(api)* keep the hub in the topology when it has no outgoing refs
+
+### Other
+
+- Merge pull request #622 from OffeneDatenmodellierung/feat/438-justify-your-allow
+- *(api)* record why a link target is safe under the projects filter
+
 ## [2.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.2.0...roteiro-v2.3.0) - 2026-08-22
 
 ### Added
