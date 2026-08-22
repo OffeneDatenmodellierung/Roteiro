@@ -84,7 +84,10 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - `cargo fmt --all --check` — clean.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — clean
   (pedantic). Prefer fixing over `#[allow(...)]`; when an allow is right, justify
-  it in a comment.
+  it in a comment — **`roteiro check` enforces this** (`unjustified-allow`), so
+  an unjustified allow fails the gate rather than waiting for a reviewer to
+  notice. A comment above the attribute counts, and so does one above the
+  attributes that sit between it and the item.
 - `cargo test --workspace --all-features` — green. **`--all-features` includes
   `exec-boxlite`.** That builds without a pre-step now: `boxlite` fetches the
   runtime archive over TLS and `rto-exec`'s build script verifies **every

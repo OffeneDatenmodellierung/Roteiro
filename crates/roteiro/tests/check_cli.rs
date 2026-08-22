@@ -1,3 +1,7 @@
+// roteiro:ignore-file — the fixtures below embed `#[allow(…)]` as test data to
+// drive the `unjustified-allow` rule. Without this the rule reports its own
+// fixture, which is the file enumerating the vocabulary rather than using it —
+// the same reason `rto_graph::markers` carries the directive.
 //! End-to-end test for the worktree-aware `roteiro check` (Stage 16): the
 //! default validates the working tree so it can gate a commit before it is made,
 //! while `--committed` validates only `HEAD`. Drives the real binary.
@@ -275,6 +279,70 @@ fn check_fails_when_two_adr_files_share_an_adr_id() {
         "distinct ids pass: {}",
         String::from_utf8_lossy(&fixed.stderr)
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #438: `roteiro check` reports an `#[allow(…)]` that carries no justification —
+/// the house rule `AGENTS.md` states and nothing enforced.
+///
+/// Driven through the **binary**, not the scanner. `rto_spec::convention`'s own
+/// tests prove the rule; this proves the wiring, and the wiring is where this
+/// repository keeps finding gaps: a rule that classifies correctly and is never
+/// folded into the report is a rule that fires in a unit test and nowhere else.
+#[test]
+fn check_reports_an_allow_that_carries_no_justification() {
+    let dir = fresh_dir("unjustified-allow");
+    git(&dir, &["init", "-q"]);
+    // Two allows in one file: one justified, one bare. A fixture with only the
+    // bare one would pass just as loudly against a rule that flags *every*
+    // allow, which is the noisy rule #438 warns against building.
+    write(
+        &dir,
+        "src/lib.rs",
+        "// the prefix is intentional here\n\
+         #[allow(clippy::struct_field_names)]\n\
+         pub struct Justified {\n    pub a_x: u8,\n}\n\
+         \n\
+         #[allow(clippy::cast_precision_loss)]\n\
+         pub fn bare(n: u64) -> f64 {\n    n as f64\n}\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = roteiro(&dir, &["check", "--json"]);
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("check --json is valid JSON");
+    let kinds: Vec<&str> = report["violations"]
+        .as_array()
+        .expect("violations")
+        .iter()
+        .filter_map(|v| v["kind"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["unjustified-allow"],
+        "exactly the bare allow, and nothing else: {report}"
+    );
+
+    let message = report["violations"][0]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("src/lib.rs:7:"),
+        "the finding names the line a reader must open: {message}"
+    );
+    // It reports the finding and never the fix — #438's second warning, from
+    // #339, where a reviewer was right about the defect and wrong about the
+    // repair. A gate that proposes an edit invites the edit to be applied
+    // unread.
+    assert!(
+        !message.contains("remove") && !message.contains("add a comment"),
+        "the message states what is wrong, not what to type: {message}"
+    );
+
+    // A gate: a convention breach exits non-zero, exactly as authored-layer
+    // drift does. Reporting it and passing would make it advisory, and #473 is
+    // the standing evidence that an advisory check is one nobody acts on.
+    assert!(!out.status.success(), "check must fail on it: {out:?}");
 
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -4042,6 +4042,8 @@ fn apply_authored_layer(
     let docs = rto_spec::authored_docs_from(blobs, read)?;
     let mut report = rto_spec::run_layer(store, &docs)?;
     report.violations.extend(docs.layer.malformed);
+    // House-style conventions, from the same read of the same blobs (#438).
+    report.violations.extend(docs.layer.conventions);
     Ok(report)
 }
 

@@ -113,6 +113,9 @@ pub use links::{
     EXTERNAL_REF_KIND, LINKS_AUTHORED_REF, LINKS_REF, external_ref_key, external_ref_node,
     external_ref_node_with, external_ref_target,
 };
+/// The whole-file scan opt-out (`roteiro:ignore-file`), so every scanner that
+/// reads sources honours one directive rather than each defining its own.
+pub use markers::is_scan_exempt;
 pub use media::{
     CandidateCount, GateReason, GateThresholds, GeneratedContent, MAX_MODEL_ID, MAX_PROMPT,
     MEDIA_PRODUCER_PREFIX, MEDIA_SCHEMA, MediaBlob, MediaBuildOptions, MediaBuildReport,

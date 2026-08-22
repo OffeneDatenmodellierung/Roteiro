@@ -43,6 +43,17 @@ pub enum ViolationKind {
     MalformedSitePage,
     /// Two or more documents declare the same `site-page` slug.
     DuplicateSiteSlug,
+    /// A `#[allow(…)]` with no justification comment — the house rule `AGENTS.md`
+    /// states and nothing checked (issue #438, corpus row `3789168273`).
+    ///
+    /// Its **own** variant rather than a message under an existing one. The ADR
+    /// version family took the other road deliberately — five checks behind
+    /// `AdrVersionDrift`, told apart by their messages — because they are five
+    /// readings of one artifact's self-consistency. This is not one of those: it
+    /// is a different artifact (Rust source), a different question (a written
+    /// convention), and a consumer filtering for it should branch on the kind
+    /// rather than match prose.
+    UnjustifiedAllow,
 }
 
 impl ViolationKind {
@@ -58,6 +69,7 @@ impl ViolationKind {
             Self::AdrVersionDrift => "adr-version-drift",
             Self::MalformedSitePage => "malformed-site-page",
             Self::DuplicateSiteSlug => "duplicate-site-slug",
+            Self::UnjustifiedAllow => "unjustified-allow",
         }
     }
 }

@@ -196,6 +196,10 @@ pub fn tool_check(store: &Store, root: Option<&Path>) -> Result<ToolCheck, rto_g
     let mut validation = validate(store, &layer.docs, &layer.blueprints, &layer.annotations)?;
     // A malformed ADR is drift, exactly as it is for the CLI gate.
     validation.report.violations.extend(layer.malformed);
+    // …and the house-style conventions, so the tool surface and the CLI gate
+    // report the same drift. A model told a different number than `roteiro check`
+    // prints has no way to tell which one is the repository's actual state.
+    validation.report.violations.extend(layer.conventions);
 
     let gate = if validation.report.has_violations() {
         Gate::Fail
