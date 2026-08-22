@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.3.0...roteiro-v2.4.0) - 2026-08-22
+
+### Added
+
+- *(api)* the topology view is a directed graph, not a star
+
+### Fixed
+
+- *(api)* keep the hub in the topology when it has no outgoing refs
+
+### Other
+
+- *(api)* record why a link target is safe under the projects filter
+
 ## [2.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.2.0...roteiro-v2.3.0) - 2026-08-22
 
 ### Added
