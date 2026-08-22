@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.2.0...roteiro-v2.3.0) - 2026-08-22
+
+### Added
+
+- *(links)* persist authored [[links]], making the `authored → gold` path reachable
+- *(links)* document the pinned matrix, and say when no comparison was possible
+- *(links)* let --matrix resolve each spoke against its own hub pin
+
+### Fixed
+
+- *(render)* count declared links before the cap, and unbreak default-features clippy
+- *(links)* refuse the hub flags too, count pruned edges, and test the vault
+- *(links)* the no-op envelope keeps the contract, and an unknown value is no baseline
+- *(links)* scope the pinned baseline to its file, and stop two shapes drifting
+- *(links)* measure each pinned cell against the revision its spoke deploys
+
 ## [2.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.1.1...roteiro-v2.2.0) - 2026-08-22
 
 ### Fixed

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.2.0...rto-render-v2.3.0) - 2026-08-22
+
+### Added
+
+- *(links)* persist authored [[links]], making the `authored → gold` path reachable
+
+### Fixed
+
+- *(render)* saturate the inferred count, and stop showing literal asterisks
+- *(render)* count declared links before the cap, and unbreak default-features clippy
+- *(links)* refuse the hub flags too, count pruned edges, and test the vault
+
 ## [2.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.1.1...rto-render-v2.2.0) - 2026-08-22
 
 ### Fixed
