@@ -49,5 +49,6 @@ pub use server::{
 #[cfg(feature = "tls")]
 pub use server::{serve_blocking_router_tls, serve_blocking_tls};
 pub use tools::{
-    ClientToolCall, ToolDef, ToolLoopOutcome, ToolRegistry, chat_with_client_tools, chat_with_tools,
+    ClientToolCall, ToolDef, ToolLoopOutcome, ToolRegistry, advertised_system_prompt,
+    chat_with_client_tools, chat_with_tools,
 };

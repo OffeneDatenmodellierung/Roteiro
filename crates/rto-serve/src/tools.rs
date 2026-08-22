@@ -49,7 +49,7 @@
 //! (the issue as filed), a `<tool_call>` the model never closed, and a call in
 //! the generation *after* the round budget ran out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -711,6 +711,23 @@ fn truncate(s: &str) -> String {
     format!("{}… (truncated)", &s[..end])
 }
 
+/// The exact system turn `tools` would be advertised with — the bytes a model
+/// spends its prefill on, and the only place the advertised surface is rendered.
+///
+/// Public so the **other** side can measure and pin its own surface: the graph
+/// tool registry lives in the `roteiro` binary, and issue #590 found that nothing
+/// pinned this format at all, so the mass of what is sent on every turn was
+/// discoverable only by hand. Measured on this repository's own graph tools, that
+/// mass is 78% tool descriptions and 21% argument schemas — which is what decides
+/// where shrinking is worth doing.
+///
+/// At the 3.13 ms/token prefill measured in issue #578 the length of this string
+/// is seconds per turn, on every turn, with no cache.
+#[must_use]
+pub fn advertised_system_prompt(tools: &[&ToolDef]) -> String {
+    tool_system_prompt(tools)
+}
+
 /// Render the system prompt that advertises `tools` and the `<tool_call>`
 /// protocol. Kept model-agnostic: any instruction-following model can comply.
 fn tool_system_prompt(tools: &[&ToolDef]) -> String {
@@ -728,15 +745,278 @@ fn tool_system_prompt(tools: &[&ToolDef]) -> String {
          making one up. If no tool is needed, just answer directly. Available \
          tools:\n",
     );
-    for t in tools {
-        let params = serde_json::to_string(&t.parameters).unwrap_or_else(|_| "{}".to_owned());
-        let _ = writeln!(
-            out,
-            "- {}: {} arguments schema: {params}",
-            t.name, t.description
+    let advertised: Vec<Advertisement> = tools.iter().map(|t| advertise(t)).collect();
+    // Argument descriptions repeated verbatim across tools, stated once. On the
+    // graph surface that is the `project` selector, carried identically by
+    // thirteen tools; on a client surface it is whatever that client repeats.
+    // The rule is mechanical rather than a special case for a known argument.
+    let shared = shared_notes(&advertised);
+    if advertised.iter().any(|a| a.call.is_some()) {
+        out.push_str(
+            "Each entry is `name(arguments) — what it does`. `?` marks an optional \
+             argument, `a|b|c` the permitted values, `1..25` an inclusive range.\n",
         );
     }
+    if !shared.is_empty() {
+        out.push_str("Arguments shared by several tools:\n");
+        for (arg, note) in &shared {
+            let _ = writeln!(out, "  {arg}: {note}");
+        }
+    }
+    for (t, ad) in tools.iter().zip(&advertised) {
+        // A schema this renderer cannot state without losing something —
+        // nesting, a `$ref`, a combinator — goes out verbatim, exactly as every
+        // schema used to. A client's arguments are the client's contract and
+        // Roteiro does not get to summarise them lossily.
+        let Some(call) = &ad.call else {
+            let params = serde_json::to_string(&t.parameters).unwrap_or_else(|_| "{}".to_owned());
+            let _ = writeln!(
+                out,
+                "- {}: {} arguments schema: {params}",
+                t.name, t.description
+            );
+            continue;
+        };
+        let _ = writeln!(out, "- {call} — {}", t.description);
+        for (arg, note) in &ad.notes {
+            if shared.iter().any(|(a, n)| a == arg && n == note) {
+                continue;
+            }
+            let _ = writeln!(out, "  {arg}: {note}");
+        }
+    }
     out
+}
+
+/// One tool as [`tool_system_prompt`] states it.
+struct Advertisement {
+    /// The call form — `search(query: str, limit?: int 1..25)` — or `None` when
+    /// the schema is not one [`advertise`] can state without losing something.
+    call: Option<String>,
+    /// `(argument, description)` pairs the schema carried, in schema order.
+    notes: Vec<(String, String)>,
+}
+
+/// Render one tool's arguments as a signature instead of as raw JSON Schema.
+///
+/// # Why this is a rendering change and nothing more
+///
+/// The wire value is untouched: [`crate::types`] measures a client's `tools`
+/// array — name, description and compact-JSON `parameters` — *before* anything
+/// here runs, so `MAX_CLIENT_TOOL_BYTES` is exactly where it was and this makes
+/// it more conservative rather than less, producing fewer prompt tokens from the
+/// same 32 KiB budget (issue #590).
+///
+/// # Why it declines rather than approximates
+///
+/// A nested object, a `$ref`, a `oneOf`, an unrecognised keyword — anything this
+/// cannot state — yields `None`, and the caller emits the schema verbatim. A
+/// client's argument shape is the contract Roteiro hands back for the client to
+/// execute; summarising it lossily would leave the model calling a tool whose
+/// arguments no longer match what will run, which is the failure
+/// `MAX_CLIENT_TOOL_BYTES` refuses to truncate for.
+fn advertise(t: &ToolDef) -> Advertisement {
+    let none = || Advertisement {
+        call: None,
+        notes: Vec::new(),
+    };
+    let Some(schema) = t.parameters.as_object() else {
+        return none();
+    };
+    // The flat-object shape, plus the two keywords a real generated schema
+    // carries that say nothing about how to *call* the tool. `$schema` names the
+    // dialect; `additionalProperties: false` is what an exhaustive signature
+    // already states, and any other value of it means extra arguments are legal,
+    // which a signature would not convey — so that one falls back.
+    for (key, value) in schema {
+        match key.as_str() {
+            "type" | "properties" | "required" | "$schema" => {}
+            "additionalProperties" if value == &serde_json::Value::Bool(false) => {}
+            _ => return none(),
+        }
+    }
+    if schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        return none();
+    }
+    // Absent is not malformed: schemars renders a struct whose fields are all
+    // `Option<T>` with no `required` key at all, which legitimately means "no
+    // required arguments" and is what Roteiro's own MCP schemas do. Any *other*
+    // shape — a bare string, a number, an array holding a non-string — is a
+    // `required` this renderer does not understand, so it declines like every
+    // other keyword it cannot state. Reading it as empty instead would advertise
+    // each required argument as optional, and a model that then omits one gets a
+    // call that fails at dispatch: the lossy summary the doc above rules out,
+    // pointing the one direction that breaks the call.
+    let required: Vec<&str> = match schema.get("required") {
+        None => Vec::new(),
+        Some(r) => {
+            let Some(names) = r
+                .as_array()
+                .and_then(|a| a.iter().map(serde_json::Value::as_str).collect())
+            else {
+                return none();
+            };
+            names
+        }
+    };
+    let mut args = Vec::new();
+    let mut notes = Vec::new();
+    if let Some(props) = schema.get("properties") {
+        let Some(props) = props.as_object() else {
+            return none();
+        };
+        // `serde_json::Map` is a `BTreeMap` here, so this already iterated in
+        // sorted order — but only because nothing in the tree enables
+        // `serde_json/preserve_order`. That is feature resolution, not a
+        // decision: any dependency turning it on would silently switch this to
+        // insertion order and change every advertised signature, with no diff to
+        // show for it. Holding the advertised surface still is what this renderer
+        // is for — issue #578 measured 3.13 ms per prompt token — so sort here
+        // and mean it.
+        let mut props: Vec<_> = props.iter().collect();
+        props.sort_by_key(|(name, _)| *name);
+        for (name, spec) in props {
+            let Some(spec) = spec.as_object() else {
+                return none();
+            };
+            let Some(rendered) = argument_type(spec) else {
+                return none();
+            };
+            // Optional two ways: absent from `required`, or nullable — schemars
+            // renders an `Option<T>` field as `"type": ["T", "null"]` and lists
+            // no `required` at all, which is what Roteiro's own MCP schemas do.
+            let optional = if required.contains(&name.as_str()) {
+                ""
+            } else {
+                "?"
+            };
+            args.push(format!("{name}{optional}: {rendered}"));
+            if let Some(note) = spec.get("description").and_then(serde_json::Value::as_str) {
+                notes.push((name.clone(), note.to_owned()));
+            }
+        }
+    }
+    Advertisement {
+        call: Some(format!("{}({})", t.name, args.join(", "))),
+        notes,
+    }
+}
+
+/// One property's type as a signature fragment, or `None` if it carries anything
+/// this cannot state — which makes the whole tool fall back to raw schema.
+///
+/// Nothing is dropped silently. A `format` says little on an integer whose range
+/// is already given, but it is rendered anyway rather than judged: deciding which
+/// keywords are "noise" is how a lossy renderer starts.
+fn argument_type(spec: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for key in spec.keys() {
+        if !matches!(
+            key.as_str(),
+            "type"
+                | "enum"
+                | "items"
+                | "minimum"
+                | "maximum"
+                | "description"
+                | "format"
+                | "default"
+        ) {
+            return None;
+        }
+    }
+    if let Some(values) = spec.get("enum") {
+        let values = values.as_array()?;
+        let names: Option<Vec<&str>> = values.iter().map(serde_json::Value::as_str).collect();
+        return Some(with_default(names?.join("|"), spec));
+    }
+    let name = match base_type(spec.get("type")?)? {
+        "string" => "str".to_owned(),
+        "integer" => "int".to_owned(),
+        "number" => "num".to_owned(),
+        "boolean" => "bool".to_owned(),
+        "array" => {
+            let items = spec.get("items")?.as_object()?;
+            format!("[{}]", argument_type(items)?)
+        }
+        _ => return None,
+    };
+    let name = match spec.get("format") {
+        None => name,
+        Some(format) => format!("{name}({})", format.as_str()?),
+    };
+    // A bound is allow-listed above *because* this renderer claims to state it,
+    // so one it cannot state — the fractional `minimum` JSON Schema permits on a
+    // `number` — declines the tool rather than falling through as if the keyword
+    // were absent, which would drop the bound from the signature silently and
+    // leave the model free to send a value the tool will reject.
+    for key in ["minimum", "maximum"] {
+        if spec.get(key).is_some_and(|v| v.as_i64().is_none()) {
+            return None;
+        }
+    }
+    // The advertised bound, which every ranking tool here carries and also states
+    // in its description. Rendering it in the signature is what makes the prose
+    // restatement redundant rather than the only place it appears.
+    let name = match (
+        spec.get("minimum").and_then(serde_json::Value::as_i64),
+        spec.get("maximum").and_then(serde_json::Value::as_i64),
+    ) {
+        (Some(lo), Some(hi)) => format!("{name} {lo}..{hi}"),
+        (Some(lo), None) => format!("{name} >={lo}"),
+        (None, Some(hi)) => format!("{name} <={hi}"),
+        (None, None) => name,
+    };
+    Some(with_default(name, spec))
+}
+
+/// A property's `type`, reading the nullable-union form an `Option<T>` field
+/// generates (`["string", "null"]`) as plain `T` — the field is already marked
+/// optional by its absence from `required`, so `| null` would be a second
+/// spelling of the `?` in the signature.
+fn base_type(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(t) => Some(t.as_str()),
+        serde_json::Value::Array(types) => {
+            let mut named = types
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|t| *t != "null");
+            let only = named.next()?;
+            named.next().is_none().then_some(only)
+        }
+        _ => None,
+    }
+}
+
+/// Append ` = <value>` for a declared default. A `null` default is how a
+/// generated schema spells "unset", which the `?` already says.
+fn with_default(rendered: String, spec: &serde_json::Map<String, serde_json::Value>) -> String {
+    match spec.get("default") {
+        None | Some(serde_json::Value::Null) => rendered,
+        Some(value) => format!("{rendered} = {value}"),
+    }
+}
+
+/// The `(argument, description)` pairs at least two tools carry **verbatim**,
+/// sorted, so the prompt can state each once above the list instead of once per
+/// tool.
+fn shared_notes(advertised: &[Advertisement]) -> Vec<(String, String)> {
+    let mut counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for ad in advertised {
+        if ad.call.is_none() {
+            continue;
+        }
+        for (arg, note) in &ad.notes {
+            *counts.entry((arg.as_str(), note.as_str())).or_default() += 1;
+        }
+    }
+    let mut shared: Vec<(String, String)> = counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|((arg, note), _)| (arg.to_owned(), note.to_owned()))
+        .collect();
+    shared.sort();
+    shared
 }
 
 /// What the tool-call markup in a generation turned out to be — the reading
@@ -1070,7 +1350,196 @@ mod tests {
         }];
         let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
         assert!(prompt.contains("<tool_call>"));
-        assert!(prompt.contains("search: find nodes"));
+        assert!(prompt.contains("search() — find nodes"));
+    }
+
+    /// The advertised surface is rendered as signatures rather than as raw JSON
+    /// Schema, and this pins the format — which issue #590 found nothing did, so
+    /// the mass a model prefills on every turn was discoverable only by hand.
+    ///
+    /// Everything the schema declares about *calling* the tool has to survive:
+    /// which arguments exist, which are required, their types, their permitted
+    /// values and their bounds.
+    #[test]
+    fn a_tool_is_advertised_as_a_signature_that_keeps_what_the_schema_declared() {
+        let tools = [ToolDef {
+            name: "search".to_owned(),
+            description: "find nodes".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
+                    "order": { "type": "string", "enum": ["rank", "recent"] },
+                    "kinds": { "type": "array", "items": { "type": "string" } },
+                },
+                "required": ["query"],
+            }),
+        }];
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        // Sorted, not in the order the schema declared them: `advertise` sorts
+        // the properties explicitly so the advertised surface cannot shift under
+        // a `serde_json/preserve_order` a dependency turns on. This assertion is
+        // what holds that — the declaration order here is deliberately different.
+        assert!(
+            prompt.contains(
+                "- search(kinds?: [str], limit?: int 1..25, order?: rank|recent, query: str) \
+                 — find nodes"
+            ),
+            "{prompt}",
+        );
+        // The bound is now IN the prompt rather than only in a schema a model may
+        // not validate against, which is the reason `model_limit` gives for each
+        // tool restating it in prose.
+        assert!(prompt.contains("1..25"), "{prompt}");
+        // And the raw form is gone, or the rendering saved nothing.
+        assert!(!prompt.contains("arguments schema:"), "{prompt}");
+    }
+
+    /// A generated schema — `$schema`, a nullable union type, a `default`, a
+    /// `format` — is the shape a **real client** sends, and is what the rendering
+    /// is worth most on. Measured on Roteiro's own MCP surface driven back in as
+    /// a client payload: 21,180 → 17,454 prompt bytes.
+    ///
+    /// `Option<T>` becomes `"type": ["T", "null"]` with no `required` entry, so a
+    /// renderer that only understood a bare string type would fall back on every
+    /// tool and save nothing at all.
+    #[test]
+    fn a_generated_schema_renders_rather_than_falling_back() {
+        let tools = [ToolDef {
+            name: "debt".to_owned(),
+            description: "list markers".to_owned(),
+            parameters: serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "default": null,
+                        "format": "uint32",
+                        "maximum": 200,
+                        "minimum": 1,
+                        "type": ["integer", "null"],
+                    },
+                    "project": { "default": null, "type": ["string", "null"] },
+                },
+            }),
+        }];
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        assert!(
+            prompt.contains("- debt(limit?: int(uint32) 1..200, project?: str) — list markers"),
+            "{prompt}",
+        );
+    }
+
+    /// **The renderer declines rather than approximating.** A client's argument
+    /// shape is the contract Roteiro hands back for the client to execute, so a
+    /// schema this cannot state — a nested object here — goes out verbatim.
+    ///
+    /// Summarising it lossily would leave the model calling a tool whose
+    /// arguments no longer match what will run, which is the same failure
+    /// `MAX_CLIENT_TOOL_BYTES` refuses to truncate for.
+    #[test]
+    fn a_schema_the_renderer_cannot_state_is_sent_verbatim() {
+        for parameters in [
+            // A nested object: the signature form has no way to say its shape.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "filter": { "type": "object", "properties": {} } },
+            }),
+            // A combinator, likewise.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "id": { "oneOf": [{ "type": "string" }] } },
+            }),
+            // `additionalProperties: true` means arguments beyond the ones named
+            // are legal, which an exhaustive-looking signature would deny.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "a": { "type": "string" } },
+                "additionalProperties": true,
+            }),
+            // `required` as a bare string, and as an array holding a non-string.
+            // Neither is a `required` this understands, and the failure of
+            // reading them as "nothing is required" points the one direction
+            // that breaks the call: `name` would advertise as `name?: str`, the
+            // model would omit it, and dispatch would reject the call. Absent
+            // stays legitimate — the generated-schema test above renders a
+            // schema carrying no `required` key at all.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": "name",
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name", 1],
+            }),
+            // A fractional bound is legal JSON Schema on a `number` and the
+            // signature has no form for `>=0.5`; rendering a bare `num` would
+            // drop a bound the model is meant to respect.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "ratio": { "type": "number", "minimum": 0.5 } },
+            }),
+            // Likewise a `format` that is not a string.
+            serde_json::json!({
+                "type": "object",
+                "properties": { "when": { "type": "string", "format": 7 } },
+            }),
+        ] {
+            let tools = [ToolDef {
+                name: "t".to_owned(),
+                description: "d".to_owned(),
+                parameters: parameters.clone(),
+            }];
+            let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+            assert!(
+                prompt.contains("arguments schema:"),
+                "must fall back for {parameters}: {prompt}",
+            );
+        }
+    }
+
+    /// An argument description repeated verbatim across tools is stated once.
+    ///
+    /// On Roteiro's own graph surface that is the `project` selector, carried
+    /// identically by thirteen of fourteen tools — 1,690 wire bytes of one
+    /// sentence. The rule is mechanical rather than a special case for a known
+    /// argument, so a client that repeats its own gets the same treatment.
+    #[test]
+    fn an_argument_description_several_tools_repeat_is_stated_once() {
+        let with_project = |name: &str, own: &str| ToolDef {
+            name: name.to_owned(),
+            description: "d".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "which hosted project" },
+                    "only_here": { "type": "string", "description": own },
+                },
+            }),
+        };
+        let tools = [
+            with_project("a", "peculiar to a"),
+            with_project("b", "peculiar to b"),
+        ];
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        assert_eq!(
+            prompt.matches("which hosted project").count(),
+            1,
+            "the repeated note belongs above the list, once: {prompt}",
+        );
+        assert!(
+            prompt.contains("Arguments shared by several tools:"),
+            "{prompt}"
+        );
+        // A note only one tool carries stays with that tool.
+        assert_eq!(prompt.matches("peculiar to a").count(), 1, "{prompt}");
+        assert_eq!(prompt.matches("peculiar to b").count(), 1, "{prompt}");
+        // And every tool still advertises the argument in its own signature, so
+        // hoisting the prose does not hide that the argument exists.
+        assert_eq!(prompt.matches("project?: str").count(), 2, "{prompt}");
     }
 
     #[test]
@@ -1444,7 +1913,7 @@ mod tests {
             .expect("outcome");
         assert!(out.client_tool_calls.is_empty());
         assert!(
-            engine.first_system_prompt().contains("echo: echo the key"),
+            engine.first_system_prompt().contains("echo("),
             "the graph tools are still advertised"
         );
     }

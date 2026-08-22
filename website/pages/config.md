@@ -53,9 +53,12 @@ tools  = true                            <span class="c"># expose graph tools to
 tls_cert = "/etc/roteiro/tls/fullchain.pem"  <span class="c"># in-process HTTPS (with tls_key); omit both for plain HTTP</span>
 tls_key  = "/etc/roteiro/tls/privkey.pem"    <span class="c"># PEM private key paired with tls_cert</span>
 
+[mcp]                                    <span class="c"># the MCP graph server (roteiro mcp, serve --mcp)</span>
+tools = ["search", "explain", "context"] <span class="c"># restrict the advertised surface; "read-only" drops the one mutating tool</span>
+
 [workspace]                              <span class="c"># host many repos from one server (ADR-0008)</span>
-roots = ["~/code"]                       <span class="c"># scan for repos (each becomes a project)</span>
-repos = []                               <span class="c"># …or list explicit repo paths</span>
+roots = ["~/code"]                       <span class="c"># scanned ONE LEVEL deep — each immediate child that is a repo</span>
+repos = []                               <span class="c"># …or list explicit repo paths (any depth)</span>
 
 &#91;&#91;workspaces&#93;&#93;                          <span class="c"># several named workspaces (a hub + its spokes)</span>
 name  = "payments"                      <span class="c"># select with --workspace-name, or by cwd</span>
@@ -74,6 +77,20 @@ app = "release-{tag}"                    <span class="c"># image app:1.4 → git
 <div class="note"><strong>Interlink a hub app with its deployment repos.</strong> The
 <code>&#91;&#91;links&#93;&#93;</code> and <code>[pins]</code> tables belong to Roteiro's cross-repo
 layer — see <a href="cross-repo.html">Cross-repo: a hub and its spokes</a>.</div>
+
+<div class="note"><strong><code>[mcp] tools</code> narrows and never widens.</strong> Naming a
+tool declines every tool not named, so the layers <strong>intersect</strong>: <code>--tools</code>,
+a project <code>roteiro.toml</code> and your <code>~/.roteiro/config.toml</code> each may narrow the
+surface and none may widen it — a committed project file cannot restore a tool you removed. An
+unknown name, or a restriction leaving nothing to serve, refuses to start rather than quietly
+advertising everything. See <a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0007-configuration-file.md">ADR-0007</a> v1.5.</div>
+
+<div class="note"><strong><code>roots</code> is scanned one level deep.</strong> Each
+<em>immediate</em> child of a root that holds a <code>.git</code> becomes a project, plus the root
+itself if it is one — never recursively. A repo at <code>~/code/&lt;org&gt;/&lt;repo&gt;</code> is
+<em>not</em> found: name each <code>&lt;org&gt;</code> directory as its own root, or list the repos
+explicitly. <code>roteiro serve</code> and <code>roteiro mcp</code> print what each root offered
+beside the project count, so a near-empty workspace says why.</div>
 
 <div class="note"><strong>Many workspaces, one install.</strong> A lone <code>[workspace]</code> is the default workspace; add <code>&#91;&#91;workspaces&#93;&#93;</code> for several named hub-and-spoke groups and <code>[standalone]</code> for repos that stand alone. <code>roteiro links</code>, <code>roteiro serve</code>, <code>roteiro mcp</code> and the <a href="modes.html#explorer">explorer</a> pick one with <code>--workspace-name</code> (or the workspace containing your current directory).</div>
 

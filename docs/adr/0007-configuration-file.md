@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.4"
-last-modified: 2026-08-19
+version: "1.5"
+last-modified: 2026-08-21
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.4 |
+| **Document version** | 1.5 |
 
 ## Reference
 
@@ -64,8 +64,47 @@ Everything else is a **value**, and values follow the ordinary order above. Most
 | `[ingest] prose`/`pdf` | value | no model and no repository-supplied code: parsing, which is what the rest of extraction already does |
 | `[paths] model_store`, `[telemetry] file` | value | test 3 as sharpened above. These change **where** Roteiro writes, not **whether** — it writes to `~/.roteiro` by default regardless |
 | `[models]`, `[debt]`, `[serve]`, `[infer]`, `[duplicates]`, `[workspace]`, `[[links]]`, `[pins]`, `[telemetry] rotation`/`format`, `[media] silence_rms`/`image_variance` | value | settings, not permissions |
+| `[mcp] tools` | value — but see below | test 1. The default already advertises every tool, so a project file setting it causes nothing that would not otherwise happen. It is nonetheless the **first key whose every setting is a denial**, and its layers therefore intersect rather than override (v1.5) |
 
 Two of those rows are worth reading as method rather than as answers. `[ingest]` was expected to be a capability and is not, because its default already grants — which is what produced the default rule above, and is a reminder that a key's *class* cannot be read off its subject matter. `[media] gate` is the reverse: an unremarkable-looking boolean that turns out to be the only key here whose **`false` is the dangerous value**.
+
+### A third case the classification did not have a name for (v1.5)
+
+`[mcp] tools` restricts what an MCP server advertises. It is a **value** by this
+ADR's own default rule — the built-in surface is every tool, so naming a subset
+in a committed `roteiro.toml` grants nothing that was not already granted, and
+the capability test fails at its first clause. But applying the ordinary
+precedence to it would have been wrong, and the reason is worth recording
+because the abstract rule did not reach it.
+
+Every setting of the key is a **denial**. Naming a tool does not ask for that
+tool; it declines every tool not named. So "the nearer layer wins" lets a nearer
+layer *un-deny*: a committed project file could restore `sandbox_clear` after
+the machine's owner removed it in `~/.roteiro/config.toml`. That is exactly the
+outcome v1.2's inversion exists to prevent, reached from the other direction —
+not by a project file granting a capability, but by a project file cancelling a
+denial.
+
+The rule is therefore: **a key whose every setting is a denial layers by
+intersection.** Every layer may narrow, none may widen, the invocation included.
+The flag narrows rather than winning because a flag has nothing else to express
+here — there is no grant available to it, exactly as this ADR says of a value
+key that "there is no deny for `[models] generative`, only a different value" —
+and because under issue #579 Roteiro may write its own `roteiro mcp …` line into
+a third-party agent's config, so the invocation is not reliably a person at a
+prompt while the user layer is unambiguously that person's standing intent.
+
+Intersection is a lattice meet: order-independent, idempotent and monotone
+downwards, so "may deny, may not grant" holds by construction rather than by a
+rule each call site remembers — which is what the section below requires. An
+empty intersection is a **startup error**, never an unrestricted server: a
+restriction that quietly restricts nothing is the defect the key was added for
+(issue #584, and omnigent#5178 on the client side of the same wire).
+
+The key sits in its own `[mcp]` table rather than in `[serve]` because
+`[serve] tools` is taken and means something else — a boolean deciding whether
+the served-chat model is offered the graph tools at all. Two keys called `tools`
+in one table, over two different surfaces, would be worse than a second table.
 
 ### The mechanism is structural, not remembered
 
@@ -181,3 +220,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.2 | 2026-08-17 | Amended by [[docs/adr/0019-remote-model-tier.md]]. One key — the remote-model-tier enable — inverts the precedence: the committed project file may **deny but never grant** egress, and granting needs the user layer plus the invocation. Recorded here as well as in 0019 because a reader of this ADR would otherwise apply the general rule and be wrong. No other key is affected. Also corrects the header table, which read 1.0 while the frontmatter read 1.1. |
 | 1.3 | 2026-08-17 | Amended (Stage 33). **`[models]` grows from two keys to five**: `vision`, `audio` and `ocr` join `embedding` and `generative`, one key per model *kind* rather than per command (`generative` governs both `spec draft` and Ask). Until now those three models were compiled-in constants, so a project could **not pin its ASR model at all** — the setting did not exist. Two rules are recorded here because a reader would otherwise apply the general ones and be wrong: (a) a key whose *value* is wrong — unknown model, wrong modality — is a **named error quoting the key**, not the *warning* that a missing-feature key gets, and never a silent fall-back to the default; (b) `roteiro config` reports such a key instead of refusing, being the command an operator runs when a pin is misbehaving. `roteiro config` also gains a **per-surface resolution table** (model, rule, layer, installed), on the same reasoning as the per-pattern `[debt] ignore` provenance added in v1.1. Precedence is unchanged; unset resolves to exactly the models each surface used before. |
 | 1.4 | 2026-08-19 | Amended on the owner's ruling that v1.2's inversion should be the standard rather than an exception, and that every key be classified under it. The project file may **deny but never grant** any **capability key** — one that turns on something whose cost or risk falls on whoever runs the command — with a four-part test (sends content off the machine; executes repository-supplied code; writes outside the repository; spends materially more of the machine) so a new key can be classified by whoever adds it rather than by whoever remembers the exception list. Records that most keys are **values**, for which the inversion is not merely unneeded but inexpressible. Classifying the whole surface produced two additions the abstract rule had missed: a fifth clause for a key that **removes a guard** (a grant wearing a denial's grammar — `[media] gate = false`, the only key here whose dangerous value is `false`), and the rule that **a capability key's built-in default is denied**, without which a key that already defaults to granted looks like a capability while being unable to grant anything. That rule reclassified `[ingest] ocr`/`vision`/`audio` from capability to value: their real gate is the non-default **build feature**, not the config key. Test 3 sharpened to writes *that would not otherwise occur*, since Roteiro writes to `~/.roteiro` regardless and `[paths]`/`[telemetry]` change where rather than whether. Also requires the mechanism be **structural** — carried by the key's type rather than by a bespoke `overlaid_with` per capability — because a second hand-written inversion is how a rule decays into a convention. |
+| 1.5 | 2026-08-21 | Amended (issue #584). Adds `[mcp] tools`, the advertised MCP tool surface, and with it a case v1.4's classification had no name for: a key that is a **value** by the default rule — its default already advertises everything, so a project file grants nothing new — and whose **every setting is nonetheless a denial**. Ordinary precedence would let a nearer layer *un-deny*, restoring a tool the machine's owner removed, which is v1.2's failure reached from the other direction. Such a key therefore **layers by intersection**: every layer may narrow the surface and none may widen it, the invocation included, and the flag narrows rather than winning because it has no grant to express and is not reliably written by a person (issue #579). Intersection is a lattice meet, so the property holds by construction rather than by a remembered rule, satisfying v1.4's requirement that the mechanism be structural. An empty intersection is a startup error and never an unrestricted server. `roteiro config` labels the key `project ∩ user` rather than naming a winning layer, on the same reasoning as v1.1's per-pattern `[debt] ignore` provenance. |

@@ -159,6 +159,6 @@ pub use sync::{
 pub use text::{first_h1, heading_text, markdown_dialect, slugify};
 pub use trust::ProducerTrust;
 pub use workspace::{
-    Follow, ResolvedWorkspace, Workspace, WorkspaceError, WorkspaceSet, discover_repos_under,
-    parse_qualified,
+    Follow, ResolvedWorkspace, RootScan, Workspace, WorkspaceError, WorkspaceSet,
+    discover_repos_under, parse_qualified, scan_root,
 };

@@ -31,6 +31,9 @@ pub struct Loaded {
     pub user_path: Option<PathBuf>,
     /// Path the project config was read from, if present.
     pub project_path: Option<PathBuf>,
+    /// A config file sitting where no layer reads it. `None` in the ordinary
+    /// case; see [`NearMiss`].
+    pub near_miss: Option<NearMiss>,
 }
 
 impl Loaded {
@@ -150,6 +153,10 @@ pub struct Config {
     pub media: MediaConfig,
     /// `roteiro serve --models` local endpoint settings.
     pub serve: ServeConfig,
+    /// `[mcp]` — the MCP graph server's advertised tool surface (issue #584).
+    /// **The one table here whose list layers by intersection**; see
+    /// [`ToolAllowList`].
+    pub mcp: McpConfig,
     /// `roteiro debt` tuning (paths excluded from the intent-debt scan).
     pub debt: DebtConfig,
     /// `[remote]` — the optional, default-off remote model tier (ADR-0019).
@@ -1045,6 +1052,111 @@ pub struct ServeConfig {
     pub tls_key: Option<String>,
 }
 
+/// `[mcp]` — what the MCP graph server advertises (`roteiro mcp`,
+/// `roteiro serve --mcp`).
+///
+/// Separate from `[serve]` because `[serve] tools` is already taken and means
+/// something else: a boolean deciding whether the *served-chat* model is given
+/// the graph tools at all. Two keys called `tools` in one table, one a boolean
+/// over a different surface, would be a worse outcome than a second table.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct McpConfig {
+    /// The tools this layer is willing for the MCP server to advertise. Unset ⇒
+    /// this layer restricts nothing. See [`ToolAllowList`] for the layering,
+    /// which is not this file's usual one.
+    pub tools: Option<ToolAllowList>,
+}
+
+/// `[mcp] tools` as **one layer** states it (issue #584).
+///
+/// # Its layers intersect, and that is the design rather than a detail
+///
+/// Every other list in this file either replaces — `[serve] models` is a
+/// selection, `roots`/`repos` are discovery — or unions, as `[debt] ignore`
+/// does. This one does neither, because of what an entry *means*: naming a tool
+/// does not ask for that tool, it declines every tool not named. A layer's
+/// effect is therefore always a **denial**, and the ordinary "nearer layer wins"
+/// would let a nearer layer *un-deny* — a committed `roteiro.toml` restoring
+/// `sandbox_clear` after the machine's owner removed it in
+/// `~/.roteiro/config.toml`. That is the failure ADR-0007 v1.4's inversion
+/// exists to prevent, reached from the other direction.
+///
+/// So the effective surface is the intersection of the built-in set with every
+/// layer that names one, **the invocation's `--tools` included**. Intersection
+/// is a lattice meet: order-independent, idempotent, and monotone downwards, so
+/// "a layer may deny and may not grant" holds by construction rather than by a
+/// rule each new call site has to remember — which is what ADR-0007 v1.4 means
+/// by requiring the mechanism be structural.
+///
+/// # Why `--tools` narrows rather than wins
+///
+/// ADR-0007's headline order puts the flag first, and it still does for every
+/// key where a flag has a value to state. Here it has none: there is no grant
+/// for a flag to express, only a further denial, exactly as the ADR says of a
+/// value key that "there is no deny for `[models] generative`, only a different
+/// value". The reading that matters is who writes the flag. Under issue #579
+/// Roteiro may write its own `roteiro mcp …` line into a third-party agent's
+/// config, so the invocation is not reliably a person typing at a prompt, while
+/// `~/.roteiro/config.toml` is unambiguously the machine owner's standing
+/// intent. A flag that could widen would let a generated registration undo it.
+/// To widen, widen the config layer — the same answer `[lint]` gives.
+///
+/// # It is a value, not a capability, under ADR-0007 v1.4
+///
+/// By the ADR's own default rule rather than by assertion: the built-in default
+/// already advertises every tool, so setting this in a committed project file
+/// cannot cause anything that would not otherwise happen, and the capability
+/// test fails at its first clause. What a project file *can* do is fail to keep
+/// a denial the user layer made, which is why the layering is the type's job.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct ToolAllowList(Vec<String>);
+
+impl ToolAllowList {
+    /// The names this layer allows, in the order written.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.0
+    }
+
+    /// The tools **both** layers allow — the meet described on this type.
+    #[must_use]
+    fn narrowed_by(&self, over: &Self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|name| over.0.iter().any(|o| o == *name))
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+impl From<Vec<String>> for ToolAllowList {
+    fn from(names: Vec<String>) -> Self {
+        Self(names)
+    }
+}
+
+impl McpConfig {
+    /// Overlay the project layer (`over`) on the user layer (`self`).
+    ///
+    /// Its own function, like [`RemoteConfig::overlaid_with`], because the one
+    /// key in it does not follow this file's ordinary precedence and that is
+    /// worth seeing where it is applied.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            tools: match (self.tools.as_ref(), over.tools.as_ref()) {
+                // A layer that says nothing restricts nothing, so the other
+                // layer's denial stands rather than being widened by silence.
+                (None, other) | (other, None) => other.cloned(),
+                (Some(user), Some(project)) => Some(user.narrowed_by(project)),
+            },
+        }
+    }
+}
+
 /// `[infer]` — defaults for the similarity-inference command.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -1182,6 +1294,7 @@ impl Config {
                 silence_rms: over.media.silence_rms.or(self.media.silence_rms),
                 image_variance: over.media.image_variance.or(self.media.image_variance),
             },
+            mcp: self.mcp.overlaid_with(&over.mcp),
             serve: ServeConfig {
                 addr: over.serve.addr.clone().or(self.serve.addr.clone()),
                 models: over.serve.models.clone().or(self.serve.models.clone()),
@@ -1714,7 +1827,11 @@ fn dedupe_workspace_name(used: &mut std::collections::HashSet<String>, base: Str
 pub fn load(cwd: &Path) -> anyhow::Result<Loaded> {
     let user_path = user_config_path().filter(|p| p.is_file());
     let project_path = find_project_config(cwd);
-    load_from(user_path, project_path)
+    let mut loaded = load_from(user_path, project_path)?;
+    // Filled here rather than in `load_from`, which is deliberately env-free so
+    // layering tests need not touch global state (issue #581).
+    loaded.near_miss = user_layer_near_miss();
+    Ok(loaded)
 }
 
 /// Read and merge explicit user/project config paths — the env-free core of
@@ -1729,6 +1846,7 @@ fn load_from(user_path: Option<PathBuf>, project_path: Option<PathBuf>) -> anyho
         project,
         user_path,
         project_path,
+        near_miss: None,
     })
 }
 
@@ -1771,6 +1889,93 @@ pub(crate) fn default_log_path() -> Option<PathBuf> {
 /// (mirrors the model store's home resolution).
 fn user_config_path() -> Option<PathBuf> {
     Some(roteiro_home()?.join("config.toml"))
+}
+
+/// A `roteiro.toml` in `$ROTEIRO_HOME` (else `~/.roteiro`), which **no layer can
+/// ever load** — the user layer is `config.toml` and the project layer needs a
+/// git ancestor, which that directory has not got (issue #581).
+///
+/// # Why this is worth a check rather than a shrug
+///
+/// The two layers use two different filenames for what a person reasonably reads
+/// as "the Roteiro config file", and the project-layer name is the more guessable
+/// of the two — it is the tool's own name. Putting it in the tool's own home
+/// directory is a natural mistake, and the reported case had been silently inert
+/// for six days. This repository has ruled before that a silently-ignored config
+/// key is the worst available outcome (ADR-0007 v1.1's `ignore_reset`, issue
+/// #513); a silently-ignored config *file* is that with a larger blast radius.
+///
+/// # Why it warns rather than refusing, and rather than loading the file
+///
+/// **Not a hard error**, because ADR-0007 v1.3 makes `roteiro config` the one
+/// command a bad configuration must not stop — it is what an operator runs
+/// *because* something is not taking effect — and a stray file must not be the
+/// thing that stops it.
+///
+/// **Not a second accepted filename**, either. ADR-0007 chose one format and one
+/// location per layer on the reasoning that a second way to spell a thing is
+/// surface that invites drift; accepting `roteiro.toml` here would create a
+/// precedence question ("both files exist — which wins?") whose every answer is
+/// a new thing to document, in order to reward a guess. Naming the real path is
+/// a one-line fix for the user and no new surface at all.
+///
+/// # Why the mirror image is *not* checked
+///
+/// A `config.toml` at a repository root would be the same mistake in the other
+/// direction, and it is deliberately ignored: a repository root is not Roteiro's
+/// directory, and `config.toml` there very plausibly belongs to something else
+/// entirely. Warning about it would fire on repositories that never mentioned
+/// Roteiro. `$ROTEIRO_HOME` **is** Roteiro's directory, so a `roteiro.toml` in it
+/// was written for Roteiro and for nothing else — which is exactly what makes it
+/// safe to be sure about.
+fn user_layer_near_miss() -> Option<NearMiss> {
+    let home = roteiro_home()?;
+    let stray = home.join("roteiro.toml");
+    stray.is_file().then(|| NearMiss {
+        stray,
+        user_layer: home.join("config.toml"),
+    })
+}
+
+/// A config file found somewhere no layer will read it, and the path that would
+/// have been read instead. See [`user_layer_near_miss`].
+///
+/// Carries both paths rather than deriving the second on demand, so
+/// [`Loaded::near_miss_warning`] is a pure function of this value and can be
+/// tested without an environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearMiss {
+    /// The file that was not read.
+    pub stray: PathBuf,
+    /// The user-layer path that would have been.
+    pub user_layer: PathBuf,
+}
+
+impl Loaded {
+    /// The warning to print when a config file sits somewhere no layer reads.
+    ///
+    /// Names both paths, because "this file was not read" without "the one that
+    /// would be" leaves the reader exactly as stuck.
+    #[must_use]
+    pub fn near_miss_warning(&self) -> Option<String> {
+        let near = self.near_miss.as_ref()?;
+        // Not a near miss if it *is* the project layer this run loaded, which
+        // happens when Roteiro's home is itself a repository root the working
+        // directory sits under. Rare, and warning that a file was not read while
+        // reading it would be worse than saying nothing.
+        if self.project_path.as_deref() == Some(near.stray.as_path()) {
+            return None;
+        }
+        Some(format!(
+            "warning: {} was NOT read. Roteiro's USER layer is {}; a `roteiro.toml` \
+             is the PROJECT layer and is only read from the repository root above \
+             your working directory, which this file has none of. Move these \
+             settings into {} for them to take effect.",
+            near.stray.display(),
+            near.user_layer.display(),
+            near.user_layer.display(),
+        ))
+    }
 }
 
 /// Find the project `roteiro.toml` at the **repository root** — the nearest
@@ -1925,6 +2130,101 @@ mod tests {
         assert_eq!(find_project_config(&root), None);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `roteiro.toml` in Roteiro's own home is never read by either layer, and
+    /// the whole defect is that nothing said so (issue #581). The warning has to
+    /// name **both** paths: "this was not read" without "this would have been"
+    /// leaves the reader exactly as stuck.
+    #[test]
+    fn a_config_file_no_layer_reads_is_named_together_with_the_one_that_is() {
+        let home = PathBuf::from("/home/u/.roteiro");
+        let mut loaded = load_from(None, None).expect("load");
+        assert!(
+            loaded.near_miss_warning().is_none(),
+            "the ordinary case must stay silent",
+        );
+
+        loaded.near_miss = Some(super::NearMiss {
+            stray: home.join("roteiro.toml"),
+            user_layer: home.join("config.toml"),
+        });
+        let warning = loaded.near_miss_warning().expect("warns");
+        assert!(
+            warning.contains("/home/u/.roteiro/roteiro.toml")
+                && warning.contains("/home/u/.roteiro/config.toml"),
+            "both paths, or the reader is no better off: {warning}",
+        );
+        assert!(warning.contains("NOT read"), "{warning}");
+
+        // And it stays quiet when that same file *is* the project layer — which
+        // happens if Roteiro's home is itself a repository root above the working
+        // directory. Saying a file was not read while reading it is worse than
+        // saying nothing.
+        loaded.project_path = Some(home.join("roteiro.toml"));
+        assert!(loaded.near_miss_warning().is_none());
+    }
+
+    /// `[mcp] tools` layers by **intersection**, and the direction is the point:
+    /// a committed `roteiro.toml` may narrow what the machine's owner allowed and
+    /// may not widen it (issue #584).
+    ///
+    /// The failing case is the third block. Under this file's ordinary "nearer
+    /// layer wins" the project file would restore `sandbox_clear` after the user
+    /// removed it — consent granted by pull request, which is exactly what
+    /// ADR-0007 v1.4's inversion exists to stop, reached from the other direction.
+    #[test]
+    fn mcp_tools_intersect_so_a_project_file_can_narrow_but_never_widen() {
+        let dir = std::env::temp_dir().join(format!("roteiro-mcp-tools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+        let tools = |loaded: &super::Loaded| -> Option<Vec<String>> {
+            loaded
+                .effective
+                .mcp
+                .tools
+                .as_ref()
+                .map(|t| t.names().to_vec())
+        };
+
+        // A layer that says nothing restricts nothing, so the other layer stands.
+        std::fs::write(&user, "[mcp]\ntools = [\"search\", \"explain\"]\n").expect("write");
+        std::fs::write(&project, "[infer]\ntop_k = 3\n").expect("write");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(
+            tools(&loaded),
+            Some(vec!["search".to_owned(), "explain".to_owned()])
+        );
+
+        // The project layer may narrow.
+        std::fs::write(&project, "[mcp]\ntools = [\"search\"]\n").expect("write");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(tools(&loaded), Some(vec!["search".to_owned()]));
+
+        // And it may NOT widen: naming a tool the user layer withheld adds
+        // nothing, and naming a disjoint set leaves nothing rather than
+        // everything — which is the reading that would be dangerous.
+        std::fs::write(
+            &project,
+            "[mcp]\ntools = [\"search\", \"explain\", \"sandbox_clear\"]\n",
+        )
+        .expect("write");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+        assert_eq!(
+            tools(&loaded),
+            Some(vec!["search".to_owned(), "explain".to_owned()]),
+            "the project layer must not restore a tool the user layer withheld",
+        );
+
+        std::fs::write(&project, "[mcp]\ntools = [\"debt\"]\n").expect("write");
+        let loaded = load_from(Some(user), Some(project)).expect("load");
+        assert_eq!(
+            tools(&loaded),
+            Some(Vec::new()),
+            "disjoint layers leave an empty surface, which the server refuses to \
+             start on — never an unrestricted one",
+        );
     }
 
     #[test]

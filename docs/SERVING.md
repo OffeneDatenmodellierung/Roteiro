@@ -242,6 +242,22 @@ request**.
 surface's contribution around 32× below that ceiling. Raising the bound re-opens
 the hole in proportion.
 
+**The bound is measured on what you send, not on what the model reads.** Roteiro
+renders a tool's arguments as a signature — `search(query: str, limit?: int
+1..25)` — rather than as raw JSON Schema, so the same 32 KiB of wire bytes
+becomes fewer prompt tokens than it used to. That makes the bound *more*
+conservative, never less: it is applied to the compact JSON before any rendering
+happens. Measured on Roteiro's own MCP surface driven back in as a client
+payload, 20,045 wire bytes rendered to 21,180 prompt bytes before and 17,454
+after, with tool-call accuracy unchanged on a fixed question set.
+
+A schema the renderer cannot state without losing something — a nested object, a
+`$ref`, a `oneOf`, `additionalProperties: true` — is sent **verbatim** instead.
+Your argument shape is the contract Roteiro hands back for you to execute, and a
+lossy summary of it would leave the model calling a tool whose arguments no
+longer match what you will run. That is the same failure the size bound refuses
+to truncate for.
+
 ## Not a hosted API
 
 Two things follow from this being a local server rather than a service, and both

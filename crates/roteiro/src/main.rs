@@ -806,9 +806,12 @@ enum Command {
         /// The PEM private-key file for `--tls-cert`.
         #[arg(long, value_name = "FILE")]
         tls_key: Option<String>,
-        /// Workspace mode (ADR-0008): host every git repo under ROOT
-        /// (repeatable), so one server — holding the model once — answers
-        /// questions about many projects, selected per call by `project`.
+        /// Workspace mode (ADR-0008): host each git repo that is an **immediate
+        /// child** of ROOT, plus ROOT itself if it is one — one level, **not
+        /// recursive** (repeatable). So one server, holding the model once,
+        /// answers questions about many projects, selected per call by `project`.
+        /// A repo two levels down (`ROOT/<org>/<repo>`) is **not** found; pass
+        /// each `<org>` directory instead, or list them under `[[workspaces]]`.
         /// Combined with `[workspace]` config. Omit for single-repo serving
         /// (the current directory's repo).
         #[arg(long, value_name = "ROOT")]
@@ -831,6 +834,16 @@ enum Command {
         /// `--features serve,mcp`).
         #[arg(long)]
         mcp: bool,
+        /// Restrict what `/mcp` advertises **and dispatches** to these tools
+        /// (comma-separated, repeatable), or the alias `read-only` for everything
+        /// except the one tool that changes something. Intersected with
+        /// `[mcp] tools` from config — every layer may narrow the surface and none
+        /// may widen it. An unknown name, or a restriction leaving nothing to
+        /// serve, is a startup error rather than a server that quietly advertises
+        /// everything. Needs `--mcp`; for the deprecated `serve --http` use
+        /// `roteiro mcp --http ADDR --tools …`.
+        #[arg(long, value_name = "TOOLS", value_delimiter = ',', requires = "mcp")]
+        tools: Vec<String>,
         /// Deprecated: `--models` is now the default for `serve` — drop the flag.
         /// Kept so existing scripts keep working; prints a one-line notice.
         #[arg(long, hide = true)]
@@ -872,9 +885,12 @@ enum Command {
         /// instead of STDIO. Terminate TLS at a reverse proxy.
         #[arg(long, value_name = "ADDR")]
         http: Option<String>,
-        /// Workspace mode (ADR-0008): host every git repo under ROOT (repeatable),
-        /// selected per call by `project`. Combined with `[workspace]` config.
-        /// Omit for single-repo serving (the current directory's repo).
+        /// Workspace mode (ADR-0008): host each git repo that is an **immediate
+        /// child** of ROOT, plus ROOT itself if it is one — one level, **not
+        /// recursive** (repeatable), selected per call by `project`. A repo two
+        /// levels down (`ROOT/<org>/<repo>`) is **not** found; pass each `<org>`
+        /// directory instead, or list them under `[[workspaces]]`. Combined with
+        /// `[workspace]` config. Omit for single-repo serving (the cwd's repo).
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
         /// Select a **named** workspace from config as the default the flat tools
@@ -885,6 +901,15 @@ enum Command {
         /// queried, instead of serving whatever its hooks last left (ADR-0008).
         #[arg(long)]
         sync_on_access: bool,
+        /// Restrict what this server advertises **and dispatches** to these tools
+        /// (comma-separated, repeatable), or the alias `read-only` for everything
+        /// except the one tool that changes something. Intersected with
+        /// `[mcp] tools` from config — every layer may narrow the surface and none
+        /// may widen it. An unknown name, or a restriction leaving nothing to
+        /// serve, is a startup error rather than a server that quietly advertises
+        /// everything.
+        #[arg(long, value_name = "TOOLS", value_delimiter = ',')]
+        tools: Vec<String>,
     },
     /// Serve the read-only graph explorer JSON API (`/v1/graph/*`) over HTTP,
     /// **llama-free** (ADR-0008): axum only — no model, no MCP, no C/C++
@@ -1618,6 +1643,13 @@ fn main() -> anyhow::Result<()> {
     // config.toml`); a malformed file is a hard error for any command (ADR-0007).
     let cwd = std::env::current_dir()?;
     let cfg = config::load(&cwd)?;
+    // A config file sitting where no layer reads it (issue #581). Warned about
+    // for every command rather than only for `config`, because the whole defect
+    // is that the file is invisible: a person who knew to run `roteiro config`
+    // would already suspect their settings were not taking effect.
+    if let Some(warning) = cfg.near_miss_warning() {
+        eprintln!("{warning}");
+    }
     // Initialise logging once, here — the single subscriber-build seam (ADR-0011).
     // Stdout logging is unchanged; a rotating OTEL-JSON file sink is added only when
     // `[telemetry] file` / `--log-file` / `--log` enables it. The returned guard
@@ -1862,6 +1894,7 @@ fn main() -> anyhow::Result<()> {
             workspace_name,
             sync_on_access,
             mcp,
+            tools,
             #[cfg(all(feature = "remote", feature = "serve"))]
             allow_remote,
             #[cfg(all(feature = "remote", feature = "serve"))]
@@ -1876,6 +1909,11 @@ fn main() -> anyhow::Result<()> {
                 tls_cert,
                 tls_key,
                 mcp,
+                // Resolved here, beside the remote grant and for the same reason:
+                // before anything is built or bound, from the layers rather than
+                // from the merged value, so an unknown name names the file that
+                // holds it (issue #584).
+                mcp_surface: resolve_mcp_surface(&cfg, &tools)?,
                 // Decided **here**, before anything is built or bound, and it is
                 // the whole of ADR-0019 v1.2's "the invocation is the server
                 // process": one gate consultation, at startup, whose answer the
@@ -1896,10 +1934,12 @@ fn main() -> anyhow::Result<()> {
             workspace,
             workspace_name,
             sync_on_access,
+            tools,
         } => run_mcp(
             ingest,
             &cfg.effective,
             http,
+            &resolve_mcp_surface(&cfg, &tools)?,
             &workspace,
             workspace_name.as_deref(),
             sync_on_access,
@@ -2062,6 +2102,15 @@ fn run_config(loaded: &config::Loaded, json: bool) -> anyhow::Result<()> {
             .as_deref()
             .map_or_else(|| "(none)".to_owned(), |p| p.display().to_string())
     );
+    // The line issue #581 is about: `project config: (none)` with no hint that a
+    // plausible-looking sibling was passed over reads as "there is nothing to
+    // find", which is the opposite of what happened.
+    if let Some(near) = loaded.near_miss.as_ref() {
+        println!(
+            "not read:       {} (no layer reads that path — see the warning above)",
+            near.stray.display()
+        );
+    }
     print_config_sections(loaded);
     println!("\n(unset values fall back to built-in defaults; a CLI flag overrides config)");
     Ok(())
@@ -2155,12 +2204,48 @@ fn print_config_sections(loaded: &config::Loaded) {
             u.serve.max_context_tokens.is_some()
         )
     );
+    print_mcp_section(loaded);
     print_remote_section(loaded);
     print_lint_section(loaded);
     print_security_section(loaded);
     print_debt_section(loaded);
     print_telemetry_section(e, p, u);
     print_workspace_section(loaded);
+}
+
+/// Print `[mcp]` — the advertised MCP tool surface (issue #584).
+///
+/// Its own function, and its own provenance label, because `tools` does not
+/// layer the way the rest of this report does: the layers **intersect**, so
+/// "project" and "user" are not alternatives and a single winning-layer label
+/// would be a lie. This is the per-pattern `[debt] ignore` reasoning applied to
+/// the other kind of list — report what the operator observes, not only the
+/// input it came from.
+fn print_mcp_section(loaded: &config::Loaded) {
+    println!("[mcp]");
+    let names = loaded
+        .effective
+        .mcp
+        .tools
+        .as_ref()
+        .map(|t| t.names().to_vec());
+    let layer = match (
+        loaded.project.mcp.tools.is_some(),
+        loaded.user.mcp.tools.is_some(),
+    ) {
+        (true, true) => "project ∩ user",
+        (true, false) => "project",
+        (false, true) => "user",
+        (false, false) => "default",
+    };
+    match names {
+        None => println!("  tools = (unrestricted — every tool this build offers)  ({layer})"),
+        Some(names) if names.is_empty() => println!(
+            "  tools = []  ({layer}) — the layers intersect to nothing; `roteiro mcp` \
+             refuses to start rather than advertising everything"
+        ),
+        Some(names) => println!("  tools = {names:?}  ({layer})"),
+    }
 }
 
 /// Print `[remote]` — the one table whose `enabled` key does **not** follow this
@@ -7327,6 +7412,21 @@ where
         .collect()
 }
 
+/// Where a workspace declaration belongs, for the three "nothing in scope"
+/// errors that offer to tell you.
+///
+/// One sentence in one place. Issue #581 is what it costs when a message sends a
+/// user to the wrong file — the error said `roteiro.toml` while
+/// [`config::WorkspaceConfig`] calls workspaces "naturally a user-layer setting",
+/// so following the advice literally, in the most obvious directory, produced a
+/// silently ignored file. Three copies of the sentence is how one fix misses two.
+///
+/// It says "prefer", not "must": the project layer really does read
+/// `[[workspaces]]`, and a message that denied it would be a second wrong answer.
+const WORKSPACE_CONFIG_ADVICE: &str = "workspaces are machine-specific, so prefer the USER config \
+     (`~/.roteiro/config.toml`, or `$ROTEIRO_HOME/config.toml`) over a committed \
+     `roteiro.toml` — both layers are read";
+
 /// Verify a workspace's authored cross-repo links (ADR-0009). For every repo in
 /// the workspace (the cwd repo plus any `--workspace`/`[workspace]` roots), read
 /// its `[[links]]` and resolve each project-qualified `to` against the other
@@ -7336,8 +7436,8 @@ fn run_links(cfg: &config::Config, scope: &LinksScope<'_>, json: bool) -> anyhow
     let paths = links_scope_paths(cfg, scope)?;
     if paths.is_empty() {
         anyhow::bail!(
-            "no repos in scope — run inside a repo, pass `--workspace <root>`, or set \
-             `[workspace]` in roteiro.toml"
+            "no repos in scope — run inside a repo, pass `--workspace <root>`, or \
+             set `[workspace]` in config ({WORKSPACE_CONFIG_ADVICE})"
         );
     }
     let workspace = rto_graph::Workspace::from_repo_paths(&paths)?;
@@ -10446,12 +10546,16 @@ fn run_explorer(
     let set = if resolved.is_empty() {
         explorer_cwd_set()?
     } else {
-        rto_graph::WorkspaceSet::from_resolved(resolved)?
+        rto_graph::WorkspaceSet::from_resolved(resolved.clone())?
     };
     if set.names().is_empty() {
+        // Same depth diagnostic `serve`/`mcp` give (issue #580): a root scanned
+        // one level deep that held no repo at that depth is a dead end, and
+        // naming the subdirectories that do hold repos turns it into a fix.
         anyhow::bail!(
             "no workspaces to serve — run inside a repo, or configure \
-             `[[workspaces]]` / `[standalone]` in roteiro.toml"
+             `[[workspaces]]` / `[standalone]` in config ({WORKSPACE_CONFIG_ADVICE}){}",
+            nested_repo_hint(&resolved)
         );
     }
     let set = Arc::new(set);
@@ -10569,11 +10673,117 @@ fn explorer_default_workspace(
     set.containing(&db).map(str::to_owned)
 }
 
-/// The parsed `serve` flags (from the clap `Command::Serve` arm), bundled so the
-/// dispatch stays a single struct rather than a long argument list.
-#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
-// Several fields (addr/TLS/mcp) are only read on the `serve` path; in an
-// mcp-only build the model endpoint is a stub, so they are legitimately unused.
+/// The resolved MCP tool restriction a `serve`/`mcp` process carries (issue #584).
+///
+/// An alias because `rto_render::mcp` exists only with the `mcp` feature, while
+/// `ServeOptions` and the `serve` command are compiled into every build — where
+/// they refuse by name rather than vanishing. One signature, every feature set.
+#[cfg(feature = "mcp")]
+type McpSurface = rto_render::mcp::Advertised;
+
+/// The no-MCP stand-in. There is no surface to restrict, and
+/// [`resolve_mcp_surface`] refuses a `--tools` that asked for one.
+#[cfg(not(feature = "mcp"))]
+type McpSurface = ();
+
+/// Resolve what an MCP server may advertise: the invocation's `--tools`
+/// intersected with `[mcp] tools` from each config layer (issue #584).
+///
+/// # Every layer narrows; none widens
+///
+/// The intersection is [`config::ToolAllowList`]'s, and its reasoning is
+/// recorded there. What happens *here* is the part a merged value cannot do:
+/// each source is validated **on its own**, so an unknown name is reported
+/// against the file or flag that holds it. Validating the intersection instead
+/// would turn a typo in one layer into an empty surface and report the wrong
+/// defect — `["search"]` ∩ `["explian"]` is empty, and "nothing left to serve"
+/// is a true statement about the wrong problem.
+///
+/// # Errors
+/// An unknown tool name in any source, or a restriction that leaves nothing this
+/// build can serve. Both refuse to start. A server that advertised the full
+/// surface because its restriction did not parse is the failure this whole flag
+/// exists to prevent (omnigent#5178), and reproducing it on our side of the wire
+/// in the pull request that closes #584 would be a poor showing.
+#[cfg(feature = "mcp")]
+fn resolve_mcp_surface(cfg: &config::Loaded, flag: &[String]) -> anyhow::Result<McpSurface> {
+    use rto_render::mcp::{Advertised, restrict};
+
+    let sources: [(&str, &[String]); 3] = [
+        ("`--tools`", flag),
+        (
+            "`[mcp] tools` in the project config",
+            cfg.project.mcp.tools.as_ref().map_or(&[], |t| t.names()),
+        ),
+        (
+            "`[mcp] tools` in the user config",
+            cfg.user.mcp.tools.as_ref().map_or(&[], |t| t.names()),
+        ),
+    ];
+    let mut surface = Advertised::All;
+    for (where_, names) in sources {
+        if names.is_empty() {
+            continue;
+        }
+        let restriction = restrict(names).map_err(|e| anyhow::anyhow!("{where_}: {e}"))?;
+        for name in &restriction.absent {
+            // ADR-0007's feature-availability rule, applied to a name: the
+            // setting is valid and this binary cannot act on it, so it warns.
+            // Silence here would be indistinguishable from a name that worked.
+            eprintln!(
+                "warning: {where_} names `{name}`, which this build does not \
+                 compile in — it restricts nothing here"
+            );
+        }
+        surface = meet(&surface, &restriction.advertised);
+    }
+    if let Advertised::Only(allowed) = &surface
+        && allowed.is_empty()
+    {
+        anyhow::bail!(
+            "the MCP tool restriction leaves nothing to serve — refusing to start \
+             rather than advertising the full surface. `--tools` and `[mcp] tools` \
+             intersect (every layer may narrow the surface, none may widen it), so \
+             widen the config layer rather than the flag"
+        );
+    }
+    Ok(surface)
+}
+
+/// The meet of two resolved surfaces: `All` is the identity, and two restrictions
+/// intersect. Kept beside [`resolve_mcp_surface`] because it is the same rule
+/// [`config::ToolAllowList`] applies between config layers, and the flag is a
+/// third layer of exactly that kind.
+#[cfg(feature = "mcp")]
+fn meet(
+    a: &rto_render::mcp::Advertised,
+    b: &rto_render::mcp::Advertised,
+) -> rto_render::mcp::Advertised {
+    use rto_render::mcp::Advertised;
+    match (a, b) {
+        (Advertised::All, other) | (other, Advertised::All) => other.clone(),
+        (Advertised::Only(x), Advertised::Only(y)) => {
+            Advertised::Only(x.intersection(y).cloned().collect())
+        }
+    }
+}
+
+/// A build without `mcp` has no MCP server to restrict, so `--tools` is refused
+/// by name rather than accepted and ignored — the silent-no-op this flag exists
+/// to remove.
+///
+/// Gated exactly as [`Command::Serve`] is, so it exists in every build that has a
+/// `--tools` to refuse and in none that does not.
+#[cfg(all(not(feature = "mcp"), any(feature = "serve", feature = "explorer")))]
+fn resolve_mcp_surface(_cfg: &config::Loaded, flag: &[String]) -> anyhow::Result<McpSurface> {
+    anyhow::ensure!(
+        flag.is_empty(),
+        "`--tools` restricts the MCP tool surface and this build has no MCP server \
+         (rebuild with `--features mcp`)"
+    );
+    Ok(())
+}
+
 #[cfg_attr(not(feature = "serve"), allow(dead_code))]
 struct ServeOptions {
     /// Serve the OpenAI-compatible `/v1` model endpoint (`--models`).
@@ -10588,6 +10798,9 @@ struct ServeOptions {
     tls_key: Option<String>,
     /// With `--models`, also mount `/mcp` on the same port (`--mcp`).
     mcp: bool,
+    /// What that `/mcp` advertises and dispatches (`--tools` ∩ `[mcp] tools`),
+    /// resolved once in the command dispatch and carried — see [`McpSurface`].
+    mcp_surface: McpSurface,
     /// The remote model tier's grant for **this server process**, or `None` for
     /// a server that will answer only from local models (ADR-0019 v1.2).
     ///
@@ -10704,7 +10917,7 @@ fn run_serve(
                     workspace_name,
                     sync_on_access,
                 )?;
-                serve_mcp(ws.flat, Some(addr))
+                serve_mcp(ws.flat, Some(addr), &opts.mcp_surface)
             }
             #[cfg(not(any(feature = "mcp", feature = "serve")))]
             {
@@ -10729,6 +10942,7 @@ fn run_mcp(
     ingest: rto_graph::IngestConfig,
     cfg: &config::Config,
     http: Option<String>,
+    surface: &McpSurface,
     workspace_roots: &[String],
     workspace_name: Option<&str>,
     sync_on_access: bool,
@@ -10742,8 +10956,8 @@ fn run_mcp(
         sync_on_access,
     )?;
     match route_mcp(http) {
-        ServerRoute::McpStdio => serve_mcp(ws.flat, None),
-        ServerRoute::McpHttp(addr) => serve_mcp(ws.flat, Some(addr)),
+        ServerRoute::McpStdio => serve_mcp(ws.flat, None, surface),
+        ServerRoute::McpHttp(addr) => serve_mcp(ws.flat, Some(addr), surface),
         // `route_mcp` only yields the two MCP transports.
         ServerRoute::Network => unreachable!("`roteiro mcp` never routes to the network server"),
     }
@@ -10867,9 +11081,16 @@ fn build_serve_workspaces(
     // `-w` naming nothing to serve — BEFORE `from_repo_paths` would surface a raw
     // `WorkspaceError::Empty`. Mirrors `run_explorer`'s message.
     if set.names().is_empty() {
+        // The depth rule belongs *here*, because this is the moment a user who
+        // passed a parent directory needs it and the only moment they are
+        // looking. Naming the subdirectories that do hold repos turns a dead end
+        // into a fix, so the probe — one `read_dir` per skipped directory,
+        // bounded — is worth its cost on this path and on no other (issue #580).
         anyhow::bail!(
             "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, \
-             or configure `[[workspaces]]` / `[standalone]` in roteiro.toml"
+             or configure `[[workspaces]]` / `[standalone]` in config \
+             ({WORKSPACE_CONFIG_ADVICE}).{}",
+            nested_repo_hint(&effective)
         );
     }
     // Validate `--workspace-name` once, up front: an unknown name fails fast (listing
@@ -10897,8 +11118,114 @@ fn build_serve_workspaces(
         },
         flat.names().join(", ")
     );
+    // Beside the project count, because that is where a user notices: a root
+    // whose repos all live one level deeper yields "1 project(s)" and no error
+    // (issue #580). Free — the scan already read each root's directory — so it
+    // costs nothing to say what was walked past.
+    for note in scanned_roots_note(&effective) {
+        eprintln!("{note}");
+    }
     install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
     Ok(ServeWorkspaces { set, flat })
+}
+
+/// What each scanned root actually offered, one line per root that skipped
+/// something — printed beside the project count on a successful start.
+///
+/// `--workspace <ROOT>` scans **one level**. That rule is deliberate and well
+/// argued (see [`rto_graph::discover_repos_under`]); the defect issue #580
+/// reports is that it lives in a Rust doc comment nobody reads while the user
+/// sees a near-empty workspace and no error at all. So the count of directories
+/// walked past is reported where the project count is, which is the line a user
+/// is looking at when the number surprises them.
+///
+/// Silent when a root skipped nothing, so an ordinary sibling-checkouts layout —
+/// the case the shallow rule is for — says nothing extra.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn scanned_roots_note(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<String> {
+    scanned_roots(effective)
+        .into_iter()
+        .filter(|scan| !scan.skipped.is_empty())
+        .map(|scan| {
+            format!(
+                "  note: {} scanned one level deep (not recursive) — {} {} hosted, \
+                 {} {} skipped for holding no `.git`; any repo nested inside those \
+                 is NOT hosted",
+                scan.root.display(),
+                scan.repos.len(),
+                plural(scan.repos.len(), "repo", "repos"),
+                scan.skipped.len(),
+                plural(scan.skipped.len(), "subdirectory", "subdirectories"),
+            )
+        })
+        .collect()
+}
+
+/// `one`/`many` chosen by `n`. A local helper so the depth notes read as English
+/// rather than as `subdirector(y/ies)`.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
+    if n == 1 { one } else { many }
+}
+
+/// The directories a failed scan walked past that **do** hold repos one level
+/// further down, as a sentence to append to the "no workspaces to serve" error.
+///
+/// Empty when there is nothing useful to say, so the error keeps its old wording
+/// in the ordinary case. Bounded at eight named directories and at
+/// [`PROBE_LIMIT`] directories examined: this runs only where the user is already
+/// stuck, and a dead end is worth one `read_dir` per candidate, but a root with
+/// ten thousand children is not worth ten thousand of them.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn nested_repo_hint(effective: &[rto_graph::ResolvedWorkspace]) -> String {
+    /// How many skipped subdirectories the probe will examine, per root.
+    const PROBE_LIMIT: usize = 256;
+    /// How many it will name in the message.
+    const NAME_LIMIT: usize = 8;
+
+    let mut named: Vec<String> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    for scan in scanned_roots(effective) {
+        let nested = scan.nested_repo_parents(PROBE_LIMIT);
+        if nested.is_empty() {
+            continue;
+        }
+        roots.push(scan.root.display().to_string());
+        named.extend(nested.iter().map(|p| p.display().to_string()));
+    }
+    if named.is_empty() {
+        return String::new();
+    }
+    let shown = named.len().min(NAME_LIMIT);
+    format!(
+        "\n\nA root is scanned ONE LEVEL DEEP — each immediate child that is a git \
+         repo, and the root itself if it is one — never recursively. {} held no repo \
+         at that depth, but {} of its subdirectories do hold repos one level \
+         further: {}{}. Pass those as `--workspace <ROOT>` instead, or list them \
+         under `[[workspaces]]`.",
+        roots.join(", "),
+        named.len(),
+        named[..shown].join(", "),
+        if named.len() > shown { ", …" } else { "" },
+    )
+}
+
+/// Scan every root named by `effective`, skipping any that cannot be read — a
+/// stale root is what the caller is already reporting, not a second error to
+/// raise from a diagnostic.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn scanned_roots(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<rto_graph::RootScan> {
+    let mut seen = std::collections::BTreeSet::new();
+    effective
+        .iter()
+        .flat_map(|ws| ws.roots.iter())
+        .filter_map(|root| {
+            let path = config::expand_tilde(root);
+            seen.insert(path.clone())
+                .then(|| rto_graph::scan_root(&path).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// The two workspace views a `serve` process holds. `set` is the full
@@ -11113,17 +11440,56 @@ fn install_workspace_reload(
 fn serve_mcp(
     workspace: std::sync::Arc<rto_graph::Workspace>,
     http: Option<String>,
+    surface: &McpSurface,
 ) -> anyhow::Result<()> {
+    announce_mcp_surface(surface);
     match http {
         Some(addr) => {
             let addr: std::net::SocketAddr = addr
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid --http address `{addr}`: {e}"))?;
             eprintln!("roteiro MCP server listening on http://{addr}/mcp");
-            rto_render::mcp::serve_http(workspace, addr).map_err(|e| anyhow::anyhow!("{e}"))
+            rto_render::mcp::serve_http(workspace, addr, surface)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
-        None => rto_render::mcp::serve_stdio(workspace).map_err(|e| anyhow::anyhow!("{e}")),
+        None => {
+            rto_render::mcp::serve_stdio(workspace, surface).map_err(|e| anyhow::anyhow!("{e}"))
+        }
     }
+}
+
+/// Say on stderr what a restricted server will advertise, and what that saved.
+///
+/// A restriction that took effect and a restriction that was ignored look
+/// identical from the outside until a model tries a tool — which is the failure
+/// mode issue #584 was filed about, so the server states its own surface. The
+/// byte figure is the one that matters on a byte-bounded provider and, at the
+/// 3.13 ms/token prefill measured in #578, the one that turns into seconds.
+#[cfg(feature = "mcp")]
+fn announce_mcp_surface(surface: &McpSurface) {
+    use rto_render::mcp::{Advertised, advertised_bytes, tool_names};
+
+    let Advertised::Only(allowed) = surface else {
+        return;
+    };
+    let all = tool_names();
+    let withheld: Vec<&str> = all
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !allowed.contains(*name))
+        .collect();
+    eprintln!(
+        "roteiro mcp: advertising {} of {} tools — {} of {} advertised bytes{}",
+        allowed.len(),
+        all.len(),
+        advertised_bytes(surface),
+        advertised_bytes(&Advertised::All),
+        if withheld.is_empty() {
+            String::new()
+        } else {
+            format!(" — withheld: {}", withheld.join(", "))
+        }
+    );
 }
 
 /// MCP serving is unavailable without the `mcp` feature.
@@ -11131,6 +11497,7 @@ fn serve_mcp(
 fn serve_mcp(
     _workspace: std::sync::Arc<rto_graph::Workspace>,
     _http: Option<String>,
+    _surface: &McpSurface,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "MCP serving needs the `mcp` feature (build with `--features mcp`); \
@@ -11648,7 +12015,11 @@ fn serve_v1_tail(
     if opts.mcp {
         #[cfg(feature = "mcp")]
         {
-            let combined = router.merge(rto_render::mcp::mcp_router(flat));
+            // Said here as well as in `serve_mcp`, because a restricted `/mcp`
+            // mounted beside `/v1` is the same claim and a reader of the startup
+            // line should not have to know which command mounted it.
+            announce_mcp_surface(&opts.mcp_surface);
+            let combined = router.merge(rto_render::mcp::mcp_router(flat, &opts.mcp_surface));
             eprintln!(
                 "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note} + /mcp — serving: {names}"
             );
@@ -16073,6 +16444,43 @@ mod cli_routing {
             route_mcp(http),
             ServerRoute::McpHttp("127.0.0.1:8080".to_owned())
         );
+    }
+
+    /// `--tools` takes a comma-separated list, is repeatable, and — on `serve` —
+    /// is refused without `--mcp` rather than accepted and ignored (issue #584).
+    ///
+    /// The last clause is the one worth a test. `serve` without `--mcp` mounts no
+    /// MCP surface, so a `--tools` there would restrict nothing; clap refusing it
+    /// is what keeps that from being a silent no-op, which is the shape of the
+    /// defect this flag was added to remove.
+    #[cfg(any(feature = "mcp", feature = "serve"))]
+    #[test]
+    fn tools_parses_as_a_list_and_serve_refuses_it_without_mcp() {
+        let Command::Mcp { tools, .. } = parse([
+            "roteiro",
+            "mcp",
+            "--tools",
+            "search,explain",
+            "--tools",
+            "path",
+        ]) else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(tools, ["search", "explain", "path"]);
+
+        let Command::Serve { tools, mcp, .. } =
+            parse(["roteiro", "serve", "--mcp", "--tools", "read-only"])
+        else {
+            panic!("expected Serve");
+        };
+        assert!(mcp);
+        assert_eq!(tools, ["read-only"]);
+
+        let refused = Cli::try_parse_from(["roteiro", "serve", "--tools", "search"])
+            .err()
+            .expect("`serve --tools` without `--mcp` must be refused")
+            .to_string();
+        assert!(refused.contains("--mcp"), "{refused}");
     }
 
     #[cfg(any(feature = "mcp", feature = "serve"))]
