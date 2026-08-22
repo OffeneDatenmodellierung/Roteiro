@@ -643,8 +643,14 @@ pub struct VaultSummary {
     /// **clone-from** column of a workspace vault's manifest (#442 part 2).
     ///
     /// The web root rather than the raw `origin` fetch URL on purpose: a vault is
-    /// made to be handed to someone, and `git@host:owner/repo.git` is only a
-    /// clone URL for a reader who already has SSH access to that host.
+    /// made to be handed to someone, and `git@host:owner/repo.git` is only
+    /// actionable for a reader who already has SSH access to that host.
+    ///
+    /// It is **where the code lives, not a guaranteed clone URL**, and the
+    /// manifest says so. `repo_web_root` normalises a remote to `https://host/…`,
+    /// which clones on the common forges and may not on an unusual one, and says
+    /// nothing about whether the reader can read a private repository. A manifest
+    /// that promised "clone from here" would be making a claim it cannot check.
     pub repo_url: Option<String>,
     /// Hex commit the graph was rendered from, for a permalink note — and, in a
     /// workspace vault, the commit this member is pinned at.
@@ -1272,13 +1278,54 @@ fn write_findings(c: &mut String, ws: &WorkspaceSummary) {
                     let at = f
                         .path
                         .as_deref()
-                        .map_or_else(String::new, |p| format!(" · `{p}`"));
-                    let _ = writeln!(c, "**`{}`** · `{}`{at} — {}\n", f.severity, f.rule, f.title);
+                        .map_or_else(String::new, |p| format!(" · `{}`", inline_untrusted(p)));
+                    let _ = writeln!(
+                        c,
+                        "**`{}`** · `{}`{at} — {}\n",
+                        inline_untrusted(&f.severity),
+                        inline_untrusted(&f.rule),
+                        inline_untrusted(&f.title)
+                    );
                     write_analyzer_message(c, f);
                 }
             }
         }
     }
+}
+
+/// One line of analyzer-sourced text, made safe to interpolate into the note.
+///
+/// The message gets a fence; **these fields did not**, and they come from the
+/// same place. A `title` carrying a newline ends the line it was placed on and
+/// starts a new block — one that can open a heading, a list or a table row — so
+/// the "quoted, not absorbed" property held for one field out of four. A `rule`
+/// or `path` carrying a backtick escapes the code span it is wrapped in.
+///
+/// Two steps, in order:
+///
+/// 1. **Collapse every whitespace run to one space.** This is what removes the
+///    structural attack: Markdown block constructs need a line start, and after
+///    this there are no line starts left inside the value.
+/// 2. **Escape the inline punctuation that can still inject.** A link in a
+///    document handed to someone can point anywhere, and a stray backtick or
+///    pipe silently reshapes the line it lands in.
+///
+/// Not a general Markdown escaper — it covers what matters for a value
+/// interpolated into one line of prose, which is the only way these fields are
+/// used.
+fn inline_untrusted(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(collapsed.len());
+    for ch in collapsed.chars() {
+        if matches!(
+            ch,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '#'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// One finding's full analyzer message, collapsed and **verbatim**.
@@ -1303,7 +1350,11 @@ fn write_findings(c: &mut String, ws: &WorkspaceSummary) {
 fn write_analyzer_message(c: &mut String, f: &FindingEntry) {
     let message = f.message.trim();
     if message.is_empty() {
-        let _ = writeln!(c, "<sub>reported by `{}`</sub>\n", f.analyzer);
+        let _ = writeln!(
+            c,
+            "<sub>reported by `{}`</sub>\n",
+            inline_untrusted(&f.analyzer)
+        );
         return;
     }
     let longest_run = message
@@ -1316,7 +1367,7 @@ fn write_analyzer_message(c: &mut String, f: &FindingEntry) {
         c,
         "<details><summary><sub>what `{}` said</sub></summary>\n\n\
          {fence}text\n{message}\n{fence}\n\n</details>\n",
-        f.analyzer
+        inline_untrusted(&f.analyzer)
     );
 }
 
@@ -1331,6 +1382,7 @@ fn describe_runs(runs: &[(String, String)]) -> String {
     }
     runs.iter()
         .map(|(a, v)| {
+            let (a, v) = (inline_untrusted(a), inline_untrusted(v));
             // An ingested report often carries no version the producer stated,
             // and the store keeps that as `unknown`. Printing "`osv-scanner`
             // unknown" reads as a version string; saying nothing reads as the
@@ -1364,10 +1416,23 @@ fn write_manifest(c: &mut String, ws: &WorkspaceSummary) {
          these repositories at these commits, and does not change when they do.*\n",
         ws.generated_at
     );
+    // "Repository", not "Clone from". The value is the **web root derived from
+    // the `origin` remote**, which is the right thing to show a reader — an
+    // `git@host:owner/repo.git` is only actionable for someone who already has
+    // SSH to that host — but it is not guaranteed to be a working clone URL for
+    // every forge or for a private repository. Naming the column "Clone from"
+    // promised something this cannot deliver, and the manifest's whole value is
+    // that its promises hold.
+    c.push_str(
+        "*Each repository below is the web root derived from that member's \
+         `origin` remote. It is where the code lives, not a guaranteed clone \
+         URL — a private repository or a forge with a different clone path still \
+         needs whatever access you would normally use.*\n\n",
+    );
 
     let any_origin = ws.members.iter().any(|m| m.repo_url.is_some());
     if any_origin {
-        c.push_str("| Member | Clone from | At commit |\n| --- | --- | --- |\n");
+        c.push_str("| Member | Repository | At commit |\n| --- | --- | --- |\n");
         for m in &ws.members {
             let _ = writeln!(
                 c,
@@ -2344,6 +2409,59 @@ after",
         );
     }
 
+    /// The fence secured the **message**. Every other analyzer-sourced field on a
+    /// finding is interpolated into a line of prose, and they come from the same
+    /// place — so a title carrying a newline used to end its line and start a new
+    /// block, which can open a heading the vault never wrote.
+    #[test]
+    fn every_analyzer_sourced_field_is_quoted_not_absorbed() {
+        let mut api = member_summary("api", 1);
+        api.coverage = Coverage::Ran(vec![("osv-scanner".into(), "1.9.0".into())]);
+        api.findings = vec![FindingEntry {
+            // Each field carries a different escape hatch.
+            rule: "R-1`x".to_owned(),
+            severity: "high".to_owned(),
+            // Newlines, a heading, a link, and a list marker — the last of which
+            // no escape set covers, so only the whitespace collapse stops it.
+            title: "broken\n\n## an injected heading\n\n- a list item\n\n[a link](http://evil)"
+                .to_owned(),
+            message: "fine".to_owned(),
+            path: Some("src/a`b.rs".to_owned()),
+            analyzer: "osv-scanner".to_owned(),
+        }];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        assert!(
+            !c.contains("\n## an injected heading"),
+            "a newline in a title must not start a block: {c}"
+        );
+        assert!(
+            !c.contains("[a link](http://evil)"),
+            "and a link must not survive as a link: {c}"
+        );
+        // The text is still readable — escaped, not deleted. Losing it would be a
+        // different failure: a finding whose title vanished is a finding nobody
+        // acts on.
+        assert!(c.contains("an injected heading"), "the words remain: {c}");
+        assert!(
+            c.contains("R-1\\`x"),
+            "a backtick cannot escape the code span it sits in: {c}"
+        );
+
+        // The structural property, asserted directly rather than inferred from
+        // the absence of a heading: the whole finding stays on **one line**. An
+        // escape set can neutralise `#` and `[`, and a newline would still end
+        // the line and start a block — and nothing escapes a `-` list marker.
+        let line = c
+            .lines()
+            .find(|l| l.contains("R-1"))
+            .unwrap_or_else(|| panic!("the finding renders: {c}"));
+        assert!(
+            line.contains("a link") && line.contains("a list item"),
+            "every part of the title stays on the finding's own line: {line}"
+        );
+    }
+
     /// The two empty states are opposite facts and must never render alike.
     #[test]
     fn an_unanalyzed_member_never_reads_as_one_that_came_back_clean() {
@@ -2486,7 +2604,7 @@ after",
         let c = render_workspace_home(&ws).content;
         assert!(c.contains("cannot be reconstructed"), "{c}");
         assert!(
-            !c.contains("| Member | Clone from |"),
+            !c.contains("| Member | Repository |"),
             "no empty table: {c}"
         );
     }

@@ -14544,6 +14544,12 @@ fn vault_findings(
         Severity::Info => 4,
         Severity::Other(_) => 5,
     };
+    // Sorted on a key that is **total**, so the claim of stability does not rest
+    // on `sort_by` happening to be stable and on `findings_layers` happening to
+    // return a fixed order. Two analyzers reporting the same advisory share a
+    // rank and a rule; without the last two components their relative order is
+    // whatever the store yielded, and a vault that reorders between renders
+    // shows a diff nobody made.
     let mut ranked: Vec<(u8, rto_render::FindingEntry)> = layers
         .iter()
         .flat_map(|l| {
@@ -14562,7 +14568,13 @@ fn vault_findings(
             })
         })
         .collect();
-    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.rule.cmp(&b.1.rule)));
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.rule.cmp(&b.1.rule))
+            .then_with(|| a.1.analyzer.cmp(&b.1.analyzer))
+            .then_with(|| a.1.path.cmp(&b.1.path))
+            .then_with(|| a.1.title.cmp(&b.1.title))
+    });
 
     Ok((ranked.into_iter().map(|(_, f)| f).collect(), coverage))
 }
@@ -14697,21 +14709,26 @@ fn vault_summary(
     })
 }
 
-/// The **enabled** `[ingest]` toggles, by name, in the order they are declared
-/// on `IngestConfig`.
+/// The **enabled** `[ingest]` toggles that change what a vault contains, by name.
 ///
 /// Named rather than dumped as a struct because the manifest is read by a person
 /// deciding whether their re-render will match: `prose, pdf` answers that, and
 /// `prose: true, pdf: true, ocr: false, …` buries it. Listing only what is *on*
 /// keeps the row short and makes an all-off member visibly empty rather than a
 /// wall of `false`.
+///
+/// **`vision` and `audio` are deliberately absent.** Since ADR-0015 they gate
+/// *generation* (`roteiro media build`), not extraction — a description is never
+/// written to `meta.content` — and the vault renders no generated media at all.
+/// Listing them would make the reproducibility claim *stricter than reality*:
+/// a reader who saw `vision` in this row and re-rendered without it would expect
+/// a different vault and get an identical one, which teaches them to distrust
+/// the row that the other entries depend on being trusted.
 fn enabled_ingest_toggles(ingest: rto_graph::IngestConfig) -> Vec<String> {
     [
         ("prose", ingest.prose),
         ("pdf", ingest.pdf),
         ("ocr", ingest.ocr),
-        ("vision", ingest.vision),
-        ("audio", ingest.audio),
     ]
     .into_iter()
     .filter(|(_, on)| *on)
