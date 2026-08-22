@@ -3106,9 +3106,12 @@ mod tests {
         assert_eq!(none["hub"], Value::Null, "{none}");
         assert_eq!(none["written"], 0, "{none}");
         assert!(none["note"].is_string(), "the reason survives: {none}");
+        // Absent, not present-as-null. `is_null()` passes either way and so does
+        // not enforce `skip_serializing_if` at all — the key has to be missing
+        // from the object for the wire shape to be what it claims.
         assert!(
-            some["note"].is_null(),
-            "and is absent when there is none: {some}"
+            !some.as_object().unwrap().contains_key("note"),
+            "`note` must be omitted on the normal path, not serialised as null: {some}"
         );
     }
 
