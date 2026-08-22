@@ -23,7 +23,7 @@
 //! renderer's internal id helper: the artifact a reader's browser resolves
 //! against is the page, so the page is what has to agree.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Every published site page's `(path, markdown)`, read from the repository.
 ///
@@ -86,8 +86,13 @@ fn rendered_h2_ids(html: &str) -> Vec<String> {
         // belongs to something else.
         let Some(end) = rest.find('>') else { break };
         let tag = &rest[..end];
-        if let Some(j) = tag.find("id=\"") {
-            let after = &tag[j + 4..];
+        // ` id="`, with the leading space, so `data-id="` and `aria-id="` are not
+        // mistaken for the attribute a browser resolves a fragment against. A
+        // bare `id="` search would read the wrong value and — worse here — would
+        // read it *silently*, since the comparison is against another list this
+        // test computed rather than against a constant anyone would recognise.
+        if let Some(j) = tag.find(" id=\"") {
+            let after = &tag[j + 5..];
             if let Some(k) = after.find('"') {
                 out.push(after[..k].to_owned());
             }
@@ -266,4 +271,26 @@ fn a_blockquoted_heading_is_addressable_in_the_page_and_absent_from_the_graph() 
     // And the helper that reconciles them names exactly the extra one, so the
     // subtraction above cannot hide a second, unrelated difference.
     assert_eq!(blockquoted_h2_ids(md), ["a-quoted-heading"]);
+}
+
+/// `rendered_h2_ids` reads the `id` attribute and not one that merely ends in
+/// `id`.
+///
+/// A bare `id="` search also matches `data-id="` and `aria-labelledby-id="`, and
+/// it would fail *silently*: this test compares two computed lists, so a reader
+/// would see two plausible slugs disagree and look for the bug in the slug rule
+/// rather than in the scraper. The renderer emits no such attribute today, which
+/// is exactly why the guard has to be explicit rather than incidental.
+#[test]
+fn only_the_id_attribute_is_read_not_one_that_merely_ends_in_id() {
+    assert_eq!(
+        rendered_h2_ids(r#"<h2 data-id="wrong" id="right">Title</h2>"#),
+        ["right"]
+    );
+    assert_eq!(
+        rendered_h2_ids(r#"<h2 id="first">A</h2><p>x</p><h2 id="second">B</h2>"#),
+        ["first", "second"]
+    );
+    // An `id` on something that is not an h2 is not a section anchor.
+    assert!(rendered_h2_ids(r#"<h3 id="deeper">C</h3>"#).is_empty());
 }
