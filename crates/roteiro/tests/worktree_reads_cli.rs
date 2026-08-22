@@ -249,6 +249,48 @@ fn every_report_surface_names_the_tree_it_answered_about() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A read that was **not** refreshed must not claim a tree.
+///
+/// `refresh_for_read` deliberately serves a schema-ahead store as it found it
+/// rather than downgrading it (#342): it prints its own note and skips the
+/// rebuild. The `--committed` announcement is a statement about a rebuild that
+/// did not happen there — the graph is whatever the newer build left, which is
+/// not necessarily `HEAD` — so announcing it would be the same class of
+/// confident-wrong answer #599 is about, reintroduced by the fix for it.
+#[test]
+fn a_read_that_was_not_refreshed_does_not_claim_a_tree() {
+    let dir = repo_with_uncommitted_marker("ahead");
+    let out = roteiro(&dir, &["sync"]);
+    assert!(out.status.success(), "sync failed: {out:?}");
+
+    // Forge a store from a future build: record a migration version this binary
+    // has never heard of. That is exactly the condition `schema_ahead` reports.
+    let db = dir.join(".git/roteiro/graph.db");
+    let conn = rusqlite::Connection::open(&db).expect("open store");
+    conn.execute(
+        "INSERT INTO schema_migrations (version) VALUES (?1)",
+        [999_999],
+    )
+    .expect("record a version from the future");
+    drop(conn);
+
+    let out = roteiro(&dir, &["search", "--committed", "Thing"]);
+    assert!(out.status.success(), "search failed: {out:?}");
+    let note = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    assert!(
+        note.contains("has not been refreshed"),
+        "the schema-ahead path must still explain itself: {note:?}"
+    );
+    assert!(
+        !note.contains("--committed"),
+        "but it must not also claim to be reporting on the committed tree, \
+         because no rebuild for that tree happened: {note:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `--staged` is the index, which is neither of the other two: an edit on disk
 /// but not staged is invisible to it, and staging the identical bytes makes it
 /// appear without anything being committed.
