@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.1.1...rto-render-v2.1.2) - 2026-08-22
+
+### Fixed
+
+- *(cli)* address review — name the flag, not the token, and stop pinning prose
+- *(cli)* read the working tree, and stop a read rewriting the store
+
 ## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.0.2...rto-render-v2.1.0) - 2026-08-22
 
 ### Added

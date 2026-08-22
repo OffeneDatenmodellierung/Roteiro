@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.1.1...roteiro-v2.1.2) - 2026-08-22
+
+### Fixed
+
+- *(cli)* address review — name the flag, not the token, and stop pinning prose
+- *(cli)* read the working tree, and stop a read rewriting the store
+
+### Other
+
+- *(cli)* fold the nine announcement copies into one method
+
 ## [2.1.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.1.0...roteiro-v2.1.1) - 2026-08-22
 
 ### Fixed
