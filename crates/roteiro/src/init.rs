@@ -266,8 +266,14 @@ fn managed_block_range(content: &str) -> Option<(usize, usize)> {
 const SKILL_SUBPATH: [&str; 3] = ["skills", "roteiro", "SKILL.md"];
 
 /// The canonical Roteiro agent skill, embedded at build time. Written verbatim to
-/// each target skill dir. It carries the managed marker on its first line, so a
-/// re-run refreshes it in place and a foreign `SKILL.md` is left untouched.
+/// each target skill dir. It carries the managed marker just below its YAML
+/// frontmatter, so a re-run refreshes it in place and a foreign `SKILL.md` is
+/// left untouched.
+///
+/// The marker sits *below* the frontmatter rather than above it because a
+/// `SKILL.md` is only frontmatter if the block is at byte 0 — see
+/// `skill_is_managed_and_a_valid_skill_document`. [`is_managed_skill`] searches
+/// the whole document, so nothing depends on the marker being first.
 #[must_use]
 pub fn skill_markdown() -> &'static str {
     include_str!("../assets/skill/SKILL.md")
@@ -493,16 +499,83 @@ mod tests {
         );
     }
 
+    /// The whole-file intent-debt opt-out the skill carries, spelled in two
+    /// pieces on purpose.
+    ///
+    /// `scan_markers` matches this directive anywhere in a blob, so writing it
+    /// contiguously *here* would exempt the whole of `init.rs` from intent-debt
+    /// detection — silently, with nothing failing, and forever. `concat!` folds
+    /// the two halves at compile time while keeping the source bytes from ever
+    /// spelling the directive. (`markers.rs` and friends carry the real thing,
+    /// deliberately, because they enumerate the vocabulary. This file does not.)
+    const IGNORE_FILE_DIRECTIVE: &str = concat!("roteiro", ":ignore-file");
+
+    /// The YAML frontmatter of `md`, or `None` if the document does not *begin*
+    /// with a frontmatter block.
+    ///
+    /// Deliberately positional, and deliberately not a search: frontmatter is
+    /// defined by being first, so the opening `---` must be at byte 0 and the
+    /// block ends at the next `---` line. Anything before the opening delimiter
+    /// — a comment, a blank line, a BOM — means the document has no
+    /// frontmatter, and this returns `None` rather than hunting for a block
+    /// further down. That mirrors what loaders actually do (an anchored
+    /// `\A---\n(.*?)\n---\n`), which is the whole point: a guard that is more
+    /// forgiving than the consumer cannot fail where the consumer does.
+    fn frontmatter(md: &str) -> Option<&str> {
+        let rest = md.strip_prefix("---\n")?;
+        let end = rest.find("\n---\n")?;
+        Some(&rest[..end])
+    }
+
     #[test]
     fn skill_is_managed_and_a_valid_skill_document() {
         let md = skill_markdown();
         assert!(is_managed_skill(md), "skill carries the managed marker");
         assert!(!is_managed_skill("---\nname: other\n---\n"));
-        // Portable SKILL.md contract: YAML frontmatter with name + description.
-        assert!(md.contains("name: roteiro"), "has a skill name");
+
+        // Portable SKILL.md contract: YAML frontmatter with name + description —
+        // asserted by *position*, not by presence.
+        //
+        // This read `md.contains("name: roteiro")` for ten days (#596). `contains`
+        // passes just as happily on a document whose block sits at line 3 behind
+        // two HTML comments, at line 30, or inside a code fence — so it passed on
+        // the one shipped by v2.0.0, which no harness could load. The frontmatter
+        // was present and well-formed; it simply was not first, and being first is
+        // the entire property that makes frontmatter frontmatter. A guard weaker
+        // than the contract it names is why ten days passed with the defect in
+        // every `roteiro init` run. Keep these assertions against `fm`, never `md`.
+        let fm = frontmatter(md).unwrap_or_else(|| {
+            panic!(
+                "SKILL.md must *begin* with its YAML frontmatter: byte 0 must be the \
+                 opening `---` line, and the block must close on a later `---` line \
+                 before any other content. Nothing may precede the opening delimiter \
+                 — not an HTML comment, not a blank line. A loader anchors its match \
+                 at the start of the file and reports the frontmatter *missing* even \
+                 when it is present and valid further down. Move the prose below the \
+                 closing `---`; both markers this file carries are found by \
+                 whole-document search, so neither needs to be first. The document \
+                 currently begins:\n{}",
+                md.lines().take(3).collect::<Vec<_>>().join("\n"),
+            )
+        });
         assert!(
-            md.contains("description:"),
-            "has a description for relevance"
+            fm.contains("name: roteiro"),
+            "has a skill name, inside the frontmatter block"
+        );
+        assert!(
+            fm.contains("description:"),
+            "has a description for relevance, inside the frontmatter block"
+        );
+        // The two markers that were moved below the frontmatter to make room for
+        // it. Both are position-independent by construction — `is_managed_skill`
+        // is a whole-document `contains`, and the whole-file debt opt-out is
+        // matched over the whole blob — but "present at all" is the part that a
+        // careless reorder can still destroy, and this file has lost content that
+        // way before (#290, #377).
+        assert!(
+            md.contains(IGNORE_FILE_DIRECTIVE),
+            "the skill enumerates the intent-debt vocabulary, so it must keep the \
+             whole-file opt-out or it registers as debt itself"
         );
         // Teaches the graph surface it is meant to.
         assert!(md.contains("search"), "covers the search entry point");
@@ -522,6 +595,37 @@ mod tests {
             md.contains("Never assert absence from `grep` alone"),
             "the companion rule-of-thumb bullet points at that section"
         );
+    }
+
+    /// Pins the discriminating power of [`frontmatter`] itself, so the guard
+    /// above cannot be quietly loosened back into a `contains`.
+    ///
+    /// The middle case is the exact document v2.0.0 shipped: a well-formed
+    /// block with `name` and `description`, two HTML comments above it. Every
+    /// needle the old assertion looked for is present in it. Only position
+    /// separates it from the first case, so only a positional check can tell
+    /// them apart.
+    #[test]
+    fn frontmatter_is_recognised_only_when_it_is_first() {
+        let body = "name: roteiro\ndescription: d";
+        let good = format!("---\n{body}\n---\n\n# Heading\n");
+        assert_eq!(frontmatter(&good), Some(body), "block at byte 0 is read");
+
+        let shipped = format!("<!-- roteiro-managed -->\n<!-- x -->\n---\n{body}\n---\n");
+        assert!(
+            shipped.contains("name: roteiro") && shipped.contains("description:"),
+            "the shipped shape satisfies every needle the old guard checked"
+        );
+        assert_eq!(
+            frontmatter(&shipped),
+            None,
+            "two comments above the block mean the document has no frontmatter"
+        );
+
+        // Even one blank line ahead of it is fatal to an anchored matcher.
+        assert_eq!(frontmatter(&format!("\n---\n{body}\n---\n")), None);
+        // An opening delimiter with no closing one is not a block either.
+        assert_eq!(frontmatter("---\nname: roteiro\n"), None);
     }
 
     /// The repository root, from this crate's manifest directory
