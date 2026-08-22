@@ -662,14 +662,19 @@ enum Command {
         /// (ADR-0009 step 8). Applies to `--infer` and `--matrix`.
         #[arg(long, value_name = "REV")]
         hub_rev: Option<String>,
-        /// With `--infer`: resolve **each spoke against the hub version it itself
-        /// pins** — read from the spoke's `submodule` / `image_ref` node — instead
-        /// of one version for all (ADR-0009 step 8b). Spokes with no detectable pin
-        /// fall back to the hub's `HEAD`, and **the report says so** — per spoke,
-        /// and in a summary line counting how many pinned anything. Falling back
-        /// silently would make an inert `--pinned` byte-identical to plain
-        /// `--infer`, which is the answer to a different question (#505).
-        #[arg(long, requires = "infer", conflicts_with_all = ["matrix", "hub_rev"])]
+        /// With `--infer` or `--matrix`: resolve **each spoke against the hub
+        /// version it itself pins** — read from the spoke's `submodule` /
+        /// `image_ref` node — instead of one version for all (ADR-0009 step 8b).
+        /// Spokes with no detectable pin fall back to the hub's `HEAD`, and **the
+        /// report says so** — per spoke, and in a summary line counting how many
+        /// pinned anything. Falling back silently would make an inert `--pinned`
+        /// byte-identical to a plain run, which is the answer to a different
+        /// question (#505).
+        ///
+        /// Still mutually exclusive with `--hub-rev`, which is the opposite
+        /// request: one version for every spoke. Asking for both is asking to
+        /// measure drift against two different things at once.
+        #[arg(long, conflicts_with = "hub_rev")]
         pinned: bool,
         /// With `--infer`: persist the inferred correspondences into each spoke's
         /// graph as durable cross-repo edges (an `inferred` import layer that
@@ -1993,6 +1998,20 @@ fn main() -> anyhow::Result<()> {
             } else if infer {
                 run_links_infer(&cfg.effective, &scope, opts, write, json)
             } else {
+                // Same rule as `--app-config-only` below, for the same reason:
+                // `--pinned` resolves each spoke against the hub version it pins,
+                // and the plain authored-links report does not resolve against a
+                // hub version at all. It used to be `requires = "infer"` in clap;
+                // that had to go so `--matrix` could take it (#504), so the
+                // refusal is stated here instead of being lost with it.
+                if pinned {
+                    anyhow::bail!(
+                        "`--pinned` applies only to `roteiro links --infer` / `--matrix` \
+                         (it resolves each spoke against the hub version it pins, \
+                         ADR-0009 step 8b); the authored-link report resolves \
+                         `[[links]]` against each repo's current graph"
+                    );
+                }
                 // `--app-config-only` only filters config-key matching, which the
                 // plain authored-links report doesn't do. Reject it here rather than
                 // silently ignoring it, so the flag never looks like it took effect.
@@ -7742,6 +7761,26 @@ struct InferredRepo {
     /// Where the pin came from (e.g. `submodule vendor/app`), when auto-detected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pin_via: Option<String>,
+    /// Hub key → value **at the rev this spoke resolved against**, when that is
+    /// not the shared baseline (`--pinned`, and this spoke pinned something).
+    ///
+    /// The matrix needs it and the infer report does not: `--infer` prints one
+    /// spoke at a time under a heading naming its rev, so its baseline is never
+    /// ambiguous. The matrix puts the spokes side by side under one hub column,
+    /// which is precisely the shape ADR-0009 v1.9 declined — carrying the
+    /// baseline per spoke is what makes it answerable.
+    ///
+    /// `#[serde(skip)]` because it is an input to a view, not a fact about the
+    /// spoke, and the infer JSON would otherwise grow a copy of the hub for every
+    /// distinct rev in the workspace.
+    #[serde(skip)]
+    hub_baseline: Option<std::collections::BTreeMap<(String, String), String>>,
+    /// `(file, key)` pairs the pinned revision declares **without a value** — a
+    /// struct-derived key. Separate from [`Self::hub_baseline`] because absence
+    /// from that map already means "not resolved against its own revision", and
+    /// conflating the two makes a cell borrow `HEAD`'s value silently.
+    #[serde(skip)]
+    hub_unknown: std::collections::BTreeSet<(String, String)>,
 }
 
 /// The `graph.db` path for the repo at `path` (`<repo>/.git/roteiro/graph.db`).
@@ -7986,7 +8025,8 @@ fn scan_workspace_infer(
         by_project.insert(hub_name.clone(), keys);
     }
 
-    let report = resolve_infer_report(&by_project, &hub_name, &project_paths, pin)?;
+    let report =
+        resolve_infer_report(&by_project, &hub_name, &project_paths, pin, app_config_only)?;
 
     Ok(InferScan::Ready(InferReady {
         hub_name,
@@ -8025,6 +8065,7 @@ fn resolve_infer_report(
     hub_name: &str,
     project_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
     pin: PinnedHub<'_>,
+    app_config_only: bool,
 ) -> anyhow::Result<Vec<InferredRepo>> {
     let hub_base = by_project[hub_name].as_slice();
     // Under `--pinned`, set the hub up **once** — repo, object cache, extractor, its
@@ -8067,6 +8108,17 @@ fn resolve_infer_report(
                                     )
                                 },
                             )?;
+                            // `--app-config-only` filtered every repo's `HEAD`
+                            // keys before matching; these were just extracted
+                            // from a pinned rev and have never been through it.
+                            // Left unfiltered, a spoke's *app* key could match a
+                            // hub *tooling* key that the same run dropped at
+                            // HEAD — the flag half-applied, which is worse than
+                            // not applied because the asymmetry is invisible.
+                            let mut k = k;
+                            if app_config_only {
+                                k.retain(|c| !rto_graph::is_tooling_config_path(&c.file));
+                            }
                             rev_cache.insert(p.rev.clone(), k);
                         }
                         (Some(p.rev), Some(p.via))
@@ -8077,9 +8129,55 @@ fn resolve_infer_report(
             // Global: HEAD, or the explicit `--hub-rev` already in `hub_base`.
             None => (pin.rev.map(str::to_owned), None),
         };
-        let hub_keys: &[infer_links::ConfigKey] = match &hub_rev {
-            Some(rev) if pin.auto => rev_cache[rev].as_slice(),
-            _ => hub_base,
+        let pinned_to_own_rev = pin.auto && hub_rev.is_some();
+        let hub_keys: &[infer_links::ConfigKey] = if pinned_to_own_rev {
+            // `hub_rev` is `Some` here by the guard above.
+            rev_cache[hub_rev.as_deref().unwrap_or_default()].as_slice()
+        } else {
+            hub_base
+        };
+        // Only when this spoke was measured against something other than the
+        // shared baseline is there a second value for a view to reconcile.
+        // Keyed by **(file, key)**, not by key alone. A `config_key` node is
+        // per-(file, key), so a hub that sets the same dotted key in two files
+        // has two nodes with two values — and `match_against_hub` picks one of
+        // them, carrying its `hub_file` on the match. Collapsing to the dotted
+        // key keeps whichever value happened to be last and computes `differs`
+        // against the wrong file's. The spoke side of this very function already
+        // keys its values `(file, key)` for the same reason.
+        //
+        // Gated on `value_known`: a struct-derived key has **no literal value in
+        // code**, and `ConfigKey::value` is then an empty *placeholder* that
+        // "carries no meaning" by its own documentation. Recording it as a
+        // baseline would compare a spoke's genuine value against `""` and report
+        // an override of something that does not exist — the same false match
+        // `value_known` exists to stop `--infer` making.
+        let hub_baseline = pinned_to_own_rev.then(|| {
+            hub_keys
+                .iter()
+                // Defence in depth: a map *of values* should not carry
+                // placeholders. The observable guarantee is carried by
+                // `hub_unknown` below — with that in place this filter cannot be
+                // seen to matter from outside, and an injection removing it stays
+                // green. It is kept because the alternative is a map whose
+                // entries mean two different things depending on another field.
+                .filter(|k| k.value_known)
+                .map(|k| ((k.file.clone(), k.key.clone()), k.value.clone()))
+                .collect()
+        });
+        // The keys the pinned revision *has* but states no value for. Kept apart
+        // from the baseline map because "absent from the map" already means
+        // something else — "not resolved against its own revision" — and a
+        // consumer that cannot tell the two apart silently falls back to `HEAD`,
+        // a revision this spoke does not deploy.
+        let hub_unknown: std::collections::BTreeSet<(String, String)> = if pinned_to_own_rev {
+            hub_keys
+                .iter()
+                .filter(|k| !k.value_known)
+                .map(|k| (k.file.clone(), k.key.clone()))
+                .collect()
+        } else {
+            std::collections::BTreeSet::new()
         };
         let (matches, orphans) = infer_links::match_against_hub(keys, hub_keys);
         report.push(InferredRepo {
@@ -8088,6 +8186,8 @@ fn resolve_infer_report(
             orphans,
             hub_rev,
             pin_via,
+            hub_baseline,
+            hub_unknown,
         });
     }
     Ok(report)
@@ -8200,9 +8300,19 @@ fn run_links_matrix(
     let ready = match scan_workspace_infer(cfg, scope, opts)? {
         InferScan::Nothing(reason) => {
             if json {
-                emit_json(
-                    &serde_json::json!({ "hub": null, "rows": [], "drift": [], "note": reason }),
-                )?;
+                // Built from the type, not hand-written. This is the CLI twin of
+                // the served endpoint's no-hub branch, and it had the identical
+                // defect: a literal is a second definition of the response, so it
+                // silently omitted `pinned`/`pins` and a caller could not tell an
+                // asked-for pin resolution from an ordinary no-op. `note` is the
+                // one field this envelope adds, so it is merged onto the
+                // serialised matrix rather than the matrix being retyped around it.
+                let mut envelope = serde_json::to_value(overview::OverrideMatrix {
+                    pinned: opts.pin.auto,
+                    ..Default::default()
+                })?;
+                envelope["note"] = reason.clone().into();
+                emit_json(&envelope)?;
             } else {
                 eprintln!("nothing to show — {reason}");
             }
@@ -8231,10 +8341,42 @@ fn run_links_matrix(
                 .collect();
             overview::SpokeInput {
                 name: rep.repo.clone(),
+                // The hub version this spoke was actually compared against
+                // (ADR-0009 step 8b). `resolve_infer_report` already did the
+                // per-spoke resolution for `--infer`; the matrix shares that
+                // scan, so this is carrying a fact it computed rather than
+                // recomputing one.
+                //
+                // Gated on `pin.auto` because `hub_rev` is set on **every** spoke
+                // under the global `--hub-rev` too, where no spoke pinned
+                // anything. Without the gate a `--matrix --hub-rev REV` run
+                // emits a populated `pins` map beside `pinned: false`, reporting
+                // one workspace-wide resolution as N per-spoke pins — the same
+                // "says a thing it did not do" this PR exists to prevent.
+                pin: opts
+                    .pin
+                    .auto
+                    .then(|| {
+                        rep.hub_rev.clone().map(|rev| overview::SpokePin {
+                            rev,
+                            via: rep.pin_via.clone(),
+                        })
+                    })
+                    .flatten(),
                 matches: rep
                     .matches
                     .iter()
                     .map(|m| overview::MatchInput {
+                        // The hub value this spoke was really compared against.
+                        // Only present when it resolved to its own rev, so the
+                        // ordinary matrix is unchanged byte for byte.
+                        hub_value: rep
+                            .hub_baseline
+                            .as_ref()
+                            .and_then(|b| b.get(&(m.hub_file.clone(), m.hub_key.clone())).cloned()),
+                        hub_value_unknown: rep
+                            .hub_unknown
+                            .contains(&(m.hub_file.clone(), m.hub_key.clone())),
                         hub_key: m.hub_key.clone(),
                         // The hub key's source file, so the matrix row can be
                         // classified as app vs tooling config (parity with the API).
@@ -8262,11 +8404,17 @@ fn run_links_matrix(
     // When resolving a pinned version, label the hub with its rev so every output
     // (text header, HTML title, JSON `hub`) says which version drift was measured
     // against.
+    //
+    // `ready.hub_rev` is the *global* rev — `--hub-rev`, one version for every
+    // spoke. Under `--pinned` there is deliberately no such value, because each
+    // spoke was measured against its own; that is carried per spoke instead, and
+    // labelling the hub with any single rev there would state a comparison the
+    // matrix did not make.
     let hub_label = match &ready.hub_rev {
         Some(rev) => format!("{} @ {rev}", ready.hub_name),
         None => ready.hub_name.clone(),
     };
-    let matrix = overview::build(&hub_label, &hub_values, spokes);
+    let matrix = overview::build(&hub_label, &hub_values, spokes, opts.pin.auto);
 
     if json {
         emit_json(&matrix)?;
@@ -8321,15 +8469,6 @@ fn persist_inferred_links(
 }
 
 /// Human-readable rendering of the inferred cross-repo config report.
-/// Abbreviate a 40-hex commit sha to 10 chars; leave short refs (tags) as-is.
-fn short_rev(rev: &str) -> &str {
-    if rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()) {
-        &rev[..10]
-    } else {
-        rev
-    }
-}
-
 /// `pinned` is whether `--pinned` asked for per-spoke pin resolution, and it is a
 /// parameter rather than something inferred from the rows because **the rows a
 /// no-op produces are indistinguishable from the rows the flag was never passed
@@ -8346,8 +8485,8 @@ fn print_infer_report(report: &[InferredRepo], hub_name: &str, hub_keys: usize, 
         // Under `--pinned`, say which hub version this spoke resolved against —
         // including when the answer is "none of its own, so the hub's HEAD".
         let pin = match (&r.hub_rev, &r.pin_via) {
-            (Some(rev), Some(via)) => format!("  @ {} (via {via})", short_rev(rev)),
-            (Some(rev), None) => format!("  @ {}", short_rev(rev)),
+            (Some(rev), Some(via)) => format!("  @ {} (via {via})", overview::short_rev(rev)),
+            (Some(rev), None) => format!("  @ {}", overview::short_rev(rev)),
             (None, _) if pinned => "  @ HEAD (no pin detected)".to_owned(),
             _ => String::new(),
         };

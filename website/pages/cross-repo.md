@@ -79,6 +79,28 @@ vendors — materialising the hub graph at that commit **in memory, no checkout*
 <span class="c"># …or pin one explicit version for the whole workspace:</span>
 roteiro links --infer --hub app --hub-rev v1.4</code></pre>
 
+The same resolution works on the **matrix** — the side-by-side view — which is
+where it earns the most: spokes on different hub versions are exactly the case a
+single shared version misreports. Each column names the version it was measured
+against, and every cell is compared to *that* version rather than to `HEAD`:
+
+<pre><code>roteiro links --matrix --pinned --hub app --workspace ~/code
+
+<span class="c"># cross-repo config overrides (hub: app, 3 spoke(s))</span>
+<span class="c">#   resolved per spoke against the hub version each pins (2 of 3 pinned one):</span>
+<span class="c">#     deploy-dev @ HEAD (no pin detected)</span>
+<span class="c">#     deploy-eu @ v2.1.0</span>
+<span class="c">#     deploy-web @ 4e0d5a6afd (via submodule app)</span></code></pre>
+
+A spoke that pins nothing is **named**, not omitted, and the count says how many
+pinned anything — so a workspace where nothing is detectable reads as
+`0 of 3 pinned one` rather than looking identical to an ordinary run. The hub
+column stays a single column showing `HEAD` and says so; a cell measured against
+a different version carries that version beside it.
+
+`--pinned` cannot be combined with `--hub-rev`: one version for every spoke and
+each spoke's own version are opposite requests.
+
 When image tags don't match your git tags, map them in `[pins]`
 (`app = "release-{tag}"`, shown in [Config](config.html)). And if the hub's CI
 publishes a graph artifact per release, resolution loads that instead of

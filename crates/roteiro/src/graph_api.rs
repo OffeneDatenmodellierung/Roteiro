@@ -999,9 +999,17 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
     let Some(hub) = effective_hub(ws, &names)? else {
         // Nothing references (or can infer against) anything — no hub, so an empty
         // (but well-shaped) matrix.
-        return Ok(Json(json!({
-            "hub": Value::Null, "spokes": [], "rows": [], "drift": []
-        }))
+        //
+        // "Well-shaped" means **the same shape the populated response has**, which
+        // is why this is built from `OverrideMatrix::default()` rather than
+        // hand-written JSON: a hand-written literal is a second definition of the
+        // response, and it drifted the moment `pinned`/`pins` were added (#504) —
+        // a client parsing the empty case got four fields where every other
+        // response now has six. Serialising the type cannot drift from itself.
+        return Ok(Json(overview::OverrideMatrix {
+            hub: String::new(),
+            ..Default::default()
+        })
         .into_response());
     };
 
@@ -1045,6 +1053,10 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                     spoke_value,
                     confidence: confidence.unwrap_or(0.0),
                     provenance: *provenance,
+                    // This endpoint resolves no pins (see `pin: None` below), so
+                    // every cell shares the one hub baseline.
+                    hub_value: None,
+                    hub_value_unknown: false,
                 }),
                 // Hub node gone, or its project isn't hosted / has no graph → drift
                 // (an orphan spoke key), not a fatal error for the endpoint.
@@ -1057,10 +1069,21 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
             name: name.clone(),
             matches,
             orphans,
+            // This endpoint reads **persisted** `external_ref` edges from each
+            // spoke's graph, which record a correspondence and not the hub
+            // version it was computed against. Per-spoke pin resolution
+            // (ADR-0009 step 8b) is a `roteiro links --pinned` operation: it
+            // re-extracts the hub at each spoke's rev, which is a git walk this
+            // endpoint deliberately does not do while serving a request.
+            //
+            // So `None` here is "this view does not resolve pins", not "this
+            // spoke pins nothing" — and `pinned: false` below is what keeps the
+            // response from claiming otherwise (#504/#505).
+            pin: None,
         });
     }
 
-    let assembled = overview::build(&hub, &hub_values, spokes);
+    let assembled = overview::build(&hub, &hub_values, spokes, false);
     Ok(Json(assembled).into_response())
 }
 
@@ -2962,6 +2985,37 @@ mod tests {
         // One live link + one drifted link → driftCount 1, two links total.
         assert_eq!(spokes[0]["driftCount"], 1);
         assert_eq!(json["links"].as_array().unwrap().len(), 2);
+    }
+
+    /// The empty (no-hub) matrix must carry **the same keys** as a populated one.
+    ///
+    /// It used to be a hand-written `json!` literal — a second definition of the
+    /// response — and it drifted the moment `pinned`/`pins` were added to
+    /// `OverrideMatrix` (#504): a client parsing the empty case got four fields
+    /// where every other response had six. The fix is that both now serialise the
+    /// same type; this test is what would have caught the drift, and it compares
+    /// key sets rather than listing fields, so the next field added to
+    /// `OverrideMatrix` cannot slip past it either.
+    #[tokio::test]
+    async fn the_empty_matrix_has_the_same_shape_as_a_populated_one() {
+        let empty = Workspace::from_stores([(SPOKE.to_owned(), spoke_store())]);
+        let (status, none) = get(single_set(empty), None, "/v1/graph/matrix").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, some) = get(single_set(linked_workspace()), None, "/v1/graph/matrix").await;
+
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&none),
+            keys(&some),
+            "the empty response must not be a different object: {none}"
+        );
+        assert_eq!(none["pinned"], false, "and must state it resolved no pins");
+        assert!(none["rows"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
