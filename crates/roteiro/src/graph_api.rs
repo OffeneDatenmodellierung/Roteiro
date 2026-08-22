@@ -1104,18 +1104,16 @@ async fn write_links(State(st): State<AppState>, params: RawPathParams) -> ApiRe
     let ws = select_ws(&st, &params)?;
     let names = ws.names();
     let Some(hub) = effective_hub(ws, &names)? else {
-        return Ok(Json(json!({
-            "hub": Value::Null,
-            "written": 0,
-            "spokes": [],
-            "note": "no cross-repo hub — nothing to infer",
-        }))
+        return Ok(Json(WriteLinksReport {
+            note: Some("no cross-repo hub — nothing to infer".to_owned()),
+            ..WriteLinksReport::default()
+        })
         .into_response());
     };
     let hub_keys = ws.with_store(Some(&hub), Store::config_keys)??;
 
     let mut total = 0usize;
-    let mut per_spoke: Vec<Value> = Vec::new();
+    let mut per_spoke: Vec<WrittenSpoke> = Vec::new();
     for name in &names {
         if name == &hub {
             continue;
@@ -1130,14 +1128,61 @@ async fn write_links(State(st): State<AppState>, params: RawPathParams) -> ApiRe
         let applied =
             ws.with_store_mut(Some(name), |s| s.apply_import_layer(LINKS_REF, &facts))??;
         total += applied.edges_applied;
-        per_spoke.push(json!({
-            "name": name,
-            "matches": matches.len(),
-            "written": applied.edges_applied,
-        }));
+        per_spoke.push(WrittenSpoke {
+            name: name.clone(),
+            matches: matches.len(),
+            written: applied.edges_applied,
+        });
     }
 
-    Ok(Json(json!({ "hub": hub, "written": total, "spokes": per_spoke })).into_response())
+    Ok(Json(WriteLinksReport {
+        hub: Some(hub),
+        written: total,
+        spokes: per_spoke,
+        note: None,
+    })
+    .into_response())
+}
+
+/// The `POST …/links/write` response.
+///
+/// A **type**, not two `json!` literals, and that is the whole point of it. This
+/// endpoint used to build its shape twice — once in the no-hub early return and
+/// once at the end — with nothing keeping the two level. They agreed by luck.
+/// Its neighbour `matrix` had the identical arrangement and did **not**: when
+/// `pinned`/`pins` were added to `OverrideMatrix` (#504) only the populated
+/// branch gained them, so a client parsing the empty case got four fields where
+/// every other response had six (#610).
+///
+/// A type cannot drift from itself, which is the property being bought here.
+/// `hub` stays `Option<String>` so the empty case keeps `hub: null` — `matrix`
+/// went to `""` because `OverrideMatrix::hub` is a `String`, and there is no
+/// reason to change a shape here that no defect requires.
+#[derive(Debug, Default, serde::Serialize)]
+struct WriteLinksReport {
+    /// The hub inferred against, or `null` when the workspace has none.
+    hub: Option<String>,
+    /// Total edges applied across every spoke.
+    written: usize,
+    /// Per-spoke counts, in workspace order.
+    spokes: Vec<WrittenSpoke>,
+    /// Why nothing was written, when nothing was. Absent on the normal path —
+    /// the one field the populated response does not carry, and the reason this
+    /// is a `skip_serializing_if` rather than an always-present `null`: an empty
+    /// `note` on a successful write would read as a warning nobody wrote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+/// One spoke's contribution to a [`WriteLinksReport`].
+#[derive(Debug, serde::Serialize)]
+struct WrittenSpoke {
+    /// The spoke project.
+    name: String,
+    /// Correspondences found against the hub.
+    matches: usize,
+    /// Edges actually applied (a duplicate of an existing edge still counts).
+    written: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -3016,6 +3061,55 @@ mod tests {
         );
         assert_eq!(none["pinned"], false, "and must state it resolved no pins");
         assert!(none["rows"].as_array().unwrap().is_empty());
+    }
+
+    /// The no-hub `links/write` response must carry **the same keys** as a
+    /// populated one.
+    ///
+    /// It used to be two hand-written `json!` literals — a second definition of
+    /// the shape — which agreed only by luck. Its neighbour `matrix` had the
+    /// identical arrangement and did *not* agree: adding `pinned`/`pins` to
+    /// `OverrideMatrix` (#504) reached only the populated branch. Both now
+    /// serialise a type, and this compares **key sets** rather than listing
+    /// fields, so the next field added cannot slip past it (#610).
+    #[tokio::test]
+    async fn the_empty_write_links_response_has_the_same_shape_as_a_populated_one() {
+        let empty = Workspace::from_stores([(SPOKE.to_owned(), spoke_store())]);
+        let (status, none) = send(
+            router(Arc::new(single_set(empty)), None),
+            "POST",
+            "/v1/graph/links/write",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, some) = send(
+            router(Arc::new(single_set(linked_workspace())), None),
+            "POST",
+            "/v1/graph/links/write",
+        )
+        .await;
+
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.retain(|s| s != "note"); // the one field only the empty case carries
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&none),
+            keys(&some),
+            "the empty response must not be a different object: {none}"
+        );
+        // `hub: null` is preserved deliberately — `matrix` went to `""` because
+        // its type's field is a `String`, and no defect here requires that.
+        assert_eq!(none["hub"], Value::Null, "{none}");
+        assert_eq!(none["written"], 0, "{none}");
+        assert!(none["note"].is_string(), "the reason survives: {none}");
+        assert!(
+            some["note"].is_null(),
+            "and is absent when there is none: {some}"
+        );
     }
 
     #[tokio::test]
