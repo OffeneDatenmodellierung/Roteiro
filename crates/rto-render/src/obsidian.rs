@@ -1184,8 +1184,12 @@ fn write_rendered_under(c: &mut String, ws: &WorkspaceSummary) {
                 // vault and something that merely resembles it.
                 "*none*".to_owned()
             } else {
+                // `[debt] ignore` is user config landing in a table cell: a
+                // glob carrying a backtick or a `|` reshapes the row. Not
+                // analyzer-sourced, but untrusted for the same reason — the
+                // vault did not write it.
                 v.iter()
-                    .map(|x| format!("`{x}`"))
+                    .map(|x| table_cell(x))
                     .collect::<Vec<_>>()
                     .join(", ")
             }
@@ -1278,12 +1282,14 @@ fn write_findings(c: &mut String, ws: &WorkspaceSummary) {
                     let at = f
                         .path
                         .as_deref()
-                        .map_or_else(String::new, |p| format!(" · `{}`", inline_untrusted(p)));
+                        .map_or_else(String::new, |p| format!(" · {}", inline_code(p)));
                     let _ = writeln!(
                         c,
-                        "**`{}`** · `{}`{at} — {}\n",
-                        inline_untrusted(&f.severity),
-                        inline_untrusted(&f.rule),
+                        "**{}** · {}{at} — {}\n",
+                        inline_code(&f.severity),
+                        inline_code(&f.rule),
+                        // Prose, not a span: the title is the sentence a reader
+                        // scans, so it is escaped rather than monospaced.
                         inline_untrusted(&f.title)
                     );
                     write_analyzer_message(c, f);
@@ -1291,6 +1297,39 @@ fn write_findings(c: &mut String, ws: &WorkspaceSummary) {
             }
         }
     }
+}
+
+/// An untrusted value as a **complete code span**, delimiters included.
+///
+/// A code span renders its content literally — no emphasis, no links, no HTML —
+/// so the only thing that can escape one is a backtick run long enough to close
+/// it. Widening the delimiter past the longest run inside the value is therefore
+/// the whole defence, and it is the *right* defence: backslash-escaping inside a
+/// span protects nothing and does show, turning `vendor/**` into `vendor\*\*`
+/// on the page.
+///
+/// Whitespace is still collapsed — a newline ends the line the span sits on
+/// however well the span itself is delimited.
+///
+/// **Not sufficient inside a table cell.** GFM splits a row on `|` *before*
+/// inline parsing, so a pipe inside a code span still ends the cell. Use
+/// [`table_cell`] there.
+fn inline_code(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let longest_run = collapsed
+        .split(|ch| ch != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let tick = "`".repeat(longest_run + 1);
+    // CommonMark strips one leading and trailing space from a span, which is how
+    // content that itself starts or ends with a backtick is expressed.
+    let pad = if collapsed.starts_with('`') || collapsed.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{tick}{pad}{collapsed}{pad}{tick}")
 }
 
 /// One line of analyzer-sourced text, made safe to interpolate into the note.
@@ -1301,31 +1340,56 @@ fn write_findings(c: &mut String, ws: &WorkspaceSummary) {
 /// the "quoted, not absorbed" property held for one field out of four. A `rule`
 /// or `path` carrying a backtick escapes the code span it is wrapped in.
 ///
-/// Two steps, in order:
+/// Three steps, in order:
 ///
 /// 1. **Collapse every whitespace run to one space.** This is what removes the
 ///    structural attack: Markdown block constructs need a line start, and after
 ///    this there are no line starts left inside the value.
-/// 2. **Escape the inline punctuation that can still inject.** A link in a
+/// 2. **HTML-escape `&`, `<`, `>`.** Some of these values land inside raw HTML
+///    (`<sub>`, `<details><summary>`), where a backslash escapes nothing — an
+///    analyzer named `</sub><script>` would close the tag and keep going. This
+///    step is why there is **one** helper rather than a Markdown one and an HTML
+///    one: two helpers means two contexts to keep straight, and the reason this
+///    function exists at all is that the first version secured one context and
+///    missed its neighbour.
+/// 3. **Backslash-escape the remaining Markdown punctuation.** A link in a
 ///    document handed to someone can point anywhere, and a stray backtick or
-///    pipe silently reshapes the line it lands in.
+///    pipe silently reshapes the line it lands in. `<` and `>` are absent from
+///    that set because step 2 already turned them into entities.
 ///
-/// Not a general Markdown escaper — it covers what matters for a value
-/// interpolated into one line of prose, which is the only way these fields are
-/// used.
+/// Safe in both contexts, so a caller never has to know which one it is in.
 fn inline_untrusted(s: &str) -> String {
     let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out = String::with_capacity(collapsed.len());
     for ch in collapsed.chars() {
-        if matches!(
-            ch,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '#'
-        ) {
-            out.push('\\');
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            // `&` is deliberately absent below: the entities written above must
+            // survive intact, and backslash-escaping their `&` would render them
+            // literally.
+            '\\' | '`' | '*' | '_' | '[' | ']' | '|' | '#' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
         }
-        out.push(ch);
     }
     out
+}
+
+/// [`inline_code`] for a value that lands in a **table cell**.
+///
+/// A code span is not enough there: GFM splits a row on `|` before it parses
+/// inline content, so a pipe inside the span still ends the cell and shifts
+/// every column after it. `\|` is the documented escape, and it is applied to
+/// the finished span so the delimiter widening still holds.
+///
+/// The distinction is not cosmetic — it is a third rendering context, and this
+/// file has now been wrong about a context twice.
+fn table_cell(s: &str) -> String {
+    inline_code(s).replace('|', "\\|")
 }
 
 /// One finding's full analyzer message, collapsed and **verbatim**.
@@ -1382,6 +1446,11 @@ fn describe_runs(runs: &[(String, String)]) -> String {
     }
     runs.iter()
         .map(|(a, v)| {
+            // `inline_untrusted`, not `inline_code`: this same value is also
+            // interpolated into `<summary>`/`<sub>` by `write_analyzer_message`,
+            // and keeping one treatment for it means there is no second context
+            // to get wrong later. That is the mistake this pair of helpers was
+            // introduced to fix, so it is not worth re-creating for monospace.
             let (a, v) = (inline_untrusted(a), inline_untrusted(v));
             // An ingested report often carries no version the producer stated,
             // and the store keeps that as `unknown`. Printing "`osv-scanner`
@@ -2443,9 +2512,11 @@ after",
         // different failure: a finding whose title vanished is a finding nobody
         // acts on.
         assert!(c.contains("an injected heading"), "the words remain: {c}");
+        // A widened delimiter, not a backslash: inside a span the backslash
+        // would show, and `vendor/**` would reach the reader as `vendor\*\*`.
         assert!(
-            c.contains("R-1\\`x"),
-            "a backtick cannot escape the code span it sits in: {c}"
+            c.contains("``R-1`x``"),
+            "the span widens past the backtick inside it: {c}"
         );
 
         // The structural property, asserted directly rather than inferred from
@@ -2459,6 +2530,73 @@ after",
         assert!(
             line.contains("a link") && line.contains("a list item"),
             "every part of the title stays on the finding's own line: {line}"
+        );
+    }
+
+    /// The analyzer name is interpolated into **raw HTML** (`<sub>`,
+    /// `<details><summary>`), where a backslash escapes nothing. Fixing the
+    /// Markdown surface and leaving this one is how the first version of the
+    /// escaping shipped.
+    #[test]
+    fn analyzer_text_cannot_break_out_of_the_html_it_sits_in() {
+        let mut api = member_summary("api", 1);
+        let hostile = "osv</sub><script>alert(1)</script>".to_owned();
+        api.coverage = Coverage::Ran(vec![(hostile.clone(), "1.0".into())]);
+        api.findings = vec![FindingEntry {
+            rule: "R-1".to_owned(),
+            severity: "high".to_owned(),
+            title: "t".to_owned(),
+            message: "m".to_owned(),
+            path: None,
+            analyzer: hostile,
+        }];
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+
+        assert!(
+            !c.contains("<script>"),
+            "a tag in analyzer text must not survive as a tag: {c}"
+        );
+        assert!(
+            !c.contains("osv</sub>"),
+            "and must not close the element it was placed inside: {c}"
+        );
+        // Escaped, not dropped: the reader still sees which analyzer said it.
+        assert!(c.contains("&lt;script&gt;"), "the text remains, inert: {c}");
+    }
+
+    /// `[debt] ignore` is user config, not analyzer output — but the vault did
+    /// not write it either, and it lands in a table cell where a `|` reshapes
+    /// the row.
+    #[test]
+    fn a_config_glob_cannot_reshape_the_settings_table() {
+        let mut api = member_summary("api", 1);
+        api.settings = RenderedUnder {
+            ingest: vec!["prose".into()],
+            debt_ignore: vec!["a`b|c".into()],
+        };
+        let c = render_workspace_home(&ws_with(vec![api])).content;
+        // Scoped to the settings table. The manifest table above it also has a
+        // row starting `| api |`, and a bare `.find` matched *that* one — so the
+        // first version of this test asserted against a row containing no glob
+        // at all, and stayed green with the escaping removed.
+        let section = c
+            .split("### Rendered under")
+            .nth(1)
+            .unwrap_or_else(|| panic!("the settings section: {c}"));
+        let row = section
+            .lines()
+            .find(|l| l.starts_with("| api |"))
+            .unwrap_or_else(|| panic!("a settings row: {section}"));
+        // Count **cell delimiters**, not `|` characters: an escaped `\|` is
+        // content, and GFM does not split on it. Counting raw pipes would fail
+        // on the correct output and pass on some wrong ones.
+        let delimiters = row
+            .char_indices()
+            .filter(|&(i, ch)| ch == '|' && !row[..i].ends_with('\\'))
+            .count();
+        assert_eq!(
+            delimiters, 4,
+            "the row keeps exactly its own four cell delimiters: {row}"
         );
     }
 
