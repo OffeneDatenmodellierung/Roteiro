@@ -921,6 +921,15 @@ pub struct WorkspaceSummary {
     /// Cross-repo links found in total, which `cross_links` may be a capped view
     /// of — so the section can say what it is not showing.
     pub cross_links_total: usize,
+    /// How many of `cross_links_total` were **declared** (`[[links]]`) rather
+    /// than inferred.
+    ///
+    /// Counted before the cap, not from `cross_links`: that vector is truncated
+    /// to [`WORKSPACE_CROSS_LINK_ROWS`](crate::WORKSPACE_CROSS_LINK_ROWS) rows,
+    /// so counting it would describe the rows on screen while reading as a
+    /// statement about the workspace — a caption that quietly changes meaning
+    /// once a workspace grows past the cap.
+    pub cross_links_authored: usize,
 }
 
 /// Render a **workspace** vault's overview: the members and their scale, the
@@ -1057,8 +1066,8 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
     // topology, an **inferred** row is a scored guess. Saying "these are all
     // candidates" over a table containing declarations would understate the
     // declarations exactly as saying nothing would overstate the matches.
-    let authored = ws.cross_links.iter().filter(|l| l.authored).count();
-    let inferred = ws.cross_links.len() - authored;
+    let authored = ws.cross_links_authored;
+    let inferred = ws.cross_links_total - authored;
     let _ = writeln!(
         c,
         "*A spoke's config key and the hub key it corresponds to, across \
@@ -1909,12 +1918,21 @@ mod tests {
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![link(true, "addr"), link(false, "port")],
-            cross_links_total: 2,
+            // Totals deliberately **larger** than the two rows shown: the caption
+            // is a statement about the workspace, and `cross_links` is a capped
+            // view of it. Counting the rows would give 1 and 1 here and read as
+            // correct — which is exactly the bug, invisible until a workspace
+            // outgrows the cap.
+            cross_links_total: 9,
+            cross_links_authored: 4,
         };
         let c = render_workspace_home(&ws).content;
 
-        assert!(c.contains("**1 declared**"), "{c}");
-        assert!(c.contains("**1 inferred**"), "{c}");
+        assert!(
+            c.contains("**4 declared**"),
+            "the caption counts the workspace, not the rows on screen: {c}"
+        );
+        assert!(c.contains("**5 inferred**"), "{c}");
         assert!(
             !c.contains("not authored facts"),
             "the blanket caveat is false once a declared row can appear: {c}"
@@ -1940,6 +1958,7 @@ mod tests {
                 authored: false,
             }],
             cross_links_total: 1,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
 
@@ -1980,6 +1999,7 @@ mod tests {
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![],
             cross_links_total: 0,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
 
@@ -2171,6 +2191,7 @@ mod tests {
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
             cross_links: vec![],
             cross_links_total: 0,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         assert_eq!(note.filename, HOME_NOTE);
@@ -2254,6 +2275,7 @@ mod tests {
                 },
             ],
             cross_links_total: 2,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         // Resolvable: a link to the other member's note, with its confidence.
@@ -2298,6 +2320,7 @@ mod tests {
                 authored: false,
             }],
             cross_links_total: 40,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         assert!(note.content.contains("Showing 1 of 40"), "{}", note.content);
@@ -2311,6 +2334,7 @@ mod tests {
             members: vec![member_summary("api", 7)],
             cross_links: vec![],
             cross_links_total: 0,
+            cross_links_authored: 0,
         };
         let note = render_workspace_home(&ws);
         assert!(note.content.contains("## Cross-repo links"));

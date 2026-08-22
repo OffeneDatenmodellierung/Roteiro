@@ -7515,6 +7515,36 @@ struct LinkResult {
     detail: String,
 }
 
+/// Persist every repo's authored layer, returning `(written, pruned, unanchored)`.
+///
+/// Three numbers rather than one because they need different fixes: `written`
+/// landed, `pruned` named a `from` that does not resolve in its own repo's graph
+/// (unsynced, or a stale/typoed key), and `unanchored` declared no `from` at all
+/// and so has nothing local for an edge to start from. Reporting one total would
+/// leave an author with a short count and no way to tell which.
+///
+/// A no-op that returns zeros when `write` is unset, so the caller has no branch.
+fn persist_authored_layers(
+    write: bool,
+    authored: &std::collections::BTreeMap<std::path::PathBuf, rto_graph::FactSet>,
+    results: &[LinkResult],
+) -> anyhow::Result<(usize, usize, usize)> {
+    if !write {
+        return Ok((0, 0, 0));
+    }
+    let (mut written, mut pruned) = (0usize, 0usize);
+    for (path, facts) in authored {
+        let (applied, dropped) = persist_authored_links(path, facts)?;
+        written += applied;
+        pruned += dropped;
+    }
+    let unanchored = results
+        .iter()
+        .filter(|r| r.status == "ok" && r.from.is_none())
+        .count();
+    Ok((written, pruned, unanchored))
+}
+
 /// Apply one repo's authored-link layer to its graph, returning the edges
 /// applied. Mirrors [`persist_inferred_links`], under its own ref.
 ///
@@ -7817,21 +7847,7 @@ fn run_links(
     // Resolved links whose declaration carries no `from` cannot become an edge —
     // an edge needs a source node in this store — and are counted so the report
     // says so rather than leaving the author to wonder why their count is short.
-    let mut written = 0usize;
-    let mut pruned = 0usize;
-    let unanchored = if write {
-        for (path, facts) in &authored {
-            let (applied, dropped) = persist_authored_links(path, facts)?;
-            written += applied;
-            pruned += dropped;
-        }
-        results
-            .iter()
-            .filter(|r| r.status == "ok" && r.from.is_none())
-            .count()
-    } else {
-        0
-    };
+    let (written, pruned, unanchored) = persist_authored_layers(write, &authored, &results)?;
 
     if json {
         emit_json(&results)?;
@@ -14164,6 +14180,10 @@ fn render_obsidian_workspace(
         ))
     });
     let cross_links_total = cross_links.len();
+    // Counted before the cap: the caption reads as a statement about the
+    // workspace, so counting the truncated view would make it quietly wrong the
+    // moment a workspace outgrows `WORKSPACE_CROSS_LINK_ROWS`.
+    let cross_links_authored = cross_links.iter().filter(|l| l.authored).count();
     cross_links.truncate(WORKSPACE_CROSS_LINK_ROWS);
 
     let home = rto_render::render_workspace_home(&rto_render::WorkspaceSummary {
@@ -14171,6 +14191,7 @@ fn render_obsidian_workspace(
         members: summaries,
         cross_links,
         cross_links_total,
+        cross_links_authored,
     });
     std::fs::write(out.join(&home.filename), &home.content)?;
 
