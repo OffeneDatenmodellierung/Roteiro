@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.0.2...rto-render-v2.1.0) - 2026-08-22
+
+### Added
+
+- *(mcp)* let the operator restrict the advertised tool surface (--tools)
+
 ## [2.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.0.0...rto-render-v2.0.1) - 2026-08-21
 
 ### Fixed
