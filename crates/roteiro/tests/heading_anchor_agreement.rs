@@ -27,32 +27,47 @@ use std::path::{Path, PathBuf};
 
 /// Every published site page's `(path, markdown)`, read from the repository.
 ///
-/// Site pages are not only under `website/pages` — six live under `docs/` — so
-/// the marker decides membership rather than the directory. Grepping one
-/// directory is how a check comes to cover less than it claims.
+/// The **marker** decides membership, and the walk is repo-wide so that is
+/// actually true: site pages are not only under `website/pages` — six of the
+/// fourteen live under `docs/` — and a check that greps one directory covers
+/// less than it claims. A page that lands somewhere new is picked up here
+/// without anyone remembering to add a path.
+///
+/// `target/` and `.git/` are skipped because they hold build output and object
+/// storage, not authored documents; an unreadable entry is skipped rather than
+/// failing the walk, since a broken symlink is not a site page.
 fn site_pages() -> Vec<(String, String)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut out = Vec::new();
-    for dir in ["website/pages", "docs"] {
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "md"))
-            .collect();
-        paths.sort();
-        for path in paths {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if rto_spec::is_site_page(&text) {
-                let rel = format!("{dir}/{}", path.file_name().unwrap().to_string_lossy());
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if !matches!(name.to_str(), Some("target" | ".git")) {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|e| e == "md")
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && rto_spec::is_site_page(&text)
+            {
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
                 out.push((rel, text));
             }
         }
     }
+    // A directory walk yields in filesystem order, which differs between
+    // machines; the assertions below are per-page, but a stable order keeps a
+    // failure reproducible.
+    out.sort();
     out
 }
 
