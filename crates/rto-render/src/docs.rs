@@ -299,11 +299,23 @@ fn options() -> Options {
 /// The `id` for every heading in `md`, in document order.
 ///
 /// An explicit `{#anchor}` wins; otherwise the id is [`rto_graph::slugify`] of
-/// the heading text — the same function that builds the section's node key, so
-/// an authored link to `site:modes#offline-mode` lands on the heading the graph
-/// says it does. A heading whose text slugifies to nothing (`## ###`) falls back
-/// to its position, and a repeat gets a `-2`, `-3`, … suffix, because two
-/// elements sharing an `id` means one of them is unreachable.
+/// the heading text. Both branches go through [`rto_graph::heading_id_from`] —
+/// the *same* function `rto_spec` builds the section's node key with — so an
+/// authored link to `site:modes#offline` lands on the heading the graph says it
+/// does.
+///
+/// That sentence used to be here and was only half true: this honoured an
+/// explicit `{#anchor}` and `rto_spec` slugified the heading text regardless, so
+/// a heading that declared its own address had one id in the page and a
+/// different key in the graph (#524). The claim is now enforced by construction
+/// rather than asserted in prose, which is the difference that matters.
+///
+/// The two **document-level** rules stay here, because only a renderer emits
+/// elements: a heading whose id would be empty (`## ###`) falls back to its
+/// position, and a repeat gets a `-2`, `-3`, … suffix, because two elements
+/// sharing an `id` means one of them is unreachable. `rto_spec` does neither, so
+/// a page with two identically-titled headings would diverge again — latent
+/// today, since no page has one.
 ///
 /// Computed from a *first parse* rather than a line scan: heading text can be
 /// spread over several inline events, and `#` inside a fenced block is not a
@@ -356,9 +368,11 @@ fn heading_ids(md: &str) -> Vec<String> {
                 let Some((explicit, text)) = current.take() else {
                     continue;
                 };
-                let base = explicit
-                    .filter(|e| !e.is_empty())
-                    .unwrap_or_else(|| rto_graph::slugify(&text));
+                // The shared rule, not a local copy of it: `rto_spec` builds the
+                // section's node key with this same function, so the `id` emitted
+                // here and the key a `[[doc#section]]` link resolves to cannot
+                // disagree (#524).
+                let base = rto_graph::heading_id_from(explicit.as_deref(), text.trim());
                 let base = if base.is_empty() {
                     format!("section-{}", ids.len() + 1)
                 } else {

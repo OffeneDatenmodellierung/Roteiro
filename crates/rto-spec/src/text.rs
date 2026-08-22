@@ -26,6 +26,29 @@ pub(crate) fn lang_for(path: &str) -> String {
 /// argument.
 pub(crate) use rto_graph::slugify;
 
+/// The `id` a `## ` heading claims — its explicit `{#id}` when the author wrote
+/// one, else [`slugify`] of its visible text.
+///
+/// Re-exported for the same reason as [`slugify`], and it is the half that was
+/// missing: this crate built every section key by slugifying the text even when
+/// the heading declared an address of its own, so a page's `{#offline}` anchor
+/// and its `site:modes#1-offline-mode-…` node key named different places (#524).
+///
+/// # What that does and does not now guarantee
+///
+/// The **base** id is one rule and both sides compute it here, so a heading that
+/// declares an address is keyed by it. `rto_render` then applies two rules this
+/// crate does not, because only a renderer emits elements: an id that would be
+/// empty (`## ###`) falls back to the heading's position, and a repeat gets a
+/// `-2` suffix, since two elements sharing an `id` means one is unreachable.
+///
+/// So a heading hitting either of those still diverges. Neither is reachable in
+/// this repository today — no page has an untitled or a duplicated heading —
+/// and `heading_anchor_agreement.rs` compares the two sides for every published
+/// page, so it is that test rather than this sentence that says whether they
+/// agree.
+pub(crate) use rto_graph::heading_id;
+
 /// The visible text of a document's first `# ` heading, and of a `## ` heading's
 /// source content.
 ///
