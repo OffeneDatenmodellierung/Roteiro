@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v2.0.2...rto-graph-v2.1.0) - 2026-08-22
+
+### Fixed
+
+- *(workspace,config)* say where a scan stopped, and which file is read
+
+### Other
+
+- Merge pull request #594 from OffeneDatenmodellierung/feat/mcp-surface-bundle
+
+## [2.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v2.0.1...rto-graph-v2.0.2) - 2026-08-21
+
+### Fixed
+
+- *(serve,spec)* strip `<think>` on `/v1`, and refuse an unterminated block
+
 ## [1.30.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v1.29.0...rto-graph-v1.30.0) - 2026-08-21
 
 ### Other

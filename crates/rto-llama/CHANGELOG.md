@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v2.0.1...rto-llama-v2.0.2) - 2026-08-21
+
+### Fixed
+
+- *(llama)* a close tag is only a block if the content opened one
+- *(serve,spec)* strip `<think>` on `/v1`, and refuse an unterminated block
+
+### Other
+
+- Merge pull request #589 from OffeneDatenmodellierung/fix/thinking-582-583
+
 ## [2.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v2.0.0...rto-llama-v2.0.1) - 2026-08-21
 
 ### Other
