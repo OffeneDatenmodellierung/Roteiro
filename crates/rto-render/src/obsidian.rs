@@ -1067,7 +1067,17 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
     // candidates" over a table containing declarations would understate the
     // declarations exactly as saying nothing would overstate the matches.
     let authored = ws.cross_links_authored;
-    let inferred = ws.cross_links_total - authored;
+    // `saturating_sub`: `WorkspaceSummary` is public, so a caller can hand us a
+    // count larger than the total. In release that subtraction wraps and the
+    // caption reports billions of inferred links — a rendering function should
+    // not be the place an inconsistent input becomes nonsense. The debug
+    // assertion says which caller was wrong, in the build that can afford to.
+    debug_assert!(
+        authored <= ws.cross_links_total,
+        "cross_links_authored ({authored}) exceeds cross_links_total ({})",
+        ws.cross_links_total
+    );
+    let inferred = ws.cross_links_total.saturating_sub(authored);
     let _ = writeln!(
         c,
         "*A spoke's config key and the hub key it corresponds to, across \
