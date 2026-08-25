@@ -929,11 +929,12 @@ async fn follow(
 async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let hub = effective_hub(ws, &names)?;
-    // The declared project-level shape, from persisted refs only. Computed before
+    // The declared project-level shape, from persisted refs only. Built before
     // the loop because a project's role depends on the *whole* workspace — who
-    // points at it, which the loop only learns about when it reaches that project.
+    // points at it, which the loop only learns about when it reaches that project
+    // — and built before the hub because the hub is a reduction over it.
     let pgraph = dependency_graph(ws, &names)?;
+    let hub = effective_hub_from(ws, &names, &pgraph)?;
     // The hub's config keys are the live-inference target (empty when there is no
     // hub, so `spoke_correspondence` yields persisted links only).
     let hub_keys = match &hub {
@@ -1363,6 +1364,15 @@ struct ProjectGraph {
     /// self-references, while this counts distinct dependent projects and excludes
     /// them. Only this one answers "is anything downstream of me".
     children: BTreeMap<String, usize>,
+    /// Whether **any** project carries a persisted external-ref edge at all — set
+    /// before the hosted-target filter, so a workspace whose links all point at
+    /// unhosted repos still reports `true`.
+    ///
+    /// That distinction is the whole reason it is a separate flag rather than
+    /// `!parents.is_empty()`: "nothing has been linked yet" falls back to
+    /// inference, while "links exist but dangle" keeps the historical `None` hub,
+    /// and both leave `parents` empty.
+    has_any_external_refs: bool,
 }
 
 impl ProjectGraph {
@@ -1383,8 +1393,13 @@ fn dependency_graph(ws: &Workspace, names: &[String]) -> Result<ProjectGraph, Ap
     let mut parents: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     let mut inbound_edges: BTreeMap<String, usize> = BTreeMap::new();
     let mut children: BTreeMap<String, usize> = BTreeMap::new();
+    let mut has_any_external_refs = false;
     for name in names {
         for ExternalRef { node, .. } in ws.with_store(Some(name), external_refs)?? {
+            // Before the target filter below, deliberately: a ref that names an
+            // unhosted project is still a ref, and the caller distinguishing
+            // "never linked" from "linked but dangling" depends on seeing it.
+            has_any_external_refs = true;
             if let Some(qualified) = external_ref_target(&node)
                 && let Some((project, _)) = parse_qualified(&qualified)
                 && hosted.contains(project)
@@ -1408,6 +1423,7 @@ fn dependency_graph(ws: &Workspace, names: &[String]) -> Result<ProjectGraph, Ap
         parents,
         inbound_edges,
         children,
+        has_any_external_refs,
     })
 }
 
@@ -1451,12 +1467,16 @@ fn hierarchy_role(graph: &ProjectGraph, name: &str) -> &'static str {
 /// the override matrix pivots on — and the wrong answer for "where does the chain
 /// end", which is why a project's place in the hierarchy is now reported separately
 /// as its `role` (ADR-0009 v1.15).
-fn determine_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, ApiError> {
-    Ok(dependency_graph(ws, names)?
+///
+/// Takes the [`ProjectGraph`] rather than the workspace: it is a pure reduction
+/// over what that already holds, so a caller with the graph in hand does not walk
+/// every project's refs a second time to be told what it just computed.
+fn determine_hub(graph: &ProjectGraph) -> Option<String> {
+    graph
         .inbound_edges
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(p, _)| p))
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .map(|(p, _)| p.clone())
 }
 
 /// The hub the cross-repo views infer against, honouring both what is persisted and
@@ -1472,26 +1492,29 @@ fn determine_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, Api
 /// - but if refs *do* exist yet only target unhosted projects, keep `None` (there is
 ///   nothing hosted to hub on), preserving the drift-not-404 behaviour.
 fn effective_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, ApiError> {
-    if let Some(hub) = determine_hub(ws, names)? {
+    effective_hub_from(ws, names, &dependency_graph(ws, names)?)
+}
+
+/// [`effective_hub`] over a [`ProjectGraph`] already in hand.
+///
+/// Both of the first two branches are answered from the graph, so this walks the
+/// stores **not at all**; only the third — the config-key count, which reads a
+/// different kind of node entirely — still needs `ws`. Before this existed,
+/// `topology` built the graph and *also* called `effective_hub`, which built it
+/// again inside `determine_hub` and then, on a workspace with no hosted refs, made
+/// a third pass to ask whether any refs existed at all.
+fn effective_hub_from(
+    ws: &Workspace,
+    names: &[String],
+    graph: &ProjectGraph,
+) -> Result<Option<String>, ApiError> {
+    if let Some(hub) = determine_hub(graph) {
         return Ok(Some(hub));
     }
-    if workspace_has_external_refs(ws, names)? {
+    if graph.has_any_external_refs {
         return Ok(None);
     }
     config_key_count_hub(ws, names)
-}
-
-/// Whether any hosted project in the workspace carries a persisted external-ref edge
-/// (an authored or previously-written cross-repo link). Distinguishes "nothing has
-/// been linked yet" (fall back to inference) from "links exist but dangle" (keep the
-/// historical `None` hub).
-fn workspace_has_external_refs(ws: &Workspace, names: &[String]) -> Result<bool, ApiError> {
-    for name in names {
-        if !ws.with_store(Some(name), external_refs)??.is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// The hosted project with the most `config_key` nodes — the CLI's default hub
