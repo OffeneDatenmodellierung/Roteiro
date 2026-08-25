@@ -1060,6 +1060,35 @@ mod tests {
         assert_eq!(doc.sections[0].title, "Design notes");
     }
 
+    /// The fallback path — a heading with **no** `{#id}` — changed too, and this
+    /// records what it changed to.
+    ///
+    /// The old key slugified the raw source line, so `## See [the plan](plan.md)`
+    /// keyed as `see-the-plan-plan-md`: the link's target spelled out in an
+    /// address, matching nothing the document renders. The key is now the slug of
+    /// the heading's **text**, `see-the-plan`, which is the anchor the renderer
+    /// emits — the agreement #524 exists to establish, arrived at from the other
+    /// direction.
+    ///
+    /// Only link and HTML syntax move a key: `slugify` already dropped backticks
+    /// and asterisks, so code spans and emphasis keyed by their text before and
+    /// after. Measured across all 247 `## ` headings under `docs/` at the time of
+    /// this change, **nothing moved** — no ADR or blueprint heading here contains
+    /// a link.
+    #[test]
+    fn a_heading_with_no_id_is_keyed_by_its_text_not_its_source() {
+        let adr = "---\nadr-id: \"0003\"\nstatus: Accepted\n---\n\n\
+                   # T\n\n## See [the plan](plan.md)\n\n## A `code` heading\n";
+        let doc = parse_adr("docs/adr/0003-x.md", adr).expect("parse");
+        let slugs: Vec<_> = doc.sections.iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["see-the-plan", "a-code-heading"],
+            "the link's target is not part of the address; the code span never was"
+        );
+        assert_eq!(doc.sections[0].title, "See the plan");
+    }
+
     /// Accepting `{#id}` on ADR headings must not cost the version table.
     ///
     /// `is_version_history` matches on the heading's words. While the title kept
