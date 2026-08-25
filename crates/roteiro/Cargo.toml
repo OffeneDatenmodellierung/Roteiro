@@ -83,7 +83,7 @@ http-body-util = "0.1"
 # `config_keys`), so it is in the lockfile and in every build of this binary
 # already, and neither `cargo deny` nor `cargo audit` gains a new surface. Keep
 # the version in step with `crates/rto-graph/Cargo.toml`.
-yaml-rust2 = "0.11.0"
+yaml-rust2 = "0.12.0"
 
 [features]
 # Ingest is available in a stock install — ADR-0014 lists it as "always, no
