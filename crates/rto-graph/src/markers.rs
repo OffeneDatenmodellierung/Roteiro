@@ -310,6 +310,19 @@ const IGNORE_LINE: &str = "roteiro:ignore";
 /// directive also satisfies the per-line check.
 const IGNORE_FILE: &str = "roteiro:ignore-file";
 
+/// Whether `bytes` opts the whole file out of scanning with `roteiro:ignore-file`.
+///
+/// Public because the directive is not only about intent debt: a file that
+/// enumerates a vocabulary rather than using it — a detector, a fixture, a test
+/// that embeds the very thing being detected — makes the same claim to every
+/// scanner that reads sources. `rto_spec::convention` asks this before reporting
+/// an unjustified `#[allow(…)]`, so a file declaring itself fixture data is
+/// exempt from both rules by one directive rather than two.
+#[must_use]
+pub fn is_scan_exempt(bytes: &[u8]) -> bool {
+    contains_bytes(bytes, IGNORE_FILE.as_bytes())
+}
+
 /// Scan `bytes` for intent-debt markers, one (highest-priority) per line, in
 /// ascending line order. Deterministic: identical `(path, bytes)` always yield
 /// identical markers. `path` selects the language's [`CommentSyntax`], which
@@ -318,7 +331,7 @@ const IGNORE_FILE: &str = "roteiro:ignore-file";
 #[must_use]
 pub fn scan_markers(path: &str, bytes: &[u8]) -> Vec<Marker> {
     // Whole-file opt-out: a blob carrying the file directive is skipped entirely.
-    if contains_bytes(bytes, IGNORE_FILE.as_bytes()) {
+    if is_scan_exempt(bytes) {
         return Vec::new();
     }
     let syntax = comment_syntax(path);

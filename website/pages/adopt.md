@@ -22,7 +22,7 @@ roteiro init
 <tr><th>Piece</th><th>What it does</th></tr>
 <tr><td>The store</td><td>A content-addressed graph under <code>.git/</code> — per-worktree, shared cache, never committed.</td></tr>
 <tr><td><code>post-checkout</code> · <code>post-merge</code> · <code>post-commit</code> hooks</td><td>Keep the graph fresh automatically as <code>HEAD</code> moves — no manual <code>sync</code>.</td></tr>
-<tr><td><code>pre-commit</code> hook</td><td>Runs <code>roteiro check</code> and <strong>blocks a commit that introduces drift</strong> (a dangling ADR link or a stale <code>@rto:</code> annotation). Skip once with <code>git commit --no-verify</code>.</td></tr>
+<tr><td><code>pre-commit</code> hook</td><td>Runs <code>roteiro check</code> and <strong>blocks a commit that introduces drift</strong> (a dangling ADR link, a stale <code>@rto:</code> annotation, or an <code>#[allow(…)]</code> with no justification comment). Skip once with <code>git commit --no-verify</code>.</td></tr>
 <tr><td><code>AGENTS.md</code></td><td>A managed section telling agents to query the graph and to run <code>roteiro review</code>/<code>check</code> — the cross-tool standard many agents read.</td></tr>
 </table>
 

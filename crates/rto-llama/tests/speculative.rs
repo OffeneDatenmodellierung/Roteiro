@@ -471,6 +471,9 @@ fn measure_speculative_speedup() {
         let acceptance = if drafted == 0 {
             "n/a".to_owned()
         } else {
+            // Token counters over one benchmark run, divided for a percentage
+            // printed to the nearest whole number. `f64` is exact to 2^53 and a
+            // run that drafted that many tokens would not have finished.
             #[allow(clippy::cast_precision_loss)]
             let rate = (after.accepted - before.accepted) as f64 / drafted as f64;
             format!("{:.0}%", rate * 100.0)
