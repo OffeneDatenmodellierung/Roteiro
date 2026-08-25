@@ -524,7 +524,15 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
             continue;
         }
         if let Some(heading) = line.strip_prefix("## ") {
-            let title = heading.trim().to_owned();
+            // Reduced to its text, as a site page's is — not the raw source line.
+            // Two things read this: the graph's section title, which would
+            // otherwise display a `{#id}` the rendered `<h2>` never shows; and
+            // `is_version_history` immediately below, which matches on the words.
+            // Leaving the id in would make `## Version history {#history}` fail
+            // that match and silently drop every row of the table — the version
+            // facts gone, with no violation raised, in an ADR that had done
+            // nothing wrong but declare an anchor.
+            let title = crate::text::heading_text(heading);
             in_history = is_version_history(&title);
             // The heading's declared id when it has one, exactly as a site page's
             // is (#524). No ADR carries an explicit `{#id}` today, so this moves
@@ -1046,6 +1054,47 @@ mod tests {
         let doc = parse_adr("docs/adr/0001-x.md", adr).expect("parse");
         let slugs: Vec<_> = doc.sections.iter().map(|s| s.slug.as_str()).collect();
         assert_eq!(slugs, ["arch", "plain-heading"]);
+        // …and the title is the heading's *text*. The rendered `<h2>` shows
+        // "Design notes"; a section titled "Design notes {#arch}" would put the
+        // anchor's source into every view that displays it.
+        assert_eq!(doc.sections[0].title, "Design notes");
+    }
+
+    /// Accepting `{#id}` on ADR headings must not cost the version table.
+    ///
+    /// `is_version_history` matches on the heading's words. While the title kept
+    /// the raw source line, declaring an anchor on the history heading made
+    /// `"Version history {#history}"` fail that match, and **every row of the
+    /// table was dropped from `VersionFacts` with no violation raised** — the
+    /// version-drift gate silently reduced to nothing on an ADR whose only
+    /// unusual act was naming its own anchor.
+    #[test]
+    fn an_anchored_version_history_heading_still_yields_its_rows() {
+        let adr = "---\nadr-id: \"0002\"\nstatus: Accepted\n---\n\n\
+                   # T\n\n## Version history {#history}\n\n\
+                   | Version | Date | Notes |\n|---|---|---|\n\
+                   | 1.0 | 2026-01-01 | First. |\n";
+        let doc = parse_adr("docs/adr/0002-x.md", adr).expect("parse");
+        assert_eq!(
+            doc.sections[0].slug, "history",
+            "the declared anchor is still the key"
+        );
+        // The rows first, and deliberately before the title assertion: the title
+        // is the *mechanism*, the lost rows are the *consequence*, and asserting
+        // the mechanism first would let this test pass its own fault injection by
+        // failing early — reporting a cosmetic difference and never reaching the
+        // question of whether the gate still has anything to read.
+        assert_eq!(
+            doc.versions
+                .history
+                .iter()
+                .map(|r| r.version.to_string())
+                .collect::<Vec<_>>(),
+            ["1.0"],
+            "the table under an anchored heading is still read: {:?}",
+            doc.versions
+        );
+        assert_eq!(doc.sections[0].title, "Version history");
     }
 
     #[test]
