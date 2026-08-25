@@ -1355,12 +1355,24 @@ struct ProjectGraph {
     /// edges, not distinct projects: five keys in one repo referencing the hub are
     /// five, which is what has always decided the hub tiebreak.
     inbound_edges: BTreeMap<String, usize>,
+    /// For each project, how many **other projects** name it as a parent — the
+    /// inverse of [`Self::parents`], accumulated in the same pass.
+    ///
+    /// Not the same number as [`Self::inbound_edges`], and not derivable from it:
+    /// that counts edges (five keys in one repo are five) and includes a repo's
+    /// self-references, while this counts distinct dependent projects and excludes
+    /// them. Only this one answers "is anything downstream of me".
+    children: BTreeMap<String, usize>,
 }
 
 impl ProjectGraph {
-    /// The hosted projects that depend on `name` — the inverse of [`Self::parents`].
+    /// How many hosted projects depend on `name`.
+    ///
+    /// A lookup rather than a scan: it is called once per project, and scanning
+    /// every `parents` set each time made role assignment O(n²) in the number of
+    /// projects for an answer already known while the map was being built.
     fn children_of(&self, name: &str) -> usize {
-        self.parents.values().filter(|p| p.contains(name)).count()
+        self.children.get(name).copied().unwrap_or(0)
     }
 }
 
@@ -1370,6 +1382,7 @@ fn dependency_graph(ws: &Workspace, names: &[String]) -> Result<ProjectGraph, Ap
     let hosted: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
     let mut parents: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     let mut inbound_edges: BTreeMap<String, usize> = BTreeMap::new();
+    let mut children: BTreeMap<String, usize> = BTreeMap::new();
     for name in names {
         for ExternalRef { node, .. } in ws.with_store(Some(name), external_refs)?? {
             if let Some(qualified) = external_ref_target(&node)
@@ -1377,11 +1390,16 @@ fn dependency_graph(ws: &Workspace, names: &[String]) -> Result<ProjectGraph, Ap
                 && hosted.contains(project)
             {
                 *inbound_edges.entry(project.to_owned()).or_default() += 1;
-                if project != name.as_str() {
-                    parents
+                if project != name.as_str()
+                    // Only a *newly* inserted parent is a new dependent: a spoke
+                    // referencing the hub from twenty config keys is one child of
+                    // it, not twenty.
+                    && parents
                         .entry(name.clone())
                         .or_default()
-                        .insert(project.to_owned());
+                        .insert(project.to_owned())
+                {
+                    *children.entry(project.to_owned()).or_default() += 1;
                 }
             }
         }
@@ -1389,6 +1407,7 @@ fn dependency_graph(ws: &Workspace, names: &[String]) -> Result<ProjectGraph, Ap
     Ok(ProjectGraph {
         parents,
         inbound_edges,
+        children,
     })
 }
 
@@ -3714,6 +3733,41 @@ mod tests {
             matrix_hubs,
             ["chart"],
             "exactly one project is the config-key baseline: {json}"
+        );
+    }
+
+    /// A repo that references its hub from several keys is **one** dependent of
+    /// it, not several. The child count is accumulated while the parent set is
+    /// built, so it has to be incremented only on a newly inserted parent —
+    /// counting every edge instead would still give the right *role* here (both
+    /// are `> 0`), which is exactly why it needs asserting directly rather than
+    /// through a role.
+    #[tokio::test]
+    async fn many_links_from_one_repo_make_one_dependent() {
+        let ws = Workspace::from_stores([
+            (
+                "infra".to_owned(),
+                chain_repo(
+                    "a",
+                    &["chart::cfgkey:cfg.toml#c", "chart::cfgkey:cfg.toml#c2"],
+                ),
+            ),
+            ("chart".to_owned(), chain_repo("c", &[])),
+        ]);
+        let names = ws.names();
+        // `ApiError` is not `Debug`, so no `.expect` here.
+        let Ok(graph) = dependency_graph(&ws, &names) else {
+            panic!("the dependency graph must build for a two-repo workspace")
+        };
+        assert_eq!(
+            graph.children_of("chart"),
+            1,
+            "two links from one repo are one dependent project"
+        );
+        assert_eq!(
+            graph.inbound_edges.get("chart").copied(),
+            Some(2),
+            "…while the hub tiebreak still counts both edges, as it always has"
         );
     }
 
