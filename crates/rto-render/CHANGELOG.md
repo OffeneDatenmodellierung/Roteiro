@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.3.0...rto-render-v3.0.0) - 2026-08-22
+
+### Added
+
+- *(render)* the workspace vault carries findings, settings and a manifest
+
+### Fixed
+
+- *(spec)* [**breaking**] a heading's id is one rule, honoured by the graph and the renderer
+- *(render)* the manifest is a table too, and a bare URL still linkifies
+- *(render)* there are three rendering contexts here, not one
+- *(render)* quote every analyzer field, and stop the manifest overpromising
+
+### Other
+
+- *(render)* the vault stopped arguing against its own new section
+
 ## [2.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.2.0...rto-render-v2.3.0) - 2026-08-22
 
 ### Added
