@@ -14122,9 +14122,19 @@ fn render_obsidian(
 ///
 /// # Errors
 ///
-/// Propagates workspace, git and store failures. A member that is simply unsynced
-/// is not an error: [`detect_spoke_pin`] returns `None` for it, which renders as
-/// no pin found.
+/// Propagates workspace, git and store failures.
+///
+/// `project_graph` returns `WorkspaceError::NoGraph` for a member with no store,
+/// which cannot arise here: the loop in [`render_obsidian_workspace`] calls
+/// `build_graph` for every member before this runs, so each has been synced by the
+/// time it is asked about. Stated because the invariant is an *ordering* one and
+/// nothing in this signature enforces it — and because, were it ever violated,
+/// erroring is the right answer rather than silently rendering a manifest with
+/// pins missing from it.
+///
+/// A member that is synced but pins nothing recognisable is a different case and
+/// not an error: [`detect_spoke_pin`] returns `None`, which renders as
+/// *(none detected)*.
 fn workspace_pins(
     ws: &rto_graph::Workspace,
     member_names: &[String],

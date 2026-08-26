@@ -1234,12 +1234,18 @@ fn write_pins(c: &mut String, ws: &WorkspaceSummary) {
     }
     c.push_str("\n### Version pins\n\n");
     let found = ws.pins.iter().filter(|p| p.rev.is_some()).count();
+    // Both halves agree with the count, not just the noun: "1 of 1 dependency
+    // resolve" is what varying one and fixing the other produces.
+    let (noun, verb) = if ws.pins.len() == 1 {
+        ("dependency", "resolves")
+    } else {
+        ("dependencies", "resolve")
+    };
     let _ = writeln!(
         c,
-        "*{found} of {} dependenc{} resolve to a hub revision. A pin is what the \
-         member **deploys**, which is not the commit it was rendered at.*\n",
-        ws.pins.len(),
-        if ws.pins.len() == 1 { "y" } else { "ies" }
+        "*{found} of {} {noun} {verb} to a hub revision. A pin is what the member \
+         **deploys**, which is not the commit it was rendered at.*\n",
+        ws.pins.len()
     );
     c.push_str("| Member | Pins | At revision | Read from |\n| --- | --- | --- | --- |\n");
     for p in &ws.pins {
@@ -2876,6 +2882,35 @@ after",
         assert!(
             c.contains("1 of 2 dependencies resolve"),
             "counts found against asked: {c}"
+        );
+    }
+
+    /// A one-dependency workspace reads as English.
+    ///
+    /// Varying the noun and fixing the verb produced "1 of 1 dependency resolve",
+    /// which is the failure mode of pluralising by hand: the two halves have to
+    /// agree with the same count, not one of them with the count and the other
+    /// with a guess. Two-member workspaces are common enough that this renders.
+    #[test]
+    fn the_pins_caption_agrees_with_a_single_dependency() {
+        let ws = WorkspaceSummary {
+            generated_at: "2026-08-26T10:00:00Z".to_owned(),
+            name: "pair".into(),
+            members: vec![member_summary("deploy", 2), member_summary("app", 5)],
+            pins: vec![MemberPin {
+                member: "deploy".into(),
+                hub: "app".into(),
+                rev: Some("1.4.0".into()),
+                via: Some("image acme/app:1.4.0".into()),
+            }],
+            cross_links: vec![],
+            cross_links_total: 0,
+            cross_links_authored: 0,
+        };
+        let c = render_workspace_home(&ws).content;
+        assert!(
+            c.contains("1 of 1 dependency resolves"),
+            "singular noun and singular verb: {c}"
         );
     }
 
