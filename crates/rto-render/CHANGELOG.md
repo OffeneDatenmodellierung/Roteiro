@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v3.0.0...rto-render-v3.1.0) - 2026-08-26
+
+### Other
+
+- Merge pull request #627 from OffeneDatenmodellierung/dependabot/cargo/yaml-rust2-0.12.0
+- Merge branch 'main' into fix/524-heading-id-is-one-rule
+
 ## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v2.3.0...rto-render-v3.0.0) - 2026-08-22
 
 ### Added

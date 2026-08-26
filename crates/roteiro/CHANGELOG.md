@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.0.0...roteiro-v3.1.0) - 2026-08-26
+
+### Added
+
+- *(graph)* a config file that names an image is declaring a pin
+
+### Other
+
+- Merge pull request #627 from OffeneDatenmodellierung/dependabot/cargo/yaml-rust2-0.12.0
+- Merge pull request #630 from OffeneDatenmodellierung/feat/431-guard-every-public-enum
+- *(guard)* a scan that cannot read a file must fail, not skip it
+- *(guard)* every public enum in the workspace must decide, not just rto-remote's
+
 ## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v2.3.0...roteiro-v3.0.0) - 2026-08-22
 
 ### Added

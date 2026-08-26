@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.0.0...rto-graph-v3.1.0) - 2026-08-26
+
+### Added
+
+- *(graph)* a config file that names an image is declaring a pin
+
+### Fixed
+
+- *(graph)* a crate's `repository` is not an image it deploys
+
+### Other
+
+- Merge pull request #627 from OffeneDatenmodellierung/dependabot/cargo/yaml-rust2-0.12.0
+- Merge branch 'main' into fix/524-heading-id-is-one-rule
+- *(graph)* state the one heading the shared rule cannot answer for
+- Merge branch 'main' into fix/524-heading-id-is-one-rule
+
 ## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v2.3.0...rto-graph-v3.0.0) - 2026-08-22
 
 ### Added
