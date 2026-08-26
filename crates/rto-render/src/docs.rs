@@ -300,9 +300,9 @@ fn options() -> Options {
 ///
 /// An explicit `{#anchor}` wins; otherwise the id is [`rto_graph::slugify`] of
 /// the heading text. Both branches go through [`rto_graph::heading_id_from`] —
-/// the *same* function `rto_spec` builds the section's node key with — so an
-/// authored link to `site:modes#offline` lands on the heading the graph says it
-/// does.
+/// the *same* function `rto_spec` builds the section's node key with, for ADRs,
+/// blueprints and site pages alike — so an authored link to `site:modes#offline`
+/// lands on the heading the graph says it does.
 ///
 /// That sentence used to be here and was only half true: this honoured an
 /// explicit `{#anchor}` and `rto_spec` slugified the heading text regardless, so

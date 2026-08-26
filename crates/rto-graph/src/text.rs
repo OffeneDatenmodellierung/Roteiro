@@ -126,11 +126,21 @@ pub fn heading_text(source: &str) -> String {
 ///
 /// # One rule, two callers — which is the whole point
 ///
-/// `rto_render` puts this on the rendered heading as its `id` attribute and
-/// `rto_spec` builds the section's node key from it, so a `[[doc#section]]` link
-/// resolves in the graph *and* lands in the browser. Both files already claimed
-/// that agreement in prose; before issue #524 the code only had it on one of two
-/// branches. The renderer honoured an explicit `{#id}` and the graph slugified
+/// `rto_render` puts this on the rendered heading as its `id` attribute, and
+/// `rto_spec` builds the section's node key from it for **all three** document
+/// classes it parses — ADRs, blueprints and site pages — so a `[[doc#section]]`
+/// link resolves in the graph *and* lands in the browser.
+///
+/// The three are named rather than summarised because "universally" is the kind
+/// of claim that goes quietly stale: #524's first fix reached site pages only,
+/// and ADRs and blueprints kept slugifying the heading text, so an author who
+/// wrote `{#id}` in an ADR would have got the same bug in a document class the
+/// fix had not reached. Extending it moved **no** existing key — none of the
+/// repository's 233 section keys changed — because no ADR or blueprint declares
+/// an explicit id today. It removes the trap rather than repairing damage.
+///
+/// Both files already claimed that agreement in prose; before #524 the code only
+/// had it on one of two branches. The renderer honoured an explicit `{#id}` and the graph slugified
 /// the heading text regardless, so
 ///
 /// ```text
@@ -172,6 +182,36 @@ pub fn heading_id_from(explicit: Option<&str>, text: &str) -> String {
 /// so "what id will this heading get" is answered once and identically on both
 /// sides. A line scan would have to re-implement attribute-block parsing, which
 /// is how a third rule gets born.
+///
+/// # The one heading it cannot answer for
+///
+/// The parse is of `# {source}` **alone**, so anything a heading inherits from
+/// the rest of its document is invisible here. In practice that is one
+/// construct: a **reference-style link**, whose definition lives elsewhere in the
+/// file.
+///
+/// ```text
+/// [plan]: plan.md
+///
+/// ## See [the plan][plan]
+/// ```
+///
+/// The renderer parses the whole document, resolves the definition, and anchors
+/// the heading at `see-the-plan`. This function sees no definition, so
+/// pulldown-cmark keeps `[the plan][plan]` as literal text and it returns
+/// `see-the-plan-plan`.
+///
+/// Left as a stated limit rather than fixed, because fixing it means threading
+/// every document's reference definitions through this signature and giving each
+/// of the three line-scanning parsers a pre-pass to collect them — a large change
+/// against **zero** occurrences: the repository contains no reference-style link
+/// definitions at all, in any document, and no heading anywhere uses the syntax.
+///
+/// It is not unguarded, either. `heading_anchor_agreement` renders every site
+/// page in full and compares the emitted `id` attributes against the graph's
+/// section keys, so a real instance in a site page fails that test rather than
+/// diverging quietly. See also the blockquote divergence (#621), recorded the
+/// same way.
 #[must_use]
 pub fn heading_id(source: &str) -> String {
     let md = format!("# {source}");
@@ -195,7 +235,25 @@ pub fn heading_id(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_h1, heading_text, slugify};
+    use super::{first_h1, heading_id, heading_text, slugify};
+
+    /// The single construct the isolated parse cannot resolve, pinned so the
+    /// limit is a recorded value rather than a surprise. See [`heading_id`]'s
+    /// docs: the renderer, parsing the whole document, would anchor the same
+    /// heading at `see-the-plan`.
+    ///
+    /// Asserted as the *divergent* value on purpose. Writing the aspirational
+    /// `see-the-plan` here and marking it `#[ignore]` would leave the real
+    /// behaviour untested, and the next person to touch this would have no way
+    /// to tell a deliberate limit from an undiscovered bug.
+    #[test]
+    fn a_reference_style_link_cannot_resolve_without_its_document() {
+        assert_eq!(heading_id("See [the plan][plan]"), "see-the-plan-plan");
+        // Inline and collapsed forms need nothing from the document, so they
+        // agree with the renderer already — the gap really is this narrow.
+        assert_eq!(heading_id("See [the plan](plan.md)"), "see-the-plan");
+        assert_eq!(heading_id("See [the plan]"), "see-the-plan");
+    }
 
     #[test]
     fn collapses_punctuation_and_trims() {
