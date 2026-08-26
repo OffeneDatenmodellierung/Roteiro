@@ -472,7 +472,9 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
 /// Deliberately, and consistently with the Dockerfile path, which emits for
 /// `latest` too. The node is the spoke's **claim** about what it deploys;
 /// whether that claim resolves to a hub revision is
-/// [`crate::…`]-downstream — `pins::detect` tries the configured template, then
+/// a question for the pin resolver in the `roteiro` binary, which is a different
+/// crate and so cannot be linked from here: `pins::detect` tries the configured
+/// `[pins]` template, then
 /// `<tag>`, then `v<tag>`, and reports a spoke as unpinned when none exist. Issue
 /// #505 settled that distinction: *no claim* and *a claim that cannot be met* are
 /// different findings, and collapsing them here would hide the second.
@@ -530,7 +532,14 @@ fn config_image_refs(
         // Shape 2: the split Helm form. Anchored on `repository`, because that is
         // the field naming the image; a `tag` on its own says which version of
         // nothing.
-        if last != "repository" || !looks_like_image(value) {
+        // `repository` alone is far too common a word to treat as an image: every
+        // `Cargo.toml` in this workspace carries `[package] repository = "https://…"`,
+        // and matching on the leaf produced one bogus `image_ref` per crate, naming
+        // a GitHub URL as the image. The key has to sit **under an `image` block** —
+        // `image.repository`, `global.image.repository`, `foo.image.repository` —
+        // which is how every chart writes it anyway.
+        let under_image = prefix.rsplit_once('.').map_or(prefix, |(_, seg)| seg) == "image";
+        if last != "repository" || !under_image || !looks_like_image(value) {
             continue;
         }
         let at = |suffix: &str| {
@@ -2459,6 +2468,53 @@ mod tests {
         // Keyed by the config key it came from, so inserting a key above it does
         // not renumber it the way a positional index would.
         assert_eq!(refs[0].key, "imageref:values.yaml#image.repository");
+    }
+
+    /// `repository` is far too common a word to read as an image on its own.
+    ///
+    /// Every `Cargo.toml` in this workspace carries `[package] repository =
+    /// "https://github.com/…"`, and `.toml` is a config path, so anchoring the
+    /// split form on the **leaf** key emitted one bogus `image_ref` per crate,
+    /// each naming a GitHub URL as the image it deploys. Found by Copilot on
+    /// #633 and reproduced against a real `Cargo.toml` before this rule existed.
+    ///
+    /// The key must sit under an `image` **block**, which is how a chart writes
+    /// it anyway — so the narrowing costs nothing real.
+    #[test]
+    fn a_cargo_manifest_repository_is_not_a_container_image() {
+        let reg = Registry::new(crate::IngestConfig::default());
+        let toml = br#"[package]
+name = "roteiro"
+repository = "https://github.com/OffeneDatenmodellierung/Roteiro"
+version = "3.0.0"
+"#;
+        let facts = reg.extract("crates/roteiro/Cargo.toml", "c1", toml);
+        let refs: Vec<&Node> = facts
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("image_ref".into()))
+            .collect();
+        assert!(
+            refs.is_empty(),
+            "a crate's source repository is not an image it deploys: {refs:?}"
+        );
+    }
+
+    /// …but the same leaf **under an `image` block** is one, at any depth a chart
+    /// nests it: `image.repository`, and `global.image.repository`.
+    #[test]
+    fn a_repository_under_an_image_block_is_a_reference_at_any_depth() {
+        let reg = Registry::new(crate::IngestConfig::default());
+        let y = b"global:\n  image:\n    repository: acme/app\n    tag: 2.0.0\n";
+        let facts = reg.extract("values.yaml", "y4", y);
+        let refs: Vec<&Node> = facts
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("image_ref".into()))
+            .collect();
+        assert_eq!(refs.len(), 1, "got: {refs:?}");
+        assert_eq!(refs[0].meta["image"], "acme/app");
+        assert_eq!(refs[0].meta["tag"], "2.0.0");
     }
 
     /// The rules are narrow on purpose: a suffix test would have swallowed
