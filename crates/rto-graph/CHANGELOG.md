@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.1.0...rto-graph-v3.2.0) - 2026-08-26
+
+### Added
+
+- *(graph)* a shared home for the project-dependency rule
+
+### Other
+
+- *(graph)* reuse the crate's external-ref token, and say the list repeats
+
 ## [3.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.0.0...rto-graph-v3.1.0) - 2026-08-26
 
 ### Added

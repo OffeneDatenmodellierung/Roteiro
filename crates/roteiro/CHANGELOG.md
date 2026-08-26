@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.1.0...roteiro-v3.2.0) - 2026-08-26
+
+### Other
+
+- *(api)* the served topology reads the lifted rule
+
 ## [3.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.0.0...roteiro-v3.1.0) - 2026-08-26
 
 ### Added
