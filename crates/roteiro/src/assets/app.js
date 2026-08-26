@@ -426,9 +426,12 @@
 
   function renderTiles(topology, matrix) {
     // `projects` includes the hub (#572), so the spoke count subtracts it.
-    const spokeRepos = (topology.projects || []).filter(
-      (p) => p.role !== "hub"
-    ).length;
+    // Keyed on `isMatrixHub`, not on `role`: since #623 `role` describes a
+    // project's place in the hierarchy (`root`/`intermediate`/`leaf`/`isolated`)
+    // and never takes the value `hub`, so `role !== "hub"` would pass every
+    // project and count the hub as a spoke of itself.
+    const spokeRepos = (topology.projects || []).filter((p) => !p.isMatrixHub)
+      .length;
     const rows = matrix.rows || [];
     const appKeys = rows.length;
     const links = (topology.links || []).length;
@@ -496,14 +499,26 @@
     // which rendered a false label for every workspace whose hub is not literally
     // named `app`, and hid the hub's own drift.
     for (const p of topology.projects || []) {
-      const isHub = p.role === "hub";
+      // The API's `isMatrixHub`, not its `role` — see `renderTiles`. The `role`
+      // passed to `addNode` below is this renderer's own two-value styling
+      // vocabulary and is a different thing from the API field of the same name.
+      const isHub = p.isMatrixHub === true;
+      const keys = `${p.keyCount || 0} keys`;
       addNode({
         id: `p:${p.name}`,
         label: p.label || p.name,
         role: isHub ? "hub" : "spoke",
+        // A snowflake's middle repo is a spoke of one project and the hub of
+        // others (#623); saying so is the whole point of the four-value role, so
+        // the box says which it is rather than leaving every non-baseline
+        // project looking alike.
         sub: isHub
-          ? `${p.keyCount || 0} keys · source of truth`
-          : `${p.keyCount || 0} keys`,
+          ? `${keys} · source of truth`
+          : p.role === "intermediate"
+            ? `${keys} · sub-hub`
+            : p.role === "root"
+              ? `${keys} · depends on nothing here`
+              : keys,
         drift: p.driftCount || 0,
       });
     }

@@ -929,7 +929,12 @@ async fn follow(
 async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let hub = effective_hub(ws, &names)?;
+    // The declared project-level shape, from persisted refs only. Built before
+    // the loop because a project's role depends on the *whole* workspace — who
+    // points at it, which the loop only learns about when it reaches that project
+    // — and built before the hub because the hub is a reduction over it.
+    let pgraph = dependency_graph(ws, &names)?;
+    let hub = effective_hub_from(ws, &names, &pgraph)?;
     // The hub's config keys are the live-inference target (empty when there is no
     // hub, so `spoke_correspondence` yields persisted links only).
     let hub_keys = match &hub {
@@ -1005,7 +1010,22 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
             // Named rather than left for the client to infer by comparing against
             // `hub`: the hub is now one entry among others, and a consumer that
             // has to re-derive which one it is will eventually derive it wrongly.
-            "role": if is_hub { "hub" } else { "spoke" },
+            //
+            // `hub`/`spoke` until v3.0: a binary label cannot describe a snowflake,
+            // where `chart` is a spoke of `app` and the hub of `infra1`/`infra2`.
+            // #572 generalised the *edges* into a directed graph but left this
+            // two-valued, so the chain's root came back labelled `spoke` — the one
+            // project nothing else depends on. The position is now derived from the
+            // project's own in/out degree (ADR-0009 v1.15).
+            "role": hierarchy_role(&pgraph, name),
+            // The hosted projects this one depends on, so a consumer can walk the
+            // chain without re-deriving it from `links` — which it must not do,
+            // since `links` also carries live-inferred correspondences.
+            "parents": pgraph.parents.get(name).cloned().unwrap_or_default(),
+            // Whether this project is the config-key baseline the matrix pivots on.
+            // Separate from `role` because they answer different questions and, in a
+            // chain, different projects: see [`determine_hub`].
+            "isMatrixHub": is_hub,
             "keyCount": key_count,
             "driftCount": drift_count,
         }));
@@ -1317,28 +1337,146 @@ fn resolve_link(ws: &Workspace, node: &Node) -> Result<Option<Node>, ApiError> {
     }
 }
 
+/// The workspace's **project-level** dependency shape, derived once and read by
+/// everything that needs to know who depends on whom.
+///
+/// Built from **persisted** external-ref edges only — the authored `[[links]]` and
+/// previously `--write`-ten ones. Deliberately *not* from the merged link list the
+/// [`topology`] view renders: that list also carries the correspondences
+/// [`spoke_correspondence`] infers live against the hub, which are a config-key
+/// *matching heuristic*, not a declared dependency. Deriving the shape from those
+/// would make every project a child of the hub by construction, and in a chain
+/// (`infra → chart → app`) would invent a `chart ↔ app` cycle out of a match.
+struct ProjectGraph {
+    /// For each project, the hosted projects it points **into** — the hubs it
+    /// depends on. A project is never its own parent, so a self-reference (a repo
+    /// whose link targets its own project name) is dropped here.
+    parents: BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// For each project, how many external-ref **edges** point into it. Counts
+    /// edges, not distinct projects: five keys in one repo referencing the hub are
+    /// five, which is what has always decided the hub tiebreak.
+    inbound_edges: BTreeMap<String, usize>,
+    /// For each project, how many **other projects** name it as a parent — the
+    /// inverse of [`Self::parents`], accumulated in the same pass.
+    ///
+    /// Not the same number as [`Self::inbound_edges`], and not derivable from it:
+    /// that counts edges (five keys in one repo are five) and includes a repo's
+    /// self-references, while this counts distinct dependent projects and excludes
+    /// them. Only this one answers "is anything downstream of me".
+    children: BTreeMap<String, usize>,
+    /// Whether **any** project carries a persisted external-ref edge at all — set
+    /// before the hosted-target filter, so a workspace whose links all point at
+    /// unhosted repos still reports `true`.
+    ///
+    /// That distinction is the whole reason it is a separate flag rather than
+    /// `!parents.is_empty()`: "nothing has been linked yet" falls back to
+    /// inference, while "links exist but dangle" keeps the historical `None` hub,
+    /// and both leave `parents` empty.
+    has_any_external_refs: bool,
+}
+
+impl ProjectGraph {
+    /// How many hosted projects depend on `name`.
+    ///
+    /// A lookup rather than a scan: it is called once per project, and scanning
+    /// every `parents` set each time made role assignment O(n²) in the number of
+    /// projects for an answer already known while the map was being built.
+    fn children_of(&self, name: &str) -> usize {
+        self.children.get(name).copied().unwrap_or(0)
+    }
+}
+
+/// Walk every hosted project's persisted external refs once, and reduce them to the
+/// project-level [`ProjectGraph`].
+fn dependency_graph(ws: &Workspace, names: &[String]) -> Result<ProjectGraph, ApiError> {
+    let hosted: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+    let mut parents: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut inbound_edges: BTreeMap<String, usize> = BTreeMap::new();
+    let mut children: BTreeMap<String, usize> = BTreeMap::new();
+    let mut has_any_external_refs = false;
+    for name in names {
+        for ExternalRef { node, .. } in ws.with_store(Some(name), external_refs)?? {
+            // Before the target filter below, deliberately: a ref that names an
+            // unhosted project is still a ref, and the caller distinguishing
+            // "never linked" from "linked but dangling" depends on seeing it.
+            has_any_external_refs = true;
+            if let Some(qualified) = external_ref_target(&node)
+                && let Some((project, _)) = parse_qualified(&qualified)
+                && hosted.contains(project)
+            {
+                *inbound_edges.entry(project.to_owned()).or_default() += 1;
+                if project != name.as_str()
+                    // Only a *newly* inserted parent is a new dependent: a spoke
+                    // referencing the hub from twenty config keys is one child of
+                    // it, not twenty.
+                    && parents
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(project.to_owned())
+                {
+                    *children.entry(project.to_owned()).or_default() += 1;
+                }
+            }
+        }
+    }
+    Ok(ProjectGraph {
+        parents,
+        inbound_edges,
+        children,
+        has_any_external_refs,
+    })
+}
+
+/// Where a project sits in the workspace hierarchy, from its own in/out degree in
+/// the [`ProjectGraph`]. Four values, replacing the `hub`/`spoke` pair that could
+/// not describe a project which is both:
+///
+/// - `root` — depends on nothing hosted, and something depends on it. The end of
+///   every chain; the application a deployment tree ultimately deploys.
+/// - `intermediate` — a **sub-hub**: depends on something *and* is depended upon.
+///   The case the binary label had no room for.
+/// - `leaf` — depends on something hosted, and nothing depends on it. An ordinary
+///   spoke, and still the common case.
+/// - `isolated` — neither. A project in the workspace with no declared cross-repo
+///   links yet, which used to be reported as a `spoke` of a hub it never named.
+///
+/// A cycle has no root: every project in it is `intermediate`, which is a truthful
+/// report of a workspace that declares one rather than an error. Nothing here
+/// recurses, so a cycle cannot hang the view.
+fn hierarchy_role(graph: &ProjectGraph, name: &str) -> &'static str {
+    let has_parents = graph.parents.get(name).is_some_and(|p| !p.is_empty());
+    let has_children = graph.children_of(name) > 0;
+    match (has_parents, has_children) {
+        (false, true) => "root",
+        (true, true) => "intermediate",
+        (true, false) => "leaf",
+        (false, false) => "isolated",
+    }
+}
+
 /// The hub project: the **hosted** project most external-ref edges point into.
 /// Targets naming a project not in `names` (an unhosted repo) are ignored, so the
 /// hub is always a project the workspace can actually read — never a phantom.
 /// `None` when nothing references a hosted project (a single-repo or unlinked
 /// workspace).
-fn determine_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, ApiError> {
-    let hosted: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
-    let mut targets: BTreeMap<String, usize> = BTreeMap::new();
-    for name in names {
-        for ExternalRef { node, .. } in ws.with_store(Some(name), external_refs)?? {
-            if let Some(qualified) = external_ref_target(&node)
-                && let Some((project, _)) = parse_qualified(&qualified)
-                && hosted.contains(project)
-            {
-                *targets.entry(project.to_owned()).or_default() += 1;
-            }
-        }
-    }
-    Ok(targets
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(p, _)| p))
+///
+/// Note what this is *not*: in a snowflake it names the busiest node, which need not
+/// be the chain's root. `infra1`/`infra2` → `chart` → `app` makes `chart` the hub on
+/// two inbound edges while `app` is what everything ultimately depends on. That is
+/// the right answer for this function's one job — picking the config-key baseline
+/// the override matrix pivots on — and the wrong answer for "where does the chain
+/// end", which is why a project's place in the hierarchy is now reported separately
+/// as its `role` (ADR-0009 v1.15).
+///
+/// Takes the [`ProjectGraph`] rather than the workspace: it is a pure reduction
+/// over what that already holds, so a caller with the graph in hand does not walk
+/// every project's refs a second time to be told what it just computed.
+fn determine_hub(graph: &ProjectGraph) -> Option<String> {
+    graph
+        .inbound_edges
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .map(|(p, _)| p.clone())
 }
 
 /// The hub the cross-repo views infer against, honouring both what is persisted and
@@ -1354,26 +1492,29 @@ fn determine_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, Api
 /// - but if refs *do* exist yet only target unhosted projects, keep `None` (there is
 ///   nothing hosted to hub on), preserving the drift-not-404 behaviour.
 fn effective_hub(ws: &Workspace, names: &[String]) -> Result<Option<String>, ApiError> {
-    if let Some(hub) = determine_hub(ws, names)? {
+    effective_hub_from(ws, names, &dependency_graph(ws, names)?)
+}
+
+/// [`effective_hub`] over a [`ProjectGraph`] already in hand.
+///
+/// Both of the first two branches are answered from the graph, so this walks the
+/// stores **not at all**; only the third — the config-key count, which reads a
+/// different kind of node entirely — still needs `ws`. Before this existed,
+/// `topology` built the graph and *also* called `effective_hub`, which built it
+/// again inside `determine_hub` and then, on a workspace with no hosted refs, made
+/// a third pass to ask whether any refs existed at all.
+fn effective_hub_from(
+    ws: &Workspace,
+    names: &[String],
+    graph: &ProjectGraph,
+) -> Result<Option<String>, ApiError> {
+    if let Some(hub) = determine_hub(graph) {
         return Ok(Some(hub));
     }
-    if workspace_has_external_refs(ws, names)? {
+    if graph.has_any_external_refs {
         return Ok(None);
     }
     config_key_count_hub(ws, names)
-}
-
-/// Whether any hosted project in the workspace carries a persisted external-ref edge
-/// (an authored or previously-written cross-repo link). Distinguishes "nothing has
-/// been linked yet" (fall back to inference) from "links exist but dangle" (keep the
-/// historical `None` hub).
-fn workspace_has_external_refs(ws: &Workspace, names: &[String]) -> Result<bool, ApiError> {
-    for name in names {
-        if !ws.with_store(Some(name), external_refs)??.is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// The hosted project with the most `config_key` nodes — the CLI's default hub
@@ -2006,12 +2147,16 @@ mod tests {
     /// own `keyCount` and `driftCount`, which is the whole point — so the tests
     /// that reason about *spokes* filter it out here rather than each adjusting
     /// an index or a count by one.
+    /// Every project except the config-key baseline. Keyed on `isMatrixHub` rather
+    /// than on `role`, which since v3.0 describes a project's place in the
+    /// hierarchy and never takes the value `hub` — a filter on `role != "hub"`
+    /// would now pass *every* project, silently inflating each caller's count.
     fn spokes_of(json: &Value) -> Vec<&Value> {
         json["projects"]
             .as_array()
             .expect("projects array")
             .iter()
-            .filter(|p| p["role"] != "hub")
+            .filter(|p| p["isMatrixHub"] != true)
             .collect()
     }
 
@@ -3402,7 +3547,7 @@ mod tests {
         let projects = json["projects"].as_array().expect("projects");
         let hub_entry = projects
             .iter()
-            .find(|p| p["role"] == "hub")
+            .find(|p| p["isMatrixHub"] == true)
             .expect("the hub must appear even with nothing pointing out of it");
         assert_eq!(hub_entry["name"], HUB);
         assert!(
@@ -3423,47 +3568,57 @@ mod tests {
     /// at twice and `app` once, so `chart` wins the hub — and it is exactly the
     /// repo whose *outgoing* edge used to be dropped, making the chain's last
     /// hop structurally undrawable however the workspace was arranged.
-    #[tokio::test]
-    async fn a_link_out_of_the_hub_is_emitted_so_a_chain_can_be_drawn() {
-        // One repo's store, holding `refs` as authored external-ref edges out of
-        // a local config key.
-        let repo = |own: &str, refs: &[&str]| {
-            let mut facts = FactSet::new().with_node(cfg_node("cfg.toml", own, "v"));
-            for (i, target) in refs.iter().enumerate() {
-                let src = format!("cfgkey:cfg.toml#{own}");
-                facts = facts.with_node(external_ref_node(target)).with_edge({
-                    let mut e = Edge::authored(
-                        if i == 0 {
-                            src
-                        } else {
-                            format!("cfgkey:cfg.toml#{own}")
-                        },
-                        external_ref_key(target),
-                        EdgeKind::References,
-                    );
-                    // `LINKS_AUTHORED_REF`, matching what `roteiro links --write`
-                    // actually writes for an authored link — a fixture that pairs
-                    // `Edge::authored` with the *inferred* layer's ref would be a
-                    // state the product never produces.
-                    e.src_ref = Some(rto_graph::LINKS_AUTHORED_REF.to_owned());
-                    e
-                });
-            }
-            apply(Store::open_in_memory().expect("store"), &facts)
-        };
+    /// One repo's store, holding `refs` as authored external-ref edges out of a
+    /// local config key.
+    fn chain_repo(own: &str, refs: &[&str]) -> Store {
+        let mut facts = FactSet::new().with_node(cfg_node("cfg.toml", own, "v"));
+        for (i, target) in refs.iter().enumerate() {
+            let src = format!("cfgkey:cfg.toml#{own}");
+            facts = facts.with_node(external_ref_node(target)).with_edge({
+                let mut e = Edge::authored(
+                    if i == 0 {
+                        src
+                    } else {
+                        format!("cfgkey:cfg.toml#{own}")
+                    },
+                    external_ref_key(target),
+                    EdgeKind::References,
+                );
+                // `LINKS_AUTHORED_REF`, matching what `roteiro links --write`
+                // actually writes for an authored link — a fixture that pairs
+                // `Edge::authored` with the *inferred* layer's ref would be a
+                // state the product never produces.
+                e.src_ref = Some(rto_graph::LINKS_AUTHORED_REF.to_owned());
+                e
+            });
+        }
+        apply(Store::open_in_memory().expect("store"), &facts)
+    }
 
-        let ws = Workspace::from_stores([
+    /// The issue's shape, shared by the two tests that read it: a three-level
+    /// snowflake `infra1,infra2 → chart → app`, where `chart` is a spoke of `app`
+    /// and the hub of the two infra repos.
+    fn chain_workspace() -> Workspace {
+        Workspace::from_stores([
             (
                 "infra1".to_owned(),
-                repo("a", &["chart::cfgkey:cfg.toml#c"]),
+                chain_repo("a", &["chart::cfgkey:cfg.toml#c"]),
             ),
             (
                 "infra2".to_owned(),
-                repo("b", &["chart::cfgkey:cfg.toml#c"]),
+                chain_repo("b", &["chart::cfgkey:cfg.toml#c"]),
             ),
-            ("chart".to_owned(), repo("c", &["app::cfgkey:cfg.toml#d"])),
-            ("app".to_owned(), repo("d", &[])),
-        ]);
+            (
+                "chart".to_owned(),
+                chain_repo("c", &["app::cfgkey:cfg.toml#d"]),
+            ),
+            ("app".to_owned(), chain_repo("d", &[])),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_link_out_of_the_hub_is_emitted_so_a_chain_can_be_drawn() {
+        let ws = chain_workspace();
 
         let (status, json) = get(single_set(ws), None, "/v1/graph/topology").await;
         assert_eq!(status, StatusCode::OK);
@@ -3478,7 +3633,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|p| p["role"] == "hub")
+            .find(|p| p["isMatrixHub"] == true)
             .expect("the hub appears in projects");
         assert_eq!(hub_entry["name"], "chart");
 
@@ -3512,6 +3667,131 @@ mod tests {
             "the chain's far end must be a node, or the hop still cannot be drawn: {json}"
         );
         assert_eq!(out_of_hub[0]["provenance"], "authored");
+    }
+
+    /// #623: a project can be a spoke of one project and the hub of others, and the
+    /// report has to be able to say so.
+    ///
+    /// Same `infra1,infra2 → chart → app` shape. Before this, `role` was
+    /// `if is_hub { "hub" } else { "spoke" }`, so `chart` (most inbound edges) was
+    /// the only "hub" and **`app` — the one project nothing else depends on — came
+    /// back labelled `"spoke"`**. The binary label had no value for `chart`'s real
+    /// position either: it is both.
+    #[tokio::test]
+    async fn a_chain_reports_a_root_a_sub_hub_and_its_leaves() {
+        let (status, json) = get(single_set(chain_workspace()), None, "/v1/graph/topology").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let role = |name: &str| -> String {
+            json["projects"]
+                .as_array()
+                .expect("projects")
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap_or_else(|| panic!("{name} must be a project: {json}"))["role"]
+                .as_str()
+                .expect("role is a string")
+                .to_owned()
+        };
+
+        assert_eq!(
+            role("app"),
+            "root",
+            "nothing hosted is downstream of app — it is the end of the chain, \
+             and used to be reported as a spoke: {json}"
+        );
+        assert_eq!(
+            role("chart"),
+            "intermediate",
+            "chart is a spoke of app AND the hub of both infra repos — the case \
+             a two-valued role could not express: {json}"
+        );
+        for leaf in ["infra1", "infra2"] {
+            assert_eq!(
+                role(leaf),
+                "leaf",
+                "{leaf} depends on chart and hosts nothing: {json}"
+            );
+        }
+
+        // The hierarchy is readable without re-deriving it from `links`, which
+        // also carries live-inferred correspondences and so cannot be walked as
+        // if it were the dependency graph.
+        let parents = |name: &str| -> Vec<String> {
+            json["projects"]
+                .as_array()
+                .expect("projects")
+                .iter()
+                .find(|p| p["name"] == name)
+                .expect("project")["parents"]
+                .as_array()
+                .expect("parents is an array")
+                .iter()
+                .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                .collect()
+        };
+        assert_eq!(
+            parents("chart"),
+            ["app"],
+            "the sub-hub names its own hub: {json}"
+        );
+        assert_eq!(parents("infra1"), ["chart"]);
+        assert!(
+            parents("app").is_empty(),
+            "the root depends on nothing hosted: {json}"
+        );
+
+        // And the matrix baseline is still chart — reported separately, because it
+        // answers a different question from `role` and, here, names a different
+        // project than the chain's root does.
+        assert_eq!(json["hub"], "chart");
+        let matrix_hubs: Vec<&str> = json["projects"]
+            .as_array()
+            .expect("projects")
+            .iter()
+            .filter(|p| p["isMatrixHub"] == true)
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert_eq!(
+            matrix_hubs,
+            ["chart"],
+            "exactly one project is the config-key baseline: {json}"
+        );
+    }
+
+    /// A repo that references its hub from several keys is **one** dependent of
+    /// it, not several. The child count is accumulated while the parent set is
+    /// built, so it has to be incremented only on a newly inserted parent —
+    /// counting every edge instead would still give the right *role* here (both
+    /// are `> 0`), which is exactly why it needs asserting directly rather than
+    /// through a role.
+    #[tokio::test]
+    async fn many_links_from_one_repo_make_one_dependent() {
+        let ws = Workspace::from_stores([
+            (
+                "infra".to_owned(),
+                chain_repo(
+                    "a",
+                    &["chart::cfgkey:cfg.toml#c", "chart::cfgkey:cfg.toml#c2"],
+                ),
+            ),
+            ("chart".to_owned(), chain_repo("c", &[])),
+        ]);
+        let names = ws.names();
+        // `ApiError` is not `Debug`, so no `.expect` here.
+        let Ok(graph) = dependency_graph(&ws, &names) else {
+            panic!("the dependency graph must build for a two-repo workspace")
+        };
+        assert_eq!(
+            graph.children_of("chart"),
+            1,
+            "two links from one repo are one dependent project"
+        );
+        assert_eq!(
+            graph.inbound_edges.get("chart").copied(),
+            Some(2),
+            "…while the hub tiebreak still counts both edges, as it always has"
+        );
     }
 
     #[tokio::test]

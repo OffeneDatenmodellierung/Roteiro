@@ -142,6 +142,40 @@ mod tests {
         );
     }
 
+    /// The explorer is served from this binary, so it is a **consumer of our own
+    /// API** — and nothing else checks that the two agree, because the app is
+    /// hand-written ES with no test runner.
+    ///
+    /// Since #623 the topology's `role` is `root`/`intermediate`/`leaf`/`isolated`
+    /// and never `hub`. The app used to select the baseline with
+    /// `p.role === "hub"` and count spokes with `p.role !== "hub"`; left alone,
+    /// the first would have matched nothing and the second everything, so the
+    /// diagram would have marked no hub and the tile would have counted the hub
+    /// as a spoke of itself — a silent misrender, since both are valid JS against
+    /// a payload whose shape merely changed underneath them.
+    #[test]
+    fn the_app_does_not_select_the_hub_by_a_role_the_api_no_longer_emits() {
+        // Code lines only. The comments at those call sites quote the old
+        // comparison in order to explain why it is wrong, and a whole-file
+        // substring match cannot tell an explanation from an instruction — it
+        // failed on the very comment describing the fix.
+        let offending: Vec<&str> = APP_JS
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .filter(|l| l.contains(r#"role === "hub""#) || l.contains(r#"role !== "hub""#))
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "app.js still compares the API's `role` against \"hub\"; the baseline \
+             is `isMatrixHub` now: {offending:?}"
+        );
+        assert!(
+            APP_JS.contains("isMatrixHub"),
+            "…and it must read the field that replaced it"
+        );
+    }
+
     #[tokio::test]
     async fn explorer_alias_serves_the_same_shell() {
         let (status, ct, _cache, body) = get("/explorer").await;
