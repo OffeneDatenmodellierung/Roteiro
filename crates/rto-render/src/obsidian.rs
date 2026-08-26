@@ -907,6 +907,35 @@ fn write_coupling(c: &mut String, s: &VaultSummary, scope: &VaultScope<'_>, hd: 
     }
 }
 
+/// One member's **version pin**: the revision of a hub it deploys (ADR-0009 step 8).
+///
+/// # Why it names its hub
+///
+/// A pin is hub-**relative**, and since #623 a workspace is a snowflake rather
+/// than a star: a project can be a spoke of one project and the hub of others, so
+/// "the hub version this member pins" has no single referent. `infra` pins
+/// `chart`, and `chart` pins `app`. Naming the hub is what lets a reader follow
+/// the chain instead of guessing which end of it a bare revision belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberPin {
+    /// The member doing the pinning — the spoke.
+    pub member: String,
+    /// The workspace member whose version is pinned — this member's parent in the
+    /// dependency graph, not necessarily the workspace's busiest node.
+    pub hub: String,
+    /// The hub git revision pinned: a submodule sha, or an image tag resolved to a
+    /// hub ref. `None` when the member depends on `hub` but declares no version
+    /// this tool can resolve.
+    ///
+    /// `None` is a **finding**, not an absence of one — see the module's rendering
+    /// of it, and issue #505, which established that "asked and found nothing" must
+    /// not render identically to "never asked".
+    pub rev: Option<String>,
+    /// Where the pin was read from (`submodule vendor/app`, `image acme/app:1.4.0`).
+    /// `None` exactly when `rev` is.
+    pub via: Option<String>,
+}
+
 /// One cross-repo edge the workspace vault can actually follow: a spoke's node
 /// linking to a hub's, through the external-ref placeholder ADR-0009 persists.
 ///
@@ -1027,6 +1056,14 @@ pub struct WorkspaceSummary {
     /// One entry per member repository, in stable name order. Each is the very
     /// same [`VaultSummary`] a per-project vault would render.
     pub members: Vec<VaultSummary>,
+    /// Version pins: for each member that depends on another, the hub revision it
+    /// deploys (ADR-0009 step 8). One entry per **dependency**, not per member — a
+    /// project with two parents pins each of them separately, and a member with no
+    /// parents contributes nothing.
+    ///
+    /// Ordered by the caller, which holds the dependency graph; the renderer only
+    /// lays them out.
+    pub pins: Vec<MemberPin>,
     /// Cross-repo links between members, already ordered and capped by the caller.
     pub cross_links: Vec<CrossLink>,
     /// Cross-repo links found in total, which `cross_links` may be a capped view
@@ -1163,6 +1200,69 @@ pub fn render_workspace_home(ws: &WorkspaceSummary) -> VaultNote {
     VaultNote {
         filename: HOME_NOTE.to_owned(),
         content: c,
+    }
+}
+
+/// The `### Version pins` table — which hub revision each member deploys
+/// (ADR-0009 step 8, issue #442).
+///
+/// # Why this is part of a *manifest* rather than a curiosity
+///
+/// The rest of the manifest reconstructs the workspace **as rendered**: clone
+/// here, check out these commits. Pins answer a different question — what each
+/// deployment repo is *running*, which is rarely the commit it was rendered at. A
+/// spoke at `HEAD` deploying `app@1.4.0` describes a live system that its own
+/// commit id says nothing about.
+///
+/// # Each pin names its hub
+///
+/// Because since #623 a workspace is a snowflake, not a star: `infra → chart →
+/// app`, where `chart` is a spoke of one and the hub of the others. A column of
+/// bare revisions would be ambiguous the moment a workspace has more than one
+/// level, and silently so.
+///
+/// # A member that pins nothing is said to pin nothing
+///
+/// A dependency with no resolvable version renders as *(none detected)* rather
+/// than being dropped. Issue #505 settled the rule this follows: **asked and found
+/// nothing** must not render identically to **never asked**. Dropping the row
+/// would make a workspace where pin detection is inert look exactly like one with
+/// no dependencies at all.
+fn write_pins(c: &mut String, ws: &WorkspaceSummary) {
+    if ws.pins.is_empty() {
+        return;
+    }
+    c.push_str("\n### Version pins\n\n");
+    let found = ws.pins.iter().filter(|p| p.rev.is_some()).count();
+    // Both halves agree with the count, not just the noun: "1 of 1 dependency
+    // resolve" is what varying one and fixing the other produces.
+    let (noun, verb) = if ws.pins.len() == 1 {
+        ("dependency", "resolves")
+    } else {
+        ("dependencies", "resolve")
+    };
+    let _ = writeln!(
+        c,
+        "*{found} of {} {noun} {verb} to a hub revision. A pin is what the member \
+         **deploys**, which is not the commit it was rendered at.*\n",
+        ws.pins.len()
+    );
+    c.push_str("| Member | Pins | At revision | Read from |\n| --- | --- | --- | --- |\n");
+    for p in &ws.pins {
+        let _ = writeln!(
+            c,
+            "| {} | {} | {} | {} |",
+            // Names are prose, not spans: `inline_untrusted` escapes `|` so they
+            // are table-safe without becoming monospaced. The revision and the
+            // source string come from git and from a config file, so they go
+            // through `table_cell` like every other value this manifest quotes.
+            inline_untrusted(&p.member),
+            inline_untrusted(&p.hub),
+            p.rev
+                .as_deref()
+                .map_or_else(|| "*(none detected)*".to_owned(), table_cell),
+            p.via.as_deref().map_or_else(|| "—".to_owned(), table_cell),
+        );
     }
 }
 
@@ -1556,6 +1656,7 @@ fn write_manifest(c: &mut String, ws: &WorkspaceSummary) {
         );
     }
 
+    write_pins(c, ws);
     write_rendered_under(c, ws);
 
     c.push_str(
@@ -1670,9 +1771,9 @@ fn write_cross_links(c: &mut String, ws: &WorkspaceSummary) {
 mod tests {
     use super::{
         AdrEntry, ConfigSecretSummary, CouplingEntry, Coverage, CrossLink, DensityEntry,
-        FindingEntry, HOME_NOTE, RenderedUnder, VaultScope, VaultSummary, WorkspaceSummary,
-        note_name, render_home, render_note, render_note_scoped, render_workspace_home,
-        scoped_note_name,
+        FindingEntry, HOME_NOTE, MemberPin, RenderedUnder, VaultScope, VaultSummary,
+        WorkspaceSummary, note_name, render_home, render_note, render_note_scoped,
+        render_workspace_home, scoped_note_name,
     };
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
 
@@ -2464,6 +2565,7 @@ mod tests {
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members,
+            pins: Vec::new(),
             cross_links: vec![],
             cross_links_total: 0,
             cross_links_authored: 0,
@@ -2721,6 +2823,114 @@ after",
         assert!(c.contains("**`WARNING`**"), "{c}");
     }
 
+    /// #442: the manifest records what each member **deploys**, not only the
+    /// commit it was rendered at — and each pin names the hub it is relative to.
+    ///
+    /// A snowflake fixture on purpose (`infra → chart → app`), because a star
+    /// would let a bare-revision column pass: it is only when a workspace has two
+    /// levels that "the hub version" stops having one answer. And deliberately
+    /// mixed — one dependency resolves, one does not — so the row that reports
+    /// *finding nothing* is exercised rather than assumed.
+    #[test]
+    fn the_manifest_records_each_members_pin_and_which_hub_it_is_relative_to() {
+        let ws = WorkspaceSummary {
+            generated_at: "2026-08-26T10:00:00Z".to_owned(),
+            name: "platform".into(),
+            members: vec![
+                member_summary("infra", 3),
+                member_summary("chart", 4),
+                member_summary("app", 9),
+            ],
+            pins: vec![
+                MemberPin {
+                    member: "chart".into(),
+                    hub: "app".into(),
+                    rev: Some("1.4.0".into()),
+                    via: Some("image acme/app:1.4.0".into()),
+                },
+                MemberPin {
+                    member: "infra".into(),
+                    hub: "chart".into(),
+                    rev: None,
+                    via: None,
+                },
+            ],
+            cross_links: vec![],
+            cross_links_total: 0,
+            cross_links_authored: 0,
+        };
+        let c = render_workspace_home(&ws).content;
+
+        assert!(c.contains("### Version pins"), "{c}");
+        // The hub is named per row. Without this the table is ambiguous the moment
+        // a workspace has more than one level — which is exactly this fixture.
+        assert!(
+            c.contains("| chart | app | `1.4.0` |") || c.contains("| chart | app |"),
+            "the pin names its hub: {c}"
+        );
+        assert!(
+            c.contains("image acme/app:1.4.0"),
+            "says where it read it: {c}"
+        );
+
+        // The unresolved dependency is REPORTED, not dropped. #505's rule: asked
+        // and found nothing must not render as never asked.
+        assert!(c.contains("| infra | chart |"), "the row survives: {c}");
+        assert!(c.contains("(none detected)"), "and says so: {c}");
+
+        // The count separates what was asked from what was found.
+        assert!(
+            c.contains("1 of 2 dependencies resolve"),
+            "counts found against asked: {c}"
+        );
+    }
+
+    /// A one-dependency workspace reads as English.
+    ///
+    /// Varying the noun and fixing the verb produced "1 of 1 dependency resolve",
+    /// which is the failure mode of pluralising by hand: the two halves have to
+    /// agree with the same count, not one of them with the count and the other
+    /// with a guess. Two-member workspaces are common enough that this renders.
+    #[test]
+    fn the_pins_caption_agrees_with_a_single_dependency() {
+        let ws = WorkspaceSummary {
+            generated_at: "2026-08-26T10:00:00Z".to_owned(),
+            name: "pair".into(),
+            members: vec![member_summary("deploy", 2), member_summary("app", 5)],
+            pins: vec![MemberPin {
+                member: "deploy".into(),
+                hub: "app".into(),
+                rev: Some("1.4.0".into()),
+                via: Some("image acme/app:1.4.0".into()),
+            }],
+            cross_links: vec![],
+            cross_links_total: 0,
+            cross_links_authored: 0,
+        };
+        let c = render_workspace_home(&ws).content;
+        assert!(
+            c.contains("1 of 1 dependency resolves"),
+            "singular noun and singular verb: {c}"
+        );
+    }
+
+    /// A workspace whose members depend on nothing has no pins section at all —
+    /// rather than an empty table, which reads as a fault.
+    #[test]
+    fn a_workspace_with_no_dependencies_has_no_pins_table() {
+        let ws = WorkspaceSummary {
+            generated_at: "2026-08-26T10:00:00Z".to_owned(),
+            name: "solo".into(),
+            members: vec![member_summary("only", 1)],
+            pins: Vec::new(),
+            cross_links: vec![],
+            cross_links_total: 0,
+            cross_links_authored: 0,
+        };
+        let c = render_workspace_home(&ws).content;
+        assert!(!c.contains("Version pins"), "{c}");
+    }
+
     /// #442 part 2: the vault says how to reconstruct the workspace it describes,
     /// and what it deliberately leaves out.
     ///
@@ -2743,6 +2953,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![api, sdk],
+            pins: Vec::new(),
             cross_links: vec![],
             cross_links_total: 0,
             cross_links_authored: 0,
@@ -2823,6 +3034,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "local".into(),
             members: vec![api],
+            pins: Vec::new(),
             cross_links: vec![],
             cross_links_total: 0,
             cross_links_authored: 0,
@@ -2860,6 +3072,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            pins: Vec::new(),
             cross_links: vec![link(true, "addr"), link(false, "port")],
             // Totals deliberately **larger** than the two rows shown: the caption
             // is a statement about the workspace, and `cross_links` is a capped
@@ -2891,6 +3104,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            pins: Vec::new(),
             cross_links: vec![CrossLink {
                 from_project: "sdk".into(),
                 from_key: "cfgkey:config.toml#addr".into(),
@@ -2942,6 +3156,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            pins: Vec::new(),
             cross_links: vec![],
             cross_links_total: 0,
             cross_links_authored: 0,
@@ -3138,6 +3353,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            pins: Vec::new(),
             cross_links: vec![],
             cross_links_total: 0,
             cross_links_authored: 0,
@@ -3202,6 +3418,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7), member_summary("sdk", 4)],
+            pins: Vec::new(),
             cross_links: vec![
                 CrossLink {
                     from_project: "sdk".into(),
@@ -3260,6 +3477,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7)],
+            pins: Vec::new(),
             cross_links: vec![CrossLink {
                 from_project: "api".into(),
                 from_key: "cfgkey:config.toml#addr".into(),
@@ -3284,6 +3502,7 @@ after",
             generated_at: "2026-08-22T10:00:00Z".to_owned(),
             name: "platform".into(),
             members: vec![member_summary("api", 7)],
+            pins: Vec::new(),
             cross_links: vec![],
             cross_links_total: 0,
             cross_links_authored: 0,
