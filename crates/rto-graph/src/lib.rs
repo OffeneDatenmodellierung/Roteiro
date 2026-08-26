@@ -71,6 +71,9 @@ pub mod reviewer;
 mod store;
 mod sync;
 mod text;
+/// The project-level dependency shape of a workspace: roles, parents, and the
+/// config-key baseline the cross-repo views pivot on (#623).
+pub mod topology;
 // Whether a producer's identity is measured or asserted (ADR-0019 §5). In *this*
 // crate rather than in `rto-remote` because `rto-remote` depends on this one, so
 // `ModelSource::Remote` cannot name a type that lives there — and because the
