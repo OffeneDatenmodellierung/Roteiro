@@ -23,8 +23,9 @@
 //!
 //! # What it is built from, and what it is deliberately not built from
 //!
-//! **Persisted external-ref edges only** — the authored `[[links]]` and previously
-//! `--write`-ten ones. Not the merged link list a topology view renders: that also
+//! **Persisted external-ref edges only** — those declared as authored `[[links]]`,
+//! and those a previous `links --write` wrote to the store. Not the merged link
+//! list a topology view renders: that also
 //! carries the correspondences inferred *live* against the hub, which are a
 //! config-key **matching heuristic**, not a declared dependency. Deriving the shape
 //! from those would make every project a child of the hub by construction, and in a
@@ -33,13 +34,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::links::external_ref_target;
+use crate::links::{EXTERNAL_REF_KIND, external_ref_target};
 use crate::model::{Node, NodeKind};
 use crate::store::{Store, StoreError};
 use crate::workspace::{Workspace, WorkspaceError, parse_qualified};
-
-/// The `NodeKind::Other` token for a cross-repo external-ref placeholder.
-const EXTERNAL_REF_KIND: &str = "external_ref";
 
 /// Where a project sits in the workspace hierarchy, from its own in/out degree.
 ///
@@ -235,6 +233,13 @@ pub fn project_graph(ws: &Workspace, names: &[String]) -> Result<ProjectGraph, W
 ///
 /// A *derived* edge never targets an external-ref placeholder, so it is excluded;
 /// and a placeholder with no incoming edge is a leftover, not a dependency.
+///
+/// **One entry per incoming edge, not per node** — a placeholder pointed at by
+/// three config keys appears three times. That is deliberate and load-bearing:
+/// [`ProjectGraph::inbound_edges_of`] counts edges, which is what decides the hub
+/// tiebreak, and de-duplicating here would silently turn it into a count of
+/// distinct placeholders and move the hub. The *distinct* count callers usually
+/// want is [`ProjectGraph::children_of`], which is derived separately.
 fn external_ref_nodes(store: &Store) -> Result<Vec<Node>, StoreError> {
     let mut out = Vec::new();
     for node in store.nodes_by_kind(&NodeKind::Other(EXTERNAL_REF_KIND.to_owned()))? {
