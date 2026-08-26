@@ -235,7 +235,56 @@ pub fn heading_id(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_h1, heading_id, heading_text, slugify};
+    use super::{first_h1, heading_id, heading_text, headings, slugify};
+
+    /// The three classes #621 measured, each a heading to a parser and invisible
+    /// to a `strip_prefix("## ")` scan — plus the mirror error, a `## ` inside a
+    /// fence, which a scan counts and a parser knows is code.
+    #[test]
+    fn a_heading_is_more_than_a_line_starting_with_two_hashes() {
+        let md = "# Title\n\n\
+                  > ## Quoted\n\n\
+                  \u{20}\u{20}## Indented\n\n\
+                  Setext\n---\n\n\
+                  ```\n## Not a heading\n```\n\n\
+                  ## Plain\n";
+        let hs = headings(md);
+        let ids: Vec<&str> = hs.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["title", "quoted", "indented", "setext", "plain"],
+            "blockquoted, indented and setext headings are headings; a fenced \
+             `## ` is not"
+        );
+    }
+
+    /// Offsets are the block's, in document order — which is all a caller needs to
+    /// attribute a later byte to the heading it falls under.
+    #[test]
+    fn heading_offsets_ascend_and_point_at_the_block() {
+        let md = "## First\n\ntext\n\n> ## Quoted\n\nmore\n";
+        let hs = headings(md);
+        assert_eq!(hs.len(), 2);
+        assert!(hs[0].start < hs[1].start, "document order: {hs:?}");
+        // The heading's own start, past the blockquote marker. Asserted because I
+        // documented the opposite first and this test is what corrected it: a
+        // caller slicing from here would otherwise get `> ## Quoted`.
+        assert!(
+            md[hs[1].start..].starts_with("## Quoted"),
+            "offset points at the heading, not its container: {:?}",
+            &md[hs[1].start..]
+        );
+    }
+
+    /// Level and text come back too, and an explicit id still wins over the slug.
+    #[test]
+    fn a_heading_carries_its_level_text_and_declared_id() {
+        let hs = headings("### Design *notes* {#arch}\n");
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].level, 3);
+        assert_eq!(hs[0].text, "Design notes", "markup reduced");
+        assert_eq!(hs[0].id, "arch", "the declared anchor, not the slug");
+    }
 
     /// The single construct the isolated parse cannot resolve, pinned so the
     /// limit is a recorded value rather than a surprise. See [`heading_id`]'s
@@ -344,4 +393,86 @@ mod tests {
             "1-offline-mode-the-default"
         );
     }
+}
+
+/// One heading found by **parsing** a document, with the byte offset at which it
+/// begins.
+///
+/// See [`headings`] for why the offset is the useful part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heading {
+    /// Heading level: 1 for `#`, 2 for `##`, and so on.
+    pub level: u8,
+    /// The id this heading claims, by the shared rule ([`heading_id_from`]) — its
+    /// explicit `{#id}` when the author wrote one, the slug of its text otherwise.
+    pub id: String,
+    /// The heading's visible text, with the markup that produced it removed.
+    pub text: String,
+    /// Byte offset into the source where this heading begins.
+    ///
+    /// The heading's own start, **not** its container's: for `> ## Quoted` it
+    /// points at the `#`, past the blockquote marker. Callers use it to decide
+    /// which heading a later byte falls under, which is a comparison rather than
+    /// a slice, so what precedes it on the line does not concern them.
+    pub start: usize,
+}
+
+/// Every heading in `md`, in document order, read with the shared dialect.
+///
+/// # Why parse rather than scan for `## `
+///
+/// Because a heading is not a line that starts with `## `. It is also
+/// `> ## Quoted` inside a blockquote, `  ## Indented` under three spaces, and
+/// `Title` over `---`. All three are headings to a parser and to the renderer,
+/// which duly emits an addressable `<h2 id="…">` for each — while a
+/// `strip_prefix("## ")` scan sees none of them, so the graph records no section
+/// and a link naming that place cannot resolve even though the place exists
+/// (#621). A `## ` inside a fenced block is the mirror error: a scan counts it,
+/// a parser knows it is code.
+///
+/// # Why an offset rather than a line number
+///
+/// The callers that need this are attributing *other* things — wiki-links,
+/// section body text — to the heading they fall under. Given the offsets, that is
+/// a comparison against the next heading's start, and it works identically for a
+/// heading the caller could not have found by scanning.
+#[must_use]
+pub fn headings(md: &str) -> Vec<Heading> {
+    let mut out: Vec<Heading> = Vec::new();
+    let mut open: Option<(u8, Option<String>, String, usize)> = None;
+    for (event, range) in Parser::new_ext(md, markdown_dialect()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, id, .. }) => {
+                let level = match level {
+                    HeadingLevel::H1 => 1,
+                    HeadingLevel::H2 => 2,
+                    HeadingLevel::H3 => 3,
+                    HeadingLevel::H4 => 4,
+                    HeadingLevel::H5 => 5,
+                    HeadingLevel::H6 => 6,
+                };
+                open = Some((level, id.map(|i| i.to_string()), String::new(), range.start));
+            }
+            // A code span is part of a heading's text, exactly as it is for the
+            // heading's id — the same rule `first_h1` applies.
+            Event::Text(t) | Event::Code(t) => {
+                if let Some((_, _, text, _)) = open.as_mut() {
+                    text.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((level, explicit, text, start)) = open.take() {
+                    let text = text.trim().to_owned();
+                    out.push(Heading {
+                        level,
+                        id: heading_id_from(explicit.as_deref(), &text),
+                        text,
+                        start,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }

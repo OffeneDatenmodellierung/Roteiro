@@ -115,14 +115,6 @@ fn rendered_h2_ids(html: &str) -> Vec<String> {
 /// no test to remember to edit. One heading in this repository is affected
 /// (`docs/BUILD_PLAN_V2.md:16`); indented and setext headings would diverge the
 /// same way and none exist today.
-fn blockquoted_h2_ids(md: &str) -> Vec<String> {
-    md.lines()
-        .filter_map(|l| l.trim_start().strip_prefix('>'))
-        .filter_map(|l| l.trim_start().strip_prefix("## "))
-        .map(rto_graph::heading_id)
-        .collect()
-}
-
 #[test]
 fn every_heading_id_equals_its_graph_section_key() {
     let pages = site_pages();
@@ -146,11 +138,11 @@ fn every_heading_id_equals_its_graph_section_key() {
             &rto_render::PublishedPages::new(),
             None,
         );
-        let quoted = blockquoted_h2_ids(text);
-        let rendered: Vec<String> = rendered_h2_ids(&html.html)
-            .into_iter()
-            .filter(|id| !quoted.contains(id))
-            .collect();
+        // No subtraction any more. This comparison used to remove blockquoted
+        // headings, because the graph scanned for `## ` at column 0 and could not
+        // see them (#621). `rto_spec` parses now, so the relation is exact: every
+        // id the renderer emits is a section key, with no class held back.
+        let rendered = rendered_h2_ids(&html.html);
 
         assert_eq!(
             rendered, graph,
@@ -227,19 +219,18 @@ fn an_explicit_attribute_is_the_address_on_both_sides() {
     assert_eq!(rendered_h2_ids(&html.html), ["Offline_Mode"]);
 }
 
-/// The known divergence, asserted rather than merely subtracted.
+/// The divergence #621 recorded, now asserted as **agreement**.
 ///
-/// `blockquoted_h2_ids` quietly removes this class from the comparison above, and
-/// a quiet subtraction is indistinguishable from a bug that happens to cancel.
-/// So the class is stated here as its own fact: the page addresses the heading,
-/// the graph does not record it.
+/// This test used to say the opposite, and deliberately: the page addressed a
+/// blockquoted heading and the graph did not record it, because `rto_spec`
+/// scanned for `## ` at column 0 while the renderer parsed. It was stated as its
+/// own fact rather than left as a quiet subtraction, precisely so that closing it
+/// would show up here as a failing assertion rather than as nothing at all.
 ///
-/// This is **not** the `{#id}` defect wearing another hat — it is the scan-versus-
-/// parse half, and closing it means `rto_spec` parsing for sections rather than
-/// scanning lines, which also decides indented and setext headings. Filed
-/// separately rather than widened into #524.
+/// It did. Kept — inverted — rather than deleted, because the class is the one a
+/// line scan would silently lose again.
 #[test]
-fn a_blockquoted_heading_is_addressable_in_the_page_and_absent_from_the_graph() {
+fn a_blockquoted_heading_is_addressable_in_the_page_and_recorded_in_the_graph() {
     let md = "---\nsite-page: probe\nsite-nav: Probe\nsite-order: 1\n---\n\n\
               # Probe\n\n> ## A quoted heading\n\n## A real one\n";
 
@@ -250,8 +241,8 @@ fn a_blockquoted_heading_is_addressable_in_the_page_and_absent_from_the_graph() 
             .iter()
             .map(|s| s.slug.as_str())
             .collect::<Vec<_>>(),
-        ["a-real-one"],
-        "the graph's line scan does not see a heading inside a blockquote"
+        ["a-quoted-heading", "a-real-one"],
+        "a heading inside a blockquote is a heading, and the graph now records it"
     );
 
     let html = rto_render::render_site_page(
@@ -265,12 +256,63 @@ fn a_blockquoted_heading_is_addressable_in_the_page_and_absent_from_the_graph() 
     assert_eq!(
         rendered_h2_ids(&html.html),
         ["a-quoted-heading", "a-real-one"],
-        "…while the renderer parses, so the page addresses both"
+        "…and the page addresses both, as it always did"
+    );
+}
+
+/// The other two classes #621 measured at zero instances, so nothing in the real
+/// site exercises them — which is exactly why they need a fixture.
+///
+/// An indented heading and a setext heading are headings to the parser and to the
+/// renderer. Under the old line scan both were invisible to the graph, and both
+/// arrive through ordinary authoring rather than deliberate cleverness.
+#[test]
+fn indented_and_setext_headings_are_sections_too() {
+    let md = "---\nsite-page: probe2\nsite-nav: Probe\nsite-order: 2\n---\n\n\
+              # Probe\n\n\u{20}\u{20}## Indented by two\n\nSetext heading\n---\n\n## Plain\n";
+
+    let parsed = rto_spec::parse_site_page("website/pages/probe2.md", md).expect("parses");
+    assert_eq!(
+        parsed
+            .sections
+            .iter()
+            .map(|s| s.slug.as_str())
+            .collect::<Vec<_>>(),
+        ["indented-by-two", "setext-heading", "plain"],
     );
 
-    // And the helper that reconciles them names exactly the extra one, so the
-    // subtraction above cannot hide a second, unrelated difference.
-    assert_eq!(blockquoted_h2_ids(md), ["a-quoted-heading"]);
+    let html = rto_render::render_site_page(
+        md,
+        "fallback",
+        &[],
+        "",
+        &rto_render::PublishedPages::new(),
+        None,
+    );
+    assert_eq!(
+        rendered_h2_ids(&html.html),
+        ["indented-by-two", "setext-heading", "plain"],
+        "the two sides agree on all three"
+    );
+}
+
+/// A `## ` inside a fenced block is the mirror error: a scan counts it, a parser
+/// knows it is a code sample. Asserted because the fix could plausibly have
+/// traded one direction of the bug for the other.
+#[test]
+fn a_hash_hash_inside_a_fence_is_a_code_sample_not_a_section() {
+    let md = "---\nsite-page: probe3\nsite-nav: Probe\nsite-order: 3\n---\n\n\
+              # Probe\n\n```\n## Not a heading\n```\n\n## Real\n";
+
+    let parsed = rto_spec::parse_site_page("website/pages/probe3.md", md).expect("parses");
+    assert_eq!(
+        parsed
+            .sections
+            .iter()
+            .map(|s| s.slug.as_str())
+            .collect::<Vec<_>>(),
+        ["real"],
+    );
 }
 
 /// `rendered_h2_ids` reads the `id` attribute and not one that merely ends in
