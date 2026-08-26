@@ -1477,3 +1477,93 @@ fn a_workspace_vault_also_writes_every_note_it_counts() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// #442: the manifest records the hub revision each member **deploys**, and names
+/// the hub it is relative to.
+///
+/// The spoke declares its version the way a chart does — an `image:` block in
+/// `values.yaml`, no Dockerfile anywhere — which is the shape that had no path to
+/// an `image_ref` node at all until #609, and so reported no pin on a real
+/// workspace. This asserts the whole chain end to end: extract the image block,
+/// resolve its tag against the hub's git tags, and render it into the manifest.
+#[test]
+fn the_workspace_vault_manifest_records_the_version_each_member_deploys() {
+    let (base, home) = workspace_fixture("ws-pins");
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+
+    // The hub gains a release tag the spoke can name.
+    git(&app, &["tag", "1.4.0"]);
+
+    // The spoke declares the version it runs, split across keys as every chart
+    // writes it. `repository` basename must match the hub's directory name.
+    write(
+        &deploy,
+        "values.yaml",
+        "image:\n  repository: acme/app\n  tag: 1.4.0\n  pullPolicy: IfNotPresent\n",
+    );
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "pin app 1.4.0"]);
+
+    for repo in [&app, &deploy] {
+        let out = roteiro_in(repo, &home, &["sync"]);
+        assert!(out.status.success(), "sync failed: {out:?}");
+    }
+
+    // A pin follows a **declared** dependency, so the cross-repo link has to be
+    // persisted first — the vault reads what is in the graph, it does not infer.
+    let infer = roteiro_in(
+        &base,
+        &home,
+        &[
+            "links",
+            "--infer",
+            "--hub",
+            "app",
+            "--write",
+            "--workspace-name",
+            "prod",
+            "--json",
+        ],
+    );
+    assert!(
+        infer.status.success(),
+        "links --infer --write failed: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+
+    let out_dir = base.join("vault");
+    let render = roteiro_in(
+        &base,
+        &home,
+        &[
+            "render",
+            "obsidian",
+            "-w",
+            "prod",
+            "--out",
+            out_dir.to_str().expect("utf-8"),
+        ],
+    );
+    assert!(render.status.success(), "render failed: {render:?}");
+
+    let home_note = std::fs::read_to_string(out_dir.join("_Home.md")).expect("read _Home.md");
+    assert!(
+        home_note.contains("### Version pins"),
+        "the manifest must carry the pins section: {home_note}"
+    );
+    // The hub is named, not implied — the whole point once a workspace can be a
+    // snowflake (#623).
+    assert!(
+        home_note.contains("| deploy | app |"),
+        "the row names the member and the hub it pins: {home_note}"
+    );
+    assert!(
+        home_note.contains("1.4.0"),
+        "the resolved hub revision: {home_note}"
+    );
+    assert!(
+        home_note.contains("image acme/app:1.4.0"),
+        "and where it was read from: {home_note}"
+    );
+}

@@ -14101,6 +14101,67 @@ fn render_obsidian(
 /// command happened to be run in — so a member's section reports exactly the
 /// figures its own `roteiro debt` would (ADR-0007 v1.1). Rendering the same
 /// repository from two directories must not produce two different numbers.
+/// Every member's **version pin**: for each dependency it declares, the hub
+/// revision it deploys (ADR-0009 step 8, issue #442).
+///
+/// # Hub-relative, and the hub is named
+///
+/// Not "the version of *the* hub". Since #623 a workspace is a snowflake, so a
+/// member's pin is relative to **its own parent** in
+/// [`rto_graph::topology::project_graph`] — `infra` pins `chart`, and `chart` pins
+/// `app`. Taking the workspace's busiest node as everyone's hub would report
+/// `infra` as pinning a version of `app` it has never heard of.
+///
+/// # A dependency with no resolvable pin is still reported
+///
+/// It yields an entry whose `rev` is `None` rather than no entry at all. Issue
+/// #505 settled the rule: *asked and found nothing* must not be indistinguishable
+/// from *never asked*, and before #609 the image half of pin detection could not
+/// fire at all for a Helm-shaped spoke — a workspace where every row said
+/// "none detected" is exactly the signal that used to be invisible.
+///
+/// # Errors
+///
+/// Propagates workspace, git and store failures. A member that is simply unsynced
+/// is not an error: [`detect_spoke_pin`] returns `None` for it, which renders as
+/// no pin found.
+fn workspace_pins(
+    ws: &rto_graph::Workspace,
+    member_names: &[String],
+) -> anyhow::Result<Vec<rto_render::MemberPin>> {
+    let graph = rto_graph::topology::project_graph(ws, member_names)?;
+    let mut pins = Vec::new();
+    for member in member_names {
+        let Some(spoke_root) = ws.project_root(Some(member))? else {
+            continue;
+        };
+        for hub in graph.parents_of(member) {
+            let Some(hub_root) = ws.project_root(Some(hub))? else {
+                continue;
+            };
+            // The hub's **directory basename**, not the workspace display label:
+            // a label carries a `-2`/`-3` collision suffix that would never match
+            // the URL or image basename a pin is recognised by.
+            let hub_dir = hub_root
+                .file_name()
+                .map_or_else(|| hub.clone(), |n| n.to_string_lossy().into_owned());
+            let hub_repo = rto_graph::Repo::discover(&hub_root)?;
+            let hub_origin = hub_repo.origin_url();
+            let found = detect_spoke_pin(&spoke_root, &hub_dir, hub_origin.as_deref(), &hub_repo)?;
+            pins.push(rto_render::MemberPin {
+                member: member.clone(),
+                hub: hub.clone(),
+                rev: found.as_ref().map(|p| p.rev.clone()),
+                via: found.map(|p| p.via),
+            });
+        }
+    }
+    // Stable: the vault is regenerated over itself, so an order that moved would
+    // show a diff on every render.
+    pins.sort_by(|a, b| (&a.member, &a.hub).cmp(&(&b.member, &b.hub)));
+    Ok(pins)
+}
+
 fn render_obsidian_workspace(
     cfg: &config::Config,
     workspace_name: &str,
@@ -14190,6 +14251,8 @@ fn render_obsidian_workspace(
     let cross_links_authored = cross_links.iter().filter(|l| l.authored).count();
     cross_links.truncate(WORKSPACE_CROSS_LINK_ROWS);
 
+    let pins = workspace_pins(&ws, &member_names)?;
+
     let home = rto_render::render_workspace_home(&rto_render::WorkspaceSummary {
         // Stamped at render, not read from the graph: it records when this vault
         // was produced, which is the fact a reader needs to judge whether it is
@@ -14197,6 +14260,7 @@ fn render_obsidian_workspace(
         generated_at: rto_exec::rfc3339_utc(std::time::SystemTime::now()),
         name: workspace_name.to_owned(),
         members: summaries,
+        pins,
         cross_links,
         cross_links_total,
         cross_links_authored,

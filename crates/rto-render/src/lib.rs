@@ -14,8 +14,9 @@ pub use docs::{
 };
 pub use obsidian::{
     AdrEntry, ConfigSecretSummary, CouplingEntry, Coverage, CrossLink, DensityEntry, FindingEntry,
-    HOME_NOTE, RenderedUnder, VaultNote, VaultScope, VaultSummary, WorkspaceSummary, note_name,
-    render_home, render_note, render_note_scoped, render_workspace_home, scoped_note_name,
+    HOME_NOTE, MemberPin, RenderedUnder, VaultNote, VaultScope, VaultSummary, WorkspaceSummary,
+    note_name, render_home, render_note, render_note_scoped, render_workspace_home,
+    scoped_note_name,
 };
 
 /// A render target for the graph.
