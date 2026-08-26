@@ -133,10 +133,25 @@ struct PubEnum {
 }
 
 /// Every `.rs` file under every crate's `src/`.
+///
+/// Every I/O failure here is **fatal**, deliberately.
+///
+/// A guard that skips what it cannot read reports the same "all clear" as a guard
+/// that read everything and found nothing — which is the exact failure mode this
+/// file exists to prevent, turned on itself. An unreadable directory would let a
+/// whole crate's public enums pass unnoticed, and the scan floor would not
+/// necessarily catch it: dropping one crate of nine leaves well over 100 enums.
 fn sources() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(rd) = fs::read_dir(dir) else { return };
-        for entry in rd.flatten() {
+        let rd = fs::read_dir(dir).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} while scanning for public enums: {e}",
+                dir.display()
+            )
+        });
+        for entry in rd {
+            let entry =
+                entry.unwrap_or_else(|e| panic!("cannot read an entry of {}: {e}", dir.display()));
             let p = entry.path();
             if p.is_dir() {
                 walk(&p, out);
@@ -150,12 +165,21 @@ fn sources() -> Vec<PathBuf> {
         .expect("crates/");
     let mut out = Vec::new();
     let mut dirs: Vec<PathBuf> = fs::read_dir(crates)
-        .expect("crates/ is readable")
-        .flatten()
-        .map(|e| e.path().join("src"))
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", crates.display()))
+        .map(|e| {
+            e.unwrap_or_else(|e| panic!("cannot read an entry of {}: {e}", crates.display()))
+                .path()
+                .join("src")
+        })
         .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
+    assert!(
+        dirs.len() >= 8,
+        "found only {} crate `src/` directories; the workspace layout has changed \
+         and this scan is no longer looking where the code is",
+        dirs.len()
+    );
     for d in &dirs {
         walk(d, &mut out);
     }
@@ -171,9 +195,11 @@ fn public_enums() -> Vec<PubEnum> {
         .expect("workspace root");
     let mut found = Vec::new();
     for file in sources() {
-        let Ok(text) = fs::read_to_string(&file) else {
-            continue;
-        };
+        // Fatal, for the reason [`sources`] gives: a source file skipped because
+        // it could not be read is a source file whose public enums went unchecked,
+        // and the test would still report success.
+        let text = fs::read_to_string(&file)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()));
         let rel = file
             .strip_prefix(root)
             .unwrap_or(&file)
