@@ -338,3 +338,57 @@ fn only_the_id_attribute_is_read_not_one_that_merely_ends_in_id() {
     // An `id` on something that is not an h2 is not a section anchor.
     assert!(rendered_h2_ids(r#"<h3 id="deeper">C</h3>"#).is_empty());
 }
+
+/// A `[[…]]` **inside a heading** is the one construct on which the two sides
+/// still disagree — stated here, with its measurement, rather than left to be
+/// rediscovered.
+///
+/// `rto_render` rewrites wiki-links to their display form *before* computing ids
+/// (`docs.rs`: `rewrite_wiki_links` then `heading_ids`), so it sees `See
+/// ADR-0001`. `rto_spec` reads the authored source and sees the raw link. For
+/// `## See [[docs/adr/0001-….md]]`:
+///
+/// ```text
+/// graph     see-docs-adr-0001-build-roteiro-unified-codebase-knowledge-graph-md
+/// rendered  see-adr-0001
+/// ```
+///
+/// **Not introduced by #621** — the old line scan read the same raw text, so this
+/// predates parsing — and **0 headings in `website/pages` or `docs` contain a
+/// wiki-link**, which is why the agreement test above passes.
+///
+/// Left as a stated limit rather than fixed because the fix is a real choice, not
+/// an oversight. Either `rto_spec` learns the render-time link rewriting — which
+/// needs the ADR prefix, an HTML concern the authored layer has no business
+/// knowing — or the renderer computes ids from the authored source instead of the
+/// rewritten text, changing the anchor of any such heading. Neither is obviously
+/// right for zero occurrences.
+///
+/// It is not unguarded: a real instance fails `every_heading_id_equals_its_graph_section_key`
+/// loudly, because that comparison renders the whole page.
+#[test]
+fn a_wiki_link_in_a_heading_is_the_one_remaining_disagreement() {
+    let md = "---\nsite-page: p\nsite-nav: P\nsite-order: 1\n---\n\n\
+              # P\n\n## See [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]]\n";
+
+    let parsed = rto_spec::parse_site_page("website/pages/p.md", md).expect("parse");
+    assert_eq!(
+        parsed.sections[0].slug,
+        "see-docs-adr-0001-build-roteiro-unified-codebase-knowledge-graph-md",
+        "the graph keys from the authored source"
+    );
+
+    let html = rto_render::render_site_page(
+        md,
+        "adr/",
+        &[],
+        "",
+        &rto_render::PublishedPages::new(),
+        None,
+    );
+    assert_eq!(
+        rendered_h2_ids(&html.html),
+        ["see-adr-0001"],
+        "the renderer keys from the display form it rewrote first"
+    );
+}
