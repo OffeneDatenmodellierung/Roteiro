@@ -524,9 +524,22 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
             continue;
         }
         if let Some(heading) = line.strip_prefix("## ") {
-            let title = heading.trim().to_owned();
+            // Reduced to its text, as a site page's is — not the raw source line.
+            // Two things read this: the graph's section title, which would
+            // otherwise display a `{#id}` the rendered `<h2>` never shows; and
+            // `is_version_history` immediately below, which matches on the words.
+            // Leaving the id in would make `## Version history {#history}` fail
+            // that match and silently drop every row of the table — the version
+            // facts gone, with no violation raised, in an ADR that had done
+            // nothing wrong but declare an anchor.
+            let title = crate::text::heading_text(heading);
             in_history = is_version_history(&title);
-            let slug = crate::text::slugify(&title);
+            // The heading's declared id when it has one, exactly as a site page's
+            // is (#524). No ADR carries an explicit `{#id}` today, so this moves
+            // no key — it removes the trap rather than repairing damage: the
+            // first author to write one would otherwise get the site-page bug
+            // back, in a document class the fix had not reached.
+            let slug = crate::text::heading_id(heading);
             current = Some(slug.clone());
             // Close the span this heading ends — the preamble if it is the first.
             match sections.last_mut() {
@@ -1024,6 +1037,93 @@ mod tests {
             parse_adr("x.md", text),
             Err(super::ParseError::MissingAdrId)
         );
+    }
+
+    /// #524, for ADRs: a heading that declares an address is keyed by it, exactly
+    /// as a site page's is.
+    ///
+    /// No ADR in this repository carries an explicit `{#id}`, so extending the
+    /// rule here moved no key — verified by diffing all 233 section keys before
+    /// and after. It removes the trap rather than repairing damage: the first
+    /// author to write one would otherwise have got the site-page bug back, in a
+    /// document class the fix had not reached.
+    #[test]
+    fn an_adr_heading_declaring_an_id_is_keyed_by_it() {
+        let adr = "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n\
+                   # T\n\n## Design notes {#arch}\n\n## Plain heading\n";
+        let doc = parse_adr("docs/adr/0001-x.md", adr).expect("parse");
+        let slugs: Vec<_> = doc.sections.iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(slugs, ["arch", "plain-heading"]);
+        // …and the title is the heading's *text*. The rendered `<h2>` shows
+        // "Design notes"; a section titled "Design notes {#arch}" would put the
+        // anchor's source into every view that displays it.
+        assert_eq!(doc.sections[0].title, "Design notes");
+    }
+
+    /// The fallback path — a heading with **no** `{#id}` — changed too, and this
+    /// records what it changed to.
+    ///
+    /// The old key slugified the raw source line, so `## See [the plan](plan.md)`
+    /// keyed as `see-the-plan-plan-md`: the link's target spelled out in an
+    /// address, matching nothing the document renders. The key is now the slug of
+    /// the heading's **text**, `see-the-plan`, which is the anchor the renderer
+    /// emits — the agreement #524 exists to establish, arrived at from the other
+    /// direction.
+    ///
+    /// Only link and HTML syntax move a key: `slugify` already dropped backticks
+    /// and asterisks, so code spans and emphasis keyed by their text before and
+    /// after. Measured across all 247 `## ` headings under `docs/` at the time of
+    /// this change, **nothing moved** — no ADR or blueprint heading here contains
+    /// a link.
+    #[test]
+    fn a_heading_with_no_id_is_keyed_by_its_text_not_its_source() {
+        let adr = "---\nadr-id: \"0003\"\nstatus: Accepted\n---\n\n\
+                   # T\n\n## See [the plan](plan.md)\n\n## A `code` heading\n";
+        let doc = parse_adr("docs/adr/0003-x.md", adr).expect("parse");
+        let slugs: Vec<_> = doc.sections.iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["see-the-plan", "a-code-heading"],
+            "the link's target is not part of the address; the code span never was"
+        );
+        assert_eq!(doc.sections[0].title, "See the plan");
+    }
+
+    /// Accepting `{#id}` on ADR headings must not cost the version table.
+    ///
+    /// `is_version_history` matches on the heading's words. While the title kept
+    /// the raw source line, declaring an anchor on the history heading made
+    /// `"Version history {#history}"` fail that match, and **every row of the
+    /// table was dropped from `VersionFacts` with no violation raised** — the
+    /// version-drift gate silently reduced to nothing on an ADR whose only
+    /// unusual act was naming its own anchor.
+    #[test]
+    fn an_anchored_version_history_heading_still_yields_its_rows() {
+        let adr = "---\nadr-id: \"0002\"\nstatus: Accepted\n---\n\n\
+                   # T\n\n## Version history {#history}\n\n\
+                   | Version | Date | Notes |\n|---|---|---|\n\
+                   | 1.0 | 2026-01-01 | First. |\n";
+        let doc = parse_adr("docs/adr/0002-x.md", adr).expect("parse");
+        assert_eq!(
+            doc.sections[0].slug, "history",
+            "the declared anchor is still the key"
+        );
+        // The rows first, and deliberately before the title assertion: the title
+        // is the *mechanism*, the lost rows are the *consequence*, and asserting
+        // the mechanism first would let this test pass its own fault injection by
+        // failing early — reporting a cosmetic difference and never reaching the
+        // question of whether the gate still has anything to read.
+        assert_eq!(
+            doc.versions
+                .history
+                .iter()
+                .map(|r| r.version.to_string())
+                .collect::<Vec<_>>(),
+            ["1.0"],
+            "the table under an anchored heading is still read: {:?}",
+            doc.versions
+        );
+        assert_eq!(doc.sections[0].title, "Version history");
     }
 
     #[test]
