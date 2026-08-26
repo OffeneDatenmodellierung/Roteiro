@@ -88,7 +88,7 @@ pdf-extract = { version = "0.12", optional = true }
 ocrs = { version = "0.12", optional = true }
 rten = { version = "0.24", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
-yaml-rust2 = "0.11.0"
+yaml-rust2 = "0.12.0"
 
 # `audio-metadata` only (ADR-0016): the *format* layer of a decoding library, used
 # for a container read and nothing else — codec, rate, bit depth, channels,
