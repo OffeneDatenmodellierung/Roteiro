@@ -986,3 +986,49 @@ fn a_staged_addition_that_is_then_edited_is_read_from_disk() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn gitignore_still_holds_unless_a_file_is_force_added() {
+    // The staged-addition overlay (#636) unions the index with the dirwalk, so it
+    // is worth pinning what that does to `.gitignore`: an ignored file is absent
+    // from the dirwalk and enters only by being in the index, which takes a
+    // deliberate `git add -f`.
+    //
+    // Both halves asserted, because only the pair distinguishes "ignore is
+    // honoured" from "ignore is bypassed": the first alone would pass on an
+    // implementation that ignores the index entirely, which is the bug being
+    // fixed, and the second alone would pass on one that leaks every ignored file.
+    let dir = fresh_dir("ignored-force-added");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "main.rs", "fn main() {}\n");
+    write(&dir, ".gitignore", "secret.rs\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "committed"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+
+    write(&dir, "secret.rs", "pub fn ignored_symbol() {}\n");
+    sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("ignored");
+    assert!(
+        store
+            .get_node("sym:rust:secret.rs#ignored_symbol")
+            .expect("q")
+            .is_none(),
+        "an ignored, unstaged file stays out"
+    );
+
+    git(&dir, &["add", "-f", "secret.rs"]);
+    sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("force-added");
+    assert!(
+        store
+            .get_node("sym:rust:secret.rs#ignored_symbol")
+            .expect("q")
+            .is_some(),
+        "force-adding overrides the ignore, and the file will be committed — the \
+         graph seeing it now rather than one commit later is the right answer"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

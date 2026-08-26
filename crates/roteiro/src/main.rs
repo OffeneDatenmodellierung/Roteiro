@@ -14142,13 +14142,19 @@ fn workspace_pins(
     let graph = rto_graph::topology::project_graph(ws, member_names)?;
     let mut pins = Vec::new();
     for member in member_names {
-        let Some(spoke_root) = ws.project_root(Some(member))? else {
-            continue;
-        };
+        // An error, not a `continue`, and for the reason this function's docs
+        // give: a manifest quietly missing a pin row is worse than one that
+        // fails, because the section's whole value is that its promises hold.
+        // It also matches the member loop above, which already refuses a member
+        // with no root — so silently skipping here would have disagreed with the
+        // caller about the same condition.
+        let spoke_root = ws
+            .project_root(Some(member))?
+            .ok_or_else(|| anyhow::anyhow!("workspace member `{member}` has no repository root"))?;
         for hub in graph.parents_of(member) {
-            let Some(hub_root) = ws.project_root(Some(hub))? else {
-                continue;
-            };
+            let hub_root = ws.project_root(Some(hub))?.ok_or_else(|| {
+                anyhow::anyhow!("workspace member `{hub}` has no repository root")
+            })?;
             // The hub's **directory basename**, not the workspace display label:
             // a label carries a `-2`/`-3` collision suffix that would never match
             // the URL or image basename a pin is recognised by.
