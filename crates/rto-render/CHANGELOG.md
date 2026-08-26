@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v3.1.0...rto-render-v3.2.0) - 2026-08-26
+
+### Added
+
+- *(render)* the manifest says what each member deploys, and against which hub
+
+### Fixed
+
+- *(render)* the caption agrees with its count, and the doc with its code
+
 ## [3.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v3.0.0...rto-render-v3.1.0) - 2026-08-26
 
 ### Other
