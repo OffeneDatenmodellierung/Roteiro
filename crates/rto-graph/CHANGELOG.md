@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.2.0...rto-graph-v3.2.1) - 2026-08-26
+
+### Fixed
+
+- *(spec)* a link written inside a heading belongs to that heading
+
+### Other
+
+- Merge branch 'main' into fix/621-parse-dont-scan
+- Merge pull request #641 from OffeneDatenmodellierung/fix/post-merge-review-follow-ups
+- *(sync)* say what the overlay actually carries, and pin the ignore boundary
+
 ## [3.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.1.0...rto-graph-v3.2.0) - 2026-08-26
 
 ### Added
