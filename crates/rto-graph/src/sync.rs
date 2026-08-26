@@ -358,12 +358,32 @@ pub fn sync_worktree(
             }
         }
 
-        // Overlay brand-new untracked files: not in `HEAD`, so absent from
-        // `committed.blobs` above. A gitignore-aware walk finds them so the
-        // working-tree `sync`/`check`/`review` see new work that isn't staged yet.
+        // Overlay brand-new files — anything on disk that `HEAD` does not have.
+        //
+        // Two sources, and it needs both (#636). `untracked_files` classifies the
+        // working tree **against the index**, so it stops reporting a file the
+        // moment it is `git add`-ed; the committed blob list above comes from the
+        // `HEAD` tree, where a new file does not exist either. A **staged
+        // addition** is therefore in neither, and used to fall straight through
+        // this overlay — so `git add`, an action that moves a file *closer* to
+        // committed, deleted its node from the graph and dropped the
+        // `+N uncommitted` marker at the exact moment the tree differed most from
+        // `HEAD`. Adding the index entries that `HEAD` lacks closes the gap.
+        //
+        // Content still comes from **disk**, not from the staged blob: this is the
+        // worktree source, and a file edited after being staged must be read as it
+        // now stands.
+        //
         // They count as dirty (so the preview re-runs when they change) and add to
         // the blob total (they are genuinely new blobs, not edits of existing ones).
-        for path in repo.untracked_files()? {
+        let head_paths: BTreeSet<&str> = committed.blobs.iter().map(|b| b.path.as_str()).collect();
+        let mut new_paths: BTreeSet<String> = repo.untracked_files()?.into_iter().collect();
+        for entry in repo.index_files()? {
+            if !head_paths.contains(entry.path.as_str()) {
+                new_paths.insert(entry.path);
+            }
+        }
+        for path in new_paths {
             match std::fs::read(workdir.join(&path)) {
                 Ok(bytes) => {
                     let woid = repo.blob_oid(&bytes)?;

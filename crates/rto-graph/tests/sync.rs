@@ -888,3 +888,101 @@ fn memory_writes_do_not_invalidate_the_fact_cache() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn staging_a_new_file_does_not_delete_it_from_the_graph() {
+    // #636. `untracked_files` classifies the working tree **against the index**,
+    // so it stops reporting a file the moment it is `git add`-ed; the committed
+    // blob list comes from the `HEAD` tree, where a new file does not exist
+    // either. A staged addition was therefore in neither, and fell through the
+    // overlay — so `git add`, which moves a file *closer* to committed, removed
+    // the node the previous sync had already stored.
+    //
+    // Asserted across all three states, because the shape of the bug is the
+    // middle one being different from both of its neighbours: it was present
+    // untracked, absent staged, present again committed.
+    let dir = fresh_dir("staged-addition");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "main.rs", "fn main() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "committed"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+
+    write(&dir, "fresh.rs", "pub fn brand_new() {}\n");
+    sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("untracked");
+    assert!(
+        store
+            .get_node("sym:rust:fresh.rs#brand_new")
+            .expect("q")
+            .is_some(),
+        "untracked: present"
+    );
+
+    git(&dir, &["add", "fresh.rs"]);
+    let staged = sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("staged");
+    assert!(
+        store
+            .get_node("sym:rust:fresh.rs#brand_new")
+            .expect("q")
+            .is_some(),
+        "staged: the node must survive `git add` — this is the regression"
+    );
+    assert_eq!(
+        staged.blobs_dirty, 1,
+        "and it is still counted as uncommitted work, so the `+N` marker holds"
+    );
+
+    git(&dir, &["commit", "-q", "-m", "add fresh"]);
+    sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("committed");
+    assert!(
+        store
+            .get_node("sym:rust:fresh.rs#brand_new")
+            .expect("q")
+            .is_some(),
+        "committed: present"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_staged_addition_that_is_then_edited_is_read_from_disk() {
+    // The overlay reads **working-tree** content, not the staged blob: this is the
+    // worktree source, and a file edited after `git add` must be seen as it now
+    // stands. Reading `entry.id` from the index instead would be a plausible
+    // implementation that silently serves the stale staged bytes.
+    let dir = fresh_dir("staged-then-edited");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "main.rs", "fn main() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "committed"]);
+
+    write(&dir, "fresh.rs", "pub fn staged_name() {}\n");
+    git(&dir, &["add", "fresh.rs"]);
+    write(&dir, "fresh.rs", "pub fn edited_name() {}\n");
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = cache_for(&repo);
+    let mut store = Store::open_in_memory().expect("store");
+    sync_worktree(&mut store, &repo, &cache, &Registry::default()).expect("sync");
+
+    assert!(
+        store
+            .get_node("sym:rust:fresh.rs#edited_name")
+            .expect("q")
+            .is_some(),
+        "the working-tree content wins"
+    );
+    assert!(
+        store
+            .get_node("sym:rust:fresh.rs#staged_name")
+            .expect("q")
+            .is_none(),
+        "the staged blob is not what the worktree source reports"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
