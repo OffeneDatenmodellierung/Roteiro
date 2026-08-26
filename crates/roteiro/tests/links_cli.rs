@@ -308,6 +308,89 @@ fn pinned_uses_pins_config_template_for_image_tags() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// #609 end to end: a spoke that **deploys** rather than builds — no Dockerfile
+/// anywhere, its version declared only in a Helm-shaped `values.yaml`.
+///
+/// Before this, `image_ref` had exactly one producer (`dockerfile_facts`, reading
+/// `FROM` lines), so this workspace reported `0 of 1 pinned` and every cell was
+/// measured against the hub's `HEAD` instead of the version the spoke actually
+/// runs. ADR-0009 step 8's second pin source did not fail — it never started, for
+/// the deployment shape most likely to want it.
+///
+/// No `[pins]` template here, deliberately: the default `<tag>` guess is the path
+/// a chart gets for free, and pinning the template test's scheme would prove only
+/// that configuration works.
+#[test]
+fn a_helm_spoke_with_no_dockerfile_still_resolves_its_pin() {
+    let base = std::env::temp_dir().join(format!("roteiro-helmpin-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+    std::fs::create_dir_all(&app).expect("mkdir app");
+    std::fs::create_dir_all(&deploy).expect("mkdir deploy");
+
+    // Hub v1 carries `serve.tools` and is tagged `1.4.0`; HEAD then renames it.
+    std::fs::write(app.join("config.toml"), "[serve]\ntools = true\n").expect("write");
+    git(&app, &["init", "-q"]);
+    git(&app, &["add", "."]);
+    git(&app, &["commit", "-q", "-m", "v1"]);
+    git(&app, &["tag", "1.4.0"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v1 sync");
+    std::fs::write(app.join("config.toml"), "[serve]\nfeatures = true\n").expect("write");
+    git(&app, &["commit", "-aqm", "v2"]);
+    assert!(roteiro(&app, &["sync"]).status.success(), "app v2 sync");
+
+    // The spoke: a chart's `image:` block, split across keys the way every chart
+    // writes it, and an env file so there is a config key to measure.
+    std::fs::write(
+        deploy.join("values.yaml"),
+        "image:\n  repository: acme/app\n  tag: 1.4.0\n  pullPolicy: IfNotPresent\n",
+    )
+    .expect("write");
+    std::fs::write(deploy.join("prod.env"), "SERVE_TOOLS=true\n").expect("write");
+    git(&deploy, &["init", "-q"]);
+    git(&deploy, &["add", "."]);
+    git(&deploy, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&deploy, &["sync"]).status.success(), "deploy sync");
+
+    let base_s = base.to_str().unwrap();
+    let out = roteiro(
+        &base,
+        &[
+            "links",
+            "--infer",
+            "--pinned",
+            "--hub",
+            "app",
+            "--workspace",
+            base_s,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "pinned infer failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let spoke = &v["spokes"][0];
+    assert_eq!(
+        spoke["hub_rev"], "1.4.0",
+        "the chart's image tag resolved as a hub git ref: {v}"
+    );
+    assert!(
+        spoke["pin_via"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("image acme/app"),
+        "pinned via the values.yaml image block, and says so: {v}"
+    );
+    // The point of resolving the pin: the key the spoke sets exists at 1.4.0 and
+    // is gone at HEAD, so measuring against HEAD would report it as drift.
+    assert!(
+        matched_hub_keys(&v).contains(&"serve.tools".to_owned()),
+        "the deployed version's key resolves: {v}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// A two-repo workspace where the spoke **vendors the hub as a submodule pinned
 /// to the hub's v1 commit**, while the hub itself has moved on and renamed the
 /// key. Returns the workspace root and that v1 sha.
