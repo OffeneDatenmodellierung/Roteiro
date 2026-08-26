@@ -358,7 +358,8 @@ pub fn sync_worktree(
             }
         }
 
-        // Overlay brand-new files — anything on disk that `HEAD` does not have.
+        // Overlay brand-new files: those `HEAD` does not have and git would
+        // nonetheless carry — untracked-but-not-ignored, plus anything staged.
         //
         // Two sources, and it needs both (#636). `untracked_files` classifies the
         // working tree **against the index**, so it stops reporting a file the
@@ -373,6 +374,13 @@ pub fn sync_worktree(
         // Content still comes from **disk**, not from the staged blob: this is the
         // worktree source, and a file edited after being staged must be read as it
         // now stands.
+        //
+        // `.gitignore` is still honoured, and the union states *how*: an ignored
+        // file is absent from the dirwalk, so it enters only by being in the
+        // index — which takes a deliberate `git add -f`. That is the right
+        // outcome rather than a leak, because force-adding overrides the ignore
+        // and the file will be committed; the graph would see it a moment later
+        // anyway.
         //
         // They count as dirty (so the preview re-runs when they change) and add to
         // the blob total (they are genuinely new blobs, not edits of existing ones).
