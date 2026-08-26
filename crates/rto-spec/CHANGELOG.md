@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v3.0.0...rto-spec-v3.0.1) - 2026-08-26
+
+### Fixed
+
+- *(spec)* a section's title is its text, not the line that declared it
+- *(spec)* extend the shared heading rule to ADRs and blueprints
+
+### Other
+
+- Merge branch 'main' into fix/524-heading-id-is-one-rule
+- *(spec)* record what the no-id fallback changed, and measure it
+- Merge branch 'main' into fix/524-heading-id-is-one-rule
+
 ## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v2.3.0...rto-spec-v3.0.0) - 2026-08-22
 
 ### Added
