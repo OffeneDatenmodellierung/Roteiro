@@ -92,9 +92,16 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
 /// reachability can be decided against (see [`crate::sync::sweep_superseded`]).
 ///
 /// The split was always there, encoded in the arithmetic; naming it only makes
-/// it readable. `EXTRACT_VERSION` is unchanged in every build: this is the same
-/// `12` the sum has always started from.
-pub(crate) const EXTRACT_BASE_VERSION: u32 = 12;
+/// it readable.
+///
+/// **12 → 13** (#609): config files now yield `image_ref` nodes for the container
+/// images they declare, so every already-cached config blob must be re-extracted.
+/// Without the bump a spoke's `values.yaml` keeps serving the fact set it produced
+/// before this existed — no `image_ref`, and therefore no detectable pin — until
+/// its bytes happen to change, which for a deployment repo pinning a stable
+/// version is precisely when it does not. Unconditional and namespace-free: this
+/// is a base-version change across every feature combination.
+pub(crate) const EXTRACT_BASE_VERSION: u32 = 13;
 
 /// The stride between feature namespaces above. Each of the three
 /// extraction-affecting features occupies a distinct power-of-ten *bit* slot
@@ -394,6 +401,16 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
     for ck in crate::config_keys::flatten(path, bytes) {
         by_key.insert(ck.key, ck.value);
     }
+    // Read before the loop below consumes the map: a config file that names a
+    // container image is declaring a version pin, not merely a setting (#609).
+    for node in config_image_refs(path, blob_id, &by_key) {
+        let node_key = node.key.clone();
+        facts = facts.with_node(node).with_edge(Edge::derived(
+            file.clone(),
+            node_key,
+            EdgeKind::References,
+        ));
+    }
     for (key, value) in by_key {
         let node_key = format!("cfgkey:{path}#{key}");
         // Redact the value of secret-looking keys so tokens/passwords from
@@ -418,6 +435,129 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
         ));
     }
     facts
+}
+
+/// `image_ref` nodes for the container images a **config file** declares (#609).
+///
+/// # Why this exists
+///
+/// `image_ref` had exactly one producer — [`dockerfile_facts`], reading `FROM`
+/// lines — so ADR-0009 step 8's *image tag → git ref → hub@rev* could only fire
+/// for a spoke that builds an image. A spoke that **deploys** one declares its
+/// version in a Helm values file or a k8s manifest, and produced no `image_ref` at
+/// all: on a real eight-repo workspace, 0 of 7 spokes had a detectable pin. The
+/// flag's documented second pin source did not merely fail, it never started.
+///
+/// The values were already being read — `container.api.image` has been a
+/// `config_key` since ADR-0009 v1.6. Only the *reading of them as a pin* was
+/// missing, which is why this sits beside the config keys rather than in its own
+/// extractor: it is the same bytes, already parsed, asked a different question.
+///
+/// # What counts as an image declaration
+///
+/// Two shapes, both common and neither guessed at:
+///
+/// - **A whole image string** under a key named `image` or ending `.image` —
+///   `container.api.image: registry/app:1.2` (k8s, mined by
+///   [`crate::config_keys`]) and a bare Helm `image: app:1.2`.
+/// - **The split Helm form**, `<prefix>.repository` with an optional
+///   `<prefix>.tag` and `<prefix>.registry` — the `image:` block essentially every
+///   chart writes, and the shape that made this issue visible.
+///
+/// A value carrying whitespace is not an image reference and is skipped, so a
+/// `description.image: a picture of the thing` contributes nothing.
+///
+/// # A tag that cannot resolve still yields a node
+///
+/// Deliberately, and consistently with the Dockerfile path, which emits for
+/// `latest` too. The node is the spoke's **claim** about what it deploys;
+/// whether that claim resolves to a hub revision is
+/// [`crate::…`]-downstream — `pins::detect` tries the configured template, then
+/// `<tag>`, then `v<tag>`, and reports a spoke as unpinned when none exist. Issue
+/// #505 settled that distinction: *no claim* and *a claim that cannot be met* are
+/// different findings, and collapsing them here would hide the second.
+fn config_image_refs(
+    path: &str,
+    blob_id: &str,
+    by_key: &std::collections::BTreeMap<String, String>,
+) -> Vec<Node> {
+    /// An image reference is a single token: `registry/org/app:1.2@sha256:…`.
+    /// Anything with whitespace in it is prose that happens to sit under a
+    /// key called `image`.
+    fn looks_like_image(v: &str) -> bool {
+        !v.is_empty() && !v.chars().any(char::is_whitespace)
+    }
+    // Keyed by the dotted config key rather than by position, mirroring
+    // `cfgkey:<path>#<dotted>`. A positional index would renumber every node below
+    // an inserted key; the key a value lives under does not move.
+    fn node_at(
+        path: &str,
+        blob_id: &str,
+        key: &str,
+        display: String,
+        meta: serde_json::Value,
+    ) -> Node {
+        let mut node = Node::new(
+            format!("imageref:{path}#{key}"),
+            NodeKind::Other(IMAGE_REF_KIND.into()),
+            display,
+        );
+        node.path = Some(path.to_owned());
+        node.blob_hash = Some(blob_id.to_owned());
+        node.meta = meta;
+        node
+    }
+
+    let mut out = Vec::new();
+    for (key, value) in by_key {
+        // Compared as the key's last dotted segment rather than by suffix: `image`
+        // and `container.api.image` are the same field at different depths, while
+        // a key called `base_image` is a different field that a suffix test would
+        // swallow. (It also sidesteps clippy reading `.image` as a file extension.)
+        let (prefix, last) = key.rsplit_once('.').unwrap_or(("", key));
+        // Shape 1: a whole image string.
+        if last == "image" && looks_like_image(value) {
+            let (name, tag, digest) = split_image(value);
+            out.push(node_at(
+                path,
+                blob_id,
+                key,
+                value.clone(),
+                serde_json::json!({ "image": name, "tag": tag, "digest": digest }),
+            ));
+            continue;
+        }
+        // Shape 2: the split Helm form. Anchored on `repository`, because that is
+        // the field naming the image; a `tag` on its own says which version of
+        // nothing.
+        if last != "repository" || !looks_like_image(value) {
+            continue;
+        }
+        let at = |suffix: &str| {
+            let k = if prefix.is_empty() {
+                suffix.to_owned()
+            } else {
+                format!("{prefix}.{suffix}")
+            };
+            by_key.get(&k).filter(|v| looks_like_image(v)).cloned()
+        };
+        let name = at("registry").map_or_else(
+            || value.clone(),
+            |r| format!("{}/{}", r.trim_end_matches('/'), value),
+        );
+        let tag = at("tag");
+        let display = tag
+            .as_ref()
+            .map_or_else(|| name.clone(), |t| format!("{name}:{t}"));
+        out.push(node_at(
+            path,
+            blob_id,
+            key,
+            display,
+            serde_json::json!({ "image": name, "tag": tag, "digest": None::<String> }),
+        ));
+    }
+    out
 }
 
 /// The `NodeKind::Other` token for a container base-image reference extracted from
@@ -2261,6 +2401,79 @@ mod tests {
                 .iter()
                 .all(|n| n.kind != NodeKind::Other("config_key".into()))
         );
+    }
+
+    /// #609: a spoke that **deploys** an image declares its version in YAML, not
+    /// in a Dockerfile, and produced no `image_ref` at all — so ADR-0009 step 8's
+    /// *image tag → git ref → hub@rev* never started for the deployment shape most
+    /// likely to want it.
+    #[test]
+    fn a_kubernetes_container_image_is_a_pin_not_only_a_setting() {
+        let reg = Registry::new(crate::IngestConfig::default());
+        let dep = b"apiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: registry.io/acme/app:1.4.0\n";
+        let facts = reg.extract("deploy/api.yaml", "y1", dep);
+        let refs: Vec<&Node> = facts
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("image_ref".into()))
+            .collect();
+        assert_eq!(refs.len(), 1, "got: {refs:?}");
+        assert_eq!(refs[0].meta["image"], "registry.io/acme/app");
+        assert_eq!(refs[0].meta["tag"], "1.4.0");
+        // The config_key is still emitted — this reads the same value a second
+        // way, it does not replace the first.
+        assert!(
+            facts
+                .nodes
+                .iter()
+                .any(|n| n.key == "cfgkey:deploy/api.yaml#container.api.image"),
+            "the config key must survive: {:?}",
+            facts.nodes
+        );
+        assert!(
+            facts
+                .edges
+                .iter()
+                .any(|e| e.src == "file:deploy/api.yaml" && e.kind == EdgeKind::References),
+            "a references edge from the file, as a Dockerfile's image gets"
+        );
+    }
+
+    /// The Helm `image:` block, which splits the reference across keys. This is the
+    /// shape that made #609 visible: 0 of 7 spokes on a real workspace had a
+    /// detectable pin, every one of them writing exactly this.
+    #[test]
+    fn a_helm_values_image_block_is_assembled_into_one_reference() {
+        let reg = Registry::new(crate::IngestConfig::default());
+        let values =
+            b"image:\n  registry: reg.io\n  repository: acme/app\n  tag: 1.4.0\n  pullPolicy: IfNotPresent\n";
+        let facts = reg.extract("values.yaml", "y2", values);
+        let refs: Vec<&Node> = facts
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("image_ref".into()))
+            .collect();
+        assert_eq!(refs.len(), 1, "one image, not one per key: {refs:?}");
+        assert_eq!(refs[0].meta["image"], "reg.io/acme/app");
+        assert_eq!(refs[0].meta["tag"], "1.4.0");
+        // Keyed by the config key it came from, so inserting a key above it does
+        // not renumber it the way a positional index would.
+        assert_eq!(refs[0].key, "imageref:values.yaml#image.repository");
+    }
+
+    /// The rules are narrow on purpose: a suffix test would have swallowed
+    /// `base_image`, and a key called `image` holding prose is not a reference.
+    #[test]
+    fn only_an_image_shaped_value_under_an_image_shaped_key_counts() {
+        let reg = Registry::new(crate::IngestConfig::default());
+        let y = b"base_image: acme/other:9\ndescription:\n  image: a picture of the thing\nnotes:\n  repository: two words here\n";
+        let facts = reg.extract("values.yaml", "y3", y);
+        let refs: Vec<&Node> = facts
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("image_ref".into()))
+            .collect();
+        assert!(refs.is_empty(), "none of these are pins: {refs:?}");
     }
 
     #[test]
