@@ -163,7 +163,10 @@ pub use sync::{
     DEFAULT_KEEP_GENERATIONS, ReclaimReport, SyncError, SyncReport, sweep_superseded, sync,
     sync_index, sync_tree, sync_worktree,
 };
-pub use text::{first_h1, heading_id, heading_id_from, heading_text, markdown_dialect, slugify};
+pub use text::{
+    Heading, first_h1, heading_id, heading_id_from, heading_text, headings, markdown_dialect,
+    slugify,
+};
 pub use trust::ProducerTrust;
 pub use workspace::{
     Follow, ResolvedWorkspace, RootScan, Workspace, WorkspaceError, WorkspaceSet,

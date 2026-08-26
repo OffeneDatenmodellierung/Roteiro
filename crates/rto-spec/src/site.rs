@@ -37,7 +37,7 @@
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 
 use crate::adr::{Section, WikiLink, clean_value, resolve_target, split_frontmatter};
-use crate::text::{first_h1, heading_id, heading_text};
+use crate::text::first_h1;
 
 /// The frontmatter field that declares a document published, and carries its
 /// slug. Its presence is the whole classification rule.
@@ -180,11 +180,60 @@ pub fn parse_site_page(rel_path: &str, text: &str) -> Result<SitePage, ParseErro
     // Walk the body exactly as the ADR and blueprint parsers do: track the
     // current section so links are attributed to it, and skip fenced code so a
     // documented `[[…]]` example is not mistaken for a real authored link.
-    let mut sections = Vec::new();
+    // Sections come from **parsing**, not from `strip_prefix("## ")` (#621).
+    //
+    // A heading is not a line beginning with `## `. `> ## Quoted`, `  ## Indented`
+    // and `Title` over `---` are all headings to the parser and to the renderer,
+    // which emits an addressable `<h2 id="…">` for each — while a line scan sees
+    // none of them, so the graph recorded no section and a `[[page#that-place]]`
+    // link could not resolve to somewhere the page genuinely has. The mirror
+    // error is a `## ` inside a fence, which a scan counts and a parser knows is
+    // code.
+    //
+    // No `text` on the sections: `Section` is shared with `parse_adr`, and only
+    // that parser populates it so far. A site page section note is empty in the
+    // vault for the same reason an ADR's was (#545).
+    let heads: Vec<rto_graph::Heading> = rto_graph::headings(body)
+        .into_iter()
+        .filter(|h| h.level == 2)
+        .collect();
+    let sections: Vec<Section> = heads
+        .iter()
+        .map(|h| Section {
+            slug: h.id.clone(),
+            title: h.text.clone(),
+            text: String::new(),
+        })
+        .collect();
+
+    // Wiki-links stay a line scan — they are not markdown constructs, so the
+    // parser has nothing to say about them — but which section owns one is now
+    // decided by **byte offset** against the parsed headings. That is what lets a
+    // link under a blockquoted heading be attributed to it, which a scan could not
+    // do because it never knew the section had started.
+    //
+    // `split_inclusive` rather than `lines`, so the offset arithmetic is the
+    // bytes themselves and stays right for `\r\n`.
     let mut links = Vec::new();
-    let mut current: Option<String> = None;
+    let mut current: Option<&str> = None;
+    let mut next = 0usize;
+    let mut offset = 0usize;
     let mut in_fence = false;
-    for line in body.lines() {
+    for raw_line in body.split_inclusive('\n') {
+        // Any heading that *begins anywhere in this line* owns it — not just one
+        // starting at the first byte. A heading's offset is its own `#`, so for
+        // `> ## Quoted` or `  ## Indented` it sits mid-line; comparing against the
+        // line's start byte would leave `current` on the previous section until
+        // the following line, and a `[[…]]` written inside the heading itself
+        // would be filed under the section before it. A heading occupies its whole
+        // line, so everything on that line belongs to it.
+        let line_end = offset + raw_line.len();
+        while next < heads.len() && heads[next].start < line_end {
+            current = Some(heads[next].id.as_str());
+            next += 1;
+        }
+        let line = raw_line.trim_end_matches(['\n', '\r']);
+        offset = line_end;
         if line.trim_start().starts_with("```") {
             in_fence = !in_fence;
             continue;
@@ -192,27 +241,8 @@ pub fn parse_site_page(rel_path: &str, text: &str) -> Result<SitePage, ParseErro
         if in_fence {
             continue;
         }
-        if let Some(heading) = line.strip_prefix("## ") {
-            let title = heading_text(heading);
-            // The heading's *declared* id, not the slug of its text: an explicit
-            // `{#offline}` is an address the author wrote, and the renderer has
-            // always honoured it. Slugifying the text regardless made the section
-            // key name a place the page does not have (#524).
-            let slug = heading_id(heading);
-            current = Some(slug.clone());
-            // No `text`: `Section` is shared with `parse_adr`, and only that
-            // parser populates it so far. A site page section note is empty in
-            // the vault for the same reason an ADR's was (#545) — the fix is the
-            // same shape and is deliberately not in that PR's scope, which is
-            // ADRs. 62 notes here against 199 there.
-            sections.push(Section {
-                slug,
-                title,
-                text: String::new(),
-            });
-        }
         for raw in crate::text::scan_wiki_links(line) {
-            let from = match &current {
+            let from = match current {
                 Some(slug) => format!("{key}#{slug}"),
                 None => key.clone(),
             };
@@ -474,6 +504,36 @@ mod tests {
                 .iter()
                 .any(|e| e.src == "site:modes" && e.dst == "site:modes#offline"),
             "contains edge"
+        );
+    }
+
+    /// A wiki-link written **inside a heading** belongs to that heading.
+    ///
+    /// Found by Copilot on #642, and it is specific to the headings this change
+    /// made visible. A heading's offset is its own `#`, so for `> ## Quoted` or
+    /// `  ## Indented` it sits mid-line; a window compared against the line's
+    /// *start* byte left `current` on the previous section until the next line,
+    /// filing the link one section too early. A plain `## Heading` starts at byte
+    /// zero of its line and never showed the bug — so the fixture uses a
+    /// blockquoted one, and a preceding section for it to be wrongly attributed
+    /// to. Without both, the test passes against the defect.
+    #[test]
+    fn a_link_inside_a_heading_belongs_to_that_heading() {
+        let md = "---\nsite-page: p\nsite-nav: P\nsite-order: 1\n---\n\n\
+                  # P\n\n## First\n\n\
+                  > ## Quoted [[crates/rto-graph/src/text.rs#slugify]]\n\ntail\n";
+        let page = parse_site_page("website/pages/p.md", md).expect("parse");
+        // Compared against the section itself rather than a written-out slug: the
+        // `[[…]]` is literal text *in* the heading, so it slugifies into that
+        // heading's own id (as it does for the rendered `<h2 id>`). Hardcoding the
+        // result would assert the slug rule here, where the subject is attribution.
+        let quoted = page.sections.last().expect("two sections");
+        assert_eq!(quoted.slug.split('-').next(), Some("quoted"), "sanity");
+        let link = page.links.first().expect("the link is found at all");
+        assert_eq!(
+            link.from,
+            format!("site:p#{}", quoted.slug),
+            "attributed to the heading it is written in, not the one before it"
         );
     }
 }
