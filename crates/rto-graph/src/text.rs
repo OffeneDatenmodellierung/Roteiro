@@ -258,10 +258,10 @@ mod tests {
         );
     }
 
-    /// Offsets are the block's, in document order — which is all a caller needs to
-    /// attribute a later byte to the heading it falls under.
+    /// Offsets are each heading's own start, in document order — which is all a
+    /// caller needs to attribute a later byte to the heading it falls under.
     #[test]
-    fn heading_offsets_ascend_and_point_at_the_block() {
+    fn heading_offsets_ascend_and_point_at_the_heading_not_its_container() {
         let md = "## First\n\ntext\n\n> ## Quoted\n\nmore\n";
         let hs = headings(md);
         assert_eq!(hs.len(), 2);

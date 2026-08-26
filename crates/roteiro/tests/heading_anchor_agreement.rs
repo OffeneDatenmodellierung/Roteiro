@@ -102,19 +102,21 @@ fn rendered_h2_ids(html: &str) -> Vec<String> {
     out
 }
 
-/// The ids the renderer emits for headings **inside a blockquote**.
+/// Every id the renderer emits for a site page is a section key in the graph, and
+/// vice versa — compared page by page across the real site.
 ///
-/// `rto_spec` finds a section by scanning for `## ` at the start of a line;
-/// `rto_render` parses, and a heading inside a blockquote is still a heading. So
-/// `> ## Title` is an addressable `<h2>` on the page and no section in the graph
-/// — the same disagreement #524 is about, reached by a different mechanism
-/// (scan versus parse rather than attribute versus text).
+/// A link into a section resolves through the graph and lands through the `id`,
+/// so the moment the two disagree the graph says a place exists and the browser
+/// scrolls nowhere. Asserting the **relation** rather than literal strings is
+/// what makes this test find divergences nobody had thought of: it was written
+/// for the `{#id}` defect (#524) and immediately produced a different one — the
+/// blockquoted heading of #621.
 ///
-/// Subtracted as a **relation** rather than listed as an exemption, so it
-/// shrinks on its own: un-blockquote the heading and this returns nothing, with
-/// no test to remember to edit. One heading in this repository is affected
-/// (`docs/BUILD_PLAN_V2.md:16`); indented and setext headings would diverge the
-/// same way and none exist today.
+/// **That exemption is gone.** This used to subtract blockquoted ids from the
+/// comparison, because `rto_spec` scanned for `## ` and could not see them.
+/// `rto_spec` parses now, so there is no class held back and no subtraction to
+/// keep honest — which matters, because an agreement test is only ever as strong
+/// as the things it declines to compare.
 #[test]
 fn every_heading_id_equals_its_graph_section_key() {
     let pages = site_pages();
