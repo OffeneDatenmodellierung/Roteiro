@@ -219,31 +219,87 @@ pub const SEARCH: &str = "Search graph nodes by text — names, keys, paths, and
 /// authority with a copy beside it.
 #[must_use]
 pub fn for_tool(name: &str) -> Option<String> {
-    if name == "context" {
-        // The one description with a runtime value in it. `CONTEXT` carries a
-        // `{cap}` placeholder rather than a baked `50`, because the served copy
-        // interpolated `TOOL_CONTEXT_EDGE_CAP` while the MCP copy hardcoded the
-        // number — so raising the cap would have left one surface quietly wrong.
-        return Some(CONTEXT.replace("{cap}", &rto_graph::TOOL_CONTEXT_EDGE_CAP.to_string()));
-    }
-    Some(
-        match name {
-            "check" => CHECK,
-            "config_secrets" => CONFIG_SECRETS,
-            "context" => CONTEXT,
-            "coupling" => COUPLING,
-            "debt" => DEBT,
-            "debt_density" => DEBT_DENSITY,
-            "explain" => EXPLAIN,
-            "list_projects" => LIST_PROJECTS,
-            "path" => PATH,
-            "sandbox_clear" => SANDBOX_CLEAR,
-            "sandbox_status" => SANDBOX_STATUS,
-            "search" => SEARCH,
-            "security_list" => SECURITY_LIST,
-            "security_status" => SECURITY_STATUS,
-            _ => return None,
+    let raw = match name {
+        "check" => CHECK,
+        "config_secrets" => CONFIG_SECRETS,
+        "context" => CONTEXT,
+        "coupling" => COUPLING,
+        "debt" => DEBT,
+        "debt_density" => DEBT_DENSITY,
+        "explain" => EXPLAIN,
+        "list_projects" => LIST_PROJECTS,
+        "path" => PATH,
+        "sandbox_clear" => SANDBOX_CLEAR,
+        "sandbox_status" => SANDBOX_STATUS,
+        "search" => SEARCH,
+        "security_list" => SECURITY_LIST,
+        "security_status" => SECURITY_STATUS,
+        _ => return None,
+    };
+    // Every description goes through the substitution, not just the one that
+    // needs it: `CONTEXT` is the only const carrying a `{cap}` placeholder
+    // today, and for the other thirteen this is a no-op. An early return for
+    // `context` beside a `context` arm in the match would leave a second path
+    // that returns the placeholder unreplaced — dead until somebody reorders
+    // the function, and then wrong in the output rather than at compile time.
+    Some(raw.replace("{cap}", &rto_graph::TOOL_CONTEXT_EDGE_CAP.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::for_tool;
+
+    /// No advertised description may still carry a `{…}` placeholder.
+    ///
+    /// `CONTEXT` holds `{cap}` so the edge cap has one source rather than a
+    /// hardcoded `50` on one surface and an interpolation on the other. The risk
+    /// that creates is a path returning the raw constant — which is exactly what a
+    /// special case beside a `match` arm for the same name would give, dead until
+    /// somebody reorders the function and then wrong in a model's prompt rather
+    /// than at compile time.
+    ///
+    /// Asserted over **every** tool, not just `context`: a placeholder added to
+    /// another constant later is the same defect, and naming only the one that has
+    /// it today would not catch it.
+    #[test]
+    fn no_description_reaches_a_caller_with_a_placeholder_in_it() {
+        for name in [
+            "check",
+            "config_secrets",
+            "context",
+            "coupling",
+            "debt",
+            "debt_density",
+            "explain",
+            "list_projects",
+            "path",
+            "sandbox_clear",
+            "sandbox_status",
+            "search",
+            "security_list",
+            "security_status",
+        ] {
+            let text = for_tool(name).expect("this module owns every name above");
+            assert!(
+                !text.contains('{'),
+                "`{name}` still carries a placeholder: {text}"
+            );
         }
-        .to_owned(),
-    )
+        assert!(for_tool("list_kind").is_none(), "MCP-only, not owned here");
+        assert!(for_tool("nope").is_none());
+    }
+
+    /// The cap really is substituted, rather than the placeholder merely being
+    /// absent because somebody deleted it from the prose.
+    #[test]
+    fn context_states_the_edge_cap_the_code_enforces() {
+        let text = for_tool("context").expect("context");
+        assert!(
+            text.contains(&format!(
+                "at most {} edges",
+                rto_graph::TOOL_CONTEXT_EDGE_CAP
+            )),
+            "the cap in the prose must be the one `bound_edges` applies: {text}"
+        );
+    }
 }
