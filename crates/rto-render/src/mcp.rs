@@ -532,6 +532,23 @@ impl GraphServer {
         let routes = routes + Self::security_tool_router();
         #[cfg(feature = "execution")]
         let routes = routes + Self::sandbox_tool_router();
+
+        // Descriptions come from [`crate::tool_text`], which is the only place
+        // they are written. They cannot come from the `#[tool]` attribute: that
+        // is parsed by `darling` into a `String`, so it takes a string literal
+        // and rejects a path — `description = SEARCH` does not compile. Setting
+        // them here instead is what lets the literals be deleted rather than
+        // duplicated and policed by a test.
+        //
+        // This is the one funnel: the three `*_tool_router()` calls above are
+        // combined nowhere else, so nothing reaches a client without passing
+        // through here.
+        let mut routes = routes;
+        for route in routes.map.values_mut() {
+            if let Some(text) = crate::tool_text::for_tool(&route.attr.name) {
+                route.attr.description = Some(text.into());
+            }
+        }
         let Advertised::Only(allowed) = advertised else {
             return routes;
         };
@@ -631,11 +648,7 @@ fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
 #[tool_router]
 impl GraphServer {
     /// Explain a node: its record and provenance-labelled incoming/outgoing edges.
-    #[tool(description = "Explain a graph node: its record and its \
-                          provenance-labelled incoming/outgoing edges. \
-                          Keys: sym:<lang>:<path>#<Name>, file:<path>, adr:<id>. \
-                          A key may be project-qualified (<project>::<key>) to follow a \
-                          cross-repo link into another hosted project (see list_projects).")]
+    #[tool]
     async fn explain(&self, Parameters(args): Parameters<ExplainArgs>) -> CallToolResult {
         // A project-qualified key follows a cross-repo link into that project.
         let (proj, bare) = qualified_or(&args.key, args.project.as_deref());
@@ -652,15 +665,7 @@ impl GraphServer {
     }
 
     /// Search the graph by text, ranked — the entry point for "what/why" questions.
-    #[tool(
-        description = "Search graph nodes by text — names, keys, paths, and captured \
-                          content (doc comments, README/ADR/blueprint prose). Returns \
-                          ranked hits with keys; curated ADRs/blueprints and READMEs rank \
-                          first, so it's the entry point for \"what is X / why\" questions. \
-                          Then `explain` a returned key. Args: query, optional limit \
-                          (1-25, default 10 — there is no unlimited setting; narrow the \
-                          query instead of asking for more)."
-    )]
+    #[tool]
     async fn search(&self, Parameters(args): Parameters<SearchArgs>) -> CallToolResult {
         let limit = model_limit(args.limit, 10, 25);
         query_result(self.with_project(args.project.as_deref(), |store| {
@@ -669,22 +674,7 @@ impl GraphServer {
     }
 
     /// A node's bounded, read-only context bundle.
-    #[tool(
-        description = "Fetch a node's CONTEXT BUNDLE: the node, its metadata, and its \
-                          one-hop provenance-labelled neighbourhood, with a validity \
-                          `fingerprint` that moves when the node or any neighbour changes. \
-                          The grounding to answer \"what is this and what is it wired to\" \
-                          from. Args: key (the only argument). \
-                          BOUNDED, and it tells you when it bound something: each direction \
-                          carries at most 50 edges. When more exist, `truncated` is true, \
-                          `outgoing.total`/`incoming.total` give the real counts, and \
-                          `omitted` names each edge kind and how many of it are missing — \
-                          so an absent `imports` edge means there are none, and a large \
-                          file's missing definitions are counted rather than silently \
-                          dropped. Read `omitted` before concluding anything from an \
-                          absence, and use `explain` or `search` to reach what was left \
-                          out."
-    )]
+    #[tool]
     async fn context(&self, Parameters(args): Parameters<ContextArgs>) -> CallToolResult {
         // A project-qualified key follows a cross-repo link into that project.
         let (proj, bare) = qualified_or(&args.key, args.project.as_deref());
@@ -709,24 +699,7 @@ impl GraphServer {
     }
 
     /// Run `roteiro check`'s drift gate, read-only, as data.
-    #[tool(
-        description = "Run the AUTHORED-LAYER DRIFT CHECK — the same gate `roteiro check` \
-                          exits non-zero on and the pre-commit hook reads — and return its \
-                          verdict as data: ADR `[[path#Symbol]]` links that no longer \
-                          resolve, `@rto:` annotations pointing at unknown or superseded \
-                          ADRs, malformed ADRs, and duplicate `adr-id`s. \
-                          READ `gate` FIRST. It is `pass`, `fail`, or `not-run`, and \
-                          `not-run` is a real outcome: a check needs the project's \
-                          repository on disk and a graph synced from the current HEAD, and \
-                          when it cannot have both it refuses rather than answering about a \
-                          tree that is nobody's. A `not-run` result carries NO `report` at \
-                          all — so if you are looking for `violations` and there is no \
-                          `report`, nothing was checked and you must say so rather than \
-                          report a clean repository. `not_run_reason` says what to fix \
-                          (usually: run `roteiro sync`). \
-                          This is read-only: it does not rebuild the graph, which is the \
-                          one thing the CLI gate does that this cannot."
-    )]
+    #[tool]
     async fn check(&self, Parameters(args): Parameters<CheckArgs>) -> CallToolResult {
         let project = args.project.as_deref();
         // The project's OWN repository, never the one this server was started in
@@ -752,14 +725,7 @@ impl GraphServer {
     }
 
     /// Find a shortest path between two nodes.
-    #[tool(
-        description = "Find a shortest path between two graph nodes, following \
-                          edges in either direction. Each hop records the edge kind, \
-                          provenance, and traversal direction (outgoing/incoming). \
-                          Args: from, to (node keys). A path lives within one project: \
-                          a project-qualified `from` (<project>::<key>) selects that \
-                          project (see list_projects)."
-    )]
+    #[tool]
     async fn path(&self, Parameters(args): Parameters<PathArgs>) -> CallToolResult {
         // A path lives within one graph: a qualified `from` selects the project,
         // and a qualifier on either endpoint is stripped to a bare, in-store key.
@@ -770,13 +736,7 @@ impl GraphServer {
     }
 
     /// List intent-debt markers (TODOs, stubs, deferred work).
-    #[tool(
-        description = "List intent-debt markers found in the codebase — TODO/FIXME/HACK \
-                          comments, todo!()/unimplemented!() stubs, and deferred-work notes — \
-                          grouped by category (todo, fixme, hack, stub, deferred). Optional \
-                          `kind` restricts to given categories. Each marker links to its \
-                          enclosing symbol or file via a `contains` edge."
-    )]
+    #[tool]
     async fn debt(&self, Parameters(args): Parameters<DebtArgs>) -> CallToolResult {
         // `ignore` is empty by necessity, not by oversight: this crate has no
         // access to the target project's `roteiro.toml`, so there is no list to
@@ -788,22 +748,7 @@ impl GraphServer {
     }
 
     /// Rank files by intent-debt density (markers per 1,000 lines).
-    #[tool(
-        description = "Rank FILES by intent-debt DENSITY — markers per 1,000 lines — rather \
-                          than by raw marker count, which ranks the biggest file first by \
-                          construction. Each row carries `markers`, `lines`, `per_kloc` and a \
-                          per-category split; `overall_per_kloc` is the repository baseline to \
-                          read a file's figure against. Args: kind, order (density|markers|\
-                          lines), limit (1-100, default 20 — no unlimited setting), \
-                          min_lines. \
-                          Two limits worth passing on to the user rather than reporting a \
-                          number as a finding. The denominator is FILE LENGTH — every line, \
-                          blanks and comments included — not source lines of code, so figures \
-                          run lower than an SLOC tool's and flatter verbose or generated \
-                          files. And the markers beneath it include prose matches (`for now`, \
-                          `placeholder`, `tbd`), so a design document can rank as dense debt. \
-                          This is a measurement, not a gate."
-    )]
+    #[tool]
     async fn debt_density(&self, Parameters(args): Parameters<DensityArgs>) -> CallToolResult {
         let limit = model_limit(args.limit, 20, 100);
         let min_lines = args.min_lines.unwrap_or(rto_graph::DEFAULT_MIN_LINES);
@@ -839,28 +784,7 @@ impl GraphServer {
     }
 
     /// Inventory secret-named config keys and their redaction state.
-    #[tool(
-        description = "Inventory the SECRET-NAMED config keys in the graph: their file \
-                          paths, their key names, and whether each value was redacted \
-                          before being stored (`state` = redacted | declared | present). \
-                          Answers \"which of this repo's config surfaces deal in \
-                          credentials\" and \"did anything unredacted get into this \
-                          graph\". Args: limit (1-200, default 50 — no unlimited \
-                          setting). \
-                          THIS IS NOT A SECRET SCANNER — state the limits when you \
-                          report it, and never imply a security guarantee. It CANNOT \
-                          find a hardcoded credential in source code: it reads config-key \
-                          nodes, so a token in a Rust or Python string literal produces \
-                          nothing here and is invisible. It CANNOT judge whether a value \
-                          is valid, because it never sees one — values are redacted \
-                          before they reach the store. It CANNOT tell a real secret from \
-                          a placeholder: `API_TOKEN=changeme` in a committed \
-                          `.env.example` and a live token are the same row. And an EMPTY \
-                          RESULT DOES NOT MEAN THERE ARE NO SECRETS — it means no config \
-                          key is secret-NAMED; a credential under an innocuous key like \
-                          `dsn` or `endpoint` never appears. If asked to scan for \
-                          secrets, say plainly that this tool cannot do it."
-    )]
+    #[tool]
     async fn config_secrets(
         &self,
         Parameters(args): Parameters<ConfigSecretArgs>,
@@ -872,19 +796,7 @@ impl GraphServer {
     }
 
     /// Rank nodes by directed call coupling (fan-in / fan-out).
-    #[tool(
-        description = "Rank symbols by DIRECTED call coupling over `calls` edges: `fan_in` \
-                          (how many distinct symbols call this one), `fan_out` (how many it \
-                          calls), and `instability` = fan_out/(fan_in+fan_out). Use \
-                          `order`=fan_in to find what the codebase most depends on, \
-                          `order`=fan_out for the symbols that reach furthest, `total` \
-                          (default) for overall coupling. Args: order, limit (1-100, \
-                          default 20 — no unlimited setting). \
-                          Caveat worth passing on to the user: call edges are resolved by \
-                          simple name, so a short generically-named function can absorb \
-                          every call to that name and show an inflated `fan_in`. Treat a \
-                          high figure on such a symbol as a question, not a finding."
-    )]
+    #[tool]
     async fn coupling(&self, Parameters(args): Parameters<CouplingArgs>) -> CallToolResult {
         let limit = model_limit(args.limit, 20, 100);
         // An unrecognised `order` is an error, not a silent fall back to `total`:
@@ -907,10 +819,7 @@ impl GraphServer {
     }
 
     /// List the projects this server hosts (ADR-0008).
-    #[tool(
-        description = "List the projects this server hosts. Pass one as `project` to the \
-                          other tools to query it. A single-project server needs no `project`."
-    )]
+    #[tool]
     async fn list_projects(&self) -> CallToolResult {
         json_result(&serde_json::json!({ "projects": self.workspace.names() }))
     }
@@ -927,28 +836,7 @@ impl GraphServer {
 #[tool_router(router = security_tool_router)]
 impl GraphServer {
     /// List stored security findings, bounded, with the never-run case named.
-    #[tool(
-        description = "List the SECURITY FINDINGS stored for this repository: every live \
-                          findings layer with its run evidence (analyzer, version, backend, \
-                          isolation, advisory database, report digest) and a page of findings. \
-                          READ `coverage` FIRST. `no-analyzer-on-record` is a real outcome and \
-                          NOT a clean repository — it carries NO `report` at all, so if there \
-                          is no `report`, nothing was checked and you must say so rather than \
-                          report zero findings. An analyzer that ran and found nothing is the \
-                          other case: `coverage` is `analyzed` and `findings` is 0. Bounded, \
-                          and it says when it bound something. `limit` is 1-100 (default 20) — \
-                          no unlimited setting — and is findings PER LAYER; each layer carries \
-                          its true `findings` count, the `page` returned, `truncated`, and how \
-                          many were `omitted`. A page keeps the most severe findings first, so \
-                          what is omitted is the least severe — never conclude a severity is \
-                          absent from a truncated page. `cross_reference` is a view over those \
-                          findings, not a replacement: it groups dependency advisories both \
-                          analyzers reported, `confirmed_by` counts how many, `1` is normal \
-                          rather than a discrepancy, and the `findings` total is unchanged by \
-                          it. Read-only: it cannot run an analyzer or ingest a report. Ask the \
-                          user to run `roteiro security run` or `roteiro security ingest` — a \
-                          tool call is not a person consenting to execution."
-    )]
+    #[tool]
     async fn security_list(
         &self,
         Parameters(args): Parameters<SecurityListArgs>,
@@ -973,37 +861,7 @@ impl GraphServer {
 
     /// What this machine has provisioned, and what this repository has analyzed —
     /// as two labelled scopes.
-    #[tool(
-        description = "Report SECURITY READINESS in TWO SEPARATELY SCOPED SECTIONS; report \
-                          them separately, never merged. `machine`: this HOST — the \
-                          pinned-asset cache under `asset_root`, and each analyzer's coverage \
-                          matrix with `host_readiness`. Identical for every project here, and \
-                          says nothing whatsoever about whether anything has been run. \
-                          `host_readiness` has THREE states with different remedies: `ready` \
-                          (assets provisioned AND the analyzer's program on PATH); \
-                          `assets-not-provisioned` (ask the user to run `roteiro security \
-                          prefetch`); `binary-not-found` (`missing_programs` names it, and \
-                          ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to install it or to \
-                          `roteiro security ingest` a report from elsewhere). Both underlying \
-                          facts (`assets_provisioned`, `missing_programs`) are ALWAYS present, \
-                          so when the state is not `ready` read both: a host can lack both and \
-                          `host_readiness` names only the first remedy. Do not read `ready` as \
-                          more than it says: it is readiness to run ON THIS HOST. The \
-                          sandboxed backend supplies analyzers from a digest-pinned image, so \
-                          `binary-not-found` does not block it, and this tool does not inspect \
-                          the image store, so it reports no sandbox verdict. `repository` \
-                          describes ONE PROJECT — the one in its `project` field, chosen by \
-                          the `project` argument — which findings layers are live, how many \
-                          findings each holds, and the age of the advisory database behind \
-                          each. `possibly_stale: true` whenever advisory data is involved and \
-                          NEVER means current; `false` means only that there is no advisory \
-                          axis. Read `repository.coverage` before concluding anything: \
-                          `no-analyzer-on-record` carries no layers and means nothing has been \
-                          analyzed — NOT a clean repository. COUNTS, NEVER FINDINGS; use \
-                          `security_list` for those. It needs no `limit`. Read-only: it cannot \
-                          provision, and `roteiro security prefetch` needs human consent, so \
-                          ask the user to run it."
-    )]
+    #[tool]
     async fn security_status(
         &self,
         Parameters(args): Parameters<SecurityStatusArgs>,
@@ -1051,30 +909,7 @@ impl GraphServer {
 #[tool_router(router = sandbox_tool_router)]
 impl GraphServer {
     /// What the machine-global sandbox image store is holding.
-    #[tool(
-        description = "Report what the machine-global SANDBOX IMAGE STORE holds: one row \
-                          per cached container image with its reference, digests, layer count, \
-                          objects on disk, and size split into layers, extracted trees, the \
-                          derived ext4 disk image and the guest base. MACHINE-GLOBAL, and \
-                          `scope` says so: one store per asset root, shared by every \
-                          repository here, so never attribute a size to the project under \
-                          discussion. No `project` argument — `security_status` is the tool \
-                          with two scopes. `bytes.total` is what an image references; \
-                          `bytes.exclusive` is what dropping that image alone would free. They \
-                          differ when images share a layer, so quote `exclusive` when saying \
-                          what clearing one would give back. `objects` counts pulled content \
-                          (manifest, config, one per distinct layer). Extracted trees and disk \
-                          images are a cache below this one, built on first run, so a \
-                          pulled-only image is complete without them; \
-                          `disk_image_built`/`base_disk_built` say whether it has run. \
-                          `unattributed` is bytes no image claims; `preserved` is state no \
-                          pinned digest re-obtains, which `sandbox_clear` never removes. Read \
-                          this before `sandbox_clear` and show the user the numbers: a \
-                          destructive verb with no way to see what it will destroy is invoked \
-                          blind. Every `reference` here is a value `sandbox_clear` accepts as \
-                          `image`. No `limit`: one row per image, counts and sizes, never \
-                          findings. Read-only."
-    )]
+    #[tool]
     async fn sandbox_status(
         &self,
         Parameters(_args): Parameters<SandboxStatusArgs>,
@@ -1089,30 +924,7 @@ impl GraphServer {
     }
 
     /// Drop cached images, and say what that freed.
-    #[tool(
-        description = "DELETE cached container images from the machine-global sandbox image \
-                          store, and report what that freed. The one tool here that changes \
-                          anything; everything it drops is re-obtainable from a pinned digest, \
-                          so it costs a re-download and never information. It cannot reach \
-                          findings, memory or the graph. MACHINE-GLOBAL: one store per asset \
-                          root, shared by every repository this server hosts, so clearing for \
-                          one project slows the next sandboxed run for all. No `project` \
-                          argument; `scope` is `machine`. Call `sandbox_status` first and show \
-                          the user what is cached and what it costs — a re-pull is minutes to \
-                          tens of minutes and gigabytes. `image` and `everything` are \
-                          DIFFERENT REQUESTS with no default: pass `image` with a reference \
-                          from `sandbox_status`, or `everything: true`. Neither is an error \
-                          and does not mean everything; both is an error. `dry_run: true` \
-                          removes nothing and `applied` says which happened. Report what it \
-                          freed: quote `freed_bytes`, with \
-                          `store_bytes_before`/`store_bytes_after` either side, rather than \
-                          saying it worked. `retained` re-checks every surviving image against \
-                          the disk afterwards; if any `complete` is false say so prominently — \
-                          that is a damaged store, not a successful clear, and `roteiro \
-                          security prefetch` is the repair. It refuses rather than guessing: a \
-                          registered box, an unrecognised entry under the store root, or an \
-                          index row pointing outside it each stop it with nothing removed."
-    )]
+    #[tool]
     async fn sandbox_clear(
         &self,
         Parameters(args): Parameters<SandboxClearArgs>,

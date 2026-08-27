@@ -12929,22 +12929,7 @@ fn debt_density_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "debt_density".to_owned(),
-        description: "Rank FILES by intent-debt DENSITY — markers per 1,000 lines — \
-                      rather than by raw marker count, which ranks the biggest file \
-                      first by construction. Each row carries `markers`, `lines`, \
-                      `per_kloc` and a per-category split; `overall_per_kloc` is the \
-                      repository baseline to read a file's figure against. Use `debt` \
-                      instead when the question is which markers exist, not where \
-                      they are concentrated. \
-                      Two limits to pass on rather than reporting a number as a \
-                      finding: the denominator is FILE LENGTH — every line, blanks \
-                      and comments included — not source lines of code, so figures \
-                      run lower than an SLOC tool's and flatter verbose or generated \
-                      files; and the markers beneath it include prose matches (`for \
-                      now`, `deferred`, `tbd`), so a design document can rank as \
-                      dense debt. This is a measurement, not a gate. \
-                      `limit` is 1-100 (default 20) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::DEBT_DENSITY.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -12980,27 +12965,7 @@ fn config_secrets_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "config_secrets".to_owned(),
-        description: "Inventory the SECRET-NAMED config keys in the graph: their file \
-                      paths, their key names, and whether each value was redacted \
-                      before being stored (`state` = redacted | declared | present). \
-                      Answers \"which of this repo's config surfaces deal in \
-                      credentials\" and \"did anything unredacted get into this \
-                      graph\". \
-                      THIS IS NOT A SECRET SCANNER — state the limits when you report \
-                      it, and never imply a security guarantee. It CANNOT find a \
-                      hardcoded credential in source code: it reads config-key nodes, \
-                      so a token in a Rust or Python string literal produces nothing \
-                      here and is invisible. It CANNOT judge whether a value is valid, \
-                      because it never sees one — values are redacted before they \
-                      reach the store. It CANNOT tell a real secret from a \
-                      placeholder: `API_TOKEN=changeme` in a committed `.env.example` \
-                      and a live token are the same row. And an EMPTY RESULT DOES NOT \
-                      MEAN THERE ARE NO SECRETS — it means no config key is \
-                      secret-NAMED; a credential under an innocuous key like `dsn` or \
-                      `endpoint` never appears. If asked to scan for secrets, say \
-                      plainly that this tool cannot do it. \
-                      `limit` is 1-200 (default 50) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::CONFIG_SECRETS.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13191,21 +13156,10 @@ fn context_tool_def(
     with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
 ) -> rto_serve::ToolDef {
     use serde_json::json;
-    let cap = rto_graph::TOOL_CONTEXT_EDGE_CAP;
     rto_serve::ToolDef {
         name: "context".to_owned(),
-        description: format!(
-            "Fetch a node's CONTEXT BUNDLE: the node, its metadata, and its one-hop \
-             provenance-labelled neighbourhood, with a validity `fingerprint` that moves \
-             when the node or any neighbour changes. Takes `key` and nothing else. \
-             BOUNDED, and it tells you when it bound something: each direction carries at \
-             most {cap} edges. When more exist, `truncated` is true, \
-             `outgoing.total`/`incoming.total` give the real counts, and `omitted` names \
-             each edge kind and how many of it are missing — so an absent `imports` edge \
-             means there are none, and a large file's missing definitions are counted \
-             rather than silently dropped. Read `omitted` before concluding anything from \
-             an absence."
-        ),
+        description: rto_render::tool_text::for_tool("context")
+            .expect("`context` is one of this module's tools"),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({ "key": { "type": "string" } })),
@@ -13231,22 +13185,7 @@ fn check_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "check".to_owned(),
-        description: "Run the AUTHORED-LAYER DRIFT CHECK — the same gate `roteiro check` \
-                      exits non-zero on and the pre-commit hook reads — and return its \
-                      verdict as data: ADR `[[path#Symbol]]` links that no longer resolve, \
-                      `@rto:` annotations pointing at unknown or superseded ADRs, malformed \
-                      ADRs, and duplicate `adr-id`s. \
-                      READ `gate` FIRST. It is `pass`, `fail`, or `not-run`, and `not-run` \
-                      is a real outcome: a check needs the project's repository on disk and \
-                      a graph synced from the current HEAD, and when it cannot have both it \
-                      refuses rather than answering about a tree that is nobody's. A \
-                      `not-run` result carries NO `report` at all — so if you are looking \
-                      for `violations` and there is no `report`, nothing was checked and \
-                      you must say so rather than report a clean repository. \
-                      `not_run_reason` says what to fix (usually: run `roteiro sync`). \
-                      Read-only: it does not rebuild the graph, which is the one thing the \
-                      CLI gate does that this cannot."
-            .to_owned(),
+        description: rto_render::tool_text::CHECK.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({})),
@@ -13266,16 +13205,7 @@ fn coupling_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "coupling".to_owned(),
-        description: "Rank symbols by DIRECTED call coupling over `calls` edges: \
-                      `fan_in` (how many distinct symbols call this one), `fan_out` \
-                      (how many it calls), `instability` = fan_out/(fan_in+fan_out). \
-                      `order`=fan_in finds what the codebase most depends on, \
-                      `order`=fan_out the symbols that reach furthest. Call edges \
-                      are resolved by simple name, so a short generically-named \
-                      function can absorb every call to that name — say so if you \
-                      report a high `fan_in` on one. \
-                      `limit` is 1-100 (default 20) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::COUPLING.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13314,11 +13244,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         let mut tools = vec![
             rto_serve::ToolDef {
                 name: "explain".to_owned(),
-                description: "Explain a graph node by key (its record and immediate \
-                              neighbours), e.g. `fn:foo` or `file:src/main.rs`. A key may be \
-                              project-qualified (`<project>::<key>`) to follow a cross-repo \
-                              link into another hosted project (see `list_projects`)."
-                    .to_owned(),
+                description: rto_render::tool_text::EXPLAIN.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({ "key": { "type": "string" } })),
@@ -13327,16 +13253,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "search".to_owned(),
-                description: "Search graph nodes by text — names, keys, paths, and captured \
-                              content (doc comments, README/ADR/blueprint prose). Returns the \
-                              top matches with keys and, for content-bearing nodes, a short \
-                              `snippet` of the node's actual content to ground your answer; \
-                              curated ADRs/blueprints and READMEs rank first, so this is the \
-                              entry point for \"what is X / why\" questions. Read the `snippet`, \
-                              and call `explain` on a returned key for the full content. \
-                              `limit` is 1-25 (default 10) — there is no unlimited \
-                              setting; narrow the query instead of asking for more."
-                    .to_owned(),
+                description: rto_render::tool_text::SEARCH.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
@@ -13348,10 +13265,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "path".to_owned(),
-                description: "Find a shortest path between two node keys. A path lives \
-                              within one project; a project-qualified `from` \
-                              (`<project>::<key>`) selects it (see `list_projects`)."
-                    .to_owned(),
+                description: rto_render::tool_text::PATH.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
@@ -13363,9 +13277,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "debt".to_owned(),
-                description: "List intent-debt markers (todo/fixme/hack/stub/deferred), \
-                              optionally filtered by category."
-                    .to_owned(),
+                description: rto_render::tool_text::DEBT.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
@@ -13405,9 +13317,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         }
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
-            description: "List the projects this server hosts (often just one). Pass one as \
-                          `project` to the other tools to query it (ADR-0008)."
-                .to_owned(),
+            description: rto_render::tool_text::LIST_PROJECTS.to_owned(),
             parameters: json!({ "type": "object", "properties": {} }),
         });
         tools
@@ -17898,26 +17808,6 @@ mod workspace_scoped_tools {
     #[test]
     fn both_tool_surfaces_describe_a_tool_the_same_way() {
         use rto_serve::ToolRegistry as _;
-        /// Tools whose prose has **not** yet been moved to `rto_render::tool_text`
-        /// and still differs between the surfaces.
-        ///
-        /// Every one of the fourteen shared tools had drifted when this test was
-        /// written — this is what was left after the four largest were unified.
-        /// Named rather than counted, so the list can only shrink and each
-        /// removal is a deliberate act in a diff; a threshold would let one
-        /// escapee hide behind another's fix. **Only ever remove from it.**
-        const NOT_YET_SHARED: [&str; 10] = [
-            "check",
-            "config_secrets",
-            "context",
-            "coupling",
-            "debt",
-            "debt_density",
-            "explain",
-            "list_projects",
-            "path",
-            "search",
-        ];
 
         let chat: std::collections::BTreeMap<String, String> = called_registry()
             .tools()
@@ -17926,43 +17816,22 @@ mod workspace_scoped_tools {
             .collect();
         let mcp = rto_render::mcp::tool_descriptions();
 
-        let mut differ = Vec::new();
-        let mut stale = Vec::new();
-        for (name, chat_desc) in &chat {
-            let Some(mcp_desc) = mcp.get(name) else {
-                continue; // a name-level divergence is the other test's finding
-            };
-            let known = NOT_YET_SHARED.contains(&name.as_str());
-            if chat_desc == mcp_desc {
-                if known {
-                    stale.push(name.clone());
-                }
-                continue;
-            }
-            if known {
-                continue;
-            }
-            if chat_desc != mcp_desc {
-                differ.push(format!(
-                    "{name}: served {} bytes, MCP {} bytes",
-                    chat_desc.len(),
-                    mcp_desc.len()
-                ));
-            }
-        }
+        let differ: Vec<String> = chat
+            .iter()
+            .filter_map(|(name, c)| {
+                // A name on one surface and not the other is the *other* test's
+                // finding; this one is only about what they say.
+                let m = mcp.get(name)?;
+                (c != m).then(|| format!("{name}: served {} bytes, MCP {} bytes", c.len(), m.len()))
+            })
+            .collect();
         assert!(
             differ.is_empty(),
-            "these tools are described differently on the two surfaces. Move the \
-             prose to `rto_render::tool_text` and have both sides take it from \
-             there — do not add to `NOT_YET_SHARED`, which exists only for the \
-             drift that predates this test:\n  {}",
+            "these tools are described differently on the two surfaces. Both should \
+             read their prose from `rto_render::tool_text`, which is the only place \
+             it is written — a literal in either place is the drift this test \
+             exists to prevent:\n  {}",
             differ.join("\n  ")
-        );
-        assert!(
-            stale.is_empty(),
-            "these `NOT_YET_SHARED` entries now agree, so the exemption is doing \
-             nothing but holding a door open. Remove them:\n  {}",
-            stale.join("\n  ")
         );
     }
 

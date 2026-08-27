@@ -1,5 +1,14 @@
 //! The **one** place each shared tool description is written.
 //!
+//! `roteiro:ignore-file` — this file is prose *about* the tools, and two of them
+//! are about intent debt: `debt`'s description has to name TODO/FIXME/HACK and
+//! `todo!()`/`unimplemented!()` stubs, and `debt_density`'s has to name the prose
+//! matches ("for now", "deferred", "tbd") a reader might otherwise be surprised
+//! by. Scanned, those descriptions register as three markers the repository does
+//! not have. The same opt-out is on `markers.rs`, `check_cli.rs` and the
+//! tool-choice fixture, for the same reason: a file that documents a scanner is
+//! not a file that owes work.
+//!
 //! # Why a module of string constants
 //!
 //! Four tools are advertised on two surfaces: the served-chat registry in
@@ -109,3 +118,132 @@ pub const SECURITY_STATUS: &str = "Report SECURITY READINESS in TWO SEPARATELY S
     NOT a clean repository. COUNTS, NEVER FINDINGS; use `security_list` for those. It needs no \
     `limit`. Read-only: it cannot provision, and `roteiro security prefetch` needs human \
     consent, so ask the user to run it.";
+
+/// `check`.
+pub const CHECK: &str = "Run the AUTHORED-LAYER DRIFT CHECK — the same gate `roteiro check` exits non-zero on and \
+    the pre-commit hook reads — and return its verdict as data: ADR `[[path#Symbol]]` links \
+    that no longer resolve, `@rto:` annotations pointing at unknown or superseded ADRs, \
+    malformed ADRs, and duplicate `adr-id`s. READ `gate` FIRST. It is `pass`, `fail`, or \
+    `not-run`, and `not-run` is a real outcome: a check needs the project's repository on disk \
+    and a graph synced from the current HEAD, and when it cannot have both it refuses rather \
+    than answering about a tree that is nobody's. A `not-run` result carries NO `report` at \
+    all — so if you are looking for `violations` and there is no `report`, nothing was checked \
+    and you must say so rather than report a clean repository. `not_run_reason` says what to \
+    fix (usually: run `roteiro sync`). Read-only: it does not rebuild the graph, which is the \
+    one thing the CLI gate does that this cannot.";
+
+/// `config_secrets`.
+pub const CONFIG_SECRETS: &str = "Inventory the SECRET-NAMED config keys in the graph: their file paths, their key names, \
+    and whether each value was redacted before being stored (`state` = redacted | declared | \
+    present). Answers \"which of this repo's config surfaces deal in credentials\" and \"did \
+    anything unredacted get into this graph\". THIS IS NOT A SECRET SCANNER — state the limits \
+    when you report it, and never imply a security guarantee. It CANNOT find a hardcoded \
+    credential in source code: it reads config-key nodes, so a token in a Rust or Python \
+    string literal produces nothing here and is invisible. It CANNOT judge whether a value is \
+    valid, because it never sees one — values are redacted before they reach the store. It \
+    CANNOT tell a real secret from a placeholder: `API_TOKEN=changeme` in a committed \
+    `.env.example` and a live token are the same row. And an EMPTY RESULT DOES NOT MEAN THERE \
+    ARE NO SECRETS — it means no config key is secret-NAMED; a credential under an innocuous \
+    key like `dsn` or `endpoint` never appears. If asked to scan for secrets, say plainly that \
+    this tool cannot do it. `limit` is 1-200 (default 50) — no unlimited setting.";
+
+/// `context`.
+pub const CONTEXT: &str = "Fetch a node's CONTEXT BUNDLE: the node, its metadata, and its one-hop provenance-labelled \
+    neighbourhood, with a validity `fingerprint` that moves when the node or any neighbour \
+    changes. The grounding to answer “what is this and what is it wired to” from. Takes `key` \
+    and nothing else. BOUNDED, and it tells you when it bound something: each direction \
+    carries at most {cap} edges. When more exist, `truncated` is true, \
+    `outgoing.total`/`incoming.total` give the real counts, and `omitted` names each edge kind \
+    and how many of it are missing — so an absent `imports` edge means there are none, and a \
+    large file's missing definitions are counted rather than silently dropped. Read `omitted` \
+    before concluding anything from an absence, and use `explain` or `search` to reach what \
+    was left out.";
+
+/// `coupling`.
+pub const COUPLING: &str = "Rank symbols by DIRECTED call coupling over `calls` edges: `fan_in` (how many distinct \
+    symbols call this one), `fan_out` (how many it calls), `instability` = \
+    fan_out/(fan_in+fan_out). `order`=fan_in finds what the codebase most depends on, \
+    `order`=fan_out the symbols that reach furthest, `total` (the default) overall coupling. \
+    Call edges are resolved by simple name, so a short generically-named function can absorb \
+    every call to that name — say so if you report a high `fan_in` on one. `limit` is 1-100 \
+    (default 20) — no unlimited setting.";
+
+/// `debt`.
+pub const DEBT: &str = "List intent-debt markers found in the codebase — TODO/FIXME/HACK comments, \
+    todo!()/unimplemented!() stubs, and deferred-work notes — grouped by category (todo, \
+    fixme, hack, stub, deferred). Optional `kind` restricts to given categories. Each marker \
+    links to its enclosing symbol or file via a `contains` edge.";
+
+/// `debt_density`.
+pub const DEBT_DENSITY: &str = "Rank FILES by intent-debt DENSITY — markers per 1,000 lines — rather than by raw marker \
+    count, which ranks the biggest file first by construction. Each row carries `markers`, \
+    `lines`, `per_kloc` and a per-category split; `overall_per_kloc` is the repository \
+    baseline to read a file's figure against. Use `debt` instead when the question is which \
+    markers exist, not where they are concentrated. Two limits to pass on rather than \
+    reporting a number as a finding: the denominator is FILE LENGTH — every line, blanks and \
+    comments included — not source lines of code, so figures run lower than an SLOC tool's and \
+    flatter verbose or generated files; and the markers beneath it include prose matches (`for \
+    now`, `deferred`, `tbd`), so a design document can rank as dense debt. This is a \
+    measurement, not a gate. `limit` is 1-100 (default 20) — no unlimited setting.";
+
+/// `explain`.
+pub const EXPLAIN: &str = "Explain a graph node: its record and its provenance-labelled incoming/outgoing edges. Keys \
+    look like `sym:<lang>:<path>#<Name>`, `file:<path>`, `adr:<id>`. A key may be \
+    project-qualified (`<project>::<key>`) to follow a cross-repo link into another hosted \
+    project (see `list_projects`).";
+
+/// `list_projects`.
+pub const LIST_PROJECTS: &str = "List the projects this server hosts (often just one). Pass one as `project` to the other \
+    tools to query it (ADR-0008). A single-project server needs no `project`.";
+
+/// `path`.
+pub const PATH: &str = "Find a shortest path between two graph nodes, following edges in either direction. Each \
+    hop records the edge kind, provenance, and traversal direction (outgoing/incoming). A path \
+    lives within one project: a project-qualified `from` (<project>::<key>) selects that \
+    project (see list_projects).";
+
+/// `search`.
+pub const SEARCH: &str = "Search graph nodes by text — names, keys, paths, and captured content (doc comments, \
+    README/ADR/blueprint prose). Returns the top matches with keys and, for content-bearing \
+    nodes, a short `snippet` of the node's actual content to ground your answer; curated \
+    ADRs/blueprints and READMEs rank first, so this is the entry point for \"what is X / why\" \
+    questions. Read the `snippet`, and call `explain` on a returned key for the full content. \
+    `limit` is 1-25 (default 10) — there is no unlimited setting; narrow the query instead of \
+    asking for more.";
+
+/// The description for `name`, or `None` for a tool this module does not own.
+///
+/// The lookup exists so [`crate::mcp`] can set descriptions on its routes at
+/// build time instead of repeating the prose in a `#[tool(description = …)]`
+/// literal. That is what makes this module the **only** definition rather than an
+/// authority with a copy beside it.
+#[must_use]
+pub fn for_tool(name: &str) -> Option<String> {
+    if name == "context" {
+        // The one description with a runtime value in it. `CONTEXT` carries a
+        // `{cap}` placeholder rather than a baked `50`, because the served copy
+        // interpolated `TOOL_CONTEXT_EDGE_CAP` while the MCP copy hardcoded the
+        // number — so raising the cap would have left one surface quietly wrong.
+        return Some(CONTEXT.replace("{cap}", &rto_graph::TOOL_CONTEXT_EDGE_CAP.to_string()));
+    }
+    Some(
+        match name {
+            "check" => CHECK,
+            "config_secrets" => CONFIG_SECRETS,
+            "context" => CONTEXT,
+            "coupling" => COUPLING,
+            "debt" => DEBT,
+            "debt_density" => DEBT_DENSITY,
+            "explain" => EXPLAIN,
+            "list_projects" => LIST_PROJECTS,
+            "path" => PATH,
+            "sandbox_clear" => SANDBOX_CLEAR,
+            "sandbox_status" => SANDBOX_STATUS,
+            "search" => SEARCH,
+            "security_list" => SECURITY_LIST,
+            "security_status" => SECURITY_STATUS,
+            _ => return None,
+        }
+        .to_owned(),
+    )
+}
