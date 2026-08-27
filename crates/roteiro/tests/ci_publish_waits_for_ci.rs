@@ -82,14 +82,16 @@ fn the_publish_job_waits_for_ci_before_it_publishes() {
 
     // The wait must come BEFORE anything that could publish. A gate after the
     // fact is not a gate.
-    let wait_at = job.find("Wait for CI to pass on this commit").unwrap_or_else(|| {
-        panic!(
-            "`{PUBLISH_JOB}` no longer waits for CI. Merging the release PR starts CI \
+    let wait_at = job
+        .find("Wait for CI to pass on this commit")
+        .unwrap_or_else(|| {
+            panic!(
+                "`{PUBLISH_JOB}` no longer waits for CI. Merging the release PR starts CI \
              and this job in parallel with no dependency between them, so removing the \
              wait means a red `main` publishes — and a published version cannot be \
              replaced, only yanked."
-        )
-    });
+            )
+        });
     let release_at = job
         .find("command: release")
         .expect("checked immediately above");
