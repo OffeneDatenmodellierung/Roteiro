@@ -14,7 +14,7 @@ authors.workspace = true
 # Pure-Rust git access for content-addressed extraction (blob/tree ids, tree
 # walking, worktree status). `sha1` selects the pure-Rust hashing backend; we
 # stay off default features to avoid pulling any network transports (offline).
-gix = { version = "0.86.0", default-features = false, features = [
+gix = { version = "0.87.1", default-features = false, features = [
     "sha1",
     "status",
     "dirwalk",
