@@ -231,6 +231,15 @@ deferred; see the ADR for the field mapping and the seam.
 - `crates/rto-llama` — llama.cpp inference core (generation, embeddings, vision), shared by serving and internal uses
 - `crates/roteiro` — umbrella CLI
 
+## Community
+
+Questions, ideas, or want to see what others are building with it? Join the
+[Roteiro Discord](https://discord.gg/bxgj4w6KM).
+
+Bugs and feature requests are better as
+[issues](https://github.com/OffeneDatenmodellierung/Roteiro/issues) — they stay
+searchable and get linked from the graph.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
