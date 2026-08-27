@@ -33,17 +33,39 @@ import urllib.request
 # One question per tool, phrased the way a user would ask rather than by naming
 # the tool — a fixture that quotes the tool's own words measures nothing but
 # string matching. `expect` is a set where two tools are defensibly correct.
+#
+# Every "miss" here has so far been the fixture's fault rather than the model's,
+# twice over: `sandbox_clear` scored protocol-following behaviour as a failure
+# (the server tells callers to show `sandbox_status` before a destructive verb),
+# and `path`/`context` were asked about symbols by name when both take node
+# **keys**, so resolving the name with `search` first was correct. Before
+# treating a wrong answer as a defect in a description, ask whether the answer
+# was in fact right.
 CASES = [
     ("Which files here have the most intent-debt markers per thousand lines?", {"debt_density"}),
     ("List every TODO and FIXME marker left in the code.", {"debt"}),
     ("What does the ProjectGraph struct do and where is it used?", {"explain", "search"}),
     ("Find nodes mentioning 'heading id'.", {"search"}),
-    ("How is Store::open connected to sync_worktree?", {"path"}),
+    # Both keys given in full, deliberately. `path` takes node **keys**, so a
+    # question naming symbols informally is legitimately answered by `search`
+    # first — the model has to resolve a name before it can call this at all.
+    # Scoring that as a miss measured the fixture, not the surface: it is what
+    # made this set read 13/15 when the surface picks correctly every time.
+    (
+        "How does sym:rust:crates/rto-graph/src/store.rs#Store::open connect to "
+        "sym:rust:crates/rto-graph/src/sync.rs#sync_worktree?",
+        {"path"},
+    ),
     ("Show me every ADR in the graph.", {"list_kind"}),
     ("Which functions are called by the most other functions?", {"coupling"}),
     ("Is the authored layer in sync with the code right now?", {"check"}),
     ("Which projects does this server host?", {"list_projects"}),
-    ("Give me the bounded neighbourhood of the sync function for an LLM prompt.", {"context"}),
+    # Same reasoning: `context` takes `key` and nothing else.
+    (
+        "Give me the bounded neighbourhood of "
+        "sym:rust:crates/rto-graph/src/sync.rs#sync_worktree for an LLM prompt.",
+        {"context"},
+    ),
     ("What config keys here look like secrets?", {"config_secrets"}),
     ("What security findings have been recorded for this repo?", {"security_list"}),
     ("Has anything been analyzed for vulnerabilities yet, and what is provisioned?", {"security_status"}),
