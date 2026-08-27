@@ -1308,15 +1308,6 @@ impl ServerHandler for GraphServer {
     }
 }
 
-/// The names of every tool this server advertises, sorted.
-///
-/// Exposed so the **other** tool surface — the served-chat `GraphToolRegistry` in
-/// the `roteiro` binary — can assert the two offer the same set. The `rmcp` macro
-/// generates this surface's schemas statically from the argument structs, so
-/// there is no shared declaration to keep them level; without a test comparing
-/// the sets, a tool added to one and forgotten on the other is invisible until
-/// somebody notices an agent can do a thing over one transport and not the other.
-/// `[debt] ignore` across three surfaces (issue #321) and `limit == 0` across five
 /// Each advertised tool's **description**, by name.
 ///
 /// Exists so the copy `rmcp` forces can be compared against its source. The macro
@@ -1339,6 +1330,15 @@ pub fn tool_descriptions() -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
+/// The names of every tool this server advertises, sorted.
+///
+/// Exposed so the **other** tool surface — the served-chat `GraphToolRegistry` in
+/// the `roteiro` binary — can assert the two offer the same set. The `rmcp` macro
+/// generates this surface's schemas statically from the argument structs, so
+/// there is no shared declaration to keep them level; without a test comparing
+/// the sets, a tool added to one and forgotten on the other is invisible until
+/// somebody notices an agent can do a thing over one transport and not the other.
+/// `[debt] ignore` across three surfaces (issue #321) and `limit == 0` across five
 /// (#393) are what that costs.
 #[must_use]
 pub fn tool_names() -> Vec<String> {

@@ -12,7 +12,7 @@ unchanged*. Token count is easy to measure and easy to improve; accuracy is the
 half that decides whether a shorter surface ships, and nothing measured it.
 
 Usage:
-    scripts/tool-choice-accuracy.py TOOLS_JSON [--url URL] [--model M] [--trials N]
+    scripts/tool-choice-accuracy.py TOOLS_JSON [--url URL] [--model M] [--timeout S]
 
 TOOLS_JSON is an OpenAI `tools` array — dump the live one from the MCP endpoint,
 or a variant with edited descriptions. Sending the surface as **client** tools is
