@@ -4,6 +4,8 @@
 
 mod docs;
 mod obsidian;
+/// The one place each shared tool description is written (#590).
+pub mod tool_text;
 
 #[cfg(feature = "mcp")]
 pub mod mcp;

@@ -12878,28 +12878,7 @@ fn sandbox_status_tool_def() -> rto_serve::ToolDef {
     use serde_json::json;
     rto_serve::ToolDef {
         name: "sandbox_status".to_owned(),
-        description: "Report what the SANDBOX IMAGE STORE on THIS MACHINE is holding: one \
-                      row per cached container image, with its reference, its digests, how \
-                      many of its objects are on disk, and its size broken down into \
-                      layers, extracted trees, the derived ext4 disk image and the guest \
-                      base. \
-                      MACHINE-GLOBAL, and `scope` says so. There is one of these per asset \
-                      root and EVERY repository this server hosts shares it, so never \
-                      attribute a size here to the project you are discussing. It takes no \
-                      `project` argument because it has no per-repository half. \
-                      `bytes.total` is what an image references; `bytes.exclusive` is what \
-                      dropping THAT IMAGE ALONE would free — they differ when another \
-                      cached image shares a layer, so quote `exclusive` when you say what \
-                      clearing one image gives back. `objects` counts the PULLED content \
-                      (manifest, config, one per distinct layer); the extracted trees and \
-                      disk images are built on first run, so a pulled-but-never-run image \
-                      is complete without them. `unattributed` is bytes no image claims; \
-                      `preserved` is state no pinned digest re-obtains, which \
-                      `sandbox_clear` never removes. \
-                      Read this BEFORE `sandbox_clear` and show the user the numbers. \
-                      Every `reference` here is a value `sandbox_clear` takes as `image`. \
-                      Read-only."
-            .to_owned(),
+        description: rto_render::tool_text::SANDBOX_STATUS.to_owned(),
         parameters: json!({ "type": "object", "properties": {} }),
     }
 }
@@ -12914,34 +12893,7 @@ fn sandbox_clear_tool_def() -> rto_serve::ToolDef {
     use serde_json::json;
     rto_serve::ToolDef {
         name: "sandbox_clear".to_owned(),
-        description: "DELETE cached container images from the SANDBOX IMAGE STORE on THIS \
-                      MACHINE, and report what that freed. This is the ONE tool here that \
-                      changes anything, and what makes it admissible is also its limit: \
-                      everything it drops is re-obtainable from a pinned digest, so it \
-                      costs a re-download and NEVER information. It cannot reach a findings \
-                      layer, a memory record or the graph. \
-                      MACHINE-GLOBAL. One store per asset root, shared by EVERY repository \
-                      this server hosts, so clearing on behalf of one project slows the \
-                      next sandboxed run for all of them. No `project` argument; `scope` in \
-                      the result says `machine`. \
-                      TELL THE USER FIRST. Call `sandbox_status` and show them what is \
-                      cached and what it costs; a re-pull is minutes and gigabytes. \
-                      `image` and `everything` are DIFFERENT REQUESTS and neither has a \
-                      default: pass `image` with a reference from `sandbox_status`, or \
-                      `everything: true`. Supplying neither is an ERROR and does not mean \
-                      everything; supplying both is an error too. `dry_run: true` reports \
-                      what would go and removes nothing — `applied` says which happened. \
-                      REPORT WHAT IT FREED: `freed_bytes`, with `store_bytes_before` and \
-                      `store_bytes_after` measured either side. Quote a figure rather than \
-                      saying it worked. \
-                      `retained` is every surviving image re-checked against the disk AFTER \
-                      the deletion. If any `complete` is false, SAY SO PROMINENTLY — that \
-                      is a damaged store, not a successful clear, and `roteiro security \
-                      prefetch` is the repair. \
-                      It refuses rather than guessing: a registered box, an unrecognised \
-                      entry under the store root, or an index row pointing outside it all \
-                      stop it with nothing removed."
-            .to_owned(),
+        description: rto_render::tool_text::SANDBOX_CLEAR.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -12977,22 +12929,7 @@ fn debt_density_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "debt_density".to_owned(),
-        description: "Rank FILES by intent-debt DENSITY — markers per 1,000 lines — \
-                      rather than by raw marker count, which ranks the biggest file \
-                      first by construction. Each row carries `markers`, `lines`, \
-                      `per_kloc` and a per-category split; `overall_per_kloc` is the \
-                      repository baseline to read a file's figure against. Use `debt` \
-                      instead when the question is which markers exist, not where \
-                      they are concentrated. \
-                      Two limits to pass on rather than reporting a number as a \
-                      finding: the denominator is FILE LENGTH — every line, blanks \
-                      and comments included — not source lines of code, so figures \
-                      run lower than an SLOC tool's and flatter verbose or generated \
-                      files; and the markers beneath it include prose matches (`for \
-                      now`, `deferred`, `tbd`), so a design document can rank as \
-                      dense debt. This is a measurement, not a gate. \
-                      `limit` is 1-100 (default 20) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::DEBT_DENSITY.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13028,27 +12965,7 @@ fn config_secrets_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "config_secrets".to_owned(),
-        description: "Inventory the SECRET-NAMED config keys in the graph: their file \
-                      paths, their key names, and whether each value was redacted \
-                      before being stored (`state` = redacted | declared | present). \
-                      Answers \"which of this repo's config surfaces deal in \
-                      credentials\" and \"did anything unredacted get into this \
-                      graph\". \
-                      THIS IS NOT A SECRET SCANNER — state the limits when you report \
-                      it, and never imply a security guarantee. It CANNOT find a \
-                      hardcoded credential in source code: it reads config-key nodes, \
-                      so a token in a Rust or Python string literal produces nothing \
-                      here and is invisible. It CANNOT judge whether a value is valid, \
-                      because it never sees one — values are redacted before they \
-                      reach the store. It CANNOT tell a real secret from a \
-                      placeholder: `API_TOKEN=changeme` in a committed `.env.example` \
-                      and a live token are the same row. And an EMPTY RESULT DOES NOT \
-                      MEAN THERE ARE NO SECRETS — it means no config key is \
-                      secret-NAMED; a credential under an innocuous key like `dsn` or \
-                      `endpoint` never appears. If asked to scan for secrets, say \
-                      plainly that this tool cannot do it. \
-                      `limit` is 1-200 (default 50) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::CONFIG_SECRETS.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13077,35 +12994,7 @@ fn security_list_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "security_list".to_owned(),
-        description: "List the SECURITY FINDINGS stored for this repository — every live \
-                      findings layer with the run evidence behind it (analyzer, version, \
-                      backend, isolation, advisory database, report digest) and a page of \
-                      its findings. \
-                      READ `coverage` FIRST. It is `analyzed` or \
-                      `no-analyzer-on-record`, and the second is a real outcome that is \
-                      NOT a clean repository: it means no analyzer result is on record \
-                      here. A `no-analyzer-on-record` result carries NO `report` at all — \
-                      so if you are looking for `findings` and there is no `report`, \
-                      nothing was checked and you must say so rather than report zero \
-                      findings. An analyzer that ran and found nothing is the OTHER case: \
-                      `coverage` is `analyzed` and `findings` is 0. \
-                      BOUNDED, and it tells you when it bound something. `limit` is \
-                      findings PER LAYER; each layer carries its true `findings` count, \
-                      the `page` actually returned, `truncated`, and how many were \
-                      `omitted`. A page keeps the most severe findings first, so what is \
-                      omitted is the least severe — never conclude a severity is absent \
-                      from a truncated page. \
-                      `cross_reference` is a VIEW over those findings, not a \
-                      replacement: it groups dependency advisories both analyzers \
-                      reported, `confirmed_by` says how many said so, `1` is a normal \
-                      state rather than a discrepancy, and the `findings` total above is \
-                      unchanged by it. \
-                      This is read-only: it cannot run an analyzer, and it cannot ingest \
-                      a report. Ask the user to run `roteiro security run` or `roteiro \
-                      security ingest` — a tool call is not a person consenting to \
-                      execution. \
-                      `limit` is 1-100 (default 20) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::SECURITY_LIST.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13137,49 +13026,7 @@ fn security_status_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "security_status".to_owned(),
-        description: "Report SECURITY READINESS in TWO SEPARATELY SCOPED SECTIONS, and \
-                      the distinction is the whole point of the tool — do not merge them \
-                      when you report it. \
-                      `machine` (scope `machine`) describes THIS HOST: the pinned-asset \
-                      cache under `asset_root`, and each shipped analyzer's coverage \
-                      matrix with its `host_readiness`. It says nothing whatsoever about \
-                      whether anything has been run, and it is identical for every project \
-                      this server hosts. \
-                      `host_readiness` is THREE states, not a boolean, because the fix \
-                      differs and only one of them is Roteiro's to perform. `ready` = \
-                      assets provisioned AND the analyzer's program on PATH. \
-                      `assets-not-provisioned` = ask the user to run `roteiro security \
-                      prefetch`. `binary-not-found` = `missing_programs` names what is \
-                      absent, and ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to \
-                      install it, or to produce a report elsewhere and `roteiro security \
-                      ingest` it. Both underlying facts (`assets_provisioned`, \
-                      `missing_programs`) are ALWAYS present, so when the state is not \
-                      `ready` read both before telling the user what to do: a host can be \
-                      missing an asset AND a binary, and `host_readiness` names only the \
-                      first remedy. \
-                      Do not read `ready` as more than it says — it is readiness to run ON \
-                      THIS HOST. The sandboxed backend supplies the analyzer from a \
-                      digest-pinned image, so `binary-not-found` does not block it, and \
-                      this tool does not inspect the image store, so it reports no sandbox \
-                      verdict at all. \
-                      `repository` (scope `repository`) describes ONE PROJECT — the one \
-                      named in its own `project` field, which the `project` argument \
-                      selects: which findings layers are live, how many findings each \
-                      holds, and how old the advisory database behind each one is. \
-                      `possibly_stale` is `true` whenever an advisory database is \
-                      involved and NEVER means current; `false` means only that the \
-                      result has no advisory-data axis. \
-                      READ `repository.coverage` before concluding anything. It is \
-                      `analyzed` or `no-analyzer-on-record`; the second carries no \
-                      `layers` at all and means nothing has been analyzed in that \
-                      project, which is NOT a clean repository. \
-                      It needs no `limit`: this is one row per shipped analyzer, one per \
-                      pinned asset and one per live layer — COUNTS, NEVER FINDINGS. Use \
-                      `security_list` for the findings themselves. \
-                      This is read-only: it cannot provision an asset. `roteiro security \
-                      prefetch` opens the network under an explicit human consent and is \
-                      not available here — ask the user to run it."
-            .to_owned(),
+        description: rto_render::tool_text::SECURITY_STATUS.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13309,21 +13156,10 @@ fn context_tool_def(
     with_project: &impl Fn(serde_json::Value) -> serde_json::Value,
 ) -> rto_serve::ToolDef {
     use serde_json::json;
-    let cap = rto_graph::TOOL_CONTEXT_EDGE_CAP;
     rto_serve::ToolDef {
         name: "context".to_owned(),
-        description: format!(
-            "Fetch a node's CONTEXT BUNDLE: the node, its metadata, and its one-hop \
-             provenance-labelled neighbourhood, with a validity `fingerprint` that moves \
-             when the node or any neighbour changes. Takes `key` and nothing else. \
-             BOUNDED, and it tells you when it bound something: each direction carries at \
-             most {cap} edges. When more exist, `truncated` is true, \
-             `outgoing.total`/`incoming.total` give the real counts, and `omitted` names \
-             each edge kind and how many of it are missing — so an absent `imports` edge \
-             means there are none, and a large file's missing definitions are counted \
-             rather than silently dropped. Read `omitted` before concluding anything from \
-             an absence."
-        ),
+        description: rto_render::tool_text::for_tool("context")
+            .expect("`context` is one of this module's tools"),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({ "key": { "type": "string" } })),
@@ -13349,22 +13185,7 @@ fn check_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "check".to_owned(),
-        description: "Run the AUTHORED-LAYER DRIFT CHECK — the same gate `roteiro check` \
-                      exits non-zero on and the pre-commit hook reads — and return its \
-                      verdict as data: ADR `[[path#Symbol]]` links that no longer resolve, \
-                      `@rto:` annotations pointing at unknown or superseded ADRs, malformed \
-                      ADRs, and duplicate `adr-id`s. \
-                      READ `gate` FIRST. It is `pass`, `fail`, or `not-run`, and `not-run` \
-                      is a real outcome: a check needs the project's repository on disk and \
-                      a graph synced from the current HEAD, and when it cannot have both it \
-                      refuses rather than answering about a tree that is nobody's. A \
-                      `not-run` result carries NO `report` at all — so if you are looking \
-                      for `violations` and there is no `report`, nothing was checked and \
-                      you must say so rather than report a clean repository. \
-                      `not_run_reason` says what to fix (usually: run `roteiro sync`). \
-                      Read-only: it does not rebuild the graph, which is the one thing the \
-                      CLI gate does that this cannot."
-            .to_owned(),
+        description: rto_render::tool_text::CHECK.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({})),
@@ -13384,16 +13205,7 @@ fn coupling_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "coupling".to_owned(),
-        description: "Rank symbols by DIRECTED call coupling over `calls` edges: \
-                      `fan_in` (how many distinct symbols call this one), `fan_out` \
-                      (how many it calls), `instability` = fan_out/(fan_in+fan_out). \
-                      `order`=fan_in finds what the codebase most depends on, \
-                      `order`=fan_out the symbols that reach furthest. Call edges \
-                      are resolved by simple name, so a short generically-named \
-                      function can absorb every call to that name — say so if you \
-                      report a high `fan_in` on one. \
-                      `limit` is 1-100 (default 20) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::COUPLING.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13432,11 +13244,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         let mut tools = vec![
             rto_serve::ToolDef {
                 name: "explain".to_owned(),
-                description: "Explain a graph node by key (its record and immediate \
-                              neighbours), e.g. `fn:foo` or `file:src/main.rs`. A key may be \
-                              project-qualified (`<project>::<key>`) to follow a cross-repo \
-                              link into another hosted project (see `list_projects`)."
-                    .to_owned(),
+                description: rto_render::tool_text::EXPLAIN.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({ "key": { "type": "string" } })),
@@ -13445,16 +13253,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "search".to_owned(),
-                description: "Search graph nodes by text — names, keys, paths, and captured \
-                              content (doc comments, README/ADR/blueprint prose). Returns the \
-                              top matches with keys and, for content-bearing nodes, a short \
-                              `snippet` of the node's actual content to ground your answer; \
-                              curated ADRs/blueprints and READMEs rank first, so this is the \
-                              entry point for \"what is X / why\" questions. Read the `snippet`, \
-                              and call `explain` on a returned key for the full content. \
-                              `limit` is 1-25 (default 10) — there is no unlimited \
-                              setting; narrow the query instead of asking for more."
-                    .to_owned(),
+                description: rto_render::tool_text::SEARCH.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
@@ -13466,10 +13265,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "path".to_owned(),
-                description: "Find a shortest path between two node keys. A path lives \
-                              within one project; a project-qualified `from` \
-                              (`<project>::<key>`) selects it (see `list_projects`)."
-                    .to_owned(),
+                description: rto_render::tool_text::PATH.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
@@ -13481,9 +13277,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             },
             rto_serve::ToolDef {
                 name: "debt".to_owned(),
-                description: "List intent-debt markers (todo/fixme/hack/stub/deferred), \
-                              optionally filtered by category."
-                    .to_owned(),
+                description: rto_render::tool_text::DEBT.to_owned(),
                 parameters: json!({
                     "type": "object",
                     "properties": with_project(json!({
@@ -13523,9 +13317,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         }
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
-            description: "List the projects this server hosts (often just one). Pass one as \
-                          `project` to the other tools to query it (ADR-0008)."
-                .to_owned(),
+            description: rto_render::tool_text::LIST_PROJECTS.to_owned(),
             parameters: json!({ "type": "object", "properties": {} }),
         });
         tools
@@ -17992,6 +17784,55 @@ mod workspace_scoped_tools {
                  feature so they cannot come apart",
             );
         }
+    }
+
+    /// The two surfaces must describe a tool the **same way**, not merely offer
+    /// the same names.
+    ///
+    /// `both_tool_surfaces_offer_the_same_tools` compares names, and that is what
+    /// let the prose come apart: the `rmcp` macro takes a string literal, so the
+    /// description is written twice with no declaration to share, and nothing
+    /// noticed when the copies diverged. Measured when this test was added, three
+    /// of the four security/sandbox descriptions differed — `sandbox_status` by
+    /// 363 bytes, `sandbox_clear` by 197, `security_list` by 55 — so a served
+    /// model and an MCP client were told materially different things about the
+    /// same tool, including `sandbox_clear`, the one tool on either surface that
+    /// destroys anything.
+    ///
+    /// A description is not decoration here. It carries the warnings that stop the
+    /// likeliest misuses — that `no-analyzer-on-record` is not a clean repository,
+    /// that `bytes.exclusive` rather than `bytes.total` is what clearing an image
+    /// frees — so one surface silently keeping an older draft of those is a real
+    /// divergence, not a formatting difference.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn both_tool_surfaces_describe_a_tool_the_same_way() {
+        use rto_serve::ToolRegistry as _;
+
+        let chat: std::collections::BTreeMap<String, String> = called_registry()
+            .tools()
+            .into_iter()
+            .map(|t| (t.name, t.description))
+            .collect();
+        let mcp = rto_render::mcp::tool_descriptions();
+
+        let differ: Vec<String> = chat
+            .iter()
+            .filter_map(|(name, c)| {
+                // A name on one surface and not the other is the *other* test's
+                // finding; this one is only about what they say.
+                let m = mcp.get(name)?;
+                (c != m).then(|| format!("{name}: served {} bytes, MCP {} bytes", c.len(), m.len()))
+            })
+            .collect();
+        assert!(
+            differ.is_empty(),
+            "these tools are described differently on the two surfaces. Both should \
+             read their prose from `rto_render::tool_text`, which is the only place \
+             it is written — a literal in either place is the drift this test \
+             exists to prevent:\n  {}",
+            differ.join("\n  ")
+        );
     }
 
     /// Neither surface may advertise a `limit` on `security_status`, because
