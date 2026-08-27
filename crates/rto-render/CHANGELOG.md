@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v3.2.0...rto-render-v3.2.1) - 2026-08-27
+
+### Fixed
+
+- *(render)* one path through `for_tool`, so no placeholder can escape
+
+### Other
+
+- *(render)* one definition per tool description, not two
+- *(render)* give each accessor back its own doc, and fix the usage line
+- *(serve)* one authority for a shared tool description, and a measure of it
+- link the community Discord from the site and the README
+
 ## [3.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v3.1.0...rto-render-v3.2.0) - 2026-08-26
 
 ### Added
