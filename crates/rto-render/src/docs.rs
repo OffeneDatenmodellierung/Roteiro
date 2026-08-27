@@ -800,7 +800,7 @@ fn page(title: &str, root: &str, nav: &str, body: &str) -> String {
          <title>{title}</title></head><body>\
          {nav}{body}\
          <p class=\"backlink\"><a href=\"{root}\">← Back to roteiro.dev</a></p>\
-         <footer>Dual-licensed MIT OR Apache-2.0 · The Roteiro Project Team</footer>\
+         <footer>Dual-licensed MIT OR Apache-2.0 · The Roteiro Project Team · <a href=\"https://discord.gg/bxgj4w6KM\">Discord</a></footer>\
          </body></html>",
         title = escape_html(title),
     )
