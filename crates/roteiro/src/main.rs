@@ -12878,28 +12878,7 @@ fn sandbox_status_tool_def() -> rto_serve::ToolDef {
     use serde_json::json;
     rto_serve::ToolDef {
         name: "sandbox_status".to_owned(),
-        description: "Report what the SANDBOX IMAGE STORE on THIS MACHINE is holding: one \
-                      row per cached container image, with its reference, its digests, how \
-                      many of its objects are on disk, and its size broken down into \
-                      layers, extracted trees, the derived ext4 disk image and the guest \
-                      base. \
-                      MACHINE-GLOBAL, and `scope` says so. There is one of these per asset \
-                      root and EVERY repository this server hosts shares it, so never \
-                      attribute a size here to the project you are discussing. It takes no \
-                      `project` argument because it has no per-repository half. \
-                      `bytes.total` is what an image references; `bytes.exclusive` is what \
-                      dropping THAT IMAGE ALONE would free — they differ when another \
-                      cached image shares a layer, so quote `exclusive` when you say what \
-                      clearing one image gives back. `objects` counts the PULLED content \
-                      (manifest, config, one per distinct layer); the extracted trees and \
-                      disk images are built on first run, so a pulled-but-never-run image \
-                      is complete without them. `unattributed` is bytes no image claims; \
-                      `preserved` is state no pinned digest re-obtains, which \
-                      `sandbox_clear` never removes. \
-                      Read this BEFORE `sandbox_clear` and show the user the numbers. \
-                      Every `reference` here is a value `sandbox_clear` takes as `image`. \
-                      Read-only."
-            .to_owned(),
+        description: rto_render::tool_text::SANDBOX_STATUS.to_owned(),
         parameters: json!({ "type": "object", "properties": {} }),
     }
 }
@@ -12914,34 +12893,7 @@ fn sandbox_clear_tool_def() -> rto_serve::ToolDef {
     use serde_json::json;
     rto_serve::ToolDef {
         name: "sandbox_clear".to_owned(),
-        description: "DELETE cached container images from the SANDBOX IMAGE STORE on THIS \
-                      MACHINE, and report what that freed. This is the ONE tool here that \
-                      changes anything, and what makes it admissible is also its limit: \
-                      everything it drops is re-obtainable from a pinned digest, so it \
-                      costs a re-download and NEVER information. It cannot reach a findings \
-                      layer, a memory record or the graph. \
-                      MACHINE-GLOBAL. One store per asset root, shared by EVERY repository \
-                      this server hosts, so clearing on behalf of one project slows the \
-                      next sandboxed run for all of them. No `project` argument; `scope` in \
-                      the result says `machine`. \
-                      TELL THE USER FIRST. Call `sandbox_status` and show them what is \
-                      cached and what it costs; a re-pull is minutes and gigabytes. \
-                      `image` and `everything` are DIFFERENT REQUESTS and neither has a \
-                      default: pass `image` with a reference from `sandbox_status`, or \
-                      `everything: true`. Supplying neither is an ERROR and does not mean \
-                      everything; supplying both is an error too. `dry_run: true` reports \
-                      what would go and removes nothing — `applied` says which happened. \
-                      REPORT WHAT IT FREED: `freed_bytes`, with `store_bytes_before` and \
-                      `store_bytes_after` measured either side. Quote a figure rather than \
-                      saying it worked. \
-                      `retained` is every surviving image re-checked against the disk AFTER \
-                      the deletion. If any `complete` is false, SAY SO PROMINENTLY — that \
-                      is a damaged store, not a successful clear, and `roteiro security \
-                      prefetch` is the repair. \
-                      It refuses rather than guessing: a registered box, an unrecognised \
-                      entry under the store root, or an index row pointing outside it all \
-                      stop it with nothing removed."
-            .to_owned(),
+        description: rto_render::tool_text::SANDBOX_CLEAR.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -13077,35 +13029,7 @@ fn security_list_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "security_list".to_owned(),
-        description: "List the SECURITY FINDINGS stored for this repository — every live \
-                      findings layer with the run evidence behind it (analyzer, version, \
-                      backend, isolation, advisory database, report digest) and a page of \
-                      its findings. \
-                      READ `coverage` FIRST. It is `analyzed` or \
-                      `no-analyzer-on-record`, and the second is a real outcome that is \
-                      NOT a clean repository: it means no analyzer result is on record \
-                      here. A `no-analyzer-on-record` result carries NO `report` at all — \
-                      so if you are looking for `findings` and there is no `report`, \
-                      nothing was checked and you must say so rather than report zero \
-                      findings. An analyzer that ran and found nothing is the OTHER case: \
-                      `coverage` is `analyzed` and `findings` is 0. \
-                      BOUNDED, and it tells you when it bound something. `limit` is \
-                      findings PER LAYER; each layer carries its true `findings` count, \
-                      the `page` actually returned, `truncated`, and how many were \
-                      `omitted`. A page keeps the most severe findings first, so what is \
-                      omitted is the least severe — never conclude a severity is absent \
-                      from a truncated page. \
-                      `cross_reference` is a VIEW over those findings, not a \
-                      replacement: it groups dependency advisories both analyzers \
-                      reported, `confirmed_by` says how many said so, `1` is a normal \
-                      state rather than a discrepancy, and the `findings` total above is \
-                      unchanged by it. \
-                      This is read-only: it cannot run an analyzer, and it cannot ingest \
-                      a report. Ask the user to run `roteiro security run` or `roteiro \
-                      security ingest` — a tool call is not a person consenting to \
-                      execution. \
-                      `limit` is 1-100 (default 20) — no unlimited setting."
-            .to_owned(),
+        description: rto_render::tool_text::SECURITY_LIST.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -13137,49 +13061,7 @@ fn security_status_tool_def(
     use serde_json::json;
     rto_serve::ToolDef {
         name: "security_status".to_owned(),
-        description: "Report SECURITY READINESS in TWO SEPARATELY SCOPED SECTIONS, and \
-                      the distinction is the whole point of the tool — do not merge them \
-                      when you report it. \
-                      `machine` (scope `machine`) describes THIS HOST: the pinned-asset \
-                      cache under `asset_root`, and each shipped analyzer's coverage \
-                      matrix with its `host_readiness`. It says nothing whatsoever about \
-                      whether anything has been run, and it is identical for every project \
-                      this server hosts. \
-                      `host_readiness` is THREE states, not a boolean, because the fix \
-                      differs and only one of them is Roteiro's to perform. `ready` = \
-                      assets provisioned AND the analyzer's program on PATH. \
-                      `assets-not-provisioned` = ask the user to run `roteiro security \
-                      prefetch`. `binary-not-found` = `missing_programs` names what is \
-                      absent, and ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to \
-                      install it, or to produce a report elsewhere and `roteiro security \
-                      ingest` it. Both underlying facts (`assets_provisioned`, \
-                      `missing_programs`) are ALWAYS present, so when the state is not \
-                      `ready` read both before telling the user what to do: a host can be \
-                      missing an asset AND a binary, and `host_readiness` names only the \
-                      first remedy. \
-                      Do not read `ready` as more than it says — it is readiness to run ON \
-                      THIS HOST. The sandboxed backend supplies the analyzer from a \
-                      digest-pinned image, so `binary-not-found` does not block it, and \
-                      this tool does not inspect the image store, so it reports no sandbox \
-                      verdict at all. \
-                      `repository` (scope `repository`) describes ONE PROJECT — the one \
-                      named in its own `project` field, which the `project` argument \
-                      selects: which findings layers are live, how many findings each \
-                      holds, and how old the advisory database behind each one is. \
-                      `possibly_stale` is `true` whenever an advisory database is \
-                      involved and NEVER means current; `false` means only that the \
-                      result has no advisory-data axis. \
-                      READ `repository.coverage` before concluding anything. It is \
-                      `analyzed` or `no-analyzer-on-record`; the second carries no \
-                      `layers` at all and means nothing has been analyzed in that \
-                      project, which is NOT a clean repository. \
-                      It needs no `limit`: this is one row per shipped analyzer, one per \
-                      pinned asset and one per live layer — COUNTS, NEVER FINDINGS. Use \
-                      `security_list` for the findings themselves. \
-                      This is read-only: it cannot provision an asset. `roteiro security \
-                      prefetch` opens the network under an explicit human consent and is \
-                      not available here — ask the user to run it."
-            .to_owned(),
+        description: rto_render::tool_text::SECURITY_STATUS.to_owned(),
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({
@@ -17992,6 +17874,96 @@ mod workspace_scoped_tools {
                  feature so they cannot come apart",
             );
         }
+    }
+
+    /// The two surfaces must describe a tool the **same way**, not merely offer
+    /// the same names.
+    ///
+    /// `both_tool_surfaces_offer_the_same_tools` compares names, and that is what
+    /// let the prose come apart: the `rmcp` macro takes a string literal, so the
+    /// description is written twice with no declaration to share, and nothing
+    /// noticed when the copies diverged. Measured when this test was added, three
+    /// of the four security/sandbox descriptions differed — `sandbox_status` by
+    /// 363 bytes, `sandbox_clear` by 197, `security_list` by 55 — so a served
+    /// model and an MCP client were told materially different things about the
+    /// same tool, including `sandbox_clear`, the one tool on either surface that
+    /// destroys anything.
+    ///
+    /// A description is not decoration here. It carries the warnings that stop the
+    /// likeliest misuses — that `no-analyzer-on-record` is not a clean repository,
+    /// that `bytes.exclusive` rather than `bytes.total` is what clearing an image
+    /// frees — so one surface silently keeping an older draft of those is a real
+    /// divergence, not a formatting difference.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn both_tool_surfaces_describe_a_tool_the_same_way() {
+        use rto_serve::ToolRegistry as _;
+        /// Tools whose prose has **not** yet been moved to `rto_render::tool_text`
+        /// and still differs between the surfaces.
+        ///
+        /// Every one of the fourteen shared tools had drifted when this test was
+        /// written — this is what was left after the four largest were unified.
+        /// Named rather than counted, so the list can only shrink and each
+        /// removal is a deliberate act in a diff; a threshold would let one
+        /// escapee hide behind another's fix. **Only ever remove from it.**
+        const NOT_YET_SHARED: [&str; 10] = [
+            "check",
+            "config_secrets",
+            "context",
+            "coupling",
+            "debt",
+            "debt_density",
+            "explain",
+            "list_projects",
+            "path",
+            "search",
+        ];
+
+        let chat: std::collections::BTreeMap<String, String> = called_registry()
+            .tools()
+            .into_iter()
+            .map(|t| (t.name, t.description))
+            .collect();
+        let mcp = rto_render::mcp::tool_descriptions();
+
+        let mut differ = Vec::new();
+        let mut stale = Vec::new();
+        for (name, chat_desc) in &chat {
+            let Some(mcp_desc) = mcp.get(name) else {
+                continue; // a name-level divergence is the other test's finding
+            };
+            let known = NOT_YET_SHARED.contains(&name.as_str());
+            if chat_desc == mcp_desc {
+                if known {
+                    stale.push(name.clone());
+                }
+                continue;
+            }
+            if known {
+                continue;
+            }
+            if chat_desc != mcp_desc {
+                differ.push(format!(
+                    "{name}: served {} bytes, MCP {} bytes",
+                    chat_desc.len(),
+                    mcp_desc.len()
+                ));
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "these tools are described differently on the two surfaces. Move the \
+             prose to `rto_render::tool_text` and have both sides take it from \
+             there — do not add to `NOT_YET_SHARED`, which exists only for the \
+             drift that predates this test:\n  {}",
+            differ.join("\n  ")
+        );
+        assert!(
+            stale.is_empty(),
+            "these `NOT_YET_SHARED` entries now agree, so the exemption is doing \
+             nothing but holding a door open. Remove them:\n  {}",
+            stale.join("\n  ")
+        );
     }
 
     /// Neither surface may advertise a `limit` on `security_status`, because

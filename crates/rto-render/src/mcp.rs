@@ -928,35 +928,26 @@ impl GraphServer {
 impl GraphServer {
     /// List stored security findings, bounded, with the never-run case named.
     #[tool(
-        description = "List the SECURITY FINDINGS stored for this repository — every live \
-                          findings layer with the run evidence behind it (analyzer, version, \
-                          backend, isolation, advisory database, report digest) and a page of \
-                          its findings. \
-                          READ `coverage` FIRST. It is `analyzed` or \
-                          `no-analyzer-on-record`, and the second is a real outcome that is \
-                          NOT a clean repository: it means no analyzer result is on record \
-                          here. A `no-analyzer-on-record` result carries NO `report` at all — \
-                          so if you are looking for `findings` and there is no `report`, \
-                          nothing was checked and you must say so rather than report zero \
-                          findings. An analyzer that ran and found nothing is the OTHER \
-                          case: `coverage` is `analyzed` and `findings` is 0. \
-                          BOUNDED, and it tells you when it bound something. `limit` \
-                          (1-100, default 20 — no unlimited setting) is findings PER LAYER; \
-                          each layer carries its true `findings` count, the `page` actually \
-                          returned, `truncated`, and how many were `omitted`. A page keeps \
-                          the most severe findings first, so what is omitted is the least \
-                          severe — never conclude a severity is absent from a truncated \
-                          page. \
-                          `cross_reference` is a VIEW over those findings, not a \
-                          replacement: it groups dependency advisories both analyzers \
-                          reported, `confirmed_by` says how many said so, `1` is a normal \
-                          state rather than a discrepancy, and the `findings` total above is \
-                          unchanged by it. Every finding named there is still addressable \
-                          under its own key. \
-                          This is read-only: it cannot run an analyzer, and it cannot \
-                          ingest a report. Ask the user to run `roteiro security run` or \
-                          `roteiro security ingest` — a tool call is not a person consenting \
-                          to execution."
+        description = "List the SECURITY FINDINGS stored for this repository: every live \
+                          findings layer with its run evidence (analyzer, version, backend, \
+                          isolation, advisory database, report digest) and a page of findings. \
+                          READ `coverage` FIRST. `no-analyzer-on-record` is a real outcome and \
+                          NOT a clean repository — it carries NO `report` at all, so if there \
+                          is no `report`, nothing was checked and you must say so rather than \
+                          report zero findings. An analyzer that ran and found nothing is the \
+                          other case: `coverage` is `analyzed` and `findings` is 0. Bounded, \
+                          and it says when it bound something. `limit` is 1-100 (default 20) — \
+                          no unlimited setting — and is findings PER LAYER; each layer carries \
+                          its true `findings` count, the `page` returned, `truncated`, and how \
+                          many were `omitted`. A page keeps the most severe findings first, so \
+                          what is omitted is the least severe — never conclude a severity is \
+                          absent from a truncated page. `cross_reference` is a view over those \
+                          findings, not a replacement: it groups dependency advisories both \
+                          analyzers reported, `confirmed_by` counts how many, `1` is normal \
+                          rather than a discrepancy, and the `findings` total is unchanged by \
+                          it. Read-only: it cannot run an analyzer or ingest a report. Ask the \
+                          user to run `roteiro security run` or `roteiro security ingest` — a \
+                          tool call is not a person consenting to execution."
     )]
     async fn security_list(
         &self,
@@ -983,48 +974,35 @@ impl GraphServer {
     /// What this machine has provisioned, and what this repository has analyzed —
     /// as two labelled scopes.
     #[tool(
-        description = "Report SECURITY READINESS in TWO SEPARATELY SCOPED SECTIONS, and \
-                          the distinction is the whole point of the tool — do not merge \
-                          them when you report it. \
-                          `machine` (scope `machine`) describes THIS HOST: the pinned-asset \
-                          cache under `asset_root`, and each shipped analyzer's coverage \
-                          matrix with its `host_readiness`. It says nothing whatsoever about \
-                          whether anything has been run, and it is identical for every \
-                          project this server hosts. \
-                          `host_readiness` is THREE states, not a boolean, because the fix \
-                          differs and only one of them is Roteiro's to perform. `ready` = \
-                          assets provisioned AND the analyzer's program on PATH. \
-                          `assets-not-provisioned` = ask the user to run `roteiro security \
-                          prefetch`. `binary-not-found` = `missing_programs` names what is \
-                          absent, and ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to \
-                          install it, or to produce a report elsewhere and `roteiro \
-                          security ingest` it. Both underlying facts (`assets_provisioned`, \
-                          `missing_programs`) are ALWAYS present, so when the state is not \
-                          `ready` read both before telling the user what to do: a host can \
-                          be missing an asset AND a binary, and `host_readiness` names only \
-                          the first remedy. \
-                          Do not read `ready` as more than it says — it is readiness to run \
-                          ON THIS HOST. The sandboxed backend supplies the analyzer from a \
-                          digest-pinned image, so `binary-not-found` does not block it, and \
-                          this tool does not inspect the image store, so it reports no \
-                          sandbox verdict at all. \
-                          `repository` (scope `repository`) describes ONE PROJECT — the one \
-                          named in its own `project` field, which the `project` argument \
-                          selects: which findings layers are live, how many findings each \
-                          holds, and how old the advisory database behind each one is. \
-                          `possibly_stale` is `true` whenever an advisory database is \
-                          involved and NEVER means current; `false` means only that the \
-                          result has no advisory-data axis. \
-                          READ `repository.coverage` before concluding anything. It is \
-                          `analyzed` or `no-analyzer-on-record`; the second carries no \
-                          `layers` at all and means nothing has been analyzed in that \
-                          project, which is NOT a clean repository. \
-                          It needs no `limit`: this is one row per shipped analyzer, one \
-                          per pinned asset and one per live layer — COUNTS, NEVER FINDINGS. \
-                          Use `security_list` for the findings themselves. \
-                          This is read-only: it cannot provision an asset. `roteiro \
-                          security prefetch` opens the network under an explicit human \
-                          consent and is not available here — ask the user to run it."
+        description = "Report SECURITY READINESS in TWO SEPARATELY SCOPED SECTIONS; report \
+                          them separately, never merged. `machine`: this HOST — the \
+                          pinned-asset cache under `asset_root`, and each analyzer's coverage \
+                          matrix with `host_readiness`. Identical for every project here, and \
+                          says nothing whatsoever about whether anything has been run. \
+                          `host_readiness` has THREE states with different remedies: `ready` \
+                          (assets provisioned AND the analyzer's program on PATH); \
+                          `assets-not-provisioned` (ask the user to run `roteiro security \
+                          prefetch`); `binary-not-found` (`missing_programs` names it, and \
+                          ROTEIRO NEVER INSTALLS ANALYZERS — ask the user to install it or to \
+                          `roteiro security ingest` a report from elsewhere). Both underlying \
+                          facts (`assets_provisioned`, `missing_programs`) are ALWAYS present, \
+                          so when the state is not `ready` read both: a host can lack both and \
+                          `host_readiness` names only the first remedy. Do not read `ready` as \
+                          more than it says: it is readiness to run ON THIS HOST. The \
+                          sandboxed backend supplies analyzers from a digest-pinned image, so \
+                          `binary-not-found` does not block it, and this tool does not inspect \
+                          the image store, so it reports no sandbox verdict. `repository` \
+                          describes ONE PROJECT — the one in its `project` field, chosen by \
+                          the `project` argument — which findings layers are live, how many \
+                          findings each holds, and the age of the advisory database behind \
+                          each. `possibly_stale: true` whenever advisory data is involved and \
+                          NEVER means current; `false` means only that there is no advisory \
+                          axis. Read `repository.coverage` before concluding anything: \
+                          `no-analyzer-on-record` carries no layers and means nothing has been \
+                          analyzed — NOT a clean repository. COUNTS, NEVER FINDINGS; use \
+                          `security_list` for those. It needs no `limit`. Read-only: it cannot \
+                          provision, and `roteiro security prefetch` needs human consent, so \
+                          ask the user to run it."
     )]
     async fn security_status(
         &self,
@@ -1074,34 +1052,28 @@ impl GraphServer {
 impl GraphServer {
     /// What the machine-global sandbox image store is holding.
     #[tool(
-        description = "Report what the SANDBOX IMAGE STORE on THIS MACHINE is holding: one \
-                          row per cached container image, with its reference, its digests, \
-                          how many layers it has, how many of its objects are on disk, and \
-                          its size broken down into layers, extracted trees, the derived \
-                          ext4 disk image and the guest base. \
-                          MACHINE-GLOBAL, and `scope` says so. There is one of these per \
-                          asset root and EVERY repository this server hosts shares it, so \
-                          never attribute a size here to the project you are discussing. It \
-                          takes no `project` argument because it has no per-repository half \
-                          — `security_status` is the tool with two scopes. \
-                          `bytes.total` is what an image references; `bytes.exclusive` is \
-                          what dropping THAT IMAGE ALONE would free. They differ when \
-                          another cached image shares a layer, so quote `exclusive` when \
-                          you tell a user what clearing one image would give back. \
-                          `objects` counts the PULLED content — manifest, config, one per \
-                          distinct layer. The extracted trees and disk images are built on \
-                          first run and are a cache below this cache, so an image that has \
-                          only ever been pulled is complete without them and \
+        description = "Report what the machine-global SANDBOX IMAGE STORE holds: one row \
+                          per cached container image with its reference, digests, layer count, \
+                          objects on disk, and size split into layers, extracted trees, the \
+                          derived ext4 disk image and the guest base. MACHINE-GLOBAL, and \
+                          `scope` says so: one store per asset root, shared by every \
+                          repository here, so never attribute a size to the project under \
+                          discussion. No `project` argument — `security_status` is the tool \
+                          with two scopes. `bytes.total` is what an image references; \
+                          `bytes.exclusive` is what dropping that image alone would free. They \
+                          differ when images share a layer, so quote `exclusive` when saying \
+                          what clearing one would give back. `objects` counts pulled content \
+                          (manifest, config, one per distinct layer). Extracted trees and disk \
+                          images are a cache below this one, built on first run, so a \
+                          pulled-only image is complete without them; \
                           `disk_image_built`/`base_disk_built` say whether it has run. \
-                          `unattributed` is bytes no cached image claims; `preserved` is \
-                          state no pinned digest re-obtains, which `sandbox_clear` will \
-                          never remove. \
-                          Read this BEFORE `sandbox_clear` and show the user the numbers: a \
-                          destructive verb with no way to see what it will destroy is \
-                          invoked blind. Every `reference` here is a value `sandbox_clear` \
-                          accepts as `image`. \
-                          It needs no `limit`: one row per cached image, counts and sizes, \
-                          never findings. Read-only."
+                          `unattributed` is bytes no image claims; `preserved` is state no \
+                          pinned digest re-obtains, which `sandbox_clear` never removes. Read \
+                          this before `sandbox_clear` and show the user the numbers: a \
+                          destructive verb with no way to see what it will destroy is invoked \
+                          blind. Every `reference` here is a value `sandbox_clear` accepts as \
+                          `image`. No `limit`: one row per image, counts and sizes, never \
+                          findings. Read-only."
     )]
     async fn sandbox_status(
         &self,
@@ -1118,36 +1090,28 @@ impl GraphServer {
 
     /// Drop cached images, and say what that freed.
     #[tool(
-        description = "DELETE cached container images from the SANDBOX IMAGE STORE on THIS \
-                          MACHINE, and report what that freed. This is the ONE tool here \
-                          that changes anything, and what makes it admissible is also its \
-                          limit: everything it drops is re-obtainable from a pinned digest, \
-                          so it costs a re-download and NEVER information. It cannot reach a \
-                          findings layer, a memory record or the graph. \
-                          MACHINE-GLOBAL. There is one store per asset root and EVERY \
-                          repository this server hosts shares it, so clearing on behalf of \
-                          one project slows the next sandboxed run for all of them. It takes \
-                          no `project` argument, and `scope` in the result says `machine`. \
-                          TELL THE USER FIRST. Call `sandbox_status` and show them what is \
-                          cached and what it is costing; a re-pull is minutes to tens of \
-                          minutes and several gigabytes of download. \
-                          `image` and `everything` are DIFFERENT REQUESTS and neither has a \
-                          default: pass `image` with a reference from `sandbox_status`, or \
-                          `everything: true`. Supplying neither is an ERROR and does not \
-                          mean everything; supplying both is an error too. `dry_run: true` \
-                          reports what would go and removes nothing — the result's `applied` \
-                          field says which happened. \
-                          REPORT WHAT IT FREED. `freed_bytes` is the accounting, \
-                          `store_bytes_before`/`store_bytes_after` are the store measured \
-                          either side, and they agree to within the index itself. Quote a \
-                          figure rather than saying it worked. \
-                          `retained` is every surviving image re-checked against the disk \
-                          AFTER the deletion, with `complete` per image. If any `complete` \
-                          is false, SAY SO PROMINENTLY — that is a damaged store, not a \
-                          successful clear, and `roteiro security prefetch` is the repair. \
-                          It refuses rather than guessing: a registered box, an entry under \
-                          the store root it does not recognise, or an index row pointing \
-                          outside that root all stop it with nothing removed."
+        description = "DELETE cached container images from the machine-global sandbox image \
+                          store, and report what that freed. The one tool here that changes \
+                          anything; everything it drops is re-obtainable from a pinned digest, \
+                          so it costs a re-download and never information. It cannot reach \
+                          findings, memory or the graph. MACHINE-GLOBAL: one store per asset \
+                          root, shared by every repository this server hosts, so clearing for \
+                          one project slows the next sandboxed run for all. No `project` \
+                          argument; `scope` is `machine`. Call `sandbox_status` first and show \
+                          the user what is cached and what it costs — a re-pull is minutes to \
+                          tens of minutes and gigabytes. `image` and `everything` are \
+                          DIFFERENT REQUESTS with no default: pass `image` with a reference \
+                          from `sandbox_status`, or `everything: true`. Neither is an error \
+                          and does not mean everything; both is an error. `dry_run: true` \
+                          removes nothing and `applied` says which happened. Report what it \
+                          freed: quote `freed_bytes`, with \
+                          `store_bytes_before`/`store_bytes_after` either side, rather than \
+                          saying it worked. `retained` re-checks every surviving image against \
+                          the disk afterwards; if any `complete` is false say so prominently — \
+                          that is a damaged store, not a successful clear, and `roteiro \
+                          security prefetch` is the repair. It refuses rather than guessing: a \
+                          registered box, an unrecognised entry under the store root, or an \
+                          index row pointing outside it each stop it with nothing removed."
     )]
     async fn sandbox_clear(
         &self,
@@ -1353,6 +1317,28 @@ impl ServerHandler for GraphServer {
 /// the sets, a tool added to one and forgotten on the other is invisible until
 /// somebody notices an agent can do a thing over one transport and not the other.
 /// `[debt] ignore` across three surfaces (issue #321) and `limit == 0` across five
+/// Each advertised tool's **description**, by name.
+///
+/// Exists so the copy `rmcp` forces can be compared against its source. The macro
+/// parses `description` into a `String` via `darling`, so it takes a string
+/// literal and rejects a path — `description = SANDBOX_STATUS` fails to compile —
+/// and `serve` does not imply `mcp`, so the served side cannot simply read this
+/// module either. [`crate::tool_text`] is therefore the authority and the literal
+/// below is a checked copy; this is what makes the check possible.
+#[must_use]
+pub fn tool_descriptions() -> std::collections::BTreeMap<String, String> {
+    GraphServer::routes(&Advertised::All)
+        .list_all()
+        .into_iter()
+        .map(|t| {
+            (
+                t.name.to_string(),
+                t.description.unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
 /// (#393) are what that costs.
 #[must_use]
 pub fn tool_names() -> Vec<String> {
