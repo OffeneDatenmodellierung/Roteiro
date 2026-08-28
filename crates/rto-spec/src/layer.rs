@@ -79,13 +79,24 @@ pub fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, 
         GraphSource::Committed => repo.walk_blobs(),
         GraphSource::Worktree => {
             let mut blobs = repo.walk_blobs()?;
-            // `untracked_files` is defined against the index, so it cannot return
-            // a path already in `blobs`. The synthesized oid is unused:
-            // `Repo::read_source` reads Worktree content from disk by path, and an
-            // untracked file has no git object to read anyway. (A bare repo has no
-            // working tree, and `untracked_files` returns nothing there, so the
-            // oid-reading fallback is never reached with one of these.)
-            blobs.extend(repo.untracked_files()?.into_iter().map(|path| BlobRef {
+            // Every path a commit would add, staged or not — **not**
+            // `untracked_files` alone, which was issue #657: that set is defined
+            // against the **index**, so `git add` on a new ADR took it out of the
+            // untracked set without putting it into HEAD, and the authored layer
+            // stopped seeing the file. `check` then reported `0 violations` on
+            // drift it had named one `git add` earlier. The old comment here was
+            // right that the two sets cannot overlap, and that is exactly why it
+            // did not notice the union had a hole.
+            //
+            // The synthesized oid is unused: `Repo::read_source` reads Worktree
+            // content from disk by path, and a not-yet-committed file has no HEAD
+            // object to read anyway. (A bare repo has no working tree, so this
+            // set is empty there and the oid-reading fallback is never reached
+            // with one of these.)
+            let head_paths: std::collections::BTreeSet<&str> =
+                blobs.iter().map(|b| b.path.as_str()).collect();
+            let added = repo.added_since_head(&head_paths)?;
+            blobs.extend(added.into_iter().map(|path| BlobRef {
                 path,
                 oid: String::new(),
             }));
