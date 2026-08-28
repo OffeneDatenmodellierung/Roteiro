@@ -64,11 +64,11 @@ pub struct AuthoredLayer {
 /// [`rto_graph::sync_worktree`] overlays into the derived layer, and the two must
 /// describe the same tree.
 ///
-/// It said "plus **untracked** files" until issue #657, and that word was the
-/// bug: `untracked_files` classifies against the *index*, so `git add` took a new
-/// ADR out of the set without putting it into `HEAD`, and the union had a hole
-/// exactly the size of "staged, not yet committed". Restating it here because a
-/// doc that describes the old union is an invitation to reconstruct it.
+/// It said "plus **untracked** files" until issue #657, and that one word was
+/// wrong: `untracked_files` classifies against the *index*, so `git add` took a
+/// new ADR out of the set without putting it into `HEAD`, and the union had a
+/// hole exactly the size of "staged, not yet committed". Restated here because a
+/// doc describing the old union is an invitation to reconstruct it.
 ///
 /// Getting this wrong is issue #330's observed symptom. `sync_worktree` walks
 /// untracked files deliberately, "so the working-tree `sync`/`check`/`review` see
