@@ -179,6 +179,15 @@ pub fn unified_untracked(repo: &Path, path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Whether git declined to warn, so the safecrlf fixture proves nothing here.
+    ///
+    /// Separated from the assertion so the skip is a *stated* outcome rather than
+    /// an assertion that happens to hold: the two are indistinguishable in a test
+    /// report, and only one of them is guarding anything.
+    fn out_is_quiet(out: &std::process::Output) -> bool {
+        out.stderr.is_empty()
+    }
+
     use super::*;
     use std::fs;
     use std::path::PathBuf;
@@ -346,6 +355,36 @@ mod tests {
         run(&["config", "core.safecrlf", "warn"]);
         // Mixed endings: git has something to say, and a diff to give.
         fs::write(dir.join("mixed.rs"), "fn a() {}\r\nfn b() {}\n").expect("write");
+
+        // **Establish that the fixture actually reproduces the situation**, by
+        // running the same command directly and looking at both streams.
+        // `unified_untracked` returns only `Option<String>`, so it cannot show
+        // whether stderr was non-empty — and a test that skipped this would pass
+        // on any platform or git version where `safecrlf` stays quiet, guarding
+        // nothing while looking green. Raised by Copilot on PR #662.
+        let raw = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args([
+                "diff",
+                CONTEXT_LINES,
+                "--no-index",
+                "--",
+                "/dev/null",
+                "mixed.rs",
+            ])
+            .output()
+            .expect("git");
+        if out_is_quiet(&raw) {
+            // Nothing to guard here on this platform. Skipping is honest;
+            // passing would not be.
+            return;
+        }
+        assert!(
+            !raw.stdout.is_empty() && !raw.stderr.is_empty(),
+            "the fixture must produce a diff *and* a warning, or this test cannot \
+             distinguish the fix from the bug"
+        );
 
         let d = unified_untracked(&dir, "mixed.rs");
         assert!(
