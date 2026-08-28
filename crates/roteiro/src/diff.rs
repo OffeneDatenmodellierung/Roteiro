@@ -45,9 +45,16 @@ pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
 ///
 /// - `[]` — the working tree against the **index**: unstaged edits only. A
 ///   staged change is invisible to it.
-/// - `["HEAD"]` — the working tree against `HEAD`: staged **and** unstaged. This
-///   is what a working-tree review wants, since it reviews what a commit would
-///   contain.
+/// - `["HEAD"]` — the **working tree** against `HEAD`. Staged edits usually
+///   appear too, but only because staging does not alter the worktree — this is
+///   *not* "what a commit would contain". A commit records the **index**, and
+///   where the two diverge (stage a file, then edit it again) this shows the
+///   later worktree content while a commit would record the earlier staged
+///   blob. It is nonetheless the right range for a working-tree review, because
+///   it matches what the graph is built from: `GraphSource::Worktree` reads
+///   content from disk, so the diff and the surrounding context describe the
+///   same tree. `check --staged` is the surface that answers the committing
+///   question.
 /// - `[base, "HEAD"]` — a commit range, needing no working tree at all.
 ///
 /// Returns `None` when git fails and `Some("")` when git ran and emitted
@@ -234,6 +241,51 @@ mod tests {
         assert!(
             vs_head.contains("+fn staged() {}") && vs_head.contains("+fn unstaged() {}"),
             "`HEAD` shows both, which is why a working-tree review uses it: {vs_head}"
+        );
+    }
+
+    /// `["HEAD"]` shows the **worktree**, not what a commit would record.
+    ///
+    /// The two are the same until the index and the worktree diverge, which is
+    /// why "staged and unstaged" reads as "what you are about to commit" and is
+    /// not. Stage one version, edit to another, and `git diff HEAD` shows the
+    /// later one while the commit would record the earlier. Raised by Copilot on
+    /// PR #656 against a doc comment that claimed the committing view.
+    ///
+    /// The behaviour is right for a working-tree review — it matches what
+    /// `GraphSource::Worktree` reads from disk — so this pins the behaviour and
+    /// its limit together, rather than leaving the justification to prose that
+    /// has now been wrong three times in this file.
+    #[test]
+    fn head_shows_the_worktree_not_the_index() {
+        let dir = repo("diverge");
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git")
+        };
+        fs::write(dir.join("kept.rs"), "fn staged_version() {}\n").expect("write");
+        run(&["add", "kept.rs"]);
+        fs::write(dir.join("kept.rs"), "fn worktree_version() {}\n").expect("write");
+
+        let vs_head = unified(&dir, &["HEAD"], "kept.rs").expect("diff");
+        assert!(
+            vs_head.contains("+fn worktree_version() {}"),
+            "`HEAD` shows the worktree content: {vs_head}"
+        );
+        assert!(
+            !vs_head.contains("+fn staged_version() {}"),
+            "and not the staged blob, which is what a commit would actually \
+             record: {vs_head}"
+        );
+
+        let cached = unified(&dir, &["--cached"], "kept.rs").expect("diff");
+        assert!(
+            cached.contains("+fn staged_version() {}"),
+            "`--cached` is the committing view: {cached}"
         );
     }
 
