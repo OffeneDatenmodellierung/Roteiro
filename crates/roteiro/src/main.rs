@@ -14229,6 +14229,7 @@ fn render_okf(
                     sources: ex.node.path.iter().map(|p| format!("/{p}")).collect(),
                 },
                 body: None,
+                member: None,
             }
         })
         .collect();

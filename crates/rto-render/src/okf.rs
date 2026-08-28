@@ -452,6 +452,14 @@ pub struct Concept<'a> {
     pub frontmatter: Frontmatter,
     /// The node's prose body, when it has one.
     pub body: Option<String>,
+    /// The workspace member this concept came from, for a bundle spanning several
+    /// repositories (ADR-0009). `None` for a single project.
+    ///
+    /// Nesting by member is what stops two repositories' `file:README.md` landing
+    /// on one path. The vault this replaces solved the same problem by qualifying
+    /// the *key* and hashing the filename, because it had one flat directory to
+    /// work with; a bundle has directories, so the structure carries it.
+    pub member: Option<String>,
 }
 
 /// Assemble a whole bundle: every concept, a per-directory `index.md`, and the
@@ -477,12 +485,13 @@ pub struct Concept<'a> {
 pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<BundleFile> {
     // Group by section, in key order, so both the output and the disambiguation
     // are deterministic.
-    let mut by_section: BTreeMap<&'static str, Vec<Concept<'_>>> = BTreeMap::new();
+    let mut by_section: BTreeMap<(Option<String>, &'static str), Vec<Concept<'_>>> =
+        BTreeMap::new();
     let mut ordered = concepts;
     ordered.sort_by(|a, b| a.explanation.node.key.cmp(&b.explanation.node.key));
     for c in ordered {
         by_section
-            .entry(section_for(&c.explanation.node.kind))
+            .entry((c.member.clone(), section_for(&c.explanation.node.kind)))
             .or_default()
             .push(c);
     }
@@ -490,7 +499,11 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
     let mut files = Vec::new();
     let mut sections: Vec<IndexEntry> = Vec::new();
 
-    for (section, members) in by_section {
+    for ((member, section), members) in by_section {
+        // `/<member>/<section>/` in a workspace, `/<section>/` on its own.
+        let dir = member
+            .as_deref()
+            .map_or_else(|| section.to_owned(), |m| format!("{}/{section}", slug(m)));
         let mut taken: BTreeMap<String, usize> = BTreeMap::new();
         let mut entries: Vec<IndexEntry> = Vec::new();
 
@@ -507,7 +520,7 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
             };
             *taken.entry(base).or_insert(0) += 1;
 
-            let path = format!("/{section}/{name}.md");
+            let path = format!("/{dir}/{name}.md");
             let title = c
                 .frontmatter
                 .title
@@ -527,12 +540,12 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
         }
 
         files.push(BundleFile {
-            path: format!("/{section}/{INDEX_FILE}"),
-            content: render_index(section, &entries),
+            path: format!("/{dir}/{INDEX_FILE}"),
+            content: render_index(&dir, &entries),
         });
         sections.push(IndexEntry {
-            title: section.to_owned(),
-            target: format!("/{section}/{INDEX_FILE}"),
+            title: dir.clone(),
+            target: format!("/{dir}/{INDEX_FILE}"),
             description: Some(format!("{} concept(s)", members.len())),
         });
     }
@@ -606,6 +619,7 @@ mod tests {
                 ..Frontmatter::default()
             },
             body: None,
+            member: None,
         }
     }
 
@@ -675,6 +689,36 @@ mod tests {
     /// second silently overwrote the first. The count printed did not know. So the
     /// assertion is not "the names differ" but **"the file count equals the
     /// concept count"** — the property whose failure was invisible.
+    /// Two members' identically-named concepts do not collide.
+    ///
+    /// Every repository has a `README.md`, so `file:README.md` is the same key in
+    /// each — the case the vault this replaces had to qualify keys and hash
+    /// filenames to survive, because it wrote one flat directory. Nesting by
+    /// member carries it structurally instead, and the assertion is again the one
+    /// whose failure was invisible: **both concepts are written**.
+    #[test]
+    fn two_members_sharing_a_key_both_survive() {
+        let a = explanation("file:README.md", "file", "README.md");
+        let b = explanation("file:README.md", "file", "README.md");
+        let mut ca = concept(&a, "file");
+        ca.member = Some("app".to_owned());
+        let mut cb = concept(&b, "file");
+        cb.member = Some("lib".to_owned());
+
+        let files = assemble(vec![ca, cb], "Workspace", &[]);
+        let concepts: Vec<&BundleFile> = files
+            .iter()
+            .filter(|f| !f.path.ends_with(INDEX_FILE) && !f.path.ends_with(LOG_FILE))
+            .collect();
+        assert_eq!(concepts.len(), 2, "both members' README must be written");
+        assert!(
+            concepts.iter().any(|f| f.path.starts_with("/app/")),
+            "one under its member: {:?}",
+            concepts.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        assert!(concepts.iter().any(|f| f.path.starts_with("/lib/")));
+    }
+
     /// A key longer than the filesystem allows is truncated, and truncation does
     /// not merge two concepts into one.
     ///
