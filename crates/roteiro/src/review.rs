@@ -57,8 +57,17 @@ pub struct FileReview {
     /// The change itself, as a unified diff (issue #649).
     ///
     /// `None` when no diff was requested or git would not produce one; `Some("")`
-    /// when there is genuinely no text to show, such as a mode-only change. The
-    /// two are not the same fact and are not rendered the same way.
+    /// when git ran and emitted nothing for this path. The two are not the same
+    /// fact and are not rendered the same way.
+    ///
+    /// Mode changes, renames and binary files are **not** the empty case, though
+    /// they read like it should be: `git diff -U3` emits headers for all three
+    /// (`old mode`/`new mode`, `similarity index`/`rename from`, `Binary files …
+    /// differ`), so they arrive as ordinary non-empty diffs. Measured rather than
+    /// assumed — 57, 79 and 97 bytes respectively on a one-file fixture.
+    ///
+    /// What is left for `Some("")` is a genuinely empty new file, or a path whose
+    /// content already matches the range's base.
     ///
     /// Additive within `roteiro.review/v1` — see `docs/JSON_SCHEMA.md`, which
     /// permits new fields within a major version. A consumer that has never

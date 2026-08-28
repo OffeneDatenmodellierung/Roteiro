@@ -181,6 +181,43 @@ mod tests {
         );
     }
 
+    /// A mode-only change is **not** the empty case, though it reads like it
+    /// should be.
+    ///
+    /// This assertion exists because the documentation got it wrong: `Some("")`
+    /// was described as meaning "a mode-only change, say", and `git diff -U3`
+    /// emits `old mode`/`new mode` headers for exactly that — 57 bytes on this
+    /// fixture, not zero. Renames and binary files are the same story
+    /// (`similarity index`/`rename from`, `Binary files … differ`). Raised by
+    /// Copilot on PR #656.
+    ///
+    /// Pinned as a test rather than corrected in prose alone, because the wrong
+    /// version was plausible enough to survive three separate write-ups of it.
+    #[test]
+    fn a_mode_only_change_still_produces_a_diff() {
+        let dir = repo("mode");
+        let mode_changed = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["update-index", "--chmod=+x", "kept.rs"])
+            .output()
+            .expect("git")
+            .status
+            .success();
+        if !mode_changed {
+            // Filesystems without an executable bit cannot stage this change, and
+            // a skip is honest where a pass would not be.
+            return;
+        }
+        let d = unified(&dir, &["--cached"], "kept.rs").expect("diff");
+        assert!(
+            !d.is_empty(),
+            "a mode-only change emits headers, so it is an ordinary non-empty \
+             diff — not the `Some(\"\")` case"
+        );
+        assert!(d.contains("mode"), "and those headers name the mode: {d}");
+    }
+
     #[test]
     fn an_untracked_diff_of_a_missing_path_fails_rather_than_reads_empty() {
         let dir = repo("missing");

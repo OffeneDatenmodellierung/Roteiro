@@ -4395,16 +4395,21 @@ fn run_review(
 ///
 /// The three states are kept distinct on purpose. No diff requested prints
 /// nothing at all. A diff that exists prints its hunks. A diff that is *empty*
-/// says so in words — a mode change, a rename, a permission bit — because
-/// silence there would read as "this file has no diff to show", which is the
-/// same failure the LLM arm's `announce_unreviewable` exists to prevent: a file
-/// nothing was said about must not look like a file with nothing to say.
+/// says so in words, because silence there would read as "this file has no diff
+/// to show", which is the same failure the LLM arm's `announce_unreviewable`
+/// exists to prevent: a file nothing was said about must not look like a file
+/// with nothing to say.
+///
+/// The message deliberately does **not** guess why it is empty. It first named
+/// mode changes, renames and binary content, and all three are wrong: `git diff
+/// -U3` emits headers for each, so they arrive here as ordinary non-empty diffs.
+/// Naming a cause the reader can check and find false is worse than naming none.
 fn print_file_diff(diff: Option<&str>) {
     let Some(text) = diff else {
         return;
     };
     if text.is_empty() {
-        println!("  diff: no textual change (mode, rename, or binary content)");
+        println!("  diff: git produced no text for this path");
         return;
     }
     for line in text.lines() {
