@@ -11415,6 +11415,11 @@ fn resolve_mcp_surface(_cfg: &config::Loaded, flag: &[String]) -> anyhow::Result
 /// from, so the two surfaces cannot answer it differently. Without `mcp` there is
 /// no restriction to apply — `resolve_mcp_surface` refuses a `--tools` in that
 /// build — so it is a constant `true` rather than a second policy.
+///
+/// **Ask it at startup, never on the request path.** `Advertised::All::allows`
+/// answers by building an rmcp router and listing it, so a loop over this costs a
+/// router per tool. [`GraphToolRegistry::restricted`] is the one caller for that
+/// reason: it asks once per tool when the server starts and keeps the answer.
 #[cfg(all(feature = "serve", feature = "mcp"))]
 fn surface_advertises(surface: &McpSurface, name: &str) -> bool {
     surface.allows(name)
