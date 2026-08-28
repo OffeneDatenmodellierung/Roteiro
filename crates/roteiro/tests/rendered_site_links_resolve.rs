@@ -51,18 +51,10 @@ fn is_html(rel: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("html"))
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf()
-}
-
 /// Render the site into a scratch directory, or `None` outside a checkout —
 /// a packaged crate carries no `docs/`, and that is a skip rather than a failure.
 fn render() -> Option<PathBuf> {
-    let root = repo_root();
+    let root = common::repo_root();
     if !root.join("docs").is_dir() || !root.join("website/pages").is_dir() {
         return None;
     }
@@ -128,25 +120,52 @@ fn emitted(root: &Path) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>
     (files, ids)
 }
 
+/// One hex digit, or `None` if that byte is not one.
+fn hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Percent-decode, since an emitted `href` may escape characters a filename or
 /// an `id` carries literally.
+///
+/// Decoding runs over **bytes** and converts once at the end. The obvious
+/// spelling — `out.push(v as char)` into a `String` — is wrong for anything
+/// outside ASCII: `as char` reinterprets a byte as a code point, so the three
+/// bytes of `%E2%80%94` become `â`, `\u{80}`, `\u{94}` instead of the em dash
+/// they encode. A percent-encoded non-ASCII anchor would then fail to match the
+/// `id` the renderer emitted, and this gate would report a broken link that a
+/// browser resolves perfectly well. A **false** failure is the worse kind here:
+/// it trains people to distrust the gate.
+///
+/// Hex digits are read byte-wise rather than by slicing `&s[i + 1..i + 3]`,
+/// which panics when those bytes are not a char boundary — a literal multi-byte
+/// character immediately after a `%` was enough to bring the whole test down.
+///
+/// Raised by Copilot on PR #653.
 fn decode(s: &str) -> String {
     let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
         {
-            out.push(v as char);
+            out.push(h * 16 + l);
             i += 3;
             continue;
         }
-        out.push(b[i] as char);
+        out.push(b[i]);
         i += 1;
     }
-    out
+    // Lossy rather than strict: a malformed escape in an authored href is a
+    // broken link to report, not a reason for the gate to panic.
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[test]
@@ -241,4 +260,27 @@ fn normalise(p: &Path) -> String {
         }
     }
     parts.join("/")
+}
+
+/// Percent-decoding round-trips non-ASCII (#653).
+///
+/// The bug this pins was invisible on ASCII, which is every link in the site
+/// today — so the gate would have kept passing while being wrong, until the
+/// first heading with an em dash or an accent produced a percent-encoded anchor
+/// and the gate reported it broken. A false failure from a gate is worse than
+/// no gate: it is the one that gets switched off.
+#[test]
+fn decoding_handles_non_ascii_and_malformed_escapes() {
+    // The em dash, which this repository's headings use heavily.
+    assert_eq!(decode("a%E2%80%94b"), "a—b");
+    // Literal non-ASCII passes through unchanged.
+    assert_eq!(decode("café"), "café");
+    // A `%` immediately before a multi-byte character: the old byte-slicing
+    // version panicked here rather than returning anything.
+    assert_eq!(decode("%é"), "%é");
+    // Ordinary ASCII escapes still work.
+    assert_eq!(decode("a%20b"), "a b");
+    // A malformed escape is left alone rather than crashing the gate.
+    assert_eq!(decode("100%"), "100%");
+    assert_eq!(decode("%zz"), "%zz");
 }
