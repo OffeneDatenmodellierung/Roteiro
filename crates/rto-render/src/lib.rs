@@ -4,6 +4,8 @@
 
 mod docs;
 mod obsidian;
+/// The OKF bundle renderer (#663) — the open-format successor to the vault.
+pub mod okf;
 /// The one place a tool's class is written, and the report that stands in for a
 /// class an operator did not load (#664).
 pub mod tool_class;
