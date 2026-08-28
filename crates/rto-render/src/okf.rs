@@ -227,6 +227,15 @@ pub fn section_for(kind: &str) -> &'static str {
     }
 }
 
+/// The longest slug a filename may carry, before any disambiguating suffix.
+///
+/// `NAME_MAX` is 255 bytes on Linux and macOS. Real keys reach it: rendering this
+/// repository failed with `File name too long (os error 63)` on a symbol key,
+/// **after** writing part of the bundle — a unit test over short fixtures could
+/// not have found it, and did not. The headroom below covers the `-` plus an
+/// eight-character digest plus `.md`.
+const MAX_SLUG: usize = 200;
+
 /// Slug a node key into a filename that is safe on every filesystem and stable
 /// across renders.
 ///
@@ -249,10 +258,17 @@ pub fn slug(key: &str) -> String {
     }
     let trimmed = out.trim_end_matches('-').to_owned();
     if trimmed.is_empty() {
-        "concept".to_owned()
-    } else {
-        trimmed
+        return "concept".to_owned();
     }
+    if trimmed.len() <= MAX_SLUG {
+        return trimmed;
+    }
+    // Truncation can *create* a collision that the full keys did not have — two
+    // long keys sharing a prefix become one name — so a shortened slug always
+    // carries a digest of the whole key. Cutting on a char boundary is free here
+    // because every retained character is ASCII.
+    let keep = MAX_SLUG - 9;
+    format!("{}-{}", &trimmed[..keep], short_digest(key))
 }
 
 /// The bundle-relative path a node is written to, always beginning with `/` so
@@ -659,6 +675,37 @@ mod tests {
     /// second silently overwrote the first. The count printed did not know. So the
     /// assertion is not "the names differ" but **"the file count equals the
     /// concept count"** — the property whose failure was invisible.
+    /// A key longer than the filesystem allows is truncated, and truncation does
+    /// not merge two concepts into one.
+    ///
+    /// Found by *running* the renderer over this repository, not by a unit test:
+    /// it failed with `File name too long (os error 63)` after writing part of
+    /// the bundle. Short fixtures cannot reach this, which is why the earlier
+    /// tests were all green while the real render was broken.
+    #[test]
+    fn an_overlong_key_is_truncated_without_colliding() {
+        let long = "sym:rust:".to_owned() + &"a".repeat(400);
+        // Same 400-character prefix, different tails: truncation alone would
+        // merge them.
+        let a = format!("{long}#one");
+        let b = format!("{long}#two");
+
+        assert!(
+            slug(&a).len() <= MAX_SLUG,
+            "slug must fit: {}",
+            slug(&a).len()
+        );
+        assert!(slug(&b).len() <= MAX_SLUG);
+        assert_ne!(
+            slug(&a),
+            slug(&b),
+            "two keys sharing a truncated prefix must not slug to one name"
+        );
+        // And the cap leaves room for `.md` plus a disambiguating suffix inside
+        // NAME_MAX (255).
+        assert!(slug(&a).len() + ".md".len() + 9 <= 255);
+    }
+
     #[test]
     fn colliding_slugs_do_not_lose_a_concept() {
         // Different keys, identical slug. (Case is not a separate hazard here:

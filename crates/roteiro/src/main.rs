@@ -13817,11 +13817,21 @@ fn run_render(
              (it renders a workspace as one vault); the docs site is per-repository"
         ),
         Some(rto_render::Target::DocsSite) => render_docs(out),
-        Some(rto_render::Target::ObsidianVault) => match workspace_name {
+        Some(rto_render::Target::OkfBundle) => match workspace_name {
             Some(name) => render_obsidian_workspace(cfg, name, out),
-            None => render_obsidian(ingest, out, debt_ignore),
+            None => render_okf(ingest, out, debt_ignore),
         },
-        None => anyhow::bail!("unknown render target `{target}` (expected: docs | obsidian)"),
+        // Names the removed target explicitly rather than listing the survivors
+        // and leaving the reader to infer. A script still passing `obsidian`
+        // should learn what happened to it, not merely that it is not valid.
+        None if target == "obsidian" => anyhow::bail!(
+            "`render obsidian` was removed in 4.0.0 — use `render okf`, which emits \
+             an Open Knowledge Format bundle. It is markdown with YAML frontmatter \
+             in nested directories, so Obsidian still opens the output folder as a \
+             vault; what changed is that it now targets an open specification \
+             rather than one application's conventions."
+        ),
+        None => anyhow::bail!("unknown render target `{target}` (expected: docs | okf)"),
     }
 }
 
@@ -14144,6 +14154,109 @@ fn adr_blob_oid<'a>(
 /// by name now points at nothing — the name is derived from the key, and the old
 /// one is not recoverable from the new. See [`rto_render::note_name`] for why the
 /// break was taken now rather than deferred.
+/// Render the graph as an **OKF v0.2 bundle** (issue #663).
+///
+/// Replaces the Obsidian vault. The two differ in more than format: the vault
+/// wrote one flat directory of hash-suffixed filenames because Obsidian folds
+/// names that differ only in case, and it lost 104 notes of 8,144 before the
+/// hash existed. A bundle nests concepts by kind, so that pressure mostly
+/// disappears and what remains is settled in
+/// [`rto_render::okf::assemble`] where the whole set is visible.
+///
+/// The provenance mapping is the part worth having. OKF derives trust tiers
+/// (§5.3) from `verified`, and Roteiro already knows which nodes were written by
+/// a person: authored prose is confirmed by the commit's author (`human:<id>`,
+/// the prefix §7 makes load-bearing), deterministic extraction is confirmed by
+/// the tool, and heuristic inference claims nothing. Most producers will emit
+/// `type` and stop.
+fn render_okf(
+    ingest: rto_graph::IngestConfig,
+    out: Option<String>,
+    debt_ignore: &[String],
+) -> anyhow::Result<()> {
+    use rto_render::okf;
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    let out = out.map_or_else(|| std::path::PathBuf::from("okf"), std::path::PathBuf::from);
+    reset_vault_dir(&out)?;
+
+    let commit = repo.head_commit_id().ok();
+    let remote = repo.origin_url();
+    let source_base = member_source_base(remote.as_deref(), commit.as_deref());
+    let tool = okf::Actor::Tool("roteiro".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
+    // One timestamp for the whole bundle: every concept in it was produced by
+    // this render, and stamping each with its own wall-clock reading would make
+    // two renders of an unchanged graph differ for no reason a reader cares about.
+    let at = rto_exec::rfc3339_utc(std::time::SystemTime::now());
+    // The commit's author confirms the authored layer. Absent (a shallow clone, a
+    // detached build) yields no confirmation rather than the tool's — see
+    // `okf::origin_for`, where falling back would move a concept between tiers.
+    let human = repo.head_author_name().map(okf::Actor::Human);
+
+    let nodes = store.all_nodes()?;
+    let mut explanations = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        if let Some(ex) = rto_graph::explain(&store, &node.key)? {
+            explanations.push((node, ex));
+        }
+    }
+
+    let concepts: Vec<okf::Concept<'_>> = explanations
+        .iter()
+        .map(|(node, ex)| {
+            let mut tags = vec![format!("roteiro/kind/{}", ex.node.kind)];
+            if let Some(lang) = &ex.node.lang {
+                tags.push(format!("roteiro/lang/{lang}"));
+            }
+            okf::Concept {
+                explanation: ex,
+                frontmatter: okf::Frontmatter {
+                    type_: ex.node.kind.clone(),
+                    title: Some(ex.node.name.clone()),
+                    description: None,
+                    resource: ex
+                        .node
+                        .path
+                        .as_deref()
+                        // `source_blob_base` ends at the commit id with no trailing
+                        // slash, so the separator belongs here. Without it the URL
+                        // reads `.../blob/<sha>docs/adr/0001.md` and 404s.
+                        .and_then(|p| source_base.as_deref().map(|b| format!("{b}/{p}"))),
+                    tags,
+                    status: None,
+                    origin: Some(okf::origin_for(node.provenance, &at, &tool, human.as_ref())),
+                    sources: ex.node.path.iter().map(|p| format!("/{p}")).collect(),
+                },
+                body: None,
+            }
+        })
+        .collect();
+
+    let count = concepts.len();
+    let files = okf::assemble(concepts, "Roteiro", &[]);
+    let written = files.len();
+    for file in &files {
+        // Paths are bundle-relative and begin with `/`; join after stripping it,
+        // or the leading slash makes this an absolute path and the bundle lands
+        // at the filesystem root.
+        let rel = file.path.trim_start_matches('/');
+        let dest = out.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, &file.content)?;
+    }
+
+    let _ = debt_ignore;
+    println!(
+        "rendered okf bundle (v{}) → {} ({count} concept(s), {written} file(s))",
+        okf::OKF_VERSION,
+        out.display()
+    );
+    Ok(())
+}
+
 fn render_obsidian(
     ingest: rto_graph::IngestConfig,
     out: Option<String>,

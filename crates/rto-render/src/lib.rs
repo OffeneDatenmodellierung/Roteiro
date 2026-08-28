@@ -1,4 +1,4 @@
-//! Renderers over the Roteiro graph. All outputs — docs site, Obsidian vault,
+//! Renderers over the Roteiro graph. All outputs — docs site, OKF bundle,
 //! and the optional MCP server (feature `mcp`) — are build products of the
 //! same store, so humans and agents always see the same data.
 
@@ -31,8 +31,15 @@ pub use obsidian::{
 pub enum Target {
     /// Static documentation website (ADRs, blueprints, AI context pages).
     DocsSite,
-    /// Obsidian-compatible markdown vault.
-    ObsidianVault,
+    /// An Open Knowledge Format bundle (OKF v0.2).
+    ///
+    /// Replaced `ObsidianVault` in 4.0.0. The vault was one-way — Roteiro wrote
+    /// it, nothing read it back, and only Obsidian could consume it. An OKF
+    /// bundle is markdown with YAML frontmatter in nested directories, so
+    /// Obsidian still opens it as a vault; what changed is that the output now
+    /// targets a specification with other consumers rather than one
+    /// application's conventions.
+    OkfBundle,
 }
 
 impl Target {
@@ -41,7 +48,7 @@ impl Target {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::DocsSite => "docs",
-            Self::ObsidianVault => "obsidian",
+            Self::OkfBundle => "okf",
         }
     }
 
@@ -50,7 +57,7 @@ impl Target {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "docs" => Some(Self::DocsSite),
-            "obsidian" => Some(Self::ObsidianVault),
+            "okf" => Some(Self::OkfBundle),
             _ => None,
         }
     }
@@ -63,9 +70,12 @@ mod tests {
     #[test]
     fn target_names_are_stable() {
         assert_eq!(Target::DocsSite.as_str(), "docs");
-        assert_eq!(Target::ObsidianVault.as_str(), "obsidian");
+        assert_eq!(Target::OkfBundle.as_str(), "okf");
         assert_eq!(Target::parse("docs"), Some(Target::DocsSite));
-        assert_eq!(Target::parse("obsidian"), Some(Target::ObsidianVault));
+        assert_eq!(Target::parse("okf"), Some(Target::OkfBundle));
+        // The removed target must not silently resolve to something else: a
+        // script still passing `obsidian` should be told, not quietly redirected.
+        assert_eq!(Target::parse("obsidian"), None);
         assert_eq!(Target::parse("nope"), None);
     }
 }

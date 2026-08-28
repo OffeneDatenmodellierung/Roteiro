@@ -170,6 +170,26 @@ impl Repo {
         Ok(commit.time().map_err(ge)?.seconds)
     }
 
+    /// The author name on the `HEAD` commit, if it can be read.
+    ///
+    /// Used to attribute the **authored** layer to a person, which is what puts a
+    /// concept in OKF's human-reviewed trust tier (§5.3) rather than the
+    /// machine-confirmed one. The `human:` prefix is applied by the renderer, not
+    /// here — this returns the bare identity.
+    ///
+    /// `None` rather than an error on a repository with no readable `HEAD`
+    /// (a fresh init, a shallow or detached build). The caller must treat that as
+    /// *no confirmation*, never as the tool's: substituting a machine actor would
+    /// move every authored concept down a trust tier silently, which is worse
+    /// than claiming nothing.
+    #[must_use]
+    pub fn head_author_name(&self) -> Option<String> {
+        let commit = self.inner.head_commit().ok()?;
+        let author = commit.author().ok()?;
+        let name = author.name.to_string();
+        (!name.trim().is_empty()).then_some(name)
+    }
+
     /// The `origin` remote's fetch URL, if one is configured — e.g. to derive a
     /// web "blob" base for source links. `None` when there is no `origin` remote.
     #[must_use]
