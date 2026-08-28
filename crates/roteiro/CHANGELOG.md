@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.2.1...roteiro-v3.2.2) - 2026-08-28
+
+### Fixed
+
+- *(ci)* read the newest check run, and stop the guards skipping in silence
+- *(ci)* let the publish gate read the checks it waits for
+
+### Other
+
+- run the formatter over the new guard test
+- *(release)* publishing waits for CI on the commit it publishes
+
 ## [3.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.2.0...roteiro-v3.2.1) - 2026-08-27
 
 ### Fixed
