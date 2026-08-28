@@ -650,3 +650,82 @@ fn review_shows_what_a_deletion_removed() {
         "and the removed code is shown: {text}"
     );
 }
+
+/// A file git calls untracked while `HEAD` still has it is not an addition.
+///
+/// `untracked_files` classifies against the **index**, so the two can be true at
+/// once: `git rm --cached f` drops `f` from the index and leaves it on disk, and
+/// git then reports it untracked while `HEAD` still carries it. Taking that set
+/// wholesale labels a tracked file `[added]`.
+///
+/// The second-order effect is worse than the label. If the same file is also
+/// edited, it arrives twice — `Modified` from `changed_files`, `Added` from the
+/// untracked walk — and the `dedup_by(path)` that follows keeps whichever the
+/// sort happened to place first, which is not a decision anyone made.
+///
+/// Raised by Copilot on PR #656.
+#[test]
+fn a_file_still_in_head_is_never_reported_as_added() {
+    let dir = fresh_dir("rm-cached");
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() {}\n",
+    );
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // Out of the index, still on disk, still in HEAD, and **unedited** — git now
+    // calls it untracked, and it is not.
+    //
+    // Unedited is what makes this discriminating. With an edit as well,
+    // `changed_files` also emits the path, lands first, and the `dedup_by` keeps
+    // the correct `modified` entry by luck of insertion order — so the buggy and
+    // fixed versions agree and the test proves nothing. That version of this test
+    // passed under fault injection, which is how the vacuity was found. Here the
+    // content is identical to HEAD, so `changed_files` says nothing and the
+    // untracked walk is the only voice: filtered, the file is absent from the
+    // review entirely; unfiltered, it is reported as an addition of a file that
+    // did not change.
+    git(&dir, &["rm", "--cached", "-q", "src/main.rs"]);
+
+    let unedited = roteiro(&dir, &["review", "--json"]);
+    let text = String::from_utf8_lossy(&unedited.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    assert!(
+        doc["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .all(|f| f["path"] != "src/main.rs"),
+        "an unchanged file HEAD still has must not be reported at all: {text}"
+    );
+
+    // Now edit it too: the path must arrive exactly once, and as a modification.
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() { helper(); }\nfn helper() {}\n",
+    );
+
+    let out = roteiro(&dir, &["review", "--json"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    let files = doc["files"].as_array().expect("files");
+
+    let entries: Vec<&serde_json::Value> = files
+        .iter()
+        .filter(|f| f["path"] == "src/main.rs")
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the path must appear exactly once, not once per source: {text}"
+    );
+    assert_eq!(
+        entries[0]["status"], "modified",
+        "a file HEAD still has is modified, never added: {text}"
+    );
+}

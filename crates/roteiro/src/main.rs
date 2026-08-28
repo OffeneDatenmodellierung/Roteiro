@@ -4323,8 +4323,19 @@ fn run_review(
         let mut changed = repo.changed_files()?;
         let head_paths: std::collections::BTreeSet<String> =
             repo.walk_blobs()?.into_iter().map(|b| b.path).collect();
-        let mut new_paths: std::collections::BTreeSet<String> =
-            repo.untracked_files()?.into_iter().collect();
+        // **Both** sources are filtered against HEAD, not just the index one.
+        // `untracked_files` is defined against the index, so a path can be in
+        // HEAD *and* reported untracked at the same time: `git rm --cached f`
+        // drops `f` from the index and leaves it on disk, and git then calls it
+        // untracked while `HEAD` still has it. Taking that set wholesale labels a
+        // tracked file `Added`, and if the same file is also edited it arrives
+        // twice — once `Modified` from `changed_files` — where the `dedup_by`
+        // below keeps whichever the sort happened to place first.
+        let mut new_paths: std::collections::BTreeSet<String> = repo
+            .untracked_files()?
+            .into_iter()
+            .filter(|p| !head_paths.contains(p))
+            .collect();
         for entry in repo.index_files()? {
             if !head_paths.contains(&entry.path) {
                 new_paths.insert(entry.path);
@@ -4335,10 +4346,10 @@ fn run_review(
             status: rto_graph::ChangeStatus::Added,
         }));
         changed.sort_by(|a, b| a.path.cmp(&b.path));
-        // The two sets are normally disjoint (tracked vs untracked), but some
-        // intermediate git states can overlap — dedupe by path so the review
-        // never lists a file twice. A tracked entry sorts before its untracked
-        // duplicate only by chance, so prefer keeping the first of each path.
+        // With both sources filtered against HEAD the two sets are disjoint by
+        // construction, so this dedupe now guards intermediate git states rather
+        // than the mislabelling above — kept because "cannot happen" is what the
+        // previous comment here said.
         changed.dedup_by(|a, b| a.path == b.path);
         changed
     };
@@ -4346,13 +4357,20 @@ fn run_review(
     // `check` and the graph API: `review`'s per-file `debt` is that same
     // inventory scoped to the change, so it must be scoped by the same list
     // (issue #409).
-    // The diff needs the repository's working directory, which a bare repo has
-    // none of — there is nothing to diff a working tree against there, so the
-    // report simply carries no diff rather than failing.
-    let diff_source = (!no_diff)
-        .then(|| repo.workdir())
-        .flatten()
-        .map(|repo| review::DiffSource { repo, base });
+    // Where to run git. A working tree when there is one; otherwise the git dir,
+    // because a **range** diff is a tree-to-tree comparison and needs no working
+    // tree at all — `git diff <base> HEAD` answers perfectly well in a bare repo.
+    // Gating the whole feature on `workdir()` withheld diffs from the one review
+    // a bare repo can actually do.
+    //
+    // A *working-tree* review in a bare repo still yields nothing, but that is
+    // decided where it should be: `changed_files` returns empty without a
+    // workdir, so there is nothing to ask for a diff of.
+    let diff_root = repo.workdir().unwrap_or_else(|| repo.git_dir());
+    let diff_source = (!no_diff).then_some(review::DiffSource {
+        repo: diff_root,
+        base,
+    });
     let review = review::build(
         &store,
         &changed,
