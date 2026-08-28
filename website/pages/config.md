@@ -54,7 +54,7 @@ tls_cert = "/etc/roteiro/tls/fullchain.pem"  <span class="c"># in-process HTTPS 
 tls_key  = "/etc/roteiro/tls/privkey.pem"    <span class="c"># PEM private key paired with tls_cert</span>
 
 [mcp]                                    <span class="c"># the MCP graph server (roteiro mcp, serve --mcp)</span>
-tools = ["search", "explain", "context"] <span class="c"># restrict the advertised surface; "read-only" drops the one mutating tool</span>
+tools = ["query", "quality"]             <span class="c"># restrict the advertised surface — a class, a tool name, or "read-only"</span>
 
 [workspace]                              <span class="c"># host many repos from one server (ADR-0008)</span>
 roots = ["~/code"]                       <span class="c"># scanned ONE LEVEL deep — each immediate child that is a repo</span>
@@ -84,6 +84,14 @@ a project <code>roteiro.toml</code> and your <code>~/.roteiro/config.toml</code>
 surface and none may widen it — a committed project file cannot restore a tool you removed. An
 unknown name, or a restriction leaving nothing to serve, refuses to start rather than quietly
 advertising everything. See <a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0007-configuration-file.md">ADR-0007</a> v1.5.</div>
+
+<div class="note"><strong>Name a class, not ten tools.</strong> <code>query</code>,
+<code>quality</code>, <code>security</code> and <code>sandbox</code> are accepted wherever a tool
+name is, and a hand-written list of names is exactly what goes stale when a tool is added. Every
+advertised tool costs tokens on every turn whether the session could reach it or not, and
+<code>security</code> + <code>sandbox</code> are roughly two fifths of it. The default is still
+every class. Whatever you leave out, <code>list_tool_classes</code> stays advertised and says so
+— see <a href="modes.html#mcp">MCP mode</a>.</div>
 
 <div class="note"><strong><code>roots</code> is scanned one level deep.</strong> Each
 <em>immediate</em> child of a root that holds a <code>.git</code> becomes a project, plus the root

@@ -138,7 +138,8 @@ roteiro mcp
 <span class="c"># Or networked over streamable HTTP (terminate TLS at a reverse proxy)</span>
 roteiro mcp --http 127.0.0.1:8080
 
-<span class="c"># Restrict what this server exposes — to a list, or to everything read-only</span>
+<span class="c"># Restrict what this server exposes — by class, by name, or to everything read-only</span>
+roteiro mcp --tools query,quality        <span class="c"># drops the security + sandbox prose: about two fifths of the surface</span>
 roteiro mcp --tools search,explain,context,path
 roteiro mcp --tools read-only            <span class="c"># drops sandbox_clear, the one mutating tool</span></code></pre>
 
@@ -147,8 +148,30 @@ roteiro mcp --tools read-only            <span class="c"># drops sandbox_clear, 
 <code>tools/call</code> — a tool that is not advertised is not callable either, because a client
 that already knows the name is exactly the case a restriction is for. An unknown name, or a
 restriction leaving nothing to serve, is a startup error rather than a server that quietly
-advertises everything. It is a size lever as well as a permission one: on this repository the full
-surface is 20,045 advertised bytes and a graph-only ten-tool list is 9,056.</div>
+advertises everything. It bounds the <em>served-chat</em> tools on the same terms, so one server
+never tells its MCP client and its chat client different things about itself.</div>
+
+<div class="note"><strong>Four classes, and a class you did not load stays
+discoverable.</strong> <code>query</code> (<code>search</code>, <code>explain</code>,
+<code>context</code>, <code>path</code>, <code>list_kind</code>, <code>list_projects</code>),
+<code>quality</code> (<code>check</code>, <code>debt</code>, <code>debt_density</code>,
+<code>coupling</code>, <code>config_secrets</code>), <code>security</code> and
+<code>sandbox</code>. Every advertised tool costs tokens on every turn whether or not the session
+could ever reach it, and <code>security</code> + <code>sandbox</code> are roughly two fifths of
+the advertised bytes — a code-navigation session pays that every turn to advertise tools it will
+never call. The default is still every class; narrowing is opt-in.
+<code>list_tool_classes</code> is advertised whatever you withhold, so a model asked about
+analyzer findings on a <code>query</code>-only server answers <em>"that class is not loaded in
+this session"</em> rather than <em>"Roteiro cannot do that"</em>.</div>
+
+<div class="note"><strong>Read the figures off your own server, not off this page.</strong>
+The exact byte counts move whenever a tool is added or a description is edited, so they are
+deliberately not pinned here — an earlier version of this page quoted a total that had already
+gone stale without anyone noticing, which is what a number nothing checks does. A restricted
+server prints the real figures for <em>your</em> build on startup:
+<pre><code>roteiro tools: advertising 7 of 16 tools — 4803 of 19155 advertised bytes — withheld: …</code></pre>
+That line is the authority, and it is printed whether or not <code>--mcp</code> is passed,
+because the selection bounds the served-chat tools too.</div>
 
 <div class="note"><strong>Renamed in v1.5.</strong> The MCP graph server moved from
 <code>roteiro serve</code> to <code>roteiro mcp</code>; bare <code>roteiro serve</code> is now

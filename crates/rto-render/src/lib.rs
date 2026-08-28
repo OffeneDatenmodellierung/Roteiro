@@ -4,6 +4,9 @@
 
 mod docs;
 mod obsidian;
+/// The one place a tool's class is written, and the report that stands in for a
+/// class an operator did not load (#664).
+pub mod tool_class;
 /// The one place each shared tool description is written (#590).
 pub mod tool_text;
 

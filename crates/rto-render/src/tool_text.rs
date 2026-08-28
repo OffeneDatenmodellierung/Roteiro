@@ -119,6 +119,19 @@ pub const SECURITY_STATUS: &str = "Report SECURITY READINESS in TWO SEPARATELY S
     `limit`. Read-only: it cannot provision, and `roteiro security prefetch` needs human \
     consent, so ask the user to run it.";
 
+/// `list_tool_classes` — the index that keeps a withheld class discoverable.
+///
+/// Deliberately the shortest description here. It stands in for whole classes of
+/// prose an operator chose not to advertise, and a long stand-in would spend the
+/// saving it exists to protect: at ~90 tokens it replaces the `security` class's
+/// ~819 or the `sandbox` class's ~713.
+pub const LIST_TOOL_CLASSES: &str = "Name this server's tool CLASSES — `query`, `quality`, `security`, `sandbox` — the tools in \
+    each, and which are LOADED here. Call it before telling a user Roteiro cannot do \
+    something: a class can be left out at startup to keep its descriptions out of every \
+    turn's prompt, and `not-loaded-here` means not advertised to this session, NOT a missing \
+    capability. Report the class name so the user can restart the server with it. Takes no \
+    arguments. Read-only.";
+
 /// `check`.
 pub const CHECK: &str = "Run the AUTHORED-LAYER DRIFT CHECK — the same gate `roteiro check` exits non-zero on and \
     the pre-commit hook reads — and return its verdict as data: ADR `[[path#Symbol]]` links \
@@ -228,6 +241,7 @@ pub fn for_tool(name: &str) -> Option<String> {
         "debt_density" => DEBT_DENSITY,
         "explain" => EXPLAIN,
         "list_projects" => LIST_PROJECTS,
+        "list_tool_classes" => LIST_TOOL_CLASSES,
         "path" => PATH,
         "sandbox_clear" => SANDBOX_CLEAR,
         "sandbox_status" => SANDBOX_STATUS,
@@ -272,6 +286,7 @@ mod tests {
             "debt_density",
             "explain",
             "list_projects",
+            "list_tool_classes",
             "path",
             "sandbox_clear",
             "sandbox_status",
