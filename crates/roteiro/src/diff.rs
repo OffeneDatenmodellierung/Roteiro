@@ -43,7 +43,18 @@ const CONTEXT_LINES: &str = "-U3";
 /// rather than decoration of a terminal.
 const OWN_OUTPUT: [&str; 2] = ["--no-ext-diff", "--no-color"];
 
-/// Run `git` in `repo` and return trimmed stdout, or `None` if it failed.
+/// The trailing bytes a captured `git` stdout may end with and nobody wants.
+///
+/// **Only** `\r` and `\n` — not `trim_end()`, which strips *all* trailing
+/// whitespace and so silently truncates a diff whose last line ends in
+/// meaningful spaces. That is not a cosmetic loss: a change that *adds* trailing
+/// whitespace renders as `-foo` / `+foo`, identical lines, in the one tool whose
+/// job is to show what changed. Raised as a suppressed comment by Copilot on
+/// PR #656.
+const LINE_ENDINGS: [char; 2] = ['\r', '\n'];
+
+/// Run `git` in `repo` and return its stdout with the trailing newline removed,
+/// or `None` if it failed.
 pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -51,9 +62,11 @@ pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
         .args(args)
         .output()
         .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches(LINE_ENDINGS)
+            .to_owned()
+    })
 }
 
 /// The unified diff for one tracked `path` over `range`.
@@ -137,7 +150,9 @@ pub fn unified_untracked(repo: &Path, path: &str) -> Option<String> {
         .args(["--no-index", "--", "/dev/null", path])
         .output()
         .ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout).trim_end().to_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout)
+        .trim_end_matches(LINE_ENDINGS)
+        .to_owned();
     match out.status.code() {
         // 0 = the inputs are identical, which for a `/dev/null` comparison means
         // a genuinely empty new file. Nothing to show, and that is the answer.
@@ -263,6 +278,34 @@ mod tests {
         assert!(
             vs_head.contains("+fn staged() {}") && vs_head.contains("+fn unstaged() {}"),
             "`HEAD` shows both, which is why a working-tree review uses it: {vs_head}"
+        );
+    }
+
+    /// Trailing whitespace on the last line of a diff survives.
+    ///
+    /// `trim_end()` strips all trailing whitespace, so a hunk ending in
+    /// meaningful spaces came back truncated. The consequence is specific and
+    /// bad: adding trailing whitespace to a file — a routine lint failure —
+    /// produced `-fn a() {}` / `+fn a() {}`, two identical-looking lines, in the
+    /// one tool whose job is to show what changed.
+    ///
+    /// Raised as a *suppressed* comment by Copilot on PR #656, which is worth
+    /// noting: the suppressed fold is not visible in the review-comments API and
+    /// had gone unread until it was pointed out.
+    #[test]
+    fn trailing_whitespace_on_the_last_diff_line_survives() {
+        let dir = repo("trailing");
+        // The edit *is* the trailing whitespace, so trimming it erases the change.
+        fs::write(dir.join("kept.rs"), "fn a() {}   \n").expect("write");
+
+        let d = unified(&dir, &[], "kept.rs").expect("diff");
+        assert!(
+            d.contains("+fn a() {}   "),
+            "the added line keeps its trailing spaces: {d:?}"
+        );
+        assert!(
+            !d.ends_with("+fn a() {}"),
+            "and the diff does not end on a truncated version of it: {d:?}"
         );
     }
 
