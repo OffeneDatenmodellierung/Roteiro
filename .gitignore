@@ -12,3 +12,6 @@ website/dist/
 # The Obsidian vault is a gitignored build-output (`roteiro render obsidian`),
 # regenerated locally / published as a CI artifact — never committed.
 /vault/
+
+# Agent worktrees and local Claude Code state — never part of the repository.
+.claude/

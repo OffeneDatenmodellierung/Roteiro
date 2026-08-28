@@ -346,3 +346,80 @@ fn check_reports_an_allow_that_carries_no_justification() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Staging a file does not change what `check` says about it (issue #657).
+///
+/// This asserts the **property**, not the code path, because the property is
+/// what failed and the code path is only where it failed *this* time. The same
+/// hole — a set defined against the index unioned with a set derived from HEAD —
+/// has now been wrong in three surfaces (#636 in `sync`, #649 in `review`, #657
+/// here), so an assertion pinned to `authored_blobs` would not have caught the
+/// previous two and will not catch the next one.
+///
+/// The failure it guards is the quiet kind. Before the fix:
+///
+/// ```console
+/// $ roteiro check          # untracked
+/// drift [broken-link]: … does not resolve
+/// $ git add docs/adr/0002-new.md
+/// $ roteiro check
+/// checked 1 ADR(s) … 0 violation(s)
+/// ```
+///
+/// Nothing about the tree changed. `git add` is what you do immediately before
+/// committing, so the gate fell silent at the moment it is most trusted.
+#[test]
+fn staging_a_file_does_not_change_what_check_says_about_it() {
+    let dir = fresh_dir("staged-drift");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    write(&dir, "docs/adr/0001-thing.md", ADR);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // A brand-new ADR linking at a symbol that does not exist: drift, and the
+    // file has never been committed, which is the whole point.
+    write(
+        &dir,
+        "docs/adr/0002-new.md",
+        "---\n\
+         adr-id: \"0002\"\n\
+         status: Accepted\n\
+         ---\n\
+         \n\
+         # ADR-0002: New\n\
+         \n\
+         ## Decision\n\
+         \n\
+         This one names [[src/lib.rs#Absent]].\n",
+    );
+
+    let untracked = roteiro(&dir, &["check"]);
+    let untracked_out = String::from_utf8_lossy(&untracked.stdout).to_string();
+    assert!(
+        !untracked.status.success(),
+        "an untracked ADR with a dangling link is drift: {untracked_out}"
+    );
+
+    git(&dir, &["add", "docs/adr/0002-new.md"]);
+
+    let staged = roteiro(&dir, &["check"]);
+    let staged_out = String::from_utf8_lossy(&staged.stdout).to_string();
+    assert!(
+        !staged.status.success(),
+        "staging must not clear the drift — the tree is unchanged, only the index \
+         moved, and `git add` is the last thing you do before committing: {staged_out}"
+    );
+    assert_eq!(
+        untracked.status.code(),
+        staged.status.code(),
+        "the same tree must gate the same way staged or not"
+    );
+    assert_eq!(
+        untracked_out, staged_out,
+        "and must say the same thing about it"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

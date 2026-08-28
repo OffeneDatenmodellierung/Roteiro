@@ -137,9 +137,17 @@ pub fn unified(repo: &Path, range: &[&str], path: &str) -> Option<String> {
 ///
 /// So a rule that accepts every `1` reports a missing file as an empty diff —
 /// the failure this whole module keeps trying not to make, where "we could not
-/// look" is rendered as "there is nothing to see". What separates them is
-/// **stderr**, which is silent on a real diff and carries the reason on a
-/// failure.
+/// look" is rendered as "there is nothing to see".
+///
+/// But **stderr alone does not separate them either**, which is the trap the
+/// first fix fell into. git writes warnings there while producing a perfectly
+/// good diff: with `core.safecrlf=warn`, a mixed-endings file yields exit 1, a
+/// 129-byte diff on stdout and a 98-byte warning on stderr. Keying on stderr
+/// discarded that diff — the same confusion, now losing real content rather than
+/// inventing empty content.
+///
+/// What separates them is **stdout**: a diff is a diff whatever git remarked on,
+/// and only an empty stdout beside a non-empty stderr is a failure.
 #[must_use]
 pub fn unified_untracked(repo: &Path, path: &str) -> Option<String> {
     let out = Command::new("git")
@@ -153,18 +161,33 @@ pub fn unified_untracked(repo: &Path, path: &str) -> Option<String> {
     let stdout = String::from_utf8_lossy(&out.stdout)
         .trim_end_matches(LINE_ENDINGS)
         .to_owned();
-    match out.status.code() {
-        // 0 = the inputs are identical, which for a `/dev/null` comparison means
-        // a genuinely empty new file. Nothing to show, and that is the answer.
-        Some(0) => Some(stdout),
-        // 1 = differs *or* failed; only a quiet stderr says which.
-        Some(1) if out.stderr.is_empty() => Some(stdout),
-        _ => None,
-    }
+    let code = out.status.code();
+    // `0` means the inputs are identical — for a `/dev/null` comparison, a
+    // genuinely empty new file. `1` means they differ, which is every ordinary
+    // call here, *or* that the call failed; anything else is a failure outright.
+    //
+    // Among the `1`s, the separator is **stdout**, not stderr: git writes
+    // warnings while producing perfectly good hunks, so only an empty stdout
+    // *beside* a non-empty stderr is an actual failure. Written as one condition
+    // rather than a match, because the arms would differ only in their comments
+    // and return the same value — which clippy reads, correctly, as a sign the
+    // distinction is in the prose rather than in the code.
+    let failed = stdout.is_empty() && !out.stderr.is_empty();
+    let ok = code == Some(0) || (code == Some(1) && !failed);
+    ok.then_some(stdout)
 }
 
 #[cfg(test)]
 mod tests {
+    /// Whether git declined to warn, so the safecrlf fixture proves nothing here.
+    ///
+    /// Separated from the assertion so the skip is a *stated* outcome rather than
+    /// an assertion that happens to hold: the two are indistinguishable in a test
+    /// report, and only one of them is guarding anything.
+    fn out_is_quiet(out: &std::process::Output) -> bool {
+        out.stderr.is_empty()
+    }
+
     use super::*;
     use std::fs;
     use std::path::PathBuf;
@@ -306,6 +329,84 @@ mod tests {
         assert!(
             !d.ends_with("+fn a() {}"),
             "and the diff does not end on a truncated version of it: {d:?}"
+        );
+    }
+
+    /// A warning on stderr does not throw away the diff on stdout.
+    ///
+    /// The first fix for the exit-code ambiguity keyed on `stderr.is_empty()`,
+    /// which is wrong in the other direction: git writes warnings there while
+    /// producing a perfectly good diff, so a repository with `core.safecrlf=warn`
+    /// and a mixed-endings file silently lost the hunks entirely. One ambiguity
+    /// traded for another — and this one loses real content rather than
+    /// inventing empty content. Raised by Copilot on PR #656.
+    #[test]
+    fn a_warning_on_stderr_does_not_discard_the_diff() {
+        let dir = repo("safecrlf");
+        // Asserts the status: a `git config` that failed would leave the fixture
+        // unable to produce a warning, the test would take the skip below, and a
+        // *setup* failure would present as "this platform does not warn". That is
+        // the same silent-skip defect this test was written to close, one level
+        // up in the fixture.
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "fixture setup `git {args:?}` failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        run(&["config", "core.autocrlf", "true"]);
+        run(&["config", "core.safecrlf", "warn"]);
+        // Mixed endings: git has something to say, and a diff to give.
+        fs::write(dir.join("mixed.rs"), "fn a() {}\r\nfn b() {}\n").expect("write");
+
+        // **Establish that the fixture actually reproduces the situation**, by
+        // running the same command directly and looking at both streams.
+        // `unified_untracked` returns only `Option<String>`, so it cannot show
+        // whether stderr was non-empty — and a test that skipped this would pass
+        // on any platform or git version where `safecrlf` stays quiet, guarding
+        // nothing while looking green. Raised by Copilot on PR #662.
+        let raw = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args([
+                "diff",
+                CONTEXT_LINES,
+                "--no-index",
+                "--",
+                "/dev/null",
+                "mixed.rs",
+            ])
+            .output()
+            .expect("git");
+        if out_is_quiet(&raw) {
+            // Nothing to guard here on this platform. Skipping is honest;
+            // passing would not be.
+            return;
+        }
+        assert!(
+            !raw.stdout.is_empty() && !raw.stderr.is_empty(),
+            "the fixture must produce a diff *and* a warning, or this test cannot \
+             distinguish the fix from the bug"
+        );
+
+        let d = unified_untracked(&dir, "mixed.rs");
+        assert!(
+            d.is_some(),
+            "a warning must not turn a real diff into `None` — that is \"we \
+             could not look\" reported for a file we looked at successfully"
+        );
+        let d = d.expect("checked above");
+        assert!(
+            d.contains("+fn a() {}"),
+            "and the hunks must survive it: {d:?}"
         );
     }
 

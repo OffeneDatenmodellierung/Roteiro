@@ -385,13 +385,7 @@ pub fn sync_worktree(
         // They count as dirty (so the preview re-runs when they change) and add to
         // the blob total (they are genuinely new blobs, not edits of existing ones).
         let head_paths: BTreeSet<&str> = committed.blobs.iter().map(|b| b.path.as_str()).collect();
-        let mut new_paths: BTreeSet<String> = repo.untracked_files()?.into_iter().collect();
-        for entry in repo.index_files()? {
-            if !head_paths.contains(entry.path.as_str()) {
-                new_paths.insert(entry.path);
-            }
-        }
-        for path in new_paths {
+        for path in repo.added_since_head(&head_paths)? {
             match std::fs::read(workdir.join(&path)) {
                 Ok(bytes) => {
                     let woid = repo.blob_oid(&bytes)?;

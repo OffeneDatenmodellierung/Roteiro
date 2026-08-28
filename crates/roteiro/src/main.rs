@@ -4321,29 +4321,14 @@ fn run_review(
         // with a staged addition in it, which is the worst way to be wrong: it
         // is the sentence you would read as "you are done".
         let mut changed = repo.changed_files()?;
-        let head_paths: std::collections::BTreeSet<String> =
-            repo.walk_blobs()?.into_iter().map(|b| b.path).collect();
-        // **Both** sources are filtered against HEAD, not just the index one.
-        // `untracked_files` is defined against the index, so a path can be in
-        // HEAD *and* reported untracked at the same time: `git rm --cached f`
-        // drops `f` from the index and leaves it on disk, and git then calls it
-        // untracked while `HEAD` still has it. Taking that set wholesale labels a
-        // tracked file `Added`, and if the same file is also edited it arrives
-        // twice — once `Modified` from `changed_files` — where the `dedup_by`
-        // below keeps whichever the sort happened to place first.
-        let mut new_paths: std::collections::BTreeSet<String> = repo
-            .untracked_files()?
-            .into_iter()
-            .filter(|p| !head_paths.contains(p))
-            .collect();
-        for entry in repo.index_files()? {
-            if !head_paths.contains(&entry.path) {
-                new_paths.insert(entry.path);
+        let head = repo.walk_blobs()?;
+        let head_paths: std::collections::BTreeSet<&str> =
+            head.iter().map(|b| b.path.as_str()).collect();
+        changed.extend(repo.added_since_head(&head_paths)?.into_iter().map(|path| {
+            rto_graph::ChangedFile {
+                path,
+                status: rto_graph::ChangeStatus::Added,
             }
-        }
-        changed.extend(new_paths.into_iter().map(|path| rto_graph::ChangedFile {
-            path,
-            status: rto_graph::ChangeStatus::Added,
         }));
         changed.sort_by(|a, b| a.path.cmp(&b.path));
         // With both sources filtered against HEAD the two sets are disjoint by

@@ -480,10 +480,86 @@ impl Repo {
         Ok(out)
     }
 
-    /// Untracked, non-ignored regular files in the working tree — brand-new files
-    /// that are in neither `HEAD` nor the index, so [`Repo::walk_blobs`] and
-    /// [`Repo::changed_files`] (both HEAD-tree based) miss them. The working-tree
-    /// `sync`/`check`/`review` overlay these so a new-but-unstaged file is seen.
+    /// Every path the working tree has that `head_paths` does not — the files
+    /// a commit would **add**, whether or not they have been staged yet.
+    ///
+    /// # Why this exists rather than `untracked_files` alone
+    ///
+    /// The obvious spelling of "new files in the working tree" is
+    /// [`Repo::untracked_files`], and it is wrong in a way that reads as
+    /// correct. The two sets classify against **different trees**:
+    /// `untracked_files` is defined against the **index**, and a caller's
+    /// `head_paths` comes from **HEAD**. So `git add` on a new file removes it
+    /// from the untracked set without adding it to HEAD, and the union of the
+    /// two has a hole exactly the size of "staged, not yet committed".
+    ///
+    /// That hole has been found three times, in three surfaces, each time as a
+    /// silent wrong answer rather than a failure:
+    ///
+    /// - issue #636 — `sync` deleted a node from the graph on `git add`;
+    /// - issue #649 — `review` said "no working-tree changes to review" on a
+    ///   tree with a staged addition in it;
+    /// - issue #657 — `check` reported **0 violations** on drift it had caught
+    ///   one `git add` earlier, silencing the gate at the moment it matters most.
+    ///
+    /// Each was fixed where it was found, which left three copies of one rule.
+    /// This is the rule, once, so the fourth surface inherits it instead of
+    /// re-deriving it.
+    ///
+    /// `head_paths` is a parameter rather than something walked here because
+    /// every caller already holds HEAD's paths for its own reasons; walking the
+    /// tree again to re-derive them would make the shared version cost more than
+    /// the copies it replaces.
+    ///
+    /// `.gitignore` is honoured, and the union states *how*: an ignored file is
+    /// absent from the dirwalk, so it enters only by being in the index — which
+    /// takes a deliberate `git add -f`. That is the right outcome rather than a
+    /// leak, because force-adding overrides the ignore and the file will be
+    /// committed regardless.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if the dirwalk or the index cannot be read.
+    pub fn added_since_head(
+        &self,
+        head_paths: &std::collections::BTreeSet<&str>,
+    ) -> Result<std::collections::BTreeSet<String>, GitError> {
+        // **Both** sources are filtered against HEAD, not only the index one.
+        // `untracked_files` classifies against the index, so a path can be in
+        // HEAD *and* reported untracked simultaneously: `git rm --cached f`
+        // drops `f` from the index and leaves it on disk, and git then calls it
+        // untracked while HEAD still carries it. Taking that set wholesale
+        // labels a tracked file an addition. Found by Copilot on #656 and fixed
+        // there inline; collapsing the call sites onto this helper would have
+        // undone it, which is what the rebase conflict was really about.
+        let mut out: std::collections::BTreeSet<String> = self
+            .untracked_files()?
+            .into_iter()
+            .filter(|p| !head_paths.contains(p.as_str()))
+            .collect();
+        for entry in self.index_files()? {
+            if !head_paths.contains(entry.path.as_str()) {
+                out.insert(entry.path);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Untracked, non-ignored regular files in the working tree: everything the
+    /// dirwalk finds that the **index** does not carry.
+    ///
+    /// Not "files in neither `HEAD` nor the index", which this said until #662
+    /// pointed at the contradiction with [`Repo::added_since_head`] directly
+    /// above. The set is defined against the index *alone*, so a path can be in
+    /// `HEAD` and in here at once: `git rm --cached f` drops `f` from the index
+    /// and leaves it on disk, and git then reports it untracked while `HEAD`
+    /// still carries it.
+    ///
+    /// **This is not "the new files in the working tree".** It is defined against
+    /// the **index**, so `git add` removes a file from it. A caller that unions
+    /// this with a HEAD-derived set has a hole exactly the size of "staged, not
+    /// yet committed" — which is issues #636, #649 and #657, three surfaces that
+    /// each made that union by hand and each gave a silently wrong answer. Use
+    /// [`Repo::added_since_head`] instead; it is that union, correct, in one place.
     ///
     /// Respects `.gitignore` / `.git/info/exclude` / global excludes, skips nested
     /// repositories and non-regular files (symlinks, dirs, submodules), and returns

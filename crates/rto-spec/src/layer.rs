@@ -58,9 +58,17 @@ pub struct AuthoredLayer {
 /// Which files in `source`'s tree carry the authored layer.
 ///
 /// The staged files in `Index` mode (so a staged-new ADR is seen), the `HEAD`
-/// tree in `Committed` mode, and in `Worktree` mode `HEAD` **plus untracked
-/// files** — because that is precisely what [`rto_graph::sync_worktree`] overlaid
-/// into the derived layer.
+/// tree in `Committed` mode, and in `Worktree` mode `HEAD` **plus everything a
+/// commit would add** — [`rto_graph::Repo::added_since_head`], which is
+/// `untracked ∪ staged-but-not-in-HEAD`. That is precisely what
+/// [`rto_graph::sync_worktree`] overlays into the derived layer, and the two must
+/// describe the same tree.
+///
+/// It said "plus **untracked** files" until issue #657, and that one word was
+/// wrong: `untracked_files` classifies against the *index*, so `git add` took a
+/// new ADR out of the set without putting it into `HEAD`, and the union had a
+/// hole exactly the size of "staged, not yet committed". Restated here because a
+/// doc describing the old union is an invitation to reconstruct it.
 ///
 /// Getting this wrong is issue #330's observed symptom. `sync_worktree` walks
 /// untracked files deliberately, "so the working-tree `sync`/`check`/`review` see
@@ -79,13 +87,24 @@ pub fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, 
         GraphSource::Committed => repo.walk_blobs(),
         GraphSource::Worktree => {
             let mut blobs = repo.walk_blobs()?;
-            // `untracked_files` is defined against the index, so it cannot return
-            // a path already in `blobs`. The synthesized oid is unused:
-            // `Repo::read_source` reads Worktree content from disk by path, and an
-            // untracked file has no git object to read anyway. (A bare repo has no
-            // working tree, and `untracked_files` returns nothing there, so the
-            // oid-reading fallback is never reached with one of these.)
-            blobs.extend(repo.untracked_files()?.into_iter().map(|path| BlobRef {
+            // Every path a commit would add, staged or not — **not**
+            // `untracked_files` alone, which was issue #657: that set is defined
+            // against the **index**, so `git add` on a new ADR took it out of the
+            // untracked set without putting it into HEAD, and the authored layer
+            // stopped seeing the file. `check` then reported `0 violations` on
+            // drift it had named one `git add` earlier. The old comment here was
+            // right that the two sets cannot overlap, and that is exactly why it
+            // did not notice the union had a hole.
+            //
+            // The synthesized oid is unused: `Repo::read_source` reads Worktree
+            // content from disk by path, and a not-yet-committed file has no HEAD
+            // object to read anyway. (A bare repo has no working tree, so this
+            // set is empty there and the oid-reading fallback is never reached
+            // with one of these.)
+            let head_paths: std::collections::BTreeSet<&str> =
+                blobs.iter().map(|b| b.path.as_str()).collect();
+            let added = repo.added_since_head(&head_paths)?;
+            blobs.extend(added.into_iter().map(|path| BlobRef {
                 path,
                 oid: String::new(),
             }));
