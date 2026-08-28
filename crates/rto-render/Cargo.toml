@@ -34,10 +34,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net
 axum = { version = "0.8", optional = true }
 schemars = { version = "1", optional = true }
 serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+# Ungated because `tool_class::report` is, and it has to be: the class table and
+# the document standing in for a withheld class are shared by BOTH tool surfaces
+# (#664), and `serve` does not imply `mcp` — a serve-only build has no MCP module
+# to read the shape from. Two hand-built copies of one JSON document is the drift
+# `tool_text` already exists to prevent for descriptions. No new edge in the tree:
+# `rto-graph` depends on serde_json non-optionally, so every build of this crate
+# already compiles it.
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 # A real YAML parser, used **only** to prove the frontmatter this crate emits
 # parses back to the value it was given (`yaml_double_quoted` / `yaml_scalar`).
 # Asserting the emitted bytes instead would pass just as happily on an escaper
@@ -55,7 +61,7 @@ yaml-rust2 = "0.12.0"
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
 # (ADR-0002) for stdio + streamable-HTTP transports; entirely feature-gated so
 # the default build pulls none of it.
-mcp = ["dep:rmcp", "dep:rto-spec", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:serde_json"]
+mcp = ["dep:rmcp", "dep:rto-spec", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde"]
 # The `security_list` / `security_status` MCP tools, which need `rto-exec`'s
 # document types. Named `execution` to match the feature that carries the same
 # surface in the `roteiro` binary, and forwarded from there — see that crate's

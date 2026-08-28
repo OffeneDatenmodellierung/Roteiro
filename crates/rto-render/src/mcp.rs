@@ -7,7 +7,8 @@
 //! a local agent-spawned subprocess, and streamable-HTTP for networked,
 //! multi-client serving (terminate TLS at a reverse proxy). Both expose the
 //! same tools — `search`, `explain`, `context`, `check`, `list_kind`, `path`,
-//! `debt`, `debt_density`, `coupling`, `config_secrets`, `list_projects`, and (with
+//! `debt`, `debt_density`, `coupling`, `config_secrets`, `list_projects`,
+//! `list_tool_classes`, and (with
 //! the `execution` feature) `security_list` / `security_status` — as thin wrappers
 //! over the
 //! matching [`rto_graph`] query primitives, so agents and the CLI see the same
@@ -823,6 +824,27 @@ impl GraphServer {
     async fn list_projects(&self) -> CallToolResult {
         json_result(&serde_json::json!({ "projects": self.workspace.names() }))
     }
+
+    /// Name the tool classes, and say which of them this server loaded (#664).
+    ///
+    /// The one tool [`restrict`] never withholds, and the reason it exists: a
+    /// class an operator did not load is invisible from the client side, and an
+    /// invisible tool and an impossible one look identical to a model. Without
+    /// this, a `query`-only server answers "Roteiro cannot report analyzer
+    /// findings" — which is false, and unrecoverable, because nothing on the wire
+    /// says the class was withheld rather than absent.
+    ///
+    /// Both predicates come from **this server's own router**, not from `#[cfg]`,
+    /// for the reason [`GraphServer::instructions`] records: an operator can now
+    /// remove a tool a build does have, so the announcement and the listing have
+    /// to be two views of one object.
+    #[tool]
+    async fn list_tool_classes(&self) -> CallToolResult {
+        json_result(&crate::tool_class::report(
+            |name| tool_names().iter().any(|t| t == name),
+            |name| self.tool_router.has_route(name),
+        ))
+    }
 }
 
 /// The two `security` subcommands that read and never write (issue #435).
@@ -960,6 +982,47 @@ impl GraphServer {
     }
 }
 
+/// The read-only rule a server states about itself, in the one of its two
+/// spellings that is true here.
+///
+/// Two spellings of one rule, chosen by whether the mutating tool is on this
+/// server: with `sandbox_clear` advertised the flat one is false, and stating a
+/// rule with its exception named is the difference between a rule and a claim a
+/// model can catch the server out on. The rule the read-only stance protects — a
+/// model must not change what the graph says — is unweakened either way.
+fn read_only_rule_clause(has_mutating_tool: bool) -> &'static str {
+    if has_mutating_tool {
+        " Every tool here answers from the graph and none of them changes it, with \
+         exactly one exception: `sandbox_clear` deletes cached container images — bytes \
+         a pinned digest re-obtains — and changes nothing the graph says."
+    } else {
+        " Every tool here is read-only."
+    }
+}
+
+/// The clause a **restricted** server adds to its `instructions`, or `None` when
+/// every class is loaded (#664).
+///
+/// Conditional because the instructions are paid for on every turn exactly as a
+/// description is. On a full server the sentence would be true and useless —
+/// nothing is withheld, so there is no wrong answer for it to prevent — and a
+/// feature whose whole point is fewer tokens must not add unconditional ones.
+///
+/// It exists at all because withholding a class is otherwise invisible: a model
+/// on a `query`-only server has no way to tell a tool that was left out from a
+/// capability Roteiro does not have, and will report the second.
+fn withheld_class_clause(has: impl Fn(&str) -> bool) -> Option<&'static str> {
+    let anything_withheld = crate::tool_class::CLASSES
+        .iter()
+        .any(|(_, tools)| tools.iter().any(|t| !has(t)));
+    (has(crate::tool_class::CLASS_INDEX_TOOL) && anything_withheld).then_some(
+        " This server was started with only SOME of its tool classes. Before telling a \
+         user Roteiro cannot do something, call `list_tool_classes`: a class marked \
+         `not-loaded-here` was left out at startup to save prompt tokens and is not a \
+         missing capability — name the class so the user can restart the server with it.",
+    )
+}
+
 impl GraphServer {
     /// The `instructions` string a client is handed on `initialize`: one clause
     /// per tool **this server actually advertises**.
@@ -1055,21 +1118,9 @@ impl GraphServer {
                  prefetch an asset; ask the user to run those.",
             );
         }
-        // Two spellings of one rule, chosen by whether the mutating tool is on
-        // this server: with `sandbox_clear` advertised the flat one is false, and
-        // stating a rule with its exception named is the difference between a rule
-        // and a claim a model can catch the server out on. The rule the read-only
-        // stance protects — a model must not change what the graph says — is
-        // unweakened either way.
-        if has("sandbox_clear") {
-            out.push_str(
-                " Every tool here answers from the graph and none of them changes it, \
-                 with exactly one exception: `sandbox_clear` deletes cached container \
-                 images — bytes a pinned digest re-obtains — and changes nothing the \
-                 graph says.",
-            );
-        } else {
-            out.push_str(" Every tool here is read-only.");
+        out.push_str(read_only_rule_clause(has("sandbox_clear")));
+        if let Some(clause) = withheld_class_clause(has) {
+            out.push_str(clause);
         }
         out.push_str(
             " There is no `review` tool — `roteiro review` is CLI-first and needs no \
@@ -1154,7 +1205,19 @@ pub fn tool_descriptions() -> std::collections::BTreeMap<String, String> {
 /// (#393) are what that costs.
 #[must_use]
 pub fn tool_names() -> Vec<String> {
-    let mut names: Vec<String> = GraphServer::routes(&Advertised::All)
+    advertised_names(&Advertised::All)
+}
+
+/// The names a server built for `advertised` would list, sorted.
+///
+/// [`tool_names`] answers the same question for the unrestricted surface and is
+/// defined in terms of this. Exposed separately (#664) so the **other** surface
+/// can be compared against a *restricted* MCP server rather than only against a
+/// full one: the two registries are separate objects, and a selection applied to
+/// one and not the other is invisible to a comparison of their unrestricted sets.
+#[must_use]
+pub fn advertised_names(advertised: &Advertised) -> Vec<String> {
+    let mut names: Vec<String> = GraphServer::routes(advertised)
         .list_all()
         .into_iter()
         .map(|t| t.name.to_string())
@@ -1204,7 +1267,7 @@ pub fn advertised_bytes(advertised: &Advertised) -> usize {
 /// Hand-written because `#[cfg]`-ed-out routes leave no trace to enumerate, and
 /// kept honest by `every_tool_covers_this_build`: it fails if a router offers a
 /// name this list does not carry, in whatever feature set the test is run under.
-pub const EVERY_TOOL: [&str; 15] = [
+pub const EVERY_TOOL: [&str; 16] = [
     "check",
     "config_secrets",
     "context",
@@ -1214,6 +1277,7 @@ pub const EVERY_TOOL: [&str; 15] = [
     "explain",
     "list_kind",
     "list_projects",
+    "list_tool_classes",
     "path",
     "sandbox_clear",
     "sandbox_status",
@@ -1290,8 +1354,9 @@ impl std::fmt::Display for RestrictError {
         match self {
             Self::Unknown(name) => write!(
                 f,
-                "unknown tool `{name}` (expected one of {}, or `{READ_ONLY}`)",
-                EVERY_TOOL.join(", ")
+                "unknown tool `{name}` (expected one of {}, a class ({}), or `{READ_ONLY}`)",
+                EVERY_TOOL.join(", "),
+                crate::tool_class::class_names().join(", "),
             ),
             Self::Empty => write!(
                 f,
@@ -1317,8 +1382,13 @@ pub struct Restriction {
 
 /// Resolve an operator's `--tools` / `[mcp] tools` list into a [`Restriction`].
 ///
-/// `names` may hold tool names and the [`READ_ONLY`] alias, in any order; the
-/// alias contributes every tool this build offers except [`MUTATING_TOOLS`].
+/// `names` may hold tool names, a **class** name from [`crate::tool_class`], and
+/// the [`READ_ONLY`] alias, in any order. The alias contributes every tool this
+/// build offers except [`MUTATING_TOOLS`]; a class contributes the tools it names.
+///
+/// [`crate::tool_class::CLASS_INDEX_TOOL`] is added to every non-empty result and
+/// cannot be withheld — see the note at the end of this function for why a
+/// restriction that could hide it would make a model misinform its user.
 ///
 /// # Errors
 /// [`RestrictError::Unknown`] for a name that is not a Roteiro tool at all, and
@@ -1343,6 +1413,20 @@ pub fn restrict(names: &[String]) -> Result<Restriction, RestrictError> {
             );
             continue;
         }
+        // A class (#664) resolves to its tools before the name check, so
+        // `--tools query` is not read as a typo. Tools of the class this build
+        // lacks are simply not selected: a class is a shorthand for a group, not
+        // an assertion that every member is present, so it has nothing to report
+        // as `absent` — the same reading `read-only` above already takes.
+        if let Some(tools) = crate::tool_class::tools_in(name) {
+            allowed.extend(
+                tools
+                    .iter()
+                    .filter(|t| in_build.iter().any(|b| b == *t))
+                    .map(|t| (*t).to_owned()),
+            );
+            continue;
+        }
         if !EVERY_TOOL.contains(&name) {
             return Err(RestrictError::Unknown(name.to_owned()));
         }
@@ -1352,9 +1436,21 @@ pub fn restrict(names: &[String]) -> Result<Restriction, RestrictError> {
             absent.push(name.to_owned());
         }
     }
+    // Emptiness is judged on what the operator *named*, before the class index is
+    // added below. Judging it afterwards would make `--tools ""` resolve to a
+    // one-tool server instead of the refusal `RestrictError::Empty` documents —
+    // a restriction that quietly restricted nothing is the defect #584 exists to
+    // prevent, and a restriction that quietly served something nobody asked for
+    // is the same mistake pointed the other way.
     if allowed.is_empty() {
         return Err(RestrictError::Empty);
     }
+    // The class index is never withheld (#664). A class an operator did not load
+    // is otherwise indistinguishable, from the client side, from a capability
+    // Roteiro does not have — so a restricted server would make a model tell a
+    // user something false. One short description is what that costs; it is
+    // dwarfed by any single class it stands in for.
+    allowed.insert(crate::tool_class::CLASS_INDEX_TOOL.to_owned());
     Ok(Restriction {
         advertised: Advertised::Only(allowed),
         absent,
@@ -2755,7 +2851,10 @@ mod tests {
             .collect();
         assert_eq!(
             listed,
-            ["explain", "search"]
+            // The class index rides along with every restriction and is the only
+            // addition (#664) — a restricted server that could not say what it
+            // withheld would leave a model reporting a missing capability.
+            ["explain", "list_tool_classes", "search"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect::<BTreeSet<String>>(),
@@ -2817,6 +2916,256 @@ mod tests {
         assert!(
             read_only < all,
             "dropping the mutating tool must drop bytes: {read_only} vs {all}",
+        );
+    }
+
+    /// The longest prefix of `text` that appears **verbatim** inside a JSON
+    /// string, capped so it stays a needle rather than the haystack.
+    ///
+    /// Needed because the surface a client receives is JSON: a description
+    /// containing `"` or `\` is escaped on the wire, so searching the raw constant
+    /// would fail to match text that *is* there — a test that passes for the wrong
+    /// reason. Cutting at the first character JSON would rewrite gives a needle
+    /// that matches if and only if the prose shipped. Capped by `char_indices` and
+    /// not by byte slicing: these descriptions contain em dashes.
+    fn wire_needle(text: &str) -> &str {
+        let stop = text.find(['"', '\\', '\n']).unwrap_or(text.len());
+        let cap = text
+            .char_indices()
+            .nth(60)
+            .map_or(text.len(), |(byte, _)| byte);
+        &text[..stop.min(cap)]
+    }
+
+    /// **A class an operator did not load contributes no tokens.**
+    ///
+    /// The property, measured on the thing that actually costs: the serialized
+    /// `tools/list` payload, not the route count. A test that counted routes would
+    /// pass while the descriptions still shipped — and the descriptions are 65% of
+    /// this surface's bytes, so they are the whole point of withholding a class.
+    ///
+    /// Two assertions per withheld tool, because they fail for different reasons.
+    /// The **name** check catches a route that survived the restriction. The
+    /// **prose** check catches the subtler one: a description reaching the wire
+    /// under some other tool's route, or a listing assembled from anywhere other
+    /// than the restricted router. The name is checked structurally rather than as
+    /// a substring, because `path` is a substring of "file paths" in another
+    /// tool's description and a substring test would fail on prose that is
+    /// legitimately there.
+    #[test]
+    fn a_withheld_class_contributes_no_bytes_to_the_serialized_surface() {
+        let full = super::tool_descriptions();
+        for (class, tools) in crate::tool_class::CLASSES {
+            let others: Vec<String> = crate::tool_class::class_names()
+                .into_iter()
+                .filter(|c| *c != class)
+                .map(str::to_owned)
+                .collect();
+            let restriction = super::restrict(&others).expect("three classes resolve");
+            let listed = GraphServer::routes(&restriction.advertised).list_all();
+            let names: BTreeSet<String> = listed.iter().map(|t| t.name.to_string()).collect();
+            let wire = serde_json::to_string(&listed).expect("the JSON a client receives");
+            for tool in tools {
+                assert!(
+                    !names.contains(*tool),
+                    "withholding `{class}` left `{tool}` advertised",
+                );
+                let Some(text) = full.get(*tool) else {
+                    continue;
+                };
+                let needle = wire_needle(text);
+                assert!(
+                    needle.len() > 20,
+                    "`{tool}`'s needle is too short to prove anything: {needle:?}",
+                );
+                assert!(
+                    !wire.contains(needle),
+                    "withholding `{class}` still shipped `{tool}`'s description to the \
+                     client. The route may be gone while its prose is not, and the prose \
+                     is what costs: {needle:?}",
+                );
+            }
+        }
+    }
+
+    /// **A class that is loaded advertises every tool it names**, with the same
+    /// description an unrestricted server would have sent.
+    ///
+    /// The other half of the property, and the one that catches an over-eager
+    /// filter. A restriction that removed too much would satisfy the withholding
+    /// test perfectly — the strongest possible "no tokens" result is a server that
+    /// advertises nothing — so the saving has to be paid for against a surface
+    /// that is still complete.
+    #[test]
+    fn a_loaded_class_advertises_every_tool_it_names() {
+        let full = super::tool_descriptions();
+        let in_build: BTreeSet<String> = tool_names().into_iter().collect();
+        for (class, tools) in crate::tool_class::CLASSES {
+            let restriction = super::restrict(&[class.to_owned()]).expect("a class resolves");
+            let listed = GraphServer::routes(&restriction.advertised).list_all();
+            let described: std::collections::BTreeMap<String, String> = listed
+                .iter()
+                .map(|t| {
+                    (
+                        t.name.to_string(),
+                        t.description.as_deref().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect();
+            for tool in tools.iter().filter(|t| in_build.contains(**t)) {
+                let got = described.get(*tool).unwrap_or_else(|| {
+                    panic!("`--tools {class}` must advertise its own member `{tool}`")
+                });
+                assert_eq!(
+                    Some(got),
+                    full.get(*tool),
+                    "`{tool}` is advertised under `{class}` with a different description \
+                     than an unrestricted server sends",
+                );
+            }
+        }
+    }
+
+    /// Naming every class must be indistinguishable from naming no restriction at
+    /// all — which is what makes the taxonomy **total**.
+    ///
+    /// A tool in no class would be dropped here and nowhere else: reachable by
+    /// name, unreachable through the aliases, and invisible to
+    /// `list_tool_classes`. That is a surface with two halves that disagree, and
+    /// it is the failure a route-counting test would miss.
+    #[test]
+    fn selecting_every_class_is_the_unrestricted_surface() {
+        let names: Vec<String> = crate::tool_class::class_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let restriction = super::restrict(&names).expect("every class resolves");
+        assert_eq!(
+            GraphServer::routes(&restriction.advertised)
+                .list_all()
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect::<BTreeSet<String>>(),
+            tool_names().into_iter().collect::<BTreeSet<String>>(),
+            "every class together must be the whole surface — a tool in no class \
+             would be silently unreachable through `--tools`",
+        );
+        assert_eq!(
+            super::advertised_bytes(&restriction.advertised),
+            super::advertised_bytes(&Advertised::All),
+            "and cost exactly the same bytes",
+        );
+    }
+
+    /// Every routed tool has exactly one class, or is the class index itself.
+    ///
+    /// The compile-time half is impossible — the table is data — so this is what
+    /// fails when a tool is added to the router and not to
+    /// [`crate::tool_class::CLASSES`].
+    #[test]
+    fn every_tool_has_exactly_one_class() {
+        for name in tool_names() {
+            if name == crate::tool_class::CLASS_INDEX_TOOL {
+                assert!(
+                    crate::tool_class::class_of(&name).is_none(),
+                    "the class index must belong to no class",
+                );
+                continue;
+            }
+            assert!(
+                crate::tool_class::class_of(&name).is_some(),
+                "`{name}` is routed but is in no class — `--tools <class>` cannot \
+                 reach it and `list_tool_classes` will not mention it",
+            );
+        }
+    }
+
+    /// The class index survives every restriction, including one that names no
+    /// class at all — and is dispatchable, not merely listed.
+    ///
+    /// This is the discoverability requirement itself. Without it a `query`-only
+    /// server is indistinguishable, from the client side, from a Roteiro that
+    /// cannot read analyzer findings, and a model asked about them answers
+    /// "Roteiro cannot do that" — which is false and which nothing on the wire
+    /// could correct.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn the_class_index_is_advertised_whatever_was_withheld() {
+        use rmcp::ServerHandler as _;
+
+        for names in [
+            vec!["query".to_owned()],
+            vec!["search".to_owned()],
+            vec![super::READ_ONLY.to_owned()],
+            vec!["security".to_owned(), "sandbox".to_owned()],
+        ] {
+            let restriction = super::restrict(&names).expect("resolves");
+            let server = seeded_with(&restriction.advertised);
+            assert!(
+                server
+                    .tool_router
+                    .list_all()
+                    .iter()
+                    .any(|t| t.name == crate::tool_class::CLASS_INDEX_TOOL),
+                "`--tools {names:?}` withheld the class index",
+            );
+            assert!(
+                server
+                    .get_tool(crate::tool_class::CLASS_INDEX_TOOL)
+                    .is_some(),
+                "listed but not dispatchable — advertisement is not authority, and \
+                 neither is its absence",
+            );
+        }
+    }
+
+    /// A restricted server tells a model to ask, and an unrestricted one does not.
+    ///
+    /// The instructions are paid for on every turn exactly as a description is, so
+    /// the pointer is only worth its bytes where it changes an answer. On a full
+    /// server no class is withheld and there is nothing for a model to recover.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn only_a_restricted_server_points_a_model_at_the_class_index() {
+        use rmcp::ServerHandler as _;
+
+        let restriction = super::restrict(&["query".to_owned()]).expect("resolves");
+        let narrow = seeded_with(&restriction.advertised)
+            .get_info()
+            .instructions
+            .unwrap_or_default();
+        assert!(
+            narrow.contains("list_tool_classes") && narrow.contains("not a missing capability"),
+            "a restricted server must say a class was withheld: {narrow}",
+        );
+        let full = seeded().get_info().instructions.unwrap_or_default();
+        assert!(
+            !full.contains("not a missing capability"),
+            "an unrestricted server has nothing to recover, and the sentence costs \
+             tokens on every turn: {full}",
+        );
+    }
+
+    /// The saving the issue was filed for, asserted as a floor on the **serialized
+    /// surface** rather than as the exact figure.
+    ///
+    /// Measured here: withholding `security` and `sandbox` drops 7,936 of 19,155
+    /// bytes — 41% — which is the ~1,984 tokens a code-navigation session pays
+    /// every turn to advertise tools it will never call. The assertion is a floor
+    /// because the exact number moves whenever anyone edits a description, and a
+    /// test that failed on prose edits would be deleted rather than fixed.
+    #[cfg(feature = "execution")]
+    #[test]
+    fn withholding_security_and_sandbox_removes_a_third_of_the_surface() {
+        let all = super::advertised_bytes(&Advertised::All);
+        let restriction = super::restrict(&["query".to_owned(), "quality".to_owned()])
+            .expect("two classes resolve");
+        let narrowed = super::advertised_bytes(&restriction.advertised);
+        assert!(
+            narrowed * 10 <= all * 7,
+            "`--tools query,quality` must remove at least 30% of the advertised \
+             bytes; it removed {} of {all}",
+            all - narrowed,
         );
     }
 
