@@ -28,9 +28,9 @@
 //! merge commit (`0db61fe`) and `no-default-features` is named red, at the only
 //! moment the fix was cheap.
 
+mod common;
+
 use std::collections::BTreeSet;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
 use yaml_rust2::Yaml;
 
 /// The jobs that are **required status checks** on `main`.
@@ -82,81 +82,10 @@ const EXPENSIVE_ARM: &str = "env.RELEASE_PR != 'true'";
 /// The step-level guard on the cheap verification a release PR does instead.
 const CHEAP_ARM: &str = "env.RELEASE_PR == 'true'";
 
-/// The repository root, from this crate's manifest directory (`crates/roteiro`).
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("repo root is two levels above crates/roteiro")
-        .to_path_buf()
-}
-
-/// Whether this is a checkout of the Roteiro repository, rather than a packaged
-/// crate unpacked from the registry.
-///
-/// The marker is the **workspace** manifest two levels above `crates/roteiro`. A
-/// packaged crate has no such ancestor: `CARGO_MANIFEST_DIR` is then
-/// `…/registry/src/<index>/roteiro-<version>`, and two levels above that is the
-/// registry's source directory, which holds sibling crates and no workspace
-/// manifest.
-///
-/// This marker has to be as loud as the thing it guards, or it is the same
-/// defect one level up with more steps: a marker that read `false` on an IO
-/// error would turn "cannot read the repository" into "this is not a
-/// repository", and skip. So only `NotFound` means absent, and every other error
-/// panics.
-fn is_repository_checkout() -> bool {
-    let manifest = repo_root().join("Cargo.toml");
-    match std::fs::read_to_string(&manifest) {
-        Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
-        Err(e) if e.kind() == ErrorKind::NotFound => false,
-        Err(e) => panic!(
-            "cannot read {} ({:?}: {e}). Without it this test cannot tell a \
-             packaged crate from a repository checkout, and guessing would make \
-             the guard skip in silence — which is the failure this whole file \
-             exists to rule out.",
-            manifest.display(),
-            e.kind(),
-        ),
-    }
-}
-
-/// A repository file's contents, or `None` when this is not a repository
-/// checkout at all.
-///
-/// The skip is legitimate: a packaged crate has no `.github/`, and this guard is
-/// about *this repository*. Collapsing every IO error into that one meaning is
-/// not. This guard exists to catch a defect that is **invisible by
-/// construction** — #482's gap was unreachable from any branch not named
-/// `release-plz-*`, which is why nothing else could find it — so a green that
-/// actually means "could not read the subject" is worse than no guard at all,
-/// because by then the green is load-bearing. #401's fragment guard set the
-/// standard by failing on an empty scan rather than skipping.
-///
-/// So the skip is made *verifiable* rather than merely narrower. Absent **and**
-/// not a checkout is the skip. Absent **in** a checkout is a failure — the file
-/// is committed, so it is supposed to be there. Anything else — permissions, a
-/// bad symlink, an IO error mid-read — panics naming the path and the kind.
-fn read_repo_file(rel: &str) -> Option<String> {
-    let path = repo_root().join(rel);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == ErrorKind::NotFound && !is_repository_checkout() => None,
-        Err(e) => panic!(
-            "cannot read {} ({:?}: {e}). This guard asserts a property of that \
-             file, so skipping here would be a green that means \"could not \
-             look\". If the file moved or was deliberately deleted, this test \
-             moves or goes with it.",
-            path.display(),
-            e.kind(),
-        ),
-    }
-}
-
 /// The parsed `jobs:` mapping of the workflow at `rel`, or `None` outside a
 /// repository checkout.
 fn workflow_jobs(rel: &str) -> Option<Vec<(String, Yaml)>> {
-    let text = read_repo_file(rel)?;
+    let text = common::repo_file(rel)?;
     let docs = yaml_rust2::YamlLoader::load_from_str(&text)
         .unwrap_or_else(|e| panic!("{rel} is not parseable YAML: {e}"));
     let doc = docs
