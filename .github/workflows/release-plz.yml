@@ -3,6 +3,12 @@ name: Release-plz
 permissions:
   pull-requests: write
   contents: write
+  # `release-plz-release` reads `.../commits/{sha}/check-runs` before it
+  # publishes. An explicit `permissions:` block sets every scope it does not
+  # name to `none`, so without this line that call is unauthorized — and because
+  # the step runs under `set -euo pipefail`, the publish would refuse *every*
+  # time rather than wait. Fail-closed, but a release that can never happen.
+  checks: read
 
 on:
   push:

@@ -111,6 +111,30 @@ fn the_publish_job_waits_for_ci_before_it_publishes() {
 }
 
 #[test]
+fn the_wait_is_allowed_to_read_the_checks_it_waits_for() {
+    let Some(text) = workflow() else {
+        return;
+    };
+    let job = publish_job(&text);
+
+    // Only meaningful while the wait authenticates as `GITHUB_TOKEN`. An app
+    // token carries the installation's own permissions and this stops applying.
+    if !job.contains("GH_TOKEN: ${{ github.token }}") {
+        return;
+    }
+
+    assert!(
+        text.contains("checks: read"),
+        "the wait queries `.../commits/{{sha}}/check-runs`, which needs the `checks: \
+         read` scope. This workflow sets an explicit `permissions:` block, and that \
+         sets every scope it does not name to `none` — so dropping this line does not \
+         make the gate permissive, it makes the publish step fail on its first API \
+         call, every single time. A release that can never happen looks exactly like \
+         a release nobody asked for."
+    );
+}
+
+#[test]
 fn the_wait_fails_closed() {
     let Some(text) = workflow() else {
         return;
