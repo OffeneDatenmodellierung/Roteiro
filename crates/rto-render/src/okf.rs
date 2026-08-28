@@ -428,9 +428,288 @@ pub fn render_log(heading: &str, days: &[LogDay]) -> String {
     out
 }
 
+/// A concept ready to be written: its node, its frontmatter, and its prose.
+pub struct Concept<'a> {
+    /// The graph node and its neighbourhood.
+    pub explanation: &'a Explanation,
+    /// The frontmatter to render.
+    pub frontmatter: Frontmatter,
+    /// The node's prose body, when it has one.
+    pub body: Option<String>,
+}
+
+/// Assemble a whole bundle: every concept, a per-directory `index.md`, and the
+/// bundle-root `index.md` carrying `okf_version`.
+///
+/// # Collisions are resolved here, and only here
+///
+/// [`slug`] can map two different keys onto one filename. The Obsidian vault this
+/// replaces appended a hash to **every** note to survive that, because it wrote
+/// one flat directory on filesystems that fold case — and it still lost 104 notes
+/// of 8,144 before the hash existed. Nesting by kind removes most of the pressure,
+/// but not all of it, so the remaining collisions are settled where the whole set
+/// is visible rather than by a per-name rule that cannot see its neighbours.
+///
+/// A colliding name gets a short digest of its key appended. The **first** name in
+/// key order keeps the bare slug, so a bundle re-rendered from an unchanged graph
+/// is byte-identical: the disambiguation depends on the set, and the set is sorted.
+///
+/// Comparison is case-**insensitive** on purpose. `Foo` and `foo` are one file on
+/// macOS and Windows, and a bundle that wrote both would silently lose one — which
+/// is exactly how the vault lost notes.
+#[must_use]
+pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<BundleFile> {
+    // Group by section, in key order, so both the output and the disambiguation
+    // are deterministic.
+    let mut by_section: BTreeMap<&'static str, Vec<Concept<'_>>> = BTreeMap::new();
+    let mut ordered = concepts;
+    ordered.sort_by(|a, b| a.explanation.node.key.cmp(&b.explanation.node.key));
+    for c in ordered {
+        by_section
+            .entry(section_for(&c.explanation.node.kind))
+            .or_default()
+            .push(c);
+    }
+
+    let mut files = Vec::new();
+    let mut sections: Vec<IndexEntry> = Vec::new();
+
+    for (section, members) in by_section {
+        let mut taken: BTreeMap<String, usize> = BTreeMap::new();
+        let mut entries: Vec<IndexEntry> = Vec::new();
+
+        for c in &members {
+            // Case folding is already handled: `slug` lowercases, so no two slugs
+            // can differ by case alone and this comparison needs no folding of its
+            // own. An earlier version folded again here and read as the guard
+            // against case-insensitive filesystems — it was a no-op, and removing
+            // it changed no test, which is how the redundancy was found.
+            let base = slug(&c.explanation.node.key);
+            let name = match taken.get(&base) {
+                None => base.clone(),
+                Some(_) => format!("{base}-{}", short_digest(&c.explanation.node.key)),
+            };
+            *taken.entry(base).or_insert(0) += 1;
+
+            let path = format!("/{section}/{name}.md");
+            let title = c
+                .frontmatter
+                .title
+                .clone()
+                .unwrap_or_else(|| c.explanation.node.name.clone());
+            entries.push(IndexEntry {
+                title,
+                target: path.clone(),
+                description: c.frontmatter.description.clone(),
+            });
+            let mut file =
+                render_concept(c.explanation, &c.frontmatter, c.body.as_deref(), &|key| {
+                    Some(format!("/{}/{}.md", section_for_key(key), slug(key)))
+                });
+            file.path = path;
+            files.push(file);
+        }
+
+        files.push(BundleFile {
+            path: format!("/{section}/{INDEX_FILE}"),
+            content: render_index(section, &entries),
+        });
+        sections.push(IndexEntry {
+            title: section.to_owned(),
+            target: format!("/{section}/{INDEX_FILE}"),
+            description: Some(format!("{} concept(s)", members.len())),
+        });
+    }
+
+    if !log.is_empty() {
+        files.push(BundleFile {
+            path: format!("/{LOG_FILE}"),
+            content: render_log("Update Log", log),
+        });
+    }
+    files.push(BundleFile {
+        path: format!("/{INDEX_FILE}"),
+        content: render_root_index(title, &sections),
+    });
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+/// The section a *key* belongs to, for resolving a link without the node.
+///
+/// A key looks like `sym:rust:path#Name` or `adr:0001#decision`; the leading
+/// token before the first `:` is the kind for authored keys, and anything else is
+/// a symbol. Cheaper than a graph lookup per edge, and wrong only for kinds that
+/// do not encode themselves in the key — which are already the `symbols` default.
+fn section_for_key(key: &str) -> &'static str {
+    section_for(key.split(':').next().unwrap_or(""))
+}
+
+/// A short, stable digest of a key, for disambiguating a collided slug.
+///
+/// FNV-1a rather than a cryptographic hash: this is a filename disambiguator, not
+/// a security boundary, and it must stay identical across renders and platforms.
+fn short_digest(key: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:08x}")[..8].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(key: &str, kind: &str, name: &str) -> NodeSummary {
+        NodeSummary {
+            key: key.to_owned(),
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            path: None,
+            lang: None,
+        }
+    }
+
+    fn explanation(key: &str, kind: &str, name: &str) -> Explanation {
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: node(key, kind, name),
+            meta: serde_json::Value::Null,
+            outgoing: Vec::new(),
+            incoming: Vec::new(),
+        }
+    }
+
+    fn concept<'a>(ex: &'a Explanation, type_: &str) -> Concept<'a> {
+        Concept {
+            explanation: ex,
+            frontmatter: Frontmatter {
+                type_: type_.to_owned(),
+                ..Frontmatter::default()
+            },
+            body: None,
+        }
+    }
+
+    /// Every file the bundle emits satisfies §11's conformance criteria.
+    ///
+    /// Asserted over the *emitted set* rather than over the renderer, because the
+    /// specification is a statement about a bundle and a per-function test cannot
+    /// make it.
+    #[test]
+    fn every_emitted_bundle_is_conformant() {
+        let a = explanation("adr:0001#decision", "adr", "ADR-0001");
+        let b = explanation("sym:rust:src/main.rs#greet", "fn", "greet");
+        let files = assemble(
+            vec![concept(&a, "adr"), concept(&b, "fn")],
+            "Roteiro",
+            &[LogDay {
+                date: "2026-08-28".into(),
+                entries: vec!["**Update**: rebuilt.".into()],
+            }],
+        );
+
+        for f in &files {
+            let reserved = f.path.ends_with(INDEX_FILE) || f.path.ends_with(LOG_FILE);
+            if reserved {
+                continue;
+            }
+            // §11.1 — a parseable frontmatter block, and §11.2 a non-empty `type`.
+            assert!(
+                f.content.starts_with("---\n"),
+                "{} opens with no frontmatter block",
+                f.path
+            );
+            let end = f.content[4..]
+                .find("\n---\n")
+                .expect("frontmatter must terminate");
+            let block = &f.content[4..4 + end];
+            assert!(
+                block
+                    .lines()
+                    .any(|l| l.starts_with("type: ") && l.len() > 8),
+                "{} carries no non-empty `type`: {block}",
+                f.path
+            );
+        }
+
+        // §8 — a nested index carries no frontmatter; only the root may.
+        let nested = files
+            .iter()
+            .find(|f| f.path == "/decisions/index.md")
+            .expect("a per-directory index");
+        assert!(!nested.content.starts_with("---"), "{}", nested.content);
+        let root = files
+            .iter()
+            .find(|f| f.path == "/index.md")
+            .expect("a root index");
+        assert!(
+            root.content.contains("okf_version: \"0.2\""),
+            "{}",
+            root.content
+        );
+    }
+
+    /// Two keys that slug identically get distinct filenames.
+    ///
+    /// The vault this replaces lost **104 notes of 8,144** to exactly this, on a
+    /// case-insensitive filesystem where two names folded into one file and the
+    /// second silently overwrote the first. The count printed did not know. So the
+    /// assertion is not "the names differ" but **"the file count equals the
+    /// concept count"** — the property whose failure was invisible.
+    #[test]
+    fn colliding_slugs_do_not_lose_a_concept() {
+        // Different keys, identical slug. (Case is not a separate hazard here:
+        // `slug` lowercases, so a case-only difference cannot survive into a
+        // filename at all.)
+        let a = explanation("sym:rust:a/b.rs#Thing", "fn", "Thing");
+        let b = explanation("sym:rust:a-b.rs#thing", "fn", "thing");
+        assert_eq!(
+            slug(&a.node.key).to_ascii_lowercase(),
+            slug(&b.node.key).to_ascii_lowercase(),
+            "fixture must actually collide, or this test proves nothing"
+        );
+
+        let files = assemble(vec![concept(&a, "fn"), concept(&b, "fn")], "T", &[]);
+        let concepts: Vec<&BundleFile> = files
+            .iter()
+            .filter(|f| !f.path.ends_with(INDEX_FILE) && !f.path.ends_with(LOG_FILE))
+            .collect();
+        assert_eq!(concepts.len(), 2, "both concepts must be written");
+
+        let paths: std::collections::BTreeSet<String> = concepts
+            .iter()
+            .map(|f| f.path.to_ascii_lowercase())
+            .collect();
+        assert_eq!(
+            paths.len(),
+            2,
+            "and to distinct files even when case is folded: {paths:?}"
+        );
+    }
+
+    /// The same graph renders to the same bytes.
+    /// The same graph renders to the same bytes, whatever order it arrives in.
+    ///
+    /// Both fixtures are in the **same section** on purpose. An earlier version
+    /// used an `adr` and a `fn`, which land in different directories — so each
+    /// section held one member, ordering within a section was never exercised,
+    /// and deleting the sort changed nothing. The test passed and guarded nothing.
+    #[test]
+    fn assembly_is_deterministic() {
+        let a = explanation("sym:rust:a.rs#a", "fn", "a");
+        let b = explanation("sym:rust:z.rs#z", "fn", "z");
+        assert_eq!(
+            section_for(&a.node.kind),
+            section_for(&b.node.kind),
+            "the fixtures must share a section, or ordering is not under test"
+        );
+        let once = assemble(vec![concept(&a, "fn"), concept(&b, "fn")], "T", &[]);
+        let twice = assemble(vec![concept(&b, "fn"), concept(&a, "fn")], "T", &[]);
+        assert_eq!(once, twice, "input order must not change the bundle");
+    }
 
     fn tool() -> Actor {
         Actor::Tool("roteiro".into(), "4.0.0".into())
