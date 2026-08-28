@@ -23,8 +23,8 @@ function exists to prevent one level down. What differs between the two is small
 specific, and reads better as a contrast in place than as two documents you have
 to hold side by side.
 
-If you only care about one of them, read [Part 1](#part-1--roteiro-lint-supplying-a-builders-image)
-or [Part 2](#part-2--roteiro-security-run-supplying-an-analyzers-image); the rules
+If you only care about one of them, read [Part 1](#part-1-roteiro-lint-supplying-a-builder-s-image)
+or [Part 2](#part-2-roteiro-security-run-supplying-an-analyzer-s-image); the rules
 above are stated in whichever part you land in.
 
 ## Part 1 — `roteiro lint`: supplying a builder's image

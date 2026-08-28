@@ -8,6 +8,9 @@
 #![allow(dead_code)]
 
 use std::io::ErrorKind;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The workspace root, from this crate's manifest directory.
 #[must_use]
@@ -83,9 +86,26 @@ pub fn repo_file(rel: &str) -> Option<String> {
     }
 }
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+/// A fresh, empty scratch directory tagged with `label`, this process's id, and
+/// a process-wide monotonic counter.
+///
+/// Both halves of the key are load-bearing. The **pid** keeps parallel test
+/// *binaries* from colliding. The **counter** keeps concurrent tests *within* a
+/// binary unique even when they pass the same label — without it, a path keyed
+/// on the pid alone is shared by every test in the file, and Rust runs those in
+/// parallel by default, so two of them race to delete and recreate the directory
+/// the other is using. That failure needs a second caller to appear before it
+/// bites, which means it arrives as a flake in somebody else's change.
+///
+/// Any existing directory at the path is removed, so a caller starts clean.
+#[must_use]
+pub fn scratch_dir(label: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("roteiro-{label}-{}-{seq}", std::process::id()));
+    std::fs::remove_dir_all(&path).ok();
+    path
+}
 
 /// A throwaway config home for a spawned `roteiro` child, so the process can
 /// never discover the developer's real `~/.roteiro/config.toml`.
@@ -111,11 +131,7 @@ impl IsolatedHome {
     /// binary unique even when they pass the same `label` — otherwise a shared
     /// deterministic path would let two instances race-delete each other's dir.
     pub fn new(label: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("roteiro-{label}-home-{}-{seq}", std::process::id()));
-        std::fs::remove_dir_all(&path).ok();
+        let path = scratch_dir(&format!("{label}-home"));
         std::fs::create_dir_all(&path).expect("mkdir isolated config home");
         Self { path }
     }
