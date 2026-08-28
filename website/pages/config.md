@@ -89,7 +89,7 @@ advertising everything. See <a href="https://github.com/OffeneDatenmodellierung/
 <code>quality</code>, <code>security</code> and <code>sandbox</code> are accepted wherever a tool
 name is, and a hand-written list of names is exactly what goes stale when a tool is added. Every
 advertised tool costs tokens on every turn whether the session could reach it or not, and
-<code>security</code> + <code>sandbox</code> are 41% of the surface here. The default is still
+<code>security</code> + <code>sandbox</code> are roughly two fifths of it. The default is still
 every class. Whatever you leave out, <code>list_tool_classes</code> stays advertised and says so
 — see <a href="modes.html#mcp">MCP mode</a>.</div>
 
