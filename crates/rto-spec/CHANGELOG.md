@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v3.3.0...rto-spec-v3.4.0) - 2026-08-28
+
+### Fixed
+
+- *(test)* prove the safecrlf fixture reproduces, and correct a stale doc
+- *(check)* staging a file no longer hides its drift
+
+### Other
+
+- *(spec)* describe the old union without tripping the debt detector
+
 ## [3.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v3.2.0...rto-spec-v3.2.1) - 2026-08-27
 
 ### Fixed
