@@ -1016,10 +1016,28 @@ fn read_only_rule_clause(has_mutating_tool: bool) -> &'static str {
 /// It exists at all because withholding a class is otherwise invisible: a model
 /// on a `query`-only server has no way to tell a tool that was left out from a
 /// capability Roteiro does not have, and will report the second.
-fn withheld_class_clause(has: impl Fn(&str) -> bool) -> Option<&'static str> {
+///
+/// # Why it takes two predicates rather than reading the router alone
+///
+/// A route can be missing for two unrelated reasons, and only one of them is a
+/// withholding. `has` alone cannot tell them apart: `security_*` and `sandbox_*`
+/// are `#[cfg(feature = "execution")]`, so on a build without that feature they
+/// are absent from **every** server, restricted or not. Deciding from `has` alone
+/// made an unrestricted server on such a build announce that it "was started with
+/// only SOME of its tool classes" — false, and paid for on every turn in exactly
+/// the configuration that withheld nothing to save anything.
+///
+/// So the signal is the **difference from this build's own unrestricted set**: a
+/// tool this build does not carry was not withheld from anyone, and only a tool
+/// `in_build` carries and `has` does not is an operator's choice. The claim and
+/// the tokens then both follow the thing the sentence is actually about.
+fn withheld_class_clause(
+    in_build: impl Fn(&str) -> bool,
+    has: impl Fn(&str) -> bool,
+) -> Option<&'static str> {
     let anything_withheld = crate::tool_class::CLASSES
         .iter()
-        .any(|(_, tools)| tools.iter().any(|t| !has(t)));
+        .any(|(_, tools)| tools.iter().any(|t| in_build(t) && !has(t)));
     (has(crate::tool_class::CLASS_INDEX_TOOL) && anything_withheld).then_some(
         " This server was started with only SOME of its tool classes. Before telling a \
          user Roteiro cannot do something, call `list_tool_classes`: a class marked \
@@ -1124,7 +1142,12 @@ impl GraphServer {
             );
         }
         out.push_str(read_only_rule_clause(has("sandbox_clear")));
-        if let Some(clause) = withheld_class_clause(has) {
+        // `tool_names` is this build's unrestricted set and is what separates a
+        // withheld tool from one the build never had — see `withheld_class_clause`.
+        // Resolved once: it builds a router to answer, and the predicate is asked
+        // per tool.
+        let in_build: BTreeSet<String> = tool_names().into_iter().collect();
+        if let Some(clause) = withheld_class_clause(|name| in_build.contains(name), has) {
             out.push_str(clause);
         }
         out.push_str(
@@ -3001,11 +3024,32 @@ mod tests {
     /// test perfectly — the strongest possible "no tokens" result is a server that
     /// advertises nothing — so the saving has to be paid for against a surface
     /// that is still complete.
+    ///
+    /// # The class this build carries nothing of
+    ///
+    /// `security` and `sandbox` are `execution`-gated, so on a build without that
+    /// feature `--tools security` names a real class and selects nothing. That is
+    /// [`RestrictError::Empty`] — the refusal-to-start that exists so a
+    /// restriction resolving to nothing can never be read as "no restriction"
+    /// (omnigent#5178). It is **asserted** here rather than skipped: a branch that
+    /// quietly `continue`d would report `ok` on a build where this test checked
+    /// nothing at all, which is the shape of a test that passes without exercising
+    /// its subject.
     #[test]
     fn a_loaded_class_advertises_every_tool_it_names() {
         let full = super::tool_descriptions();
         let in_build: BTreeSet<String> = tool_names().into_iter().collect();
         for (class, tools) in crate::tool_class::CLASSES {
+            if !tools.iter().any(|t| in_build.contains(*t)) {
+                assert_eq!(
+                    super::restrict(&[class.to_owned()]),
+                    Err(super::RestrictError::Empty),
+                    "`--tools {class}` selects nothing this build carries, and a \
+                     restriction that resolves to nothing must refuse to start rather \
+                     than serve the full surface",
+                );
+                continue;
+            }
             let restriction = super::restrict(&[class.to_owned()]).expect("a class resolves");
             let listed = GraphServer::routes(&restriction.advertised).list_all();
             let described: std::collections::BTreeMap<String, String> = listed
@@ -3149,6 +3193,107 @@ mod tests {
             "an unrestricted server has nothing to recover, and the sentence costs \
              tokens on every turn: {full}",
         );
+    }
+
+    /// The same property through a **real** server, and deliberately ungated so it
+    /// runs in every feature set the suite is built under.
+    ///
+    /// `only_a_restricted_server_points_a_model_at_the_class_index` asserts this
+    /// too and is `#[cfg(feature = "execution")]`, because its other half needs the
+    /// `execution` tools to withhold — and that gate is exactly why the defect
+    /// survived: under `--all-features` and under `default` the clause was correct,
+    /// and it was wrong only in the build where no test ran. An ungated assertion
+    /// over `Advertised::All` costs one line and covers the configuration the gated
+    /// one cannot reach.
+    #[test]
+    fn no_feature_set_makes_an_unrestricted_server_claim_a_restriction() {
+        use rmcp::ServerHandler as _;
+
+        let instructions = seeded().get_info().instructions.unwrap_or_default();
+        assert!(
+            !instructions.contains("not a missing capability"),
+            "an unrestricted server withheld nothing and must not say it did — the \
+             `security_*`/`sandbox_*` tools are absent from an `execution`-less build \
+             for a reason no `--tools` flag can undo, and calling that a withholding \
+             both misinforms the model and spends tokens on every turn: {instructions}",
+        );
+    }
+
+    /// **An unrestricted server says nothing about withholding — whatever feature
+    /// set it was built with.**
+    ///
+    /// The sentence is only worth its tokens where it changes an answer, and on an
+    /// unrestricted server there is no withheld class for a model to recover. That
+    /// is easy to get right for the build the suite happens to run under and easy
+    /// to get wrong for the others: `security_*` and `sandbox_*` are
+    /// `#[cfg(feature = "execution")]`, so a version of this that decided from the
+    /// router alone emitted the clause on **every** server built without that
+    /// feature — claiming a restriction nobody applied, in exactly the
+    /// configuration that saved nothing by it.
+    ///
+    /// Driven through synthetic predicates rather than a real server, because the
+    /// property is about the *relationship* between two sets and a test built from
+    /// one router can only ever exercise the feature set it was compiled under. A
+    /// `#[cfg(feature = "execution")]` test here would have passed under
+    /// `--all-features` and under `default` while the defect sat in the build CI
+    /// runs as `no-default-features`.
+    #[test]
+    fn an_unrestricted_server_never_claims_a_class_was_withheld() {
+        let index = crate::tool_class::CLASS_INDEX_TOOL;
+        let execution_tool = |name: &str| {
+            crate::tool_class::class_of(name).is_some_and(|c| c == "security" || c == "sandbox")
+        };
+
+        // Every tool present: nothing withheld, nothing to say.
+        assert_eq!(
+            super::withheld_class_clause(|_| true, |_| true),
+            None,
+            "a full server has no withheld class and must not spend tokens saying so",
+        );
+
+        // The build without `execution`. Its `security_*`/`sandbox_*` routes are
+        // absent from an unrestricted server too, and absent is not withheld.
+        let carried = |name: &str| !execution_tool(name);
+        assert_eq!(
+            super::withheld_class_clause(carried, carried),
+            None,
+            "a build that does not carry the `execution` tools withheld nothing — \
+             saying otherwise tells a model a restriction was applied that was not, \
+             and costs tokens on every turn to do it",
+        );
+
+        // And the case the clause exists for is still detected: this build carries
+        // everything and the operator kept only `query`.
+        let kept = |name: &str| {
+            name == index || crate::tool_class::class_of(name).is_some_and(|c| c == "query")
+        };
+        assert!(
+            super::withheld_class_clause(|_| true, kept).is_some(),
+            "a genuinely restricted server must still point a model at the index",
+        );
+        // Including on the feature-poor build, where `quality` is still withheld
+        // by the operator even though `security`/`sandbox` are merely absent.
+        assert!(
+            super::withheld_class_clause(carried, |n| carried(n) && kept(n)).is_some(),
+            "a restriction and a feature gate can coexist, and the restriction is \
+             still worth telling a model about",
+        );
+
+        // A server with no index to point at says nothing, even with a class
+        // genuinely withheld: telling a model to call a tool that is not
+        // advertised is worse than silence. `restrict` cannot produce this, and
+        // that is the point — the clause must not depend on it having been used.
+        let no_index = |name: &str| {
+            crate::tool_class::class_of(name).is_some_and(|c| c == "query") && name != index
+        };
+        assert!(
+            crate::tool_class::CLASSES
+                .iter()
+                .any(|(_, tools)| tools.iter().any(|t| !no_index(t))),
+            "the fixture must actually withhold something, or the next assertion \
+             passes for the wrong reason",
+        );
+        assert_eq!(super::withheld_class_clause(|_| true, no_index), None);
     }
 
     /// The saving the issue was filed for, asserted as a floor on the **serialized

@@ -11407,28 +11407,46 @@ fn resolve_mcp_surface(_cfg: &config::Loaded, flag: &[String]) -> anyhow::Result
     Ok(())
 }
 
-/// Whether `surface` advertises `name` — the one question the served-chat
-/// registry asks of an operator's selection (#664).
+/// Which of the tools this surface `carries` an operator's `surface` advertises
+/// — the one question the served-chat registry asks of the selection (#664).
 ///
-/// Its own function because [`McpSurface`] is two types. With `mcp` it forwards
-/// to `Advertised::allows`, which is the same predicate the MCP router is built
-/// from, so the two surfaces cannot answer it differently. Without `mcp` there is
+/// Its own function because [`McpSurface`] is two types. Without `mcp` there is
 /// no restriction to apply — `resolve_mcp_surface` refuses a `--tools` in that
-/// build — so it is a constant `true` rather than a second policy.
+/// build — so it is the carried set unchanged rather than a second policy.
 ///
-/// **Ask it at startup, never on the request path.** `Advertised::All::allows`
-/// answers by building an rmcp router and listing it, so a loop over this costs a
-/// router per tool. [`GraphToolRegistry::restricted`] is the one caller for that
-/// reason: it asks once per tool when the server starts and keeps the answer.
+/// # Why it narrows a set rather than answering about one name
+///
+/// It used to be a per-name predicate forwarding to `Advertised::allows`, which
+/// answers `All` by **building an rmcp router and listing it**. That is a fine
+/// way to answer the question once and a poor way to answer it sixteen times per
+/// registry, once per hosted workspace, which is what a predicate invites. The
+/// set form makes the unrestricted case what it actually is — the carried set,
+/// copied — and the restricted case one intersection, so there is no router to
+/// build and no loop for a later caller to put it back into.
+///
+/// `Advertised` is matched here rather than delegated to for the same reason: the
+/// delegate has to answer "is this a Roteiro tool at all", which this caller
+/// already knows, and paid for a router to find out.
 #[cfg(all(feature = "serve", feature = "mcp"))]
-fn surface_advertises(surface: &McpSurface, name: &str) -> bool {
-    surface.allows(name)
+fn surface_narrows(
+    surface: &McpSurface,
+    carried: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    match surface {
+        rto_render::mcp::Advertised::All => carried.clone(),
+        rto_render::mcp::Advertised::Only(allowed) => {
+            carried.intersection(allowed).cloned().collect()
+        }
+    }
 }
 
-/// The no-MCP reading: nothing was restricted, so everything is advertised.
+/// The no-MCP reading: nothing was restricted, so everything carried is served.
 #[cfg(all(feature = "serve", not(feature = "mcp")))]
-fn surface_advertises(_surface: &McpSurface, _name: &str) -> bool {
-    true
+fn surface_narrows(
+    _surface: &McpSurface,
+    carried: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    carried.clone()
 }
 
 #[cfg_attr(not(feature = "serve"), allow(dead_code))]
@@ -12892,11 +12910,7 @@ impl GraphToolRegistry {
             workspace,
             #[cfg(feature = "execution")]
             asset_root: rto_exec::asset_root(),
-            advertised: carried
-                .iter()
-                .filter(|name| surface_advertises(surface, name))
-                .cloned()
-                .collect(),
+            advertised: surface_narrows(surface, &carried),
             carried,
         }
     }
