@@ -38,6 +38,11 @@ mod remote_transport;
 // no Ask to wire.
 #[cfg(all(feature = "remote", feature = "serve"))]
 mod remote_engine;
+// Diff text for a path over a range. Unconditional and shared: the graph arm
+// below is unconditional, `review_llm` is gated on a generation backend, and
+// both need the same hunks — see the module doc for why that forced one home
+// rather than a second copy (issue #649).
+mod diff;
 mod review;
 // The LLM reviewer's driver and the corpus replay that measures it (Stage 35b).
 // Present under `test` as well as under a generation backend: the diff
@@ -362,6 +367,19 @@ enum Command {
         /// cost a full pass.
         #[arg(long, value_name = "N", requires = "replay")]
         limit: Option<usize>,
+        /// Leave the diff out of the report.
+        ///
+        /// The diff is shown by default: the complaint in issue #649 was that a
+        /// reviewer had to hold `git diff` in another window and join it to this
+        /// report by hand, and an agent handed the JSON got the context without
+        /// the change it is context *for*. Both are only fixed if it is there
+        /// without asking.
+        ///
+        /// This is the escape hatch for when the graph view is what is wanted
+        /// and the hunks are noise — a very large change, or a caller that
+        /// already has the diff.
+        #[arg(long)]
+        no_diff: bool,
         /// Give the reviewer **graph context** — the ADRs governing the code under
         /// review, and the doc comments elsewhere in the file the diff does not
         /// show — assembled from the graph as it was at each reviewed commit.
@@ -1908,6 +1926,7 @@ fn main() -> anyhow::Result<()> {
             checks,
             limit,
             graph_context,
+            no_diff,
         } => match (score, replay, llm) {
             (Some(run), _, _) => review::run_score(&run, corpus.as_deref(), json),
             (None, Some(out), _) => {
@@ -1916,7 +1935,7 @@ fn main() -> anyhow::Result<()> {
             (None, None, true) => {
                 run_llm_review(base.as_deref(), checks.as_deref(), graph_context, ingest)
             }
-            (None, None, false) => run_review(ingest, json, base.as_deref(), debt_ignore),
+            (None, None, false) => run_review(ingest, json, base.as_deref(), debt_ignore, no_diff),
         },
         Command::Query {
             key,
@@ -4272,6 +4291,7 @@ fn run_review(
     json: bool,
     base: Option<&str>,
     debt_ignore: &[String],
+    no_diff: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
     // Range review is over committed history, so build the committed (HEAD)
@@ -4283,33 +4303,63 @@ fn run_review(
         GraphSource::Worktree
     };
     let report = build_graph(&repo, &mut store, &cache, ingest, source)?;
-    let changed =
-        if let Some(base) = base {
-            repo.changed_between(base)?
-        } else {
-            // Working-tree review: tracked edits/deletes, plus brand-new untracked
-            // files as additions — the overlaid graph already includes them, so the
-            // change set must too or their symbols would go unreviewed.
-            let mut changed = repo.changed_files()?;
-            changed.extend(repo.untracked_files()?.into_iter().map(|path| {
-                rto_graph::ChangedFile {
-                    path,
-                    status: rto_graph::ChangeStatus::Added,
-                }
-            }));
-            changed.sort_by(|a, b| a.path.cmp(&b.path));
-            // The two sets are normally disjoint (tracked vs untracked), but some
-            // intermediate git states can overlap — dedupe by path so the review
-            // never lists a file twice. A tracked entry sorts before its untracked
-            // duplicate only by chance, so prefer keeping the first of each path.
-            changed.dedup_by(|a, b| a.path == b.path);
-            changed
-        };
+    let changed = if let Some(base) = base {
+        repo.changed_between(base)?
+    } else {
+        // Working-tree review: tracked edits/deletes, plus brand-new files as
+        // additions — the overlaid graph already includes them, so the change
+        // set must too or their symbols would go unreviewed.
+        //
+        // "Brand-new" is `untracked ∪ staged-but-not-in-HEAD`, not `untracked`
+        // alone, for the reason `sync` had to learn in issue #636: the two
+        // source sets classify against **different trees**. `changed_files`
+        // walks HEAD's blobs, so a file HEAD has never seen is not in it; and
+        // `untracked_files` classifies against the *index*, so `git add` takes
+        // the file out of that set too. A staged new file therefore fell
+        // through both and was not reviewed at all — no symbols, no diff, and
+        // no mention. `review` reported "no working-tree changes" on a tree
+        // with a staged addition in it, which is the worst way to be wrong: it
+        // is the sentence you would read as "you are done".
+        let mut changed = repo.changed_files()?;
+        let head_paths: std::collections::BTreeSet<String> =
+            repo.walk_blobs()?.into_iter().map(|b| b.path).collect();
+        let mut new_paths: std::collections::BTreeSet<String> =
+            repo.untracked_files()?.into_iter().collect();
+        for entry in repo.index_files()? {
+            if !head_paths.contains(&entry.path) {
+                new_paths.insert(entry.path);
+            }
+        }
+        changed.extend(new_paths.into_iter().map(|path| rto_graph::ChangedFile {
+            path,
+            status: rto_graph::ChangeStatus::Added,
+        }));
+        changed.sort_by(|a, b| a.path.cmp(&b.path));
+        // The two sets are normally disjoint (tracked vs untracked), but some
+        // intermediate git states can overlap — dedupe by path so the review
+        // never lists a file twice. A tracked entry sorts before its untracked
+        // duplicate only by chance, so prefer keeping the first of each path.
+        changed.dedup_by(|a, b| a.path == b.path);
+        changed
+    };
     // The repository's own `[debt] ignore`, on the same footing as `debt`,
     // `check` and the graph API: `review`'s per-file `debt` is that same
     // inventory scoped to the change, so it must be scoped by the same list
     // (issue #409).
-    let review = review::build(&store, &changed, &report.violations, debt_ignore)?;
+    // The diff needs the repository's working directory, which a bare repo has
+    // none of — there is nothing to diff a working tree against there, so the
+    // report simply carries no diff rather than failing.
+    let diff_source = (!no_diff)
+        .then(|| repo.workdir())
+        .flatten()
+        .map(|repo| review::DiffSource { repo, base });
+    let review = review::build(
+        &store,
+        &changed,
+        &report.violations,
+        debt_ignore,
+        diff_source,
+    )?;
 
     if json {
         emit_json(&review)?;
@@ -4320,6 +4370,28 @@ fn run_review(
         exit_gate_failure();
     }
     Ok(())
+}
+
+/// Print one file's diff beneath its graph context, indented so the two read as
+/// one entry rather than as two reports about the same path (issue #649).
+///
+/// The three states are kept distinct on purpose. No diff requested prints
+/// nothing at all. A diff that exists prints its hunks. A diff that is *empty*
+/// says so in words — a mode change, a rename, a permission bit — because
+/// silence there would read as "this file has no diff to show", which is the
+/// same failure the LLM arm's `announce_unreviewable` exists to prevent: a file
+/// nothing was said about must not look like a file with nothing to say.
+fn print_file_diff(diff: Option<&str>) {
+    let Some(text) = diff else {
+        return;
+    };
+    if text.is_empty() {
+        println!("  diff: no textual change (mode, rename, or binary content)");
+        return;
+    }
+    for line in text.lines() {
+        println!("  {line}");
+    }
 }
 
 /// Render a review report as a compact, scannable summary.
@@ -4351,6 +4423,7 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
         if !file.debt.is_empty() {
             println!("  intent-debt: {}", file.debt.len());
         }
+        print_file_diff(file.diff.as_deref());
     }
     if !review.impacted.is_empty() {
         let names: Vec<&str> = review.impacted.iter().map(|i| i.key.as_str()).collect();

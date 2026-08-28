@@ -512,3 +512,141 @@ fn score_and_base_are_mutually_exclusive() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `review` shows the change, not only what the graph knows about it (#649).
+///
+/// The complaint the diff answers is that a reviewer had to hold `git diff` in
+/// another window and join it to this report by hand, and that an agent handed
+/// the JSON received the context without the change it is context *for*. So the
+/// assertions here are about the diff being present **by default** in both
+/// surfaces — an opt-in would not have fixed either half.
+#[test]
+fn review_shows_the_diff_by_default_in_both_surfaces() {
+    let dir = fresh_dir("diff");
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() {}\n",
+    );
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() { helper(); }\nfn helper() {}\n",
+    );
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "non-drift review exits 0: {text}");
+    assert!(text.contains("@@"), "a hunk header is shown: {text}");
+    assert!(
+        text.contains("+fn helper() {}"),
+        "the added line is shown: {text}"
+    );
+    // The graph context is not displaced by the diff — the point is both, in one
+    // place. A change that showed the diff *instead* would have traded one
+    // half-report for another.
+    assert!(
+        text.contains("calls: sym:rust:src/main.rs#helper"),
+        "graph context survives alongside the diff: {text}"
+    );
+
+    let json = roteiro(&dir, &["review", "--json"]);
+    let text = String::from_utf8_lossy(&json.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    let diff = doc["files"][0]["diff"].as_str().expect("a diff field");
+    assert!(
+        diff.contains("+fn helper() {}"),
+        "JSON carries the hunks: {diff}"
+    );
+
+    // `--no-diff` is the escape hatch, and must leave the rest untouched.
+    let plain = roteiro(&dir, &["review", "--no-diff"]);
+    let text = String::from_utf8_lossy(&plain.stdout);
+    assert!(!text.contains("@@"), "--no-diff omits the hunks: {text}");
+    assert!(
+        text.contains("calls: sym:rust:src/main.rs#helper"),
+        "--no-diff keeps the graph context: {text}"
+    );
+    let plain_json = roteiro(&dir, &["review", "--no-diff", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&plain_json.stdout)).expect("valid JSON");
+    assert!(
+        doc["files"][0].get("diff").is_none(),
+        "--no-diff omits the field entirely rather than sending null"
+    );
+}
+
+/// A brand-new file shows its contents (#649).
+///
+/// This is the case that fails **silently**. An untracked path is not part of
+/// the comparison `git diff` makes, so it reports success and no text — which
+/// is indistinguishable from a file that did not change. The review would list
+/// the file, list its symbols, and omit the only thing new about it, while
+/// looking entirely healthy.
+#[test]
+fn review_shows_the_contents_of_a_brand_new_file() {
+    let dir = fresh_dir("diff-added");
+    write(&dir, "src/main.rs", "fn main() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // Never `git add`ed: untracked, which is how a new file exists for most of
+    // the time anyone would want to review it.
+    write(&dir, "src/added.rs", "fn brand_new() {}\n");
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("src/added.rs [added]"),
+        "the new file is listed: {text}"
+    );
+    assert!(
+        text.contains("+fn brand_new() {}"),
+        "and its contents are shown, not just its name: {text}"
+    );
+
+    // Staging it must not change the answer: the same file, the same review.
+    git(&dir, &["add", "src/added.rs"]);
+    let staged = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&staged.stdout);
+    assert!(
+        text.contains("+fn brand_new() {}"),
+        "a staged addition shows its contents too: {text}"
+    );
+}
+
+/// A deletion shows what was removed (#649).
+///
+/// The graph cannot answer this one at all — the nodes are gone, so there is no
+/// context to print and the file would otherwise appear as a bare path with a
+/// `[deleted]` tag. The removed code is the only evidence of what the change did.
+#[test]
+fn review_shows_what_a_deletion_removed() {
+    let dir = fresh_dir("diff-deleted");
+    write(&dir, "src/main.rs", "fn main() {}\n");
+    write(&dir, "src/gone.rs", "fn doomed() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    std::fs::remove_file(dir.join("src/gone.rs")).expect("remove");
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("src/gone.rs [deleted]"),
+        "the deletion is listed: {text}"
+    );
+    assert!(
+        text.contains("-fn doomed() {}"),
+        "and the removed code is shown: {text}"
+    );
+}

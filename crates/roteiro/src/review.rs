@@ -8,6 +8,7 @@
 //! bonus; this command needs no server.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use rto_graph::{NodeContext, NodeKind, Store, StoreError, build_context, debt, dependents};
 use serde::Serialize;
@@ -53,6 +54,55 @@ pub struct FileReview {
     pub symbols: Vec<SymbolReview>,
     /// Intent-debt markers present in the file.
     pub debt: Vec<String>,
+    /// The change itself, as a unified diff (issue #649).
+    ///
+    /// `None` when no diff was requested or git would not produce one; `Some("")`
+    /// when there is genuinely no text to show, such as a mode-only change. The
+    /// two are not the same fact and are not rendered the same way.
+    ///
+    /// Additive within `roteiro.review/v1` — see `docs/JSON_SCHEMA.md`, which
+    /// permits new fields within a major version. A consumer that has never
+    /// heard of this one is unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+}
+
+/// Where [`build`] should read diff text from.
+///
+/// Passing `None` for this is what "review without the diff" means; the graph
+/// arm behaves exactly as it did before issue #649.
+#[derive(Debug, Clone, Copy)]
+pub struct DiffSource<'a> {
+    /// The repository to run git in.
+    pub repo: &'a Path,
+    /// The range's base, or `None` for a working-tree review.
+    pub base: Option<&'a str>,
+}
+
+impl DiffSource<'_> {
+    /// The unified diff for one changed file, or `None` if git would not answer.
+    ///
+    /// An **added** file needs care. In a working-tree review it may be
+    /// untracked, and plain `git diff` cannot see an untracked path at all — it
+    /// reports success and no text, which is indistinguishable from an
+    /// unchanged file. So an empty answer for an addition is retried against
+    /// `/dev/null`, which is the only way a brand-new file's contents reach the
+    /// reviewer. Getting this wrong is quiet: the file is listed, its symbols
+    /// are listed, and the one thing new about it is missing.
+    fn for_file(self, cf: &rto_graph::ChangedFile) -> Option<String> {
+        let range: Vec<&str> = match self.base {
+            Some(b) => vec![b, "HEAD"],
+            None => vec!["HEAD"],
+        };
+        let text = crate::diff::unified(self.repo, &range, &cf.path);
+        if cf.status == rto_graph::ChangeStatus::Added
+            && self.base.is_none()
+            && text.as_deref().is_none_or(str::is_empty)
+        {
+            return crate::diff::unified_untracked(self.repo, &cf.path);
+        }
+        text
+    }
 }
 
 /// One changed symbol and the graph's view of it.
@@ -137,6 +187,7 @@ pub fn build(
     changed: &[rto_graph::ChangedFile],
     violations: &[rto_spec::Violation],
     ignore: &[String],
+    diff: Option<DiffSource<'_>>,
 ) -> Result<ReviewReport, StoreError> {
     let changed_paths: BTreeSet<&str> = changed.iter().map(|c| c.path.as_str()).collect();
     // Every marker `debt` retains under this repository's `[debt] ignore`, keyed
@@ -154,6 +205,10 @@ pub fn build(
                 status: "deleted",
                 symbols: Vec::new(),
                 debt: Vec::new(),
+                // A deletion has a diff worth reading — it is the removed code,
+                // and it is the only place a reviewer can see what was lost. The
+                // graph cannot show it: the nodes are gone.
+                diff: diff.and_then(|d| d.for_file(cf)),
             });
             continue;
         }
@@ -184,6 +239,7 @@ pub fn build(
             status: cf.status.as_str(),
             symbols,
             debt,
+            diff: diff.and_then(|d| d.for_file(cf)),
         });
     }
 

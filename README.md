@@ -33,7 +33,7 @@ cargo install roteiro          # lean default build; offline unless you ask it t
 cd your-repo
 roteiro init                   # store + git hooks + AGENTS.md
 roteiro sync                   # build the graph
-roteiro review                 # graph-grounded review of your change
+roteiro review                 # your change, plus what the graph knows about it
 ```
 
 The default build needs no toolchain class beyond the C compiler Rust itself
