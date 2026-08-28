@@ -420,4 +420,6 @@ fn staging_a_file_does_not_change_what_check_says_about_it() {
         untracked_out, staged_out,
         "and must say the same thing about it"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
