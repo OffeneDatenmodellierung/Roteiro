@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.3.0...roteiro-v3.3.1) - 2026-08-28
+
+### Fixed
+
+- *(test)* prove the safecrlf fixture reproduces, and correct a stale doc
+- *(diff)* a warning on stderr must not discard the diff
+- *(check)* staging a file no longer hides its drift
+
+### Other
+
+- *(check)* clean up the scratch directory like every other test here
+- *(diff)* a failed fixture setup must not present as an unsupported platform
+
 ## [3.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.2.1...roteiro-v3.3.0) - 2026-08-28
 
 ### Added
