@@ -12107,6 +12107,11 @@ fn serve_mcp(
 /// mode issue #584 was filed about, so the server states its own surface. The
 /// byte figure is the one that matters on a byte-bounded provider and, at the
 /// 3.13 ms/token prefill measured in #578, the one that turns into seconds.
+///
+/// It describes **both** surfaces since #664, which is why `serve` announces it
+/// whether or not `--mcp` was passed: the selection now narrows the served-chat
+/// tools too, and a `serve --tools query` that said nothing would be exactly the
+/// silent restriction this line exists to make visible.
 #[cfg(feature = "mcp")]
 fn announce_mcp_surface(surface: &McpSurface) {
     use rto_render::mcp::{Advertised, advertised_bytes, tool_names};
@@ -12121,7 +12126,7 @@ fn announce_mcp_surface(surface: &McpSurface) {
         .filter(|name| !allowed.contains(*name))
         .collect();
     eprintln!(
-        "roteiro mcp: advertising {} of {} tools — {} of {} advertised bytes{}",
+        "roteiro tools: advertising {} of {} tools — {} of {} advertised bytes{}",
         allowed.len(),
         all.len(),
         advertised_bytes(surface),
@@ -12582,6 +12587,12 @@ fn serve_v1_tail(
     // set already holds. The per-workspace registries back
     // `/v1/workspaces/{ws}/chat/completions`, so a workspace-level Ask cannot see or
     // answer about a project outside the selected workspace.
+    // Before either surface is built, and unconditionally on `serve`: the
+    // selection narrows the served-chat tools as well as `/mcp` (#664), so a
+    // `serve --tools query` without `--mcp` has an effect and must say so. A
+    // restriction nobody can see is the failure #584 was filed about.
+    #[cfg(feature = "mcp")]
+    announce_mcp_surface(&opts.mcp_surface);
     let (tools, workspace_tools): (Option<SharedToolRegistry>, WorkspaceToolRegistries) =
         if cfg.serve.tools.unwrap_or(true) {
             // The **same** resolved selection the `/mcp` router is given (#664).
@@ -12590,15 +12601,15 @@ fn serve_v1_tail(
             // recurring as; a `--tools query` server that still advertised
             // fifteen tools to the served model would also spend the whole saving
             // the flag was set to make.
-            let surface = opts.mcp_surface.clone();
+            let surface = &opts.mcp_surface;
             let flat_tools: SharedToolRegistry =
-                std::sync::Arc::new(GraphToolRegistry::restricted(flat.clone(), surface.clone()));
+                std::sync::Arc::new(GraphToolRegistry::restricted(flat.clone(), surface));
             let per_ws: WorkspaceToolRegistries = set
                 .workspace_handles()
                 .into_iter()
                 .map(|(name, ws)| {
                     let reg: SharedToolRegistry =
-                        std::sync::Arc::new(GraphToolRegistry::restricted(ws, surface.clone()));
+                        std::sync::Arc::new(GraphToolRegistry::restricted(ws, surface));
                     (name, reg)
                 })
                 .collect();
@@ -12665,10 +12676,6 @@ fn serve_v1_tail(
     if opts.mcp {
         #[cfg(feature = "mcp")]
         {
-            // Said here as well as in `serve_mcp`, because a restricted `/mcp`
-            // mounted beside `/v1` is the same claim and a reader of the startup
-            // line should not have to know which command mounted it.
-            announce_mcp_surface(&opts.mcp_surface);
             let combined = router.merge(rto_render::mcp::mcp_router(flat, &opts.mcp_surface));
             eprintln!(
                 "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note} + /mcp — serving: {names}"
@@ -12825,21 +12832,34 @@ struct GraphToolRegistry {
     /// its absence, cleared 8.7 GB on the machine this was written on.
     #[cfg(feature = "execution")]
     asset_root: std::path::PathBuf,
-    /// What this registry advertises **and** dispatches: every tool, or the
-    /// classes/names the operator selected (#664).
+    /// The tool names this registry advertises **and** dispatches: every tool it
+    /// carries, or what the operator's `--tools` selection kept of them (#664).
     ///
-    /// The **same resolved value** the MCP server is given, not a second one
-    /// computed the same way. The two surfaces already share their descriptions
+    /// Resolved from the **same value** the MCP server is given, not computed a
+    /// second time the same way. The two surfaces already share their descriptions
     /// (`rto_render::tool_text`) and their class table
     /// (`rto_render::tool_class`); sharing the selection too is what stops a
     /// `--tools query` server advertising four tools over MCP and fifteen over
     /// chat, which is one server telling two clients different things about
     /// itself — the shape of the drift issue #321 kept recurring as.
     ///
-    /// Its type is [`McpSurface`], which is `()` in a build without `mcp`. A
-    /// serve-only build has no restriction to apply and
-    /// [`surface_advertises`] is a constant `true` there.
-    surface: McpSurface,
+    /// Stored as the resolved **set** rather than as the [`McpSurface`] it came
+    /// from, because `tools()` runs on every chat request while the selection is
+    /// fixed at startup: `Advertised::All::allows` builds an rmcp router to answer,
+    /// and asking it once per tool per request would rebuild it fifteen times a
+    /// turn to learn something that cannot change.
+    advertised: std::collections::BTreeSet<String>,
+    /// Every tool name this surface **carries in this build**, before the
+    /// selection above narrowed it.
+    ///
+    /// Held for the same reason `advertised` is, and it has to be a second set
+    /// rather than a derivation: distinguishing a tool the operator withheld from
+    /// one this surface never had is the whole point of the class index, and only
+    /// the difference between these two answers it. Deriving it from
+    /// [`served_tool_defs`] on the request path would rebuild every `ToolDef`
+    /// — descriptions and JSON schemas included — on every tool call, to learn a
+    /// set of sixteen strings fixed at compile time.
+    carried: std::collections::BTreeSet<String>,
 }
 
 #[cfg(feature = "serve")]
@@ -12853,16 +12873,26 @@ impl GraphToolRegistry {
     /// applied to one surface and not the other.
     #[cfg(test)]
     fn new(workspace: std::sync::Arc<rto_graph::Workspace>) -> Self {
-        Self::restricted(workspace, McpSurface::default())
+        Self::restricted(workspace, &McpSurface::default())
     }
 
     /// A registry confined to `surface`, for a server started with `--tools`.
-    fn restricted(workspace: std::sync::Arc<rto_graph::Workspace>, surface: McpSurface) -> Self {
+    ///
+    /// The selection is resolved against this surface's own tool set **here**, at
+    /// startup, so nothing on the request path has to ask again.
+    fn restricted(workspace: std::sync::Arc<rto_graph::Workspace>, surface: &McpSurface) -> Self {
+        let carried: std::collections::BTreeSet<String> =
+            served_tool_defs().into_iter().map(|t| t.name).collect();
         Self {
             workspace,
             #[cfg(feature = "execution")]
             asset_root: rto_exec::asset_root(),
-            surface,
+            advertised: carried
+                .iter()
+                .filter(|name| surface_advertises(surface, name))
+                .cloned()
+                .collect(),
+            carried,
         }
     }
 
@@ -13380,10 +13410,14 @@ fn coupling_tool_def(
 /// to the dispatcher's own unknown-tool error, which is the right answer for it —
 /// there is no class to load that would produce it.
 #[cfg(feature = "serve")]
-fn withheld_tool_refusal(surface: &McpSurface, name: &str) -> Option<String> {
+fn withheld_tool_refusal(
+    carried: &std::collections::BTreeSet<String>,
+    advertised: &std::collections::BTreeSet<String>,
+    name: &str,
+) -> Option<String> {
     if name == rto_render::tool_class::CLASS_INDEX_TOOL
-        || surface_advertises(surface, name)
-        || !served_tool_defs().iter().any(|t| t.name == name)
+        || advertised.contains(name)
+        || !carried.contains(name)
     {
         return None;
     }
@@ -13405,12 +13439,13 @@ fn withheld_tool_refusal(surface: &McpSurface, name: &str) -> Option<String> {
 /// selection, read through the same predicate `tools` filters with, so the reply
 /// and the listing cannot disagree.
 #[cfg(feature = "serve")]
-fn class_index_reply(surface: &McpSurface) -> Result<String, String> {
-    let carried: std::collections::BTreeSet<String> =
-        served_tool_defs().into_iter().map(|t| t.name).collect();
+fn class_index_reply(
+    carried: &std::collections::BTreeSet<String>,
+    advertised: &std::collections::BTreeSet<String>,
+) -> Result<String, String> {
     serde_json::to_string(&rto_render::tool_class::report(
         |tool| carried.contains(tool),
-        |tool| surface_advertises(surface, tool),
+        |tool| advertised.contains(tool),
     ))
     .map_err(|e| e.to_string())
 }
@@ -13538,7 +13573,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         // keeps `rto_render::tool_class` the only place a class is written down —
         // a per-tool `if` would be a second one, and the two would drift the way
         // the descriptions did before `tool_text`.
-        tools.retain(|t| surface_advertises(&self.surface, &t.name));
+        tools.retain(|t| self.advertised.contains(&t.name));
         // The class index is appended after the filter and is never subject to
         // it. It is how a model learns that a class was WITHHELD rather than
         // absent, so a restriction able to remove it would leave the served model
@@ -13559,11 +13594,11 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
     fn call(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
         let str_arg = |k: &str| args.get(k).and_then(serde_json::Value::as_str);
         let project = str_arg("project");
-        if let Some(refusal) = withheld_tool_refusal(&self.surface, name) {
+        if let Some(refusal) = withheld_tool_refusal(&self.carried, &self.advertised, name) {
             return Err(refusal);
         }
         match name {
-            "list_tool_classes" => class_index_reply(&self.surface),
+            "list_tool_classes" => class_index_reply(&self.carried, &self.advertised),
             "list_projects" => serde_json::to_string(&serde_json::json!({
                 "projects": self.workspace.names(),
             }))
@@ -18045,7 +18080,7 @@ mod workspace_scoped_tools {
                 "api",
                 rto_graph::Store::open_in_memory().expect("store"),
             )),
-            restriction.advertised,
+            &restriction.advertised,
         )
     }
 

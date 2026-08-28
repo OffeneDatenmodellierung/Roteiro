@@ -840,8 +840,13 @@ impl GraphServer {
     /// to be two views of one object.
     #[tool]
     async fn list_tool_classes(&self) -> CallToolResult {
+        // Resolved once. `tool_names` builds an unrestricted router to answer, and
+        // the predicate is asked once per tool row — calling it inside the closure
+        // would rebuild that router fifteen times to learn something that cannot
+        // change while the process runs.
+        let in_build: BTreeSet<String> = tool_names().into_iter().collect();
         json_result(&crate::tool_class::report(
-            |name| tool_names().iter().any(|t| t == name),
+            |name| in_build.contains(name),
             |name| self.tool_router.has_route(name),
         ))
     }
