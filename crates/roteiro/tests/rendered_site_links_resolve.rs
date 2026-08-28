@@ -33,6 +33,8 @@
 //! that remained — anchors on `SANDBOXED_LINTING.md` written to GitHub's slug
 //! rule — are fixed in the same change. This lands at zero.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -64,14 +66,28 @@ fn render() -> Option<PathBuf> {
     if !root.join("docs").is_dir() || !root.join("website/pages").is_dir() {
         return None;
     }
-    let out = std::env::temp_dir().join(format!("roteiro-site-links-{}", std::process::id()));
-    std::fs::remove_dir_all(&out).ok();
-    let status = std::process::Command::new(BIN)
+    // Keyed by pid **and** a process-wide counter, not the pid alone. Rust runs
+    // the tests in a binary in parallel, so a pid-only path is shared by every
+    // test in this file: the moment a second one calls `render`, the two race to
+    // delete and recreate the directory the other is reading. That failure needs
+    // a second caller to exist before it bites, so it would arrive as a flake in
+    // somebody else's change rather than as a mistake in this one.
+    let out = common::scratch_dir("site-links");
+    let result = std::process::Command::new(BIN)
         .args(["render", "docs", "--out", out.to_str().expect("utf-8 path")])
         .current_dir(&root)
-        .status()
+        .output()
         .expect("run `roteiro render docs`");
-    assert!(status.success(), "`render docs` failed: {status}");
+    // `output()` rather than `status()`: when this gate fails in CI, the render's
+    // own diagnosis is the whole of the evidence, and `status()` throws it away.
+    // A gate that fails without saying why costs more than it saves.
+    assert!(
+        result.status.success(),
+        "`render docs` failed: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr),
+    );
     Some(out)
 }
 
