@@ -95,17 +95,89 @@ pub fn class_names() -> Vec<&'static str> {
     CLASSES.iter().map(|(name, _)| *name).collect()
 }
 
+/// A tool advertised on this server.
+const LOADED: &str = "loaded";
+/// A tool this build carries that the operator's selection did not keep.
+const WITHHELD: &str = "withheld";
+/// A tool this build or surface does not carry at all.
+const UNAVAILABLE: &str = "unavailable";
+/// A class with no tool advertised here.
+const NOT_LOADED_HERE: &str = "not-loaded-here";
+/// A class advertised in part.
+const PARTLY_LOADED: &str = "partly-loaded";
+
+/// Every state this module can emit, each with the one line that defines it.
+///
+/// # Why the note is generated from this rather than written beside it
+///
+/// The note exists to stop a model reporting a withheld tool as a capability
+/// Roteiro does not have, and it can only do that if a model reading **only the
+/// JSON** can tell the states apart. A hand-written note did not hold that: it
+/// explained `not-loaded-here` and `unavailable` while the payload also emitted
+/// `loaded`, `withheld` and `partly-loaded` with nothing defining them — and
+/// `withheld` is precisely the case the note is for.
+///
+/// Building the note from this table makes *no observable state is undefined*
+/// true by construction rather than by remembering. The states are consts rather
+/// than literals at each match arm for the same reason: the value in the payload
+/// and the entry that explains it are one string, so they cannot come apart.
+///
+/// Definitions are terse deliberately. This travels back on every call, and a
+/// feature whose point is spending fewer tokens should not restate itself.
+const STATE_GLOSSARY: [(&str, &str); 5] = [
+    (LOADED, "advertised here"),
+    // No definition may contain a semicolon: `note` joins the entries with one, so
+    // an internal semicolon reads as a further state with no name.
+    (
+        WITHHELD,
+        "this build has the tool but the operator's `--tools` did not select its class",
+    ),
+    (NOT_LOADED_HERE, "no tool of the class is advertised here"),
+    (
+        PARTLY_LOADED,
+        "some of the class is advertised, some withheld",
+    ),
+    (
+        UNAVAILABLE,
+        "this build or surface does not carry it at all, and no startup flag reaches it",
+    ),
+];
+
+/// What a caller should *do* about those states — advice rather than definition,
+/// so it is stated once instead of repeated per entry.
+const STATE_GUIDANCE: &str = "`withheld`, `not-loaded-here` and `partly-loaded` are STARTUP CHOICES made to keep unused tool descriptions out of every turn's prompt (`roteiro serve --tools query,quality`, or `[mcp] tools` in `roteiro.toml`) — they are NOT capabilities Roteiro lacks. Name the class so the user can restart the server with it, rather than reporting that Roteiro cannot answer the question.";
+
+/// The rendered definition of `state` as it appears in a [`note`].
+///
+/// Shared with the test so "is this state defined" asks about the **definition**
+/// and not about the word appearing anywhere. [`STATE_GUIDANCE`] names three
+/// states in passing, so a bare substring check would call those defined however
+/// the glossary changed underneath it.
+fn definition_prefix(state: &str) -> String {
+    format!("`{state}` = ")
+}
+
+/// The `note` a [`report`] carries: every observable state defined, then what to
+/// do about them.
+fn note() -> String {
+    let defined: Vec<String> = STATE_GLOSSARY
+        .iter()
+        .map(|(name, meaning)| format!("{}{meaning}", definition_prefix(name)))
+        .collect();
+    format!("`state` values: {}. {STATE_GUIDANCE}", defined.join("; "))
+}
+
 /// What a single tool's presence is, from a caller's point of view.
 ///
 /// Three states rather than a boolean because the **remedies differ**, and a
-/// client told only "absent" would guess. `withheld` is an operator's `--tools`
-/// and is undone by widening it; `unavailable` is a tool this build or this
+/// client told only "absent" would guess. [`WITHHELD`] is an operator's `--tools`
+/// and is undone by widening it; [`UNAVAILABLE`] is a tool this build or this
 /// surface does not carry at all, and no flag reaches it.
 fn tool_state(in_build: bool, advertised: bool) -> &'static str {
     match (in_build, advertised) {
-        (false, _) => "unavailable",
-        (true, true) => "loaded",
-        (true, false) => "withheld",
+        (false, _) => UNAVAILABLE,
+        (true, true) => LOADED,
+        (true, false) => WITHHELD,
     }
 }
 
@@ -145,31 +217,26 @@ pub fn report(
                 .filter(|t| in_build(t) && advertised(t))
                 .count();
             let state = match (present, loaded) {
-                (0, _) => "unavailable",
-                (_, 0) => "not-loaded-here",
-                (p, l) if p == l => "loaded",
-                _ => "partly-loaded",
+                (0, _) => UNAVAILABLE,
+                (_, 0) => NOT_LOADED_HERE,
+                (p, l) if p == l => LOADED,
+                _ => PARTLY_LOADED,
             };
             serde_json::json!({ "class": class, "state": state, "tools": rows })
         })
         .collect();
     serde_json::json!({
         "classes": classes,
-        "note": "A class is `not-loaded-here` when this server was started without it \
-                 (`roteiro serve --tools query,quality`, or `[mcp] tools` in \
-                 `roteiro.toml`). That is a startup choice made to keep unused tool \
-                 descriptions out of every turn's prompt — it is NOT a capability \
-                 Roteiro lacks. Say so in those words and name the class, so the user \
-                 can restart the server with it, rather than reporting that Roteiro \
-                 cannot answer the question. A tool marked `unavailable` is a \
-                 different case: this build or this surface does not carry it, and no \
-                 startup flag reaches it.",
+        "note": note(),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CLASS_INDEX_TOOL, CLASSES, class_names, class_of, report, tools_in};
+    use super::{
+        CLASS_INDEX_TOOL, CLASSES, STATE_GLOSSARY, class_names, class_of, definition_prefix, note,
+        report, tools_in,
+    };
     use std::collections::BTreeSet;
 
     /// No tool may sit in two classes.
@@ -246,6 +313,128 @@ mod tests {
             .find(|c| c["class"] == "security")
             .expect("security class");
         assert_eq!(security["state"], "not-loaded-here", "{doc}");
+    }
+
+    /// Every `state` string a caller can observe is **defined in the note**.
+    ///
+    /// The note's whole job is to stop a model reporting a withheld tool as a
+    /// capability Roteiro does not have, and it can only do that if a model
+    /// reading nothing but this JSON can tell the states apart. It could not: it
+    /// explained two of the five, and the three it omitted included `withheld` —
+    /// exactly the case it exists for.
+    ///
+    /// Both sides are **derived**, not listed. The emitted set is collected by
+    /// walking the real payload for every `state` key, over scenarios chosen to
+    /// produce each one; the defined set is [`STATE_GLOSSARY`], which the note is
+    /// built from. A test that grepped for today's words would pass while a sixth
+    /// state shipped undefined — the same doc-describes-code-inaccurately shape
+    /// this module already had once.
+    ///
+    /// The membership check asks for the rendered **definition**
+    /// ([`definition_prefix`]), not for the word: [`STATE_GUIDANCE`] names three
+    /// states in passing, so a bare substring test would call those defined no
+    /// matter what the glossary did.
+    #[test]
+    fn every_state_the_report_emits_is_defined_in_its_note() {
+        use std::collections::BTreeSet;
+
+        /// Every `"state"` value anywhere in the document, at any depth, so the
+        /// collection does not depend on the payload's current shape.
+        fn states_in(value: &serde_json::Value, found: &mut BTreeSet<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if key == "state"
+                            && let Some(state) = child.as_str()
+                        {
+                            found.insert(state.to_owned());
+                        }
+                        states_in(child, found);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        states_in(item, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Chosen to drive every arm of both state machines. The last one is not
+        // redundant with the one above it, and the set equality below is what
+        // proved that: a whole-class selection only ever yields `loaded` or
+        // `not-loaded-here`, so without a *partially* selected class nothing
+        // emitted `partly-loaded` and it would have shipped undefined. That is the
+        // case for deriving the emitted set instead of listing it.
+        /// One predicate pair to drive [`report`] with, and a label for the
+        /// failure message. Named because the tuple is otherwise too dense to
+        /// read — and clippy says so.
+        type Scenario = (&'static str, fn(&str) -> bool, fn(&str) -> bool);
+
+        let scenarios: [Scenario; 5] = [
+            ("nothing carried", |_| false, |_| false),
+            ("all carried, none advertised", |_| true, |_| false),
+            ("all carried, all advertised", |_| true, |_| true),
+            (
+                "all carried, one class advertised",
+                |_| true,
+                |name| class_of(name).is_some_and(|c| c == "query"),
+            ),
+            (
+                "all carried, one tool of each class advertised",
+                |_| true,
+                |name| {
+                    class_of(name)
+                        .and_then(tools_in)
+                        .and_then(<[&str]>::first)
+                        .is_some_and(|first| *first == name)
+                },
+            ),
+        ];
+
+        let mut emitted: BTreeSet<String> = BTreeSet::new();
+        for (label, in_build, advertised) in scenarios {
+            let doc = report(in_build, advertised);
+            let mut here = BTreeSet::new();
+            states_in(&doc, &mut here);
+            assert!(!here.is_empty(), "`{label}` produced no state at all");
+            emitted.extend(here);
+        }
+
+        let note = note();
+        for state in &emitted {
+            assert!(
+                note.contains(&definition_prefix(state)),
+                "the report can emit `{state}` and the note never defines it. A client \
+                 that sees only this JSON cannot tell it from a capability Roteiro \
+                 lacks, which is the one thing the note exists to prevent. Add it to \
+                 `STATE_GLOSSARY`",
+            );
+        }
+
+        // The glossary must not accumulate entries for states nothing emits
+        // either: an unreachable definition is prompt tokens spent on a value no
+        // client will ever see.
+        let defined: BTreeSet<String> = STATE_GLOSSARY
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(
+            emitted, defined,
+            "the states the report emits and the states the glossary defines must be \
+             the same set — left is emitted, right is defined",
+        );
+
+        // The glossary renders into one sentence with `; ` between entries, so a
+        // definition carrying its own semicolon reads as an extra, nameless state.
+        for (name, meaning) in STATE_GLOSSARY {
+            assert!(
+                !meaning.contains(';'),
+                "`{name}`'s definition contains the separator `note` joins with, so it \
+                 reads as two entries: {meaning:?}",
+            );
+        }
     }
 
     /// A fully loaded surface reports every class loaded — the default, and the
