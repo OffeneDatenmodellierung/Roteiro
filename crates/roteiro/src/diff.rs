@@ -39,16 +39,29 @@ pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
 
 /// The unified diff for one tracked `path` over `range`.
 ///
-/// `range` is passed to `git diff` verbatim: empty means the working tree
-/// against the index and `HEAD` as git itself defines it, `["HEAD"]` means the
-/// working tree against `HEAD` (staged edits included), and `[base, "HEAD"]`
-/// means a commit range.
+/// `range` is passed to `git diff` verbatim, and the three forms compare
+/// **different pairs of trees** — a distinction worth stating because the empty
+/// one is not the intuitive default:
 ///
-/// Returns `None` when git fails and `Some("")` when there is genuinely nothing
-/// to show — a mode-only change, say. Callers must not collapse those two: one
-/// is "we could not look" and the other is "we looked and there is no text",
-/// which is the same distinction [`review_llm`](crate::review_llm) draws when it
-/// refuses to send a hunkless file to a model.
+/// - `[]` — the working tree against the **index**: unstaged edits only. A
+///   staged change is invisible to it.
+/// - `["HEAD"]` — the working tree against `HEAD`: staged **and** unstaged. This
+///   is what a working-tree review wants, since it reviews what a commit would
+///   contain.
+/// - `[base, "HEAD"]` — a commit range, needing no working tree at all.
+///
+/// Returns `None` when git fails and `Some("")` when git ran and emitted
+/// nothing. Callers must not collapse those two: one is "we could not look" and
+/// the other is "we looked and there is no text", which is the same distinction
+/// [`review_llm`](crate::review_llm) draws when it refuses to send a hunkless
+/// file to a model.
+///
+/// The empty case is **not** a mode change, a rename, or a binary file, though
+/// each reads like it should be: `git diff -U3` emits headers for all three, so
+/// they come back as ordinary non-empty diffs (see
+/// `a_mode_only_change_still_produces_a_diff`). What is left is a genuinely
+/// empty file, or a path whose content already matches the other side of the
+/// comparison.
 #[must_use]
 pub fn unified(repo: &Path, range: &[&str], path: &str) -> Option<String> {
     let mut args: Vec<&str> = vec!["diff", CONTEXT_LINES];
@@ -178,6 +191,49 @@ mod tests {
         assert!(
             d.contains("+fn c() {}"),
             "expected the new file's text: {d}"
+        );
+    }
+
+    /// The three `range` forms compare different pairs of trees.
+    ///
+    /// Pinned because the doc comment described `[]` as "the working tree
+    /// against the index and `HEAD`", which conflates the two comparisons that
+    /// actually differ — and a caller picking `[]` for a working-tree review
+    /// would silently miss every staged edit. Raised by Copilot on PR #656.
+    #[test]
+    fn an_empty_range_sees_only_unstaged_edits() {
+        let dir = repo("range");
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git")
+        };
+        fs::write(dir.join("kept.rs"), "fn a() {}\nfn staged() {}\n").expect("write");
+        run(&["add", "kept.rs"]);
+        fs::write(
+            dir.join("kept.rs"),
+            "fn a() {}\nfn staged() {}\nfn unstaged() {}\n",
+        )
+        .expect("write");
+
+        let unstaged_only = unified(&dir, &[], "kept.rs").expect("diff");
+        assert!(
+            unstaged_only.contains("+fn unstaged() {}"),
+            "an empty range shows the unstaged edit: {unstaged_only}"
+        );
+        assert!(
+            !unstaged_only.contains("+fn staged() {}"),
+            "and does NOT show the staged one — it compares against the index: \
+             {unstaged_only}"
+        );
+
+        let vs_head = unified(&dir, &["HEAD"], "kept.rs").expect("diff");
+        assert!(
+            vs_head.contains("+fn staged() {}") && vs_head.contains("+fn unstaged() {}"),
+            "`HEAD` shows both, which is why a working-tree review uses it: {vs_head}"
         );
     }
 
