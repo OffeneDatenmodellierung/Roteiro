@@ -23,7 +23,7 @@
 //! only run that would notice is the one that publishes something it should not
 //! have, which is the run whose outcome cannot be undone.
 
-use std::path::{Path, PathBuf};
+mod common;
 
 /// The workflow file this guard reads.
 const WORKFLOW: &str = ".github/workflows/release-plz.yml";
@@ -35,18 +35,15 @@ const PUBLISH_JOB: &str = "release-plz-release";
 /// of them, or it vouches for less than the merge did.
 const REQUIRED: [&str; 4] = ["checks", "default-features", "msrv", "no-default-features"];
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf()
-}
-
 /// The workflow text, or `None` when the tests run outside a checkout (a
 /// packaged crate carries no `.github`), which is a skip rather than a failure.
+///
+/// [`common::repo_file`] rather than `read_to_string(..).ok()`: that spelling
+/// skipped this guard on **any** IO error, so "could not read the workflow"
+/// became a green — the same silent-skip defect the guard itself is about, one
+/// level up. Only a missing file outside a checkout is a skip; the rest panic.
 fn workflow() -> Option<String> {
-    std::fs::read_to_string(repo_root().join(WORKFLOW)).ok()
+    common::repo_file(WORKFLOW)
 }
 
 /// The `release-plz-release:` job block, from its key to the next job key.
@@ -123,8 +120,16 @@ fn the_wait_is_allowed_to_read_the_checks_it_waits_for() {
         return;
     }
 
+    // A real mapping key, not a substring: `contains("checks: read")` is
+    // satisfied by a commented-out line or by prose discussing the scope — and
+    // this file's own workflow comment discusses it at length. The guard is about
+    // the permission being *in effect*, so it has to read like YAML does.
+    let granted = text.lines().any(|l| {
+        let t = l.trim();
+        !t.starts_with('#') && t.split('#').next().unwrap_or("").trim() == "checks: read"
+    });
     assert!(
-        text.contains("checks: read"),
+        granted,
         "the wait queries `.../commits/{{sha}}/check-runs`, which needs the `checks: \
          read` scope. This workflow sets an explicit `permissions:` block, and that \
          sets every scope it does not name to `none` — so dropping this line does not \
@@ -161,5 +166,60 @@ fn the_wait_fails_closed() {
         job.contains("deadline"),
         "the wait must be bounded: a job that waits forever is a release that never \
          happens and nobody is told why"
+    );
+}
+
+/// The wait reads the **newest** check run for each name, not whichever the API
+/// listed first.
+///
+/// A commit can carry several check runs sharing one name: re-running a job adds
+/// a run rather than replacing it, and re-running a red job is the most ordinary
+/// thing to do on the tree this gate guards. Without a collapse, the loop's
+/// first-match lookup reads an arbitrary one — so a stale success can authorise
+/// a publish while the newest run is failing, which is the outcome the whole
+/// step exists to prevent, reached by querying the right endpoint and believing
+/// the wrong row.
+///
+/// Raised by Copilot on PR #652. Latent rather than observed: a scan of twelve
+/// recent commits on `main` found no duplicate names, because nothing had been
+/// re-run. "Not yet" is not a guarantee, and the failure would be silent.
+#[test]
+fn the_wait_reads_the_newest_run_for_each_name() {
+    let Some(text) = workflow() else {
+        return;
+    };
+    let job = publish_job(&text);
+
+    assert!(
+        job.contains("\\(.id)"),
+        "the check-run rows must carry the id, or there is nothing to pick the \
+         newest by"
+    );
+    assert!(
+        job.contains("-k2,2nr"),
+        "the rows must be collapsed to the newest run per name before the \
+         per-name lookup. Without it the loop takes whichever row the API \
+         happened to list first, and a re-run makes that a coin toss on the job \
+         that decides whether to publish."
+    );
+    // The collapse must be a sort, not a `jq group_by`: `--paginate` applies
+    // `--jq` per page, so a group across pages would silently see only the last
+    // one — a wrong answer that looks like a working filter.
+    //
+    // Read the *commands*, not the comments. The first version of this assertion
+    // was `!job.contains("group_by")` and failed on the correct workflow,
+    // because the comment above the sort explains why a `group_by` is not used.
+    // That is the same defect Copilot raised about `contains("checks: read")`,
+    // arrived at from the other side: a substring test cannot tell code from
+    // prose about the code.
+    let commands: String = job
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !commands.contains("group_by"),
+        "collapse with `sort`, not `jq group_by`: `--paginate` runs the jq filter \
+         once per page, so a cross-page group silently sees only the last page"
     );
 }

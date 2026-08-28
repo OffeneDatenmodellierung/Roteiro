@@ -102,9 +102,26 @@ jobs:
           set -euo pipefail
           required="checks default-features msrv no-default-features"
           deadline=$(( $(date +%s) + 45*60 ))
+          tab=$(printf '\t')
           while :; do
+            # One row per check run, newest first within each name.
+            #
+            # A commit can carry **several check runs sharing one name**: re-running
+            # a job adds a new run rather than replacing the old one, and re-running
+            # a red job is the most ordinary thing to do on the tree this gate
+            # guards. Taking whichever row the API happened to list first would let
+            # a stale success authorise a publish while the newest run is failing —
+            # the exact outcome this step exists to prevent, arrived at by reading
+            # the right endpoint and believing the wrong row.
+            #
+            # The collapse is a sort rather than a `jq group_by`, because `--paginate`
+            # applies `--jq` **per page**: a group across pages would silently see
+            # only the last one. Sorting by name, then by id descending, puts the
+            # newest run for each name first, so the existing first-match lookup
+            # becomes a newest-match lookup.
             runs=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
-                     --paginate --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "")"')
+                     --paginate --jq '.check_runs[] | "\(.name)\t\(.id)\t\(.status)\t\(.conclusion // "")"' \
+                   | sort -t"$tab" -k1,1 -k2,2nr)
             pending=0
             for name in $required; do
               line=$(printf '%s\n' "$runs" | awk -F'\t' -v n="$name" '$1==n {print; exit}')
@@ -113,8 +130,8 @@ jobs:
                 pending=1
                 continue
               fi
-              status=$(printf '%s' "$line" | cut -f2)
-              conclusion=$(printf '%s' "$line" | cut -f3)
+              status=$(printf '%s' "$line" | cut -f3)
+              conclusion=$(printf '%s' "$line" | cut -f4)
               if [ "$status" != "completed" ]; then
                 echo "waiting: '$name' is $status"
                 pending=1

@@ -30,8 +30,8 @@
 //!   - drop `timeout-minutes` from an apt step -> named by
 //!     `every_apt_step_is_bounded`
 
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+mod common;
+
 use yaml_rust2::Yaml;
 
 /// The largest `timeout-minutes` that still counts as a bound.
@@ -49,37 +49,6 @@ use yaml_rust2::Yaml;
 /// will quietly double.
 const CEILING_MINUTES: i64 = 120;
 
-/// The repository root, from this crate's manifest directory (`crates/roteiro`).
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("repo root is two levels above crates/roteiro")
-        .to_path_buf()
-}
-
-/// Whether this is a checkout of the Roteiro repository, rather than a packaged
-/// crate unpacked from the registry.
-///
-/// Same marker, and the same reasoning, as `ci_release_pr_parity`: only
-/// `NotFound` means absent, and every other error panics, because a marker that
-/// read `false` on an IO error would turn "cannot read the repository" into
-/// "this is not a repository" and skip the guard in silence.
-fn is_repository_checkout() -> bool {
-    let manifest = repo_root().join("Cargo.toml");
-    match std::fs::read_to_string(&manifest) {
-        Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
-        Err(e) if e.kind() == ErrorKind::NotFound => false,
-        Err(e) => panic!(
-            "cannot read {} ({:?}: {e}). Without it this test cannot tell a \
-             packaged crate from a repository checkout, and guessing would make \
-             the guard skip in silence.",
-            manifest.display(),
-            e.kind(),
-        ),
-    }
-}
-
 /// The jobs of `ci.yml`, or `None` outside a repository checkout.
 ///
 /// A packaged crate has no `.github/`, and that is the only legitimate absence.
@@ -87,18 +56,7 @@ fn is_repository_checkout() -> bool {
 /// to be there, and a green meaning "could not look" is worse than no guard.
 fn ci_jobs() -> Option<Vec<(String, Yaml)>> {
     let rel = ".github/workflows/ci.yml";
-    let path = repo_root().join(rel);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound && !is_repository_checkout() => return None,
-        Err(e) => panic!(
-            "cannot read {} ({:?}: {e}). This guard asserts a property of that \
-             file, so skipping here would be a green that means \"could not \
-             look\".",
-            path.display(),
-            e.kind(),
-        ),
-    };
+    let text = common::repo_file(rel)?;
     let docs = yaml_rust2::YamlLoader::load_from_str(&text)
         .unwrap_or_else(|e| panic!("{rel} is not parseable YAML: {e}"));
     let doc = docs
