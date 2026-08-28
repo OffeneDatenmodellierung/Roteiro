@@ -40,6 +40,11 @@
 use std::path::Path;
 use std::process::Command;
 
+// The one definition of "run git here" (issue #649): this module used to carry
+// its own copy, and the graph arm could not reach it behind this module's
+// feature gate.
+use crate::diff::git;
+
 use rto_graph::reviewer::FileUnderReview;
 
 /// The half of this module that needs a generation backend. Everything outside
@@ -523,19 +528,6 @@ fn parent_module_source(path: &str, sources: &dyn Fn(&str) -> Option<String>) ->
     None
 }
 
-/// Run `git` in `repo` and return trimmed stdout, or `None` if it failed.
-fn git(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
-}
-
 /// The commit a review commit's branch forked from — **the corrected
 /// reconstruction recipe**.
 ///
@@ -661,7 +653,7 @@ pub fn files_at(repo: &Path, sha: &str, main: &str) -> anyhow::Result<ReviewSet>
     let names = git(repo, &["diff", "--name-only", &fork, sha])
         .ok_or_else(|| anyhow::anyhow!("git diff --name-only {fork}..{sha} failed"))?;
     Ok(ReviewSet::collect(sha, &names, &|path| {
-        git(repo, &["diff", "-U3", &fork, sha, "--", path])
+        crate::diff::unified(repo, &[&fork, sha], path)
     }))
 }
 
@@ -968,10 +960,8 @@ fn changed_files(repo: &Path, base: Option<&str>) -> ReviewSet {
     // to filter on `!diff.is_empty()` alone, which sent binary blobs and
     // mode-only records to the model under a contract they cannot satisfy.
     ReviewSet::collect(&head, &names, &|path| {
-        let mut d: Vec<&str> = vec!["diff", "-U3"];
-        d.extend(range.iter().map(String::as_str));
-        d.extend(["--", path]);
-        git(repo, &d)
+        let r: Vec<&str> = range.iter().map(String::as_str).collect();
+        crate::diff::unified(repo, &r, path)
     })
 }
 

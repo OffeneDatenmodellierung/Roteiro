@@ -512,3 +512,220 @@ fn score_and_base_are_mutually_exclusive() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `review` shows the change, not only what the graph knows about it (#649).
+///
+/// The complaint the diff answers is that a reviewer had to hold `git diff` in
+/// another window and join it to this report by hand, and that an agent handed
+/// the JSON received the context without the change it is context *for*. So the
+/// assertions here are about the diff being present **by default** in both
+/// surfaces — an opt-in would not have fixed either half.
+#[test]
+fn review_shows_the_diff_by_default_in_both_surfaces() {
+    let dir = fresh_dir("diff");
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() {}\n",
+    );
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() { helper(); }\nfn helper() {}\n",
+    );
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "non-drift review exits 0: {text}");
+    assert!(text.contains("@@"), "a hunk header is shown: {text}");
+    assert!(
+        text.contains("+fn helper() {}"),
+        "the added line is shown: {text}"
+    );
+    // The graph context is not displaced by the diff — the point is both, in one
+    // place. A change that showed the diff *instead* would have traded one
+    // half-report for another.
+    assert!(
+        text.contains("calls: sym:rust:src/main.rs#helper"),
+        "graph context survives alongside the diff: {text}"
+    );
+
+    let json = roteiro(&dir, &["review", "--json"]);
+    let text = String::from_utf8_lossy(&json.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    let diff = doc["files"][0]["diff"].as_str().expect("a diff field");
+    assert!(
+        diff.contains("+fn helper() {}"),
+        "JSON carries the hunks: {diff}"
+    );
+
+    // `--no-diff` is the escape hatch, and must leave the rest untouched.
+    let plain = roteiro(&dir, &["review", "--no-diff"]);
+    let text = String::from_utf8_lossy(&plain.stdout);
+    assert!(!text.contains("@@"), "--no-diff omits the hunks: {text}");
+    assert!(
+        text.contains("calls: sym:rust:src/main.rs#helper"),
+        "--no-diff keeps the graph context: {text}"
+    );
+    let plain_json = roteiro(&dir, &["review", "--no-diff", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&plain_json.stdout)).expect("valid JSON");
+    assert!(
+        doc["files"][0].get("diff").is_none(),
+        "--no-diff omits the field entirely rather than sending null"
+    );
+}
+
+/// A brand-new file shows its contents (#649).
+///
+/// This is the case that fails **silently**. An untracked path is not part of
+/// the comparison `git diff` makes, so it reports success and no text — which
+/// is indistinguishable from a file that did not change. The review would list
+/// the file, list its symbols, and omit the only thing new about it, while
+/// looking entirely healthy.
+#[test]
+fn review_shows_the_contents_of_a_brand_new_file() {
+    let dir = fresh_dir("diff-added");
+    write(&dir, "src/main.rs", "fn main() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // Never `git add`ed: untracked, which is how a new file exists for most of
+    // the time anyone would want to review it.
+    write(&dir, "src/added.rs", "fn brand_new() {}\n");
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("src/added.rs [added]"),
+        "the new file is listed: {text}"
+    );
+    assert!(
+        text.contains("+fn brand_new() {}"),
+        "and its contents are shown, not just its name: {text}"
+    );
+
+    // Staging it must not change the answer: the same file, the same review.
+    git(&dir, &["add", "src/added.rs"]);
+    let staged = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&staged.stdout);
+    assert!(
+        text.contains("+fn brand_new() {}"),
+        "a staged addition shows its contents too: {text}"
+    );
+}
+
+/// A deletion shows what was removed (#649).
+///
+/// The graph cannot answer this one at all — the nodes are gone, so there is no
+/// context to print and the file would otherwise appear as a bare path with a
+/// `[deleted]` tag. The removed code is the only evidence of what the change did.
+#[test]
+fn review_shows_what_a_deletion_removed() {
+    let dir = fresh_dir("diff-deleted");
+    write(&dir, "src/main.rs", "fn main() {}\n");
+    write(&dir, "src/gone.rs", "fn doomed() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    std::fs::remove_file(dir.join("src/gone.rs")).expect("remove");
+
+    let out = roteiro(&dir, &["review"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("src/gone.rs [deleted]"),
+        "the deletion is listed: {text}"
+    );
+    assert!(
+        text.contains("-fn doomed() {}"),
+        "and the removed code is shown: {text}"
+    );
+}
+
+/// A file git calls untracked while `HEAD` still has it is not an addition.
+///
+/// `untracked_files` classifies against the **index**, so the two can be true at
+/// once: `git rm --cached f` drops `f` from the index and leaves it on disk, and
+/// git then reports it untracked while `HEAD` still carries it. Taking that set
+/// wholesale labels a tracked file `[added]`.
+///
+/// The second-order effect is worse than the label. If the same file is also
+/// edited, it arrives twice — `Modified` from `changed_files`, `Added` from the
+/// untracked walk — and the `dedup_by(path)` that follows keeps whichever the
+/// sort happened to place first, which is not a decision anyone made.
+///
+/// Raised by Copilot on PR #656.
+#[test]
+fn a_file_still_in_head_is_never_reported_as_added() {
+    let dir = fresh_dir("rm-cached");
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() {}\n",
+    );
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "initial sync");
+
+    // Out of the index, still on disk, still in HEAD, and **unedited** — git now
+    // calls it untracked, and it is not.
+    //
+    // Unedited is what makes this discriminating. With an edit as well,
+    // `changed_files` also emits the path, lands first, and the `dedup_by` keeps
+    // the correct `modified` entry by luck of insertion order — so the buggy and
+    // fixed versions agree and the test proves nothing. That version of this test
+    // passed under fault injection, which is how the vacuity was found. Here the
+    // content is identical to HEAD, so `changed_files` says nothing and the
+    // untracked walk is the only voice: filtered, the file is absent from the
+    // review entirely; unfiltered, it is reported as an addition of a file that
+    // did not change.
+    git(&dir, &["rm", "--cached", "-q", "src/main.rs"]);
+
+    let unedited = roteiro(&dir, &["review", "--json"]);
+    let text = String::from_utf8_lossy(&unedited.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    assert!(
+        doc["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .all(|f| f["path"] != "src/main.rs"),
+        "an unchanged file HEAD still has must not be reported at all: {text}"
+    );
+
+    // Now edit it too: the path must arrive exactly once, and as a modification.
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { greet(); }\nfn greet() { helper(); }\nfn helper() {}\n",
+    );
+
+    let out = roteiro(&dir, &["review", "--json"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    let files = doc["files"].as_array().expect("files");
+
+    let entries: Vec<&serde_json::Value> = files
+        .iter()
+        .filter(|f| f["path"] == "src/main.rs")
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the path must appear exactly once, not once per source: {text}"
+    );
+    assert_eq!(
+        entries[0]["status"], "modified",
+        "a file HEAD still has is modified, never added: {text}"
+    );
+}
