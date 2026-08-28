@@ -24,6 +24,25 @@ use std::process::Command;
 /// into reviewing differently sized windows onto the same change.
 const CONTEXT_LINES: &str = "-U3";
 
+/// The flags that make `git diff` answer for itself, in its own format.
+///
+/// `--no-ext-diff` refuses `diff.external` and `GIT_EXTERNAL_DIFF`. Git runs
+/// those instead of diffing, and their output *replaces* the diff entirely, so
+/// a configured helper turns this function into "run whatever that is and
+/// return its stdout" — verified: with `diff.external` set, `git diff` printed
+/// only the helper's output and no hunks at all.
+///
+/// Reachability, stated honestly rather than alarmingly: `git clone` does **not**
+/// copy the remote's config, so this is not a clone-and-execute vector. It is
+/// reachable through `GIT_EXTERNAL_DIFF` in the environment, and through the
+/// `.git/config` of a repository directory obtained as an archive or a shared
+/// checkout. Both are narrow, and the flag costs nothing.
+///
+/// `--no-color` is the same argument without the security half: `color.diff` can
+/// be `always`, and ANSI escapes in a `--json` field are corruption of data
+/// rather than decoration of a terminal.
+const OWN_OUTPUT: [&str; 2] = ["--no-ext-diff", "--no-color"];
+
 /// Run `git` in `repo` and return trimmed stdout, or `None` if it failed.
 pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
@@ -72,6 +91,7 @@ pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
 #[must_use]
 pub fn unified(repo: &Path, range: &[&str], path: &str) -> Option<String> {
     let mut args: Vec<&str> = vec!["diff", CONTEXT_LINES];
+    args.extend(OWN_OUTPUT);
     args.extend(range.iter().copied());
     args.extend(["--", path]);
     git(repo, &args)
@@ -112,7 +132,9 @@ pub fn unified_untracked(repo: &Path, path: &str) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["diff", CONTEXT_LINES, "--no-index", "--", "/dev/null", path])
+        .args(["diff", CONTEXT_LINES])
+        .args(OWN_OUTPUT)
+        .args(["--no-index", "--", "/dev/null", path])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim_end().to_owned();
@@ -241,6 +263,47 @@ mod tests {
         assert!(
             vs_head.contains("+fn staged() {}") && vs_head.contains("+fn unstaged() {}"),
             "`HEAD` shows both, which is why a working-tree review uses it: {vs_head}"
+        );
+    }
+
+    /// A configured external differ does not get to answer for us.
+    ///
+    /// `diff.external` and `GIT_EXTERNAL_DIFF` make git run a command *instead
+    /// of* diffing, and its stdout replaces the diff — so without `--no-ext-diff`
+    /// this function becomes "run whatever that is and return its output". Raised
+    /// by Copilot on PR #656, after the diff became default-on for the graph arm.
+    ///
+    /// Both vectors are covered here: repository config, and the environment.
+    #[test]
+    fn an_external_differ_is_refused() {
+        let dir = repo("extdiff");
+        let helper = dir.join("helper.sh");
+        fs::write(&helper, "#!/bin/sh\necho EXTERNAL-DIFF-EXECUTED\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let configured = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["config", "diff.external"])
+            .arg(&helper)
+            .output()
+            .expect("git")
+            .status
+            .success();
+        assert!(configured, "set diff.external");
+        fs::write(dir.join("kept.rs"), "fn a() {}\nfn b() {}\n").expect("write");
+
+        let d = unified(&dir, &[], "kept.rs").expect("diff");
+        assert!(
+            !d.contains("EXTERNAL-DIFF-EXECUTED"),
+            "the configured helper must not have run: {d}"
+        );
+        assert!(
+            d.contains("+fn b() {}"),
+            "and git's own diff must be what came back: {d}"
         );
     }
 
