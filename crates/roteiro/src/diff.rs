@@ -343,13 +343,24 @@ mod tests {
     #[test]
     fn a_warning_on_stderr_does_not_discard_the_diff() {
         let dir = repo("safecrlf");
+        // Asserts the status: a `git config` that failed would leave the fixture
+        // unable to produce a warning, the test would take the skip below, and a
+        // *setup* failure would present as "this platform does not warn". That is
+        // the same silent-skip defect this test was written to close, one level
+        // up in the fixture.
         let run = |args: &[&str]| {
-            Command::new("git")
+            let out = Command::new("git")
                 .arg("-C")
                 .arg(&dir)
                 .args(args)
                 .output()
-                .expect("git")
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "fixture setup `git {args:?}` failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
         };
         run(&["config", "core.autocrlf", "true"]);
         run(&["config", "core.safecrlf", "warn"]);

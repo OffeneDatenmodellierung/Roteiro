@@ -544,9 +544,15 @@ impl Repo {
         Ok(out)
     }
 
-    /// Untracked, non-ignored regular files in the working tree — brand-new files
-    /// that are in neither `HEAD` nor the index, so [`Repo::walk_blobs`] and
-    /// [`Repo::changed_files`] (both HEAD-tree based) miss them.
+    /// Untracked, non-ignored regular files in the working tree: everything the
+    /// dirwalk finds that the **index** does not carry.
+    ///
+    /// Not "files in neither `HEAD` nor the index", which this said until #662
+    /// pointed at the contradiction with [`Repo::added_since_head`] directly
+    /// above. The set is defined against the index *alone*, so a path can be in
+    /// `HEAD` and in here at once: `git rm --cached f` drops `f` from the index
+    /// and leaves it on disk, and git then reports it untracked while `HEAD`
+    /// still carries it.
     ///
     /// **This is not "the new files in the working tree".** It is defined against
     /// the **index**, so `git add` removes a file from it. A caller that unions
