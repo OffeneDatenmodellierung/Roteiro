@@ -74,6 +74,7 @@ fn engine_with_both() -> Option<Arc<LlamaEngine>> {
 /// A short, deterministic (temperature 0) chat request for `model`.
 fn req(model: &str) -> ChatRequest {
     ChatRequest {
+        tools: None,
         model: model.to_owned(),
         messages: vec![Message {
             role: "user".to_owned(),

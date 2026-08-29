@@ -572,16 +572,47 @@ pub fn chat_with_client_tools(
         });
     }
 
-    // Prepend a system turn advertising the tools and the call protocol.
+    // Each tool is stated to the model exactly **once**, and this chooses where.
+    //
+    // Preferably through the request, so the model's own chat template renders
+    // the tools in the shape it was trained for (#492): each template does this
+    // differently — all three in the registry wrap tools in `<tools>`, but
+    // `qwen3-coder-30b-a3b` declares each one as XML elements inside it while the
+    // others use a JSON object — and only the template knows which. This path was
+    // impossible before, because `apply_chat_template` took no tools argument at
+    // all.
+    //
+    // Otherwise here, in the system turn. `carries_tools` is what decides, and it
+    // has to be asked rather than assumed: a request routed to a remote tier is
+    // sent as an ADR-0019 allow-listed payload with no `tools` field at all, so
+    // for that model the conversation is the only way tools can travel.
+    //
+    // The rest of the system turn goes out either way, because it is not the tool
+    // list: it states the `<tool_call>` protocol this server parses, and the
+    // grounding rules (`search` first, cite node keys, never guess from a name).
+    // A template renders tool *definitions* and says nothing about how this
+    // server wants a call framed.
+    let tools_for_template = openai_tool_shape(&advertised);
+    // Both halves, not just `carries_tools`: dropping the listing is safe only
+    // if the tools were actually put on the request. The early return above
+    // makes the first half true today, and it is what keeps the two facts tied
+    // together if that ever stops being so.
+    let engine_advertises = tools_for_template.is_some() && engine.carries_tools(&req.model);
+
     let mut messages = Vec::with_capacity(req.messages.len() + 1);
     messages.push(Message {
         role: "system".to_owned(),
-        content: tool_system_prompt(&advertised),
+        content: if engine_advertises {
+            grounding_rules()
+        } else {
+            tool_system_prompt(&advertised)
+        },
     });
     messages.extend(req.messages.iter().cloned());
 
     let generate = |messages: &[Message]| {
         engine.chat(&ChatRequest {
+            tools: tools_for_template.clone(),
             model: req.model.clone(),
             messages: messages.to_vec(),
             images: req.images.clone(),
@@ -711,8 +742,8 @@ fn truncate(s: &str) -> String {
     format!("{}… (truncated)", &s[..end])
 }
 
-/// The exact system turn `tools` would be advertised with — the bytes a model
-/// spends its prefill on, and the only place the advertised surface is rendered.
+/// The system turn `tools` are advertised with **when the engine carries none of
+/// them itself** — the largest surface a model can be asked to spend prefill on.
 ///
 /// Public so the **other** side can measure and pin its own surface: the graph
 /// tool registry lives in the `roteiro` binary, and issue #590 found that nothing
@@ -723,28 +754,109 @@ fn truncate(s: &str) -> String {
 ///
 /// At the 3.13 ms/token prefill measured in issue #578 the length of this string
 /// is seconds per turn, on every turn, with no cache.
+///
+/// # It is a bound, not the bytes every model sees
+///
+/// Since #492 a model whose engine reports [`Engine::carries_tools`] gets the
+/// tools from its own chat template instead, and this listing is not sent to it
+/// at all — it receives the grounding rules alone. The full listing still goes to
+/// engines that cannot carry tools, the remote tier among them, so this remains
+/// the number to shrink: it is what the worst-served model pays, and no model
+/// pays more.
 #[must_use]
 pub fn advertised_system_prompt(tools: &[&ToolDef]) -> String {
     tool_system_prompt(tools)
 }
 
+/// The advertised tools in OpenAI's `[{type, function:{…}}]` shape — the shape
+/// every chat template in the registry is written against.
+///
+/// `None` for an empty set, because a template distinguishes "no tools" from
+/// "an empty list of tools" only by accident, and the request should say what
+/// the caller meant.
+fn openai_tool_shape(advertised: &[&ToolDef]) -> Option<serde_json::Value> {
+    if advertised.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Array(
+        advertised
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// The grounding rules alone, for a model whose engine advertises the tools
+/// itself.
+///
+/// Everything here is Roteiro's and appears in no chat template: a template
+/// renders tool *definitions* and has nothing to say about answering only from
+/// the graph or citing node keys. Sent on every tooled turn, so the rules do not
+/// depend on which engine is serving.
+fn grounding_rules() -> String {
+    system_prompt(&[], false)
+}
+
 /// Render the system prompt that advertises `tools` and the `<tool_call>`
 /// protocol. Kept model-agnostic: any instruction-following model can comply.
 fn tool_system_prompt(tools: &[&ToolDef]) -> String {
-    let mut out = String::from(
+    system_prompt(tools, true)
+}
+
+/// The system turn, with the tool listing when `list` and without it otherwise.
+///
+/// One function for both so the rules cannot drift apart between the engine that
+/// carries tools and the engine that does not — two wordings of one instruction
+/// would be the same defect as two listings.
+///
+/// The protocol sentence differs because the situations do. When the listing is
+/// here, nothing else has told the model how to frame a call, so this states the
+/// form outright. When the engine advertises, the model's own template has
+/// already framed it in the shape it was trained on, and naming a competing form
+/// is how #489's dialect problem starts.
+fn system_prompt(tools: &[&ToolDef], list: bool) -> String {
+    // The `<tool_call>` envelope is stated either way, because it is *this
+    // server's* and no chat template supplies it: `read_markup` keys on that
+    // wrapper, and a model left to its own would use whatever wrapper it was
+    // trained on — which for a model Roteiro has never seen is not this one.
+    //
+    // What differs is the body. With no listing here the model has been shown the
+    // tools in its own trained shape, so pinning a competing inner form is how
+    // #489's dialect problem starts; `Dialect::ALL` reads both anyway. With the
+    // listing, nothing else has defined a body shape, so this defines one.
+    let protocol = if list {
+        "reply with ONLY a tool call on its own, as \
+         `<tool_call>{\"name\": \"<tool>\", \"arguments\": { … }}</tool_call>`"
+    } else {
+        "reply with ONLY a tool call on its own, wrapped in \
+         `<tool_call>`…`</tool_call>`, with the call itself in the form your \
+         instructions specify"
+    };
+    let mut out = format!(
         "You answer questions about this codebase using ONLY its Roteiro knowledge \
-         graph, reached through the tools below. When a tool would help, reply with \
-         ONLY a tool call on its own, in exactly this form:\n\
-         <tool_call>{\"name\": \"<tool>\", \"arguments\": { ... }}</tool_call>\n\
+         graph, reached through the tools available to you. When a tool would \
+         help, {protocol}.\n\
          After you receive a <tool_response>, use it to answer. Ground every claim \
          in what the tools return: use `search` to find relevant nodes, then read \
          each hit's `snippet` or call `explain` on its key to read the node's \
          actual content BEFORE describing it — never guess from a node's name \
          alone. Cite the node keys you used (e.g. `file:README.md`, `fn:foo`). If \
          the tools do not contain the answer, say you could not find it rather than \
-         making one up. If no tool is needed, just answer directly. Available \
-         tools:\n",
+         making one up. If no tool is needed, just answer directly.\n"
     );
+    if !list {
+        return out;
+    }
+    out.push_str("Available tools:\n");
     let advertised: Vec<Advertisement> = tools.iter().map(|t| advertise(t)).collect();
     // Argument descriptions repeated verbatim across tools, stated once. On the
     // graph surface that is the `project` selector, carried identically by
@@ -1117,7 +1229,8 @@ fn read_markup(completion: &Completion) -> Markup {
 
 /// A call syntax a model may emit inside `<tool_call>…</tool_call>`.
 ///
-/// [`tool_system_prompt`] instructs the JSON form and most models comply, but a
+/// [`tool_system_prompt`] instructs the JSON form and most models comply — but it
+/// is sent only to a model whose engine cannot carry tools, and in any case a
 /// model's *training* can beat an instruction: the chat templates shipped in
 /// `qwen3-coder-30b-a3b` and `qwen3.8-27b` tell them that "an inner
 /// `<function=...></function>` block must be nested within `<tool_call>` XML
@@ -1271,7 +1384,7 @@ fn xml_argument(raw: &str) -> serde_json::Value {
 mod tests {
     use super::{
         Dialect, Disposition, Ending, Limits, Markup, SuppressedTools, ToolCall, Unfinished,
-        disposition, finish, read_markup, tool_system_prompt,
+        disposition, finish, read_markup, system_prompt, tool_system_prompt,
     };
     use crate::engine::{
         ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message,
@@ -1752,6 +1865,7 @@ mod tests {
             "the node abc is a function",
         ]);
         let req = ChatRequest {
+            tools: None,
             model: "scripted".to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),
@@ -1781,6 +1895,7 @@ mod tests {
         }
         let engine = ScriptedEngine::new(&["direct answer"]);
         let req = ChatRequest {
+            tools: None,
             model: "scripted".to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),
@@ -1878,6 +1993,26 @@ mod tests {
         }
     }
 
+    /// A [`RecordingEngine`] that reports carrying tools itself, as
+    /// `LlamaEngine` does.
+    struct TemplateEngine(RecordingEngine);
+
+    impl Engine for TemplateEngine {
+        fn models(&self) -> Vec<ModelInfo> {
+            self.0.models()
+        }
+        fn carries_tools(&self, _model: &str) -> bool {
+            true
+        }
+        fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            self.0.chat_stream(req, on_token)
+        }
+    }
+
     fn client_tool(name: &str) -> ToolDef {
         ToolDef {
             name: name.to_owned(),
@@ -1888,6 +2023,7 @@ mod tests {
 
     fn user_request() -> ChatRequest {
         ChatRequest {
+            tools: None,
             model: "scripted".to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),
@@ -1902,6 +2038,81 @@ mod tests {
 
     fn call_markup(name: &str, arguments: &str) -> String {
         format!("<tool_call>{{\"name\":\"{name}\",\"arguments\":{arguments}}}</tool_call>")
+    }
+
+    /// An engine that carries the tools is not sent them a second time.
+    ///
+    /// The duplication this pair exists to prevent: the model's own chat
+    /// template renders every tool, and a system turn that lists them again
+    /// states one set of tools twice in two different shapes. What must survive
+    /// is the grounding prose, which is Roteiro's and is in no template.
+    #[test]
+    fn an_engine_that_carries_tools_gets_no_second_listing() {
+        let engine = TemplateEngine(RecordingEngine::new("done"));
+        let _ = chat_with_tools(&engine, &EchoRegistry, &user_request(), 4).expect("completion");
+
+        let system = engine.0.first_system_prompt();
+        let system = Message {
+            role: "system".to_owned(),
+            content: system,
+        };
+        assert!(
+            !system.content.contains("Available tools:"),
+            "the tool listing was sent as well as the template's: {}",
+            system.content
+        );
+        assert!(
+            !system.content.contains("echo("),
+            "a tool was named in the system turn: {}",
+            system.content
+        );
+        assert!(
+            system.content.contains("Cite the node keys you used"),
+            "the grounding rules went missing with the listing: {}",
+            system.content
+        );
+    }
+
+    /// Both variants name the `<tool_call>` envelope.
+    ///
+    /// It is the one thing that cannot be delegated to a chat template:
+    /// `read_markup` keys on that wrapper, and a template is free to have trained
+    /// the model on a different one. Dropping the tool *list* for a
+    /// template-carrying engine must not drop the envelope with it, or the
+    /// model's call comes back in a wrapper this server does not read and is
+    /// handed to the user as prose — which is #489 exactly.
+    #[test]
+    fn every_variant_states_the_envelope_this_server_parses() {
+        let tools = [client_tool("echo")];
+        let refs: Vec<&ToolDef> = tools.iter().collect();
+        for prompt in [system_prompt(&refs, true), system_prompt(&[], false)] {
+            assert!(
+                prompt.contains("<tool_call>"),
+                "the envelope went unstated: {prompt}"
+            );
+        }
+    }
+
+    /// An engine that does *not* carry them still gets the full listing.
+    ///
+    /// The remote tier is this case: its ADR-0019 payload has no `tools` field,
+    /// so the conversation is the only way a tool can reach the model. Dropping
+    /// the listing for everyone would have left that path advertising nothing.
+    #[test]
+    fn an_engine_that_carries_nothing_still_gets_the_listing() {
+        let engine = RecordingEngine::new("done");
+        let _ = chat_with_tools(&engine, &EchoRegistry, &user_request(), 4).expect("completion");
+
+        let system = Message {
+            role: "system".to_owned(),
+            content: engine.first_system_prompt(),
+        };
+        assert!(
+            system.content.contains("Available tools:"),
+            "an engine that carries no tools was sent none: {}",
+            system.content
+        );
+        assert!(system.content.contains("echo("), "{}", system.content);
     }
 
     #[test]
@@ -2274,6 +2485,7 @@ mod tests {
             "the node abc is a function".to_owned(),
         ]);
         let req = ChatRequest {
+            tools: None,
             model: "scripted".to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),
@@ -2342,6 +2554,7 @@ mod tests {
     /// the client-tool half of the old code.
     fn ask_request() -> ChatRequest {
         ChatRequest {
+            tools: None,
             model: "scripted".to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),

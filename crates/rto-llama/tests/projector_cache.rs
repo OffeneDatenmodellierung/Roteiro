@@ -123,6 +123,7 @@ fn served() -> Option<Served> {
 fn transcribe(engine: &LlamaEngine, clip: &[u8]) -> String {
     let completion = engine
         .chat(&ChatRequest {
+            tools: None,
             model: MODEL.to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),

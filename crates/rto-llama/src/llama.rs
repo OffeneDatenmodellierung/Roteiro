@@ -77,7 +77,9 @@ use llama_cpp_2::mtmd::{
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
-use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo};
+use crate::engine::{
+    ChatRequest, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
+};
 use crate::slot::KeyedSlot;
 use crate::speculative::{Mtp, SpecCounters, SpeculativeStats, draft_head_layers};
 
@@ -775,16 +777,7 @@ impl LlamaEngine {
         on_token: &mut dyn FnMut(&str),
     ) -> Result<CompletionStats, EngineError> {
         let model = &resolved.model;
-        let messages = req
-            .messages
-            .iter()
-            .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| EngineError::Inference(format!("chat message: {e}")))?;
-        let template = resolve_chat_template(model)?;
-        let prompt = model
-            .apply_chat_template(&template, &messages, true)
-            .map_err(|e| EngineError::Inference(format!("apply chat template: {e}")))?;
+        let prompt = render_prompt(model, &req.model, &req.messages, req.tools.as_ref())?;
 
         let tokens = model
             .str_to_token(&prompt, AddBos::Always)
@@ -1054,24 +1047,114 @@ fn media_prompt(
         markers.push('\n');
     }
 
-    let messages = req
+    // The markers go into the message *before* templating, so the media sits
+    // where the model expects it inside its own turn structure rather than being
+    // appended to a finished prompt.
+    let messages: Vec<Message> = req
         .messages
         .iter()
         .enumerate()
-        .map(|(i, m)| {
-            let content = if i == target {
+        .map(|(i, m)| Message {
+            role: m.role.clone(),
+            content: if i == target {
                 format!("{markers}{}", m.content)
             } else {
                 m.content.clone()
-            };
-            LlamaChatMessage::new(m.role.clone(), content)
+            },
         })
+        .collect();
+
+    render_prompt(model, &req.model, &messages, req.tools.as_ref())
+}
+
+/// Render the conversation into a prompt, using the model's **own** template.
+///
+/// Prefers rendering the embedded Jinja in Rust (issue #492). `apply_chat_template`
+/// remains the path for a *builtin name* — the fallback a model with no embedded
+/// template resolves to — because a name is a key into llama.cpp's table, not
+/// something to render.
+///
+/// Why not `apply_chat_template` for the Jinja too: it runs none. `llama.h` says
+/// so ("does not use a jinja parser"), and it substring-matches for `<|im_start|>`
+/// then emits eight lines of C++ instead. qwen3-32b's 4,100-byte template comes
+/// back as 153 bytes.
+///
+/// `tools` reach the template's own `tools` slot, which is the shape a model
+/// trained on tool use expects — and the thing `apply_chat_template` could not do
+/// at any setting, because its signature carries no tools argument. A builtin
+/// name has no such slot, so tools are simply absent on that path; the caller's
+/// system turn still advertises them.
+///
+/// A template that fails to render is **not** silently replaced by the C++ path.
+/// That would trade a loud failure for a wrong prompt, which is the whole defect
+/// being fixed here: the caller gets the error and can see which template broke.
+fn render_prompt(
+    model: &LlamaModel,
+    name: &str,
+    messages: &[Message],
+    tools: Option<&serde_json::Value>,
+) -> Result<String, EngineError> {
+    let template = resolve_chat_template(model)?;
+    let raw = template
+        .to_str()
+        .map_err(|e| EngineError::Inference(format!("chat template is not UTF-8: {e}")))?;
+
+    if crate::chat_template::is_jinja(raw) {
+        let msgs: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+            .collect();
+        // Deliberately does **not** fall back to `apply_chat_template`. That path
+        // runs no Jinja and would answer with a prompt built from eight lines of
+        // C++ — a silently wrong prompt in place of a loud failure, which is the
+        // defect this whole module exists to remove.
+        //
+        // `render_advertising` rather than `render`, so that a template which
+        // never references `tools` still gets them: that is what lets rto-serve
+        // stop listing the tools a second time in its own system turn.
+        return crate::chat_template::render_advertising(raw, &msgs, tools, true).map_err(|e| {
+            // Actionable, because this is the one failure an unknown model can
+            // bring: its template uses a Jinja feature this renderer does not
+            // have. Naming the model and the gap is what turns "it broke" into a
+            // fix — and the registry has already produced two such gaps
+            // (`tojson`, `startswith`), each closed by adding the feature rather
+            // than by giving up on Jinja.
+            EngineError::Inference(format!(
+                "model `{name}`: its embedded chat template could not be rendered \
+                 ({e}). The template is the model's own, so this is a Jinja feature \
+                 Roteiro does not yet support rather than a fault in the model. \
+                 Roteiro renders the template itself because llama.cpp's does not \
+                 run Jinja at all and would otherwise return a prompt this model \
+                 was not trained on."
+            ))
+        });
+    }
+
+    // A builtin template *name* has no `tools` slot — llama.cpp renders it from
+    // C++. So if the caller offered tools, they are advertised here instead, and
+    // the guarantee this function makes holds either way: **a caller that passes
+    // tools gets them into the prompt**, without having to know which path ran.
+    //
+    // Not a second rendering competing with the template's: exactly one of these
+    // branches executes. The fallback is deliberately plain, because a model that
+    // embeds no chat template was not trained on a tool-use format either.
+    let mut messages = messages.to_vec();
+    if let Some(t) = tools {
+        messages.insert(
+            0,
+            Message {
+                role: "system".to_owned(),
+                content: crate::chat_template::tool_advertisement(t),
+            },
+        );
+    }
+    let llama_messages = messages
+        .iter()
+        .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| EngineError::Inference(format!("chat message: {e}")))?;
-
-    let template = resolve_chat_template(model)?;
     model
-        .apply_chat_template(&template, &messages, true)
+        .apply_chat_template(&template, &llama_messages, true)
         .map_err(|e| EngineError::Inference(format!("apply chat template: {e}")))
 }
 
@@ -1283,6 +1366,14 @@ fn run_generation(
 }
 
 impl Engine for LlamaEngine {
+    /// Always. `render_prompt` guarantees it: the model's own chat template
+    /// renders the tools where it references them, and `render_advertising`
+    /// supplies a plain advertisement where it does not.
+    fn carries_tools(&self, model: &str) -> bool {
+        let _ = model;
+        true
+    }
+
     fn models(&self) -> Vec<ModelInfo> {
         self.served
             .iter()

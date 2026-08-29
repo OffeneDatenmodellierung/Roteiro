@@ -3580,6 +3580,7 @@ mod projector_binding {
     ) -> String {
         engine
             .chat(&ChatRequest {
+                tools: None,
                 model: model.to_owned(),
                 messages: vec![Message {
                     role: "user".to_owned(),

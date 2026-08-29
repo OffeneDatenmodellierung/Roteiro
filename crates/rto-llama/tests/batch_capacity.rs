@@ -127,6 +127,7 @@ fn an_overlong_chat_prompt_is_refused_and_the_process_survives() {
     };
 
     let request = |content: String| ChatRequest {
+        tools: None,
         model: TEXT_MODEL.to_owned(),
         messages: vec![Message {
             role: "user".to_owned(),
@@ -199,6 +200,7 @@ fn a_prompt_past_the_old_2048_token_bound_now_succeeds() {
     // context. This is the band that used to abort.
     let completion = engine
         .chat(&ChatRequest {
+            tools: None,
             model: TEXT_MODEL.to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),

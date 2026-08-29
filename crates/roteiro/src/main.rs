@@ -5113,8 +5113,56 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
         "installed `{name}` → {}  (use it with `{use_hint}`)",
         dir.display()
     );
+    warn_if_chat_template_unrenderable(name, &dir);
     Ok(())
 }
+
+/// Say now, at install, if this model's chat template is one Roteiro cannot
+/// render — rather than at the first chat that uses it.
+///
+/// Roteiro renders a model's **own** Jinja template (issue #492), because
+/// llama.cpp's `apply_chat_template` runs no Jinja and would answer with a prompt
+/// the model was never trained on. The cost of doing it properly is that a
+/// template using a Jinja feature this renderer lacks fails — and the two the
+/// registry has already produced (`tojson`, `startswith`) were both closed by
+/// adding the feature.
+///
+/// A failure mid-conversation is the worst place to learn that. Here it is
+/// actionable: the model is installed, nothing is lost, and the user knows before
+/// they depend on it.
+///
+/// **Warns, never fails.** A model may be installed for embeddings, OCR or audio
+/// and never see a chat turn, and a pull that succeeded must not exit non-zero
+/// because a capability the user may not want is unavailable. Silence means one
+/// of: no embedded template (normal for non-chat models), or one that renders.
+#[cfg(feature = "inference-local-models")]
+fn warn_if_chat_template_unrenderable(name: &str, dir: &std::path::Path) {
+    let gguf = dir.join("model.gguf");
+    let Some(template) = rto_llama::gguf::chat_template(&gguf) else {
+        return;
+    };
+    if !rto_llama::chat_template::is_jinja(&template) {
+        return;
+    }
+    // One representative turn. A template that renders this renders a
+    // conversation; one that fails here fails every time.
+    let probe = [serde_json::json!({"role": "user", "content": "hello"})];
+    if let Err(e) = rto_llama::chat_template::render(&template, &probe, None, true) {
+        eprintln!(
+            "warning: `{name}` embeds a chat template Roteiro cannot render ({e}).\n  \
+             The model is installed and usable for anything that does not need a \
+             chat prompt. Chat requests to it will fail with this same message \
+             rather than silently using a prompt it was not trained on.\n  \
+             The template is the model's own — this is a Jinja feature Roteiro does \
+             not support yet, not a fault in the model."
+        );
+    }
+}
+
+/// Without a local inference backend there is no renderer to check against, so
+/// there is nothing to say.
+#[cfg(not(feature = "inference-local-models"))]
+fn warn_if_chat_template_unrenderable(_name: &str, _dir: &std::path::Path) {}
 
 /// Open a streaming HTTPS reader for `url` starting at byte `from` (the body is
 /// never buffered whole).
@@ -5961,6 +6009,7 @@ fn draft_sections(
         let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
         let completion = engine
             .chat(&rto_llama::ChatRequest {
+                tools: None,
                 model: model.to_owned(),
                 messages: vec![rto_llama::Message {
                     role: "user".to_owned(),

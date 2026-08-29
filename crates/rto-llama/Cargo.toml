@@ -20,6 +20,24 @@ thiserror = { workspace = true }
 # installs the subscriber (ADR-0011); this only makes the facade a
 # direct edge so the warning lands in the same place every other log does.
 tracing = "0.1"
+# Chat templating, in Rust (issue #492). `LlamaModel::apply_chat_template` wraps
+# `llama_chat_apply_template`, which llama.h states plainly "does not use a jinja
+# parser — it only support a pre-defined list of template": it substring-matches
+# for `<|im_start|>` and renders eight lines of C++ instead. qwen3-32b's own
+# 4,100-byte template comes back as 153 bytes. It also takes **no `tools`
+# argument at all**, so a tool definition cannot reach a model's template through
+# it however the Jinja is handled.
+#
+# Upstream declined a binding to llama.cpp's real templating engine as out of
+# scope (utilityai/llama-cpp-rs#1048), and argued their own case: chat templating
+# and tool-call parsing belong in Rust, above the token level. This is that.
+#
+# `json` supplies the `tojson` filter and `pycompat` the Python string methods
+# (`startswith`) these templates use — both established by rendering every
+# template in this repository's registry before either was added.
+minijinja = { version = "2", default-features = false, features = ["builtins", "loop_controls", "macros", "json", "serde"] }
+minijinja-contrib = { version = "2", default-features = false, features = ["pycompat"] }
+serde_json = { workspace = true }
 # The llama.cpp engine. Opt-in: pulls a C/C++ toolchain (cmake, clang, libclang)
 # to build vendored llama.cpp. The pure-Rust `Engine` trait + request/result
 # types build and are usable without it (e.g. mock engines, wire mappers).

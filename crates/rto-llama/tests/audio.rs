@@ -86,6 +86,7 @@ fn transcribes_speech_audio_via_mtmd() {
 
     let out = engine
         .chat(&ChatRequest {
+            tools: None,
             model: MODEL.to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),

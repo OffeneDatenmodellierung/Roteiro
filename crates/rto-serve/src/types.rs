@@ -514,6 +514,7 @@ impl ChatCompletionRequest {
         }
         Ok(NormalisedChat {
             request: ChatRequest {
+                tools: None,
                 model: self.model,
                 messages,
                 images,
