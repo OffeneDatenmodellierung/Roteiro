@@ -85,11 +85,17 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
 
 /// Every lossy string conversion in `text` that feeds a hash, as violations.
 ///
-/// `to_string_lossy` (and `to_str().unwrap_or_default()`) replace invalid byte
-/// sequences with `U+FFFD`. That is fine for a message a human reads. It is a
-/// defect when the result becomes an **identity**, because two inputs differing
-/// only in those bytes produce the same string, therefore the same digest, and
-/// the second silently overwrites the first.
+/// `to_string_lossy` replaces every invalid byte sequence with `U+FFFD`. That is
+/// fine for a message a human reads. It is a defect when the result becomes an
+/// **identity**, because two inputs differing only in those bytes produce the
+/// same string, therefore the same digest, and the second silently overwrites
+/// the first.
+///
+/// That one conversion is the whole of what this scans for. `to_str()` discards
+/// differently — it yields `None`, so `unwrap_or_default()` turns *every*
+/// non-UTF-8 path into the same empty string rather than a `U+FFFD` rendering of
+/// itself — and the rule does not look for it, because this workspace has no
+/// instance of it feeding a hash.
 ///
 /// # Why this one and not a general "lossy conversion" rule
 ///
@@ -98,12 +104,13 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
 /// character is the right outcome. A rule that flagged all of them would be
 /// noise, and noise is how a gate stops being read.
 ///
-/// So the rule is narrow by construction: it fires only where the converted value
-/// reaches a hasher within a few lines. It catches **one** site in this
-/// repository, which is the defect the review corpus recorded (issue #438,
-/// `lossy-identity`, still live at the time this rule was written) — and it stays
-/// valuable precisely because widening it would convert a zero-noise rule into a
-/// noisy one.
+/// So the rule is narrow by construction: it fires only where the conversion and
+/// the hash marker sit on the **same line**, which is what makes the converted
+/// value syntactically an argument to the call rather than merely near it. It
+/// catches **one** site in this repository, which is the defect the review
+/// corpus recorded (issue #438, `lossy-identity`, still live at the time this
+/// rule was written) — and it stays valuable precisely because widening it would
+/// convert a zero-noise rule into a noisy one.
 ///
 /// Rust sources only, decided by `rel_path` for the same reason as
 /// [`scan_unjustified_allows`]: a mention of `to_string_lossy` in prose is not a
