@@ -106,7 +106,9 @@ pub use findings::{
     MAX_IDENTITY_PART, NetworkPolicy, RunnerKind, SECURITY_LAYER_PREFIX, Severity, SourceIdentity,
     WorktreeAccess, WorktreeId, analyzer_id_error, is_valid_analyzer_id, layer_key,
 };
-pub use git::{BlobRef, ChangeStatus, ChangedFile, GitError, GraphSource, Repo, Submodule};
+pub use git::{
+    BlobRef, ChangeStatus, ChangedFile, GitError, GraphSource, PathAuthor, Repo, Submodule,
+};
 #[cfg(feature = "inference")]
 pub use infer::{
     DuplicateConfig, DuplicatePair, DuplicateReport, EMBED_REF, Embedder, HashEmbedder,

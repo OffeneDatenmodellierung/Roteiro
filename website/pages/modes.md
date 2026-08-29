@@ -29,46 +29,40 @@ roteiro check
 roteiro path 'file:src/main.rs' 'adr:0001'
 roteiro debt
 
-<span class="c"># Render the graph to a docs site or an Obsidian vault</span>
+<span class="c"># Render the graph to a docs site or an OKF bundle</span>
 roteiro render docs
-roteiro render obsidian
+roteiro render okf
 
-<span class="c"># …or one vault spanning a whole workspace, members and all</span>
-roteiro render obsidian --workspace-name payments</code></pre>
+<span class="c"># …or one bundle spanning a whole workspace, members and all</span>
+roteiro render okf --workspace-name payments</code></pre>
 
-Without `--workspace-name`, `render obsidian` renders the current project, with
-unqualified note names, even when that repository is a member of a configured
-workspace. With one, every note is keyed `<project>::<key>` so two repositories'
-`README.md` cannot claim the same note, and cross-repo links resolve inside the
-vault. The filename is derived from that key — a readable lowercase hint, then a
-hash of the whole key — so no filename contains `::`.
+Without `--workspace-name`, `render okf` renders the current project with its
+sections at the bundle root, even when that repository is a member of a
+configured workspace. With one, each member's concepts nest under `/<member>/`.
+That is what keeps them apart: node keys are repository-relative, so every
+repository's `README.md` is the same key — `file:README.md` — and the directory
+does the separating rather than a naming scheme. Each member is read with **its
+own** `roteiro.toml`.
 
-Two things to know before you rely on a vault: **the output directory is deleted
-and rebuilt on every render**, so your own notes belong *outside* it and link
-into it by name — and **note names changed in issue #574, with no migration**, to
-stop two nodes silently landing on one file. Both are explained on the
-[Obsidian vault](obsidian-vault.html) page.
+Two things to know before you rely on a bundle: **the output directory is
+deleted and rebuilt on every render**, so your own notes belong *outside* it and
+link into it by name — and **the format changed in 4.0.0, with no migration**:
+`render obsidian` and the vault it wrote are gone. Both are explained on the
+[OKF bundle](okf-bundle.html) page.
 
-A workspace vault is **shareable**, and says so about itself. Its `_Home`
-carries a *Reproducing this vault* section — when it was rendered, and for each
-member the repository its `origin` points at and the commit it was rendered
-from — so a reader can reconstruct the workspace it describes rather than take
-its word for it, and can tell a stale vault from a current one. That repository
-link is where the code lives rather than a guaranteed clone URL: a private
-repository still needs whatever access you would normally use, and the vault
-says so.
+A bundle is **shareable**, and what it shares is the graph. It names every file,
+symbol, configuration key and intent-debt marker in the repository, and carries
+the *whole text* of the prose it ingested — the ADRs, the blueprints, the
+documents — so a bundle of a private repository is private. Two things it does
+**not** carry, because neither is a graph node: **analyzer findings** and
+**agent memory** live in stores of their own and no render reaches them. A
+configuration key appears by name, never with its value.
 
-It also carries each member's **analyzer findings**, so the vault answers *what
-is wrong with this workspace* as well as *what is in it*. Two things follow, and
-the vault states both where a reader is about to act on them. It distinguishes
-*"an analyzer ran and found nothing"* from *"nobody has ever looked"* — those are
-opposite facts, and only the first is good news. And because it lists unpatched
-weaknesses and where they are, a shared vault cannot be un-shared: treat it as
-you would the analyzer reports themselves. Agent memory is the one thing left
-out entirely (it has no redaction chokepoint at all), and config values are
-redacted by **key name**, so a secret in a value whose key is not named like one
-is not redacted — narrower than it sounds, and far more consequential in an
-artifact you hand to someone than in a local store.
+The workspace vault's `_Home` had two summaries a bundle has no home for yet —
+the cross-member findings summary and the version-pin table. They are recorded as
+not-yet-reimplemented in
+<a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0021-open-knowledge-format-bundle.md">ADR-0021</a>
+rather than left to be noticed.
 
 ## 2 · Online mode — richer inference with local models {#online}
 

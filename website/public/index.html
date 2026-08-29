@@ -62,8 +62,8 @@ extracted from the source, a human decision, or a machine's suggestion.</p>
 <tr><td><span class="pill inferred">inferred</span></td><td>Docs, PDFs, images, embeddings</td><td>Fuzzy suggestions with confidence scores</td></tr>
 </table>
 
-<p>One store. One query surface. Three renderers — a docs website, an Obsidian
-vault, and an optional MCP server — are all <em>build outputs of the same graph</em>,
+<p>One store. One query surface. Three renderers — a docs website, an OKF
+bundle, and an optional MCP server — are all <em>build outputs of the same graph</em>,
 so <strong>what humans review is exactly what agents query</strong>.</p>
 
 <div class="note"><strong>Offline by default.</strong> The default build makes no network call
@@ -137,7 +137,7 @@ a large repository.</p>
   <div class="card"><h3>1 · Extract</h3><p>tree-sitter parses each source blob into symbols, calls and imports. Prose, PDFs and images can be ingested too. Deterministic and cached per git blob.</p></div>
   <div class="card"><h3>2 · Author</h3><p>ADRs, blueprints and inline <code>// @rto:</code> annotations add human intent. <code>roteiro check</code> verifies these links against the code and fails CI on drift.</p></div>
   <div class="card"><h3>3 · Infer</h3><p>Optional embeddings suggest <span class="pill inferred">inferred</span> similarity edges and likely duplicates, each with a confidence score you can threshold.</p></div>
-  <div class="card"><h3>4 · Render / Serve</h3><p>Emit a docs site or an Obsidian vault, or serve the graph to AI agents over MCP — every output is regenerated from the one store.</p></div>
+  <div class="card"><h3>4 · Render / Serve</h3><p>Emit a docs site or an OKF bundle, or serve the graph to AI agents over MCP — every output is regenerated from the one store.</p></div>
 </div>
 
 <p>Because provenance is a first-class attribute, a query can say not just
@@ -181,11 +181,11 @@ isn't committed (it would bloat history and conflict on merge).</div>
 <a href="https://github.com/OffeneDatenmodellierung/Roteiro/releases/tag/graph-latest">graph-latest</a>
 release:
 <ul>
-<li><a href="https://github.com/OffeneDatenmodellierung/Roteiro/releases/download/graph-latest/roteiro-vault.zip"><strong>roteiro-vault.zip</strong></a> — the rendered <strong>Obsidian vault</strong>. Download, unzip, and <em>Open folder as vault</em> in Obsidian to explore the codebase as a linked, provenance-tagged graph (an <code>_Home</code> note gives the overview).</li>
+<li><a href="https://github.com/OffeneDatenmodellierung/Roteiro/releases/download/graph-latest/roteiro-okf.zip"><strong>roteiro-okf.zip</strong></a> — the rendered <strong>OKF bundle</strong> (<a href="https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md">Open Knowledge Format</a> v0.2). Download, unzip, and read it with anything that speaks the format — or <em>Open folder as vault</em> in Obsidian, which parses the same markdown and frontmatter (the root and every section directory carry an <code>index.md</code>).</li>
 <li><a href="https://github.com/OffeneDatenmodellierung/Roteiro/releases/download/graph-latest/roteiro-graph.json"><strong>roteiro-graph.json</strong></a> — the content-addressed graph itself; <code>curl -fsSL &lt;url&gt; | roteiro load -</code>.</li>
 </ul>
 Both are build-outputs — regenerate either locally at any commit with
-<code>roteiro render obsidian</code> / <code>roteiro export</code>.</div>
+<code>roteiro render okf</code> / <code>roteiro export</code>.</div>
 
 
 <h2 id="build">Install &amp; build</h2>

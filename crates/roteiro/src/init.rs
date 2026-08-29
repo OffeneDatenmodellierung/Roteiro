@@ -40,11 +40,11 @@ pub const MANAGED_HOOKS: &[&str] = &["post-checkout", "post-merge", "post-commit
 /// download fails, or the artifact's tree does not match `HEAD` (`load` refuses a
 /// stale artifact). Network only happens with this opt-in.
 ///
-/// When `vault` is set (`roteiro init --vault`), the freshness hooks additionally
-/// regenerate the local Obsidian vault from the fresh graph. `pre-commit` is
+/// When `okf` is set (`roteiro init --okf`), the freshness hooks additionally
+/// regenerate the local OKF bundle from the fresh graph. `pre-commit` is
 /// unaffected by either flag.
 #[must_use]
-pub fn hook_script(name: &str, fetch: bool, vault: bool) -> String {
+pub fn hook_script(name: &str, fetch: bool, okf: bool) -> String {
     let header = format!(
         "#!/bin/sh\n\
          # {HOOK_MARKER}: Roteiro knowledge-graph automation.\n\
@@ -65,8 +65,8 @@ pub fn hook_script(name: &str, fetch: bool, vault: bool) -> String {
         );
     }
     // Freshness hook: refresh the graph after HEAD moves, then — when
-    // `roteiro init --vault` opted in — regenerate the local Obsidian vault so it
-    // tracks the graph (a gitignored build-output, never committed).
+    // `roteiro init --okf` opted in — regenerate the local OKF bundle so it tracks
+    // the graph (a build-output, never committed).
     let mut body = if fetch {
         FETCH_REFRESH.to_owned()
     } else {
@@ -74,19 +74,49 @@ pub fn hook_script(name: &str, fetch: bool, vault: bool) -> String {
          command -v roteiro >/dev/null 2>&1 && roteiro sync --committed >/dev/null 2>&1 || true\n"
             .to_owned()
     };
-    if vault {
-        body.push_str(VAULT_REFRESH);
+    if okf {
+        body.push_str(&okf_refresh());
     }
     format!("{header}{body}")
 }
 
-/// Appended to the freshness hooks by `--vault`: rebuild the local Obsidian vault
-/// from the now-fresh graph. `render obsidian` syncs the graph itself and writes
-/// to the gitignored `vault/` dir; best-effort, never failing the git operation.
-const VAULT_REFRESH: &str = concat!(
-    "# Regenerate the local Obsidian vault (gitignored build-output) to match.\n",
-    "command -v roteiro >/dev/null 2>&1 && roteiro render obsidian >/dev/null 2>&1 || true\n",
-);
+/// Appended to the freshness hooks by `--okf`: rebuild the local OKF bundle from
+/// the now-fresh graph. `render okf` syncs the graph itself and writes to
+/// [`crate::BUNDLE_DIR`], a build-output that belongs in `.gitignore`.
+///
+/// A function rather than a literal so the directory is named **once**, by the
+/// constant the renderer's own default reads. The message a user meets at the
+/// moment the refresh failed is not the place for a second spelling of where it
+/// would have written.
+///
+/// # Why this step reports its failure, when the ones around it do not
+///
+/// It used to end `>/dev/null 2>&1 || true`, and after 4.0.0 removed
+/// `render obsidian` that shape hid a command which *could not succeed*: the
+/// bundle silently stopped being refreshed and nothing anywhere said so. A
+/// best-effort step may swallow a transient failure; it must not be able to
+/// swallow a permanent one, because then nothing distinguishes "nothing to do"
+/// from "this has never worked".
+///
+/// So stdout stays quiet — a summary line on every checkout is noise — but
+/// stderr is left alone and a failing render says which command to run to see
+/// why. The git operation is still never failed: the `||` branch ends the hook
+/// on a success status, and git ignores a `post-*` hook's exit code regardless.
+/// `exit` is deliberately not used, so a step appended after this one would
+/// still run.
+fn okf_refresh() -> String {
+    // Any line continuation here must fall between whole words: broken mid-token
+    // it would render as `okf/ bundle`, which reads like a path that does not
+    // exist rather than like a sentence (Copilot, this PR).
+    format!(
+        "# Regenerate the local OKF bundle (a build-output; gitignore it) to match.\n\
+         if command -v roteiro >/dev/null 2>&1; then\n\
+         \troteiro render okf >/dev/null || echo 'roteiro: could not refresh the \
+         OKF bundle in {dir}/ — run `roteiro render okf` to see why' >&2\n\
+         fi\n",
+        dir = crate::BUNDLE_DIR
+    )
+}
 
 /// The freshness-hook body used with `--fetch`: try the CI artifact, else rebuild.
 /// Kept as a literal (no interpolation) so the shell `$tmp`/braces stay verbatim.
@@ -97,7 +127,7 @@ const FETCH_REFRESH: &str = concat!(
     "# artifact before rebuilding. `roteiro load` refuses an artifact whose tree\n",
     "# does not match HEAD, so a stale asset falls through to a local rebuild.\n",
     "# A flag records success rather than `exit`ing, so any step appended below\n",
-    "# (e.g. --vault's render) still runs.\n",
+    "# (e.g. --okf's render) still runs.\n",
     "loaded=0\n",
     "if command -v gh >/dev/null 2>&1; then\n",
     "\t# Portable temp file: GNU `mktemp` needs no args; BSD/macOS needs a\n",
@@ -134,8 +164,7 @@ pub enum HookOutcome {
 
 /// Install (or refresh) one managed hook in `hooks_dir`, without clobbering a
 /// foreign hook of the same name. `fetch` selects the artifact-fast-path freshness
-/// hooks, and `vault` appends local Obsidian-vault regeneration (see
-/// [`hook_script`]).
+/// hooks, and `okf` appends local OKF-bundle regeneration (see [`hook_script`]).
 ///
 /// # Errors
 /// Returns [`io::Error`] on filesystem failure.
@@ -143,7 +172,7 @@ pub fn install_hook(
     hooks_dir: &Path,
     name: &str,
     fetch: bool,
-    vault: bool,
+    okf: bool,
 ) -> io::Result<HookOutcome> {
     fs::create_dir_all(hooks_dir)?;
     let path = hooks_dir.join(name);
@@ -153,7 +182,7 @@ pub fn install_hook(
         Err(e) if e.kind() == io::ErrorKind::NotFound => HookOutcome::Installed,
         Err(e) => return Err(e),
     };
-    fs::write(&path, hook_script(name, fetch, vault))?;
+    fs::write(&path, hook_script(name, fetch, okf))?;
     set_executable(&path)?;
     Ok(outcome)
 }
@@ -340,42 +369,218 @@ mod tests {
             s.contains("roteiro sync --committed"),
             "freshness hook syncs"
         );
-        // The default freshness hook does not touch the network or render a vault.
+        // The default freshness hook does not touch the network or render a
+        // bundle.
         assert!(!s.contains("gh release download"));
-        assert!(!s.contains("render obsidian"), "vault render is opt-in");
+        assert!(!s.contains("render okf"), "bundle render is opt-in");
         assert!(!is_managed_hook("#!/bin/sh\necho other\n"));
     }
 
     #[test]
-    fn vault_flag_appends_vault_render_to_freshness_hooks_only() {
-        // `--vault` adds a vault regeneration step to the freshness hooks…
+    fn okf_flag_appends_bundle_render_to_freshness_hooks_only() {
+        // `--okf` adds a bundle regeneration step to the freshness hooks…
         let fresh = hook_script("post-merge", false, true);
+        // The *invocation*, not the words. Measured: a bare
+        // `contains("roteiro render okf")` passes even when the hook invokes
+        // `render obsidian`, because the failure message quotes the command it
+        // was telling the user to run. A string that co-occurs with the property
+        // is not the property.
         assert!(
-            fresh.contains("roteiro render obsidian"),
-            "freshness hook regenerates the vault with --vault"
+            fresh.contains("\troteiro render okf >"),
+            "freshness hook regenerates the bundle with --okf: {fresh}"
         );
         assert!(
             fresh.contains("roteiro sync --committed"),
             "still syncs first"
         );
-        // …and composes with --fetch. The fetch fast path must set a flag on a
-        // successful load rather than `exit`ing, or the appended vault render would
-        // be unreachable (regression guard, Copilot on #173).
-        let fetch_vault = hook_script("post-checkout", true, true);
+        // A failing render must be audible. `|| true` here would restore exactly
+        // the shape that hid `render obsidian` for a whole major version: a step
+        // that cannot succeed, saying nothing.
         assert!(
-            fetch_vault.contains("roteiro render obsidian"),
-            "vault render is present with --fetch --vault"
+            !fresh.contains("render okf >/dev/null 2>&1"),
+            "the render's stderr must reach the user: {fresh}"
         );
         assert!(
-            fetch_vault.contains("loaded=1"),
+            fresh.contains("could not refresh the OKF bundle in okf/ —"),
+            "a failing render must name itself: {fresh}"
+        );
+        // …and composes with --fetch. The fetch fast path must set a flag on a
+        // successful load rather than `exit`ing, or the appended bundle render
+        // would be unreachable (regression guard, Copilot on #173).
+        let fetch_okf = hook_script("post-checkout", true, true);
+        assert!(
+            fetch_okf.contains("\troteiro render okf >"),
+            "bundle render is present with --fetch --okf: {fetch_okf}"
+        );
+        assert!(
+            fetch_okf.contains("loaded=1"),
             "fetch success records a flag, not an early exit"
         );
         assert!(
-            !fetch_vault.contains("; exit 0"),
-            "no early `exit 0` that would short-circuit the appended vault render"
+            !fetch_okf.contains("; exit 0"),
+            "no early `exit 0` that would short-circuit the appended bundle render"
         );
         // …but never touches the pre-commit gate.
-        assert!(!hook_script("pre-commit", false, true).contains("render obsidian"));
+        assert!(!hook_script("pre-commit", false, true).contains("render okf"));
+    }
+
+    /// Every `roteiro` invocation a hook shell script contains is a command this
+    /// binary actually accepts.
+    ///
+    /// **This is the guard the file did not have.** 4.0.0 removed
+    /// `render obsidian`, and the hook installed by `--okf` went on invoking it
+    /// for a whole PR: `|| true` and `2>&1` meant a user saw nothing, and three
+    /// unit tests *asserted the broken string*, so the suite stayed green while
+    /// the product did not work. Pinning a literal proves the generator emits what
+    /// it was told to; it cannot notice that what it was told is no longer a
+    /// command.
+    ///
+    /// So this asserts against the CLI itself rather than against a list kept
+    /// here. `try_parse_from` catches a removed or renamed subcommand and a flag
+    /// that no longer exists; a `render` target is checked separately because the
+    /// target is a positional `String` — clap accepts `render obsidian` happily,
+    /// and only [`rto_render::Target::parse`] knows it is gone. That is exactly
+    /// the seam the defect went through.
+    #[test]
+    fn every_roteiro_command_a_hook_runs_is_one_the_cli_accepts() {
+        use clap::Parser as _;
+
+        let mut checked = 0usize;
+        for name in super::MANAGED_HOOKS {
+            for fetch in [false, true] {
+                for okf in [false, true] {
+                    let script = hook_script(name, fetch, okf);
+                    for argv in roteiro_invocations(&script) {
+                        let shown = argv.join(" ");
+                        let parsed = crate::Cli::try_parse_from(
+                            std::iter::once("roteiro".to_owned()).chain(argv.iter().cloned()),
+                        );
+                        assert!(
+                            parsed.is_ok(),
+                            "hook `{name}` (fetch={fetch}, okf={okf}) runs `roteiro {shown}`, \
+                             which this CLI does not accept: {:?}",
+                            parsed.err().map(|e| e.to_string())
+                        );
+                        // clap is satisfied by any word here — the removed target
+                        // was a positional string, which is how it survived.
+                        if argv.first().map(String::as_str) == Some("render") {
+                            let target = argv.get(1).map(String::as_str).unwrap_or_default();
+                            assert!(
+                                rto_render::Target::parse(target).is_some(),
+                                "hook `{name}` renders target `{target}`, which is not a \
+                                 render target this build has"
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        // The extraction is the load-bearing part: a matcher that found nothing
+        // would make every assertion above vacuously true.
+        assert!(
+            checked >= 8,
+            "the scripts must contain roteiro invocations to check; found {checked}"
+        );
+    }
+
+    /// Every `roteiro …` command line in a hook script, as argv without the
+    /// program name.
+    ///
+    /// Deliberately small: hook bodies are written here, so this only has to read
+    /// the shell *this file* generates. It splits on the operators those bodies
+    /// use, drops redirections, and ignores `roteiro` appearing as an argument
+    /// (`command -v roteiro`) rather than as the command.
+    fn roteiro_invocations(script: &str) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        for line in script.lines() {
+            let line = line.trim_start_matches(['\t', ' ']);
+            if line.starts_with('#') {
+                continue;
+            }
+            for part in line
+                .split("&&")
+                .flat_map(|p| p.split("||"))
+                .flat_map(|p| p.split(';'))
+                .flat_map(|p| p.split('|'))
+            {
+                let part = part.trim();
+                // `if`/`then` prefix a command on the same line.
+                let part = part
+                    .strip_prefix("if ")
+                    .or_else(|| part.strip_prefix("then "))
+                    .unwrap_or(part)
+                    .trim();
+                let Some(rest) = part.strip_prefix("roteiro ") else {
+                    continue;
+                };
+                let argv: Vec<String> = rest
+                    .split_whitespace()
+                    .take_while(|t| !t.starts_with('>') && !t.starts_with("2>"))
+                    .map(|t| t.trim_matches('"').to_owned())
+                    .collect();
+                if !argv.is_empty() {
+                    out.push(argv);
+                }
+            }
+        }
+        out
+    }
+
+    /// Every generated hook is valid POSIX shell.
+    ///
+    /// The bodies compose — `--fetch` picks one, `--okf` appends another — so a
+    /// construct that parses alone can still be broken by what precedes it. This
+    /// file gained its first multi-line `if … fi` in a freshness body when the
+    /// bundle refresh stopped hiding its own failure, and `sh` is the only thing
+    /// here that actually knows whether the result parses. A hook git cannot run
+    /// fails the same way the removed command did: quietly, at a moment nobody is
+    /// watching.
+    #[test]
+    fn every_generated_hook_is_valid_posix_shell() {
+        let dir = tmp("shell-syntax");
+        for name in super::MANAGED_HOOKS {
+            for fetch in [false, true] {
+                for okf in [false, true] {
+                    let script = hook_script(name, fetch, okf);
+                    let path = dir.join(format!("{name}-{fetch}-{okf}.sh"));
+                    std::fs::write(&path, &script).expect("write");
+                    let out = std::process::Command::new("sh")
+                        .arg("-n")
+                        .arg(&path)
+                        .output()
+                        .expect("run sh -n");
+                    assert!(
+                        out.status.success(),
+                        "hook `{name}` (fetch={fetch}, okf={okf}) is not valid shell: {}\n{script}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The directory `render okf` writes by default is the directory this
+    /// repository ignores.
+    ///
+    /// Two spellings of one fact, in files that no compiler relates: renaming the
+    /// output directory while leaving `.gitignore` naming the old one is how this
+    /// PR left a 8,700-file build-output untracked-and-unignored, visible only as
+    /// a flooded `git status`.
+    #[test]
+    fn the_default_bundle_directory_is_ignored_here() {
+        let ignore = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(".gitignore"),
+        )
+        .expect("the repository has a .gitignore");
+        let entry = format!("/{}/", crate::BUNDLE_DIR);
+        assert!(
+            ignore.lines().any(|l| l.trim() == entry),
+            "`.gitignore` must carry `{entry}` — the directory `render okf` writes \
+             without `--out`"
+        );
     }
 
     #[test]
@@ -392,7 +597,7 @@ mod tests {
             s.contains("roteiro sync --committed"),
             "falls back to a local rebuild"
         );
-        // Neither `--fetch` nor `--vault` alters the pre-commit gate.
+        // Neither `--fetch` nor `--okf` alters the pre-commit gate.
         assert_eq!(
             hook_script("pre-commit", true, true),
             hook_script("pre-commit", false, false)

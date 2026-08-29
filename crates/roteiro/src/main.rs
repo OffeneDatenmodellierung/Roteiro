@@ -170,7 +170,7 @@ impl LogArgs {
 ///   are a *server*. It answers for a repository, not for whoever's editor happens
 ///   to have unsaved work; following a dirty worktree would make one client's
 ///   uncommitted edit visible to every other.
-/// - **`export`, `render obsidian`** produce a shareable snapshot, whose whole
+/// - **`export`, `render okf`** produce a shareable snapshot, whose whole
 ///   value is being reproducible from a commit (#442's manifest half depends on
 ///   exactly that).
 /// - **`init`, the importers, `infer --write`, `compare-codegraph`, `scaffold`**
@@ -298,10 +298,14 @@ enum Command {
         /// network with this flag, and fall back to a local rebuild on any miss.
         #[arg(long)]
         fetch: bool,
-        /// Also regenerate the local Obsidian vault (`vault/`, gitignored) from
-        /// the graph on every checkout/merge/commit, so it stays current.
-        #[arg(long)]
-        vault: bool,
+        /// Also render the local OKF bundle from the graph just built, so it
+        /// exists immediately; the installed hooks keep it fresh thereafter.
+        ///
+        /// Written to `okf/`, which **you should add to `.gitignore`**: it is a
+        /// build-output, it churns on every code change, and `sync` re-ingests it
+        /// if committed. `init` does not edit `.gitignore` for you.
+        #[arg(long = "okf", alias = "vault")]
+        okf: bool,
     },
     /// Incrementally update the graph for the current tree (content-addressed).
     ///
@@ -753,47 +757,47 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Render the graph: docs site or Obsidian vault.
+    /// Render the graph: docs site or OKF bundle.
     ///
-    /// **The output directory is deleted and rebuilt on every render.** A vault is
-    /// a build-output of the graph, regenerated over itself so that a note for a
+    /// **The output directory is deleted and rebuilt on every render.** A bundle is
+    /// a build-output of the graph, regenerated over itself so that a concept for a
     /// symbol you have since renamed does not linger for ever. Nothing you put
-    /// inside it survives: keep your own notes *outside* the vault and link into
-    /// it (issue #442).
+    /// inside it survives: keep your own notes *outside* it and link in (issue
+    /// #442).
     ///
-    /// **Note names changed in issue #574 and there is no migration.** They used
-    /// to collide — two keys could produce one file, and on macOS and Windows two
-    /// names differing only in case are the same file, so this repository's vault
-    /// was 104 notes short of the count it printed. Every name now carries a hash
-    /// of its key, so every node gets its own note; the cost is that every note
-    /// was renamed, and a hand-written link into a vault rendered by an earlier
-    /// version now resolves to nothing. Re-point those links (Obsidian's
-    /// autocomplete will find the new names) or re-create them from the new vault.
+    /// **`obsidian` was replaced by `okf` in 4.0.0.** The output is an Open
+    /// Knowledge Format bundle (v0.2): markdown concept documents with YAML
+    /// frontmatter, nested by kind and by workspace member, linked by ordinary
+    /// markdown links. Obsidian reads all three, so *Open folder as vault* still
+    /// works — what changed is that the output targets an open specification with
+    /// other consumers rather than one application's conventions.
+    ///
+    /// The nesting also retires the hazard that shaped the vault: it wrote one
+    /// flat directory, and on macOS and Windows two names differing only in case
+    /// are one file, so this repository's vault was once **104 notes short of the
+    /// count it printed**. Directories make that collision structural rather than
+    /// something a filename hash has to survive.
     Render {
-        /// Target: docs | obsidian
+        /// Target: docs | okf
         target: String,
-        /// Output directory (default: `website/dist` for docs, `vault` for
-        /// obsidian). **Emptied first** — see the command's help.
+        /// Output directory (default: `website/dist` for docs, `okf` for the
+        /// bundle). **Emptied first** — see the command's help.
         #[arg(long)]
         out: Option<String>,
-        /// `obsidian` only: render a **named** workspace from config
-        /// (`[[workspaces]]`/`[standalone]`) as **one vault spanning its member
+        /// `okf` only: render a **named** workspace from config
+        /// (`[[workspaces]]`/`[standalone]`) as **one bundle spanning its member
         /// repositories**, instead of the current project alone (issue #442).
-        /// Member notes are keyed `<project>::<key>`, because node keys are
-        /// repository-relative and every member's `README.md` would otherwise
-        /// claim the same note; the filename is derived from that key — a
-        /// readable lowercase hint, then a hash of the whole key — so no
-        /// filename contains `::`. An unknown name fails fast, listing the
-        /// known ones.
+        /// Each member's concepts are nested under `/<member>/`, because node keys
+        /// are repository-relative and every member's `README.md` would otherwise
+        /// claim the same path. An unknown name fails fast, listing the known ones.
         ///
-        /// **Omitted, the current project alone is rendered, with unqualified
-        /// names.** Deliberately *not* "the workspace containing the current repo"
-        /// (which is how `links -w` defaults): a user's own notes live outside the
-        /// vault and link into it by name, so a bare `render obsidian` silently
-        /// becoming a multi-repo render would rename every note and break every
-        /// one of those links with no error. Workspace mode is opt-in, by name,
-        /// always — a name may move because a release says so, never because of
-        /// where the command was run.
+        /// **Omitted, the current project alone is rendered**, with sections at the
+        /// bundle root. Deliberately *not* "the workspace containing the current
+        /// repo" (which is how `links -w` defaults): a bare `render okf` silently
+        /// becoming a multi-repo render would move every concept a directory deeper
+        /// and break every link into the bundle with no error. Workspace mode is
+        /// opt-in, by name, always — a name may move because a release says so,
+        /// never because of where the command was run.
         #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
         workspace_name: Option<String>,
     },
@@ -1871,7 +1875,7 @@ fn main() -> anyhow::Result<()> {
     let gate = cfg.effective.media.resolve();
     // Paths excluded from the intent-debt scan (`[debt] ignore`), shared by
     // every surface that reports intent debt for *this* repository — `debt`,
-    // `debt-density`, `check`'s debt summary, and the Obsidian `_Home` overview.
+    // `debt-density` and `check`'s debt summary.
     // One list, so no two surfaces can disagree about what is in scope
     // (ADR-0007 v1.1, issues #321 and #372).
     let debt_ignore: &[String] = cfg.effective.debt.ignore.as_deref().unwrap_or(&[]);
@@ -2075,7 +2079,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
-        Command::Init { fetch, vault } => run_init(ingest, fetch, vault, debt_ignore),
+        Command::Init { fetch, okf } => run_init(ingest, fetch, okf, debt_ignore),
         Command::Render {
             target,
             out,
@@ -3928,7 +3932,7 @@ fn open_graph() -> anyhow::Result<(rto_graph::Repo, rto_graph::Store, rto_graph:
 }
 
 /// [`open_graph`], for a repository found from `dir` rather than the current
-/// directory — a workspace vault renders each member in turn, from wherever the
+/// directory — a workspace bundle renders each member in turn, from wherever the
 /// command was run.
 fn open_graph_at(
     dir: &std::path::Path,
@@ -4466,7 +4470,7 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
 fn run_init(
     ingest: rto_graph::IngestConfig,
     fetch: bool,
-    vault: bool,
+    okf: bool,
     debt_ignore: &[String],
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
@@ -4479,7 +4483,7 @@ fn run_init(
     // otherwise the common git dir (shared across worktrees).
     let hooks_dir = repo.hooks_dir();
     for name in init::MANAGED_HOOKS {
-        match init::install_hook(&hooks_dir, name, fetch, vault)? {
+        match init::install_hook(&hooks_dir, name, fetch, okf)? {
             init::HookOutcome::Installed => println!("installed hook: {name}"),
             init::HookOutcome::Updated => println!("refreshed hook: {name}"),
             init::HookOutcome::SkippedForeign => {
@@ -4523,10 +4527,10 @@ fn run_init(
         }
     }
 
-    // With `--vault`, render the vault once now so it exists immediately (the
+    // With `--okf`, render the bundle once now so it exists immediately (the
     // installed hooks keep it fresh thereafter).
-    if vault {
-        render_obsidian(ingest, None, debt_ignore)?;
+    if okf {
+        render_okf(ingest, None, debt_ignore)?;
     }
 
     println!("roteiro initialised — graph has {nodes} nodes, {edges} edges");
@@ -13799,7 +13803,16 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
     }
 }
 
-/// Render a build-output of the graph: the docs site or an Obsidian vault.
+/// Where `render okf` writes when `--out` is omitted, for the single-project and
+/// the workspace path alike.
+///
+/// Named once because it is also a claim made *outside* the code: this repository
+/// gitignores the directory (a bundle is a build-output that `sync` would
+/// re-ingest), and `the_default_bundle_directory_is_ignored_here` reads this
+/// constant rather than a second copy of the word.
+const BUNDLE_DIR: &str = "okf";
+
+/// Render a build-output of the graph: the docs site or an OKF bundle.
 fn run_render(
     cfg: &config::Config,
     ingest: rto_graph::IngestConfig,
@@ -13809,19 +13822,30 @@ fn run_render(
     workspace_name: Option<&str>,
 ) -> anyhow::Result<()> {
     match rto_render::Target::parse(target) {
-        // `--workspace-name` scopes a *vault*; the docs site is this repository's
+        // `--workspace-name` scopes a *bundle*; the docs site is this repository's
         // published website and has no workspace form. Rejected rather than
         // ignored, so the flag never looks like it took effect.
         Some(rto_render::Target::DocsSite) if workspace_name.is_some() => anyhow::bail!(
-            "`--workspace-name` applies only to `roteiro render obsidian` \
-             (it renders a workspace as one vault); the docs site is per-repository"
+            "`--workspace-name` applies only to `roteiro render okf` \
+             (it renders a workspace as one bundle, nested by member); the docs \
+             site is per-repository"
         ),
         Some(rto_render::Target::DocsSite) => render_docs(out),
-        Some(rto_render::Target::ObsidianVault) => match workspace_name {
-            Some(name) => render_obsidian_workspace(cfg, name, out),
-            None => render_obsidian(ingest, out, debt_ignore),
+        Some(rto_render::Target::OkfBundle) => match workspace_name {
+            Some(name) => render_okf_workspace(cfg, name, out),
+            None => render_okf(ingest, out, debt_ignore),
         },
-        None => anyhow::bail!("unknown render target `{target}` (expected: docs | obsidian)"),
+        // Names the removed target explicitly rather than listing the survivors
+        // and leaving the reader to infer. A script still passing `obsidian`
+        // should learn what happened to it, not merely that it is not valid.
+        None if target == "obsidian" => anyhow::bail!(
+            "`render obsidian` was removed in 4.0.0 — use `render okf`, which emits \
+             an Open Knowledge Format bundle. It is markdown with YAML frontmatter \
+             in nested directories, so Obsidian still opens the output folder as a \
+             vault; what changed is that it now targets an open specification \
+             rather than one application's conventions."
+        ),
+        None => anyhow::bail!("unknown render target `{target}` (expected: docs | okf)"),
     }
 }
 
@@ -13957,7 +13981,7 @@ fn discover_site_sources(
     .collect();
 
     // Where a link out of the site points instead. Pinned to the rendered
-    // commit, exactly as the vault renderer's Source links are — GitHub serves a
+    // commit, exactly as the bundle's `resource` links are — GitHub serves a
     // blob by sha forever, so the link survives the file being renamed, and one
     // repository with two answers to "which commit does a source link mean"
     // would be its own defect. `None` (no `origin`, or an unmappable one) leaves
@@ -14085,256 +14109,48 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The blob holding a node's full prose text, or `None` if it has none.
+/// Render a workspace as **one OKF bundle**, nested by member (#663, #442).
 ///
-/// The kind check is the whole of the rule and is load-bearing in both
-/// directions. A **file** node *is* the document, so it gets it. Every other node
-/// that shares the path does not: an `adr`/`adr_section` node's path is the ADR
-/// markdown file, and matching on the path alone would paste the entire document
-/// into all twenty ADR notes and all 179 of their section notes, next to the
-/// `file:` note that already carries it once. A symbol's `meta.content` is a doc
-/// comment — a summary of a definition, not a document — and is right as it is.
+/// Each member contributes its own concepts under `/<member>/<section>/`, read
+/// with **its own** configuration — `[ingest]` toggles and `[debt] ignore` come
+/// from that repository's `roteiro.toml`, not the one the command was run in, so
+/// a member's concepts are exactly the ones its own `roteiro` would produce
+/// (ADR-0007 v1.1).
 ///
-/// `blobs` is already filtered to prose paths, so a non-prose file node (source
-/// code, config, an image) simply misses the lookup and keeps whatever extraction
-/// captured for it. PDF and OCR text stay capped too: they are extraction
-/// *results*, not bytes this call site could re-read.
-fn prose_blob_oid<'a>(
-    blobs: &'a std::collections::HashMap<String, String>,
-    ex: &rto_graph::Explanation,
-) -> Option<&'a str> {
-    if ex.node.kind != rto_graph::NodeKind::File.as_str() {
-        return None;
-    }
-    blobs.get(ex.node.path.as_deref()?).map(String::as_str)
-}
-
-/// The ADR file behind an `adr` or `adr_section` node, or `None` for anything
-/// else.
-///
-/// The mirror image of [`prose_blob_oid`]'s kind check, and load-bearing for the
-/// same reason read the other way round. These are precisely the nodes that carry
-/// an ADR's path *without being the document*, so each is entitled to a **slice**
-/// of that file and none of them to the whole of it — [`rto_spec::AdrDoc::text_for_key`]
-/// does the splitting. A path-only rule here would paste all 16 KB of ADR-0015
-/// into its twenty-odd notes at once.
-fn adr_blob_oid<'a>(
-    blobs: &'a std::collections::HashMap<String, String>,
-    ex: &rto_graph::Explanation,
-) -> Option<&'a str> {
-    if ex.node.kind != rto_graph::NodeKind::Adr.as_str()
-        && ex.node.kind != rto_graph::NodeKind::AdrSection.as_str()
-    {
-        return None;
-    }
-    blobs.get(ex.node.path.as_deref()?).map(String::as_str)
-}
-
-/// Render an Obsidian vault for **the current project**: one linked markdown note
-/// per graph node in `<out>` (default `vault`).
-///
-/// This is the whole of `roteiro render obsidian` with no `--workspace-name`. It
-/// renders exactly the nodes it always did, with exactly the same bodies — but as
-/// of issue #574 **not under the same names**: [`rto_render::note_name`] was not
-/// injective under filename case folding, and this repository's vault was
-/// silently one file short for each of 104 keys. The count printed below is now
-/// the number of notes on disk, which before that fix it was not.
-///
-/// There is no migration. A hand-written note *outside* the vault that linked in
-/// by name now points at nothing — the name is derived from the key, and the old
-/// one is not recoverable from the new. See [`rto_render::note_name`] for why the
-/// break was taken now rather than deferred.
-fn render_obsidian(
-    ingest: rto_graph::IngestConfig,
-    out: Option<String>,
-    debt_ignore: &[String],
-) -> anyhow::Result<()> {
-    let (repo, mut store, cache) = open_graph()?;
-    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-    let out = out.map_or_else(
-        || std::path::PathBuf::from("vault"),
-        std::path::PathBuf::from,
-    );
-    reset_vault_dir(&out)?;
-
-    let commit = repo.head_commit_id().ok();
-    let remote = repo.origin_url();
-    let source_base = member_source_base(remote.as_deref(), commit.as_deref());
-
-    let mut names = NoteNames::default();
-    let count = write_member_notes(
-        &repo,
-        &store,
-        ingest,
-        &out,
-        &rto_render::VaultScope::PROJECT,
-        source_base.as_deref(),
-        &mut names,
-    )?;
-
-    // The overview note: what was scanned, structure, provenance, ADRs, debt.
-    let repo_url = remote.as_deref().and_then(repo_web_root);
-    let home = rto_render::render_home(&vault_summary(
-        &repo,
-        &store,
-        repo_url,
-        commit,
-        debt_ignore,
-        ingest,
-    )?);
-    std::fs::write(out.join(&home.filename), &home.content)?;
-
-    println!(
-        "rendered obsidian vault → {} ({count} note(s) + {})",
-        out.display(),
-        rto_render::HOME_NOTE
-    );
-    names.report();
-    Ok(())
-}
-
-/// Render **one vault spanning a named workspace's member repositories** (issue
-/// #442 part 1).
-///
-/// Nothing here is a new export surface: every note is one a per-project vault
-/// would already have rendered for that member, and the only edges shown are the
-/// ones the graph already holds. What changes is the *span* — members can no
-/// longer overwrite each other's notes, `_Home` is the workspace overview, and
-/// the cross-repo links ADR-0009 persists finally have both of their endpoints in
-/// one vault.
-///
-/// Two related names, because conflating them sends a reader looking for a file
-/// that does not exist:
-///
-/// - the **key** a note is rendered from is project-qualified,
-///   `<project>::<key>` — ADR-0009's cross-repo form, reused rather than
-///   reinvented, which is why a cross-repo link resolves to a note in this vault;
-/// - the **note name** is [`rto_render::note_name`] of that key: `:` slugs to
-///   `-`, the whole hint lowercases, and a hash of the key is appended. There is
-///   no `::` in a filename.
-///
-/// So `app`'s `file:README.md` is keyed `app::file:README.md` and written to
-/// `app-file-readme.md-a114bde6dcaba1c1.md`.
-///
-/// Qualification is what stops *members* colliding; it does nothing about the two
-/// mechanisms that were losing notes *within* a member, so before issue #574 a
-/// workspace vault lost those once per member and the total scaled with the
-/// member count. It is the hash, not the prefix, that makes the count printed
-/// below equal the number of files written.
-///
-/// Each member is read with **its own** configuration — `[ingest]` toggles and
-/// `[debt] ignore` come from that repository's `roteiro.toml`, not the one the
-/// command happened to be run in — so a member's section reports exactly the
-/// figures its own `roteiro debt` would (ADR-0007 v1.1). Rendering the same
-/// repository from two directories must not produce two different numbers.
-/// Every member's **version pin**: for each dependency it declares, the hub
-/// revision it deploys (ADR-0009 step 8, issue #442).
-///
-/// # Hub-relative, and the hub is named
-///
-/// Not "the version of *the* hub". Since #623 a workspace is a snowflake, so a
-/// member's pin is relative to **its own parent** in
-/// [`rto_graph::topology::project_graph`] — `infra` pins `chart`, and `chart` pins
-/// `app`. Taking the workspace's busiest node as everyone's hub would report
-/// `infra` as pinning a version of `app` it has never heard of.
-///
-/// # A dependency with no resolvable pin is still reported
-///
-/// It yields an entry whose `rev` is `None` rather than no entry at all. Issue
-/// #505 settled the rule: *asked and found nothing* must not be indistinguishable
-/// from *never asked*, and before #609 the image half of pin detection could not
-/// fire at all for a Helm-shaped spoke — a workspace where every row said
-/// "none detected" is exactly the signal that used to be invisible.
-///
-/// # Errors
-///
-/// Propagates workspace, git and store failures.
-///
-/// `project_graph` returns `WorkspaceError::NoGraph` for a member with no store,
-/// which cannot arise here: the loop in [`render_obsidian_workspace`] calls
-/// `build_graph` for every member before this runs, so each has been synced by the
-/// time it is asked about. Stated because the invariant is an *ordering* one and
-/// nothing in this signature enforces it — and because, were it ever violated,
-/// erroring is the right answer rather than silently rendering a manifest with
-/// pins missing from it.
-///
-/// A member that is synced but pins nothing recognisable is a different case and
-/// not an error: [`detect_spoke_pin`] returns `None`, which renders as
-/// *(none detected)*.
-fn workspace_pins(
-    ws: &rto_graph::Workspace,
-    member_names: &[String],
-) -> anyhow::Result<Vec<rto_render::MemberPin>> {
-    let graph = rto_graph::topology::project_graph(ws, member_names)?;
-    let mut pins = Vec::new();
-    for member in member_names {
-        // An error, not a `continue`, and for the reason this function's docs
-        // give: a manifest quietly missing a pin row is worse than one that
-        // fails, because the section's whole value is that its promises hold.
-        // It also matches the member loop above, which already refuses a member
-        // with no root — so silently skipping here would have disagreed with the
-        // caller about the same condition.
-        let spoke_root = ws
-            .project_root(Some(member))?
-            .ok_or_else(|| anyhow::anyhow!("workspace member `{member}` has no repository root"))?;
-        for hub in graph.parents_of(member) {
-            let hub_root = ws.project_root(Some(hub))?.ok_or_else(|| {
-                anyhow::anyhow!("workspace member `{hub}` has no repository root")
-            })?;
-            // The hub's **directory basename**, not the workspace display label:
-            // a label carries a `-2`/`-3` collision suffix that would never match
-            // the URL or image basename a pin is recognised by.
-            let hub_dir = hub_root
-                .file_name()
-                .map_or_else(|| hub.clone(), |n| n.to_string_lossy().into_owned());
-            let hub_repo = rto_graph::Repo::discover(&hub_root)?;
-            let hub_origin = hub_repo.origin_url();
-            let found = detect_spoke_pin(&spoke_root, &hub_dir, hub_origin.as_deref(), &hub_repo)?;
-            pins.push(rto_render::MemberPin {
-                member: member.clone(),
-                hub: hub.clone(),
-                rev: found.as_ref().map(|p| p.rev.clone()),
-                via: found.map(|p| p.via),
-            });
-        }
-    }
-    // Stable: the vault is regenerated over itself, so an order that moved would
-    // show a diff on every render.
-    pins.sort_by(|a, b| (&a.member, &a.hub).cmp(&(&b.member, &b.hub)));
-    Ok(pins)
-}
-
-fn render_obsidian_workspace(
+/// The vault this replaces had to qualify every key as `<project>::<key>` and
+/// hash the filename, because it wrote one flat directory and two members'
+/// `file:README.md` would otherwise overwrite each other. A bundle nests, so the
+/// structure carries what the naming scheme used to.
+fn render_okf_workspace(
     cfg: &config::Config,
     workspace_name: &str,
     out: Option<String>,
 ) -> anyhow::Result<()> {
+    use rto_render::okf;
+
     let paths = workspace_member_paths(cfg, workspace_name)?;
-    // Names come from `Workspace::from_repo_paths` rather than being re-derived
-    // here, because that is the rule that produced the `<project>::<key>` targets
-    // already recorded in the members' external-ref nodes. Two naming rules would
-    // mean cross-repo links that resolve at query time and dangle in the vault.
+    // Names from `Workspace::from_repo_paths`, not re-derived: that is the rule
+    // that produced the `<project>::<key>` targets already recorded in the
+    // members' external-ref nodes, and a second naming rule would mean cross-repo
+    // links that resolve at query time and dangle in the bundle.
     let ws = rto_graph::Workspace::from_repo_paths(&paths)?;
     let member_names = ws.names();
-    let members: std::collections::BTreeSet<String> = member_names.iter().cloned().collect();
 
     let out = out.map_or_else(
-        || std::path::PathBuf::from("vault"),
+        || std::path::PathBuf::from(BUNDLE_DIR),
         std::path::PathBuf::from,
     );
-    reset_vault_dir(&out)?;
+    reset_bundle_dir(&out)?;
 
-    let mut names = NoteNames::default();
-    let mut summaries = Vec::with_capacity(member_names.len());
-    let mut cross_links = Vec::new();
-    let mut count = 0usize;
+    let tool = okf::Actor::Tool("roteiro".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
 
+    // Each member's nodes and explanations must outlive the borrow the concepts
+    // take, so they are collected first and the concepts built afterwards.
+    let mut per_member = Vec::new();
     for project in &member_names {
         let root = ws.project_root(Some(project))?.ok_or_else(|| {
             anyhow::anyhow!("workspace member `{project}` has no repository root")
         })?;
-
-        // That member's own configuration, not the invoking directory's.
         let member_cfg = config::load(&root).map_err(|e| {
             anyhow::anyhow!(
                 "reading the configuration of workspace member `{project}` at {}: {e}",
@@ -14342,7 +14158,6 @@ fn render_obsidian_workspace(
             )
         })?;
         let ingest = member_cfg.effective.ingest.resolve();
-        let debt_ignore = member_cfg.effective.debt.ignore.clone().unwrap_or_default();
 
         let (repo, mut store, cache) = open_graph_at(&root)?;
         build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
@@ -14350,79 +14165,381 @@ fn render_obsidian_workspace(
         let commit = repo.head_commit_id().ok();
         let remote = repo.origin_url();
         let source_base = member_source_base(remote.as_deref(), commit.as_deref());
-        let scope = rto_render::VaultScope {
-            project: Some(project),
-            members: &members,
-        };
+        // Each member is at its own commit, so each carries its own fallback
+        // timestamp. One shared clock reading would date every member to the
+        // moment the workspace was rendered and make the bundle differ on every
+        // run — see `render_okf`, which takes the same commit time for the same
+        // reason.
+        let at = okf_instant(repo.head_commit_time().unwrap_or_default());
 
-        count += write_member_notes(
-            &repo,
-            &store,
-            ingest,
-            &out,
-            &scope,
-            source_base.as_deref(),
-            &mut names,
-        )?;
-        collect_cross_links(&store, project, &members, &mut cross_links)?;
-
-        let repo_url = remote.as_deref().and_then(repo_web_root);
-        summaries.push(vault_summary(
-            &repo,
-            &store,
-            repo_url,
-            commit,
-            &debt_ignore,
-            ingest,
-        )?);
+        let bodies = okf_bodies(&repo, &store, ingest)?;
+        let nodes = store.all_nodes()?;
+        // Per document, in this member's own history — the `HEAD` author would
+        // credit whoever last pushed *here* with confirming every ADR in it.
+        let authors = repo.last_authors(&authored_paths(&nodes))?;
+        let mut explanations = Vec::with_capacity(nodes.len());
+        for node in &nodes {
+            if let Some(ex) = rto_graph::explain(&store, &node.key)? {
+                explanations.push((node.provenance, ex));
+            }
+        }
+        per_member.push((
+            project.clone(),
+            source_base,
+            authors,
+            at,
+            explanations,
+            bodies,
+        ));
     }
 
-    // Stable, and stable for a reason: the vault is regenerated over itself, so a
-    // `_Home` whose member order moved would show a diff on every render.
-    cross_links.sort_by(|a: &rto_render::CrossLink, b: &rto_render::CrossLink| {
-        (&a.from_project, &a.from_key, &a.to_qualified).cmp(&(
-            &b.from_project,
-            &b.from_key,
-            &b.to_qualified,
-        ))
-    });
-    let cross_links_total = cross_links.len();
-    // Counted before the cap: the caption reads as a statement about the
-    // workspace, so counting the truncated view would make it quietly wrong the
-    // moment a workspace outgrows `WORKSPACE_CROSS_LINK_ROWS`.
-    let cross_links_authored = cross_links.iter().filter(|l| l.authored).count();
-    cross_links.truncate(WORKSPACE_CROSS_LINK_ROWS);
+    let mut concepts = Vec::new();
+    for (project, source_base, authors, at, explanations, bodies) in &per_member {
+        for (provenance, ex) in explanations {
+            let render = OkfRender {
+                source_base: source_base.as_deref(),
+                tool: &tool,
+                authors,
+                at,
+                bodies,
+            };
+            concepts.push(okf_concept(ex, *provenance, Some(project.clone()), &render));
+        }
+    }
 
-    let pins = workspace_pins(&ws, &member_names)?;
-
-    let home = rto_render::render_workspace_home(&rto_render::WorkspaceSummary {
-        // Stamped at render, not read from the graph: it records when this vault
-        // was produced, which is the fact a reader needs to judge whether it is
-        // still current (#442 part 2).
-        generated_at: rto_exec::rfc3339_utc(std::time::SystemTime::now()),
-        name: workspace_name.to_owned(),
-        members: summaries,
-        pins,
-        cross_links,
-        cross_links_total,
-        cross_links_authored,
-    });
-    std::fs::write(out.join(&home.filename), &home.content)?;
+    let count = concepts.len();
+    let files = okf::assemble(concepts, &format!("Workspace: {workspace_name}"), &[]);
+    let written = write_bundle(&out, &files)?;
 
     println!(
-        "rendered obsidian vault for workspace `{workspace_name}` → {} \
-         ({count} note(s) across {} member(s) + {})",
+        "rendered okf bundle (v{}) for workspace `{workspace_name}` → {} \
+         ({count} concept(s) across {} member(s), {written} file(s))",
+        okf::OKF_VERSION,
         out.display(),
-        member_names.len(),
-        rto_render::HOME_NOTE
+        member_names.len()
     );
-    names.report();
     Ok(())
 }
 
-/// Cross-repo links shown in the workspace `_Home`. An overview, not the report:
-/// the full one is `roteiro links --matrix`, and `_Home` says so when it truncates.
-const WORKSPACE_CROSS_LINK_ROWS: usize = 25;
+/// The **raw** source text a bundle may draw on, keyed by repository-relative
+/// path. Frontmatter is stripped at the point of use, not here, because the
+/// declared `status:` is read from the same text.
+///
+/// A node's `meta.content` is an **embedding budget** — whitespace-collapsed and
+/// truncated — so a concept built from it alone is a few percent of its source on
+/// one line: findable, and close to unreadable. The bundle exists to give an
+/// agent the text, so the text is read from the blob.
+///
+/// Only prose and ADR blobs are read, on demand. The tree walk is eager and reads
+/// no content, so this repository reads the ~74 blobs that are prose rather than
+/// all 7,969 of its nodes.
+///
+/// ADR paths are **not** gated on `ingest.prose`: an ADR's text is the authored
+/// layer, which is re-parsed on every sync whatever the derived layer ingests.
+/// Which paths are ADRs is read off the graph rather than re-decided here, so
+/// `rto_spec`'s classification stays the only one.
+fn okf_bodies(
+    repo: &rto_graph::Repo,
+    store: &rto_graph::Store,
+    ingest: rto_graph::IngestConfig,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let adr_paths: std::collections::HashSet<String> = store
+        .all_nodes()?
+        .into_iter()
+        .filter(|n| n.kind == rto_graph::NodeKind::Adr)
+        .filter_map(|n| n.path)
+        .collect();
+    let mut wanted: Vec<rto_graph::BlobRef> = Vec::new();
+    if ingest.prose || !adr_paths.is_empty() {
+        for blob in repo.walk_blobs()? {
+            if adr_paths.contains(&blob.path) || (ingest.prose && rto_graph::is_prose(&blob.path)) {
+                wanted.push(blob);
+            }
+        }
+    }
+    let mut out = std::collections::HashMap::with_capacity(wanted.len());
+    for blob in wanted {
+        if let Ok(bytes) = repo.read_blob(&blob.oid)
+            && let Ok(text) = String::from_utf8(bytes)
+        {
+            out.insert(blob.path, text);
+        }
+    }
+    Ok(out)
+}
+
+/// A document's prose, with any leading YAML frontmatter removed.
+///
+/// The source's own frontmatter must not become body text. It is metadata OKF
+/// already carries in its own block, so emitting it twice states the same facts
+/// in two places — and the closing `---` lands mid-document, where a reader or a
+/// parser can take it for a horizontal rule or a second frontmatter block.
+///
+/// Only a block at the very start counts: a `---` further down is a rule, and
+/// consuming to it would swallow the document.
+fn strip_frontmatter(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return text;
+    };
+    match rest.find("\n---\n") {
+        Some(end) => rest[end + 5..].trim_start_matches('\n'),
+        None => text,
+    }
+}
+
+/// The OKF `status` for an ADR, from the `status:` its frontmatter declares.
+///
+/// OKF offers `draft` | `stable` | `deprecated` (§4), and an ADR's vocabulary is
+/// richer, so the mapping loses detail on purpose rather than inventing values
+/// the specification does not define. `Rejected` and `Superseded` both become
+/// `deprecated`: they differ in *why* a decision stopped applying, and a consumer
+/// deriving "do not build on this" needs only that it did.
+///
+/// Reads a *document*, so the caller decides which concepts the document's
+/// lifecycle is actually about — see [`okf_concept`]. Handing it every concept
+/// that shares an ADR's path gave the file and its debt markers the decision's
+/// status, which is a different claim about a different thing.
+fn okf_status(source: Option<&str>) -> Option<String> {
+    let raw = source?;
+    let declared = raw
+        .lines()
+        .take(40)
+        .find_map(|l| l.trim().strip_prefix("status:"))?
+        .split('#')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    let mapped = match declared.as_str() {
+        "accepted" => "stable",
+        "draft" | "for review" => "draft",
+        "rejected" | "superseded" => "deprecated",
+        _ => return None,
+    };
+    Some(mapped.to_owned())
+}
+
+/// Build one OKF concept from a node's explanation and provenance.
+///
+/// Shared by the single-project and workspace renderers so the frontmatter — and
+/// with it the trust tier a consumer derives — cannot differ between them.
+struct OkfRender<'r> {
+    /// Where a node's source lives in the rendered commit, for `resource`.
+    source_base: Option<&'r str>,
+    /// The producing tool, for `generated.by`.
+    tool: &'r rto_render::okf::Actor,
+    /// Who last changed each authored document, keyed by repository-relative
+    /// path, for `verified[].by` on the authored layer.
+    ///
+    /// **Per path, not per repository.** `verified: [{ by: human:<id> }]` says
+    /// that person stands behind *this* document, so the `HEAD` author would
+    /// record ~200 confirmations nobody made.
+    authors: &'r std::collections::BTreeMap<String, rto_graph::PathAuthor>,
+    /// The fallback timestamp for everything not dated by a document of its own:
+    /// the `HEAD` commit's time, so re-rendering an unchanged commit produces an
+    /// unchanged bundle. A wall clock here would make every render differ.
+    at: &'r str,
+    /// Raw source text, keyed by path.
+    bodies: &'r std::collections::HashMap<String, String>,
+}
+
+/// The RFC 3339 instant a git commit time names.
+fn okf_instant(secs: i64) -> String {
+    rto_exec::rfc3339_from_unix(u64::try_from(secs).unwrap_or(0))
+}
+
+/// The distinct repository-relative paths of the **authored** nodes in `nodes`.
+///
+/// The input to one history walk. Restricted to the authored layer because that
+/// is the only provenance a person can confirm — a derived symbol is confirmed by
+/// the tool, and looking up who last touched its file would answer a question
+/// nobody asked. Deduplicated because ~180 `adr_section` nodes share ~20 files.
+fn authored_paths(nodes: &[rto_graph::Node]) -> std::collections::BTreeSet<String> {
+    nodes
+        .iter()
+        .filter(|n| n.provenance == rto_graph::Provenance::Authored)
+        .filter_map(|n| n.path.clone())
+        .collect()
+}
+
+fn okf_concept<'a>(
+    ex: &'a rto_graph::Explanation,
+    provenance: rto_graph::Provenance,
+    member: Option<String>,
+    r: &OkfRender<'_>,
+) -> rto_render::okf::Concept<'a> {
+    use rto_render::okf;
+
+    let mut tags = vec![format!("roteiro/kind/{}", ex.node.kind)];
+    if let Some(lang) = &ex.node.lang {
+        tags.push(format!("roteiro/lang/{lang}"));
+    }
+    // Who last changed *this* document, and when they did it. A concept with no
+    // path, or one whose history could not be read, gets no human and the
+    // bundle's own timestamp — which `okf::origin_for` turns into no
+    // confirmation rather than the tool's.
+    let attribution = ex.node.path.as_deref().and_then(|p| r.authors.get(p));
+    let human = attribution.map(|a| okf::Actor::Human(a.name.clone()));
+    // The author's own commit time, not the render's: dating a person's
+    // confirmation to a moment they had nothing to do with is a second false
+    // claim on top of the first.
+    let at = attribution.map_or_else(|| r.at.to_owned(), |a| okf_instant(a.at));
+    okf::Concept {
+        explanation: ex,
+        frontmatter: okf::Frontmatter {
+            type_: ex.node.kind.clone(),
+            title: Some(ex.node.name.clone()),
+            description: None,
+            // `source_blob_base` ends at the commit id with no trailing slash, so
+            // the separator belongs here. Without it the URL reads
+            // `.../blob/<sha>docs/adr/0001.md` and 404s.
+            resource: ex
+                .node
+                .path
+                .as_deref()
+                .and_then(|p| r.source_base.map(|b| format!("{b}/{p}"))),
+            tags,
+            // Read from the source's own `status:`, not invented here — an ADR
+            // that says `Superseded` should not read as `stable` in a bundle.
+            //
+            // Only concepts that *are* the decision. Everything else sharing the
+            // ADR's file is a different concept: the `file:` node is the document,
+            // and a `marker` is a piece of unfinished work inside it — labelling
+            // either "stable" because the decision above them is accepted states
+            // something nobody claimed. A section keeps it, because a section of a
+            // superseded decision is superseded.
+            status: matches!(ex.node.kind.as_str(), "adr" | "adr_section")
+                .then(|| {
+                    okf_status(
+                        ex.node
+                            .path
+                            .as_deref()
+                            .and_then(|p| r.bodies.get(p))
+                            .map(String::as_str),
+                    )
+                })
+                .flatten(),
+            origin: Some(okf::origin_for(provenance, &at, r.tool, human.as_ref())),
+            sources: ex.node.path.iter().map(|p| format!("/{p}")).collect(),
+        },
+        // Only a node that *is* the file carries the file's prose. A symbol
+        // inside it would otherwise repeat the whole document once per function,
+        // which is how a bundle becomes larger than the repository it describes.
+        body: matches!(
+            ex.node.kind.as_str(),
+            "file" | "adr" | "blueprint" | "doc" | "site_page"
+        )
+        .then(|| {
+            ex.node
+                .path
+                .as_deref()
+                .and_then(|p| r.bodies.get(p))
+                .map(|t| strip_frontmatter(t).to_owned())
+        })
+        .flatten(),
+        member,
+    }
+}
+
+/// Write an assembled bundle to `out`, returning the number of files written.
+fn write_bundle(
+    out: &std::path::Path,
+    files: &[rto_render::okf::BundleFile],
+) -> anyhow::Result<usize> {
+    for file in files {
+        // Paths are bundle-relative and open with `/`; joining one unstripped
+        // makes it absolute and the bundle lands at the filesystem root.
+        let dest = out.join(file.path.trim_start_matches('/'));
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, &file.content)?;
+    }
+    Ok(files.len())
+}
+
+/// Render the graph as an **OKF v0.2 bundle** (issue #663).
+///
+/// Replaces the Obsidian vault. The two differ in more than format: the vault
+/// wrote one flat directory of hash-suffixed filenames because Obsidian folds
+/// names that differ only in case, and it lost 104 notes of 8,144 before the
+/// hash existed. A bundle nests concepts by kind, so that pressure mostly
+/// disappears and what remains is settled in
+/// [`rto_render::okf::assemble`] where the whole set is visible.
+///
+/// The provenance mapping is the part worth having. OKF derives trust tiers
+/// (§5.3) from `verified`, and Roteiro already knows which nodes were written by
+/// a person: authored prose is confirmed by the commit's author (`human:<id>`,
+/// the prefix §7 makes load-bearing), deterministic extraction is confirmed by
+/// the tool, and heuristic inference claims nothing. Most producers will emit
+/// `type` and stop.
+fn render_okf(
+    ingest: rto_graph::IngestConfig,
+    out: Option<String>,
+    debt_ignore: &[String],
+) -> anyhow::Result<()> {
+    use rto_render::okf;
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+    let out = out.map_or_else(
+        || std::path::PathBuf::from(BUNDLE_DIR),
+        std::path::PathBuf::from,
+    );
+    reset_bundle_dir(&out)?;
+
+    let commit = repo.head_commit_id().ok();
+    let remote = repo.origin_url();
+    let source_base = member_source_base(remote.as_deref(), commit.as_deref());
+    let tool = okf::Actor::Tool("roteiro".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
+    // The commit's own time, not the wall clock: the bundle is a build output of
+    // one commit, so two renders of that commit must produce the same bytes. A
+    // `SystemTime::now()` here would make every render differ from the last while
+    // describing an unchanged graph.
+    let at = okf_instant(repo.head_commit_time().unwrap_or_default());
+
+    let nodes = store.all_nodes()?;
+    let mut explanations = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        if let Some(ex) = rto_graph::explain(&store, &node.key)? {
+            explanations.push((node, ex));
+        }
+    }
+    // One history walk for the whole authored layer. Only authored concepts can
+    // reach the human-reviewed tier, so only their paths are looked up — ~20
+    // files here, shared by ~180 `adr_section` nodes.
+    let authors = repo.last_authors(&authored_paths(&nodes))?;
+
+    let bodies = okf_bodies(&repo, &store, ingest)?;
+    // Through the same builder as the workspace path: the frontmatter decides the
+    // trust tier a consumer derives, and two constructions of it could disagree
+    // about a concept's provenance depending only on which command was run.
+    let render = OkfRender {
+        source_base: source_base.as_deref(),
+        tool: &tool,
+        authors: &authors,
+        at: &at,
+        bodies: &bodies,
+    };
+    let concepts: Vec<okf::Concept<'_>> = explanations
+        .iter()
+        .map(|(node, ex)| okf_concept(ex, node.provenance, None, &render))
+        .collect();
+
+    let count = concepts.len();
+    let files = okf::assemble(concepts, "Roteiro", &[]);
+    // The same writer as the workspace path. It was written out twice here, and
+    // the leading-slash rule it turns on is the difference between a bundle in
+    // `out` and a bundle at the filesystem root — not a rule to keep two copies of.
+    let written = write_bundle(&out, &files)?;
+
+    let _ = debt_ignore;
+    println!(
+        "rendered okf bundle (v{}) → {} ({count} concept(s), {written} file(s))",
+        okf::OKF_VERSION,
+        out.display()
+    );
+    Ok(())
+}
 
 /// The member repository paths of the workspace named `workspace_name`.
 ///
@@ -14453,7 +14570,7 @@ fn workspace_member_paths(
 }
 
 /// The configured workspace named `name`, or a clear error listing the known ones.
-/// Shared by `links -w` and `render obsidian -w` so one name fails the same way in
+/// Shared by `links -w` and `render okf -w` so one name fails the same way in
 /// both.
 fn select_resolved_workspace<'a>(
     resolved: &'a [rto_graph::ResolvedWorkspace],
@@ -14469,19 +14586,17 @@ fn select_resolved_workspace<'a>(
     })
 }
 
-/// Empty `out`, then create it. A vault is a build output that is regenerated over
+/// Empty `out`, then create it. A bundle is a build output that is regenerated over
 /// itself; the alternative is stale notes for symbols that have since been renamed
 /// accumulating for ever. The contract this rests on is stated in the issue: the
-/// vault directory is Roteiro's, and a user's own notes belong outside it.
+/// output directory is Roteiro's, and a user's own notes belong outside it.
 ///
 /// **This is a data-loss surface, so it is stated where a user meets it** — in
-/// `render`'s `--help`, in `docs/OBSIDIAN_VAULT.md`, and in the README — not only
-/// here. Nothing placed inside the vault survives a render, which is exactly what
-/// makes the note *names* the only stable interface it has: the sole thing that
-/// persists is a note outside the vault linking in by name. That is why issue
-/// #574's renaming was worth a deliberate break rather than a compatibility
-/// shim, and why it does not get a second one.
-fn reset_vault_dir(out: &std::path::Path) -> anyhow::Result<()> {
+/// `render`'s `--help`, in `docs/OKF_BUNDLE.md`, and in the README — not only
+/// here. Nothing placed inside the bundle survives a render, which is exactly
+/// what makes the concept *paths* the only stable interface it has: the sole
+/// thing that persists is a document outside the bundle linking in by path.
+fn reset_bundle_dir(out: &std::path::Path) -> anyhow::Result<()> {
     if out.exists() {
         std::fs::remove_dir_all(out)?;
     }
@@ -14490,498 +14605,14 @@ fn reset_vault_dir(out: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// A web "blob" base for clickable Source links, from the origin remote and the
-/// rendered commit (an absolute URL, so it works in a downloaded vault too).
-/// `None` when there is no mappable remote — notes then omit the link.
+/// rendered commit (an absolute URL, so it works in a downloaded bundle too).
+/// `None` when there is no mappable remote — concepts then omit `resource`.
 fn member_source_base(remote: Option<&str>, commit: Option<&str>) -> Option<String> {
     match (remote, commit) {
         (Some(r), Some(c)) => source_blob_base(r, c),
         _ => None,
     }
 }
-
-/// The note names a vault has already claimed, so a name written twice is
-/// **reported** instead of one note silently overwriting the other.
-///
-/// Keyed case-insensitively, because that is what a reader gets either way:
-/// Obsidian resolves `[[links]]` without regard to case, and macOS and Windows
-/// fold it in the filesystem too, so two notes whose names differ only in case are
-/// one note however they were written.
-///
-/// This began as instrumentation for the question workspace mode had to answer —
-/// do members collide? — and answering it turned up that they already did *within*
-/// a single project: measured on this repository before any workspace support
-/// existed, 8,144 nodes rendered to 8,040 distinct notes. Nine were lost to the
-/// slug and 95 to filename case folding. The count printed said 8,144.
-///
-/// Issue #574 fixed the naming rather than only reporting it, so this is now a
-/// **guard rather than a census**: [`rto_render::note_name`] appends a 64-bit
-/// hash of the whole key to every name, which makes a collision a hash collision.
-/// One is not expected — the birthday bound over this repository's keys is about
-/// 2e-12 — but "not expected" is exactly the claim that loses a note quietly, so
-/// the check stays and the report says which two keys did it. Silence here is now
-/// the assertion that the count printed is the number of files written.
-#[derive(Default)]
-struct NoteNames {
-    /// Lowercased note filename → the node key that claimed it first.
-    claimed: std::collections::HashMap<String, String>,
-    /// `(filename, first key, overwriting key)` for each collision.
-    collisions: Vec<(String, String, String)>,
-}
-
-impl NoteNames {
-    /// Record that `key` wrote `filename`, noting a collision if it was taken.
-    fn claim(&mut self, filename: &str, key: &str) {
-        match self.claimed.entry(filename.to_lowercase()) {
-            std::collections::hash_map::Entry::Occupied(e) => {
-                self.collisions
-                    .push((filename.to_owned(), e.get().clone(), key.to_owned()));
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(key.to_owned());
-            }
-        }
-    }
-
-    /// Warn about collisions, naming a few. Silent when there are none.
-    fn report(&self) {
-        if self.collisions.is_empty() {
-            return;
-        }
-        eprintln!(
-            "warning: {} note(s) share a name with another and are one note in the \
-             vault, so the count above is larger than the number of files written. \
-             Since issue #574 every name carries a hash of its whole key, so this \
-             is a hash collision and a bug worth reporting — not the old lossy \
-             slug. The graph is complete; the vault is not:",
-            self.collisions.len()
-        );
-        for (name, first, second) in self.collisions.iter().take(5) {
-            eprintln!("  {name}: `{first}` and `{second}`");
-        }
-        if self.collisions.len() > 5 {
-            eprintln!("  … and {} more", self.collisions.len() - 5);
-        }
-    }
-}
-
-/// Write one member's notes into `out` under `scope`, returning how many were
-/// rendered. Shared by the single-project and workspace paths, so both read prose
-/// and ADR bodies by exactly the same rules.
-fn write_member_notes(
-    repo: &rto_graph::Repo,
-    store: &rto_graph::Store,
-    ingest: rto_graph::IngestConfig,
-    out: &std::path::Path,
-    scope: &rto_render::VaultScope<'_>,
-    source_base: Option<&str>,
-    names: &mut NoteNames,
-) -> anyhow::Result<usize> {
-    // Where a prose file's full text lives in the rendered commit, keyed by path.
-    //
-    // A node's `meta.content` is an *embedding* budget (`MAX_CONTENT`, whitespace
-    // collapsed), so a note built from it alone is a few percent of its source on
-    // a single line — findable, and close to unreadable. `render_note` is a pure
-    // function of the `Explanation` and cannot reach the source; this call site
-    // has the repository, so it supplies the text.
-    //
-    // Only the *tree walk* is eager, and it reads no blob content: a body is read
-    // on demand, one prose node at a time, so this repository reads the 74 blobs
-    // that are prose rather than all 7,969 of its nodes. Empty when prose ingest
-    // is off, which is a project saying it does not want prose bodies — the same
-    // setting that leaves `meta.content` unset for these files.
-    //
-    // The ADR files are collected alongside and *not* gated on `ingest.prose`: an
-    // ADR's text is the authored layer, which `apply_authored_layer` re-parses from
-    // blobs on every sync whatever the derived layer chooses to ingest. Which paths
-    // are ADRs is read off the graph rather than re-decided here, so the
-    // classification in `rto_spec::authored_docs_from` stays the only one.
-    let adr_paths: std::collections::HashSet<String> = store
-        .all_nodes()?
-        .into_iter()
-        .filter(|n| n.kind == rto_graph::NodeKind::Adr)
-        .filter_map(|n| n.path)
-        .collect();
-    let mut prose_blobs: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut adr_blobs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    if ingest.prose || !adr_paths.is_empty() {
-        for blob in repo.walk_blobs()? {
-            if adr_paths.contains(&blob.path) {
-                adr_blobs.insert(blob.path.clone(), blob.oid.clone());
-            }
-            if ingest.prose && rto_graph::is_prose(&blob.path) {
-                prose_blobs.insert(blob.path, blob.oid);
-            }
-        }
-    }
-
-    // Each ADR parsed at most once, however many notes it feeds — this repository
-    // is 20 ADRs behind 199 notes. Keyed by blob oid, so the cache is
-    // content-addressed like everything else that reads a tree. `None` records a
-    // blob that could not be read or parsed, so a broken ADR is not re-read once
-    // per section.
-    let mut adr_docs: std::collections::HashMap<String, Option<rto_spec::AdrDoc>> =
-        std::collections::HashMap::new();
-
-    let mut count = 0usize;
-    for key in store.all_keys()? {
-        // A cross-repo placeholder whose target is a member of this vault is not
-        // rendered: every edge to it was pointed at the real note instead, so a
-        // note here would be an unreachable stand-in for a node this vault holds.
-        if scope.redirects_external_ref(&key) {
-            continue;
-        }
-        if let Some(ex) = rto_graph::explain(store, &key)? {
-            // A non-UTF-8 blob falls back to `meta.content`: extraction papered
-            // over it with `from_utf8_lossy`, and a note of replacement
-            // characters is worse than the capped text.
-            let body = if let Some(oid) = adr_blob_oid(&adr_blobs, &ex) {
-                let path = ex.node.path.clone().unwrap_or_default();
-                adr_docs
-                    .entry(oid.to_owned())
-                    .or_insert_with(|| {
-                        let text = repo
-                            .read_blob(oid)
-                            .ok()
-                            .and_then(|bytes| String::from_utf8(bytes).ok())?;
-                        rto_spec::parse_adr(&path, &text).ok()
-                    })
-                    .as_ref()
-                    .and_then(|doc| doc.text_for_key(&ex.node.key))
-                    .map(ToOwned::to_owned)
-            } else {
-                prose_blob_oid(&prose_blobs, &ex)
-                    .and_then(|oid| repo.read_blob(oid).ok())
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-            };
-            let note = rto_render::render_note_scoped(&ex, source_base, body.as_deref(), scope);
-            names.claim(&note.filename, &ex.node.key);
-            std::fs::write(out.join(&note.filename), &note.content)?;
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Collect one member's cross-repo links: the edges pointing at its external-ref
-/// placeholders (ADR-0009), which is where a spoke records that one of its config
-/// keys corresponds to a hub's.
-///
-/// These are read off the store, never inferred here. `roteiro links --infer
-/// --write` is what puts them there; a workspace whose members have never been
-/// inferred over simply has none.
-fn collect_cross_links(
-    store: &rto_graph::Store,
-    project: &str,
-    members: &std::collections::BTreeSet<String>,
-    out: &mut Vec<rto_render::CrossLink>,
-) -> anyhow::Result<()> {
-    let kind = rto_graph::NodeKind::Other(rto_graph::EXTERNAL_REF_KIND.to_owned());
-    for placeholder in store.nodes_by_kind(&kind)? {
-        let Some(qualified) = rto_graph::external_ref_target(&placeholder) else {
-            continue;
-        };
-        let resolves = rto_graph::parse_qualified(&qualified)
-            .is_some_and(|(target, _)| members.contains(target));
-        let Some(ex) = rto_graph::explain(store, &placeholder.key)? else {
-            continue;
-        };
-        for edge in ex.incoming {
-            // The source node's display name, for a row that reads as something
-            // other than a key. Its absence is not worth failing a render over.
-            let name = rto_graph::explain(store, &edge.node)?
-                .map_or_else(|| edge.node.clone(), |src| src.node.name);
-            out.push(rto_render::CrossLink {
-                from_project: project.to_owned(),
-                from_key: edge.node,
-                from_name: name,
-                kind: edge.kind,
-                confidence: edge.confidence,
-                authored: edge.provenance == rto_graph::Provenance::Authored.as_str(),
-                to_qualified: qualified.clone(),
-                resolves,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Aggregate the store into the figures the vault's `_Home` overview shows.
-///
-/// `debt_ignore` is the repository's `[debt] ignore` list, threaded from `main`
-/// so `_Home` scopes intent debt exactly as `roteiro debt`, `roteiro
-/// debt-density`, `check` and the graph API do (ADR-0007 v1.1).
-/// This member's stored analyzer findings and its coverage, for the vault
-/// (#442 part 2, ADR-0012).
-///
-/// Two values because an empty list means nothing on its own: a member with no
-/// findings and a member nobody has analyzed are opposite facts that render
-/// identically unless the coverage is carried alongside. `findings_layers`
-/// returns one layer per run, so "were there any runs" is exactly the question
-/// [`rto_render::Coverage`] needs — and it is asked here rather than inferred
-/// from the findings being empty, which is the inference that gives the wrong
-/// answer.
-///
-/// Ordered most-severe first, then by rule, so the reader meets the worst thing
-/// first and the order is stable across renders. `Severity::Other` sorts last
-/// **and keeps its own label**: a level Roteiro does not recognise is still the
-/// analyzer's word, and mapping it onto a known rung would be inventing a
-/// judgement the tool did not make.
-fn vault_findings(
-    store: &rto_graph::Store,
-) -> anyhow::Result<(Vec<rto_render::FindingEntry>, rto_render::Coverage)> {
-    use rto_graph::Severity;
-
-    let layers = store.findings_layers(None)?;
-    let coverage = if layers.is_empty() {
-        rto_render::Coverage::NotRun
-    } else {
-        rto_render::Coverage::Ran(
-            layers
-                .iter()
-                .map(|l| (l.run.analyzer.clone(), l.run.analyzer_version.clone()))
-                .collect(),
-        )
-    };
-
-    let rank = |s: &Severity| match s {
-        Severity::Critical => 0u8,
-        Severity::High => 1,
-        Severity::Medium => 2,
-        Severity::Low => 3,
-        Severity::Info => 4,
-        Severity::Other(_) => 5,
-    };
-    // Sorted on a key that is **total**, so the claim of stability does not rest
-    // on `sort_by` happening to be stable and on `findings_layers` happening to
-    // return a fixed order. Two analyzers reporting the same advisory share a
-    // rank and a rule; without the last two components their relative order is
-    // whatever the store yielded, and a vault that reorders between renders
-    // shows a diff nobody made.
-    let mut ranked: Vec<(u8, rto_render::FindingEntry)> = layers
-        .iter()
-        .flat_map(|l| {
-            l.findings.iter().map(move |f| {
-                (
-                    rank(&f.severity),
-                    rto_render::FindingEntry {
-                        rule: f.rule.clone(),
-                        severity: f.severity.as_str().to_owned(),
-                        title: f.title.clone(),
-                        message: f.message.clone(),
-                        path: f.path.clone(),
-                        analyzer: l.run.analyzer.clone(),
-                    },
-                )
-            })
-        })
-        .collect();
-    ranked.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.rule.cmp(&b.1.rule))
-            .then_with(|| a.1.analyzer.cmp(&b.1.analyzer))
-            .then_with(|| a.1.path.cmp(&b.1.path))
-            .then_with(|| a.1.title.cmp(&b.1.title))
-    });
-
-    Ok((ranked.into_iter().map(|(_, f)| f).collect(), coverage))
-}
-
-fn vault_summary(
-    repo: &rto_graph::Repo,
-    store: &rto_graph::Store,
-    repo_url: Option<String>,
-    commit: Option<String>,
-    debt_ignore: &[String],
-    ingest: rto_graph::IngestConfig,
-) -> anyhow::Result<rto_render::VaultSummary> {
-    use rto_graph::{NodeKind, Provenance};
-
-    let project = repo
-        .workdir()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("this project")
-        .to_owned();
-
-    let (findings, coverage) = vault_findings(store)?;
-    let settings = rto_render::RenderedUnder {
-        ingest: enabled_ingest_toggles(ingest),
-        debt_ignore: debt_ignore.to_vec(),
-    };
-
-    // Node counts by kind, most-frequent first (ties broken by kind for stability).
-    let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for node in store.all_nodes()? {
-        *by_kind.entry(node.kind.as_str().to_owned()).or_default() += 1;
-    }
-    let mut node_counts: Vec<(String, usize)> = by_kind.into_iter().collect();
-    node_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    // Edge counts per provenance (only non-zero classes). Store errors propagate
-    // rather than silently reporting a zero count.
-    let mut edge_provenance = Vec::new();
-    for p in [
-        Provenance::Derived,
-        Provenance::Authored,
-        Provenance::Inferred,
-    ] {
-        let n = store.edges_by_provenance(p)?.len();
-        if n > 0 {
-            edge_provenance.push((p.as_str().to_owned(), n));
-        }
-    }
-
-    // ADRs with their lifecycle status.
-    let adrs = store
-        .nodes_by_kind(&NodeKind::Adr)?
-        .into_iter()
-        .map(|n| rto_render::AdrEntry {
-            key: n.key,
-            name: n.name,
-            status: n
-                .meta
-                .get("status")
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned),
-        })
-        .collect();
-
-    // Scoped by the repository's own `[debt] ignore`: a vault that counted the
-    // vendored tree the CLI excludes would report a different debt for the same
-    // repository, which is the disagreement ADR-0007 v1.1 exists to prevent.
-    let debt = rto_graph::debt(store, &[], debt_ignore)?
-        .by_category
-        .into_iter()
-        .collect();
-
-    // Where that debt is concentrated, which the category counts above cannot
-    // show. Capped for the same reason as the coupling table below; the full
-    // ranking is `roteiro debt-density` / `GET .../debt/density`. The same
-    // `debt_ignore` as the category counts above — the two tables sit on one
-    // page and must be two lenses on one marker set, not two marker sets.
-    let densest_files = rto_graph::debt_density(
-        store,
-        &[],
-        debt_ignore,
-        rto_graph::DensityOrder::Density,
-        HOME_COUPLING_ROWS,
-        rto_graph::DEFAULT_MIN_LINES,
-    )?
-    .items
-    .into_iter()
-    .map(|i| rto_render::DensityEntry {
-        path: i.path,
-        markers: i.markers,
-        lines: i.lines,
-        per_kloc: i.per_kloc,
-    })
-    .collect();
-
-    let config_secrets = vault_config_secrets(store)?;
-
-    // Directed call coupling, ranked by fan-in — "what does this codebase most
-    // depend on". Capped, because `_Home` is an overview, not the report; the
-    // full ranking is `roteiro coupling` / `GET .../coupling`.
-    let most_called =
-        rto_graph::coupling(store, rto_graph::CouplingOrder::FanIn, HOME_COUPLING_ROWS)?
-            .items
-            .into_iter()
-            // A node with no callers is not "depended on"; with a short graph the
-            // fan-in ranking's tail is all zeroes and would pad the table with noise.
-            .filter(|i| i.fan_in > 0)
-            .map(|i| rto_render::CouplingEntry {
-                key: i.key,
-                name: i.name,
-                fan_in: i.fan_in,
-                fan_out: i.fan_out,
-            })
-            .collect();
-
-    Ok(rto_render::VaultSummary {
-        project,
-        total_nodes: usize::try_from(store.node_count()?)?,
-        total_edges: usize::try_from(store.edge_count()?)?,
-        node_counts,
-        edge_provenance,
-        adrs,
-        debt,
-        densest_files,
-        config_secrets,
-        most_called,
-        repo_url,
-        commit,
-        findings,
-        coverage,
-        settings,
-    })
-}
-
-/// The **enabled** `[ingest]` toggles that change what a vault contains, by name.
-///
-/// Named rather than dumped as a struct because the manifest is read by a person
-/// deciding whether their re-render will match: `prose, pdf` answers that, and
-/// `prose: true, pdf: true, ocr: false, …` buries it. Listing only what is *on*
-/// keeps the row short and makes an all-off member visibly empty rather than a
-/// wall of `false`.
-///
-/// **`vision` and `audio` are deliberately absent.** Since ADR-0015 they gate
-/// *generation* (`roteiro media build`), not extraction — a description is never
-/// written to `meta.content` — and the vault renders no generated media at all.
-/// Listing them would make the reproducibility claim *stricter than reality*:
-/// a reader who saw `vision` in this row and re-rendered without it would expect
-/// a different vault and get an identical one, which teaches them to distrust
-/// the row that the other entries depend on being trusted.
-fn enabled_ingest_toggles(ingest: rto_graph::IngestConfig) -> Vec<String> {
-    [
-        ("prose", ingest.prose),
-        ("pdf", ingest.pdf),
-        ("ocr", ingest.ocr),
-    ]
-    .into_iter()
-    .filter(|(_, on)| *on)
-    .map(|(name, _)| name.to_owned())
-    .collect()
-}
-
-/// The `_Home` note's secret-named config-key figures, or `None` when the graph
-/// holds none — the overview then omits the section rather than rendering a row of
-/// zeroes, which would read as "scanned, and clean". See
-/// [`rto_graph::config_secrets`] for why this lens cannot support that reading.
-///
-/// Key **names** are deliberately left out of the vault: a note is browsed
-/// casually and out of context, and `roteiro config-secrets` is where the names
-/// belong, alongside the full caveat. The file list is capped for the same reason
-/// the other overview tables are.
-fn vault_config_secrets(
-    store: &rto_graph::Store,
-) -> anyhow::Result<Option<rto_render::ConfigSecretSummary>> {
-    let secrets = rto_graph::config_secrets(store, 0)?;
-    if secrets.secret_named == 0 {
-        return Ok(None);
-    }
-    // `items` is ordered by `(path, …)`, so equal paths are adjacent and `dedup`
-    // is enough to make this the distinct-file list.
-    let mut files: Vec<String> = secrets
-        .items
-        .iter()
-        .filter_map(|i| i.path.clone())
-        .collect();
-    files.dedup();
-    files.truncate(HOME_COUPLING_ROWS);
-    Ok(Some(rto_render::ConfigSecretSummary {
-        secret_named: secrets.secret_named,
-        redacted: secrets.redacted,
-        declared: secrets.declared,
-        unredacted: secrets.unredacted,
-        files,
-    }))
-}
-
-/// Rows in the vault `_Home` note's directed-coupling and debt-density tables.
-/// An overview figure: enough to see the shape of the codebase, not the whole
-/// ranking.
-const HOME_COUPLING_ROWS: usize = 10;
 
 /// Web root for a git remote URL (`https://<host>/<owner>/<repo>`), or `None` if
 /// it isn't a URL shape we can map. Handles `git@host:owner/repo(.git)`,
@@ -15138,120 +14769,6 @@ mod config_secrets_summary_tests {
             "{:?}",
             config_secrets_summary(&r)
         );
-    }
-}
-
-#[cfg(test)]
-mod vault_body_tests {
-    use super::{adr_blob_oid, prose_blob_oid};
-
-    fn blobs() -> std::collections::HashMap<String, String> {
-        // Only prose paths, exactly as `render_obsidian` builds it.
-        [
-            ("docs/adr/0015-media.md", "oid-adr"),
-            ("README.md", "oid-readme"),
-        ]
-        .into_iter()
-        .map(|(p, o)| (p.to_owned(), o.to_owned()))
-        .collect()
-    }
-
-    fn node(kind: &str, path: Option<&str>) -> rto_graph::Explanation {
-        rto_graph::Explanation {
-            schema: rto_graph::SCHEMA,
-            node: rto_graph::NodeSummary {
-                key: "k".into(),
-                kind: kind.into(),
-                name: "n".into(),
-                path: path.map(ToOwned::to_owned),
-                lang: None,
-            },
-            meta: serde_json::Value::Null,
-            outgoing: vec![],
-            incoming: vec![],
-        }
-    }
-
-    #[test]
-    fn a_prose_file_node_resolves_to_its_blob() {
-        assert_eq!(
-            prose_blob_oid(&blobs(), &node("file", Some("README.md"))),
-            Some("oid-readme")
-        );
-    }
-
-    /// The kind check, which is the whole of the rule. An ADR and each of its
-    /// sections carry the *ADR file's* path, so matching on the path alone would
-    /// paste the entire document into every one of them — beside the `file:` note
-    /// that already holds it once. Twenty ADRs and 179 section notes on this
-    /// repository, so the wrong answer here is not a small one.
-    #[test]
-    fn a_node_sharing_a_prose_path_does_not_get_the_document() {
-        for kind in ["adr", "adr_section", "site_page", "marker"] {
-            assert_eq!(
-                prose_blob_oid(&blobs(), &node(kind, Some("docs/adr/0015-media.md"))),
-                None,
-                "{kind} shares the path but is not the document"
-            );
-        }
-    }
-
-    /// The two rules are complements, not overlaps: exactly the kinds
-    /// `prose_blob_oid` refuses are the ones `adr_blob_oid` claims. Asserted
-    /// together because the bug they guard against is a node being served by
-    /// *both* — which is how an ADR note would end up holding the whole file the
-    /// `file:` note already holds.
-    #[test]
-    fn the_adr_rule_claims_exactly_what_the_prose_rule_refuses() {
-        let path = "docs/adr/0015-media.md";
-        for kind in ["adr", "adr_section"] {
-            let ex = node(kind, Some(path));
-            assert_eq!(
-                adr_blob_oid(&blobs(), &ex),
-                Some("oid-adr"),
-                "{kind} is entitled to a slice of its ADR"
-            );
-            assert_eq!(
-                prose_blob_oid(&blobs(), &ex),
-                None,
-                "{kind} is never given the whole document"
-            );
-        }
-
-        // A `file` node on the very same path is the document, and stays the
-        // prose rule's. No node is claimed by both rules.
-        let file = node("file", Some(path));
-        assert_eq!(prose_blob_oid(&blobs(), &file), Some("oid-adr"));
-        assert_eq!(adr_blob_oid(&blobs(), &file), None);
-    }
-
-    /// Everything else on an ADR's path — and every node without one — is refused.
-    #[test]
-    fn the_adr_rule_refuses_any_other_kind() {
-        for kind in ["site_page", "marker", "fn", "struct"] {
-            assert_eq!(
-                adr_blob_oid(&blobs(), &node(kind, Some("docs/adr/0015-media.md"))),
-                None,
-                "{kind} is not an ADR-layer node"
-            );
-        }
-        assert_eq!(adr_blob_oid(&blobs(), &node("adr", None)), None);
-        assert_eq!(
-            adr_blob_oid(&blobs(), &node("adr", Some("docs/adr/9999-absent.md"))),
-            None,
-            "a path with no blob in the rendered tree"
-        );
-    }
-
-    #[test]
-    fn a_non_prose_file_node_and_a_pathless_node_are_left_alone() {
-        // Not in the map: `render_obsidian` filters it to prose paths, so source
-        // code, config and images keep whatever extraction captured.
-        assert_eq!(
-            prose_blob_oid(&blobs(), &node("file", Some("src/main.rs"))),
-            None
-        );
-        assert_eq!(prose_blob_oid(&blobs(), &node("file", None)), None);
     }
 }
 
@@ -17383,25 +16900,24 @@ mod cli_routing {
         assert!(sync_on_access);
     }
 
-    /// `render obsidian -w <name>` selects a workspace; **bare `render obsidian`
-    /// carries none**, which is the compatibility promise of issue #442 stated at
-    /// the parse layer. Workspace mode renames every note, and a user's own notes
-    /// link into the vault by name, so it must never be entered by inference.
+    /// `render okf -w <name>` selects a workspace; **bare `render okf` carries
+    /// none**, which is the compatibility promise of issue #442 stated at the
+    /// parse layer. Workspace mode moves every concept a directory deeper, and a
+    /// link into the bundle is a path, so it must never be entered by inference.
     #[test]
     fn render_takes_a_workspace_name_and_defaults_to_none() {
         let Command::Render {
             target,
             workspace_name,
             ..
-        } = parse(["roteiro", "render", "obsidian", "-w", "platform"])
+        } = parse(["roteiro", "render", "okf", "-w", "platform"])
         else {
             panic!("expected Render");
         };
-        assert_eq!(target, "obsidian");
+        assert_eq!(target, "okf");
         assert_eq!(workspace_name.as_deref(), Some("platform"));
 
-        let Command::Render { workspace_name, .. } = parse(["roteiro", "render", "obsidian"])
-        else {
+        let Command::Render { workspace_name, .. } = parse(["roteiro", "render", "okf"]) else {
             panic!("expected Render");
         };
         assert_eq!(
@@ -17411,7 +16927,7 @@ mod cli_routing {
         );
     }
 
-    /// A vault spans a workspace; the docs site is one repository's published
+    /// A bundle spans a workspace; the docs site is one repository's published
     /// website. Refused rather than ignored, so the flag never looks like it took
     /// effect.
     #[test]
@@ -17427,7 +16943,10 @@ mod cli_routing {
         .expect_err("`render docs -w` must not silently render the plain site")
         .to_string();
         assert!(err.contains("--workspace-name"), "{err}");
-        assert!(err.contains("render obsidian"), "{err}");
+        // Names the target that *does* take the flag. This said `render obsidian`
+        // until 4.0.0 removed it — an error that points at a target which no
+        // longer exists sends the reader to a second error.
+        assert!(err.contains("render okf"), "{err}");
     }
 
     /// An unknown workspace name fails fast and lists the known ones — the same
