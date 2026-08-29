@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v3.3.0...rto-spec-v4.0.0) - 2026-08-29
+
+### Added
+
+- *(check)* [**breaking**] a lossy conversion feeding a hash is drift, and fix the one we had
+
+### Fixed
+
+- *(test)* prove the safecrlf fixture reproduces, and correct a stale doc
+- *(check)* staging a file no longer hides its drift
+
+### Other
+
+- *(check)* the counts justifying this rule were wrong, and now measured
+- *(check)* the module claimed nothing enforces what it enforces
+- *(check)* the rule's own doc named a conversion it does not scan
+- *(spec)* describe the old union without tripping the debt detector
+
 ## [3.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v3.2.0...rto-spec-v3.2.1) - 2026-08-27
 
 ### Fixed

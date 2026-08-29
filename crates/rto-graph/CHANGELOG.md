@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.3.0...rto-graph-v4.0.0) - 2026-08-29
+
+### Fixed
+
+- *(check)* staging a file no longer hides its drift
+
+### Other
+
+- *(diff)* a failed fixture setup must not present as an unsupported platform
+
 ## [3.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.2.0...rto-graph-v3.2.1) - 2026-08-27
 
 ### Fixed
