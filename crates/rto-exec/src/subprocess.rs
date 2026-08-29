@@ -45,11 +45,10 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use rto_graph::{Isolation, RunnerKind};
+use rto_graph::{Isolation, RunnerKind, rfc3339_utc};
 
 use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
 use crate::assets;
-use crate::clock::rfc3339_utc;
 use crate::guidance::{Guidance, Line};
 use crate::ingest::assemble;
 use crate::runner::{AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_request};

@@ -111,7 +111,7 @@ use boxlite::{
     BoxCommand, BoxOptions, BoxliteOptions, BoxliteRuntime, LiteBox, NetworkSpec, RootfsSpec,
 };
 use futures::StreamExt as _;
-use rto_graph::{Isolation, SourceIdentity};
+use rto_graph::{Isolation, SourceIdentity, rfc3339_utc};
 
 use crate::adapter::NativeContext;
 use crate::adapter::clippy::{self, Clippy, FeatureSet};
@@ -120,7 +120,6 @@ use crate::boxlite::{
     SandboxError, SandboxProbe, pinned_digest, reference_is_present, sandbox_probe,
 };
 use crate::child_env::ChildEnv;
-use crate::clock::rfc3339_utc;
 use crate::guidance::{Guidance, Line};
 use crate::lint::{LintError, LintOutcome, Toolchain, scratch_dir};
 use crate::lint_grant::Backend;

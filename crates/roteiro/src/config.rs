@@ -596,9 +596,12 @@ impl SecurityConfig {
     /// Gated on the backend that resolves images, because in a build without one
     /// its only caller is compiled out — and an item whose callers are all cfg'd
     /// away is precisely the `-D warnings` rejection ADR-0014 v1.7 records the
-    /// `no-default-features` job existing to catch. [`Self::image_for`] and
-    /// [`Self::problems`] are ungated: reporting a key is not a property of which
-    /// backends were compiled in.
+    /// `no-default-features` job existing to catch. [`Self::image_for`] is gated
+    /// for the same reason but on `execution`, not on this feature: its callers
+    /// are the `security`/`sandbox` commands, which need an analyzer surface
+    /// rather than a sandbox backend. [`Self::problems`] is ungated, because
+    /// *reporting* a key is not a property of which backends were compiled in,
+    /// and it has a `not(execution)` arm that says so.
     #[cfg(feature = "exec-boxlite")]
     #[must_use]
     pub fn declared(&self) -> Vec<(String, String)> {
@@ -609,6 +612,13 @@ impl SecurityConfig {
     }
 
     /// The declared reference for one analyzer, if this configuration names one.
+    ///
+    /// Gated on `execution` on the same terms as [`Self::declared`] above: every
+    /// caller is a `security`/`sandbox` command, and all of them are behind this
+    /// feature, so an ungated item here is dead code in a build without it. #667
+    /// is what found that — until then no CI job compiled a configuration with
+    /// `execution` off, so `-D dead_code` had nothing to reject it in.
+    #[cfg(feature = "execution")]
     #[must_use]
     pub fn image_for(&self, analyzer: &str) -> Option<&str> {
         self.images.get(analyzer).map(String::as_str)
@@ -656,6 +666,12 @@ impl SecurityConfig {
     /// analyzer surface where it prints the section.
     #[cfg(not(feature = "execution"))]
     #[must_use]
+    #[expect(
+        clippy::unused_self,
+        reason = "the `execution` arm above reads `self.images`; an associated \
+                  function here would give the two arms different call sites and \
+                  push the cfg out to every caller"
+    )]
     pub fn problems(&self) -> Vec<String> {
         Vec::new()
     }
@@ -3477,11 +3493,16 @@ mod tests {
             "a project entry for one analyzer must not discard a user entry for another"
         );
         assert_eq!(images.len(), 2);
-        assert_eq!(
-            loaded.effective.security.image_for("cargo-audit"),
-            Some(format!("mine/audit@sha256:{hex}").as_str())
-        );
-        assert_eq!(loaded.effective.security.image_for("osv-scanner"), None);
+        // `image_for` is gated on `execution` (see its own note); the layering
+        // above is not, so the rest of this test runs in every feature set.
+        #[cfg(feature = "execution")]
+        {
+            assert_eq!(
+                loaded.effective.security.image_for("cargo-audit"),
+                Some(format!("mine/audit@sha256:{hex}").as_str())
+            );
+            assert_eq!(loaded.effective.security.image_for("osv-scanner"), None);
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3493,6 +3514,7 @@ mod tests {
     fn no_security_table_declares_nothing_and_reports_nothing() {
         let empty = Config::default();
         assert!(empty.security.images.is_empty());
+        #[cfg(feature = "execution")]
         assert!(empty.security.image_for("semgrep").is_none());
         assert!(
             empty.security.problems().is_empty(),

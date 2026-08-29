@@ -61,12 +61,11 @@ use boxlite::{
     BoxCommand, BoxOptions, BoxliteOptions, BoxliteRuntime, LiteBox, NetworkSpec, RootfsSpec,
 };
 use futures::StreamExt as _;
-use rto_graph::{Isolation, RunnerKind};
+use rto_graph::{Isolation, RunnerKind, rfc3339_utc};
 
 use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
 use crate::assets;
 use crate::child_env::ChildEnv;
-use crate::clock::rfc3339_utc;
 use crate::ingest::assemble;
 use crate::runner::{AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_request};
 use crate::snippet::WorktreeSnippets;

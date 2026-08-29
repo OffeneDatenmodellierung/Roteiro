@@ -66,10 +66,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use rto_graph::{age_in_days, rfc3339_utc};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::adapter_for;
-use crate::clock::{age_in_days, rfc3339_utc};
 use crate::runner::ExecError;
 use crate::sha256_hex;
 

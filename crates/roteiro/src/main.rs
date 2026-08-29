@@ -14343,8 +14343,12 @@ struct OkfRender<'r> {
 }
 
 /// The RFC 3339 instant a git commit time names.
+///
+/// `rto_graph`, not `rto_exec`: this is on the OKF render path, which is gated on
+/// nothing, and `rto-exec` is an optional dependency. It was `rto_exec::` and
+/// `--no-default-features --features mcp` did not compile (#667).
 fn okf_instant(secs: i64) -> String {
-    rto_exec::rfc3339_from_unix(u64::try_from(secs).unwrap_or(0))
+    rto_graph::rfc3339_from_unix(u64::try_from(secs).unwrap_or(0))
 }
 
 /// The distinct repository-relative paths of the **authored** nodes in `nodes`.

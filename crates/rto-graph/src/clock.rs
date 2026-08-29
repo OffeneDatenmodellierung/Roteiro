@@ -1,10 +1,30 @@
 //! Wall-clock timestamps for run evidence, in RFC 3339 UTC.
 //!
-//! An [`crate::AnalysisRun`]'s `started_at`/`ended_at` and an asset's
-//! `fetched_at` are **evidence about a point in time**, so unlike everything on
-//! the extraction path they legitimately read a clock. Nothing here feeds
-//! `nodes`/`edges`, so the determinism rule in `AGENTS.md` — derived extraction
-//! is a pure function of `(path, blob id, bytes)` — is untouched.
+//! An analyzer run's `started_at`/`ended_at`, an asset's `fetched_at` and a
+//! rendered bundle's timestamps are **evidence about a point in time**, so
+//! unlike everything on the extraction path they legitimately read a clock.
+//! Nothing here feeds `nodes`/`edges`, so the determinism rule in `AGENTS.md` —
+//! derived extraction is a pure function of `(path, blob id, bytes)` — is
+//! untouched. Nothing in *this* module reads a clock either: every entry point
+//! is a pure function of the `SystemTime` or the string it is handed, which is
+//! what lets the callers that do read one stay testable.
+//!
+//! In **this** crate rather than in `rto-exec`, where it started, for the reason
+//! `trust` and `model_choice` are here: everything depends on `rto-graph` and
+//! `rto-exec` is optional. Until #667 these were `rto_exec::`, and a render path
+//! — which is gated on nothing — reached across for one, so `cargo check -p
+//! roteiro --no-default-features --features mcp` did not compile on `main` and
+//! nobody found out, because no CI job built a configuration without
+//! `execution`.
+//!
+//! It happened **twice**, which is why the fix is the move and not the call site.
+//! The reference #667 reported was the workspace-vault renderer's
+//! `generated_at`; #671 deleted that renderer and its OKF replacement reached for
+//! `rfc3339_from_unix` in `okf_instant`, reproducing the same error at a new line
+//! within days. Renderers want timestamps and are ungated; keeping the formatter
+//! where they can always see it is what ends the class.
+//!
+//! `rto-exec` re-exports these four names, so its own callers did not move.
 //!
 //! The formatting is done by hand rather than by pulling a date-time crate: one
 //! output format is needed (`YYYY-MM-DDTHH:MM:SSZ`), the civil-from-days
@@ -36,7 +56,7 @@ pub fn rfc3339_utc(at: SystemTime) -> String {
 /// Format `secs` seconds since the Unix epoch as RFC 3339 UTC.
 ///
 /// ```
-/// # use rto_exec::rfc3339_from_unix;
+/// # use rto_graph::rfc3339_from_unix;
 /// assert_eq!(rfc3339_from_unix(0), "1970-01-01T00:00:00Z");
 /// assert_eq!(rfc3339_from_unix(1_755_248_400), "2025-08-15T09:00:00Z");
 /// ```

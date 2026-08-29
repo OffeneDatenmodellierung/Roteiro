@@ -462,7 +462,58 @@ jobs:
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-fail-fast
 
-  # The ADR-0014 posture that provisions and ingests but cannot execute.
+  # The feature sets with `execution` OFF, and the one that only provisions.
+  #
+  # Read the name literally, because for a long time it was not true. Until #667
+  # this job ran exactly one command — `--no-default-features --features
+  # execution` — so the job called `no-default-features` turned a feature back
+  # on, and with `checks`/`coverage`/`msrv` on `--all-features` and
+  # `default-features` on the default set (which contains `execution`), **every
+  # cell of the matrix carried `execution` and no configuration without it was
+  # ever compiled**.
+  #
+  # What that cost, measured on `main` rather than argued: `cargo check -p
+  # roteiro --no-default-features --features mcp` failed with `cannot find module
+  # or crate rto_exec`. `--features mcp` is a documented way to build the MCP
+  # server (README) and it had been broken unnoticed, because nothing built it.
+  # Two `-D warnings` rejections of the familiar artefact-of-exclusion class sat
+  # behind it.
+  #
+  # And it recurred **while #667 was open**, which is the argument for a cell
+  # rather than a one-line fix. The reference the issue reported was the
+  # workspace-vault renderer stamping `generated_at` with `rto_exec::rfc3339_utc`.
+  # #671 deleted that renderer outright and replaced it with the OKF one — and the
+  # replacement reached for `rto_exec::rfc3339_from_unix` in `okf_instant`, so the
+  # identical compile error came back at a new line number in the same week. A
+  # render path is ungated and wants a timestamp; nothing but a build stops it
+  # reaching into an optional crate for one. The formatter now lives in
+  # `rto-graph`, which every configuration links.
+  #
+  # It also made a gate vacuous. `#[cfg(feature = "execution")]` is a cfg that was
+  # true in every job, so a test carrying it ran everywhere and said nothing about
+  # the configuration that was broken — and three `#[cfg(not(feature =
+  # "execution"))]` arms in `rto-render`'s MCP tests ran in **no job at all**. The
+  # `Test (mcp only …)` step below is what exercises them; a clippy-only cell
+  # would compile those arms and still never run them.
+  #
+  # Three cells now, and each is a configuration the documentation offers:
+  #
+  #   * `--no-default-features` — the floor. `crates/roteiro/Cargo.toml` promises
+  #     it "still yields a binary with no analyzer surface at all"; this is what
+  #     makes that a checked claim rather than a comment.
+  #   * `--no-default-features --features mcp` — the combination #667 reproduced
+  #     the breakage with. Not implied by the floor: `mcp` compiles the whole
+  #     `rto-render::mcp` surface and `dep:tokio`, which the floor leaves out.
+  #   * `--no-default-features --features execution` — the ADR-0014 posture,
+  #     below, unchanged.
+  #
+  # Adding cells here rather than adding a job, deliberately: `no-default-features`
+  # is a REQUIRED status check on `main` (branch protection lists it by name), so
+  # renaming the job would leave that context permanently unreported and wedge
+  # every open PR with nothing red to look at. Cells added here are required from
+  # the commit that adds them; a new advisory job would reproduce the exact
+  # failure this issue is about — a signal nobody is obliged to read. They also
+  # share this runner's warm cargo cache with the set already built here.
   #
   # ADR-0014 v1.2 names `--no-default-features --features execution` as a
   # supported build. Nothing compiled it, and by issue #445 it had drifted into
@@ -527,12 +578,32 @@ jobs:
       - name: Manifests and lockfile agree (release PR)
         if: env.RELEASE_PR == 'true'
         run: cargo metadata --locked --format-version 1 > /dev/null
-      - name: Clippy (execution only, no default features)
+      # The floor: no feature on anywhere. First, because a failure here is the
+      # one a reader should see before any of the richer sets — every other cell
+      # in this job builds a superset of it.
+      - name: Clippy (no features at all)
         if: env.RELEASE_PR != 'true'
-        run: cargo clippy --workspace --all-targets --no-default-features --features execution -- -D warnings
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
       # `--no-fail-fast` for the reason `default-features` records: plain `cargo
       # test` stops at the first failing binary, which makes the totals a lower
       # bound rather than a measurement.
+      - name: Test (no features at all)
+        if: env.RELEASE_PR != 'true'
+        run: cargo test --workspace --no-default-features --no-fail-fast
+      # The MCP server without an analyzer surface — the combination #667 found
+      # broken on `main`. The test step is where `rto-render`'s three
+      # `cfg(not(feature = "execution"))` arms actually run: they are inside the
+      # `mcp` module, so the cell above does not compile them and every other job
+      # in this file has `execution` on.
+      - name: Clippy (mcp only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo clippy --workspace --all-targets --no-default-features --features mcp -- -D warnings
+      - name: Test (mcp only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo test --workspace --no-default-features --features mcp --no-fail-fast
+      - name: Clippy (execution only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo clippy --workspace --all-targets --no-default-features --features execution -- -D warnings
       - name: Test (execution only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --features execution --no-fail-fast
