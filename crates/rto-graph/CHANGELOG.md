@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.3.0...rto-graph-v4.0.0) - 2026-08-29
+
+### Added
+
+- *(okf)* render the bundle, and cap a slug the filesystem would refuse
+
+### Fixed
+
+- *(init)* [**breaking**] the hook this PR installs invoked a command this PR deleted
+- *(okf)* a title could write its own `verified` block
+- *(okf)* a shallow clone would have re-created the attribution it just fixed
+- *(okf)* a link resolved by guesswork, and a review nobody did
+- *(check)* staging a file no longer hides its drift
+
+### Other
+
+- *(okf)* the shallow-boundary skip is not the only thing holding that guard
+- *(diff)* a failed fixture setup must not present as an unsupported platform
+
 ## [3.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v3.2.0...rto-graph-v3.2.1) - 2026-08-27
 
 ### Fixed
