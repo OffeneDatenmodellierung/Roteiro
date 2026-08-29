@@ -27,7 +27,10 @@ application's conventions.
 
 Two differences an Obsidian user will notice:
 
-- there is no `_Home` note; each directory carries an `index.md` instead;
+- there is no `_Home` note; the bundle root and every section directory carry
+  an `index.md` instead. A workspace member's own directory carries none — it is
+  a container, and the root index links straight through to `<member>/<section>`,
+  so nothing in the bundle is unreachable;
 - links are `[title](/path.md)` rather than `[[wikilinks]]`. Obsidian resolves
   both, and only the second is Obsidian-specific.
 

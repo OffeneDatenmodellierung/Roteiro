@@ -544,8 +544,15 @@ struct Placed<'a> {
     concepts: Vec<(Concept<'a>, String)>,
 }
 
-/// Assemble a whole bundle: every concept, a per-directory `index.md`, and the
-/// bundle-root `index.md` carrying `okf_version`.
+/// Assemble a whole bundle: every concept, an `index.md` for each section
+/// directory, and the bundle-root `index.md` carrying `okf_version`.
+///
+/// A workspace **member's** directory carries no index of its own: it is a
+/// container for that member's sections, and the root index links straight
+/// through to `<member>/<section>`, so nothing is unreachable without one.
+/// `an_index_lists_a_section_and_a_member_directory_is_a_container` pins that,
+/// because the layout is documented in `docs/OKF_BUNDLE.md` and a bundle that
+/// grew member indexes would make that page wrong without failing anything.
 ///
 /// # Collisions are resolved here, and only here
 ///
@@ -1137,6 +1144,85 @@ mod tests {
             targets,
             vec![target],
             "the reference must reach `app`'s concept rather than `deploy`'s stub"
+        );
+    }
+
+    /// **An `index.md` lists a section; a workspace member's directory is a
+    /// container and has none.**
+    ///
+    /// §8 makes an index *optional* in any directory, so a missing one is not a
+    /// conformance failure and no conformance check will ever mention it. What it
+    /// is instead is a documented layout — `docs/OKF_BUNDLE.md`, ADR-0021 and the
+    /// site each tell a reader which directories carry one — and prose the
+    /// renderer can contradict without failing anything is how all three came to
+    /// over-claim "each directory carries an `index.md`". Pinning the exact set
+    /// means a bundle that grows member indexes has to move those pages with it.
+    ///
+    /// The member directory is not a dead end without one: the root index links
+    /// straight through to `<member>/<section>`, which the second half asserts,
+    /// because "no index here" is only defensible while nothing needs it.
+    #[test]
+    fn an_index_lists_a_section_and_a_member_directory_is_a_container() {
+        let readme = explanation("file:README.md", "file", "README.md");
+        let thing = explanation("sym:rust:a.rs#thing", "fn", "thing");
+
+        let member = |ex, type_, name: &str| {
+            let mut c = concept(ex, type_);
+            c.member = Some(name.to_owned());
+            c
+        };
+        let files = assemble(
+            vec![
+                member(&readme, "file", "app"),
+                member(&thing, "fn", "deploy"),
+            ],
+            "Workspace",
+            &[],
+        );
+
+        let emitted: std::collections::BTreeSet<&str> =
+            files.iter().map(|f| f.path.as_str()).collect();
+        // The fixture is load-bearing only if it really made two members whose
+        // sections differ, so that is asserted before the set below — which an
+        // empty bundle would otherwise satisfy by containing only a root index.
+        assert!(
+            emitted.contains("/app/files/file-readme-md.md")
+                && emitted.contains("/deploy/symbols/sym-rust-a-rs-thing.md"),
+            "the fixture must place a concept in each member: {emitted:?}"
+        );
+
+        // `/{INDEX_FILE}` rather than the bare name: a concept whose slug ends
+        // `-index` would otherwise be counted as a directory listing.
+        let index_suffix = format!("/{INDEX_FILE}");
+        let indexes: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.as_str())
+            .filter(|p| p.ends_with(&index_suffix))
+            .collect();
+        assert_eq!(
+            indexes,
+            vec![
+                "/app/files/index.md",
+                "/deploy/symbols/index.md",
+                "/index.md"
+            ],
+            "the bundle root and every section directory carry an index, and a \
+             member directory carries none"
+        );
+
+        let from_root: Vec<String> = internal_links(&files)
+            .into_iter()
+            .filter(|(from, _)| from == "/index.md")
+            .map(|(_, target)| target)
+            .collect();
+        assert_eq!(
+            from_root,
+            vec![
+                "/app/files/index.md".to_owned(),
+                "/deploy/symbols/index.md".to_owned()
+            ],
+            "the root index must reach each section directly, since the member \
+             directory between them carries no index of its own"
         );
     }
 

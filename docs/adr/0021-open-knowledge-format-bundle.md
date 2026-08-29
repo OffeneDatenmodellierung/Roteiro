@@ -154,7 +154,8 @@ differ while describing an identical graph.
 A bundle is markdown with YAML frontmatter linked by ordinary markdown links.
 Obsidian parses all three, so *Open folder as vault* still works. This is not a
 compatibility shim: it follows from the format being plain markdown. An Obsidian
-user loses the `_Home` note (each directory carries an `index.md`) and
+user loses the `_Home` note (the bundle root and every section directory carry
+an `index.md`) and
 `[[wikilinks]]` (Obsidian resolves markdown links too).
 
 ## Consequences
