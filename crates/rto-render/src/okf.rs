@@ -82,6 +82,19 @@ pub struct BundleFile {
 /// The three shapes are not interchangeable: a consumer classifying trust keys
 /// off the `human:` prefix, so using the wrong one silently moves a concept
 /// between tiers.
+///
+/// # Deliberately exhaustive
+///
+/// This is deliberately not `#[non_exhaustive]`, though these crates are
+/// published and a fourth variant would therefore be a breaking change. **The
+/// set is closed by the specification, not by us**: §7 defines exactly these
+/// three forms, and a
+/// fourth appearing means OKF changed. When that happens a caller matching on
+/// this enum *should* stop compiling, because a new actor form is a decision
+/// about trust that must be looked at rather than absorbed by a wildcard arm.
+///
+/// `#[non_exhaustive]` would buy version-compatibility at the price of making
+/// that change silent — which is the opposite of what the trust model needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Actor {
     /// A person: `human:<id>`. The only form that yields the human-reviewed tier.
