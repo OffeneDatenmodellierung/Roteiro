@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.3.0...roteiro-v4.0.0) - 2026-08-29
+
+### Added
+
+- *(okf)* [**breaking**] delete the Obsidian vault renderer
+- *(okf)* nest a workspace bundle by member
+- *(okf)* render the bundle, and cap a slug the filesystem would refuse
+- *(mcp)* a session should not pay for tools it will never call
+
+### Fixed
+
+- *(init)* the failure message split a path across a line continuation
+- *(init)* [**breaking**] the hook this PR installs invoked a command this PR deleted
+- *(okf)* a cross-repo link landed on the stub standing in for its target
+- *(okf)* a title could write its own `verified` block
+- *(okf)* a shallow clone would have re-created the attribution it just fixed
+- *(okf)* a link resolved by guesswork, and a review nobody did
+- *(serve)* a refusal must not invent a remedy that cannot work
+- *(mcp)* a tool this build never had was not withheld from anyone
+- *(test)* prove the safecrlf fixture reproduces, and correct a stale doc
+- *(diff)* a warning on stderr must not discard the diff
+- *(check)* staging a file no longer hides its drift
+
+### Other
+
+- *(okf)* the shallow-boundary skip is not the only thing holding that guard
+- *(serve)* say at the risk site that this predicate is startup-only
+- *(serve)* resolve the tool selection once, not once per predicate call
+- *(check)* clean up the scratch directory like every other test here
+- *(diff)* a failed fixture setup must not present as an unsupported platform
+
 ## [3.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.2.1...roteiro-v3.3.0) - 2026-08-28
 
 ### Added

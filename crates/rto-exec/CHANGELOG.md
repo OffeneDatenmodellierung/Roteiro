@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v3.3.0...rto-exec-v4.0.0) - 2026-08-29
+
+### Added
+
+- *(check)* [**breaking**] a lossy conversion feeding a hash is drift, and fix the one we had
+
 ## [1.29.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v1.28.0...rto-exec-v1.29.0) - 2026-08-20
 
 ### Fixed
