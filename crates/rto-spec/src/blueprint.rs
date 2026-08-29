@@ -101,7 +101,31 @@ pub fn parse_blueprint(rel_path: &str, text: &str) -> BlueprintDoc {
     let mut links = Vec::new();
     let mut current: Option<String> = None;
     let mut in_fence = false;
-    for line in text.lines() {
+    // The id each heading actually **gets**, read off one parse of the whole
+    // document and keyed by the byte it starts at — the same lookup `parse_adr`
+    // uses, for the same reason (#629). A heading's id depends on the headings
+    // before it: one that names nothing is numbered by position, and one
+    // claiming an id an earlier heading took is suffixed. Both are invisible to
+    // a per-line `heading_id`, so `## Notes` twice keyed two sections `notes`
+    // and the second upserted the first out of the graph.
+    //
+    // A blueprint **is** rendered: `roteiro render --target docs-site` walks
+    // `docs/blueprint(s)/` and writes each one through `rto_render::render_doc`
+    // as a root-level page, listed above the ADRs on the index. So this carries
+    // both halves of the defect — the lost node *and* an anchor the graph cannot
+    // name — exactly as an ADR does, and the id here has to be the id the page
+    // publishes.
+    let parsed_ids: std::collections::BTreeMap<usize, String> = rto_graph::headings(text)
+        .into_iter()
+        .map(|h| (h.start, h.id))
+        .collect();
+    // `split_inclusive` rather than `lines`, so the offset arithmetic is the
+    // bytes themselves and stays right for `\r\n` (as `site.rs` does).
+    let mut offset = 0usize;
+    for raw_line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += raw_line.len();
+        let line = raw_line.trim_end_matches(['\n', '\r']);
         if line.trim_start().starts_with("```") {
             in_fence = !in_fence;
             continue;
@@ -114,8 +138,12 @@ pub fn parse_blueprint(rel_path: &str, text: &str) -> BlueprintDoc {
             // now accepted here, the raw line would put an anchor the rendered
             // `<h2>` never shows into the title the bundle displays.
             let title = crate::text::heading_text(heading);
-            // The shared rule, as for ADRs and site pages (#524).
-            let slug = crate::text::heading_id(heading);
+            // The shared rule, as for ADRs and site pages (#524) — and now the
+            // whole of it, position and uniqueness included (#629).
+            let slug = parsed_ids
+                .get(&line_start)
+                .cloned()
+                .unwrap_or_else(|| crate::text::heading_id(heading));
             current = Some(slug.clone());
             // No `text`: `Section` is shared with `parse_adr`, and only that
             // parser populates it so far. A blueprint section note is empty in

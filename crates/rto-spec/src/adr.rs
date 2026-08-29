@@ -504,6 +504,31 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
     let mut byte_offset = 0usize;
     let mut span_start = 0usize;
     let mut preamble_end: Option<usize> = None;
+    // The id each heading actually **gets**, read off one parse of the whole
+    // document and keyed by the byte it starts at.
+    //
+    // Not `heading_id` per line, because two of the three questions in "what id
+    // does this heading get" are document questions and a line cannot answer
+    // them: an unnameable heading is numbered by its position, and a heading
+    // claiming an id an earlier one took is suffixed. Answering them here — or
+    // not answering them, which is what this did — is how #629 happened: the
+    // renderer emitted `same` and `same-2` for `## A {#same}` / `## B {#same}`
+    // while this keyed both sections `same`, and the second upserted the first
+    // out of the graph.
+    //
+    // The numbering counts **every** level, which is why it has to come from the
+    // parse rather than from a dedup over the `## ` lines below: `# Same` before
+    // `## Same` pushes the h2 to `same-2` on the page, and a dedup that only saw
+    // `##` would key it `same` and be wrong in a new way.
+    //
+    // A `## ` line with no parsed heading at its offset falls back to the
+    // single-heading rule. That is a line the scan counts and the parser does not
+    // — a `~~~`-fenced code sample, say, since the fence tracking here knows only
+    // backticks — and it keeps such a line behaving exactly as it did before.
+    let parsed_ids: std::collections::BTreeMap<usize, String> = rto_graph::headings(body)
+        .into_iter()
+        .map(|h| (h.start, h.id))
+        .collect();
     for (line_idx, line) in body.lines().enumerate() {
         // Advance the cursor first: every `continue` below still consumes a line,
         // and a fenced line's bytes belong to whichever section encloses it.
@@ -539,7 +564,10 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
             // no key — it removes the trap rather than repairing damage: the
             // first author to write one would otherwise get the site-page bug
             // back, in a document class the fix had not reached.
-            let slug = crate::text::heading_id(heading);
+            let slug = parsed_ids
+                .get(&line_start)
+                .cloned()
+                .unwrap_or_else(|| crate::text::heading_id(heading));
             current = Some(slug.clone());
             // Close the span this heading ends — the preamble if it is the first.
             match sections.last_mut() {

@@ -310,17 +310,19 @@ fn options() -> Options {
 /// different key in the graph (#524). The claim is now enforced by construction
 /// rather than asserted in prose, which is the difference that matters.
 ///
-/// The two **document-level** rules stay here, because only a renderer emits
-/// elements: a heading whose id would be empty (`## ###`) falls back to its
-/// position, and a repeat gets a `-2`, `-3`, … suffix, because two elements
-/// sharing an `id` means one of them is unreachable. `rto_spec` does neither, so
-/// a page with two identically-titled headings would diverge again — latent
-/// today, since no page has one.
+/// The two **document-level** rules — a heading whose id would be empty
+/// (`## ###`) falls back to its position, and a repeat gets a `-2`, `-3`, …
+/// suffix — used to stay here, on the argument that only a renderer emits
+/// elements and so only a renderer can have two share an `id`. They are in
+/// [`rto_graph::headings`] now, because that argument was wrong in its
+/// consequence: `rto_spec` did neither, so `## A {#same}` / `## B {#same}`
+/// rendered two anchors and upserted into **one** graph node (#629).
 ///
 /// Computed from a *first parse* rather than a line scan: heading text can be
 /// spread over several inline events, and `#` inside a fenced block is not a
 /// heading at all. Parsing twice costs a document-sized pass and cannot be wrong
-/// about what the renderer will see, because it is the same parser.
+/// about what the renderer will see, because it is the same parser — and now
+/// literally the same call, so "the same parser" has stopped being a claim.
 ///
 /// # This rule is not GitHub's, and deliberately stays that way
 ///
@@ -351,41 +353,21 @@ fn options() -> Options {
 /// currently checks an intra-document anchor** in either rendering — not
 /// `roteiro check`, not this crate. Issue #459 is where that check belongs.
 fn heading_ids(md: &str) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
-    let mut current: Option<(Option<String>, String)> = None;
-    for event in Parser::new_ext(md, options()) {
-        match event {
-            Event::Start(Tag::Heading { id, .. }) => {
-                current = Some((id.map(|i| i.to_string()), String::new()));
-            }
-            Event::Text(t) | Event::Code(t) => {
-                if let Some((_, text)) = current.as_mut() {
-                    text.push_str(&t);
-                }
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                let Some((explicit, text)) = current.take() else {
-                    continue;
-                };
-                // The shared rule, not a local copy of it: `rto_spec` builds the
-                // section's node key with this same function, so the `id` emitted
-                // here and the key a `[[doc#section]]` link resolves to cannot
-                // disagree (#524).
-                let base = rto_graph::heading_id_from(explicit.as_deref(), text.trim());
-                let base = if base.is_empty() {
-                    format!("section-{}", ids.len() + 1)
-                } else {
-                    base
-                };
-                let n = seen.entry(base.clone()).or_insert(0);
-                *n += 1;
-                ids.push(if *n == 1 { base } else { format!("{base}-{n}") });
-            }
-            _ => {}
-        }
-    }
-    ids
+    // Keep this body a single delegation, for the reason [`options`] gives about
+    // the dialect. This used to parse the document itself and own two rules the
+    // graph did not have — the `section-N` fallback for a heading that names
+    // nothing, and the `-2` suffix for one whose id is taken. Owning them here
+    // was justified on the grounds that only a renderer emits elements and so
+    // only a renderer can have two share an `id`. What it actually produced was
+    // #629: this emitted `same` and `same-2` while `rto_spec` keyed both sections
+    // `same` and upserted one over the other, so the graph's surviving node named
+    // a place the page addressed as something else.
+    //
+    // Both rules live in `rto_graph::headings` now, applied over **every** level
+    // — which is the half a local dedup cannot reproduce, because `rto_spec`
+    // records only `##` and `# Same` before `## Same` still pushes the h2 to
+    // `same-2` here.
+    rto_graph::headings(md).into_iter().map(|h| h.id).collect()
 }
 
 /// Split a relative path into the number of hops it takes **above** its own
@@ -874,9 +856,9 @@ fn escape_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexEntry, NavEntry, PublishedPages, SourceBase, escape_html, markdown_to_html, options,
-        render_adr, render_adr_index, render_doc, render_markdown, render_nav, render_site_page,
-        replace_site_nav,
+        IndexEntry, NavEntry, PublishedPages, SourceBase, escape_html, heading_ids,
+        markdown_to_html, options, render_adr, render_adr_index, render_doc, render_markdown,
+        render_nav, render_site_page, replace_site_nav,
     };
 
     /// The site index most tests do not exercise: with it empty, a `.md` link
@@ -1435,6 +1417,37 @@ mod tests {
         // fails. That is the invariant worth holding, and it is a wider one than
         // "stay a single delegation".
         assert_eq!(options(), rto_graph::markdown_dialect());
+    }
+
+    #[test]
+    fn the_heading_id_rule_is_not_reimplemented_here() {
+        // The counterpart of the test directly above, and the same argument:
+        // `heading_ids` exists to hold this file's rationale about ids, not a
+        // second copy of the rule. This reads as a tautology against the body as
+        // written, which is exactly its job — it has no failure mode until
+        // someone gives the body one.
+        //
+        // The fixture **contains the difference** rather than being a plain
+        // document: a repeat, a claim an `h1` already took, and a heading that
+        // names nothing. A local copy re-grown here would have to get all three
+        // right to pass, and the one that used to be here got the second wrong —
+        // it counted all levels while `rto_spec` counted `##` only, which is
+        // what #629 was.
+        let md = "# Same\n\n## Same\n\n## Dup\n\n## Dup\n\n### ###\n";
+        assert_eq!(
+            heading_ids(md),
+            rto_graph::headings(md)
+                .into_iter()
+                .map(|h| h.id)
+                .collect::<Vec<_>>()
+        );
+        // Agreement is necessary and not sufficient: two implementations that
+        // both dropped the dedup would satisfy the assertion above. So pin what
+        // the shared rule answers, once, here.
+        assert_eq!(
+            heading_ids(md),
+            ["same", "same-2", "dup", "dup-2", "section-5"]
+        );
     }
 
     /// A source base for a document in `dir`, at a fixed sha.

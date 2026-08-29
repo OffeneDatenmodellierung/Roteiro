@@ -1,6 +1,7 @@
 //! Small text helpers shared across the crates that build and render the graph.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::collections::BTreeMap;
 
 /// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`,
 /// trimmed of leading/trailing `-`.
@@ -163,10 +164,16 @@ pub fn heading_text(source: &str) -> String {
 /// It returns empty for a heading with no explicit id and no text that slugifies
 /// to anything (`## ###`), and it does not de-duplicate. Both are **document**
 /// questions — a heading's position, and whether an earlier heading already took
-/// the id — and this sees one heading. `rto_render::docs` owns them, because two
-/// elements sharing an `id` means one is unreachable and only the renderer emits
-/// elements. That asymmetry is latent rather than academic: no site page carries
-/// two headings with the same text today, so nothing diverges from it yet.
+/// the id — and this sees one heading.
+///
+/// They are answered one level up, by [`headings`], which reads the whole
+/// document. They used to be answered in `rto_render::docs` instead, on the
+/// argument that only the renderer emits elements and so only the renderer can
+/// have two of them share an `id`. That argument was wrong in its consequence:
+/// the renderer suffixed the second `{#same}` to `same-2` and the graph upserted
+/// one section over the other, so the surviving node named a place the page
+/// addressed as something else (#629). A rule only one side applies is a
+/// divergence with extra steps.
 #[must_use]
 pub fn heading_id_from(explicit: Option<&str>, text: &str) -> String {
     explicit
@@ -274,6 +281,51 @@ mod tests {
             "offset points at the heading, not its container: {:?}",
             &md[hs[1].start..]
         );
+    }
+
+    /// A second heading claiming an id the first took is suffixed, and the
+    /// numbering runs over **every** level (#629).
+    ///
+    /// The all-levels part is the half that cannot be reproduced by a caller that
+    /// keeps only `##`: `# Same` before `## Same` puts the h2 at `same-2`, so a
+    /// caller filtering to `##` after this ran agrees with the renderer and one
+    /// deduplicating within its own subset does not. That asymmetry — the
+    /// renderer counting all levels, `rto_spec` recording one — is precisely why
+    /// the rule sits here instead of in either of them.
+    #[test]
+    fn a_repeated_id_is_suffixed_and_the_count_spans_every_level() {
+        let ids = |md: &str| -> Vec<String> { headings(md).into_iter().map(|h| h.id).collect() };
+
+        assert_eq!(ids("## A {#same}\n\n## B {#same}\n"), ["same", "same-2"]);
+        assert_eq!(
+            ids("## Dup\n\n## Dup\n\n## Dup\n"),
+            ["dup", "dup-2", "dup-3"]
+        );
+        // Across levels, in both directions: an h1 or an h3 takes the bare id
+        // just as an h2 would, and the h2 that follows is suffixed.
+        assert_eq!(ids("# Same\n\n## Same\n"), ["same", "same-2"]);
+        assert_eq!(ids("### Same\n\n## Same\n"), ["same", "same-2"]);
+        // And a heading a `## ` scan cannot see still consumes its id, so the
+        // one that follows is numbered against the page rather than against the
+        // subset any caller happens to keep.
+        assert_eq!(ids("> ## X\n\n## X\n"), ["x", "x-2"]);
+    }
+
+    /// A heading that names nothing is numbered by its position among **all**
+    /// headings — the other document-level rule that moved here with the dedup.
+    ///
+    /// `## ###` slugifies to the empty string, and an empty id is not an address.
+    /// `section-2` because the `# Title` above it is heading one.
+    #[test]
+    fn a_heading_that_names_nothing_falls_back_to_its_position() {
+        let hs = headings("# Title\n\n## ###\n\n## Real\n");
+        let ids: Vec<&str> = hs.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["title", "section-2", "real"]);
+        // Position first, then uniqueness: two unnameable headings get distinct
+        // positions rather than one name and a suffix.
+        let hs = headings("## ###\n\n## ###\n");
+        let ids: Vec<&str> = hs.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["section-1", "section-2"]);
     }
 
     /// Level and text come back too, and an explicit id still wins over the slug.
@@ -403,8 +455,13 @@ mod tests {
 pub struct Heading {
     /// Heading level: 1 for `#`, 2 for `##`, and so on.
     pub level: u8,
-    /// The id this heading claims, by the shared rule ([`heading_id_from`]) — its
-    /// explicit `{#id}` when the author wrote one, the slug of its text otherwise.
+    /// The id this heading **gets**, which is the id it can be linked by.
+    ///
+    /// [`heading_id_from`] answers what it claims — its explicit `{#id}` when the
+    /// author wrote one, the slug of its text otherwise. This is that answer after
+    /// the two questions only the document can settle: an unnameable heading falls
+    /// back to its position, and a claim an earlier heading already took is
+    /// suffixed. See [`headings`].
     pub id: String,
     /// The heading's visible text, with the markup that produced it removed.
     pub text: String,
@@ -436,9 +493,36 @@ pub struct Heading {
 /// section body text — to the heading they fall under. Given the offsets, that is
 /// a comparison against the next heading's start, and it works identically for a
 /// heading the caller could not have found by scanning.
+///
+/// # Why the id is settled here and not per heading
+///
+/// Two of the three questions in "what is this heading's id" need the whole
+/// document, so [`heading_id_from`] cannot answer them and this is the first
+/// place that can:
+///
+/// - a heading that names nothing (`## ###`, no explicit id) falls back to its
+///   **position**, `section-N`, 1-based over every heading in the document;
+/// - a heading claiming an id an earlier heading already took is **suffixed**,
+///   `same` then `same-2` then `same-3`.
+///
+/// Both used to live in `rto_render::docs::heading_ids`, which is where #629
+/// found them: the renderer deduplicated and the graph did not, so
+/// `## A {#same}` / `## B {#same}` rendered as two addressable anchors and
+/// upserted into **one** graph node — section A gone, and the `same-2` anchor
+/// addressable by nothing.
+///
+/// # It counts every level, and that is the load-bearing part
+///
+/// `# Same` followed by `## Same` renders as `same` / `same-2`. A caller that
+/// wants only `##` sections — [`rto_spec`](https://docs.rs/rto-spec) does —
+/// must filter **after** this ran, not dedupe within its own subset, or the h2
+/// gets keyed `same` while the page addresses it as `same-2`. That is the
+/// divergence a dedup local to either side reintroduces, and the reason this
+/// numbering is over all headings rather than over the ones any one caller keeps.
 #[must_use]
 pub fn headings(md: &str) -> Vec<Heading> {
     let mut out: Vec<Heading> = Vec::new();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut open: Option<(u8, Option<String>, String, usize)> = None;
     for (event, range) in Parser::new_ext(md, markdown_dialect()).into_offset_iter() {
         match event {
@@ -463,9 +547,25 @@ pub fn headings(md: &str) -> Vec<Heading> {
             Event::End(TagEnd::Heading(_)) => {
                 if let Some((level, explicit, text, start)) = open.take() {
                     let text = text.trim().to_owned();
+                    let claimed = heading_id_from(explicit.as_deref(), &text);
+                    // Position first, then uniqueness — in that order, because a
+                    // heading that names nothing still has to be given a name
+                    // before anything can ask whether the name is taken.
+                    let claimed = if claimed.is_empty() {
+                        format!("section-{}", out.len() + 1)
+                    } else {
+                        claimed
+                    };
+                    let n = seen.entry(claimed.clone()).or_insert(0);
+                    *n += 1;
+                    let id = if *n == 1 {
+                        claimed
+                    } else {
+                        format!("{claimed}-{n}")
+                    };
                     out.push(Heading {
                         level,
-                        id: heading_id_from(explicit.as_deref(), &text),
+                        id,
                         text,
                         start,
                     });

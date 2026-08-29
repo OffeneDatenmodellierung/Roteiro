@@ -339,6 +339,241 @@ fn only_the_id_attribute_is_read_not_one_that_merely_ends_in_id() {
     assert!(rendered_h2_ids(r#"<h3 id="deeper">C</h3>"#).is_empty());
 }
 
+/// Two headings claiming one id: the page addresses both, so the graph must key
+/// both (#629).
+///
+/// The renderer suffixed the second to `same-2` and `rto_spec` keyed both
+/// `same`, so `SitePageDoc::facts` built the same node twice and the second
+/// **upserted the first out of the graph** — section A gone, and the `same-2`
+/// anchor the page publishes addressable by nothing.
+///
+/// A synthetic fixture rather than a corpus sweep, and deliberately: measured
+/// across every markdown file in the repository there are **zero** duplicate
+/// heading ids, so `every_heading_id_equals_its_graph_section_key` passes on the
+/// broken implementation exactly as loudly as on the fixed one. A guard held up
+/// by the absence of the input is not a guard.
+#[test]
+fn two_headings_claiming_one_id_are_two_sections_on_both_sides() {
+    let md = "---\nsite-page: probe4\nsite-nav: Probe\nsite-order: 4\n---\n\n\
+              # Probe\n\n## A {#same}\n\n## B {#same}\n";
+
+    let parsed = rto_spec::parse_site_page("website/pages/probe4.md", md).expect("parses");
+    assert_eq!(
+        parsed
+            .sections
+            .iter()
+            .map(|s| (s.slug.as_str(), s.title.as_str()))
+            .collect::<Vec<_>>(),
+        [("same", "A"), ("same-2", "B")],
+        "both sections survive, and the second is keyed by the address the page \
+         actually gives it"
+    );
+
+    let html = rto_render::render_site_page(
+        md,
+        "fallback",
+        &[],
+        "",
+        &rto_render::PublishedPages::new(),
+        None,
+    );
+    assert_eq!(rendered_h2_ids(&html.html), ["same", "same-2"]);
+}
+
+/// The case that makes a dedup *local to either side* the wrong fix: the id an
+/// `<h2>` gets depends on headings that are not `<h2>`s.
+///
+/// `# Same` then `## Same` renders as `same` / `same-2`, because the renderer
+/// numbers across every level. `rto_spec` records only `##` sections, so a dedup
+/// over its own subset would key that h2 `same` — agreeing with nothing, and
+/// wrong in a way the duplicate-`##` case above cannot reveal. The numbering has
+/// to be computed over all headings and filtered afterwards, which is why it
+/// lives in `rto_graph::headings` and not in either caller.
+///
+/// Asserted for an `h1` above and an `h3` below, so a fix that happened to count
+/// only *outer* levels fails too.
+#[test]
+fn an_h2_whose_id_another_level_took_is_suffixed_on_both_sides() {
+    for other in ["# Same", "### Same"] {
+        let md = format!(
+            "---\nsite-page: probe5\nsite-nav: Probe\nsite-order: 5\n---\n\n\
+             # Probe\n\n{other}\n\n## Same\n"
+        );
+
+        let parsed = rto_spec::parse_site_page("website/pages/probe5.md", &md).expect("parses");
+        assert_eq!(
+            parsed
+                .sections
+                .iter()
+                .map(|s| s.slug.as_str())
+                .collect::<Vec<_>>(),
+            ["same-2"],
+            "{other}: the graph keys the h2 by the anchor the page gives it, not \
+             by what it would have got had it been alone"
+        );
+
+        let html = rto_render::render_site_page(
+            &md,
+            "fallback",
+            &[],
+            "",
+            &rto_render::PublishedPages::new(),
+            None,
+        );
+        assert_eq!(rendered_h2_ids(&html.html), ["same-2"], "{other}");
+    }
+}
+
+/// The other document-level rule that moved with the dedup: a heading that names
+/// nothing is numbered by its **position among all headings**.
+///
+/// `## ###` slugifies to the empty string. The renderer has always given it
+/// `section-N`; the graph keyed it `""`, so `site:probe#` was a node naming an
+/// anchor no page has. Both rules were in the renderer for the same stated
+/// reason and both had the same defect, so both moved — leaving one behind would
+/// have kept a divergence of exactly the shape being fixed.
+///
+/// `section-2`, not `section-1`: the page's `# Probe` is the first heading. That
+/// is the all-levels counting again, in the other rule.
+#[test]
+fn a_heading_that_names_nothing_is_numbered_by_position_on_both_sides() {
+    let md = "---\nsite-page: probe6\nsite-nav: Probe\nsite-order: 6\n---\n\n\
+              # Probe\n\n## ###\n\n## Real\n";
+
+    let parsed = rto_spec::parse_site_page("website/pages/probe6.md", md).expect("parses");
+    assert_eq!(
+        parsed
+            .sections
+            .iter()
+            .map(|s| s.slug.as_str())
+            .collect::<Vec<_>>(),
+        ["section-2", "real"],
+    );
+
+    let html = rto_render::render_site_page(
+        md,
+        "fallback",
+        &[],
+        "",
+        &rto_render::PublishedPages::new(),
+        None,
+    );
+    assert_eq!(rendered_h2_ids(&html.html), ["section-2", "real"]);
+}
+
+/// An ADR is rendered to a page too, so it has both halves of #629 — and its
+/// parser still finds sections by scanning for `## `.
+///
+/// That scan is the reason the id cannot be deduplicated where it is computed:
+/// the numbering has to come from the document-wide parse, which the scan then
+/// reads by byte offset. This asserts the outcome rather than the mechanism —
+/// two sections, each keyed by the anchor the rendered ADR gives it, with **both
+/// bodies** intact, since the upsert took a section's text with it.
+#[test]
+fn an_adr_with_two_headings_claiming_one_id_keeps_both_sections() {
+    let md = "---\ntype: adr\nadr-id: 9999\nstatus: Accepted\ntitle: Probe\n---\n\n\
+              # Probe\n\n## Notes {#n}\n\nfirst\n\n## Other {#n}\n\nsecond\n";
+
+    let doc = rto_spec::parse_adr("docs/adr/9999-probe.md", md).expect("parses");
+    assert_eq!(
+        doc.sections
+            .iter()
+            .map(|s| (s.slug.as_str(), s.title.as_str(), s.text.as_str()))
+            .collect::<Vec<_>>(),
+        [("n", "Notes", "first"), ("n-2", "Other", "second")],
+    );
+
+    let rendered = rto_render::render_adr(md, "fallback", &rto_render::PublishedPages::new(), None);
+    assert_eq!(rendered_h2_ids(&rendered.html), ["n", "n-2"]);
+}
+
+/// How far #629's fix reaches into an ADR, stated so the next reader does not
+/// have to infer it from silence.
+///
+/// #621 moved `rto_spec::site` from scanning to parsing. It did **not** move
+/// `parse_adr`, which still decides *which* headings are sections by looking for
+/// `## ` at column 0 — so a blockquoted heading in an ADR is addressable on the
+/// rendered ADR page and absent from the graph, exactly the defect #621 closed
+/// one document class over. That is #621's remaining half and not this one's.
+///
+/// What #629 does reach is the **id** of the sections the scan does find, and
+/// this is where the two interact: the h2 below is keyed `quoted-2`, because the
+/// numbering comes from a parse that saw the blockquoted heading take `quoted`
+/// first. A dedup written into the scan could not have known that and would have
+/// keyed it `quoted` — a link resolving in the graph and scrolling nowhere.
+///
+/// So the missing section is a gap, and the surviving one is correct. Those are
+/// different failures, and only the first is still open.
+#[test]
+fn an_adrs_sections_are_still_scanned_for_but_keyed_by_the_parse() {
+    let md = "---\ntype: adr\nadr-id: 9998\nstatus: Accepted\ntitle: Probe\n---\n\n\
+              # Probe\n\n> ## Quoted\n\n## Quoted\n";
+
+    let doc = rto_spec::parse_adr("docs/adr/9998-probe.md", md).expect("parses");
+    assert_eq!(
+        doc.sections
+            .iter()
+            .map(|s| s.slug.as_str())
+            .collect::<Vec<_>>(),
+        ["quoted-2"],
+        "the blockquoted heading is not a section here (#621's remaining half), \
+         and the one that is gets the id the page gives it (#629)"
+    );
+
+    let rendered = rto_render::render_adr(md, "fallback", &rto_render::PublishedPages::new(), None);
+    assert_eq!(
+        rendered_h2_ids(&rendered.html),
+        ["quoted", "quoted-2"],
+        "the page addresses both, as it always did"
+    );
+}
+
+/// A blueprint carries both halves of #629, because a blueprint is rendered.
+///
+/// `roteiro render --target docs-site` walks `docs/blueprint(s)/` and writes
+/// each one through `render_doc` as a root-level page — so this has the lost
+/// node *and* an anchor the graph cannot name, exactly as an ADR does. The first
+/// draft of this test asserted only the node count, on the belief that a
+/// blueprint is graph-only; Copilot caught the claim on #685, and the render
+/// assertion below is what would have caught it here.
+///
+/// `BlueprintDoc::facts` builds `blueprint:<path>#<slug>` per section, so two
+/// `## Notes` headings produced one node and the second silently replaced the
+/// first.
+#[test]
+fn a_blueprint_with_two_identical_headings_keeps_both_sections() {
+    let md = "# Thing — Technical Implementation Plan\n\n## Notes\n\nfirst\n\n## Notes\n\nsecond\n";
+
+    let doc = rto_spec::parse_blueprint("docs/blueprint/thing.md", md);
+    assert_eq!(
+        doc.sections
+            .iter()
+            .map(|s| s.slug.as_str())
+            .collect::<Vec<_>>(),
+        ["notes", "notes-2"],
+    );
+
+    let facts = doc.facts();
+    let section_nodes = facts
+        .nodes
+        .iter()
+        .filter(|n| n.key.starts_with("blueprint:docs/blueprint/thing.md#"))
+        .count();
+    assert_eq!(
+        section_nodes, 2,
+        "two headings, two nodes — the upsert is what #629 was"
+    );
+
+    // The page the site actually publishes for this file, through the same
+    // `render_doc` `render_docs` calls for a blueprint.
+    let rendered = rto_render::render_doc(md, "thing", &rto_render::PublishedPages::new(), None);
+    assert_eq!(
+        rendered_h2_ids(&rendered.html),
+        ["notes", "notes-2"],
+        "and the two node keys are the two anchors the page publishes"
+    );
+}
+
 /// A `[[…]]` **inside a heading** is the one construct on which the two sides
 /// still disagree — stated here, with its measurement, rather than left to be
 /// rediscovered.
