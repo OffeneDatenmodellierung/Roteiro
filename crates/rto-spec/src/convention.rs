@@ -2,11 +2,18 @@
 // detect (`#[allow(…)]` without justification, a lossy conversion feeding a
 // hash). They are test data, not uses: without this directive each rule's first
 // act is to report its own test.
-//! House-style conventions that are **written down and not enforced**.
+//! House-style conventions that **no compiler or linter enforces** — and that
+//! this module makes the drift gate enforce.
+//!
+//! Every violation the scanners here return is folded into the check report's
+//! violations, by both the CLI gate and the `tool_check` surface, so a hit fails
+//! `roteiro check` and exits non-zero. "Not enforced" describes where these
+//! conventions come from, not what happens to them now.
 //!
 //! `AGENTS.md` states one plainly: *"Prefer fixing over `#[allow(...)]`; when an
-//! allow is right, justify it in a comment."* Nothing checked it, so the
-//! convention held by habit — and habit is what a reviewer spends attention on.
+//! allow is right, justify it in a comment."* Until this module, nothing checked
+//! it, so the convention held by habit — and habit is what a reviewer spends
+//! attention on.
 //! Corpus row `3789168273` is that attention being spent: a human noticed a new
 //! `#[allow(clippy::cast_possible_truncation)]` with no justification, in review,
 //! by reading.
