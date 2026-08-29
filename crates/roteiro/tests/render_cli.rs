@@ -1060,11 +1060,18 @@ fn two_renders_of_one_commit_are_byte_identical() {
 /// the one commit it has.
 ///
 /// This is where the per-document fix would quietly undo itself. `actions/checkout`
-/// defaults to `fetch-depth: 1`, and at the shallow boundary a commit's parents
-/// are simply absent — so a naive "differs from every parent" reads the single
-/// commit present as having introduced the whole tree, and every ADR is confirmed
-/// by whoever pushed last. That is the original defect, reappearing in exactly the
-/// job that publishes the artifact.
+/// defaults to `fetch-depth: 1`, and at the shallow boundary the history a
+/// comparison needs is absent — so a naive "differs from every parent" reads the
+/// single commit present as having introduced the whole tree, and every ADR is
+/// confirmed by whoever pushed last. That is the original defect, reappearing in
+/// exactly the job that publishes the artifact.
+///
+/// **Two mechanisms in `last_authors` hold this, and either alone suffices**, so
+/// a single-fault injection cannot prove this test non-vacuous: removing the
+/// `shallow_commits()` boundary check leaves it green, and so does reverting the
+/// all-or-nothing parent read. Both together make it fail, naming a human. What
+/// *does* fail it on its own is the defect it was written for — attributing every
+/// path to the newest commit containing it.
 ///
 /// Unverified is the honest answer: absence of `verified` is a tier, and it says
 /// *nobody has confirmed this*, which is true of a bundle built from a repository

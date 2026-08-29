@@ -267,12 +267,22 @@ impl Repo {
         let mut repo = self.inner.clone();
         repo.object_cache_size_if_unset(8 * 1024 * 1024);
 
-        // The shallow boundary, where the parents a comparison needs are simply
-        // absent. gix reports such a commit as parentless, which would otherwise
-        // read as "a root commit introduced everything it contains" — and in a
-        // `fetch-depth: 1` checkout that is *every* path, attributed to whoever
-        // made the one commit present. That is precisely the false claim this
-        // method exists to stop, so a boundary commit resolves nothing.
+        // The shallow boundary, where the history a comparison needs is absent.
+        // In a `fetch-depth: 1` checkout the paths that would be misattributed
+        // there are *every* path, credited to whoever made the one commit
+        // present — precisely the false claim this method exists to stop — so a
+        // boundary commit resolves nothing.
+        //
+        // Two mechanisms refuse it, and measured by injection **either alone is
+        // enough**: deleting this check leaves
+        // `a_shallow_clone_claims_no_human_verifier_rather_than_the_wrong_one`
+        // green, and so does reverting the all-or-nothing parent read below.
+        // Only removing both makes it fail. The reason is that gix does not
+        // report a boundary commit as parentless: it lists the parent ids, and
+        // the *objects* behind them are what is missing, so the read below
+        // already declines. This check is kept as the one that does not depend
+        // on an object lookup failing — it names the condition git itself
+        // records, and it is the cheaper of the two.
         let boundary: BTreeSet<gix::ObjectId> = repo
             .shallow_commits()
             .map_err(ge)?
