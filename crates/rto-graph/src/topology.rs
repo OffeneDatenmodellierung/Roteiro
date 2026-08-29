@@ -10,14 +10,14 @@
 //!
 //! That second half is this module, and it was not optional for long. The
 //! consolidated rule lived in `roteiro`'s `graph_api`, which is
-//! `#[cfg(feature = "explorer")]`, while the workspace **vault** renderer is not
+//! `#[cfg(feature = "explorer")]`, while the workspace **bundle** renderer is not
 //! gated at all. So the first caller outside the web API — version pins in the
 //! shareable manifest (#442) — could not legally call the rule it needed, and its
 //! only alternatives were to write a third one or to gate a Markdown export
 //! behind a web-API feature.
 //!
 //! Living in `rto-graph` puts it below every caller: the explorer's JSON API, the
-//! vault renderer, and the `links` views all depend on this crate unconditionally,
+//! bundle renderer, and the `links` views all depend on this crate unconditionally,
 //! which is the same argument [`crate::slugify`] and [`crate::markdown_dialect`]
 //! already make for themselves.
 //!

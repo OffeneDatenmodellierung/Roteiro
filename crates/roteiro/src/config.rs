@@ -1428,7 +1428,7 @@ impl Config {
     ///
     /// **Nesting flattens.** A workspace that `includes` others is a workspace with
     /// more members and nothing else — the same flat [`rto_graph::ResolvedWorkspace`]
-    /// every surface already consumes, so `links`, `serve`, the explorer and the vault
+    /// every surface already consumes, so `links`, `serve`, the explorer and the bundle
     /// see a longer member list and no new concept. See [`NamedWorkspace::includes`].
     ///
     /// Fully backward-compatible: a config with only `[workspace]` yields exactly one

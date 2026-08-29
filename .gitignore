@@ -2,16 +2,15 @@
 *.sqlite3
 .roteiro/
 website/dist/
-# The Obsidian vault is a build-output of the graph (`roteiro render obsidian`),
+# The OKF bundle is a build-output of the graph (`roteiro render okf`),
 # regenerated locally and published as a CI artifact — never committed (it would
-# be re-ingested by `sync`, and it churns on every code change).
-/vault/
+# be re-ingested by `sync`, and it churns on every code change). The directory is
+# whatever `render okf` writes without `--out`, which
+# `the_default_bundle_directory_is_ignored_here` holds this entry to.
+/okf/
 
 # macOS Finder metadata
 .DS_Store
-# The Obsidian vault is a gitignored build-output (`roteiro render obsidian`),
-# regenerated locally / published as a CI artifact — never committed.
-/vault/
 
 # Agent worktrees and local Claude Code state — never part of the repository.
 .claude/

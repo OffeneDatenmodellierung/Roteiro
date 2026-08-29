@@ -1342,7 +1342,7 @@ fn resolve_link(ws: &Workspace, node: &Node) -> Result<Option<Node>, ApiError> {
 ///
 /// It used to sit here, which made it unreachable from anything outside this
 /// module: `graph_api` is `#[cfg(feature = "explorer")]`, and the workspace
-/// vault renderer — the first caller that needed a hub outside the web API — is
+/// bundle renderer — the first caller that needed a hub outside the web API — is
 /// not gated at all. #623 asked for exactly this lift and it did not happen at
 /// the time, which is what left a third hub rule as the only alternative.
 //

@@ -298,11 +298,14 @@ enum Command {
         /// network with this flag, and fall back to a local rebuild on any miss.
         #[arg(long)]
         fetch: bool,
-        /// Also render the local OKF bundle (`okf/`, gitignored) from the graph
-        /// just built, so it exists immediately; the installed hooks keep it fresh
-        /// thereafter.
+        /// Also render the local OKF bundle from the graph just built, so it
+        /// exists immediately; the installed hooks keep it fresh thereafter.
+        ///
+        /// Written to `okf/`, which **you should add to `.gitignore`**: it is a
+        /// build-output, it churns on every code change, and `sync` re-ingests it
+        /// if committed. `init` does not edit `.gitignore` for you.
         #[arg(long = "okf", alias = "vault")]
-        vault: bool,
+        okf: bool,
     },
     /// Incrementally update the graph for the current tree (content-addressed).
     ///
@@ -2076,7 +2079,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
-        Command::Init { fetch, vault } => run_init(ingest, fetch, vault, debt_ignore),
+        Command::Init { fetch, okf } => run_init(ingest, fetch, okf, debt_ignore),
         Command::Render {
             target,
             out,
@@ -4467,7 +4470,7 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
 fn run_init(
     ingest: rto_graph::IngestConfig,
     fetch: bool,
-    vault: bool,
+    okf: bool,
     debt_ignore: &[String],
 ) -> anyhow::Result<()> {
     let (repo, mut store, cache) = open_graph()?;
@@ -4480,7 +4483,7 @@ fn run_init(
     // otherwise the common git dir (shared across worktrees).
     let hooks_dir = repo.hooks_dir();
     for name in init::MANAGED_HOOKS {
-        match init::install_hook(&hooks_dir, name, fetch, vault)? {
+        match init::install_hook(&hooks_dir, name, fetch, okf)? {
             init::HookOutcome::Installed => println!("installed hook: {name}"),
             init::HookOutcome::Updated => println!("refreshed hook: {name}"),
             init::HookOutcome::SkippedForeign => {
@@ -4526,7 +4529,7 @@ fn run_init(
 
     // With `--okf`, render the bundle once now so it exists immediately (the
     // installed hooks keep it fresh thereafter).
-    if vault {
+    if okf {
         render_okf(ingest, None, debt_ignore)?;
     }
 
@@ -13800,6 +13803,15 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
     }
 }
 
+/// Where `render okf` writes when `--out` is omitted, for the single-project and
+/// the workspace path alike.
+///
+/// Named once because it is also a claim made *outside* the code: this repository
+/// gitignores the directory (a bundle is a build-output that `sync` would
+/// re-ingest), and `the_default_bundle_directory_is_ignored_here` reads this
+/// constant rather than a second copy of the word.
+const BUNDLE_DIR: &str = "okf";
+
 /// Render a build-output of the graph: the docs site or an OKF bundle.
 fn run_render(
     cfg: &config::Config,
@@ -14124,7 +14136,10 @@ fn render_okf_workspace(
     let ws = rto_graph::Workspace::from_repo_paths(&paths)?;
     let member_names = ws.names();
 
-    let out = out.map_or_else(|| std::path::PathBuf::from("okf"), std::path::PathBuf::from);
+    let out = out.map_or_else(
+        || std::path::PathBuf::from(BUNDLE_DIR),
+        std::path::PathBuf::from,
+    );
     reset_bundle_dir(&out)?;
 
     let tool = okf::Actor::Tool("roteiro".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
@@ -14466,7 +14481,10 @@ fn render_okf(
 
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-    let out = out.map_or_else(|| std::path::PathBuf::from("okf"), std::path::PathBuf::from);
+    let out = out.map_or_else(
+        || std::path::PathBuf::from(BUNDLE_DIR),
+        std::path::PathBuf::from,
+    );
     reset_bundle_dir(&out)?;
 
     let commit = repo.head_commit_id().ok();
@@ -16882,25 +16900,24 @@ mod cli_routing {
         assert!(sync_on_access);
     }
 
-    /// `render obsidian -w <name>` selects a workspace; **bare `render obsidian`
-    /// carries none**, which is the compatibility promise of issue #442 stated at
-    /// the parse layer. Workspace mode renames every note, and a user's own notes
-    /// link into the vault by name, so it must never be entered by inference.
+    /// `render okf -w <name>` selects a workspace; **bare `render okf` carries
+    /// none**, which is the compatibility promise of issue #442 stated at the
+    /// parse layer. Workspace mode moves every concept a directory deeper, and a
+    /// link into the bundle is a path, so it must never be entered by inference.
     #[test]
     fn render_takes_a_workspace_name_and_defaults_to_none() {
         let Command::Render {
             target,
             workspace_name,
             ..
-        } = parse(["roteiro", "render", "obsidian", "-w", "platform"])
+        } = parse(["roteiro", "render", "okf", "-w", "platform"])
         else {
             panic!("expected Render");
         };
-        assert_eq!(target, "obsidian");
+        assert_eq!(target, "okf");
         assert_eq!(workspace_name.as_deref(), Some("platform"));
 
-        let Command::Render { workspace_name, .. } = parse(["roteiro", "render", "obsidian"])
-        else {
+        let Command::Render { workspace_name, .. } = parse(["roteiro", "render", "okf"]) else {
             panic!("expected Render");
         };
         assert_eq!(
