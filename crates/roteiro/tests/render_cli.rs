@@ -1038,3 +1038,102 @@ fn two_renders_of_one_commit_are_byte_identical() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A shallow clone attributes **nothing**, rather than attributing everything to
+/// the one commit it has.
+///
+/// This is where the per-document fix would quietly undo itself. `actions/checkout`
+/// defaults to `fetch-depth: 1`, and at the shallow boundary a commit's parents
+/// are simply absent — so a naive "differs from every parent" reads the single
+/// commit present as having introduced the whole tree, and every ADR is confirmed
+/// by whoever pushed last. That is the original defect, reappearing in exactly the
+/// job that publishes the artifact.
+///
+/// Unverified is the honest answer: absence of `verified` is a tier, and it says
+/// *nobody has confirmed this*, which is true of a bundle built from a repository
+/// whose history is not there. The workflow asks for full history so the published
+/// bundle does not land here.
+#[test]
+fn a_shallow_clone_claims_no_human_verifier_rather_than_the_wrong_one() {
+    let dir = fresh_dir("okf-shallow");
+    git(&dir, &["init", "-q"]);
+    let adr =
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: A\n\n## Context\n\nProse.\n";
+    write(&dir, "docs/adr/0001-a.md", adr);
+    git(&dir, &["add", "."]);
+    commit_as(&dir, "Ada", "2020-01-02T03:04:05+00:00", "the adr");
+
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    git(&dir, &["add", "."]);
+    commit_as(
+        &dir,
+        "Mallory",
+        "2022-03-04T05:06:07+00:00",
+        "unrelated code",
+    );
+
+    // The same fixture at full depth *does* attribute, or the assertion below
+    // would hold for a reason that has nothing to do with shallowness.
+    let deep = Command::new(BIN)
+        .args(["render", "okf", "--out", "deep"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render okf");
+    assert!(
+        deep.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deep.stderr)
+    );
+    assert!(
+        bundle_files(&dir.join("deep"))
+            .iter()
+            .any(|(_, t)| t.contains("by: \"human:Ada\"")),
+        "the full-depth control must attribute, or this test proves nothing"
+    );
+
+    let shallow = dir.join("shallow");
+    git(
+        &dir,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &format!("file://{}", dir.display()),
+            shallow.to_str().expect("utf-8 path"),
+        ],
+    );
+    assert!(
+        shallow.join(".git/shallow").is_file(),
+        "the clone must actually be shallow, or this test proves nothing"
+    );
+
+    let out = Command::new(BIN)
+        .args(["render", "okf", "--out", "bundle"])
+        .current_dir(&shallow)
+        .output()
+        .expect("run render okf");
+    assert!(
+        out.status.success(),
+        "a shallow checkout must still render: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let files = bundle_files(&shallow.join("bundle"));
+    assert!(
+        !files.is_empty(),
+        "the shallow render must produce a bundle"
+    );
+    let claimed: Vec<&String> = files
+        .iter()
+        .filter(|(_, text)| text.contains("by: \"human:"))
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        claimed.is_empty(),
+        "no human may be named when the history that would name them is absent: \
+         {claimed:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

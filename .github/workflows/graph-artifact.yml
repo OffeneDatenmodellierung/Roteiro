@@ -46,6 +46,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, because `render okf` reads it. The bundle's
+          # `verified: [{ by: human:<id> }]` names the author of the commit that
+          # last changed *that document* (ADR-0021), which needs the commits
+          # where those changes are. The action's default `fetch-depth: 1` leaves
+          # one commit and a shallow boundary, and the renderer then attributes
+          # nothing at all rather than attributing everything to whoever pushed —
+          # correct, but it would silently publish an artifact with no
+          # human-reviewed tier in it.
+          fetch-depth: 0
       # Pinned toolchain, `master` ref of the action; see the `checks` job in
       # `ci.yml` for why one action ref now serves both purposes, and for what
       # raising it involves. Bumped with the four sites there, in one commit,

@@ -91,6 +91,14 @@ in the repository as human-reviewed by the bot. Claiming a confirmation nobody
 made is the worst error available in a format whose whole point is the
 distinction, so where the history cannot be read the concept goes unverified.
 
+A **shallow clone** is that case, and it is the one that would have undone this
+quietly. At the shallow boundary a commit's parents are absent, so "changed
+relative to every parent" is unknowable — and read naively, the single commit a
+`fetch-depth: 1` checkout has appears to have introduced the whole tree. A
+boundary commit therefore confirms nothing, and the workflow that publishes the
+bundle asks for full history so the published artifact is attributed rather than
+blank.
+
 ### Nesting replaces a naming scheme
 
 Concepts nest by kind, and by workspace member when a workspace is rendered. Two
@@ -169,4 +177,4 @@ renderer nobody maintains.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |
+| 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key, that a shallow clone confirms nothing rather than confirming everything, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |

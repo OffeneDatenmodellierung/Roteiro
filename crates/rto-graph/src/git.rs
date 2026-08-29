@@ -262,6 +262,18 @@ impl Repo {
         let mut repo = self.inner.clone();
         repo.object_cache_size_if_unset(8 * 1024 * 1024);
 
+        // The shallow boundary, where the parents a comparison needs are simply
+        // absent. gix reports such a commit as parentless, which would otherwise
+        // read as "a root commit introduced everything it contains" — and in a
+        // `fetch-depth: 1` checkout that is *every* path, attributed to whoever
+        // made the one commit present. That is precisely the false claim this
+        // method exists to stop, so a boundary commit resolves nothing.
+        let boundary: BTreeSet<gix::ObjectId> = repo
+            .shallow_commits()
+            .map_err(ge)?
+            .map(|c| c.iter().copied().collect())
+            .unwrap_or_default();
+
         let mut pending: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
         // (tree id, path) -> blob id there. Keyed on the *tree* rather than the
         // commit so a parent looked up as a parent and later walked as a commit
@@ -281,6 +293,9 @@ impl Repo {
                 break;
             }
             let info = info.map_err(ge)?;
+            if boundary.contains(&info.id) {
+                continue;
+            }
             let commit = info.object().map_err(ge)?;
             let tree_id = commit.tree_id().map_err(ge)?.detach();
             let parent_trees: Vec<gix::ObjectId> = info
