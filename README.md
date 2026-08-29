@@ -20,8 +20,8 @@ OKF bundle, and an optional MCP server (`--features mcp`) — all build
 outputs of the same graph, so what humans review is what agents query. *Build
 output* is meant literally: `render` **deletes and rebuilds its output directory
 every time**, so keep your own notes outside the bundle and link into it — see
-[docs/OKF_BUNDLE.md](docs/OKF_BUNDLE.md), which also covers the concept
-rename in issue #574. Offline
+[docs/OKF_BUNDLE.md](docs/OKF_BUNDLE.md), which also covers how concept paths
+are derived and what replaced the Obsidian vault in 4.0.0. Offline
 by default — one optional, default-off feature can call a hosted model, and
 [it is described below](#one-capability-sends-your-repositorys-content-elsewhere-it-is-off);
 git-native and content-addressed, so the graph is shareable across a team.

@@ -236,10 +236,15 @@ impl Repo {
     /// changed by that commit.
     ///
     /// A path absent from the result was never resolved: the history ran out
-    /// first (a shallow clone), or the walk failed. The caller must read that as
-    /// *no confirmation*, never as the tool's — substituting a machine actor
-    /// would move a concept down a trust tier silently, which is worse than
-    /// claiming nothing.
+    /// first (a shallow clone), a commit's parents could not be read (a partial
+    /// clone), or the walk failed. The caller must read that as *no
+    /// confirmation*, never as the tool's — substituting a machine actor would
+    /// move a concept down a trust tier silently, which is worse than claiming
+    /// nothing.
+    ///
+    /// Every commit this cannot fully compare is skipped rather than guessed at,
+    /// for the same reason: the only wrong answer that costs anything here is a
+    /// confident one.
     ///
     /// # Errors
     /// Returns [`GitError::Git`] if `HEAD` cannot be resolved or the history
@@ -298,14 +303,30 @@ impl Repo {
             }
             let commit = info.object().map_err(ge)?;
             let tree_id = commit.tree_id().map_err(ge)?.detach();
-            let parent_trees: Vec<gix::ObjectId> = info
+            // **Every** parent, or none of this commit's answers. A parent that
+            // cannot be read is not a parent that is absent: dropping it silently
+            // shrinks the set this commit is compared against, and dropping the
+            // last one turns the commit into an apparent root that introduced
+            // everything it contains. Both directions produce an attribution, and
+            // an attribution derived from history we could not read is the false
+            // claim this whole method exists to avoid. A partial clone reaches
+            // here without a `shallow` file to warn us.
+            let parent_trees: Option<Vec<gix::ObjectId>> = info
                 .parent_ids
                 .iter()
-                .filter_map(|id| {
-                    let parent = repo.find_object(*id).ok()?.try_into_commit().ok()?;
-                    Some(parent.tree_id().ok()?.detach())
+                .map(|id| {
+                    repo.find_object(*id)
+                        .ok()
+                        .and_then(|o| o.try_into_commit().ok())
+                        .and_then(|c| c.tree_id().ok())
+                        .map(gix::Id::detach)
                 })
                 .collect();
+            // `collect` into an `Option<Vec<_>>` is the all-or-nothing above: one
+            // unreadable parent makes the whole set `None`.
+            let Some(parent_trees) = parent_trees else {
+                continue;
+            };
 
             let mut resolved: Vec<&str> = Vec::new();
             for path in &pending {

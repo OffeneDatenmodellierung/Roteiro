@@ -41,12 +41,13 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-/// Commit as a named person at a fixed instant.
+/// Run git as a named person at a fixed instant — for any command that writes a
+/// commit, `commit` and `merge` alike.
 ///
 /// Both halves are the point: the fixture has to distinguish *who* touched
 /// *which* document, and it has to date each commit so the bundle's timestamps
 /// can be asserted literally rather than compared against a clock.
-fn commit_as(dir: &Path, who: &str, when: &str, message: &str) {
+fn git_as(dir: &Path, who: &str, when: &str, args: &[&str]) {
     let status = Command::new("git")
         .args([
             "-c",
@@ -56,13 +57,18 @@ fn commit_as(dir: &Path, who: &str, when: &str, message: &str) {
             "-c",
             "commit.gpgsign=false",
         ])
-        .args(["commit", "-q", "-m", message])
+        .args(args)
         .env("GIT_AUTHOR_DATE", when)
         .env("GIT_COMMITTER_DATE", when)
         .current_dir(dir)
         .status()
-        .expect("run git commit");
-    assert!(status.success(), "git commit as {who} failed");
+        .expect("run git");
+    assert!(status.success(), "git {args:?} as {who} failed");
+}
+
+/// Commit the index as a named person at a fixed instant.
+fn commit_as(dir: &Path, who: &str, when: &str, message: &str) {
+    git_as(dir, who, when, &["commit", "-q", "-m", message]);
 }
 
 fn write(dir: &Path, rel: &str, content: &str) {
@@ -1134,6 +1140,215 @@ fn a_shallow_clone_claims_no_human_verifier_rather_than_the_wrong_one() {
         "no human may be named when the history that would name them is absent: \
          {claimed:?}"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The frontmatter block of a bundle file, as `(key, value)` pairs for the
+/// top-level scalars. Nested lists are skipped: this reads the keys a consumer
+/// branches on, not the whole document.
+fn frontmatter_of(text: &str) -> Vec<(String, String)> {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return Vec::new();
+    };
+    let Some(end) = rest.find("\n---\n") else {
+        return Vec::new();
+    };
+    rest[..end]
+        .lines()
+        .filter(|l| !l.starts_with(' ') && !l.starts_with('-'))
+        .filter_map(|l| l.split_once(": "))
+        .map(|(k, v)| (k.to_owned(), v.trim_matches('"').to_owned()))
+        .collect()
+}
+
+/// An ADR's `status` reaches the decision and its sections, and **nothing else
+/// that happens to live in the same file**.
+///
+/// OKF's `status` (§4) is a claim about the concept carrying it. The `file:` node
+/// for an ADR is the document, not the decision; a `marker` is a piece of
+/// unfinished work *inside* the document. Labelling either `stable` because the
+/// decision above them was accepted asserts something nobody wrote — and a debt
+/// marker reading "stable" inverts what the marker is for.
+///
+/// A section keeps the status, because a section of a superseded decision is
+/// superseded.
+#[test]
+fn an_adrs_status_does_not_leak_onto_the_file_or_its_debt_markers() {
+    let dir = fresh_dir("okf-status-scope");
+    git(&dir, &["init", "-q"]);
+    write(
+        &dir,
+        "docs/adr/0001-a.md",
+        "---\nadr-id: \"0001\"\nstatus: Superseded\n---\n\n# ADR-0001: A\n\n## Context\n\n\
+         Prose, and a marker: TODO tidy this up.\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "okf", "--out", "bundle"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render okf");
+    assert!(
+        out.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut by_kind: std::collections::BTreeMap<String, Vec<(String, Option<String>)>> =
+        std::collections::BTreeMap::new();
+    for (path, text) in bundle_files(&dir.join("bundle")) {
+        let fm = frontmatter_of(&text);
+        let Some((_, kind)) = fm.iter().find(|(k, _)| k == "type") else {
+            continue;
+        };
+        let status = fm
+            .iter()
+            .find(|(k, _)| k == "status")
+            .map(|(_, v)| v.clone());
+        by_kind
+            .entry(kind.clone())
+            .or_default()
+            .push((path, status));
+    }
+
+    // The fixture must produce all three kinds, or the assertions below are
+    // satisfied by concepts that were never emitted.
+    for kind in ["adr", "adr_section", "file", "marker"] {
+        assert!(
+            by_kind.contains_key(kind),
+            "the fixture must emit a `{kind}` concept: {:?}",
+            by_kind.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // The decision and its sections carry the mapped status …
+    for kind in ["adr", "adr_section"] {
+        for (path, status) in &by_kind[kind] {
+            assert_eq!(
+                status.as_deref(),
+                Some("deprecated"),
+                "{path} is the decision (or part of it) and must carry its status"
+            );
+        }
+    }
+    // … and nothing else does, however much of the file it shares.
+    for kind in ["file", "marker"] {
+        for (path, status) in &by_kind[kind] {
+            assert_eq!(
+                status.as_deref(),
+                None,
+                "{path} is a `{kind}`, not the decision — it must claim no lifecycle \
+                 of the decision's"
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A commit whose parent cannot be read attributes **nothing through that
+/// commit**, rather than comparing against the parents that happen to be there.
+///
+/// Dropping an unreadable parent shrinks the set a commit is compared against,
+/// and a smaller set makes "changed relative to every parent" easier to satisfy —
+/// so the *merge* looks like it introduced what the missing branch actually
+/// added. The fixture is exactly that shape: Bob writes the ADR on a branch,
+/// Mallory merges it, and Bob's commit is then removed from the object store.
+///
+/// Measured, not supposed. Dropping unreadable parents renders this repository
+/// successfully and records **Mallory** as having confirmed the ADR Bob wrote:
+/// a silent false claim in the one field OKF derives the human-reviewed tier
+/// from. Refusing is the correct outcome — the history that would name the author
+/// is not there to be read.
+#[test]
+fn a_commit_whose_parent_cannot_be_read_attributes_nobody() {
+    const BASE: &str = "2020-01-02T03:04:05+00:00";
+    const SIDE: &str = "2021-02-03T04:05:06+00:00";
+    const MERGE: &str = "2022-03-04T05:06:07+00:00";
+
+    let dir = fresh_dir("okf-unreadable-parent");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    git(&dir, &["add", "."]);
+    commit_as(&dir, "Ada", BASE, "base");
+
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    write(
+        &dir,
+        "docs/adr/0001-a.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: A\n\n## Context\n\nProse.\n",
+    );
+    git(&dir, &["add", "."]);
+    commit_as(&dir, "Bob", SIDE, "the adr");
+    let side = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf-8")
+    .trim()
+    .to_owned();
+
+    git(&dir, &["checkout", "-q", "main"]);
+    git_as(
+        &dir,
+        "Mallory",
+        MERGE,
+        &["merge", "-q", "--no-ff", "-m", "merge", "feature"],
+    );
+
+    // Intact, the ADR is Bob's. Without this the assertion below would hold on a
+    // bundle that attributes nothing for reasons unrelated to the damage.
+    let control = Command::new(BIN)
+        .args(["render", "okf", "--out", "control"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render okf");
+    assert!(
+        control.status.success(),
+        "the control render must succeed: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(
+        bundle_files(&dir.join("control"))
+            .iter()
+            .any(|(_, t)| t.contains("by: \"human:Bob\"")),
+        "the intact fixture must attribute the ADR to Bob, or the damage below \
+         proves nothing"
+    );
+
+    // Remove the side commit's object: its tree is still referenced by the merge,
+    // so the repository still checks out — only the *history* is unreadable.
+    let object = dir.join(".git/objects").join(&side[..2]).join(&side[2..]);
+    assert!(object.is_file(), "expected a loose object at {object:?}");
+    std::fs::remove_file(&object).expect("remove the side commit");
+
+    let out = Command::new(BIN)
+        .args(["render", "okf", "--out", "bundle"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render okf");
+
+    // Refusing outright is a fine answer, and is what happens today. What must
+    // never happen is a bundle that names the merge's author as the ADR's.
+    if out.status.success() {
+        let named: Vec<String> = bundle_files(&dir.join("bundle"))
+            .into_iter()
+            .filter(|(_, t)| t.contains("human:Mallory"))
+            .map(|(p, _)| p)
+            .collect();
+        assert!(
+            named.is_empty(),
+            "the merge's author must not inherit the confirmation of a branch whose \
+             history cannot be read: {named:?}"
+        );
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

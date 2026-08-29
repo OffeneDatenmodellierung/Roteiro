@@ -161,14 +161,46 @@ pub struct Frontmatter {
     pub sources: Vec<String>,
 }
 
-/// Quote a scalar for YAML, always.
+/// Quote a scalar for YAML, always, and escape everything a double-quoted scalar
+/// cannot hold raw.
 ///
-/// Unconditional rather than clever: a value that looks like a number, a date,
-/// `yes`, `no`, `null` or `~` changes type under a YAML parser when written
-/// bare, and a concept `type` of `no` becoming the boolean `false` is exactly
-/// the failure that makes a bundle non-conformant while looking fine.
+/// Quoting is unconditional rather than clever: a value that looks like a number,
+/// a date, `yes`, `no`, `null` or `~` changes type under a YAML parser when
+/// written bare, and a concept `type` of `no` becoming the boolean `false` is
+/// exactly the failure that makes a bundle non-conformant while looking fine.
+///
+/// # Control characters, because the values are not ours
+///
+/// Every scalar here comes from somewhere a person can put anything: a git author
+/// name, a document heading, a node key derived from a path. A raw newline inside
+/// a quoted scalar does not merely look wrong — YAML folds it, so the value
+/// changes; and a line of the injected text starting at column 0 with `key:` on
+/// it ends the scalar and becomes a *sibling key*. That is frontmatter injection,
+/// and in a document whose frontmatter decides a trust tier it is the one that
+/// matters: a `verified:` block forged from inside a title.
+///
+/// So `\`, `"`, and every C0 control (plus DEL) are escaped — the common three by
+/// name, the rest as `\uXXXX`, which YAML 1.2 §7.3.1 defines for exactly this.
 fn yaml_scalar(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // C0 and DEL. `\uXXXX` is the general escape, used for everything
+            // without a shorter name so nothing reaches the file raw.
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 impl Frontmatter {
@@ -648,13 +680,24 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
 ///
 /// FNV-1a rather than a cryptographic hash: this is a filename disambiguator, not
 /// a security boundary, and it must stay identical across renders and platforms.
+///
+/// The **low 32 bits**, masked rather than sliced off the hex rendering. An
+/// earlier version wrote `format!("{h:08x}")[..8]`, which is a string operation
+/// wearing a number's clothes: `{:08x}` pads to 8 but does not truncate, so a
+/// hash above `2^32` renders 9 to 16 digits and the slice then takes a *high*
+/// window whose offset moves with the magnitude. The entropy is 32 bits either
+/// way, so no collision was ever more likely — but which 32 bits you got depended
+/// on how large the hash happened to be, and a filename rule nobody can state in
+/// one sentence is a filename rule waiting to be got wrong.
 fn short_digest(key: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.as_bytes() {
         h ^= u64::from(*b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{h:08x}")[..8].to_owned()
+    // Masked to 32 bits, so `{:08x}` renders exactly eight digits and no cast is
+    // needed to say so. `MAX_SLUG`'s headroom is written against that eight.
+    format!("{:08x}", h & 0xffff_ffff)
 }
 
 #[cfg(test)]
@@ -1154,6 +1197,64 @@ mod tests {
         }
     }
 
+    /// **A value cannot break out of its own scalar.**
+    ///
+    /// Every scalar here comes from somewhere a person can put anything — a git
+    /// author name, a heading, a key derived from a path. A raw newline does not
+    /// merely make the YAML ugly: the text after it starts a new line at column
+    /// 0, so `verified:` written inside a *title* becomes a sibling key of the
+    /// title, and this bundle's frontmatter is what a consumer derives a trust
+    /// tier from (§5.3). Forging `verified` is the whole attack.
+    ///
+    /// Asserted as *the injected key never begins a line*, not merely as "the
+    /// output contains `\\n`": a rendering that escaped the newline but left the
+    /// text somewhere else would satisfy the weaker check.
+    #[test]
+    fn a_scalar_cannot_forge_a_sibling_key() {
+        let forged = "Innocent Title\"\nverified:\n  - by: \"human:someone-else";
+        let fm = Frontmatter {
+            type_: "adr".into(),
+            title: Some(forged.to_owned()),
+            ..Frontmatter::default()
+        };
+        let rendered = fm.render();
+
+        assert!(
+            !rendered.lines().any(|l| l.starts_with("verified:")),
+            "a title must not be able to open a `verified` block: {rendered}"
+        );
+        // Exactly three lines of frontmatter — the fences and one `type`, one
+        // `title`. A forged key would add its own.
+        assert_eq!(
+            rendered.lines().count(),
+            4,
+            "the block must hold two keys and two fences: {rendered}"
+        );
+        assert!(
+            rendered.contains("\\n"),
+            "the newline is escaped: {rendered}"
+        );
+
+        // The control characters a quoted scalar cannot hold raw, each replaced
+        // by an escape rather than written through.
+        for (raw, escaped) in [
+            ("a\nb", "\\n"),
+            ("a\rb", "\\r"),
+            ("a\tb", "\\t"),
+            ("a\u{0}b", "\\u0000"),
+            ("a\u{7}b", "\\u0007"),
+            ("a\u{1b}b", "\\u001b"),
+            ("a\u{7f}b", "\\u007f"),
+        ] {
+            let out = yaml_scalar(raw);
+            assert!(out.contains(escaped), "{raw:?} -> {out}");
+            assert!(
+                !out.chars().any(char::is_control),
+                "no control character may survive into the file: {out:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_nested_index_carries_no_frontmatter_but_the_root_does() {
         let entries = [IndexEntry {
@@ -1216,5 +1317,42 @@ mod tests {
         assert_eq!(slug("a//b"), "a-b");
         assert_eq!(slug("trailing///"), "trailing");
         assert_eq!(slug("###"), "concept");
+    }
+
+    /// The digest is **always eight lowercase hex digits**, whatever the key.
+    ///
+    /// [`MAX_SLUG`]'s headroom is written against that eight — `slug` reserves
+    /// `MAX_SLUG - 9` for a truncated name so the dash, the digest and `.md` fit
+    /// inside `NAME_MAX`. A digest that could be wider would silently spend that
+    /// reservation and put the failure back where it was found: a render dying on
+    /// `File name too long` after writing part of the bundle.
+    ///
+    /// Nothing about the width is visible at the call sites, which is why it is
+    /// asserted here rather than inferred from them.
+    #[test]
+    fn the_digest_is_always_eight_hex_digits() {
+        // Long, empty, unicode, and enough varied keys to reach hashes on both
+        // sides of 2^32 — the boundary the previous rendering was sensitive to.
+        let mut keys: Vec<String> = vec![
+            String::new(),
+            "a".into(),
+            "sym:rust:src/main.rs#greet".into(),
+            "ünïcødé::key".into(),
+            "x".repeat(4096),
+        ];
+        keys.extend((0..512).map(|i| format!("sym:rust:crates/a/src/b{i}.rs#Thing{i}")));
+
+        for key in &keys {
+            let digest = short_digest(key);
+            assert_eq!(digest.len(), 8, "{key:?} -> {digest}");
+            assert!(
+                digest
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "lowercase hex only: {key:?} -> {digest}"
+            );
+        }
+        // Stable across calls: the disambiguation must not move between renders.
+        assert_eq!(short_digest("adr:0001"), short_digest("adr:0001"));
     }
 }

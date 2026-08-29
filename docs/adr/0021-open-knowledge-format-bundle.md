@@ -99,6 +99,19 @@ boundary commit therefore confirms nothing, and the workflow that publishes the
 bundle asks for full history so the published artifact is attributed rather than
 blank.
 
+**A value cannot forge a key.** Every scalar written into frontmatter comes from
+somewhere a person can put anything — a git author name, a heading, a key derived
+from a path — so scalars are quoted unconditionally *and* every control character
+is escaped. A raw newline in a title does not merely produce ugly YAML: the text
+after it begins a line at column 0, and `verified:` written there becomes a
+sibling of the title rather than part of it. In a document whose frontmatter
+decides a trust tier, that is the injection that matters.
+
+**Only the decision carries the decision's `status`.** An ADR's file, and the
+intent-debt markers inside it, are different concepts that happen to share a
+path; `status: stable` on a `TODO` inverts what the marker is for. Sections keep
+it, because a section of a superseded decision is superseded.
+
 ### Nesting replaces a naming scheme
 
 Concepts nest by kind, and by workspace member when a workspace is rendered. Two
@@ -177,4 +190,4 @@ renderer nobody maintains.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key, that a shallow clone confirms nothing rather than confirming everything, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |
+| 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key, that a shallow clone confirms nothing rather than confirming everything, that a scalar cannot forge a frontmatter key, that only the decision carries the decision's `status`, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |

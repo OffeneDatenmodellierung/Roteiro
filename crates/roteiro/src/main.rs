@@ -14125,7 +14125,7 @@ fn render_okf_workspace(
     let member_names = ws.names();
 
     let out = out.map_or_else(|| std::path::PathBuf::from("okf"), std::path::PathBuf::from);
-    reset_vault_dir(&out)?;
+    reset_bundle_dir(&out)?;
 
     let tool = okf::Actor::Tool("roteiro".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
 
@@ -14279,6 +14279,11 @@ fn strip_frontmatter(text: &str) -> &str {
 /// the specification does not define. `Rejected` and `Superseded` both become
 /// `deprecated`: they differ in *why* a decision stopped applying, and a consumer
 /// deriving "do not build on this" needs only that it did.
+///
+/// Reads a *document*, so the caller decides which concepts the document's
+/// lifecycle is actually about — see [`okf_concept`]. Handing it every concept
+/// that shares an ADR's path gave the file and its debt markers the decision's
+/// status, which is a different claim about a different thing.
 fn okf_status(source: Option<&str>) -> Option<String> {
     let raw = source?;
     let declared = raw
@@ -14380,13 +14385,24 @@ fn okf_concept<'a>(
             tags,
             // Read from the source's own `status:`, not invented here — an ADR
             // that says `Superseded` should not read as `stable` in a bundle.
-            status: okf_status(
-                ex.node
-                    .path
-                    .as_deref()
-                    .and_then(|p| r.bodies.get(p))
-                    .map(String::as_str),
-            ),
+            //
+            // Only concepts that *are* the decision. Everything else sharing the
+            // ADR's file is a different concept: the `file:` node is the document,
+            // and a `marker` is a piece of unfinished work inside it — labelling
+            // either "stable" because the decision above them is accepted states
+            // something nobody claimed. A section keeps it, because a section of a
+            // superseded decision is superseded.
+            status: matches!(ex.node.kind.as_str(), "adr" | "adr_section")
+                .then(|| {
+                    okf_status(
+                        ex.node
+                            .path
+                            .as_deref()
+                            .and_then(|p| r.bodies.get(p))
+                            .map(String::as_str),
+                    )
+                })
+                .flatten(),
             origin: Some(okf::origin_for(provenance, &at, r.tool, human.as_ref())),
             sources: ex.node.path.iter().map(|p| format!("/{p}")).collect(),
         },
@@ -14451,7 +14467,7 @@ fn render_okf(
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
     let out = out.map_or_else(|| std::path::PathBuf::from("okf"), std::path::PathBuf::from);
-    reset_vault_dir(&out)?;
+    reset_bundle_dir(&out)?;
 
     let commit = repo.head_commit_id().ok();
     let remote = repo.origin_url();
@@ -14493,18 +14509,10 @@ fn render_okf(
 
     let count = concepts.len();
     let files = okf::assemble(concepts, "Roteiro", &[]);
-    let written = files.len();
-    for file in &files {
-        // Paths are bundle-relative and begin with `/`; join after stripping it,
-        // or the leading slash makes this an absolute path and the bundle lands
-        // at the filesystem root.
-        let rel = file.path.trim_start_matches('/');
-        let dest = out.join(rel);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&dest, &file.content)?;
-    }
+    // The same writer as the workspace path. It was written out twice here, and
+    // the leading-slash rule it turns on is the difference between a bundle in
+    // `out` and a bundle at the filesystem root — not a rule to keep two copies of.
+    let written = write_bundle(&out, &files)?;
 
     let _ = debt_ignore;
     println!(
@@ -14566,13 +14574,11 @@ fn select_resolved_workspace<'a>(
 /// output directory is Roteiro's, and a user's own notes belong outside it.
 ///
 /// **This is a data-loss surface, so it is stated where a user meets it** — in
-/// `render`'s `--help`, in `docs/OBSIDIAN_VAULT.md`, and in the README — not only
-/// here. Nothing placed inside the vault survives a render, which is exactly what
-/// makes the note *names* the only stable interface it has: the sole thing that
-/// persists is a note outside the vault linking in by name. That is why issue
-/// #574's renaming was worth a deliberate break rather than a compatibility
-/// shim, and why it does not get a second one.
-fn reset_vault_dir(out: &std::path::Path) -> anyhow::Result<()> {
+/// `render`'s `--help`, in `docs/OKF_BUNDLE.md`, and in the README — not only
+/// here. Nothing placed inside the bundle survives a render, which is exactly
+/// what makes the concept *paths* the only stable interface it has: the sole
+/// thing that persists is a document outside the bundle linking in by path.
+fn reset_bundle_dir(out: &std::path::Path) -> anyhow::Result<()> {
     if out.exists() {
         std::fs::remove_dir_all(out)?;
     }
@@ -14581,8 +14587,8 @@ fn reset_vault_dir(out: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// A web "blob" base for clickable Source links, from the origin remote and the
-/// rendered commit (an absolute URL, so it works in a downloaded vault too).
-/// `None` when there is no mappable remote — notes then omit the link.
+/// rendered commit (an absolute URL, so it works in a downloaded bundle too).
+/// `None` when there is no mappable remote — concepts then omit `resource`.
 fn member_source_base(remote: Option<&str>, commit: Option<&str>) -> Option<String> {
     match (remote, commit) {
         (Some(r), Some(c)) => source_blob_base(r, c),
