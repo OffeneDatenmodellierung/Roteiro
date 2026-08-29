@@ -75,12 +75,13 @@
 
 use std::path::Path;
 
-use rto_graph::{AdvisoryDb, AnalysisRun, Finding, FindingsLayer, Isolation, RunnerKind, Severity};
+use rto_graph::{
+    AdvisoryDb, AnalysisRun, Finding, FindingsLayer, Isolation, RunnerKind, Severity, age_in_days,
+};
 use serde::Serialize;
 
 use crate::adapter::ADAPTERS;
 use crate::assets::{AssetStatus, resolve, status};
-use crate::clock::age_in_days;
 use crate::crossref::{Correspondence, across_analyzers};
 
 /// Schema tag for the tool-surface `security list` document.

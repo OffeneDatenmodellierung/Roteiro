@@ -114,7 +114,6 @@ pub mod boxlite;
 /// `inherit` half at all.
 #[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
 mod child_env;
-mod clock;
 pub mod crossref;
 /// Emitting a `file://` URL for a local path, and reading one back.
 ///
@@ -232,7 +231,17 @@ pub use assets::{
 };
 #[cfg(feature = "exec-boxlite")]
 pub use boxlite::{BoxliteRunner, SandboxError, SandboxProbe, sandbox_probe};
-pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
+// The RFC 3339 UTC formatter moved to `rto-graph` in #667: `rto-exec` is an
+// optional dependency of the CLI, and the CLI's render path — which is gated on
+// nothing — needs the same function to stamp a bundle's timestamps. It is
+// `okf_instant` that needs it today; the workspace-vault renderer that needed it
+// when #667 was filed was deleted by #671, whose OKF replacement reintroduced the
+// same unlinked-crate error at a new line. The move is aimed at that recurrence,
+// not at either call site.
+//
+// Re-exported under the names it has always had so this crate's own callers, and
+// `rto_exec::rfc3339_utc` in the CLI's `execution`/`remote` paths, did not have
+// to move with it.
 pub use crossref::{
     Correspondence, Report, across_analyzers as cross_reference_across_analyzers, cross_reference,
 };
@@ -244,6 +253,7 @@ pub use ingest::{
 };
 #[cfg(feature = "exec-subprocess")]
 pub use lint::{LintError, LintOutcome, Toolchain, invocation as lint_invocation, run as run_lint};
+pub use rto_graph::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 // ADR-0020 §6's grant. Re-exported under `lint_`-prefixed names because the
 // concepts have twins in `rto-remote` (ADR-0019 §3) and a reader who meets
 // `ConfigGrant` in the binary must be able to see which of the two it is.

@@ -103,11 +103,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rto_graph::{Isolation, SourceIdentity};
+use rto_graph::{Isolation, SourceIdentity, rfc3339_utc};
 
 use crate::adapter::clippy::{self, Clippy, FeatureSet, Summary};
 use crate::adapter::{Invocation, LINT_ANALYZERS, NativeContext, UNKNOWN_VERSION};
-use crate::clock::rfc3339_utc;
 use crate::guidance::{Guidance, Line};
 use crate::ingest::NormalizedReport;
 use crate::runner::{ExecError, worktree_id};

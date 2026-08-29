@@ -19,6 +19,11 @@ mod artifact;
 #[cfg(feature = "audio-metadata")]
 pub mod audio;
 mod cache;
+// RFC 3339 UTC formatting for evidence timestamps (#667). Here rather than in
+// `rto-exec` because `rto-exec` is optional and the render paths, which are
+// gated on nothing, need the same formatter — twice now, in two different
+// renderers. `rto-exec` re-exports it; see the module for the history.
+mod clock;
 mod codegraph;
 mod config_keys;
 mod context;
@@ -86,6 +91,7 @@ pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
 #[cfg(feature = "audio-metadata")]
 pub use audio::{AUDIO_STREAM_KIND, AudioDuration, AudioFacts, AudioTag, Exactness};
 pub use cache::{CacheError, ObjectCache, ObjectSweep};
+pub use clock::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
 pub use codegraph::{ORACLE_SCHEMA, OracleError, OracleReport, compare as compare_codegraph};
 pub use config_keys::{
     ConfigKey, canonicalize as canonicalize_config_key, flatten as flatten_config, is_config_path,
