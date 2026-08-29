@@ -75,14 +75,19 @@ pub fn hook_script(name: &str, fetch: bool, okf: bool) -> String {
             .to_owned()
     };
     if okf {
-        body.push_str(OKF_REFRESH);
+        body.push_str(&okf_refresh());
     }
     format!("{header}{body}")
 }
 
 /// Appended to the freshness hooks by `--okf`: rebuild the local OKF bundle from
-/// the now-fresh graph. `render okf` syncs the graph itself and writes to `okf/`,
-/// a build-output that belongs in `.gitignore`.
+/// the now-fresh graph. `render okf` syncs the graph itself and writes to
+/// [`crate::BUNDLE_DIR`], a build-output that belongs in `.gitignore`.
+///
+/// A function rather than a literal so the directory is named **once**, by the
+/// constant the renderer's own default reads. The message a user meets at the
+/// moment the refresh failed is not the place for a second spelling of where it
+/// would have written.
 ///
 /// # Why this step reports its failure, when the ones around it do not
 ///
@@ -99,13 +104,19 @@ pub fn hook_script(name: &str, fetch: bool, okf: bool) -> String {
 /// on a success status, and git ignores a `post-*` hook's exit code regardless.
 /// `exit` is deliberately not used, so a step appended after this one would
 /// still run.
-const OKF_REFRESH: &str = concat!(
-    "# Regenerate the local OKF bundle (a build-output; gitignore it) to match.\n",
-    "if command -v roteiro >/dev/null 2>&1; then\n",
-    "\troteiro render okf >/dev/null || echo 'roteiro: could not refresh the okf/ \
-bundle — run `roteiro render okf` to see why' >&2\n",
-    "fi\n",
-);
+fn okf_refresh() -> String {
+    // Any line continuation here must fall between whole words: broken mid-token
+    // it would render as `okf/ bundle`, which reads like a path that does not
+    // exist rather than like a sentence (Copilot, this PR).
+    format!(
+        "# Regenerate the local OKF bundle (a build-output; gitignore it) to match.\n\
+         if command -v roteiro >/dev/null 2>&1; then\n\
+         \troteiro render okf >/dev/null || echo 'roteiro: could not refresh the \
+         OKF bundle in {dir}/ — run `roteiro render okf` to see why' >&2\n\
+         fi\n",
+        dir = crate::BUNDLE_DIR
+    )
+}
 
 /// The freshness-hook body used with `--fetch`: try the CI artifact, else rebuild.
 /// Kept as a literal (no interpolation) so the shell `$tmp`/braces stay verbatim.
@@ -390,7 +401,7 @@ mod tests {
             "the render's stderr must reach the user: {fresh}"
         );
         assert!(
-            fresh.contains("could not refresh the okf/ bundle"),
+            fresh.contains("could not refresh the OKF bundle in okf/ —"),
             "a failing render must name itself: {fresh}"
         );
         // …and composes with --fetch. The fetch fast path must set a flag on a
@@ -514,6 +525,39 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Every generated hook is valid POSIX shell.
+    ///
+    /// The bodies compose — `--fetch` picks one, `--okf` appends another — so a
+    /// construct that parses alone can still be broken by what precedes it. This
+    /// file gained its first multi-line `if … fi` in a freshness body when the
+    /// bundle refresh stopped hiding its own failure, and `sh` is the only thing
+    /// here that actually knows whether the result parses. A hook git cannot run
+    /// fails the same way the removed command did: quietly, at a moment nobody is
+    /// watching.
+    #[test]
+    fn every_generated_hook_is_valid_posix_shell() {
+        let dir = tmp("shell-syntax");
+        for name in super::MANAGED_HOOKS {
+            for fetch in [false, true] {
+                for okf in [false, true] {
+                    let script = hook_script(name, fetch, okf);
+                    let path = dir.join(format!("{name}-{fetch}-{okf}.sh"));
+                    std::fs::write(&path, &script).expect("write");
+                    let out = std::process::Command::new("sh")
+                        .arg("-n")
+                        .arg(&path)
+                        .output()
+                        .expect("run sh -n");
+                    assert!(
+                        out.status.success(),
+                        "hook `{name}` (fetch={fetch}, okf={okf}) is not valid shell: {}\n{script}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            }
+        }
     }
 
     /// The directory `render okf` writes by default is the directory this
