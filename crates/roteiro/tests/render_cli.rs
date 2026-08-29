@@ -41,6 +41,30 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// Commit as a named person at a fixed instant.
+///
+/// Both halves are the point: the fixture has to distinguish *who* touched
+/// *which* document, and it has to date each commit so the bundle's timestamps
+/// can be asserted literally rather than compared against a clock.
+fn commit_as(dir: &Path, who: &str, when: &str, message: &str) {
+    let status = Command::new("git")
+        .args([
+            "-c",
+            &format!("user.name={who}"),
+            "-c",
+            &format!("user.email={}@example.com", who.to_ascii_lowercase()),
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(["commit", "-q", "-m", message])
+        .env("GIT_AUTHOR_DATE", when)
+        .env("GIT_COMMITTER_DATE", when)
+        .current_dir(dir)
+        .status()
+        .expect("run git commit");
+    assert!(status.success(), "git commit as {who} failed");
+}
+
 fn write(dir: &Path, rel: &str, content: &str) {
     let path = dir.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
@@ -811,4 +835,206 @@ fn a_workspace_bundle_keeps_both_members_readme() {
         "each member's README belongs under its own member directory, got {dirs:?}"
     );
     std::fs::remove_dir_all(&base).ok();
+}
+
+/// Every `.md` file in a bundle, as `(bundle-relative path, content)`.
+fn bundle_files(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|x| x == "md") {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read_to_string(&path).expect("read")));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The `human:` verifier names whoever last touched **that document**, and the
+/// bundle is dated by the **commit**, not by the clock.
+///
+/// Both halves are claims a consumer acts on. OKF derives the human-reviewed
+/// trust tier (§5.3) from `verified[].by`, so attributing every authored concept
+/// to the `HEAD` author records a review that person never did — and a bundle is
+/// a build output of one commit, so a wall-clock timestamp makes two renders of
+/// that commit differ while describing an identical graph.
+///
+/// The fixture separates the two on purpose: `HEAD` is authored by someone who
+/// touched **neither** ADR, so a per-repository attribution has a name to leak
+/// and this test has something to catch.
+#[test]
+fn the_verifier_is_the_documents_own_author_and_the_bundle_is_dated_by_the_commit() {
+    const ADA: &str = "2020-01-02T03:04:05+00:00";
+    const GRACE: &str = "2021-02-03T04:05:06+00:00";
+    const HEAD: &str = "2022-03-04T05:06:07+00:00";
+
+    let dir = fresh_dir("okf-attribution");
+    git(&dir, &["init", "-q"]);
+
+    let adr = |id: &str, title: &str| {
+        format!(
+            "---\nadr-id: \"{id}\"\nstatus: Accepted\n---\n\n# ADR-{id}: {title}\n\n\
+             ## Context\n\nProse.\n"
+        )
+    };
+    write(&dir, "docs/adr/0001-alpha.md", &adr("0001", "Alpha"));
+    git(&dir, &["add", "."]);
+    commit_as(&dir, "Ada", ADA, "alpha");
+
+    write(&dir, "docs/adr/0002-beta.md", &adr("0002", "Beta"));
+    git(&dir, &["add", "."]);
+    commit_as(&dir, "Grace", GRACE, "beta");
+
+    // A last commit touching neither ADR. Under a per-repository attribution
+    // this name would appear on both of them.
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    git(&dir, &["add", "."]);
+    commit_as(&dir, "Mallory", HEAD, "unrelated code");
+
+    let out = Command::new(BIN)
+        .args(["render", "okf", "--out", "bundle"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render okf");
+    assert!(
+        out.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let files = bundle_files(&dir.join("bundle"));
+
+    // The fixture is load-bearing only if the ADRs reached the bundle as
+    // human-verified concepts at all — otherwise every assertion below is
+    // satisfied by an empty search.
+    let human_verified = files
+        .iter()
+        .filter(|(_, text)| text.contains("verified:\n  - by: \"human:"))
+        .count();
+    assert!(
+        human_verified >= 2,
+        "the fixture must produce human-verified concepts: {:?}",
+        files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+
+    let carrying = |needle: String| -> Vec<String> {
+        files
+            .iter()
+            .filter(|(_, text)| text.contains(&needle))
+            .map(|(path, _)| path.clone())
+            .collect()
+    };
+
+    // Each ADR is confirmed by its own author, at that author's own commit time.
+    for (source, who, when) in [
+        ("docs/adr/0001-alpha.md", "Ada", "2020-01-02T03:04:05Z"),
+        ("docs/adr/0002-beta.md", "Grace", "2021-02-03T04:05:06Z"),
+    ] {
+        let concepts: Vec<&(String, String)> = files
+            .iter()
+            .filter(|(_, text)| text.contains(&format!("- resource: \"/{source}\"")))
+            .filter(|(_, text)| text.contains("verified:\n  - by: \"human:"))
+            .collect();
+        assert!(
+            !concepts.is_empty(),
+            "no human-verified concept is sourced from {source}"
+        );
+        for (path, text) in &concepts {
+            assert!(
+                text.contains(&format!("by: \"human:{who}\"")),
+                "{path} is sourced from {source} but is not confirmed by {who}:\n{text}"
+            );
+            assert!(
+                text.contains(&format!("at: \"{when}\"")),
+                "{path} must carry {who}'s own commit time {when}:\n{text}"
+            );
+        }
+    }
+
+    // The `HEAD` author confirmed nothing: they touched neither document.
+    let leaked = carrying("human:Mallory".to_owned());
+    assert!(
+        leaked.is_empty(),
+        "the HEAD author must not be recorded as confirming documents they never \
+         touched: {leaked:?}"
+    );
+
+    // And what no document dates — the derived layer — carries the commit's own
+    // time. A `SystemTime::now()` here would read as the year the test ran.
+    let head_dated = carrying("at: \"2022-03-04T05:06:07Z\"".to_owned());
+    assert!(
+        !head_dated.is_empty(),
+        "concepts with no document of their own must be dated by HEAD, not by the \
+         wall clock: {:?}",
+        files
+            .iter()
+            .filter(|(_, t)| t.contains("generated:"))
+            .map(|(p, _)| p)
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Two renders of one commit produce the same bytes.
+///
+/// Stated over the whole bundle rather than over the timestamp alone, because
+/// reproducibility is a property of the artifact: a consumer diffing two
+/// downloads to see what changed learns nothing if every render differs. What it
+/// catches is *set-dependent* output — slug disambiguation, map iteration, sort
+/// order — going unstable.
+///
+/// **It does not catch a wall clock**, and was measured not to: two renders in
+/// one test run land in the same second, so `SystemTime::now()` formats to the
+/// same string and this passes. The timestamp is pinned by
+/// [`the_verifier_is_the_documents_own_author_and_the_bundle_is_dated_by_the_commit`],
+/// which asserts the literal `HEAD` commit time. Both are needed; neither
+/// subsumes the other.
+#[test]
+fn two_renders_of_one_commit_are_byte_identical() {
+    let dir = fresh_dir("okf-reproducible");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\npub fn thing() {}\n");
+    write(
+        &dir,
+        "docs/adr/0001-a.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: A\n\n## Context\n\nProse.\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let render = |out: &str| {
+        let done = Command::new(BIN)
+            .args(["render", "okf", "--out", out])
+            .current_dir(&dir)
+            .output()
+            .expect("run render okf");
+        assert!(
+            done.status.success(),
+            "render failed: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        bundle_files(&dir.join(out))
+    };
+
+    let once = render("bundle-a");
+    let twice = render("bundle-b");
+    assert!(
+        !once.is_empty(),
+        "the fixture must produce a bundle to compare"
+    );
+    assert_eq!(
+        once, twice,
+        "a bundle rendered twice from one commit must not differ"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

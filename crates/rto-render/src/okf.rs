@@ -42,7 +42,10 @@
 //!
 //! §7 makes the `human:` prefix load-bearing: it is the only thing that
 //! separates human-reviewed from machine-confirmed, and producers **MUST** use it
-//! for hand-authored content. Roteiro knows which nodes those are.
+//! for hand-authored content. Roteiro knows which nodes those are, and resolves
+//! *which person* per document — the author of the commit that last changed that
+//! document's path. Naming one author for the whole repository would record a
+//! review that person never did, on every ADR at once.
 //!
 //! # One deliberate divergence
 //!
@@ -284,8 +287,15 @@ pub fn slug(key: &str) -> String {
     format!("{}-{}", &trimmed[..keep], short_digest(key))
 }
 
-/// The bundle-relative path a node is written to, always beginning with `/` so
-/// it can be used as a link target verbatim (§6 — absolute, bundle-relative).
+/// The bundle-relative path a node takes in a single-project bundle whose slug
+/// did not collide, always beginning with `/` so it can be used as a link target
+/// verbatim (§6 — absolute, bundle-relative).
+///
+/// **Provisional, not authoritative.** [`assemble`] overwrites it, because the
+/// real path also carries the workspace member's directory and a disambiguating
+/// digest when two keys slug alike — neither of which is visible from one node.
+/// Resolving a *link* with this function is the bug it exists to make obvious:
+/// use the placement [`assemble`] passes to [`render_concept`].
 #[must_use]
 pub fn concept_path(node: &NodeSummary) -> String {
     format!("/{}/{}.md", section_for(&node.kind), slug(&node.key))
@@ -482,6 +492,19 @@ pub struct Concept<'a> {
     pub member: Option<String>,
 }
 
+/// One directory's concepts, each with the path [`assemble`]'s first pass gave
+/// it — the intermediate the second pass renders from.
+struct Placed<'a> {
+    /// The workspace member these concepts came from, when the bundle spans one.
+    /// Also the scope a link resolves in: the same key in two members is two
+    /// concepts.
+    member: Option<String>,
+    /// The bundle-relative directory: `<member>/<section>`, or `<section>` alone.
+    dir: String,
+    /// Each concept and the bundle-relative path it will be written to.
+    concepts: Vec<(Concept<'a>, String)>,
+}
+
 /// Assemble a whole bundle: every concept, a per-directory `index.md`, and the
 /// bundle-root `index.md` carrying `okf_version`.
 ///
@@ -501,6 +524,20 @@ pub struct Concept<'a> {
 /// Comparison is case-**insensitive** on purpose. `Foo` and `foo` are one file on
 /// macOS and Windows, and a bundle that wrote both would silently lose one — which
 /// is exactly how the vault lost notes.
+///
+/// # Links are resolved against the placement, not re-derived from the key
+///
+/// Which is why this happens in two passes. A concept's path depends on the whole
+/// set — the member directory it nests under, and whether its slug collided — so
+/// *any* rule that turns a key into a path on its own is guessing. The first pass
+/// places every concept and records `key -> path`; the second renders, resolving
+/// each relationship through that map. A key the map does not hold is not in the
+/// bundle, and its link is dropped rather than written as a path that does not
+/// exist.
+///
+/// The map is scoped **per member**: `file:README.md` is a different concept in
+/// each repository of a workspace, so a link from one member's concept resolves
+/// inside that member.
 #[must_use]
 pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<BundleFile> {
     // Group by section, in key order, so both the output and the disambiguation
@@ -516,8 +553,10 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
             .push(c);
     }
 
-    let mut files = Vec::new();
-    let mut sections: Vec<IndexEntry> = Vec::new();
+    // Pass one: place every concept. Nothing is rendered yet, because a link
+    // written now could only guess at a path this pass is still deciding.
+    let mut placed: Vec<Placed<'_>> = Vec::new();
+    let mut index: BTreeMap<Option<String>, BTreeMap<String, String>> = BTreeMap::new();
 
     for ((member, section), members) in by_section {
         // `/<member>/<section>/` in a workspace, `/<section>/` on its own.
@@ -525,9 +564,10 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
             .as_deref()
             .map_or_else(|| section.to_owned(), |m| format!("{}/{section}", slug(m)));
         let mut taken: BTreeMap<String, usize> = BTreeMap::new();
-        let mut entries: Vec<IndexEntry> = Vec::new();
+        let mut concepts: Vec<(Concept<'_>, String)> = Vec::with_capacity(members.len());
+        let member_index = index.entry(member.clone()).or_default();
 
-        for c in &members {
+        for c in members {
             // Case folding is already handled: `slug` lowercases, so no two slugs
             // can differ by case alone and this comparison needs no folding of its
             // own. An earlier version folded again here and read as the guard
@@ -541,6 +581,26 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
             *taken.entry(base).or_insert(0) += 1;
 
             let path = format!("/{dir}/{name}.md");
+            member_index.insert(c.explanation.node.key.clone(), path.clone());
+            concepts.push((c, path));
+        }
+        placed.push(Placed {
+            member,
+            dir,
+            concepts,
+        });
+    }
+
+    let mut files = Vec::new();
+    let mut sections: Vec<IndexEntry> = Vec::new();
+
+    // Pass two: render, resolving every link through the placement above.
+    for section in placed {
+        let member_index = index.get(&section.member);
+        let dir = &section.dir;
+        let mut entries: Vec<IndexEntry> = Vec::with_capacity(section.concepts.len());
+
+        for (c, path) in &section.concepts {
             let title = c
                 .frontmatter
                 .title
@@ -553,20 +613,20 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
             });
             let mut file =
                 render_concept(c.explanation, &c.frontmatter, c.body.as_deref(), &|key| {
-                    Some(format!("/{}/{}.md", section_for_key(key), slug(key)))
+                    member_index.and_then(|m| m.get(key)).cloned()
                 });
-            file.path = path;
+            file.path.clone_from(path);
             files.push(file);
         }
 
         files.push(BundleFile {
             path: format!("/{dir}/{INDEX_FILE}"),
-            content: render_index(&dir, &entries),
+            content: render_index(dir, &entries),
         });
         sections.push(IndexEntry {
             title: dir.clone(),
             target: format!("/{dir}/{INDEX_FILE}"),
-            description: Some(format!("{} concept(s)", members.len())),
+            description: Some(format!("{} concept(s)", section.concepts.len())),
         });
     }
 
@@ -582,16 +642,6 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
     });
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
-}
-
-/// The section a *key* belongs to, for resolving a link without the node.
-///
-/// A key looks like `sym:rust:path#Name` or `adr:0001#decision`; the leading
-/// token before the first `:` is the kind for authored keys, and anything else is
-/// a symbol. Cheaper than a graph lookup per edge, and wrong only for kinds that
-/// do not encode themselves in the key — which are already the `symbols` default.
-fn section_for_key(key: &str) -> &'static str {
-    section_for(key.split(':').next().unwrap_or(""))
 }
 
 /// A short, stable digest of a key, for disambiguating a collided slug.
@@ -641,6 +691,162 @@ mod tests {
             body: None,
             member: None,
         }
+    }
+
+    fn edge(to: &str) -> rto_graph::EdgeRef {
+        rto_graph::EdgeRef {
+            kind: "references".to_owned(),
+            provenance: "authored",
+            confidence: None,
+            node: to.to_owned(),
+        }
+    }
+
+    /// Every `](/…)` link in an emitted bundle, as `(containing file, target)`.
+    fn internal_links(files: &[BundleFile]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for f in files {
+            let mut rest = f.content.as_str();
+            while let Some(open) = rest.find("](/") {
+                rest = &rest[open + 2..];
+                let Some(close) = rest.find(')') else { break };
+                out.push((f.path.clone(), rest[..close].to_owned()));
+                rest = &rest[close..];
+            }
+        }
+        out
+    }
+
+    /// **Every internal link points at a file the bundle actually contains.**
+    ///
+    /// The conformance test above cannot make this assertion, and would not have
+    /// caught its failure: §11 tells consumers they **MUST NOT** reject a bundle
+    /// for a broken cross-link, so a bundle full of them is still conformant. It
+    /// is still wrong, and this repository promises better (ADR-0021).
+    ///
+    /// Three ways a link target can differ from a key's own slug, all present in
+    /// the fixture because a resolver that re-derives the path from the key gets
+    /// each of them wrong:
+    ///
+    /// 1. a **workspace member** prefixes the directory;
+    /// 2. a **collided slug** takes a digest suffix;
+    /// 3. a node whose **kind and key disagree** about the section —
+    ///    `blueprint_section` keys begin `blueprint:` but the concept files under
+    ///    `symbols`, which is how 43 links broke in a real render of this
+    ///    repository.
+    #[test]
+    fn every_emitted_link_resolves_to_a_file_that_exists() {
+        // (3) key says `blueprint:`, kind says `blueprint_section` → `symbols`.
+        let section = {
+            let mut ex = explanation(
+                "blueprint:docs/blueprint/roteiro.md#1-crate-placement",
+                "blueprint_section",
+                "1 · Crate placement",
+            );
+            ex.outgoing = vec![edge("blueprint:docs/blueprint/roteiro.md")];
+            ex
+        };
+        let plan = {
+            let mut ex = explanation(
+                "blueprint:docs/blueprint/roteiro.md",
+                "blueprint",
+                "roteiro.md",
+            );
+            // (2) both collision partners, and the section above.
+            ex.outgoing = vec![
+                edge("blueprint:docs/blueprint/roteiro.md#1-crate-placement"),
+                edge("sym:rust:a/b.rs#Thing"),
+                edge("sym:rust:a-b.rs#thing"),
+            ];
+            ex
+        };
+        let thing_a = explanation("sym:rust:a/b.rs#Thing", "fn", "Thing");
+        let thing_b = explanation("sym:rust:a-b.rs#thing", "fn", "thing");
+        assert_eq!(
+            slug(&thing_a.node.key),
+            slug(&thing_b.node.key),
+            "the fixture must actually collide, or the digest suffix is never exercised"
+        );
+
+        // (1) everything nests under one workspace member.
+        let concepts: Vec<Concept<'_>> = [
+            (&section, "blueprint_section"),
+            (&plan, "blueprint"),
+            (&thing_a, "fn"),
+            (&thing_b, "fn"),
+        ]
+        .into_iter()
+        .map(|(ex, type_)| {
+            let mut c = concept(ex, type_);
+            c.member = Some("Alpha".to_owned());
+            c
+        })
+        .collect();
+
+        let files = assemble(concepts, "Workspace", &[]);
+        let emitted: std::collections::BTreeSet<&str> =
+            files.iter().map(|f| f.path.as_str()).collect();
+
+        // The fixture is load-bearing only if the placement really did all three
+        // things. Asserted before the links, so a fixture that stopped exercising
+        // one of them fails here rather than passing vacuously below.
+        assert!(
+            emitted
+                .iter()
+                .all(|p| *p == "/index.md" || p.starts_with("/alpha/")),
+            "every concept must nest under its member: {emitted:?}"
+        );
+        assert!(
+            emitted.contains("/alpha/symbols/sym-rust-a-b-rs-thing.md"),
+            "the first collision partner keeps the bare slug: {emitted:?}"
+        );
+        assert!(
+            emitted
+                .iter()
+                .any(|p| p.starts_with("/alpha/symbols/sym-rust-a-b-rs-thing-")),
+            "the second takes a digest suffix: {emitted:?}"
+        );
+        assert!(
+            emitted.contains(
+                "/alpha/symbols/blueprint-docs-blueprint-roteiro-md-1-crate-placement.md"
+            ),
+            "a `blueprint_section` files under `symbols`, not under its key's \
+             `blueprints`: {emitted:?}"
+        );
+
+        let links = internal_links(&files);
+        // A resolver that drops what it cannot place satisfies the loop below by
+        // emitting nothing, so count first: 4 relationship links (one per edge),
+        // 4 concept entries across the two directory indexes, and 2 directory
+        // entries in the root index.
+        assert_eq!(links.len(), 4 + 4 + 2, "{links:?}");
+
+        for (from, target) in &links {
+            assert!(
+                emitted.contains(target.as_str()),
+                "{from} links to {target}, which the bundle does not contain: {emitted:?}"
+            );
+        }
+
+        // Existence is not enough, and this is the half that is easy to miss: two
+        // concepts whose slugs collided are *different files*, so a resolver that
+        // re-derives the bare slug sends both links to whichever one kept it. That
+        // target exists, so the loop above passes while the link points at the
+        // wrong concept — silently wrong rather than broken. `plan` has three
+        // distinct edge targets and must therefore emit three distinct paths.
+        let plan_path = "/alpha/blueprints/blueprint-docs-blueprint-roteiro-md.md";
+        let from_plan: std::collections::BTreeSet<&str> = links
+            .iter()
+            .filter(|(from, _)| from == plan_path)
+            .map(|(_, target)| target.as_str())
+            .collect();
+        assert_eq!(
+            from_plan.len(),
+            plan.outgoing.len(),
+            "{plan_path} has {} edges to distinct concepts but links to {} file(s): {from_plan:?}",
+            plan.outgoing.len(),
+            from_plan.len()
+        );
     }
 
     /// Every file the bundle emits satisfies §11's conformance criteria.
@@ -702,13 +908,6 @@ mod tests {
         );
     }
 
-    /// Two keys that slug identically get distinct filenames.
-    ///
-    /// The vault this replaces lost **104 notes of 8,144** to exactly this, on a
-    /// case-insensitive filesystem where two names folded into one file and the
-    /// second silently overwrote the first. The count printed did not know. So the
-    /// assertion is not "the names differ" but **"the file count equals the
-    /// concept count"** — the property whose failure was invisible.
     /// A document that brings its own heading is not given a second one.
     #[test]
     fn a_body_with_its_own_heading_is_not_double_titled() {
@@ -834,7 +1033,6 @@ mod tests {
         );
     }
 
-    /// The same graph renders to the same bytes.
     /// The same graph renders to the same bytes, whatever order it arrives in.
     ///
     /// Both fixtures are in the **same section** on purpose. An earlier version

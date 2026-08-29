@@ -19,7 +19,7 @@ One SQLite store. One query surface. Three renderers: a docs website, an
 OKF bundle, and an optional MCP server (`--features mcp`) — all build
 outputs of the same graph, so what humans review is what agents query. *Build
 output* is meant literally: `render` **deletes and rebuilds its output directory
-every time**, so keep your own notes outside the vault and link into it — see
+every time**, so keep your own notes outside the bundle and link into it — see
 [docs/OKF_BUNDLE.md](docs/OKF_BUNDLE.md), which also covers the concept
 rename in issue #574. Offline
 by default — one optional, default-off feature can call a hosted model, and

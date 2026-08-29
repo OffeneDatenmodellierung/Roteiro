@@ -59,6 +59,47 @@ fn ge<E: std::fmt::Display>(e: E) -> GitError {
     GitError::Git(e.to_string())
 }
 
+/// Who last changed one path, and when — see [`Repo::last_authors`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathAuthor {
+    /// The commit author's name, exactly as git recorded it. The bare identity:
+    /// any prefix a format requires (OKF's `human:`, §7) is the renderer's.
+    pub name: String,
+    /// That commit's commit time, in seconds since the Unix epoch, UTC.
+    ///
+    /// Carried alongside the name because the two are one claim. Stamping a
+    /// person's confirmation with the *render's* clock would date a review to a
+    /// moment the reviewer had nothing to do with, and would make the bundle
+    /// differ on every render for a document nobody touched.
+    pub at: i64,
+}
+
+/// The blob id at `path` within `tree`, memoised on `(tree, path)`.
+///
+/// `None` means the path does not exist in that tree — which is a state the
+/// caller compares like any other, because a path appearing (or disappearing) is
+/// as much a change as its content differing.
+fn blob_at<'p>(
+    repo: &gix::Repository,
+    memo: &mut std::collections::HashMap<(gix::ObjectId, &'p str), Option<gix::ObjectId>>,
+    tree: gix::ObjectId,
+    path: &'p str,
+) -> Result<Option<gix::ObjectId>, GitError> {
+    if let Some(hit) = memo.get(&(tree, path)) {
+        return Ok(*hit);
+    }
+    let found = repo
+        .find_object(tree)
+        .map_err(ge)?
+        .try_into_tree()
+        .map_err(ge)?
+        .lookup_entry(path.split('/').map(str::as_bytes))
+        .map_err(ge)?
+        .map(|e| e.id().detach());
+    memo.insert((tree, path), found);
+    Ok(found)
+}
+
 /// A discovered git repository.
 pub struct Repo {
     inner: gix::Repository,
@@ -170,24 +211,127 @@ impl Repo {
         Ok(commit.time().map_err(ge)?.seconds)
     }
 
-    /// The author name on the `HEAD` commit, if it can be read.
+    /// Who last changed each of `paths`, and when — the equivalent of
+    /// `git log -1 --format='%an %ct' -- <path>` for a whole set at once.
     ///
     /// Used to attribute the **authored** layer to a person, which is what puts a
     /// concept in OKF's human-reviewed trust tier (§5.3) rather than the
     /// machine-confirmed one. The `human:` prefix is applied by the renderer, not
     /// here — this returns the bare identity.
     ///
-    /// `None` rather than an error on a repository with no readable `HEAD`
-    /// (a fresh init, a shallow or detached build). The caller must treat that as
-    /// *no confirmation*, never as the tool's: substituting a machine actor would
-    /// move every authored concept down a trust tier silently, which is worse
-    /// than claiming nothing.
-    #[must_use]
-    pub fn head_author_name(&self) -> Option<String> {
-        let commit = self.inner.head_commit().ok()?;
-        let author = commit.author().ok()?;
-        let name = author.name.to_string();
-        (!name.trim().is_empty()).then_some(name)
+    /// # Per path, because the claim is per document
+    ///
+    /// The obvious cheap answer is the `HEAD` commit's author, and it is wrong in
+    /// a way the format cannot survive: `verified: [{ by: human:<id> }]` asserts
+    /// that *that person* stands behind *that document*, so attributing the whole
+    /// repository to whoever pushed last records a confirmation nobody made. A
+    /// bot merge at `HEAD` would mark every ADR as human-reviewed by the bot.
+    ///
+    /// # What "last changed" means here
+    ///
+    /// Walking newest-first by commit time, a commit changed a path when the blob
+    /// at that path differs from the blob in **every** parent — the same
+    /// definition `git log -- <path>` uses, so a merge that only carried a change
+    /// across is not credited with making it. A path present in a root commit was
+    /// changed by that commit.
+    ///
+    /// A path absent from the result was never resolved: the history ran out
+    /// first (a shallow clone), or the walk failed. The caller must read that as
+    /// *no confirmation*, never as the tool's — substituting a machine actor
+    /// would move a concept down a trust tier silently, which is worse than
+    /// claiming nothing.
+    ///
+    /// # Errors
+    /// Returns [`GitError::Git`] if `HEAD` cannot be resolved or the history
+    /// cannot be walked.
+    pub fn last_authors(
+        &self,
+        paths: &std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeMap<String, PathAuthor>, GitError> {
+        use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+        let mut out: BTreeMap<String, PathAuthor> = BTreeMap::new();
+        if paths.is_empty() {
+            return Ok(out);
+        }
+        let head = self.inner.head_id().map_err(ge)?.detach();
+
+        // A local handle carrying an object cache. The walk reads each commit's
+        // tree and its parents' trees, and every parent is itself visited later
+        // in the walk, so without a cache the same objects are decoded twice.
+        let mut repo = self.inner.clone();
+        repo.object_cache_size_if_unset(8 * 1024 * 1024);
+
+        let mut pending: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+        // (tree id, path) -> blob id there. Keyed on the *tree* rather than the
+        // commit so a parent looked up as a parent and later walked as a commit
+        // is one lookup, not two.
+        let mut memo: HashMap<(gix::ObjectId, &str), Option<gix::ObjectId>> = HashMap::new();
+
+        let walk = repo
+            .rev_walk([head])
+            .sorting(gix::revision::walk::Sorting::ByCommitTime(
+                gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
+            ))
+            .all()
+            .map_err(ge)?;
+
+        for info in walk {
+            if pending.is_empty() {
+                break;
+            }
+            let info = info.map_err(ge)?;
+            let commit = info.object().map_err(ge)?;
+            let tree_id = commit.tree_id().map_err(ge)?.detach();
+            let parent_trees: Vec<gix::ObjectId> = info
+                .parent_ids
+                .iter()
+                .filter_map(|id| {
+                    let parent = repo.find_object(*id).ok()?.try_into_commit().ok()?;
+                    Some(parent.tree_id().ok()?.detach())
+                })
+                .collect();
+
+            let mut resolved: Vec<&str> = Vec::new();
+            for path in &pending {
+                let here = blob_at(&repo, &mut memo, tree_id, path)?;
+                // A root commit introduces whatever it contains; otherwise the
+                // commit changed the path only if no parent already had this blob.
+                let changed = if parent_trees.is_empty() {
+                    here.is_some()
+                } else {
+                    let mut differs = true;
+                    for parent in &parent_trees {
+                        if blob_at(&repo, &mut memo, *parent, path)? == here {
+                            differs = false;
+                            break;
+                        }
+                    }
+                    differs
+                };
+                if changed {
+                    resolved.push(path);
+                }
+            }
+            if resolved.is_empty() {
+                continue;
+            }
+            // Read the author only once a path actually resolved: it decodes the
+            // commit's header, and most commits in the walk touch none of `paths`.
+            let author = commit
+                .author()
+                .ok()
+                .map(|a| a.name.to_string())
+                .filter(|n| !n.trim().is_empty());
+            let at = commit.time().map_err(ge)?.seconds;
+            for path in resolved {
+                pending.remove(path);
+                if let Some(name) = author.clone() {
+                    out.insert(path.to_owned(), PathAuthor { name, at });
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The `origin` remote's fetch URL, if one is configured — e.g. to derive a

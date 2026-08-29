@@ -14128,7 +14128,6 @@ fn render_okf_workspace(
     reset_vault_dir(&out)?;
 
     let tool = okf::Actor::Tool("roteiro".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
-    let at = rto_exec::rfc3339_utc(std::time::SystemTime::now());
 
     // Each member's nodes and explanations must outlive the borrow the concepts
     // take, so they are collected first and the concepts built afterwards.
@@ -14151,27 +14150,42 @@ fn render_okf_workspace(
         let commit = repo.head_commit_id().ok();
         let remote = repo.origin_url();
         let source_base = member_source_base(remote.as_deref(), commit.as_deref());
-        let human = repo.head_author_name().map(okf::Actor::Human);
+        // Each member is at its own commit, so each carries its own fallback
+        // timestamp. One shared clock reading would date every member to the
+        // moment the workspace was rendered and make the bundle differ on every
+        // run — see `render_okf`, which takes the same commit time for the same
+        // reason.
+        let at = okf_instant(repo.head_commit_time().unwrap_or_default());
 
         let bodies = okf_bodies(&repo, &store, ingest)?;
         let nodes = store.all_nodes()?;
+        // Per document, in this member's own history — the `HEAD` author would
+        // credit whoever last pushed *here* with confirming every ADR in it.
+        let authors = repo.last_authors(&authored_paths(&nodes))?;
         let mut explanations = Vec::with_capacity(nodes.len());
         for node in &nodes {
             if let Some(ex) = rto_graph::explain(&store, &node.key)? {
                 explanations.push((node.provenance, ex));
             }
         }
-        per_member.push((project.clone(), source_base, human, explanations, bodies));
+        per_member.push((
+            project.clone(),
+            source_base,
+            authors,
+            at,
+            explanations,
+            bodies,
+        ));
     }
 
     let mut concepts = Vec::new();
-    for (project, source_base, human, explanations, bodies) in &per_member {
+    for (project, source_base, authors, at, explanations, bodies) in &per_member {
         for (provenance, ex) in explanations {
             let render = OkfRender {
                 source_base: source_base.as_deref(),
                 tool: &tool,
-                human: human.as_ref(),
-                at: &at,
+                authors,
+                at,
                 bodies,
             };
             concepts.push(okf_concept(ex, *provenance, Some(project.clone()), &render));
@@ -14293,13 +14307,38 @@ struct OkfRender<'r> {
     source_base: Option<&'r str>,
     /// The producing tool, for `generated.by`.
     tool: &'r rto_render::okf::Actor,
-    /// The commit's author, for `verified[].by` on the authored layer.
-    human: Option<&'r rto_render::okf::Actor>,
-    /// One timestamp for the whole render, so an unchanged graph renders
-    /// identically rather than differing by wall-clock reading.
+    /// Who last changed each authored document, keyed by repository-relative
+    /// path, for `verified[].by` on the authored layer.
+    ///
+    /// **Per path, not per repository.** `verified: [{ by: human:<id> }]` says
+    /// that person stands behind *this* document, so the `HEAD` author would
+    /// record ~200 confirmations nobody made.
+    authors: &'r std::collections::BTreeMap<String, rto_graph::PathAuthor>,
+    /// The fallback timestamp for everything not dated by a document of its own:
+    /// the `HEAD` commit's time, so re-rendering an unchanged commit produces an
+    /// unchanged bundle. A wall clock here would make every render differ.
     at: &'r str,
     /// Raw source text, keyed by path.
     bodies: &'r std::collections::HashMap<String, String>,
+}
+
+/// The RFC 3339 instant a git commit time names.
+fn okf_instant(secs: i64) -> String {
+    rto_exec::rfc3339_from_unix(u64::try_from(secs).unwrap_or(0))
+}
+
+/// The distinct repository-relative paths of the **authored** nodes in `nodes`.
+///
+/// The input to one history walk. Restricted to the authored layer because that
+/// is the only provenance a person can confirm — a derived symbol is confirmed by
+/// the tool, and looking up who last touched its file would answer a question
+/// nobody asked. Deduplicated because ~180 `adr_section` nodes share ~20 files.
+fn authored_paths(nodes: &[rto_graph::Node]) -> std::collections::BTreeSet<String> {
+    nodes
+        .iter()
+        .filter(|n| n.provenance == rto_graph::Provenance::Authored)
+        .filter_map(|n| n.path.clone())
+        .collect()
 }
 
 fn okf_concept<'a>(
@@ -14314,6 +14353,16 @@ fn okf_concept<'a>(
     if let Some(lang) = &ex.node.lang {
         tags.push(format!("roteiro/lang/{lang}"));
     }
+    // Who last changed *this* document, and when they did it. A concept with no
+    // path, or one whose history could not be read, gets no human and the
+    // bundle's own timestamp — which `okf::origin_for` turns into no
+    // confirmation rather than the tool's.
+    let attribution = ex.node.path.as_deref().and_then(|p| r.authors.get(p));
+    let human = attribution.map(|a| okf::Actor::Human(a.name.clone()));
+    // The author's own commit time, not the render's: dating a person's
+    // confirmation to a moment they had nothing to do with is a second false
+    // claim on top of the first.
+    let at = attribution.map_or_else(|| r.at.to_owned(), |a| okf_instant(a.at));
     okf::Concept {
         explanation: ex,
         frontmatter: okf::Frontmatter {
@@ -14338,7 +14387,7 @@ fn okf_concept<'a>(
                     .and_then(|p| r.bodies.get(p))
                     .map(String::as_str),
             ),
-            origin: Some(okf::origin_for(provenance, r.at, r.tool, r.human)),
+            origin: Some(okf::origin_for(provenance, &at, r.tool, human.as_ref())),
             sources: ex.node.path.iter().map(|p| format!("/{p}")).collect(),
         },
         // Only a node that *is* the file carries the file's prose. A symbol
@@ -14408,14 +14457,11 @@ fn render_okf(
     let remote = repo.origin_url();
     let source_base = member_source_base(remote.as_deref(), commit.as_deref());
     let tool = okf::Actor::Tool("roteiro".to_owned(), env!("CARGO_PKG_VERSION").to_owned());
-    // One timestamp for the whole bundle: every concept in it was produced by
-    // this render, and stamping each with its own wall-clock reading would make
-    // two renders of an unchanged graph differ for no reason a reader cares about.
-    let at = rto_exec::rfc3339_utc(std::time::SystemTime::now());
-    // The commit's author confirms the authored layer. Absent (a shallow clone, a
-    // detached build) yields no confirmation rather than the tool's — see
-    // `okf::origin_for`, where falling back would move a concept between tiers.
-    let human = repo.head_author_name().map(okf::Actor::Human);
+    // The commit's own time, not the wall clock: the bundle is a build output of
+    // one commit, so two renders of that commit must produce the same bytes. A
+    // `SystemTime::now()` here would make every render differ from the last while
+    // describing an unchanged graph.
+    let at = okf_instant(repo.head_commit_time().unwrap_or_default());
 
     let nodes = store.all_nodes()?;
     let mut explanations = Vec::with_capacity(nodes.len());
@@ -14424,6 +14470,10 @@ fn render_okf(
             explanations.push((node, ex));
         }
     }
+    // One history walk for the whole authored layer. Only authored concepts can
+    // reach the human-reviewed tier, so only their paths are looked up — ~20
+    // files here, shared by ~180 `adr_section` nodes.
+    let authors = repo.last_authors(&authored_paths(&nodes))?;
 
     let bodies = okf_bodies(&repo, &store, ingest)?;
     // Through the same builder as the workspace path: the frontmatter decides the
@@ -14432,7 +14482,7 @@ fn render_okf(
     let render = OkfRender {
         source_base: source_base.as_deref(),
         tool: &tool,
-        human: human.as_ref(),
+        authors: &authors,
         at: &at,
         bodies: &bodies,
     };

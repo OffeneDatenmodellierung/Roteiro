@@ -12,7 +12,7 @@ domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
 version: "1.0"
-last-modified: 2026-08-28
+last-modified: 2026-08-29
 confluence-url:
 ---
 
@@ -54,7 +54,7 @@ another. Its only hard requirement is a non-empty `type`.
 **The shareable form of the graph is an OKF v0.2 bundle. `render obsidian` is
 removed in 4.0.0 and replaced by `render okf`.**
 
-Three things follow, and each is load-bearing.
+Four things follow, and each is load-bearing.
 
 ### The provenance mapping is the reason this is a good fit, not the markdown
 
@@ -81,6 +81,16 @@ concept claims **no** confirmation rather than the tool's — substituting a
 machine actor would move every authored concept down a tier silently, which is
 worse than claiming nothing.
 
+**The human is resolved per document, not per repository.** `verified: [{ by:
+human:<id> }]` asserts that *that person* stands behind *that document*, so the
+name is the author of the commit that last changed the document's own path
+([[crates/rto-graph/src/git.rs#Repo]] `last_authors`), and the `at` is that
+commit's time rather than the render's. The cheap answer — the `HEAD` commit's
+author — is a false claim at scale: a bot merge at `HEAD` would record every ADR
+in the repository as human-reviewed by the bot. Claiming a confirmation nobody
+made is the worst error available in a format whose whole point is the
+distinction, so where the history cannot be read the concept goes unverified.
+
 ### Nesting replaces a naming scheme
 
 Concepts nest by kind, and by workspace member when a workspace is rendered. Two
@@ -90,6 +100,23 @@ not because the keys were qualified and the filenames hashed.
 This retires both mechanisms the vault needed rather than porting them. The
 renderer still asserts that **the number of concepts reported equals the number
 of files written**, because that is the property whose failure was invisible.
+
+**A link is resolved against the placement, never re-derived from the key.** A
+concept's path depends on the whole set — the member directory it nests under,
+and a disambiguating digest when two keys slug alike — so any rule that turns one
+key into one path in isolation is guessing, and guessed wrong for 43 links in a
+real render of this repository. `assemble` places every concept first, records
+`key -> path`, and resolves relationships through that map; a key the map does
+not hold is not in the bundle, and its link is dropped rather than written as a
+path that does not exist.
+
+### The bundle is a function of the commit
+
+Every timestamp comes from git: a document's own last-change time where it has
+one, the `HEAD` commit's time otherwise. Rendering the same commit twice
+therefore produces the same bytes, which is what lets a consumer diff two
+downloads and learn something. A wall-clock reading would make every render
+differ while describing an identical graph.
 
 ### Obsidian keeps working, and that is a consequence rather than a goal
 
@@ -142,4 +169,4 @@ renderer nobody maintains.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 1.0 | 2026-08-28 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |
+| 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |
