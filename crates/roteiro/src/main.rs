@@ -5135,7 +5135,7 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
 /// and never see a chat turn, and a pull that succeeded must not exit non-zero
 /// because a capability the user may not want is unavailable. Silence means one
 /// of: no embedded template (normal for non-chat models), or one that renders.
-#[cfg(feature = "inference-local-models")]
+#[cfg(all(feature = "models", feature = "inference-local-models"))]
 fn warn_if_chat_template_unrenderable(name: &str, dir: &std::path::Path) {
     let gguf = dir.join("model.gguf");
     let Some(template) = rto_llama::gguf::chat_template(&gguf) else {
@@ -5161,7 +5161,12 @@ fn warn_if_chat_template_unrenderable(name: &str, dir: &std::path::Path) {
 
 /// Without a local inference backend there is no renderer to check against, so
 /// there is nothing to say.
-#[cfg(not(feature = "inference-local-models"))]
+///
+/// Gated on `models` as well, and not only on the backend, because that is what
+/// gates the sole caller (`run_model_pull`). Without it this stub survives into
+/// a build with `models` off — `--no-default-features --features execution`, one
+/// of CI's cells — where nothing calls it and `-D warnings` reports it as dead.
+#[cfg(all(feature = "models", not(feature = "inference-local-models")))]
 fn warn_if_chat_template_unrenderable(_name: &str, _dir: &std::path::Path) {}
 
 /// Open a streaming HTTPS reader for `url` starting at byte `from` (the body is

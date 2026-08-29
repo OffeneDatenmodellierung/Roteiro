@@ -592,6 +592,9 @@ pub fn chat_with_client_tools(
     // grounding rules (`search` first, cite node keys, never guess from a name).
     // A template renders tool *definitions* and says nothing about how this
     // server wants a call framed.
+    // Whether the graph is on the table at all. `SuppressedTools` empties it the
+    // moment a client supplies tools of its own, and the prompt must say so.
+    let graph_reachable = !graph_tools.is_empty();
     let tools_for_template = openai_tool_shape(&advertised);
     // Both halves, not just `carries_tools`: dropping the listing is safe only
     // if the tools were actually put on the request. The early return above
@@ -603,9 +606,9 @@ pub fn chat_with_client_tools(
     messages.push(Message {
         role: "system".to_owned(),
         content: if engine_advertises {
-            grounding_rules()
+            grounding_rules(graph_reachable)
         } else {
-            tool_system_prompt(&advertised)
+            tool_system_prompt(&advertised, graph_reachable)
         },
     });
     messages.extend(req.messages.iter().cloned());
@@ -765,7 +768,7 @@ fn truncate(s: &str) -> String {
 /// pays more.
 #[must_use]
 pub fn advertised_system_prompt(tools: &[&ToolDef]) -> String {
-    tool_system_prompt(tools)
+    tool_system_prompt(tools, true)
 }
 
 /// The advertised tools in OpenAI's `[{type, function:{…}}]` shape — the shape
@@ -802,14 +805,14 @@ fn openai_tool_shape(advertised: &[&ToolDef]) -> Option<serde_json::Value> {
 /// renders tool *definitions* and has nothing to say about answering only from
 /// the graph or citing node keys. Sent on every tooled turn, so the rules do not
 /// depend on which engine is serving.
-fn grounding_rules() -> String {
-    system_prompt(&[], false)
+fn grounding_rules(graph: bool) -> String {
+    system_prompt(&[], false, graph)
 }
 
 /// Render the system prompt that advertises `tools` and the `<tool_call>`
 /// protocol. Kept model-agnostic: any instruction-following model can comply.
-fn tool_system_prompt(tools: &[&ToolDef]) -> String {
-    system_prompt(tools, true)
+fn tool_system_prompt(tools: &[&ToolDef], graph: bool) -> String {
+    system_prompt(tools, true, graph)
 }
 
 /// The system turn, with the tool listing when `list` and without it otherwise.
@@ -823,7 +826,7 @@ fn tool_system_prompt(tools: &[&ToolDef]) -> String {
 /// form outright. When the engine advertises, the model's own template has
 /// already framed it in the shape it was trained on, and naming a competing form
 /// is how #489's dialect problem starts.
-fn system_prompt(tools: &[&ToolDef], list: bool) -> String {
+fn system_prompt(tools: &[&ToolDef], list: bool, graph: bool) -> String {
     // The `<tool_call>` envelope is stated either way, because it is *this
     // server's* and no chat template supplies it: `read_markup` keys on that
     // wrapper, and a model left to its own would use whatever wrapper it was
@@ -841,15 +844,32 @@ fn system_prompt(tools: &[&ToolDef], list: bool) -> String {
          `<tool_call>`…`</tool_call>`, with the call itself in the form your \
          instructions specify"
     };
-    let mut out = format!(
+    // Only when the graph is actually reachable. A client that supplies its own
+    // tools suppresses the graph ones entirely (see `SuppressedTools`), and
+    // telling that model to answer "using ONLY the Roteiro knowledge graph", via
+    // a `search` and an `explain` it has not been given, is an instruction it
+    // cannot follow — it can only refuse, or keep calling tools that are not
+    // there. What survives is the part that is true either way: ground the answer
+    // in what the tools returned, and do not invent when they do not answer.
+    let opening = if graph {
         "You answer questions about this codebase using ONLY its Roteiro knowledge \
-         graph, reached through the tools available to you. When a tool would \
-         help, {protocol}.\n\
-         After you receive a <tool_response>, use it to answer. Ground every claim \
-         in what the tools return: use `search` to find relevant nodes, then read \
-         each hit's `snippet` or call `explain` on its key to read the node's \
-         actual content BEFORE describing it — never guess from a node's name \
-         alone. Cite the node keys you used (e.g. `file:README.md`, `fn:foo`). If \
+         graph, reached through the tools available to you."
+    } else {
+        "You answer questions using the tools available to you."
+    };
+    let grounding = if graph {
+        "Ground every claim in what the tools return: use `search` to find \
+         relevant nodes, then read each hit's `snippet` or call `explain` on its \
+         key to read the node's actual content BEFORE describing it — never guess \
+         from a node's name alone. Cite the node keys you used (e.g. \
+         `file:README.md`, `fn:foo`)."
+    } else {
+        "Ground every claim in what the tools return, and never describe \
+         something a tool has not shown you."
+    };
+    let mut out = format!(
+        "{opening} When a tool would help, {protocol}.\n\
+         After you receive a <tool_response>, use it to answer. {grounding} If \
          the tools do not contain the answer, say you could not find it rather than \
          making one up. If no tool is needed, just answer directly.\n"
     );
@@ -1463,7 +1483,7 @@ mod tests {
             description: "find nodes".to_owned(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>(), true);
         assert!(prompt.contains("<tool_call>"));
         assert!(prompt.contains("search() — find nodes"));
     }
@@ -1491,7 +1511,7 @@ mod tests {
                 "required": ["query"],
             }),
         }];
-        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>(), true);
         // One exact line, because the rendering is the thing being pinned:
         // every argument present, `?` on each one `required` omits, each type
         // and its bound, and the description after an em dash.
@@ -1593,7 +1613,7 @@ mod tests {
                 },
             }),
         }];
-        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>(), true);
         assert!(
             prompt.contains("- debt(limit?: int(uint32) 1..200, project?: str) — list markers"),
             "{prompt}",
@@ -1662,7 +1682,7 @@ mod tests {
                 description: "d".to_owned(),
                 parameters: parameters.clone(),
             }];
-            let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+            let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>(), true);
             assert!(
                 prompt.contains("arguments schema:"),
                 "must fall back for {parameters}: {prompt}",
@@ -1693,7 +1713,7 @@ mod tests {
             with_project("a", "peculiar to a"),
             with_project("b", "peculiar to b"),
         ];
-        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>(), true);
         assert_eq!(
             prompt.matches("which hosted project").count(),
             1,
@@ -1722,7 +1742,7 @@ mod tests {
             description: "find nodes".to_owned(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>());
+        let prompt = tool_system_prompt(&tools.iter().collect::<Vec<_>>(), true);
         let lower = prompt.to_lowercase();
         // Pin the *grounding* "only" (answer from the graph), not the "reply with
         // ONLY a tool call" formatting rule that also contains the bare word — so
@@ -2073,6 +2093,39 @@ mod tests {
         );
     }
 
+    /// A client's own tools suppress the graph, and the prompt stops claiming it.
+    ///
+    /// `SuppressedTools` empties the graph registry the moment a client supplies
+    /// tools, so telling that model to answer "using ONLY the Roteiro knowledge
+    /// graph" through a `search` and an `explain` it was never given is an
+    /// instruction it cannot follow. It can only refuse, or keep calling tools
+    /// that are not there.
+    #[test]
+    fn a_client_tool_turn_does_not_claim_a_graph_that_was_suppressed() {
+        let engine = RecordingEngine::new("done");
+        let _ = chat_with_client_tools(
+            &engine,
+            &EchoRegistry,
+            &[client_tool("get_weather")],
+            &user_request(),
+            4,
+        )
+        .expect("outcome");
+
+        let prompt = engine.first_system_prompt();
+        assert!(
+            !prompt.contains("Roteiro knowledge graph"),
+            "claimed the graph while it was suppressed: {prompt}"
+        );
+        assert!(
+            !prompt.contains("`search`"),
+            "named a graph tool the model was not given: {prompt}"
+        );
+        // What must survive: the envelope, and grounding in what tools returned.
+        assert!(prompt.contains("<tool_call>"), "{prompt}");
+        assert!(prompt.contains("Ground every claim"), "{prompt}");
+    }
+
     /// Both variants name the `<tool_call>` envelope.
     ///
     /// It is the one thing that cannot be delegated to a chat template:
@@ -2085,7 +2138,10 @@ mod tests {
     fn every_variant_states_the_envelope_this_server_parses() {
         let tools = [client_tool("echo")];
         let refs: Vec<&ToolDef> = tools.iter().collect();
-        for prompt in [system_prompt(&refs, true), system_prompt(&[], false)] {
+        for prompt in [
+            system_prompt(&refs, true, true),
+            system_prompt(&[], false, true),
+        ] {
             assert!(
                 prompt.contains("<tool_call>"),
                 "the envelope went unstated: {prompt}"

@@ -295,18 +295,40 @@ pub fn render_advertising(
     tools: Option<&serde_json::Value>,
     add_generation_prompt: bool,
 ) -> Result<String, TemplateError> {
+    // An empty array is "no tools", not "an empty list of tools". Advertising it
+    // would hand the model `You may call these tools.` followed by `[]`, and
+    // `ignores_tools` would compare two renderings that differ in nothing.
+    let tools = tools.filter(|t| !t.as_array().is_some_and(Vec::is_empty));
     let Some(t) = tools else {
         return render_shaped(template, messages, None, add_generation_prompt);
     };
     if !ignores_tools(template, messages, t, add_generation_prompt) {
         return render_shaped(template, messages, Some(t), add_generation_prompt);
     }
-    let mut announced = Vec::with_capacity(messages.len() + 1);
-    announced.push(serde_json::json!({
-        "role": "system",
-        "content": tool_advertisement(t),
-    }));
-    announced.extend_from_slice(messages);
+
+    // Folded into the caller's own system turn where there is one, rather than
+    // added as a second. A chat template is entitled to reject a system message
+    // that is not the first, or to allow only one, and several do — so inserting
+    // a turn to describe the tools could make a template that renders perfectly
+    // well stop rendering at all. Prepended within that turn so the tools are
+    // stated before the instructions that refer to them.
+    let mut announced = messages.to_vec();
+    match announced
+        .first_mut()
+        .filter(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("system"))
+        .and_then(|m| Some((m.get("content")?.as_str()?.to_owned(), m)))
+    {
+        Some((existing, first)) => {
+            first["content"] =
+                serde_json::Value::String(format!("{}\n\n{existing}", tool_advertisement(t)));
+        }
+        // No system turn to fold into — or one whose content is not a plain
+        // string, which this must not flatten.
+        None => announced.insert(
+            0,
+            serde_json::json!({"role": "system", "content": tool_advertisement(t)}),
+        ),
+    }
     render_shaped(template, &announced, Some(t), add_generation_prompt)
 }
 

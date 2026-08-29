@@ -335,3 +335,42 @@ fn a_template_that_renders_the_conversation_away_is_an_error() {
     let text = err.to_string();
     assert!(text.contains("rendered the conversation away"), "{text}");
 }
+
+/// An empty tool array is "no tools", not "an empty list of tools".
+#[test]
+fn an_empty_tool_list_is_not_advertised() {
+    let ignores = "{%- for m in messages %}<|{{ m.role }}|>{{ m.content }}{%- endfor %}";
+    let msgs = vec![serde_json::json!({"role": "user", "content": "hello"})];
+    let empty = serde_json::json!([]);
+    let out = rto_llama::chat_template::render_advertising(ignores, &msgs, Some(&empty), true)
+        .expect("renders");
+    assert!(!out.contains("You may call these tools"), "{out}");
+}
+
+/// The fallback folds into the caller's system turn instead of adding a second.
+///
+/// A chat template may reject a system message that is not the first, or allow
+/// only one. Inserting a turn to describe the tools could therefore stop a
+/// perfectly good template from rendering at all.
+#[test]
+fn the_fallback_folds_into_an_existing_system_turn() {
+    let ignores = "{%- for m in messages %}<|{{ m.role }}|>{{ m.content }}\n{%- endfor %}";
+    let msgs = vec![
+        serde_json::json!({"role": "system", "content": "GROUNDING RULES HERE"}),
+        serde_json::json!({"role": "user", "content": "hello"}),
+    ];
+    let tools = serde_json::json!([{
+        "type": "function",
+        "function": {"name": "roteiro_path", "description": "d", "parameters": {}}
+    }]);
+    let out = rto_llama::chat_template::render_advertising(ignores, &msgs, Some(&tools), true)
+        .expect("renders");
+
+    assert_eq!(
+        out.matches("<|system|>").count(),
+        1,
+        "a second system turn was added rather than folded in: {out}"
+    );
+    assert!(out.contains("roteiro_path"), "{out}");
+    assert!(out.contains("GROUNDING RULES HERE"), "{out}");
+}
