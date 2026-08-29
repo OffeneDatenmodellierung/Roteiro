@@ -3500,7 +3500,7 @@ fn print_debt_section(loaded: &config::Loaded) {
             println!("    {pattern:?}  ({layer})");
         }
     }
-    if loaded.effective.debt.ignore_reset == Some(true) {
+    if loaded.effective.debt.ignore_reset.declared() == Some(true) {
         println!("  ignore_reset = true  (inherited patterns dropped)");
         for pattern in loaded.debt_ignore_discarded() {
             println!("    {pattern:?}  (discarded from user)");

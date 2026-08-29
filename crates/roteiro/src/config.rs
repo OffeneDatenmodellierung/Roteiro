@@ -91,7 +91,8 @@ impl Loaded {
     /// behaviour they asked for either way.
     #[must_use]
     pub fn debt_ignore_reset_was_inert(&self) -> bool {
-        self.user.debt.ignore_reset == Some(true) && self.effective.debt.ignore_reset != Some(true)
+        self.user.debt.ignore_reset.declared() == Some(true)
+            && self.effective.debt.ignore_reset.declared() != Some(true)
     }
 
     /// The user-layer `[debt] ignore` patterns that `ignore_reset` discarded, so
@@ -106,7 +107,7 @@ impl Loaded {
     /// the unconditional headline in `roteiro config`, not this list.
     #[must_use]
     pub fn debt_ignore_discarded(&self) -> Vec<&str> {
-        if self.effective.debt.ignore_reset != Some(true) {
+        if self.effective.debt.ignore_reset.declared() != Some(true) {
             return Vec::new();
         }
         let kept = self.effective.debt.ignore.as_deref().unwrap_or_default();
@@ -197,6 +198,98 @@ pub struct Config {
     pub pins: std::collections::BTreeMap<String, String>,
 }
 
+/// A configuration key the overlay **does not inherit**: the effective value is
+/// the nearer layer's, and the layer beneath is never consulted.
+///
+/// # What it is
+///
+/// An `Option<T>` with no [`Option::or`]. That absence is the entire feature.
+///
+/// Every ordinary key in this module merges as `over.k.or(self.k)`, which is
+/// right for a *value* the run consumes afterwards: unset in the project layer
+/// means "not decided here", so the user layer's answer stands. It is wrong for a
+/// key that is a **directive to the merge itself**, because inheriting such a key
+/// inverts its meaning — the flag stops recording what the merge did and starts
+/// reporting what some lower layer asked for and did not get.
+///
+/// Not hypothetical. `[debt] ignore_reset` was merged with `.or()` (issue #674;
+/// review-corpus row `3792273276`, class `contract-drift`, at sha `413f73cc`), so
+/// a user-layer reset — inert, because [`merge_ignore`] consults the nearer
+/// layer's flag and only that one — surfaced in the effective config, and
+/// `roteiro config` announced "inherited patterns dropped" directly above a list
+/// in which every inherited pattern was still present.
+///
+/// # Why a type, and not a rule in the drift gate
+///
+/// Issue #674 offered both and asked for the count first. Measured on this file:
+///
+/// | | |
+/// | --- | --- |
+/// | fields the layer overlay combines | 44 |
+/// | merged by ordinary `.or()`/`.or_else()` inheritance | 35 |
+/// | merged some other way | 9 |
+/// | of those, **non-inheritable** — the lower layer is never read | **1** |
+///
+/// A lexical rule therefore has one correct call site to learn from and 35 to be
+/// confused by, and nothing in the source distinguishes them: #674's own
+/// diagnosis is that *nothing declares which fields are inheritable*.
+///
+/// Its false positives are not tunable either, because they *are* this module's
+/// documentation. On the tree the rule was measured against, `config.rs` held the
+/// strings `over.enabled.or(self.enabled)`,
+/// `over.allow_unsandboxed.or(self.allow_unsandboxed)` and
+/// `.or(self.debt.ignore_reset)` — all three inside comments explaining that the
+/// code deliberately does **not** do that. Scanned for the shape it detects, the
+/// rule reports the documentation of its own fix: **0 true positives, 3 false
+/// positives**. Two of the three survive this change and cannot be retired —
+/// [`RemoteConfig::enabled`] and [`LintConfig::allow_unsandboxed`] still need the
+/// explanation — and the paragraph you are reading quotes all three again, so a
+/// rule shipped today would report **five**, every one of them prose. There is no
+/// `roteiro:ignore-file` escape either, because this is production code that has
+/// to stay scanned. Issue #438 is explicit that a rule which fires on correct code
+/// is worse than no rule, so no rule was added.
+///
+/// This type is the declaration #674 found missing, written where the field is
+/// declared, and it costs the mistake a compile error instead of a review.
+///
+/// # The three keys that deliberately do *not* use it
+///
+/// [`RemoteConfig::enabled`] (ADR-0019 §3), [`LintConfig::allow_unsandboxed`]
+/// (ADR-0020 §6) and [`McpConfig::tools`] also reject `.or()`, and they are still
+/// `Option`s. They are not non-inheritable: all three **read both layers** and
+/// combine them — an `AND` for the two grants, an intersection for the allow-list
+/// — so a lower layer's `false`, or its narrower list, is load-bearing. Wrapping
+/// them here would name their policy wrongly, which is the failure this type
+/// exists to prevent. Their type-level answer is the `ConfigGrant` /
+/// [`ToolAllowList`] they already route through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct NotInherited<T>(Option<T>);
+
+impl<T> Default for NotInherited<T> {
+    /// Unset — a layer that says nothing declares nothing.
+    ///
+    /// Hand-written rather than derived so it holds for any `T`: the derive would
+    /// add a `T: Default` bound, and "this layer set no value" has nothing to do
+    /// with whether the value type has a default.
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T: Copy> NotInherited<T> {
+    /// What **this layer** declared, if it declared anything.
+    ///
+    /// The only way out of the wrapper, and named for what it returns: one
+    /// layer's own declaration, never a merged answer. Callers compare it
+    /// (`== Some(true)`) rather than combining it with another layer's, because
+    /// combining is precisely what this key must not do.
+    #[must_use]
+    pub const fn declared(self) -> Option<T> {
+        self.0
+    }
+}
+
 /// `[debt]` — intent-debt reporting.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -258,10 +351,17 @@ pub struct DebtConfig {
     /// starts doing exactly what it says, with no config to migrate. Rejecting it
     /// permanently would encode a temporary fact as a rule.
     ///
+    /// # Not inherited, and not by convention
+    ///
+    /// A [`NotInherited<bool>`](NotInherited), not an `Option<bool>`, so the
+    /// `over.k.or(self.k)` every ordinary key in this module is merged with is a
+    /// **compile error** here rather than a review comment. It was a review
+    /// comment once (issue #674), and that is the whole argument for the type.
+    ///
     /// Accepted as `ignore_reset` (canonical, matching every other key in this
     /// file) or `ignore-reset`.
     #[serde(alias = "ignore-reset")]
-    pub ignore_reset: Option<bool>,
+    pub ignore_reset: NotInherited<bool>,
 }
 
 /// `[remote]` — the optional, **default-off** remote model tier (ADR-0019), and
@@ -1242,7 +1342,7 @@ pub fn debt_ignore_for(
 /// The distinguishing question is whether adding an entry *widens* something
 /// harmless (an exclusion) or *changes what is reached* (discovery, selection).
 fn merge_ignore(base: Option<&[String]>, over: &DebtConfig) -> Option<Vec<String>> {
-    if over.ignore_reset == Some(true) {
+    if over.ignore_reset.declared() == Some(true) {
         return over.ignore.clone();
     }
     match (base, over.ignore.as_deref()) {
@@ -1315,13 +1415,14 @@ impl Config {
             // deliberately do not.
             debt: DebtConfig {
                 ignore: merge_ignore(self.debt.ignore.as_deref(), &over.debt),
-                // NOT inherited with `.or(self.debt.ignore_reset)`, unlike every
-                // scalar above. Those are *values* the run consumes afterwards, so
-                // falling back to the lower layer is right. This is a **directive
-                // to the merge**, already consumed by `merge_ignore` — which reads
-                // `over`'s flag and only `over`'s. After the overlay it is no
-                // longer an input to anything; it is the *record* of what the
-                // merge did. Inheriting it made the record disagree with the
+                // The nearer layer's, alone — and a `NotInherited<bool>`, so the
+                // fallback every scalar above uses is not merely wrong here, it
+                // does not compile. The scalars are *values* the run consumes
+                // afterwards, so reaching down a layer is right for them. This is
+                // a **directive to the merge**, already consumed by `merge_ignore`
+                // — which reads `over`'s flag and only `over`'s. After the overlay
+                // it is no longer an input to anything; it is the *record* of what
+                // the merge did. Inheriting it made the record disagree with the
                 // event: a user-layer reset (inert, since `merge_ignore` never
                 // consults it) surfaced in `effective`, and `roteiro config` — the
                 // command whose whole job is explaining what the config did —
@@ -2410,7 +2511,7 @@ mod tests {
         )
         .expect("project");
         let kebab = load_from(Some(user.clone()), Some(project.clone())).expect("load");
-        assert_eq!(kebab.effective.debt.ignore_reset, Some(true));
+        assert_eq!(kebab.effective.debt.ignore_reset.declared(), Some(true));
         assert_eq!(
             kebab.effective.debt.ignore.as_deref(),
             Some(["thirdparty/**".to_owned()].as_slice())
@@ -2469,7 +2570,7 @@ mod tests {
 
         // The effective flag records the merge that ran, which reset nothing.
         assert_ne!(
-            loaded.effective.debt.ignore_reset,
+            loaded.effective.debt.ignore_reset.declared(),
             Some(true),
             "a user-layer reset governs nothing, so it must not appear as one in \
              the effective config — that is the claim `roteiro config` prints"
@@ -2513,7 +2614,7 @@ mod tests {
         )
         .expect("project");
         let both = load_from(Some(user.clone()), Some(project)).expect("load");
-        assert_eq!(both.effective.debt.ignore_reset, Some(true));
+        assert_eq!(both.effective.debt.ignore_reset.declared(), Some(true));
         assert_eq!(both.debt_ignore_discarded(), vec!["vendor/**", "target/**"]);
         assert!(
             !both.debt_ignore_reset_was_inert(),
@@ -2523,7 +2624,7 @@ mod tests {
 
         // With no project config at all, the user's reset is still inert.
         let alone = load_from(Some(user), None).expect("load");
-        assert_ne!(alone.effective.debt.ignore_reset, Some(true));
+        assert_ne!(alone.effective.debt.ignore_reset.declared(), Some(true));
         assert!(alone.debt_ignore_reset_was_inert());
         assert_eq!(
             alone.effective.debt.ignore.as_deref(),
