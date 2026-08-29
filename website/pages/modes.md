@@ -29,14 +29,14 @@ roteiro check
 roteiro path 'file:src/main.rs' 'adr:0001'
 roteiro debt
 
-<span class="c"># Render the graph to a docs site or an Obsidian vault</span>
+<span class="c"># Render the graph to a docs site or an OKF bundle</span>
 roteiro render docs
-roteiro render obsidian
+roteiro render okf
 
 <span class="c"># …or one vault spanning a whole workspace, members and all</span>
-roteiro render obsidian --workspace-name payments</code></pre>
+roteiro render okf --workspace-name payments</code></pre>
 
-Without `--workspace-name`, `render obsidian` renders the current project, with
+Without `--workspace-name`, `render okf` renders the current project, with
 unqualified note names, even when that repository is a member of a configured
 workspace. With one, every note is keyed `<project>::<key>` so two repositories'
 `README.md` cannot claim the same note, and cross-repo links resolve inside the
@@ -47,7 +47,7 @@ Two things to know before you rely on a vault: **the output directory is deleted
 and rebuilt on every render**, so your own notes belong *outside* it and link
 into it by name — and **note names changed in issue #574, with no migration**, to
 stop two nodes silently landing on one file. Both are explained on the
-[Obsidian vault](obsidian-vault.html) page.
+[OKF bundle](okf-bundle.html) page.
 
 A workspace vault is **shareable**, and says so about itself. Its `_Home`
 carries a *Reproducing this vault* section — when it was rendered, and for each

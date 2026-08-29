@@ -16,11 +16,11 @@ Every edge in the graph records **how it was produced**:
 | `inferred` | Docs, PDFs, images, embeddings | Fuzzy suggestions with confidence scores |
 
 One SQLite store. One query surface. Three renderers: a docs website, an
-Obsidian vault, and an optional MCP server (`--features mcp`) — all build
+OKF bundle, and an optional MCP server (`--features mcp`) — all build
 outputs of the same graph, so what humans review is what agents query. *Build
 output* is meant literally: `render` **deletes and rebuilds its output directory
 every time**, so keep your own notes outside the vault and link into it — see
-[docs/OBSIDIAN_VAULT.md](docs/OBSIDIAN_VAULT.md), which also covers the note
+[docs/OKF_BUNDLE.md](docs/OKF_BUNDLE.md), which also covers the concept
 rename in issue #574. Offline
 by default — one optional, default-off feature can call a hosted model, and
 [it is described below](#one-capability-sends-your-repositorys-content-elsewhere-it-is-off);
@@ -226,7 +226,7 @@ deferred; see the ADR for the field mapping and the seam.
 - `crates/rto-graph` — SQLite store, provenance model, content-addressed cache, extraction, sync, query, inference
 - `crates/rto-spec` — house-style ADR/blueprint parsing, `check` (drift gate), importers, spec authoring
 - `crates/rto-faithful` — rendering faithfulness: every claim in a rendered summary must trace to a tool finding
-- `crates/rto-render` — docs site, Obsidian vault, MCP server (feature-gated)
+- `crates/rto-render` — docs site, OKF bundle, MCP server (feature-gated)
 - `crates/rto-serve` — local OpenAI-compatible model server (llama.cpp; feature-gated)
 - `crates/rto-llama` — llama.cpp inference core (generation, embeddings, vision), shared by serving and internal uses
 - `crates/roteiro` — umbrella CLI
