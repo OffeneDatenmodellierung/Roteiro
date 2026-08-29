@@ -109,10 +109,12 @@ pub fn parse_blueprint(rel_path: &str, text: &str) -> BlueprintDoc {
     // a per-line `heading_id`, so `## Notes` twice keyed two sections `notes`
     // and the second upserted the first out of the graph.
     //
-    // A blueprint is not rendered to HTML, so there is no anchor to disagree
-    // with here — the damage is the lost node alone. It reads the same rule
-    // anyway: one rule shared is the arrangement, and a second one written here
-    // "because this side has no renderer" is how the first divergence started.
+    // A blueprint **is** rendered: `roteiro render --target docs-site` walks
+    // `docs/blueprint(s)/` and writes each one through `rto_render::render_doc`
+    // as a root-level page, listed above the ADRs on the index. So this carries
+    // both halves of the defect — the lost node *and* an anchor the graph cannot
+    // name — exactly as an ADR does, and the id here has to be the id the page
+    // publishes.
     let parsed_ids: std::collections::BTreeMap<usize, String> = rto_graph::headings(text)
         .into_iter()
         .map(|h| (h.start, h.id))

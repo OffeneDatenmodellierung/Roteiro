@@ -528,18 +528,23 @@ fn an_adrs_sections_are_still_scanned_for_but_keyed_by_the_parse() {
     );
 }
 
-/// A blueprint is never rendered, so the anchor half of #629 cannot reach it —
-/// the lost node is the whole of the damage, and it is enough.
+/// A blueprint carries both halves of #629, because a blueprint is rendered.
+///
+/// `roteiro render --target docs-site` walks `docs/blueprint(s)/` and writes
+/// each one through `render_doc` as a root-level page — so this has the lost
+/// node *and* an anchor the graph cannot name, exactly as an ADR does. The first
+/// draft of this test asserted only the node count, on the belief that a
+/// blueprint is graph-only; Copilot caught the claim on #685, and the render
+/// assertion below is what would have caught it here.
 ///
 /// `BlueprintDoc::facts` builds `blueprint:<path>#<slug>` per section, so two
 /// `## Notes` headings produced one node and the second silently replaced the
-/// first. Asserted here because "no renderer, no divergence" is the argument
-/// that would justify leaving this parser alone, and it is wrong.
+/// first.
 #[test]
 fn a_blueprint_with_two_identical_headings_keeps_both_sections() {
     let md = "# Thing — Technical Implementation Plan\n\n## Notes\n\nfirst\n\n## Notes\n\nsecond\n";
 
-    let doc = rto_spec::parse_blueprint("docs/plans/thing.md", md);
+    let doc = rto_spec::parse_blueprint("docs/blueprint/thing.md", md);
     assert_eq!(
         doc.sections
             .iter()
@@ -552,11 +557,20 @@ fn a_blueprint_with_two_identical_headings_keeps_both_sections() {
     let section_nodes = facts
         .nodes
         .iter()
-        .filter(|n| n.key.starts_with("blueprint:docs/plans/thing.md#"))
+        .filter(|n| n.key.starts_with("blueprint:docs/blueprint/thing.md#"))
         .count();
     assert_eq!(
         section_nodes, 2,
         "two headings, two nodes — the upsert is what #629 was"
+    );
+
+    // The page the site actually publishes for this file, through the same
+    // `render_doc` `render_docs` calls for a blueprint.
+    let rendered = rto_render::render_doc(md, "thing", &rto_render::PublishedPages::new(), None);
+    assert_eq!(
+        rendered_h2_ids(&rendered.html),
+        ["notes", "notes-2"],
+        "and the two node keys are the two anchors the page publishes"
     );
 }
 
