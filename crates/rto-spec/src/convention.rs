@@ -106,18 +106,23 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
 ///
 /// # Why this one and not a general "lossy conversion" rule
 ///
-/// There are 44 `to_string_lossy` call sites in this workspace and 43 of them are
-/// correct — they build messages, log lines, and error text, where a replacement
+/// Counted on the commit this rule was written against: **71** `to_string_lossy`
+/// call sites across the workspace, of which exactly **one** was a defect. The
+/// other 70 build messages, log lines, and error text, where a replacement
 /// character is the right outcome. A rule that flagged all of them would be
 /// noise, and noise is how a gate stops being read.
 ///
 /// So the rule is narrow by construction: it fires only where the conversion and
 /// the hash marker sit on the **same line**, which is what makes the converted
-/// value syntactically an argument to the call rather than merely near it. It
-/// catches **one** site in this repository, which is the defect the review
-/// corpus recorded (issue #438, `lossy-identity`, still live at the time this
-/// rule was written) — and it stays valuable precisely because widening it would
-/// convert a zero-noise rule into a noisy one.
+/// value syntactically an argument to the call rather than merely near it.
+///
+/// The one site it caught — `rto_exec::worktree_id`, the defect the review corpus
+/// recorded as `lossy-identity` (issue #438) — is fixed in the same change that
+/// added the rule. So on a clean tree this rule reports **nothing**, and its job
+/// from here is to stop that shape returning. Those counts are a snapshot of one
+/// commit, not an invariant; what does not change is the trade — the rule stays
+/// valuable precisely because widening it would convert a zero-noise rule into a
+/// noisy one.
 ///
 /// Rust sources only, decided by `rel_path` for the same reason as
 /// [`scan_unjustified_allows`]: a mention of `to_string_lossy` in prose is not a
@@ -179,7 +184,8 @@ pub fn scan_lossy_identity(rel_path: &str, text: &str) -> Vec<Violation> {
 /// What counts as "this value is becoming an identity".
 ///
 /// Named rather than inlined so the set is visible: every addition widens the
-/// rule, and this rule's worth is that it does not fire on the 43 correct uses.
+/// rule, and this rule's worth is that it stays silent on every correct use of
+/// `to_string_lossy` — which, now the one defect is fixed, is all of them.
 const HASH_MARKERS: [&str; 5] = ["sha256", "Sha256", "Hasher", "blake3", "digest"];
 
 /// Every `#[allow(…)]` in `text` that carries no justification, as violations.
@@ -244,7 +250,8 @@ mod tests {
         assert!(v[0].message.contains("src/runner.rs:1"), "{}", v[0].message);
     }
 
-    /// The 43 correct uses must stay silent, or the rule is noise.
+    /// The correct uses — all of them, once the one defect is fixed — must stay
+    /// silent, or the rule is noise.
     #[test]
     fn a_lossy_conversion_in_a_message_is_not_reported() {
         for line in [
