@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v4.0.0...rto-exec-v4.0.1) - 2026-08-29
+
+### Fixed
+
+- *(ci)* the matrix never once turned `execution` off
+
 ## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v3.3.0...rto-exec-v4.0.0) - 2026-08-29
 
 ### Added
