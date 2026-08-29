@@ -3,7 +3,6 @@
 //! same store, so humans and agents always see the same data.
 
 mod docs;
-mod obsidian;
 /// The OKF bundle renderer (#663) — the open-format successor to the vault.
 pub mod okf;
 /// The one place a tool's class is written, and the report that stands in for a
@@ -18,12 +17,6 @@ pub mod mcp;
 pub use docs::{
     IndexEntry, NavEntry, PublishedPages, RenderedAdr, SourceBase, markdown_to_html, render_adr,
     render_adr_index, render_doc, render_nav, render_site_page, replace_site_nav,
-};
-pub use obsidian::{
-    AdrEntry, ConfigSecretSummary, CouplingEntry, Coverage, CrossLink, DensityEntry, FindingEntry,
-    HOME_NOTE, MemberPin, RenderedUnder, VaultNote, VaultScope, VaultSummary, WorkspaceSummary,
-    note_name, render_home, render_note, render_note_scoped, render_workspace_home,
-    scoped_note_name,
 };
 
 /// A render target for the graph.

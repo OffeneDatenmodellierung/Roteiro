@@ -109,7 +109,6 @@ const GRANDFATHERED: &[(&str, &str)] = &[
     ("crates/rto-render/src/lib.rs", "Target"),
     ("crates/rto-render/src/mcp.rs", "Advertised"),
     ("crates/rto-render/src/mcp.rs", "RestrictError"),
-    ("crates/rto-render/src/obsidian.rs", "Coverage"),
     ("crates/rto-serve/src/openai_params.rs", "Forward"),
     ("crates/rto-serve/src/openai_params.rs", "Mention"),
     ("crates/rto-serve/src/openai_params.rs", "Support"),

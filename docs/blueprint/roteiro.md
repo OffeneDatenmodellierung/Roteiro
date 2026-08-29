@@ -111,7 +111,7 @@ engine).
 
 The graph is queried one way and rendered many ways. `query`/`context`/`path`
 read the store [[crates/rto-graph/src/query.rs]]; the docs-site and Obsidian
-renderers [[crates/rto-render/src/docs.rs]] / [[crates/rto-render/src/obsidian.rs]]
+renderers [[crates/rto-render/src/docs.rs]] / [[crates/rto-render/src/okf.rs]]
 are build-outputs of the same graph; and the local model server
 [[crates/rto-serve/src/server.rs]] exposes an OpenAI-compatible `/v1` endpoint over
 pulled models, optionally registering the graph tools so a served model can query

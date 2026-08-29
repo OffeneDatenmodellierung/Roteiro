@@ -334,12 +334,19 @@ pub fn render_concept(
 ) -> BundleFile {
     let mut content = fm.render();
     content.push('\n');
-    let _ = writeln!(
-        content,
-        "# {}\n",
-        fm.title.as_deref().unwrap_or(&ex.node.name)
-    );
-    if let Some(text) = body.map(str::trim).filter(|t| !t.is_empty()) {
+    let text = body.map(str::trim).filter(|t| !t.is_empty());
+    // A document that opens with its own `#` heading keeps it. Writing the title
+    // above it would give the concept two H1s saying nearly the same thing, and
+    // the document's own is the better one — it is what its author wrote.
+    let body_leads_with_heading = text.is_some_and(|t| t.starts_with("# "));
+    if !body_leads_with_heading {
+        let _ = writeln!(
+            content,
+            "# {}\n",
+            fm.title.as_deref().unwrap_or(&ex.node.name)
+        );
+    }
+    if let Some(text) = text {
         content.push_str(text);
         content.push_str("\n\n");
     }
@@ -689,6 +696,39 @@ mod tests {
     /// second silently overwrote the first. The count printed did not know. So the
     /// assertion is not "the names differ" but **"the file count equals the
     /// concept count"** — the property whose failure was invisible.
+    /// A document that brings its own heading is not given a second one.
+    #[test]
+    fn a_body_with_its_own_heading_is_not_double_titled() {
+        let ex = explanation("adr:0010", "adr", "ADR-0010");
+        let fm = Frontmatter {
+            type_: "adr".into(),
+            title: Some("Explorer web app".into()),
+            ..Frontmatter::default()
+        };
+        let with = render_concept(
+            &ex,
+            &fm,
+            Some("# ADR-0010: Explorer web app\n\nBody."),
+            &|_| None,
+        );
+        let h1s = |c: &str| c.lines().filter(|l| l.starts_with("# ")).count();
+        assert_eq!(h1s(&with.content), 1, "exactly one H1: {}", with.content);
+        assert!(with.content.contains("# ADR-0010: Explorer web app"));
+        assert!(
+            !with.content.contains("# Explorer web app\n\n# ADR-0010"),
+            "the frontmatter title must not be stacked above the document's own"
+        );
+
+        // A body with no heading still gets one, or the concept has no title at all.
+        let without = render_concept(&ex, &fm, Some("Just prose."), &|_| None);
+        assert!(
+            without.content.contains("# Explorer web app"),
+            "a headingless body still gets the title: {}",
+            without.content
+        );
+        assert_eq!(h1s(&without.content), 1);
+    }
+
     /// Two members' identically-named concepts do not collide.
     ///
     /// Every repository has a `README.md`, so `file:README.md` is the same key in
