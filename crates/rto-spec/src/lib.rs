@@ -35,7 +35,7 @@ pub use blueprint::{BlueprintDoc, is_blueprint, parse_blueprint};
 pub use check::{
     CheckReport, Validation, Violation, ViolationKind, run, run_layer, validate, validate_layer,
 };
-pub use convention::scan_unjustified_allows;
+pub use convention::{scan_lossy_identity, scan_unjustified_allows};
 pub use import::{GRAPHIFY_REF, GraphifyImport, ImportError, ImportReport, import_graphify};
 pub use lat::{
     LAT_REF, LatAnnotation, LatImport, LatReport, import_lat, import_lat_backlinks,

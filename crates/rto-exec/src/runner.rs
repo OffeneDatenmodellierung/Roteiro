@@ -181,7 +181,12 @@ pub fn worktree_id(path: &Path) -> Result<WorktreeId, ExecError> {
     // A path that cannot be made absolute (no working directory) still has a
     // usable lexical form; fall back to it rather than failing the run.
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let digest = sha256_hex(absolute.to_string_lossy().as_bytes());
+    // The **bytes**, not `to_string_lossy`. A path is bytes on Unix, and lossy
+    // conversion maps every invalid sequence to `U+FFFD` — so two worktrees whose
+    // paths differ only in those bytes hashed to one id, and the second silently
+    // overwrote the first's findings. Recorded as `lossy-identity` in the review
+    // corpus (issue #438) and caught by the rule of that name.
+    let digest = sha256_hex(absolute.as_os_str().as_encoded_bytes());
     Ok(WorktreeId::new(&digest[..16])?)
 }
 
