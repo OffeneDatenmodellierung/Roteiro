@@ -266,6 +266,9 @@ pub fn authored_docs_from<E>(
                 .extend(crate::convention::scan_unjustified_allows(
                     &blob.path, &text,
                 ));
+            layer
+                .conventions
+                .extend(crate::convention::scan_lossy_identity(&blob.path, &text));
         }
     }
     Ok(out)

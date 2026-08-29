@@ -1,3 +1,7 @@
+// roteiro:ignore-file — the fixtures below embed the very patterns these rules
+// detect (`#[allow(…)]` without justification, a lossy conversion feeding a
+// hash). They are test data, not uses: without this directive each rule's first
+// act is to report its own test.
 //! House-style conventions that are **written down and not enforced**.
 //!
 //! `AGENTS.md` states one plainly: *"Prefer fixing over `#[allow(...)]`; when an
@@ -79,6 +83,91 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
     j > 0 && is_comment(lines[j - 1])
 }
 
+/// Every lossy string conversion in `text` that feeds a hash, as violations.
+///
+/// `to_string_lossy` (and `to_str().unwrap_or_default()`) replace invalid byte
+/// sequences with `U+FFFD`. That is fine for a message a human reads. It is a
+/// defect when the result becomes an **identity**, because two inputs differing
+/// only in those bytes produce the same string, therefore the same digest, and
+/// the second silently overwrites the first.
+///
+/// # Why this one and not a general "lossy conversion" rule
+///
+/// There are 44 `to_string_lossy` call sites in this workspace and 43 of them are
+/// correct — they build messages, log lines, and error text, where a replacement
+/// character is the right outcome. A rule that flagged all of them would be
+/// noise, and noise is how a gate stops being read.
+///
+/// So the rule is narrow by construction: it fires only where the converted value
+/// reaches a hasher within a few lines. It catches **one** site in this
+/// repository, which is the defect the review corpus recorded (issue #438,
+/// `lossy-identity`, still live at the time this rule was written) — and it stays
+/// valuable precisely because widening it would convert a zero-noise rule into a
+/// noisy one.
+///
+/// Rust sources only, decided by `rel_path` for the same reason as
+/// [`scan_unjustified_allows`]: a mention of `to_string_lossy` in prose is not a
+/// use of it, and this doc comment is itself the proof.
+#[must_use]
+pub fn scan_lossy_identity(rel_path: &str, text: &str) -> Vec<Violation> {
+    // The same extension test [`scan_unjustified_allows`] uses, and for the same
+    // reason: `ends_with(".rs")` is case-sensitive, so `X.RS` on a case-folding
+    // filesystem would skip a file the graph considers Rust source.
+    if !std::path::Path::new(rel_path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+    {
+        return Vec::new();
+    }
+    // The same whole-file opt-out [`scan_unjustified_allows`] honours, and needed
+    // for the same reason: this rule's own tests embed the defect as fixture
+    // strings, so without it the rule's first act is to report its own test
+    // three times. A rule that flags itself is how a zero-noise rule becomes one
+    // people switch off.
+    if rto_graph::is_scan_exempt(text.as_bytes()) {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("to_string_lossy") {
+            continue;
+        }
+        // **Same line only.** A first version looked two lines either side and
+        // immediately produced a false positive: a test that pushed
+        // `file_name().to_string_lossy()` as a *name* into one tuple field while
+        // hashing the file's bytes in the next. Adjacent to a hash is not the
+        // same as feeding one, and a rule that cannot tell them apart is the
+        // noisy rule issue #438 warns against becoming.
+        //
+        // Requiring both on one line means the converted value is syntactically
+        // an argument to the call. It is narrower than the defect class in
+        // general — a conversion bound to a variable and hashed later slips
+        // through — and that is the trade: this rule is worth having because it
+        // does not cry wolf, not because it is complete.
+        if HASH_MARKERS.iter().any(|m| line.contains(m)) {
+            out.push(Violation {
+                kind: ViolationKind::LossyIdentity,
+                message: format!(
+                    "{rel_path}:{}: a lossy string conversion reaches a hash — two \
+                     inputs differing only in invalid UTF-8 collapse to one digest, \
+                     and the second silently replaces the first. Hash the bytes \
+                     (`as_os_str().as_encoded_bytes()`) rather than the lossy string, \
+                     or reject non-UTF-8 input explicitly.",
+                    i + 1
+                ),
+            });
+        }
+    }
+    out
+}
+
+/// What counts as "this value is becoming an identity".
+///
+/// Named rather than inlined so the set is visible: every addition widens the
+/// rule, and this rule's worth is that it does not fire on the 43 correct uses.
+const HASH_MARKERS: [&str; 5] = ["sha256", "Sha256", "Hasher", "blake3", "digest"];
+
 /// Every `#[allow(…)]` in `text` that carries no justification, as violations.
 ///
 /// Rust sources only: the attribute is Rust syntax, and a `#[allow(` in prose or
@@ -128,6 +217,55 @@ pub fn scan_unjustified_allows(rel_path: &str, text: &str) -> Vec<Violation> {
 
 #[cfg(test)]
 mod tests {
+    use super::{ViolationKind, scan_lossy_identity};
+
+    #[test]
+    fn a_lossy_conversion_feeding_a_hash_is_reported() {
+        let v = scan_lossy_identity(
+            "src/runner.rs",
+            "let digest = sha256_hex(absolute.to_string_lossy().as_bytes());\n",
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].kind, ViolationKind::LossyIdentity);
+        assert!(v[0].message.contains("src/runner.rs:1"), "{}", v[0].message);
+    }
+
+    /// The 43 correct uses must stay silent, or the rule is noise.
+    #[test]
+    fn a_lossy_conversion_in_a_message_is_not_reported() {
+        for line in [
+            "eprintln!(\"cannot read {}\", path.to_string_lossy());",
+            "let name = entry.file_name().to_string_lossy().into_owned();",
+            "anyhow::bail!(\"{}: unreadable\", p.to_string_lossy())",
+        ] {
+            assert!(
+                scan_lossy_identity("src/x.rs", line).is_empty(),
+                "false positive on: {line}"
+            );
+        }
+    }
+
+    /// Adjacent to a hash is not the same as feeding one.
+    ///
+    /// This is the false positive the first version produced: a name built by a
+    /// lossy conversion in one tuple field, and the file's *bytes* hashed in the
+    /// next. Two lines apart, and unrelated.
+    #[test]
+    fn a_conversion_near_a_hash_but_not_in_it_is_not_reported() {
+        let src = "found.push((\n    entry.file_name().to_string_lossy().into_owned(),\n    sha256_hex(&bytes),\n));\n";
+        assert!(
+            scan_lossy_identity("tests/pin.rs", src).is_empty(),
+            "a conversion two lines from a hash it does not feed must not fire"
+        );
+    }
+
+    /// Rust sources only: this module's own prose names the function.
+    #[test]
+    fn a_mention_in_prose_is_not_a_use() {
+        let md = "Call `sha256_hex(p.to_string_lossy().as_bytes())` to hash a path.\n";
+        assert!(scan_lossy_identity("docs/guide.md", md).is_empty());
+    }
+
     use super::scan_unjustified_allows;
 
     fn hits(text: &str) -> Vec<String> {

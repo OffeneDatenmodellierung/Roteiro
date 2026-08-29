@@ -54,6 +54,14 @@ pub enum ViolationKind {
     /// convention), and a consumer filtering for it should branch on the kind
     /// rather than match prose.
     UnjustifiedAllow,
+    /// A lossy string conversion feeding a value that must be unique.
+    ///
+    /// `to_string_lossy` replaces every invalid byte sequence with `U+FFFD`, so
+    /// two inputs that differ only in those bytes become one string. Harmless in
+    /// a message; a defect when the result is hashed or used as an identity,
+    /// because two distinct things then collapse into one and the later silently
+    /// replaces the earlier.
+    LossyIdentity,
 }
 
 impl ViolationKind {
@@ -70,6 +78,7 @@ impl ViolationKind {
             Self::MalformedSitePage => "malformed-site-page",
             Self::DuplicateSiteSlug => "duplicate-site-slug",
             Self::UnjustifiedAllow => "unjustified-allow",
+            Self::LossyIdentity => "lossy-identity",
         }
     }
 }
