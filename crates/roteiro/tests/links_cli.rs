@@ -17,6 +17,15 @@ fn git(dir: &Path, args: &[&str]) {
             "user.email=test@example.com",
             "-c",
             "commit.gpgsign=false",
+            // And tags. `tag.gpgsign = true` in a developer's global config does
+            // not merely sign the tag: it promotes `git tag <name>` from a
+            // lightweight tag to an annotated one, and an annotated tag requires
+            // a message. The calls below pass none, so without this the tag fails
+            // with `fatal: no tag message?` — before any signing is attempted, so
+            // the error names nothing about signing. CI never sees it, because CI
+            // has no global config to inherit.
+            "-c",
+            "tag.gpgsign=false",
             "-c",
             "init.defaultBranch=main",
         ])
