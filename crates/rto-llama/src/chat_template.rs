@@ -93,6 +93,17 @@ pub fn is_jinja(template: &str) -> bool {
     template.contains("{%") || template.contains("{{")
 }
 
+/// Renders performed on this thread, so a test can pin how many a tooled turn
+/// costs.
+///
+/// Thread-local rather than a global counter because the harness runs tests in
+/// parallel and a shared count would race. Test-only: nothing outside the guard
+/// reads it.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RENDER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Render `template` with the model's own Jinja engine semantics.
 ///
 /// `tools` is passed through untouched. A template that ignores it renders as
@@ -111,6 +122,8 @@ pub fn render(
     tools: Option<&serde_json::Value>,
     add_generation_prompt: bool,
 ) -> Result<String, TemplateError> {
+    #[cfg(test)]
+    RENDER_CALLS.with(|c| c.set(c.get() + 1));
     let mut env = Environment::new();
     // Python string methods (`startswith`, `endswith`, …). Jinja2 exposes them
     // because it runs on Python; minijinja does not, and templates written
@@ -247,7 +260,7 @@ fn render_shaped(
     ))
 }
 
-/// True when `template` makes no use of `tools` at all.
+/// The prompt with `tools` applied, plus whether the template ignored them.
 ///
 /// Settled by rendering twice and comparing, which is exact: if passing the
 /// tools changes no byte of the output, they reached nothing. Searching the
@@ -255,21 +268,26 @@ fn render_shaped(
 /// in the conversation by coincidence and would read as an advertisement the
 /// template never made.
 ///
+/// Returns the tooled rendering rather than only the verdict, because the caller
+/// needs exactly that string when the template did use the tools. Computing it
+/// and throwing it away cost a third full render on every tooled turn — the
+/// common path — which at issue #578's prefill economics is not a rounding
+/// error.
+///
 /// A template that *fails* to render without tools is plainly using them, so an
-/// error here answers "not ignored" rather than propagating a second failure.
-fn ignores_tools(
+/// error there answers "not ignored" rather than propagating a second failure.
+fn render_and_test_tools(
     template: &str,
     messages: &[Message],
     tools: &serde_json::Value,
     add_generation_prompt: bool,
-) -> bool {
-    let Ok(with) = render_shaped(template, messages, Some(tools), add_generation_prompt) else {
-        return false;
-    };
-    matches!(
+) -> Result<(String, bool), TemplateError> {
+    let with = render_shaped(template, messages, Some(tools), add_generation_prompt)?;
+    let ignored = matches!(
         render_shaped(template, messages, None, add_generation_prompt),
         Ok(without) if without == with
-    )
+    );
+    Ok((with, ignored))
 }
 
 /// Render `template`, guaranteeing that advertised `tools` reach the prompt.
@@ -302,8 +320,9 @@ pub fn render_advertising(
     let Some(t) = tools else {
         return render_shaped(template, messages, None, add_generation_prompt);
     };
-    if !ignores_tools(template, messages, t, add_generation_prompt) {
-        return render_shaped(template, messages, Some(t), add_generation_prompt);
+    let (rendered, ignored) = render_and_test_tools(template, messages, t, add_generation_prompt)?;
+    if !ignored {
+        return Ok(rendered);
     }
 
     // Folded into the caller's own system turn where there is one, rather than
@@ -330,6 +349,40 @@ pub fn render_advertising(
         ),
     }
     render_shaped(template, &announced, Some(t), add_generation_prompt)
+}
+
+#[cfg(test)]
+mod render_cost {
+    use super::{RENDER_CALLS, render_advertising};
+
+    /// A tooled turn renders the template **twice**, not three times.
+    ///
+    /// Two is the floor: deciding whether a template uses `tools` means
+    /// rendering with them and without them and comparing. What is avoidable is
+    /// a third render to produce the prompt, when the first render already is
+    /// that prompt. It was three until review pointed it out — on the common
+    /// path of every tooled chat, where #578 measures prefill in seconds.
+    #[test]
+    fn a_tooled_turn_renders_twice_not_three_times() {
+        let uses_tools = "{%- if tools %}<tools>{{ tools|length }}</tools>{%- endif %}\
+                          {%- for m in messages %}{{ m.content }}{%- endfor %}";
+        let tools = serde_json::json!([{
+            "type": "function",
+            "function": {"name": "roteiro_search", "description": "d", "parameters": {}}
+        }]);
+        let msgs = vec![serde_json::json!({"role": "user", "content": "what is fn foo?"})];
+
+        RENDER_CALLS.with(|c| c.set(0));
+        let out = render_advertising(uses_tools, &msgs, Some(&tools), true).expect("renders");
+        let calls = RENDER_CALLS.with(std::cell::Cell::get);
+
+        assert!(out.contains("<tools>"), "the template did advertise: {out}");
+        assert_eq!(
+            calls, 2,
+            "a tooled turn cost {calls} renders; two is the floor, and three means \
+             the prompt was rendered again after the comparison already produced it"
+        );
+    }
 }
 
 #[cfg(test)]
