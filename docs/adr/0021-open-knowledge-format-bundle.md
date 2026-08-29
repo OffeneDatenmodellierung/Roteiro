@@ -131,6 +131,16 @@ real render of this repository. `assemble` places every concept first, records
 not hold is not in the bundle, and its link is dropped rather than written as a
 path that does not exist.
 
+**A cross-repo reference resolves to the other member's concept, not to the stub
+standing in for it.** A member's graph records a reference into a sibling
+repository as an `extref:<project>::<key>` placeholder, because that member
+cannot see the target ([[docs/adr/0009-cross-repo-workspace-links.md]]). A
+workspace *bundle* can: the sibling is in it. Resolving the placeholder's own key
+produces a link that works and teaches nothing — a document whose whole content
+is that it is not the document the reader wanted — so the reference follows
+through to the real concept, falling back to the placeholder only when that
+member or that concept is genuinely absent.
+
 ### The bundle is a function of the commit
 
 Every timestamp comes from git: a document's own last-change time where it has
@@ -190,4 +200,4 @@ renderer nobody maintains.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key, that a shallow clone confirms nothing rather than confirming everything, that a scalar cannot forge a frontmatter key, that only the decision carries the decision's `status`, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |
+| 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key and a cross-repo reference follows through to the other member's concept, that a shallow clone confirms nothing rather than confirming everything, that a scalar cannot forge a frontmatter key, that only the decision carries the decision's `status`, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |

@@ -548,6 +548,17 @@ fn workspace_fixture(tag: &str) -> (PathBuf, PathBuf) {
         "prod.env",
         "SERVE_ADDR=0.0.0.0:8443\nSERVE_TOOLS=false\n",
     );
+    // A **declared** cross-repo link into `app` (ADR-0009). This is the thing a
+    // workspace bundle exists to put both ends of in one place, so the fixture
+    // that stands for a workspace has to have one — without it, every assertion
+    // about cross-repo resolution is made against a bundle that contains no
+    // cross-repo reference.
+    write(
+        &deploy,
+        "roteiro.toml",
+        "[[links]]\nfrom = \"cfgkey:prod.env#SERVE_ADDR\"\n\
+         to = \"app::cfgkey:config.toml#serve.addr\"\nkind = \"references\"\n",
+    );
     git(&deploy, &["init", "-q"]);
     git(&deploy, &["add", "."]);
     git(&deploy, &["commit", "-q", "-m", "init"]);
@@ -1351,4 +1362,116 @@ fn a_commit_whose_parent_cannot_be_read_attributes_nobody() {
     }
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **In a workspace bundle, a cross-repo link resolves into the other member.**
+///
+/// This is the property the workspace bundle exists for. ADR-0009 and #442 put it
+/// as the cross-repo link finally having *both* endpoints in one output; a bundle
+/// whose cross-repo links do not resolve is the single-project bundle with extra
+/// directories.
+///
+/// Two things make it un-catchable by the guards already here. OKF §11 tells
+/// consumers they **MUST NOT** reject a bundle for a broken cross-link, so the
+/// conformance test stays green. And a member-scoped lookup finds the
+/// `extref:<project>::<key>` **placeholder**, which is a real file in the bundle —
+/// so an existence check is satisfied by a link that lands the reader on a
+/// document whose whole content is that it is not the one they wanted. The
+/// assertion here is therefore the *destination*.
+///
+/// Driven through the real binary, because the risk is precisely that the renderer
+/// and the graph disagree about what a cross-repo key looks like — a hand-made key
+/// would test my assumption rather than the graph's.
+#[test]
+fn a_cross_repo_link_resolves_into_the_other_member() {
+    let (base, home) = workspace_fixture("okf-xrepo");
+    let app = base.join("app");
+    let deploy = base.join("deploy");
+
+    // The declared `[[links]]` entry only becomes an `extref:` node once each
+    // member has a graph and `links --write` has attached it (#573). Without this
+    // the bundle contains no cross-repo reference at all, and every assertion
+    // below would pass over its absence — which is exactly how a fixture stops
+    // testing the thing it was written for.
+    for member in [&app, &deploy] {
+        assert!(
+            roteiro_in(member, &home, &["sync"]).status.success(),
+            "sync {member:?}"
+        );
+    }
+    let linked = roteiro_in(
+        &app,
+        &home,
+        &["links", "--workspace-name", "prod", "--write"],
+    );
+    assert!(
+        linked.status.success(),
+        "links --write failed: {}{}",
+        String::from_utf8_lossy(&linked.stdout),
+        String::from_utf8_lossy(&linked.stderr)
+    );
+
+    let out = roteiro_in(
+        &app,
+        &home,
+        &[
+            "render",
+            "okf",
+            "--workspace-name",
+            "prod",
+            "--out",
+            "bundle",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "workspace render failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let files = bundle_files(&app.join("bundle"));
+    let emitted: std::collections::BTreeSet<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+
+    // The placeholder must be there, or the reference never reached the graph and
+    // there is nothing to resolve.
+    assert!(
+        emitted
+            .iter()
+            .any(|p| p.starts_with("deploy/") && p.contains("extref-app-")),
+        "the fixture must produce a cross-repo placeholder in `deploy`: {emitted:?}"
+    );
+
+    let referrer = "deploy/symbols/cfgkey-prod-env-serve-addr.md";
+    let (_, text) = files
+        .iter()
+        .find(|(p, _)| p == referrer)
+        .unwrap_or_else(|| panic!("no {referrer} in {emitted:?}"));
+
+    let mut targets: Vec<String> = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(open) = rest.find("](/") {
+        rest = &rest[open + 3..];
+        let Some(close) = rest.find(')') else { break };
+        targets.push(rest[..close].to_owned());
+        rest = &rest[close..];
+    }
+    assert!(
+        !targets.is_empty(),
+        "{referrer} must emit relationship links:\n{text}"
+    );
+    for target in &targets {
+        assert!(
+            emitted.contains(target.as_str()),
+            "{referrer} links to /{target}, which the bundle does not contain: \
+             {emitted:?}"
+        );
+    }
+    assert!(
+        targets.iter().any(|t| t.starts_with("app/")),
+        "the cross-repo reference must land in `app`, not on `deploy`'s own \
+         placeholder: {targets:?}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
 }

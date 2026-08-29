@@ -71,6 +71,13 @@ pub const INDEX_FILE: &str = "index.md";
 /// The reserved filename for a change log (§9).
 pub const LOG_FILE: &str = "log.md";
 
+/// The namespace a cross-repo placeholder node's key carries (ADR-0009).
+///
+/// Spelled once here and checked against the graph's own writer by
+/// `the_placeholder_prefix_is_the_graphs`, so the two cannot drift into
+/// disagreeing about what a placeholder key looks like.
+const EXTREF_PREFIX: &str = "extref:";
+
 /// One rendered file in the bundle: a bundle-relative path and its content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleFile {
@@ -645,7 +652,13 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
             });
             let mut file =
                 render_concept(c.explanation, &c.frontmatter, c.body.as_deref(), &|key| {
-                    member_index.and_then(|m| m.get(key)).cloned()
+                    // A cross-repo reference names a concept that is *in this
+                    // bundle*, one member over. Following the placeholder's own
+                    // key would land the reader on the stub standing in for it
+                    // (see `cross_member_target`), which is a worse answer than
+                    // the one the bundle already contains.
+                    cross_member_target(&index, key)
+                        .or_else(|| member_index.and_then(|m| m.get(key)).cloned())
                 });
             file.path.clone_from(path);
             files.push(file);
@@ -674,6 +687,39 @@ pub fn assemble(concepts: Vec<Concept<'_>>, title: &str, log: &[LogDay]) -> Vec<
     });
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
+}
+
+/// Where a **cross-repo reference** actually points, when the member it names is
+/// in this same bundle.
+///
+/// A workspace graph records a reference into another repository as an
+/// `extref:<project>::<key>` placeholder node in the *referring* member
+/// (ADR-0009): a stub standing in for a concept that member cannot see. But a
+/// workspace **bundle** contains that other member, so the concept the reference
+/// is about is right there — and linking to the stub instead would send a reader
+/// to a document whose entire content is that it is not the document they wanted.
+///
+/// Both spellings reach the same place: the placeholder node's key
+/// (`extref:<project>::<key>`, what an edge actually points at) and a bare
+/// project-qualified key. What counts as *qualified* is
+/// [`rto_graph::parse_qualified`]'s decision, not a second `::` rule invented
+/// here — the keys were produced by that rule, so the bundle must not disagree
+/// with it about where the project name ends.
+///
+/// `None` unless every part holds: the key parses as qualified, it names a member
+/// of **this** bundle, and that member really has the concept. The caller falls
+/// back to the member-scoped lookup then — which yields the placeholder, a file
+/// that exists — because a stub in the bundle beats a link to nothing.
+fn cross_member_target(
+    index: &BTreeMap<Option<String>, BTreeMap<String, String>>,
+    key: &str,
+) -> Option<String> {
+    let qualified = key.strip_prefix(EXTREF_PREFIX).unwrap_or(key);
+    let (project, bare) = rto_graph::parse_qualified(qualified)?;
+    // The membership test is what makes reading a bare key this way safe: a
+    // symbol key containing `::` splits too, but its left half is never a
+    // workspace member's name.
+    index.get(&Some(project.to_owned()))?.get(bare).cloned()
 }
 
 /// A short, stable digest of a key, for disambiguating a collided slug.
@@ -1012,6 +1058,86 @@ mod tests {
             concepts.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
         assert!(concepts.iter().any(|f| f.path.starts_with("/lib/")));
+    }
+
+    /// The prefix this module strips is the one the graph writes.
+    ///
+    /// Two crates spelling a key namespace independently is how a resolver stops
+    /// recognising the keys it is given, silently — the link would simply stop
+    /// crossing, and every target still exists, so nothing else would notice.
+    #[test]
+    fn the_placeholder_prefix_is_the_graphs() {
+        assert_eq!(rto_graph::external_ref_key(""), EXTREF_PREFIX);
+    }
+
+    /// **A cross-repo reference links to the other member's concept, not to the
+    /// stub standing in for it.**
+    ///
+    /// A workspace graph records a reference into another repository as an
+    /// `extref:<project>::<key>` placeholder in the *referring* member, because
+    /// that member cannot see the target. A workspace **bundle** can: the other
+    /// member is in it. Resolving the placeholder's own key — which is what a
+    /// member-scoped lookup does — produces a link that works and teaches nothing,
+    /// landing the reader on a document whose whole content is that it is not the
+    /// document they wanted. An existence check cannot see that, which is why the
+    /// assertion is the *destination* rather than that a link resolved.
+    #[test]
+    fn a_cross_repo_reference_reaches_the_other_members_concept() {
+        // `app` has the real concept.
+        let real = explanation("file:README.md", "file", "README.md");
+        // `deploy` holds the placeholder, and a document that references it.
+        let stub = explanation(
+            "extref:app::file:README.md",
+            "external_ref",
+            "app::file:README.md",
+        );
+        let referrer = {
+            let mut ex = explanation("doc:deploy.md", "doc", "deploy.md");
+            ex.outgoing = vec![edge("extref:app::file:README.md")];
+            ex
+        };
+
+        let member = |ex, type_, name: &str| {
+            let mut c = concept(ex, type_);
+            c.member = Some(name.to_owned());
+            c
+        };
+        let files = assemble(
+            vec![
+                member(&real, "file", "app"),
+                member(&stub, "external_ref", "deploy"),
+                member(&referrer, "doc", "deploy"),
+            ],
+            "Workspace",
+            &[],
+        );
+
+        let emitted: std::collections::BTreeSet<&str> =
+            files.iter().map(|f| f.path.as_str()).collect();
+        let target = "/app/files/file-readme-md.md";
+        assert!(
+            emitted.contains(target),
+            "the fixture must place the real concept: {emitted:?}"
+        );
+        // The stub is still written — it is a concept of `deploy`'s graph — and
+        // links must simply not prefer it.
+        let stub_path = "/deploy/symbols/extref-app-file-readme-md.md";
+        assert!(
+            emitted.contains(stub_path),
+            "the placeholder must still be a concept: {emitted:?}"
+        );
+
+        let links = internal_links(&files);
+        let targets: Vec<&str> = links
+            .iter()
+            .filter(|(from, _)| from == "/deploy/docs/doc-deploy-md.md")
+            .map(|(_, t)| t.as_str())
+            .collect();
+        assert_eq!(
+            targets,
+            vec![target],
+            "the reference must reach `app`'s concept rather than `deploy`'s stub"
+        );
     }
 
     /// A key longer than the filesystem allows is truncated, and truncation does
