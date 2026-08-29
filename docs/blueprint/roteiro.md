@@ -50,7 +50,7 @@ model dependencies stay opt-in behind feature flags:
   trait and a llama.cpp-backed engine (generation, embeddings, multimodal),
   behind the `llama` feature (ADR-0003/0006).
 - [[crates/rto-render/src/lib.rs]] — the renderers over the graph (docs site,
-  Obsidian vault, MCP surface).
+  OKF bundle, MCP surface).
 - [[crates/rto-serve/src/lib.rs]] — the opt-in, loopback, OpenAI-compatible `/v1`
   endpoint (ADR-0006).
 - [[crates/roteiro/src/main.rs]] — the CLI that wires them together.
@@ -110,7 +110,7 @@ engine).
 ## 7. Serving & the one query surface
 
 The graph is queried one way and rendered many ways. `query`/`context`/`path`
-read the store [[crates/rto-graph/src/query.rs]]; the docs-site and Obsidian
+read the store [[crates/rto-graph/src/query.rs]]; the docs-site and OKF
 renderers [[crates/rto-render/src/docs.rs]] / [[crates/rto-render/src/okf.rs]]
 are build-outputs of the same graph; and the local model server
 [[crates/rto-serve/src/server.rs]] exposes an OpenAI-compatible `/v1` endpoint over
