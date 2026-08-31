@@ -216,11 +216,23 @@ mod tests {
     /// a synthetic header proves the parser and not the format.
     #[test]
     fn it_reads_a_real_gguf_when_one_is_installed() {
+        // Said out loud, both times. A test that returns early in silence is
+        // indistinguishable from one that ran and passed, and this one asserts
+        // nothing at all when it takes either branch — which is its state on CI,
+        // where the model is not installed. The doc above promises a stated skip;
+        // this is what makes that true rather than aspirational.
         let Some(home) = std::env::var_os("HOME") else {
+            eprintln!("SKIP it_reads_a_real_gguf_when_one_is_installed: no HOME");
             return;
         };
         let p = Path::new(&home).join(".roteiro/models/qwen3-32b/model.gguf");
         if !p.is_file() {
+            eprintln!(
+                "SKIP it_reads_a_real_gguf_when_one_is_installed: {} is not installed \
+                 (`roteiro model pull qwen3-32b`); the synthetic-header test still \
+                 proves the parser, but nothing here has proved the format",
+                p.display()
+            );
             return;
         }
         let t = chat_template(&p).expect("qwen3-32b embeds a chat template");

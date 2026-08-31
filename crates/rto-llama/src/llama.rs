@@ -1095,9 +1095,14 @@ fn render_prompt(
     tools: Option<&serde_json::Value>,
 ) -> Result<String, EngineError> {
     let template = resolve_chat_template(model)?;
-    let raw = template
-        .to_str()
-        .map_err(|e| EngineError::Inference(format!("chat template is not UTF-8: {e}")))?;
+    let raw = template.to_str().map_err(|e| {
+        // Named, as the render failure below is. This is the one error here that
+        // says a *model's own metadata* is malformed, so the answer a reader
+        // needs — which of the installed models — must not be the thing it omits.
+        EngineError::Inference(format!(
+            "model `{name}`: its embedded chat template is not UTF-8 ({e})"
+        ))
+    })?;
 
     if crate::chat_template::is_jinja(raw) {
         let msgs: Vec<serde_json::Value> = messages
