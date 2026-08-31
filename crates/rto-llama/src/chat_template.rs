@@ -93,24 +93,29 @@ pub fn is_jinja(template: &str) -> bool {
     template.contains("{%") || template.contains("{{")
 }
 
-/// Renders performed on this thread, so a test can pin how many a tooled turn
-/// costs.
-///
-/// Thread-local rather than a global counter because the harness runs tests in
-/// parallel and a shared count would race. Test-only: nothing outside the guard
-/// reads it.
 #[cfg(test)]
 thread_local! {
+    /// Renders performed on this thread, so a test can pin how many a tooled
+    /// turn costs.
+    ///
+    /// Thread-local rather than a global counter because the harness runs tests
+    /// in parallel and a shared count would race. Test-only: nothing outside the
+    /// guard reads it.
     pub(crate) static RENDER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Render `template` with the model's own Jinja engine semantics.
 ///
-/// `tools` is passed through untouched. A template that ignores it renders as
-/// though it were absent, and one that uses it receives exactly the JSON the
-/// model was trained on — which is the whole point, and the thing
-/// `apply_chat_template` cannot do at any setting because it takes no such
-/// argument.
+/// A template that uses `tools` receives exactly the JSON the model was trained
+/// on — which is the whole point, and the thing `apply_chat_template` cannot do
+/// at any setting, because it takes no such argument.
+///
+/// `None` is **not** passed through as `none`: it is rendered as an empty list,
+/// for the reason given at the `tools` binding below. So a template testing
+/// `tools is none` never sees a true, and one testing `{% if tools %}` or
+/// `tools | length` behaves as it would with no tools at all. The distinction
+/// matters only to a template written to branch on the difference, and none in
+/// the registry does.
 ///
 /// # Errors
 /// [`TemplateError::Parse`] if the template is not valid Jinja, and

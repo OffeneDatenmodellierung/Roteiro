@@ -374,3 +374,23 @@ fn the_fallback_folds_into_an_existing_system_turn() {
     assert!(out.contains("roteiro_path"), "{out}");
     assert!(out.contains("GROUNDING RULES HERE"), "{out}");
 }
+
+/// No tools is an empty list, not `none` — the documented behaviour, pinned.
+///
+/// `qwen3-coder-30b-a3b` guards with `tools is iterable and tools | length > 0`.
+/// Jinja2 short-circuits that because `none is iterable` is false; minijinja does
+/// not, so `none` reaches `| length` and the render fails outright. The
+/// substitution is therefore load-bearing, and a reader who believed the header
+/// comment's earlier claim that `tools` was "passed through untouched" would
+/// mispredict what a template testing `tools is none` sees.
+#[test]
+fn absent_tools_render_as_an_empty_list_not_none() {
+    let probe = "{% if tools is none %}NONE{% elif tools %}SOME{% else %}EMPTY{% endif %}";
+    let msgs = vec![serde_json::json!({"role": "user", "content": "hello"})];
+    let out = rto_llama::chat_template::render(probe, &msgs, None, false).expect("renders");
+    assert_eq!(
+        out.trim(),
+        "EMPTY",
+        "absent tools reached the template as: {out}"
+    );
+}
