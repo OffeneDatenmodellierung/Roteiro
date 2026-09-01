@@ -23,6 +23,11 @@ mod graph_api;
 mod explorer_app;
 mod infer_links;
 mod init;
+/// Automatic discovery of a workspace member's OKF bundle, and the trust /
+/// acknowledge / ignore consent prompt that guards reading one (#706 phase 2).
+/// A sibling module rather than more of `main.rs`: the policy — in particular
+/// what happens when there is no terminal — is worth reading in one piece.
+mod okf_discovery;
 mod overview;
 mod pins;
 // The remote model tier's transport (ADR-0019) — **the only module in this
@@ -5863,16 +5868,12 @@ fn run_import_okf(
     // and make removal propagation impossible.
     let peer = match peer {
         Some(name) => name.to_owned(),
-        None => root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cannot derive a peer name from {}; pass --peer <NAME>",
-                    root.display()
-                )
-            })?,
+        None => default_peer_name(root).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot derive a peer name from {}; pass --peer <NAME>",
+                root.display()
+            )
+        })?,
     };
     // The peer names the layer and namespaces every imported key, so a blank one
     // would produce `import:okf/` and `okf:/…` — a layer nobody can name and
@@ -5919,12 +5920,25 @@ fn run_import_okf(
     let src_ref = read::import_ref(&peer);
     let applied = store.apply_import_layer(&src_ref, &imported.facts)?;
 
+    // Running this command by hand **is** the consent, so record it: automatic
+    // discovery must not then ask about a peer the operator has just answered
+    // for. The flag chose between the two importing answers, so that is what is
+    // stored — `ignore` is only ever reachable from the prompt, because
+    // declining by not running a command leaves nothing to record.
+    let decision = if trust {
+        rto_graph::OkfDecision::Trust
+    } else {
+        rto_graph::OkfDecision::Acknowledge
+    };
+    record_okf_consent(&store, &peer, root, decision, &imported.report)?;
+
     let r = &imported.report;
     if json {
         let mut report = serde_json::to_value(r)?;
         report["peer"] = serde_json::json!(peer);
         report["src_ref"] = serde_json::json!(src_ref);
         report["trust"] = serde_json::json!(mode.as_str());
+        report["consent"] = serde_json::json!(decision.as_str());
         report["edges_applied"] = serde_json::json!(applied.edges_applied);
         report["edges_pruned_stale"] = serde_json::json!(applied.edges_pruned);
         report["nodes_removed"] = serde_json::json!(applied.nodes_removed);
@@ -5987,12 +6001,138 @@ fn print_okf_report(
             r.links_outside_relationships
         );
     }
+    for line in okf_screen_lines(r) {
+        println!("{line}");
+    }
     if mode == rto_render::okf::read::Trust::Acknowledge {
         println!(
             "  every concept is `external-inferred`: their information without their \
              confirmation. Re-run with --trust to adopt the tiers they claimed."
         );
     }
+}
+
+/// What the content screen decided, as report lines (#706 phase 2).
+///
+/// Shared by the import report and the discovery prompt, so the sentence the
+/// operator is asked to answer is the same one the command prints. Never quotes
+/// the offending text — see [`rto_render::okf::read::ScreenedRow`].
+///
+/// Returns lines rather than printing them because its two callers write to
+/// **different streams**: the import command's report is the command's result
+/// and goes to stdout, while discovery's is a diagnostic that must stay off
+/// stdout so a `--json` document is not corrupted by it.
+fn okf_screen_lines(r: &rto_render::okf::read::OkfReport) -> Vec<String> {
+    if r.concepts_quarantined == 0 && r.concepts_blocked == 0 {
+        return Vec::new();
+    }
+    let mut out = vec![format!(
+        "  screen: {} concept(s) quarantined, {} blocked [{}]",
+        r.concepts_quarantined,
+        r.concepts_blocked,
+        r.screen_classes.join(", ")
+    )];
+    // Bounded: a hostile bundle can carry any number of findings, and a report
+    // that scrolls the decision off the screen is a report nobody reads.
+    for row in r.screened.iter().take(OKF_SCREEN_ROWS) {
+        out.push(format!(
+            "    {} ({}) {}: {}",
+            row.path,
+            row.field,
+            row.verdict,
+            row.detail.join("; ")
+        ));
+    }
+    if r.screened.len() > OKF_SCREEN_ROWS {
+        out.push(format!(
+            "    … and {} more (use --json for all of them)",
+            r.screened.len() - OKF_SCREEN_ROWS
+        ));
+    }
+    if r.concepts_blocked > 0 {
+        out.push(
+            "    a blocked concept carried text addressed to a language model that was \
+             *hidden*, and was not imported at all"
+                .to_owned(),
+        );
+    }
+    out
+}
+
+/// How many screening rows the human-readable report names before summarising.
+const OKF_SCREEN_ROWS: usize = 5;
+
+/// The screen fingerprint a consent record stores for this bundle.
+fn okf_screen_classes(r: &rto_render::okf::read::OkfReport) -> String {
+    let borrowed: Vec<&str> = r.screen_classes.iter().map(String::as_str).collect();
+    rto_graph::screen_fingerprint(&borrowed)
+}
+
+/// Record the answer to the trust question for one peer (#706 phase 2).
+///
+/// The record is keyed by peer name — the same string that names the import
+/// layer — and carries the bundle root and the screening fingerprint, which are
+/// the two things that can invalidate it. See
+/// [`rto_graph::ConsentState::Lapsed`].
+fn record_okf_consent(
+    store: &rto_graph::Store,
+    peer: &str,
+    root: &std::path::Path,
+    decision: rto_graph::OkfDecision,
+    report: &rto_render::okf::read::OkfReport,
+) -> anyhow::Result<()> {
+    store.put_okf_consent(&rto_graph::OkfConsent {
+        peer: peer.to_owned(),
+        decision,
+        root: okf_root_key(root),
+        screen_classes: okf_screen_classes(report),
+        decided_at: rto_graph::rfc3339_utc(std::time::SystemTime::now()),
+    })?;
+    Ok(())
+}
+
+/// The peer name `roteiro import --from okf <path>` uses when `--peer` is not
+/// given.
+///
+/// Normally the bundle directory's own name. **But a directory named after the
+/// convention names nobody**: `<repo>/okf` is where a repository publishes, not
+/// who published it, so `--from okf ../spoke/okf` would otherwise import as peer
+/// `okf` while automatic discovery — which names the peer after the repository —
+/// imported the very same bundle as peer `spoke`.
+///
+/// Two names for one bundle is not a cosmetic difference. The peer names the
+/// import layer's `src_ref` and namespaces every imported key, so the two would
+/// be **separate layers holding duplicate nodes**, and it keys the consent
+/// record, so answering the question by hand would not stop discovery asking it
+/// again. Both were observed before this rule existed;
+/// `a_recorded_answer_stops_the_scan_raising_that_peer` is the guard.
+fn default_peer_name(root: &std::path::Path) -> Option<String> {
+    let own = root.file_name().and_then(|n| n.to_str())?;
+    if own == rto_graph::OKF_BUNDLE_DIR
+        && let Some(parent) = root
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        && !parent.is_empty()
+    {
+        return Some(parent.to_owned());
+    }
+    Some(own.to_owned())
+}
+
+/// The bundle root as a consent record stores it.
+///
+/// Canonicalised where possible, so `./okf` and an absolute path to the same
+/// directory are one source rather than two — otherwise the same bundle
+/// imported from two working directories would ask twice and then read as
+/// [`rto_graph::ConsentState::Moved`] on every alternate run. Falls back to the
+/// path as given when the directory cannot be resolved, which is the honest
+/// answer rather than a guess.
+fn okf_root_key(root: &std::path::Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .display()
+        .to_string()
 }
 
 /// Every markdown file under an OKF bundle root, keyed by its bundle-relative
@@ -8382,6 +8522,262 @@ fn repo_path_identity(p: &std::path::Path) -> std::path::PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Discover the OKF bundles published by members of this workspace, ask about
+/// the undecided ones, and act on the answers (#706 phase 2, ADR-0021).
+///
+/// `decide` is `--write`: it gates asking and importing, not discovering. See
+/// [`okf_discovery`] for the whole policy, in particular what happens when there
+/// is no terminal — which is where this delegates rather than deciding again.
+/// How much a caller lets discovery do.
+///
+/// Three levels rather than a `bool`, because `--json` needs the middle one:
+/// gating discovery on `!json` made a flag that selects an **output format**
+/// change **behaviour**, so automation using `--json` never refreshed a standing
+/// grant and its OKF layers went stale. Reported by Copilot on #711.
+///
+/// Deliberately **not `#[non_exhaustive]`**: it enumerates how much authority a
+/// caller grants this scan, and a fourth level would be a new answer to that
+/// question rather than a detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discovery {
+    /// May ask, and may write: `links --write` with a terminal.
+    Decide,
+    /// May write, must not ask. `links --write --json`, where stdout is a
+    /// document for a program and there is no person behind it to answer.
+    RefreshOnly,
+    /// May do neither: a server start, or `links` without `--write`.
+    ReportOnly,
+}
+
+impl Discovery {
+    /// Whether this level may change the graph.
+    fn writes(self) -> bool {
+        matches!(self, Self::Decide | Self::RefreshOnly)
+    }
+}
+
+/// Discover the OKF bundles published by members of this workspace, ask about
+/// the undecided ones, and act on the answers (#706 phase 2, ADR-0021).
+///
+/// Every line this prints goes to **stderr**, including the import summaries.
+/// Discovery is a diagnostic about *peers*, not the result of the command that
+/// triggered it — and under `--json` the result is the JSON document, which a
+/// stray `println!` would corrupt.
+fn discover_okf_in_workspace(
+    workspace: &rto_graph::Workspace,
+    paths: &[std::path::PathBuf],
+    level: Discovery,
+) -> anyhow::Result<()> {
+    let decide = level.writes();
+    let bundles = rto_graph::discover_okf_bundles(paths);
+    if bundles.is_empty() {
+        return Ok(());
+    }
+    let mut noted = okf_discovery::Noted::default();
+    let interactive = level == Discovery::Decide && okf_discovery::may_prompt();
+
+    for (path, project) in workspace_project_names(paths) {
+        // A repo never consumes its own bundle: it already holds those concepts,
+        // at their real provenance rather than an external one.
+        let peers: Vec<rto_graph::OkfBundle> = bundles
+            .iter()
+            .filter(|b| &b.repo != path)
+            .cloned()
+            .collect();
+        if peers.is_empty() {
+            continue;
+        }
+        // A member that is unsynced, or whose graph cannot be opened, is skipped
+        // rather than fatal. This runs on a server's startup path, and a
+        // *discovery* failure must never be the reason a service does not boot:
+        // the worst outcome of skipping is that a bundle goes unmentioned until
+        // that repo has a graph, which is also the point at which it would have
+        // had a placeholder to fill.
+        let Ok(Ok(found)) = workspace.with_store(Some(&project), |store| {
+            okf_discovery::discovered(store, &peers)
+        }) else {
+            continue;
+        };
+
+        for d in found {
+            match d.state.decision() {
+                // A standing grant. Re-apply the layer so the peer's edits and
+                // withdrawals reach this graph, without re-asking and without
+                // rewriting the record: `decided_at` records when the person
+                // answered, not when a scan last ran.
+                //
+                // Only under `decide`, which is `--write`. A verification run
+                // and a server start must not mutate the graph.
+                Some(recorded) if decide && recorded.imports() => {
+                    apply_okf_decision(workspace, &project, &d, recorded, Record::Keep)?;
+                }
+                // A recorded `ignore`, or a grant on a non-mutating run. Nothing
+                // to do and nothing to say — being asked once is the whole point.
+                Some(_) => {}
+                // A bundle that did not read is reported and never decided:
+                // there is nothing to consent to in a directory that does not
+                // parse, and a grant stored against it would apply to whatever
+                // it later became.
+                None if !d.is_readable() => {
+                    if noted.should_note(&d.bundle.peer) {
+                        eprintln!(
+                            "{}",
+                            okf_discovery::note_text(&d, okf_discovery::Unasked::Unreadable)
+                        );
+                    }
+                }
+                None if interactive => {
+                    let decision = okf_discovery::ask(&d)?;
+                    apply_okf_decision(workspace, &project, &d, decision, Record::Write)?;
+                }
+                None => {
+                    if noted.should_note(&d.bundle.peer) {
+                        // Which of the two silences this is — no terminal, or a
+                        // terminal on a command that does not write. Telling a
+                        // user at a terminal that their run "is not interactive"
+                        // sends them hunting a TTY problem they do not have.
+                        let because = match level {
+                            Discovery::Decide => okf_discovery::Unasked::NoTerminal,
+                            Discovery::RefreshOnly => okf_discovery::Unasked::MachineOutput,
+                            Discovery::ReportOnly => okf_discovery::Unasked::NotWriting,
+                        };
+                        eprintln!("{}", okf_discovery::note_text(&d, because));
+                    }
+                }
+            }
+        }
+    }
+    if noted.suppressed() > 0 {
+        eprintln!(
+            "roteiro: and {} further peer(s) publishing bundles nothing has been decided \
+             about; run `roteiro links --write` from a terminal to decide them.",
+            noted.suppressed()
+        );
+    }
+    Ok(())
+}
+
+/// Whether this call is answering the question or acting on a standing answer.
+///
+/// A refresh must not rewrite the record. `decided_at` is when a **person**
+/// answered, and stamping it with the time a scan happened to run would erase
+/// that; the screen fingerprint is what they were shown when they answered, and
+/// re-stamping it would silently re-grant consent over whatever the bundle
+/// carries now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    /// A fresh answer: write it.
+    Write,
+    /// Acting on an answer already given: leave it exactly as it is.
+    Keep,
+}
+
+/// Record one answer, and import the bundle when the answer says to.
+///
+/// Recording happens **whatever** the answer, `ignore` included: "asked once,
+/// not per sync" is only true if a refusal is remembered too, and a decision
+/// that had to be retyped every scan would be no better than no record.
+fn apply_okf_decision(
+    workspace: &rto_graph::Workspace,
+    project: &str,
+    d: &okf_discovery::Discovered,
+    decision: rto_graph::OkfDecision,
+    record: Record,
+) -> anyhow::Result<()> {
+    // An importing decision over a bundle that does not read is refused here as
+    // well as at the prompt, and this arm is the one that is actually reachable:
+    // a peer whose grant is **standing** can break their bundle at any time, and
+    // `screen_regressed("", "")` is false, so the grant still holds. Without
+    // this, a refresh would reach `read_bundle` and fail — turning one peer's
+    // broken publish into a failure of `roteiro links --write` for everybody.
+    //
+    // The previously imported layer is deliberately **left alone** rather than
+    // cleared: a bundle that stopped parsing is not a peer withdrawing their
+    // concepts, and treating it as one would delete real content over a syntax
+    // error at the other end. Copilot raised the recording half of this on #711;
+    // the failure half was the sharper edge of the same finding.
+    if decision.imports() && !d.is_readable() {
+        eprintln!(
+            "roteiro: {}'s OKF bundle at {} no longer reads ({}), so it was not \
+             re-imported. Anything already imported from it is untouched.",
+            d.bundle.peer,
+            d.bundle.bundle.display(),
+            d.summary(),
+        );
+        return Ok(());
+    }
+
+    if record == Record::Write {
+        let row = rto_graph::OkfConsent {
+            peer: d.bundle.peer.clone(),
+            decision,
+            root: d.root_key(),
+            screen_classes: d.screen_classes(),
+            decided_at: rto_graph::rfc3339_utc(std::time::SystemTime::now()),
+        };
+        workspace.with_store(Some(project), |store| store.put_okf_consent(&row))??;
+    }
+
+    if !decision.imports() {
+        eprintln!(
+            "  okf: {} ignored — the cross-repo placeholder stays as it is",
+            d.bundle.peer
+        );
+        return Ok(());
+    }
+
+    let mode = match decision {
+        rto_graph::OkfDecision::Trust => rto_render::okf::read::Trust::Trust,
+        _ => rto_render::okf::read::Trust::Acknowledge,
+    };
+    let files = read_bundle_files(&d.bundle.bundle)?;
+    let src_ref = rto_render::okf::read::import_ref(&d.bundle.peer);
+
+    // Re-read with the answer that was given **and** with this store's
+    // placeholder keys, which the screening read deliberately did not have. The
+    // import is `apply_import_layer`, so a repeat of this whole path is
+    // idempotent for nodes and edges and still propagates removal — phase 1's
+    // guarantees are inherited rather than re-implemented.
+    let applied = workspace.with_store_mut(Some(project), |store| -> anyhow::Result<_> {
+        let extref_keys: Vec<String> = store
+            .nodes_by_kind(&rto_graph::NodeKind::Other(
+                rto_graph::EXTERNAL_REF_KIND.to_owned(),
+            ))?
+            .into_iter()
+            .map(|n| n.key)
+            .collect();
+        let imported = rto_render::okf::read::read_bundle(
+            &d.bundle.bundle.display().to_string(),
+            &files,
+            &rto_render::okf::read::ReadOptions {
+                trust: mode,
+                peer: &d.bundle.peer,
+                extref_keys: &extref_keys,
+            },
+        )?;
+        let applied = store.apply_import_layer(&src_ref, &imported.facts)?;
+        Ok((imported.report, applied))
+    })??;
+    let (report, applied) = applied;
+
+    // stderr, not stdout: this is a diagnostic about a peer, and under `--json`
+    // stdout carries a document a program parses.
+    eprintln!(
+        "  okf: {} {} — {} concept(s), {} edge(s), {} placeholder(s) filled, \
+         {} removed as withdrawn (under {src_ref})",
+        d.bundle.peer,
+        decision.as_str(),
+        report.concepts_read,
+        applied.edges_applied,
+        report.extrefs_filled.len(),
+        applied.nodes_removed,
+    );
+    for line in okf_screen_lines(&report) {
+        eprintln!("{line}");
+    }
+    Ok(())
+}
+
 /// De-duplicate repo paths by [`repo_path_identity`], keeping each repo's first
 /// spelling and the input order. The one place the "same repo reached by two
 /// paths" rule lives on the CLI side — shared by `roteiro links` scoping
@@ -8487,6 +8883,29 @@ fn run_links(
     // an edge needs a source node in this store — and are counted so the report
     // says so rather than leaving the author to wonder why their count is short.
     let (written, pruned, unanchored) = persist_authored_layers(write, &authored, &results)?;
+
+    // Discovery runs **after** the layer is persisted, because the `extref:`
+    // placeholders it scopes itself to are what that write creates. Running it
+    // first would find nothing on the very run that made the links.
+    //
+    // `write` gates the *import*, not the discovery: `roteiro links` on its own
+    // is a verification command, and a check that silently changed the graph it
+    // was checking would be the wrong kind of surprise. Without `--write` the
+    // undecided bundles are reported and nothing is asked or recorded.
+    // Runs under `--json` too. Gating this on `!json` made a flag that selects
+    // an *output format* change *behaviour*: automation using `--json` never
+    // refreshed a standing grant, so its OKF layers went stale. All of
+    // discovery's output goes to stderr, so the JSON document on stdout stays a
+    // JSON document.
+    discover_okf_in_workspace(
+        &workspace,
+        &paths,
+        match (write, json) {
+            (true, false) => Discovery::Decide,
+            (true, true) => Discovery::RefreshOnly,
+            (false, _) => Discovery::ReportOnly,
+        },
+    )?;
 
     if json {
         emit_json(&results)?;
@@ -11748,6 +12167,20 @@ fn run_explorer(
     // person, and it installed no SIGHUP handler at all — the signal killed it.
     // It holds no flattened workspace, so `set` is the whole of what it serves
     // and the whole of what a reload has to swap.
+    // Undecided peer bundles, mentioned once (#706 phase 2) — the same policy
+    // `serve` and `mcp` follow, for the same reason: nobody is at an explorer
+    // start either. Only on the configured path, because the cwd fallback hosts
+    // one repo and a repo has no peers.
+    //
+    // Best-effort throughout: a `Workspace` that will not build, or a store that
+    // will not open, means no note — never a failure to start.
+    if from_config
+        && let Ok(paths) = resolved_repo_paths(&resolved, &[])
+        && let Ok(flat) = rto_graph::Workspace::from_repo_paths(&paths)
+        && let Err(e) = discover_okf_in_workspace(&flat, &paths, Discovery::ReportOnly)
+    {
+        eprintln!("roteiro explorer: could not check for peer OKF bundles: {e}");
+    }
     if from_config {
         register_workspace_reload(&set, None, cfg.clone(), Vec::new());
     } else {
@@ -12358,6 +12791,15 @@ fn build_serve_workspaces(
     // costs nothing to say what was walked past.
     for note in scanned_roots_note(&effective) {
         eprintln!("{note}");
+    }
+    // Undecided peer bundles, mentioned once and never acted on (#706 phase 2).
+    // `decide = false`: there is no human at a server start, so nothing is asked,
+    // nothing is imported and — the part that matters — nothing is recorded, so
+    // a server's silence never becomes an answer a later interactive run reads.
+    // The argument in full is in `okf_discovery`. Failures are swallowed: a
+    // bundle nobody has decided about is not a reason to refuse to serve.
+    if let Err(e) = discover_okf_in_workspace(&flat, &paths, Discovery::ReportOnly) {
+        eprintln!("roteiro {cmd}: could not check for peer OKF bundles: {e}");
     }
     // Both surfaces, from one snapshot: `set` backs `/v1/graph/*` and the UI,
     // `flat` backs the model tools, `/v1/{project}/…` and the MCP router. Reloading

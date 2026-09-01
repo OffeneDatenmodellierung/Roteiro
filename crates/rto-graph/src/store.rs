@@ -1055,6 +1055,141 @@ impl Store {
     // `export_factset` — and the published `GraphArtifact` — stays a pure
     // function of the tree no matter what an analyzer reports. ---
 
+    /// The recorded answer to the OKF trust question for `peer`, if there is one
+    /// (#706 phase 2).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn okf_consent(&self, peer: &str) -> Result<Option<crate::OkfConsent>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT peer, decision, root, screen_classes, decided_at
+                 FROM okf_consent WHERE peer = ?1",
+                [peer],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((peer, decision, root, screen_classes, decided_at)) = row else {
+            return Ok(None);
+        };
+        // A token the `CHECK` constraint permits but this build does not know is
+        // a store written by a newer Roteiro. Reading it as "no answer" is the
+        // safe direction: it asks again rather than acting on a decision whose
+        // meaning this build cannot state.
+        let Some(decision) = crate::OkfDecision::from_token(&decision) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::OkfConsent {
+            peer,
+            decision,
+            root,
+            screen_classes,
+            decided_at,
+        }))
+    }
+
+    /// Whether the recorded answer for `peer` still covers the bundle now at
+    /// `root` screening as `classes`, and why not when it does not.
+    ///
+    /// The two invalidators, and the one deliberately absent, are argued in
+    /// [`crate::ConsentState::Lapsed`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn okf_consent_holds(
+        &self,
+        peer: &str,
+        root: &str,
+        classes: &str,
+    ) -> Result<crate::ConsentState, StoreError> {
+        let Some(record) = self.okf_consent(peer)? else {
+            return Ok(crate::ConsentState::Unasked);
+        };
+        if record.root != root {
+            return Ok(crate::ConsentState::Moved { was: record.root });
+        }
+        if crate::screen_regressed(&record.screen_classes, classes) {
+            return Ok(crate::ConsentState::Lapsed {
+                was: record.screen_classes,
+                now: classes.to_owned(),
+            });
+        }
+        Ok(crate::ConsentState::Holds(record.decision))
+    }
+
+    /// Record (or replace) the answer for one peer.
+    ///
+    /// Replacing rather than appending is deliberate: this is a *current
+    /// decision*, not a history. ADR-0019's ledger appends because it records
+    /// acts that happened; a consent record answers "what is it now", and two
+    /// rows for one peer would need a tie-break nobody would get right.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on write failure.
+    pub fn put_okf_consent(&self, record: &crate::OkfConsent) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO okf_consent (peer, decision, root, screen_classes, decided_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(peer) DO UPDATE SET
+                 decision = excluded.decision,
+                 root = excluded.root,
+                 screen_classes = excluded.screen_classes,
+                 decided_at = excluded.decided_at",
+            [
+                record.peer.as_str(),
+                record.decision.as_str(),
+                record.root.as_str(),
+                record.screen_classes.as_str(),
+                record.decided_at.as_str(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every recorded OKF answer, in peer order — for `roteiro import --from okf`
+    /// reporting and for tests.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn okf_consents(&self) -> Result<Vec<crate::OkfConsent>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT peer, decision, root, screen_classes, decided_at
+             FROM okf_consent ORDER BY peer",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (peer, decision, root, screen_classes, decided_at) = row?;
+            if let Some(decision) = crate::OkfDecision::from_token(&decision) {
+                out.push(crate::OkfConsent {
+                    peer,
+                    decision,
+                    root,
+                    screen_classes,
+                    decided_at,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Replace the findings layer `run.layer` **wholesale**, atomically: the
     /// previous run for that layer and every finding row it owned are deleted,
     /// then this run and its findings are written. A finding that has since been

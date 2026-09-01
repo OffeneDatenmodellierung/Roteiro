@@ -78,7 +78,17 @@ pub mod review_score;
 // response parsing and the compile-claim site derivation are functions of bytes,
 // so what the reviewer *decides* is testable with no model and no network. The
 // loop that calls an engine is in the binary, where the engine already is.
+/// The recorded answer to "may this peer's OKF bundle be read into our graph?"
+/// (#706 phase 2). Beside the store that holds it and the screen that informs
+/// it, rather than in `rto-render`: the record is a row in `graph.db`, and the
+/// renderer has no business owning a consent decision.
+pub mod okf_consent;
 pub mod reviewer;
+/// Screening foreign prose before it becomes node content (#706). In this crate
+/// because what it protects is here: `meta.content`, `query`'s `content_snippet`
+/// that returns it to a model, and `cap_content` that admits it. `rto-render`
+/// depends on this crate, so a screen there could never guard a second consumer.
+pub mod screen;
 mod store;
 mod sync;
 mod text;
@@ -165,6 +175,9 @@ pub use models::{
     interpret_range_response, is_installed, model_dir, partial_meta_path, partial_path,
     remove_model, set_model_store, sha256_hex, store_root, verify_sha256,
 };
+pub use okf_consent::{
+    ConsentState, OkfConsent, OkfDecision, screen_fingerprint, screen_regressed,
+};
 pub use provenance::Provenance;
 pub use query::{
     ConfigSecretItem, ConfigSecretReport, CouplingItem, CouplingOrder, CouplingReport,
@@ -184,6 +197,7 @@ pub use text::{
 };
 pub use trust::ProducerTrust;
 pub use workspace::{
-    Follow, ReloadPlan, ResolvedWorkspace, RootScan, SetReloadPlan, Workspace, WorkspaceError,
-    WorkspaceSet, discover_repos_under, parse_qualified, scan_root,
+    Follow, OKF_BUNDLE_DIR, OkfBundle, ReloadPlan, ResolvedWorkspace, RootScan, SetReloadPlan,
+    Workspace, WorkspaceError, WorkspaceSet, discover_okf_bundles, discover_repos_under,
+    okf_bundle_in, parse_qualified, scan_root,
 };

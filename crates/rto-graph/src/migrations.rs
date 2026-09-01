@@ -703,6 +703,49 @@ CREATE INDEX idx_nodes_kind ON nodes(kind);
 CREATE INDEX idx_nodes_provenance ON nodes(provenance);
 ";
 
+/// Migration 15: the OKF peer-consent record (#706 phase 2, ADR-0021).
+///
+/// One row per peer whose bundle this graph has been offered, holding the answer
+/// to the trust / acknowledge / ignore question so it is asked **once** rather
+/// than on every scan.
+///
+/// # Why the answer is stored here and not in a config file
+///
+/// ADR-0019 §3 refuses to let a *project* config grant the remote tier, because
+/// `roteiro.toml` is committed and shared: a merged line would be "consent by
+/// pull request, granted by someone else, noticed by nobody". The same objection
+/// would apply to recording an OKF grant in any committed file, and it is why
+/// this is a table in `graph.db` — which lives under `<git_dir>/roteiro/` and is
+/// never committed. A grant made on this machine stays on it.
+///
+/// # Why it sits beside `imports`
+///
+/// The grant authorises exactly one thing: the import layer at
+/// `import:okf/<peer>` in the `imports` table. Keeping the two in one file means
+/// they are deleted together — a graph rebuilt from nothing has no layer *and*
+/// no grant, so the question is asked again rather than a stale answer silently
+/// re-authorising an import nobody has seen since.
+///
+/// # What invalidates a row
+///
+/// `screen_classes` is the sorted, comma-joined set of
+/// [`crate::screen::FindingKind`] tokens the bundle produced **when the question
+/// was answered**. A later scan that finds a class not in that set means the
+/// bundle now carries something the person answering was not shown, and the
+/// grant lapses — see `Store::okf_consent_holds`. `root` invalidates it too: the
+/// same peer name resolving to a different directory is a different source.
+///
+/// Like `imports` and `node_context`, this table is untouched by `rebuild`.
+const M0015_OKF_CONSENT: &str = "
+CREATE TABLE okf_consent (
+    peer           TEXT PRIMARY KEY,
+    decision       TEXT NOT NULL CHECK (decision IN ('trust','acknowledge','ignore')),
+    root           TEXT NOT NULL,
+    screen_classes TEXT NOT NULL,
+    decided_at     TEXT NOT NULL
+);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -760,6 +803,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 14,
         sql: M0014_EXTERNAL_PROVENANCE,
+    },
+    Migration {
+        version: 15,
+        sql: M0015_OKF_CONSENT,
     },
 ];
 
