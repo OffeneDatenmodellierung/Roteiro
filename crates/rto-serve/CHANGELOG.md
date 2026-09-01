@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v4.2.0...rto-serve-v4.2.1) - 2026-09-01
+
+### Fixed
+
+- *(tools)* refuse a tool argument key neither surface recognises
+
+### Other
+
+- *(tools)* say what a non-object `arguments` means here, and add no debt
+
 ## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v4.0.0...rto-serve-v4.1.0) - 2026-09-01
 
 ### Added
