@@ -900,6 +900,17 @@ impl BoxliteRunner {
                 message: e.to_string(),
             })?;
 
+        // Boot it, in as many words. boxlite ≤0.9.7 started a box as a side
+        // effect of the first `exec`; 0.10.0 refuses to, for any box whose init
+        // the caller chose — and this one's is chosen, `GUEST_INIT` above. Its
+        // reasoning is that booting re-runs that command, which must not happen
+        // because someone asked to exec or copy a file. Here it is exactly what
+        // is wanted, and saying so is a line of code rather than an argument.
+        boxed.start().await.map_err(|e| SandboxError::Runtime {
+            stage: "start",
+            message: e.to_string(),
+        })?;
+
         let result = self.exec_in(&boxed, invocation).await;
 
         // Tear down whatever happened, and let the run's own error win: a

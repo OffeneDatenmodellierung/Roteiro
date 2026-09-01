@@ -686,6 +686,16 @@ impl Builder<'_> {
             })
         })?;
 
+        // Explicit, for `boxlite.rs`'s reason: since boxlite 0.10.0 a box whose
+        // init the caller chose is never booted as a side effect of `exec`, and
+        // `GUEST_INIT` above is chosen.
+        boxed.start().await.map_err(|e| {
+            BuilderError::from(SandboxError::Runtime {
+                stage: "start",
+                message: e.to_string(),
+            })
+        })?;
+
         let result = self.lint_in(&boxed, features).await;
 
         // Tear down whatever happened, and let the run's own error win: a

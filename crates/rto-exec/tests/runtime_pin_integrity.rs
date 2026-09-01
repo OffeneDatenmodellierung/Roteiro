@@ -141,7 +141,8 @@ fn the_pins_are_for_the_boxlite_release_the_lockfile_resolves() {
     );
 
     assert_eq!(
-        versions[0], rto_exec::RUNTIME_VERSION,
+        versions[0],
+        rto_exec::RUNTIME_VERSION,
         "the lockfile resolves boxlite {} but the sandbox-runtime pins are for {}. Bump \
          crates/rto-exec/src/runtime_pins.rs to the matching release and re-run \
          scripts/derive-runtime-file-pins.py — never the other way round, and never by \
