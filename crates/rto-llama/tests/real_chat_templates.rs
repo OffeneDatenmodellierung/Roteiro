@@ -11,7 +11,9 @@
 //! reading documentation, and not by any fixture small enough to write by hand.
 //!
 //! So these are the genuine articles, extracted from the GGUFs' embedded
-//! `tokenizer.chat_template` metadata and vendored verbatim. They are the
+//! `tokenizer.chat_template` metadata and vendored verbatim — each one's source
+//! model and GGUF recorded in `tests/fixtures/templates/PROVENANCE.md`, which
+//! also says why they are not rows in the native-dependency register. They are the
 //! artefact the renderer must handle, and shrinking them to something
 //! comfortable would be shrinking the test's subject.
 //!

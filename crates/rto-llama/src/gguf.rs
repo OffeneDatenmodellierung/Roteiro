@@ -72,9 +72,35 @@ fn read_str(r: &mut impl Read) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
+/// How deeply an array may nest before this reader gives up.
+///
+/// Nothing legitimate approaches it: a GGUF metadata array holds scalars or
+/// strings, and an array *of arrays* is already unusual. It exists because
+/// `skip_value` recurses, and recursion driven by a file's own bytes is a stack
+/// the file gets to choose the depth of.
+const MAX_ARRAY_DEPTH: u32 = 64;
+
 /// Skip one value of type `tag`, returning `None` on a shape this reader does
 /// not know — which ends the walk rather than guessing at an offset.
-fn skip_value(r: &mut (impl Read + Seek), tag: u32) -> Option<()> {
+///
+/// `depth` bounds nesting. Without it a crafted header aborts the process: each
+/// `[array, array]` pair costs 12 bytes in the file and one stack frame here, so
+/// 2.4 MB of them overflows the stack — measured, `fatal runtime error: stack
+/// overflow`. That is not a parse failure this function can report, and every
+/// other malformed input it meets comes back as `None`; a reader whose contract
+/// is "unreadable means `None`" must not have an input that kills the process
+/// instead.
+///
+/// The unbounded *counts* are deliberately left alone. `n_kv` and an array's
+/// element count are read straight from the file and used as loop bounds, which
+/// reads like the same hazard and is not: every iteration reads from the file, so
+/// the walk ends at EOF whatever the count claimed. Measured with both set to
+/// `u64::MAX` — 24 µs and 21 µs, both `None`. Capping them would add a bound that
+/// never binds, and would state a guarantee the EOF already gives.
+fn skip_value(r: &mut (impl Read + Seek), tag: u32, depth: u32) -> Option<()> {
+    if depth > MAX_ARRAY_DEPTH {
+        return None;
+    }
     match tag {
         8 => {
             let n = read_u64(r)?;
@@ -92,7 +118,7 @@ fn skip_value(r: &mut (impl Read + Seek), tag: u32) -> Option<()> {
                 // because only its own length says where the next one starts.
                 None => {
                     for _ in 0..count {
-                        skip_value(r, elem)?;
+                        skip_value(r, elem, depth + 1)?;
                     }
                 }
             }
@@ -132,13 +158,100 @@ pub fn chat_template(path: &Path) -> Option<String> {
             // stops long before the tensor data.
             return if tag == 8 { read_str(&mut r) } else { None };
         }
-        skip_value(&mut r, tag)?;
+        skip_value(&mut r, tag, 0)?;
     }
     None
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// A header that nests arrays without limit is refused, not fatal.
+    ///
+    /// The distinction this pins is the whole contract of this module: every
+    /// malformed input comes back as `None`, so the caller can say "this model's
+    /// metadata is unreadable" and carry on. A stack overflow is not `None` — it
+    /// aborts the process, and `roteiro model pull` dies with `fatal runtime
+    /// error` instead of a sentence naming the model.
+    ///
+    /// Measured before the bound existed: this exact 2.4 MB input aborted with
+    /// `fatal runtime error: stack overflow` (SIGABRT). The file is small because
+    /// each nesting level costs 12 bytes and one stack frame, which is the point
+    /// — the attacker spends bytes far more cheaply than the reader spends stack.
+    #[test]
+    fn a_header_that_nests_arrays_without_end_is_refused_rather_than_fatal() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&MAGIC);
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.push(b'x');
+        b.extend_from_slice(&9u32.to_le_bytes());
+        // 200_000 levels of "an array whose elements are arrays".
+        for _ in 0..200_000u32 {
+            b.extend_from_slice(&9u32.to_le_bytes());
+            b.extend_from_slice(&1u64.to_le_bytes());
+        }
+        let dir = std::env::temp_dir().join("rto-gguf-nested");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let p = dir.join("nested.gguf");
+        std::fs::write(&p, &b).expect("write");
+
+        assert_eq!(
+            chat_template(&p),
+            None,
+            "a nested header must be unreadable, not fatal"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The counts are *not* bounded, and that is the right call.
+    ///
+    /// `n_kv` and an array's element count are read from the file and used as
+    /// loop bounds, which looks like the same hazard as the recursion above. It
+    /// is not: each iteration reads, so the walk ends at EOF regardless of what
+    /// the count claimed.
+    ///
+    /// This **documents** that; it does not guard it. Adding
+    /// `read_u64(..)?.min(4096)` leaves it green — verified — because a
+    /// redundant cap and no cap produce the same `None`. What it would catch is
+    /// the outcome changing: a dishonest count that hangs, panics, or returns a
+    /// template. Said plainly because a test named for a property it cannot fail
+    /// on is worth less than one that admits its reach.
+    #[test]
+    fn a_dishonest_count_ends_at_the_end_of_the_file() {
+        let header = |tail: &[u8], n_kv: u64| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&MAGIC);
+            b.extend_from_slice(&3u32.to_le_bytes());
+            b.extend_from_slice(&0u64.to_le_bytes());
+            b.extend_from_slice(&n_kv.to_le_bytes());
+            b.extend_from_slice(tail);
+            b
+        };
+        let dir = std::env::temp_dir().join("rto-gguf-counts");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        // `n_kv` claims 2^64-1 entries and the file holds none.
+        let a = dir.join("nkv.gguf");
+        std::fs::write(&a, header(&[], u64::MAX)).expect("write");
+        assert_eq!(chat_template(&a), None);
+
+        // One entry whose array claims 2^64-1 string elements.
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        tail.push(b'x');
+        tail.extend_from_slice(&9u32.to_le_bytes());
+        tail.extend_from_slice(&8u32.to_le_bytes());
+        tail.extend_from_slice(&u64::MAX.to_le_bytes());
+        let c = dir.join("count.gguf");
+        std::fs::write(&c, header(&tail, 1)).expect("write");
+        assert_eq!(chat_template(&c), None);
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&c);
+    }
     use super::*;
     use std::io::Write as _;
 
