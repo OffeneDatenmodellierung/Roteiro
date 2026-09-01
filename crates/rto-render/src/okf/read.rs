@@ -1541,6 +1541,60 @@ mod tests {
         );
     }
 
+    /// Every field `concept_meta` writes, asserted once.
+    ///
+    /// The fields are the peer's own record of what they published, and most of
+    /// them had no test at all: `tags`, `sources`, `resource`, `status`, `peer`
+    /// and `path` were constructed and never read back, so any of them could
+    /// have been dropped, renamed or crossed with its neighbour and every other
+    /// test would still have passed.
+    ///
+    /// Written as **one whole-value comparison** rather than a field at a time,
+    /// so a field added to `concept_meta` without a decision about it fails here
+    /// instead of arriving unnoticed. The two halves that vary per import —
+    /// `origin` and `content` — are checked separately below.
+    #[test]
+    fn the_peers_own_record_survives_the_import_intact() {
+        let doc = "---\ntype: \"adr\"\ntitle: \"A decision\"\ndescription: \"One sentence.\"\nresource: \"https://example.test/blob/abc/docs/adr/0001.md\"\nstatus: \"Accepted\"\ntags:\n  - \"architecture\"\n  - \"storage\"\nverified:\n  - by: \"human:alice\"\n    at: \"2026-09-01T10:00:00Z\"\nsources:\n  - resource: \"/docs/adr/0001.md\"\n---\n\n# A decision\n\nThe prose.\n";
+        let import = read(&[("/decisions/a.md", doc)], Trust::Trust);
+        let meta = &import.facts.nodes[0].meta;
+
+        let mut okf = meta["okf"].clone();
+        // Checked on their own terms just below; removed so the comparison
+        // covers everything else exhaustively.
+        let origin = okf["origin"].take();
+        assert_eq!(
+            okf,
+            serde_json::json!({
+                "source": "import:okf/acme",
+                "peer": "acme",
+                "path": "/decisions/a.md",
+                "type": "adr",
+                "trust": "trust",
+                "claimed": { "tier": "authored", "verified": true },
+                "resource": "https://example.test/blob/abc/docs/adr/0001.md",
+                "status": "Accepted",
+                "tags": ["architecture", "storage"],
+                "sources": ["/docs/adr/0001.md"],
+                "description": "One sentence.",
+                "origin": serde_json::Value::Null,
+            }),
+        );
+        assert_eq!(
+            origin,
+            serde_json::json!({
+                "by": "human:alice",
+                "at": "2026-09-01T10:00:00Z",
+                "confirms": true,
+            }),
+        );
+        assert_eq!(meta["content"], "# A decision The prose.");
+        // Not a placeholder, so no `qualified` — that key is what
+        // `external_ref_target` reads, and writing it on a node that stands in
+        // for nothing would make the workspace resolver chase an empty target.
+        assert_eq!(meta.get("qualified"), None);
+    }
+
     #[test]
     fn a_relative_link_resolves_against_its_own_directory() {
         assert_eq!(

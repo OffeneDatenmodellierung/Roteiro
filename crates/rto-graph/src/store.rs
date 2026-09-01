@@ -1810,10 +1810,6 @@ fn to_u32(v: i64) -> Result<u32, StoreError> {
     u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("span offset out of range: {v}")))
 }
 
-/// The true provenance of an import-layer node, from its key namespace: Graphify
-/// nodes (`graphify:`) are [`Provenance::Inferred`]; every other import node (lat,
-/// …) is [`Provenance::Authored`]. Import-layer nodes are never derived, so this
-/// is used to repair a legacy `Derived` tag on load (see `load_import_layers`).
 /// The message for a stored provenance token this build cannot parse.
 ///
 /// It names **both** causes, because until migration 14 there was only one and
@@ -1831,6 +1827,11 @@ fn unknown_provenance(what: &str, token: &str) -> String {
     )
 }
 
+/// The true provenance of an import-layer node, from its key namespace: Graphify
+/// nodes (`graphify:`) are [`Provenance::Inferred`]; an OKF concept (`okf:`) is
+/// [`Provenance::ExternalInferred`]; every other import node (lat, …) is
+/// [`Provenance::Authored`]. Import-layer nodes are never derived, so this is
+/// used to repair a legacy `Derived` tag on load (see `load_import_layers`).
 fn import_node_provenance(key: &str) -> Provenance {
     if key.starts_with("graphify:") {
         Provenance::Inferred
