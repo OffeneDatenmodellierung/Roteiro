@@ -1071,6 +1071,20 @@ impl GraphServer {
                  content too — README/ADR/blueprint prose — and ranks curated docs \
                  first, so it answers \"what is X / why\").",
             );
+            // #675 took this sentence out of `SEARCH`'s description because the
+            // served surface's system turn already states it for every tool at
+            // once. This surface has no such turn, so the statement lands here
+            // instead of being lost — and here it costs once per session, in
+            // `initialize`, rather than once per `tools/list`.
+            //
+            // Deliberately not put back in the description: two copies of one
+            // instruction is what #675 is about, and the served copy is the older
+            // and more general of the two.
+            out.push_str(
+                " Read each hit's `snippet`, or call `explain` on its key, to read \
+                 a node's actual content before describing it — never answer from \
+                 a node's name alone.",
+            );
         }
         if has("explain") {
             out.push_str(" `explain` gives a key's provenance-labelled neighbourhood.");
@@ -2762,6 +2776,44 @@ mod tests {
         let desc = tool.description.as_deref().unwrap_or_default();
         for claim in ["needs no `limit`", "COUNTS, NEVER FINDINGS"] {
             assert!(desc.contains(claim), "missing `{claim}` from: {desc}");
+        }
+    }
+
+    /// **Read the content, not the name — and this surface is the only one that
+    /// says so here.**
+    ///
+    /// The served-chat surface states this in the system turn
+    /// `rto_serve::advertised_system_prompt` builds, which is why #675 could take
+    /// it out of `tool_text::SEARCH` without losing it *there*. MCP has no system
+    /// turn: a client gets `instructions` and a `tools/list`, so if this sentence
+    /// is in neither, nothing tells an MCP client to open a hit before describing
+    /// it — Copilot caught exactly that on the #675 PR.
+    ///
+    /// Asserted against `instructions` rather than against the description on
+    /// purpose. The point of the move was to state it **once per session** instead
+    /// of once per tool listing, and a test that would also pass with the sentence
+    /// back in the description would not hold that distinction. It is scoped to a
+    /// server that actually offers `search`, because a restricted one has no hits
+    /// to open.
+    #[test]
+    fn an_mcp_client_is_told_to_open_a_hit_rather_than_read_its_name() {
+        let instructions = seeded().get_info().instructions.unwrap_or_default();
+        assert!(
+            instructions.contains("`search`"),
+            "this fixture must advertise `search`, or the assertion below is \
+             vacuous: {instructions}",
+        );
+        for clause in [
+            "Read each hit's `snippet`",
+            "call `explain` on its key",
+            "never answer from a node's name alone",
+        ] {
+            assert!(
+                instructions.contains(clause),
+                "MCP has no system turn, so `instructions` is the only place this \
+                 surface can carry `{clause}` — #675 moved it here out of \
+                 `tool_text::SEARCH` and it must not go missing: {instructions}",
+            );
         }
     }
 
