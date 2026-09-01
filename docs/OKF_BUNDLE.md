@@ -80,6 +80,89 @@ carries no frontmatter or no `type` is skipped and the reason is printed — but
 directory in which nothing at all parsed is refused rather than imported as
 nothing.
 
+### The reader is tested against bundles Roteiro did not write
+
+Reading back one's own output proves a round trip, not interoperability. Since a
+reader tested only against its own writer will agree with itself about a dialect
+it also invents, the reader is exercised against two of the four bundles
+published in the specification's own repository — vendored under
+`crates/rto-render/tests/fixtures/okf-upstream/`, provenance and licence recorded
+alongside them.
+
+That test found four defects the round trip could not, all of them silent. The
+reader hand-parsed a line-oriented YAML subset shaped like Roteiro's own emitter,
+and against real third-party markdown it dropped flow mappings
+(`generated: { by: …, at: … }`, the form the specification's own examples use),
+dropped flow sequences, dropped block sequences whose items sit at the parent
+key's indentation (PyYAML's default), and *truncated* folded multi-line scalars
+at their first line. Nothing was skipped and nothing was reported.
+
+The trust consequence was the serious one: all nine concepts of the published
+`acme_retail` bundle read as **unverified** when eight carry a human sign-off, so
+`import --from okf --trust` adopted nothing while reporting success. The reader
+now parses frontmatter with a real YAML parser, and the counts are cross-checked
+against an independent implementation (below).
+
+## Why Roteiro does not ship its own OKF validator
+
+The obvious next feature is `roteiro okf validate` — a conformance gate over a
+stranger's bundle. It was investigated and deliberately **not** built, because a
+good one already exists.
+
+[`W4G1/okf`](https://github.com/W4G1/okf) is a pure-Rust OKF **v0.2** toolkit on
+crates.io (Apache-2.0, compatible with this project's `MIT OR Apache-2.0`). Its
+`okf-validator` crate does strict conformance checking with a severity split,
+`okf lint` adds hygiene rules, and the `okf` CLI also offers `trust`, `info`,
+`links`, `graph`, `computations`, `diff` and `fmt`. It is current, and it is
+substantially more complete than anything worth writing here as a side quest.
+Notably `okf-core`, the model and parser underneath it, has **zero
+dependencies**.
+
+Two other ecosystem tools were read and are *not* suitable as references:
+[`okflint`](https://github.com/mattdav/okflint) is a generic engine that
+validates against a manifest the producer writes, so it answers "does this match
+the rules I declared" rather than "does this conform to OKF v0.2" — and it cannot
+run on a third-party bundle at all without one being authored first.
+[`okf-schema`](https://github.com/gsemet/okf-schema) ships no canonical OKF
+schema; every schema lives inside the bundle being checked and is the producer's
+own.
+
+So the standing position is:
+
+- **No Roteiro validator.** Re-implementing `okf-validator` would duplicate real
+  work and drift from the spec, which is the failure mode the rest of the
+  ecosystem already demonstrates.
+- **No runtime dependency on it either.** `okf-validator` pulls a JavaScript
+  parser, a Python parser, a SQL parser and `syn` — 94 transitive crates — to
+  syntax-check fenced code blocks. That is a large supply-chain surface for a CLI
+  convenience, and ADR-0017 exists because this project takes that seriously.
+  `okf-core` alone (zero dependencies) is a much better candidate and is worth
+  revisiting for the reader itself.
+- **Use it as a differential oracle.** The upstream fixtures' expected trust
+  tiers in `tests/okf_interop.rs` were confirmed against `okf trust`: it reads
+  `acme_retail` as 8 human-reviewed + 1 unverified, and Roteiro's reader now
+  reads exactly the same split.
+
+### What the four published bundles say about the spec
+
+All four upstream bundles (`ga4`, `acme_retail`, `crypto_bitcoin`,
+`stackoverflow`) are conformant — confirmed independently by `okf-validator` and
+by `okflint`'s core stage. Two disagreements surfaced and are worth raising
+upstream rather than encoding here:
+
+- **`sources[].author` contradicts §7.** §5.1 says `author` uses "the actor
+  convention (§7)", but the spec's own Appendix A writes
+  `author: team:finance-fpa`, and `acme_retail` writes
+  `author: team:data-platform` — neither of which is one of §7's three forms
+  (`human:<id>`, `<producer>/<version>`, `process:<id>`). Either §7 needs a
+  `team:` form or §5.1 should stop pointing at it. A validator enforcing §7 on
+  `author` would flag the specification's own example.
+- **`okflint`'s `S204` contradicts §5.** It requires `stale_after` to be a bare
+  `YYYY-MM-DD` date and so flags all seven `stale_after` values in Google's
+  `acme_retail`, even though §5 states that *every* timestamp-valued key is an
+  ISO 8601 datetime with an explicit UTC offset, and §5.5's own example is
+  `2026-09-23T00:00:00Z`. This one is a bug in the tool, not in the spec.
+
 
 ## One place Roteiro guarantees more than the specification asks
 
