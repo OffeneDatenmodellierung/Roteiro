@@ -464,16 +464,72 @@ mod tests {
         for name in OWNED {
             let text = for_tool(name).expect("owned");
             let Some(at) = text.find("  ") else { continue };
-            let from = at.saturating_sub(60);
-            let to = (at + 60).min(text.len());
             panic!(
                 "`{name}` has a run of spaces at byte {at}. It reaches the model and \
                  costs bytes against `DESCRIPTION_BYTE_BUDGET`. A continued line \
                  carries its separating space BEFORE the backslash, never after it \
                  as well: …{}…",
-                &text[from..to],
+                window_around(&text, at, 60),
             );
         }
+    }
+
+    /// `radius` bytes either side of `at`, snapped out to character boundaries.
+    ///
+    /// # Why this is not `&text[at - radius..at + radius]`
+    ///
+    /// **That form panics, and it panics only when the guard above finally
+    /// fires** — the one moment the guard exists for. These descriptions are far
+    /// from ASCII: 74 em dashes at three bytes each, plus ellipses, `↔` and curly
+    /// quotes. A window whose end lands inside one of those aborts with `byte
+    /// index N is not a char boundary` *before* the assertion message is built, so
+    /// the diagnostic that justifies the whole test is the part that breaks.
+    /// Caught by Copilot on the #675 PR, and reproduced by injecting a double
+    /// space beside an em dash: the guard fired, and reported the em dash instead
+    /// of the defect.
+    ///
+    /// Snapping outward rather than clamping, because a window that silently
+    /// shrank could hide the very characters that caused the trouble. `0` and
+    /// `len()` are always boundaries, so both loops terminate, and no input can
+    /// panic here — not merely no input this repository holds today.
+    fn window_around(text: &str, at: usize, radius: usize) -> &str {
+        let mut from = at.saturating_sub(radius);
+        while !text.is_char_boundary(from) {
+            from -= 1;
+        }
+        let mut to = at.saturating_add(radius).min(text.len());
+        while !text.is_char_boundary(to) {
+            to += 1;
+        }
+        &text[from..to]
+    }
+
+    /// [`window_around`] survives the multi-byte characters this prose is full of.
+    ///
+    /// The fix for a panic needs a test that would fail without it, and the guard
+    /// above cannot be that test: it only builds a window when it is already
+    /// failing, so on a healthy tree it never exercises this at all. Every case
+    /// here puts a boundary demand inside an em dash, which is what byte
+    /// arithmetic gets wrong.
+    #[test]
+    fn a_diagnostic_window_never_splits_a_character() {
+        // `—` is three bytes, so every offset inside it is a trap.
+        let text = "alpha — bravo — charlie — delta";
+        let dash = text.find('—').expect("an em dash");
+        for radius in 0..text.len() + 4 {
+            for at in [0, dash, dash + 3, text.len()] {
+                let got = window_around(text, at, radius);
+                assert!(
+                    text.contains(got),
+                    "window must be a real substring: {got:?}"
+                );
+            }
+        }
+        // And it really does widen past a character rather than truncating it.
+        assert!(
+            window_around(text, dash + 3, 1).contains('—'),
+            "a window abutting a multi-byte character must include it whole",
+        );
     }
 
     /// The cap really is substituted, rather than the placeholder merely being
